@@ -7,9 +7,6 @@ use tycho_network::PeerId;
 
 #[derive(Clone, Copy, TlWrite, TlRead, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Digest([u8; 32]);
-impl Digest {
-    pub const MAX_TL_BYTES: usize = 32;
-}
 
 impl Display for Digest {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -30,13 +27,19 @@ impl Debug for Digest {
 }
 
 impl Digest {
+    pub const MAX_TL_BYTES: usize = 32;
+
+    pub(super) const ZERO: Self = Self([0; 32]);
+
     pub(super) fn new(bytes: &[u8]) -> Self {
         Self(blake3::hash(bytes).into())
     }
+
     // TODO encode DB key with TL and remove this method
     pub fn wrap(value: [u8; 32]) -> Self {
         Self(value)
     }
+
     pub fn inner(&self) -> &'_ [u8; 32] {
         &self.0
     }
@@ -44,10 +47,6 @@ impl Digest {
 
 #[derive(Clone, TlWrite, TlRead, PartialEq)]
 pub struct Signature([u8; 64]);
-
-impl Signature {
-    pub const MAX_TL_BYTES: usize = 64;
-}
 
 impl Display for Signature {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -67,6 +66,14 @@ impl Debug for Signature {
 }
 
 impl Signature {
+    pub const MAX_TL_BYTES: usize = 64;
+
+    pub(super) const ZERO: Self = Self([0; 64]);
+
+    pub(super) fn inner(&self) -> &'_ [u8; 64] {
+        &self.0
+    }
+
     pub fn new(local_keypair: &KeyPair, digest: &Digest) -> Self {
         Self(local_keypair.sign_raw(digest.0.as_slice()))
     }

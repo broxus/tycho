@@ -6,57 +6,99 @@ use bumpalo::Bump;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::ConsensusConfig;
-use tl_proto::{TlError, TlRead, TlWrite};
-use tycho_network::{try_handle_prefix_with_offset, PeerId};
+use tl_proto::{TlError, TlRead, TlResult, TlWrite};
+use tycho_network::PeerId;
 
 use crate::engine::MempoolConfig;
-use crate::models::point::body::PointBody;
+use crate::models::point::serde_helpers::{
+    PointBodyWrite, PointPrefixRead, PointRawRead, PointRead, PointWrite,
+};
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature};
+use crate::models::{PeerCount, PointInfo};
 
-#[derive(Clone, TlWrite, TlRead)]
+#[derive(Clone)]
 pub struct Point(Arc<PointInner>);
 
-#[derive(TlWrite, TlRead, Debug)]
-#[tl(boxed, id = "consensus.pointInner", scheme = "proto.tl")]
+#[cfg_attr(test, derive(PartialEq))]
 struct PointInner {
+    serialized: Vec<u8>,
+    parsed: PointParsed,
+}
+
+#[cfg_attr(test, derive(PartialEq))]
+struct PointParsed {
     // hash of everything except signature
     digest: Digest,
     // author's signature for the digest
     signature: Signature,
-    body: PointBody,
+    round: Round, // let it be @ r+0
+    payload_len: u32,
+    payload_bytes: u32,
+    data: PointData,
+    /// signatures for own point from previous round (if one exists, else empty map):
+    /// the node may prove its vertex@r-1 with its point@r+0 only; contains signatures from
+    /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
+    evidence: BTreeMap<PeerId, Signature>,
+}
+
+impl<'tl> TlRead<'tl> for PointParsed {
+    type Repr = tl_proto::Boxed;
+
+    fn read_from(packet: &mut &'tl [u8]) -> TlResult<Self> {
+        let read = PointRead::read_from(packet)?;
+
+        let payload_len = u32::try_from(read.body.payload.len()).unwrap_or(u32::MAX);
+        let payload_bytes = u32::try_from(read.body.payload.iter().fold(0, |acc, b| acc + b.len()))
+            .unwrap_or(u32::MAX);
+
+        Ok(Self {
+            digest: read.digest,
+            signature: read.signature,
+            round: read.body.round,
+            payload_len,
+            payload_bytes,
+            data: read.body.data,
+            evidence: read.body.evidence,
+        })
+    }
 }
 
 impl Debug for Point {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Point")
-            .field("body", &self.0.body)
             .field("digest", self.digest())
             .field("signature", self.signature())
+            .field("round", &self.round().0)
+            .field("payload_len", &self.payload_len())
+            .field("payload_bytes", &self.payload_bytes())
+            .field("data", self.data())
+            .field("evidence", self.evidence())
             .finish()
     }
 }
 
 impl Point {
-    pub const TL_ID: u32 = tl_proto::id!("consensus.pointInner", scheme = "proto.tl");
-
     pub fn max_byte_size(consensus_config: &ConsensusConfig) -> usize {
-        // 4 bytes of Point tag
-        // 32 bytes of Digest
-        // 64 bytes of Signature
+        let min_ext_msg_boc_size: usize = 48;
 
-        // Point body size
+        let max_payload_size: usize = tl_proto::bytes_max_size_hint(min_ext_msg_boc_size)
+            * (1 + (consensus_config.payload_batch_bytes as usize / min_ext_msg_boc_size));
 
-        4 + Digest::MAX_TL_BYTES
-            + Signature::MAX_TL_BYTES
-            + PointBody::max_byte_size(consensus_config)
+        let max_evidence_size: usize =
+            PeerCount::MAX.full() * (PeerId::MAX_TL_BYTES + Signature::MAX_TL_BYTES);
+
+        4 + Signature::MAX_TL_BYTES
+            + max_payload_size
+            + PointInfo::MAX_BYTE_SIZE
+            + max_evidence_size
     }
 
     pub fn new(
         local_keypair: &KeyPair,
         round: Round,
-        evidence: BTreeMap<PeerId, Signature>,
-        payload: Vec<Bytes>,
+        payload: &[Bytes],
         data: PointData,
+        evidence: BTreeMap<PeerId, Signature>,
         conf: &MempoolConfig,
     ) -> Self {
         assert_eq!(
@@ -64,69 +106,105 @@ impl Point {
             PeerId::from(local_keypair.public_key),
             "produced point author must match local key pair"
         );
-        let body = PointBody {
+
+        let mut serialized = Vec::<u8>::with_capacity(conf.point_max_bytes);
+        PointWrite {
+            digest: &Digest::ZERO,
+            signature: &Signature::ZERO,
+            body: PointBodyWrite {
+                round,
+                payload,
+                data: &data,
+                evidence: &evidence,
+            },
+        }
+        .write_to(&mut serialized);
+
+        let body_offset = 4 + Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES;
+
+        let digest = Digest::new(&serialized[body_offset..]);
+        let signature = Signature::new(local_keypair, &digest);
+
+        serialized[4..4 + Digest::MAX_TL_BYTES].copy_from_slice(digest.inner());
+        serialized[4 + Digest::MAX_TL_BYTES..body_offset].copy_from_slice(signature.inner());
+
+        let payload_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+        let payload_bytes =
+            u32::try_from(payload.iter().fold(0, |acc, b| acc + b.len())).unwrap_or(u32::MAX);
+
+        let parsed = PointParsed {
+            digest,
+            signature,
             round,
+            payload_len,
+            payload_bytes,
             data,
             evidence,
-            payload,
         };
 
-        let digest = body.make_digest(conf);
-        Self(Arc::new(PointInner {
-            signature: Signature::new(local_keypair, &digest),
-            digest,
-            body,
-        }))
+        Self(Arc::new(PointInner { parsed, serialized }))
+    }
+
+    pub fn new_from_bytes(serialized: Vec<u8>) -> Result<Self, TlError> {
+        let parsed = PointParsed::read_from(&mut serialized.as_ref())?;
+        Ok(Self(Arc::new(PointInner { parsed, serialized })))
+    }
+
+    pub fn serialized(&self) -> &[u8] {
+        &self.0.serialized
     }
 
     pub fn digest(&self) -> &'_ Digest {
-        &self.0.digest
+        &self.0.parsed.digest
     }
 
     pub fn signature(&self) -> &'_ Signature {
-        &self.0.signature
+        &self.0.parsed.signature
     }
 
     pub fn round(&self) -> Round {
-        self.0.body.round
+        self.0.parsed.round
     }
 
-    pub fn data(&self) -> &PointData {
-        &self.0.body.data
-    }
-
-    pub fn evidence(&self) -> &BTreeMap<PeerId, Signature> {
-        &self.0.body.evidence
-    }
-
-    pub fn payload(&self) -> &Vec<Bytes> {
-        &self.0.body.payload
+    pub fn payload_len(&self) -> u32 {
+        self.0.parsed.payload_len
     }
 
     pub fn payload_bytes(&self) -> u32 {
-        self.0.body.payload_bytes()
+        self.0.parsed.payload_bytes
+    }
+
+    pub fn data(&self) -> &PointData {
+        &self.0.parsed.data
+    }
+
+    pub fn evidence(&self) -> &BTreeMap<PeerId, Signature> {
+        &self.0.parsed.evidence
     }
 
     pub fn id(&self) -> PointId {
+        let parsed = &self.0.parsed;
         PointId {
-            author: self.0.body.data.author,
-            round: self.0.body.round,
-            digest: self.0.digest,
+            author: parsed.data.author,
+            round: parsed.round,
+            digest: parsed.digest,
         }
     }
 
     pub fn prev_id(&self) -> Option<PointId> {
+        let parsed = &self.0.parsed;
         Some(PointId {
-            author: self.0.body.data.author,
-            round: self.0.body.round.prev(),
-            digest: *self.0.body.data.prev_digest()?,
+            author: parsed.data.author,
+            round: parsed.round.prev(),
+            digest: *parsed.data.prev_digest()?,
         })
     }
 
     pub fn prev_proof(&self) -> Option<PrevPointProof> {
+        let parsed = &self.0.parsed;
         Some(PrevPointProof {
-            digest: *self.0.body.data.prev_digest()?,
-            evidence: self.0.body.evidence.clone(),
+            digest: *parsed.data.prev_digest()?,
+            evidence: parsed.evidence.clone(),
         })
     }
 
@@ -134,38 +212,38 @@ impl Point {
     /// blame every dependent point author and the sender of this point,
     /// do not use the author from point's body
     pub fn is_integrity_ok(&self) -> bool {
-        (self.0.signature).verifies(&self.0.body.data.author, &self.0.digest)
+        let parsed = &self.0.parsed;
+        (parsed.signature).verifies(&parsed.data.author, &parsed.digest)
     }
 
     /// blame author and every dependent point's author
     /// must be checked right after integrity, before any manipulations with the point
     pub fn is_well_formed(&self, conf: &MempoolConfig) -> bool {
-        self.0.body.is_well_formed(conf)
+        let parsed = &self.0.parsed;
+        (parsed.data).is_well_formed(parsed.round, parsed.payload_len, &parsed.evidence, conf)
     }
 
     pub fn anchor_link(&self, link_field: AnchorStageRole) -> &'_ Link {
-        self.0.body.data.anchor_link(link_field)
+        self.0.parsed.data.anchor_link(link_field)
     }
 
     pub fn anchor_round(&self, link_field: AnchorStageRole) -> Round {
-        self.0.body.data.anchor_round(link_field, self.0.body.round)
+        (self.0.parsed.data).anchor_round(link_field, self.0.parsed.round)
     }
 
     /// the final destination of an anchor link
     pub fn anchor_id(&self, link_field: AnchorStageRole) -> PointId {
-        self.0
-            .body
-            .data
-            .anchor_id(link_field, self.0.body.round)
+        let parsed = &self.0.parsed;
+        (parsed.data)
+            .anchor_id(link_field, parsed.round)
             .unwrap_or(self.id())
     }
 
     /// next point in path from `&self` to the anchor
     pub fn anchor_link_id(&self, link_field: AnchorStageRole) -> PointId {
-        self.0
-            .body
-            .data
-            .anchor_link_id(link_field, self.0.body.round)
+        let parsed = &self.0.parsed;
+        (parsed.data)
+            .anchor_link_id(link_field, parsed.round)
             .unwrap_or(self.id())
     }
 
@@ -174,40 +252,21 @@ impl Point {
     where
         T: AsRef<[u8]>,
     {
-        #[derive(TlRead)]
-        #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
-        struct PointBodyPrefix<'tl> {
-            _round: Round,
-            payload: Vec<&'tl [u8]>,
-        }
-
-        let (constructor, mut data) = try_handle_prefix_with_offset(&data)?;
-        if constructor != Point::TL_ID {
-            return Err(TlError::UnknownConstructor);
-        }
-        // skip 32 + 64 bytes of digest and signature
-        <[u8; Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES]>::read_from(&mut data)?;
-        let PointBodyPrefix { payload, .. } = <_>::read_from(&mut data)?;
-
-        Ok(payload
+        let prefix = PointPrefixRead::read_from(&mut data.as_ref())?;
+        Ok((prefix.body.payload)
             .into_iter()
             .map(|item| &*bump.alloc_slice_copy(item))
             .collect())
     }
 
     pub fn verify_hash(&self) -> Result<(), TlError> {
-        let bytes = tl_proto::serialize(self);
-        Self::verify_hash_inner(&bytes)
+        Self::verify_hash_inner(&self.0.serialized)
     }
 
     pub fn verify_hash_inner(data: &[u8]) -> Result<(), TlError> {
-        let (constructor, mut data) = try_handle_prefix_with_offset(&data)?;
-        if constructor != Point::TL_ID {
-            return Err(TlError::UnknownConstructor);
-        }
-        let hash = <[u8; Digest::MAX_TL_BYTES]>::read_from(&mut data)?;
-        <[u8; Signature::MAX_TL_BYTES]>::read_from(&mut data)?;
-        if hash == <[u8; Digest::MAX_TL_BYTES]>::from(blake3::hash(data)) {
+        let data = &mut &data[..];
+        let read = PointRawRead::<'_>::read_from(data)?;
+        if read.digest == Digest::new(read.body.as_ref()) {
             Ok(())
         } else {
             Err(TlError::InvalidData)
@@ -226,130 +285,140 @@ impl PrevPointProof {
         // according to the rule of thumb to yield every 0.01-0.1 ms,
         // and that each signature check takes near 0.03 ms,
         // every check deserves its own async task - delegate to rayon as a whole
-        self.evidence
-            .iter()
-            .all(|(peer, sig)| sig.verifies(peer, &self.digest))
+        (self.evidence.iter()).all(|(peer, sig)| sig.verifies(peer, &self.digest))
     }
 }
 
 #[cfg(test)]
-mod tests {
+#[allow(dead_code, reason = "false positives")]
+pub mod test_point {
     use std::collections::BTreeMap;
-    use std::time::Instant;
 
-    use bytes::{Bytes, BytesMut};
+    use bytes::Bytes;
     use everscale_crypto::ed25519::SecretKey;
-    use rand::{thread_rng, RngCore};
-    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-    use tycho_util::sync::rayon_run;
+    use rand::{thread_rng, Rng, RngCore};
 
     use super::*;
-    use crate::models::{PointInfo, Through, UnixTime};
-    use crate::test_utils::default_test_config;
-    const PEERS: usize = 100;
-    const MSG_COUNT: usize = 1;
-    const MSG_BYTES: usize = 780768; // 64 * 100;
+    use crate::models::{Through, UnixTime};
 
-    fn new_key_pair() -> KeyPair {
+    pub const PEERS: usize = 100;
+
+    pub const MSG_BYTES: usize = 64 * 1024;
+
+    pub fn new_key_pair() -> KeyPair {
         let mut secret_bytes: [u8; 32] = [0; 32];
         thread_rng().fill_bytes(&mut secret_bytes);
         KeyPair::from(&SecretKey::from_bytes(secret_bytes))
     }
 
-    fn point_body(key_pair: &KeyPair) -> PointBody {
-        let mut payload = Vec::with_capacity(MSG_COUNT);
+    pub fn payload(conf: &MempoolConfig) -> Vec<Bytes> {
+        let msg_count = conf.consensus.payload_batch_bytes as usize / MSG_BYTES;
+        let mut payload = Vec::with_capacity(msg_count);
         let mut bytes = vec![0; MSG_BYTES];
-        for _ in 0..MSG_COUNT {
+        for _ in 0..msg_count {
             thread_rng().fill_bytes(bytes.as_mut_slice());
             payload.push(Bytes::copy_from_slice(&bytes));
         }
-
-        let prev_digest = Digest::new(&[42]);
-        let mut includes = BTreeMap::default();
-        let mut evidence = BTreeMap::default();
-        for _ in 0..PEERS {
-            let key_pair = new_key_pair();
-            let peer_id = PeerId::from(key_pair.public_key);
-            thread_rng().fill_bytes(bytes.as_mut_slice());
-            let digest = Digest::new(&bytes);
-            includes.insert(peer_id, digest);
-            evidence.insert(peer_id, Signature::new(&key_pair, &prev_digest));
-        }
-
-        PointBody {
-            round: Round(thread_rng().next_u32()),
-            data: PointData {
-                author: PeerId::from(key_pair.public_key),
-                time: UnixTime::now(),
-                includes,
-                witness: BTreeMap::from([
-                    (PeerId([1; 32]), Digest::new(&[1])),
-                    (PeerId([2; 32]), Digest::new(&[2])),
-                ]),
-                anchor_trigger: Link::Direct(Through::Witness(PeerId([1; 32]))),
-                anchor_proof: Link::Indirect {
-                    to: PointId {
-                        author: PeerId([122; 32]),
-                        round: Round(852),
-                        digest: Digest::new(&[2]),
-                    },
-                    path: Through::Witness(PeerId([2; 32])),
-                },
-                anchor_time: UnixTime::now(),
-            },
-            evidence,
-            payload,
-        }
+        payload
     }
-    fn sig_data() -> (Digest, Vec<(PeerId, Signature)>) {
-        let mut bytes = vec![0; MSG_BYTES];
-        thread_rng().fill_bytes(bytes.as_mut_slice());
-        let digest = Digest::new(&bytes);
-        let mut data = Vec::with_capacity(PEERS);
+
+    pub fn prev_point_data() -> (Digest, Vec<(PeerId, Signature)>) {
+        let mut buf = [0; Digest::MAX_TL_BYTES];
+        thread_rng().fill_bytes(&mut buf);
+        let digest = Digest::wrap(buf);
+        let mut evidence = Vec::with_capacity(PEERS);
         for _ in 0..PEERS {
             let key_pair = new_key_pair();
             let sig = Signature::new(&key_pair, &digest);
             let peer_id = PeerId::from(key_pair.public_key);
-            data.push((peer_id, sig));
+            evidence.push((peer_id, sig));
         }
-        (digest, data)
+        (digest, evidence)
     }
 
+    pub fn point(key_pair: &KeyPair, payload: &[Bytes], conf: &MempoolConfig) -> Point {
+        let prev_digest = Digest::new(&[42]);
+        let mut includes = BTreeMap::default();
+        includes.insert(PeerId::from(key_pair.public_key), prev_digest);
+        let mut evidence = BTreeMap::default();
+        let mut buf = [0; Digest::MAX_TL_BYTES];
+        for i in 0..PEERS {
+            let key_pair = new_key_pair();
+            let peer_id = PeerId::from(key_pair.public_key);
+            if i > 0 {
+                thread_rng().fill_bytes(&mut buf);
+                includes.insert(peer_id, Digest::wrap(buf));
+            }
+            evidence.insert(peer_id, Signature::new(&key_pair, &prev_digest));
+        }
+        let round = Round(thread_rng().gen_range(10..u32::MAX - 10));
+        let anchor_time = UnixTime::now();
+        let data = PointData {
+            author: PeerId::from(key_pair.public_key),
+            time: anchor_time.next(),
+            includes,
+            witness: BTreeMap::from([
+                (PeerId([1; 32]), Digest::new(&[1])),
+                (PeerId([2; 32]), Digest::new(&[2])),
+            ]),
+            anchor_trigger: Link::Direct(Through::Witness(PeerId([1; 32]))),
+            anchor_proof: Link::Indirect {
+                to: PointId {
+                    author: PeerId([122; 32]),
+                    round: round - 6_u32,
+                    digest: Digest::new(&[2]),
+                },
+                path: Through::Witness(PeerId([2; 32])),
+            },
+            anchor_time,
+        };
+        Point::new(key_pair, round, payload, data, evidence, conf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use anyhow::{ensure, Context, Result};
+    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+    use test_point::{new_key_pair, payload, point, prev_point_data, PEERS};
+    use tycho_util::sync::rayon_run;
+
+    use super::*;
+    use crate::models::PointInfo;
+    use crate::test_utils::default_test_config;
+
     #[test]
-    pub fn check_serialize() {
-        let merged_conf = default_test_config();
+    pub fn check_serialize() -> Result<()> {
+        let conf = default_test_config().conf;
+        let point = point(&new_key_pair(), &payload(&conf), &conf);
 
-        let point_key_pair = new_key_pair();
-        let point_body = point_body(&point_key_pair);
-        let digest = point_body.make_digest(&merged_conf.conf);
-        let point = Point(Arc::new(PointInner {
-            signature: Signature::new(&point_key_pair, &digest),
-            digest,
-            body: point_body.clone(),
-        }));
+        let point_2 =
+            Point::new_from_bytes(point.serialized().to_vec()).context("parse point bytes")?;
+        ensure!(point.0 == point_2.0, "point serde roundtrip");
+
         let info = PointInfo::from(&point);
-        let mut data = Vec::<u8>::with_capacity(info.max_size_hint());
-        info.write_to(&mut data);
-        let ref_info = PointInfo::serializable_from(&point);
-        let mut ref_data = Vec::<u8>::with_capacity(info.max_size_hint());
-        ref_info.write_to(&mut ref_data);
+        let mut info_b = Vec::<u8>::with_capacity(info.max_size_hint());
+        info.write_to(&mut info_b);
 
-        assert_eq!(
-            info,
-            tl_proto::deserialize(&ref_data).expect("deserialize point info from ref"),
+        let info_w = PointInfo::serializable_from(&point);
+        let mut info_w_b = Vec::<u8>::with_capacity(info_w.max_size_hint());
+        info_w.write_to(&mut info_w_b);
+
+        ensure!(
+            info == tl_proto::deserialize(&info_w_b).context("deserialize point info from ref")?,
+            "point info serde roundtrip"
         );
-        assert_eq!(
-            Digest::new(&data),
-            Digest::new(&ref_data),
-            "compare serialized bytes"
-        );
+        ensure!(info_b == info_w_b, "compare serialized info bytes");
+        Ok(())
     }
 
     #[test]
     pub fn check_sig() {
-        let _merged_conf = default_test_config();
+        let _conf = default_test_config().conf;
 
-        let (digest, data) = sig_data();
+        let (digest, data) = prev_point_data();
 
         let timer = Instant::now();
         for (peer_id, sig) in &data {
@@ -376,9 +445,9 @@ mod tests {
 
     #[tokio::test]
     pub async fn check_sig_on_rayon() {
-        let _merged_conf = default_test_config();
+        let _conf = default_test_config().conf;
 
-        let (digest, data) = sig_data();
+        let (digest, data) = prev_point_data();
 
         let timer = Instant::now();
         rayon_run(|| ()).await;
@@ -388,7 +457,7 @@ mod tests {
         let timer = Instant::now();
         rayon_run(move || {
             assert!(
-                data.par_iter()
+                data.iter()
                     .all(|(peer_id, sig)| sig.verifies(peer_id, &digest)),
                 "invalid signature"
             );
@@ -396,81 +465,68 @@ mod tests {
         .await;
         let elapsed = timer.elapsed();
         println!(
-            "check {PEERS} sigs on rayon in par iter took {}",
+            "check {PEERS} sigs sequentially on rayon took {}",
             humantime::format_duration(elapsed)
         );
     }
 
     #[test]
     pub fn check_new_point() {
-        let merged_conf = default_test_config();
-
+        let conf = default_test_config().conf;
         let point_key_pair = new_key_pair();
-        let point_body = point_body(&point_key_pair);
-        let digest = point_body.make_digest(&merged_conf.conf);
-        let point = Point(Arc::new(PointInner {
-            signature: Signature::new(&point_key_pair, &digest),
-            digest,
-            body: point_body.clone(),
-        }));
+        let payload = payload(&conf);
+        let point = point(&point_key_pair, &payload, &conf);
+
+        let mut data = Vec::<u8>::with_capacity(conf.point_max_bytes);
+        let timer = Instant::now();
+        PointWrite {
+            digest: point.digest(),
+            signature: point.signature(),
+            body: PointBodyWrite {
+                payload: &payload,
+                round: point.round(),
+                data: point.data(),
+                evidence: point.evidence(),
+            },
+        }
+        .write_to(&mut data);
+        let tl_elapsed = timer.elapsed();
+
+        println!(
+            "tl write {} bytes of point with {} bytes payload took {}",
+            point.serialized().len(),
+            point.payload_bytes(),
+            humantime::format_duration(tl_elapsed)
+        );
 
         let timer = Instant::now();
-        let mut data = BytesMut::with_capacity(point_body.max_size_hint());
-        point_body.write_to(&mut data);
-        let elapsed = timer.elapsed();
-
-        let bytes = data.freeze();
-
-        let timer = Instant::now();
-        let digest = Digest::new(bytes.as_ref());
+        let digest = Digest::new(&point.serialized()[4 + 32 + 64..]);
         let sha_elapsed = timer.elapsed();
         assert_eq!(&digest, point.digest(), "point digest");
+        println!("hash took {}", humantime::format_duration(sha_elapsed));
 
         let timer = Instant::now();
         let sig = Signature::new(&point_key_pair, &digest);
         let sig_elapsed = timer.elapsed();
         assert_eq!(&sig, point.signature(), "point signature");
-
-        println!(
-            "tl {} bytes of point with {} bytes payload took {}",
-            bytes.len(),
-            point_body
-                .payload
-                .iter()
-                .fold(0, |acc, bytes| acc + bytes.len()),
-            humantime::format_duration(elapsed)
-        );
-        println!("hash took {}", humantime::format_duration(sha_elapsed));
         println!("sig took {}", humantime::format_duration(sig_elapsed));
-        println!(
-            "total {}",
-            humantime::format_duration(elapsed + sha_elapsed + sig_elapsed)
-        );
+
+        let total = tl_elapsed + sha_elapsed + sig_elapsed;
+        println!("total point build {}", humantime::format_duration(total));
     }
 
     #[test]
     pub fn massive_point_deserialization() {
-        let merged_conf = default_test_config();
+        let conf = default_test_config().conf;
+        let point = point(&new_key_pair(), &payload(&conf), &conf);
 
-        let point_key_pair = new_key_pair();
-        let point_payload = MSG_COUNT * MSG_BYTES;
-
-        let point_body = point_body(&point_key_pair);
-        let digest = point_body.make_digest(&merged_conf.conf);
-        let point = Point(Arc::new(PointInner {
-            signature: Signature::new(&point_key_pair, &digest),
-            digest,
-            body: point_body.clone(),
-        }));
-
-        let mut data = Vec::<u8>::with_capacity(merged_conf.conf.point_max_bytes);
-        point.write_to(&mut data);
-        let byte_size = data.len();
+        let serialized = (0..PEERS)
+            .map(|_| point.serialized().to_vec())
+            .collect::<Vec<_>>();
 
         let timer = Instant::now();
-        const POINTS_LEN: u32 = 100;
-        for _ in 0..POINTS_LEN {
-            if let Err(e) = tl_proto::deserialize::<Point>(&data) {
+        for bytes in serialized {
+            if let Err(e) = Point::new_from_bytes(bytes) {
                 println!("error {e:?}");
                 return;
             }
@@ -478,60 +534,67 @@ mod tests {
 
         let elapsed = timer.elapsed();
         println!(
-            "tl read of {POINTS_LEN} point os size {byte_size} bytes of point with {point_payload} bytes payload took {}",
+            "tl read of {PEERS} point of size {} bytes of point with {} bytes payload took {}",
+            point.serialized().len(),
+            point.payload_bytes(),
             humantime::format_duration(elapsed)
         );
     }
 
     #[test]
     pub fn read_payload_from_tl() {
-        let merged_conf = default_test_config();
+        let conf = default_test_config().conf;
+        let payload = payload(&conf);
+        let point = point(&new_key_pair(), &payload, &conf);
 
-        let point_key_pair = new_key_pair();
-        let point_body = point_body(&point_key_pair);
-        let digest = point_body.make_digest(&merged_conf.conf);
-        let point = Point(Arc::new(PointInner {
-            signature: Signature::new(&point_key_pair, &digest),
-            digest,
-            body: point_body.clone(),
-        }));
-
-        let bytes = tl_proto::serialize(&point);
-
-        let bump = Bump::new();
-        let payload = Point::read_payload_from_tl_bytes(&bytes, &bump)
+        let bump = Bump::with_capacity(point.payload_len() as usize);
+        let timer = Instant::now();
+        let payload_r = Point::read_payload_from_tl_bytes(point.serialized(), &bump)
             .expect("Failed to deserialize ShortPoint from Point bytes");
-        assert_eq!(payload, point.0.body.payload);
+        let elapsed = timer.elapsed();
+
+        assert_eq!(payload, payload_r);
+        assert_eq!(payload.len(), point.payload_len() as usize);
+        assert_eq!(
+            payload.iter().map(|m| m.len()).sum::<usize>(),
+            point.payload_bytes() as usize
+        );
+        println!(
+            "read {} bytes of payload took {}",
+            point.payload_bytes(),
+            humantime::format_duration(elapsed)
+        );
     }
 
     #[test]
     pub fn massive_point_serialization() {
-        let merged_conf = default_test_config();
+        let conf = default_test_config().conf;
+        let payload = payload(&conf);
+        let point = point(&new_key_pair(), &payload, &conf);
 
-        let point_key_pair = new_key_pair();
+        let mut data = Vec::<u8>::with_capacity(conf.point_max_bytes);
         let timer = Instant::now();
-        let point_payload = MSG_COUNT * MSG_BYTES;
-        let mut byte_size = 0;
-
-        let point_body = point_body(&point_key_pair);
-        let digest = point_body.make_digest(&merged_conf.conf);
-        let point = Point(Arc::new(PointInner {
-            signature: Signature::new(&point_key_pair, &digest),
-            digest,
-            body: point_body.clone(),
-        }));
         const POINTS_LEN: u32 = 100;
         for _ in 0..POINTS_LEN {
-            let point = point.clone();
-            let mut data = Vec::<u8>::with_capacity(merged_conf.conf.point_max_bytes);
-            point.write_to(&mut data);
-            byte_size = data.len();
-            // data.freeze();
+            data.clear();
+            PointWrite {
+                digest: &Digest::ZERO,
+                signature: &Signature::ZERO,
+                body: PointBodyWrite {
+                    payload: &payload,
+                    round: point.round(),
+                    data: point.data(),
+                    evidence: point.evidence(),
+                },
+            }
+            .write_to(&mut data);
         }
 
         let elapsed = timer.elapsed();
         println!(
-            "tl write of {POINTS_LEN} point os size {byte_size} bytes of point with {point_payload} bytes payload took {}",
+            "tl write of {POINTS_LEN} point os size {} bytes of point with {} bytes payload took {}",
+            point.serialized().len(),
+            point.payload_bytes(),
             humantime::format_duration(elapsed)
         );
     }

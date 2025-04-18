@@ -4,9 +4,8 @@ use tycho_network::{PeerId, PrivateOverlay};
 use tycho_util::FastHashSet;
 
 use crate::effects::Task;
-use crate::intercom::dto::PeerState;
 use crate::intercom::peer_schedule::stateful::PeerScheduleStateful;
-use crate::intercom::peer_schedule::WeakPeerSchedule;
+use crate::intercom::peer_schedule::{PeerState, WeakPeerSchedule};
 use crate::intercom::PeerSchedule;
 use crate::models::PeerCount;
 

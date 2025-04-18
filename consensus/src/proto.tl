@@ -24,7 +24,7 @@ consensus.pointId
     digest:int256
     = consensus.PointId;
 
-consensus.pointInner
+consensus.point
     digest:int256
     signature:bytes
     body:consensus.pointBody
@@ -68,40 +68,39 @@ link.through.includes   x:int256 = link.Through;
 /*
 * Representation of PointByIdResponse
 */
-intercom.pointByIdResponse.defined          x:bytes     = intercom.PointByIdResponse;
-intercom.pointByIdResponse.definedNone                  = intercom.PointByIdResponse;
-intercom.pointByIdResponse.tryLater                     = intercom.PointByIdResponse;
-
+intercom.pointByIdResponse.defined          x:bytes         = intercom.PointByIdResponse;
+intercom.pointByIdResponse.definedNone                      = intercom.PointByIdResponse;
+intercom.pointByIdResponse.tryLater                         = intercom.PointByIdResponse;
 
 /*
 * Representation of SignatureResponse
 */
-intercom.signatureResponse.signature        x:bytes     = intercom.SignatureResponse;
-intercom.signatureResponse.noPoint                      = intercom.SignatureResponse;
-intercom.signatureResponse.tryLater                     = intercom.SignatureResponse;
-intercom.signatureResponse.rejected                     = intercom.SignatureResponse;
+intercom.signatureResponse.signature        x:bytes         = intercom.SignatureResponse;
+intercom.signatureResponse.noPoint                          = intercom.SignatureResponse;
+intercom.signatureResponse.tryLater                         = intercom.SignatureResponse;
+intercom.signatureResponse.rejected                         = intercom.SignatureResponse;
 
 /*
 * Representation of SignatureRejectedReason
 */
-intercom.signatureRejectedReason.tooOldRound            = intercom.SignatureRejectedReason;
-intercom.signatureRejectedReason.cannotSign             = intercom.SignatureRejectedReason;
-intercom.signatureRejectedReason.unknownPeer            = intercom.SignatureRejectedReason;
+intercom.signatureRejectedReason.tooOldRound                = intercom.SignatureRejectedReason;
+intercom.signatureRejectedReason.cannotSign                 = intercom.SignatureRejectedReason;
+intercom.signatureRejectedReason.unknownPeer                = intercom.SignatureRejectedReason;
 
 
 /*
 * Representation of BroadcastResponse
 */
-intercom.broadcastResponse                              = intercom.BroadcastResponse;
+intercom.broadcastResponse                                  = intercom.BroadcastResponse;
 
 /*
 * Representation of generic query wrapper
 */
-core.queryWrapper  {X:Type}  tag:core.QueryTag  body:X  = core.QueryWrapper X;
+intercom.queryRequest {X:Type} tag:intercom.QueryTag body:X = intercom.QueryRequest X;
 
 /*
 * Representation of query wrapper type tag
 */
-core.queryTag.broadcast                                 = core.QueryTag;
-core.queryTag.pointById                                 = core.QueryTag;
-core.queryTag.signature                                 = core.QueryTag;
+intercom.queryTag.broadcast                                 = intercom.QueryTag;
+intercom.queryTag.pointById                                 = intercom.QueryTag;
+intercom.queryTag.signature                                 = intercom.QueryTag;
