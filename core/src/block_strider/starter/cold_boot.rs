@@ -337,7 +337,7 @@ impl StarterInner {
 
             self.storage
                 .block_handle_storage()
-                .set_block_applied(&handle);
+                .set_block_committed(&handle);
         }
 
         Ok(())

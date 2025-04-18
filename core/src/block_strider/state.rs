@@ -4,13 +4,25 @@ use everscale_types::models::BlockId;
 use tycho_block_util::block::ShardHeights;
 use tycho_storage::Storage;
 
+#[derive(Debug, Clone, Copy)]
+pub struct CommitMasterBlock<'a> {
+    pub block_id: &'a BlockId,
+    pub is_key_block: bool,
+    pub shard_heights: &'a ShardHeights,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CommitShardBlock<'a> {
+    pub block_id: &'a BlockId,
+}
+
 pub trait BlockStriderState: Send + Sync + 'static {
     fn load_last_mc_block_id(&self) -> BlockId;
 
-    fn is_commited(&self, block_id: &BlockId) -> bool;
+    fn is_committed(&self, block_id: &BlockId) -> bool;
 
-    fn commit_master(&self, block_id: &BlockId, shard_heights: &ShardHeights);
-    fn commit_shard(&self, block_id: &BlockId);
+    fn commit_master(&self, ctx: CommitMasterBlock<'_>);
+    fn commit_shard(&self, ctx: CommitShardBlock<'_>);
 }
 
 pub struct PersistentBlockStriderState {
@@ -35,20 +47,37 @@ impl BlockStriderState for PersistentBlockStriderState {
         }
     }
 
-    fn is_commited(&self, block_id: &BlockId) -> bool {
-        match self.storage.block_handle_storage().load_handle(block_id) {
-            Some(handle) => handle.is_applied(),
-            None => false,
+    fn is_committed(&self, block_id: &BlockId) -> bool {
+        if block_id.is_masterchain() {
+            let last_mc = self.load_last_mc_block_id();
+            last_mc.seqno >= block_id.seqno
+        } else {
+            match self.storage.block_handle_storage().load_handle(block_id) {
+                Some(handle) => handle.is_committed(),
+                None => false,
+            }
         }
     }
 
-    fn commit_master(&self, block_id: &BlockId, _shard_heights: &ShardHeights) {
-        assert!(block_id.is_masterchain());
-        self.storage.node_state().store_last_mc_block_id(block_id);
+    fn commit_master(&self, ctx: CommitMasterBlock<'_>) {
+        assert!(ctx.block_id.is_masterchain());
+        self.storage
+            .node_state()
+            .store_last_mc_block_id(ctx.block_id);
     }
 
-    fn commit_shard(&self, block_id: &BlockId) {
-        assert!(!block_id.is_masterchain());
+    fn commit_shard(&self, ctx: CommitShardBlock<'_>) {
+        assert!(!ctx.block_id.is_masterchain());
+
+        let handles = self.storage.block_handle_storage();
+        if let Some(handle) = handles.load_handle(ctx.block_id) {
+            handles.set_block_committed(&handle);
+        } else {
+            tracing::warn!(
+                block_id = %ctx.block_id,
+                "committing shard block without a block handle",
+            );
+        }
     }
 }
 
@@ -69,7 +98,7 @@ impl BlockStriderState for TempBlockStriderState {
         self.top_blocks.lock().unwrap().0
     }
 
-    fn is_commited(&self, block_id: &BlockId) -> bool {
+    fn is_committed(&self, block_id: &BlockId) -> bool {
         let commited = self.top_blocks.lock().unwrap();
         let (mc_block_id, shard_heights) = &*commited;
         if block_id.is_masterchain() {
@@ -79,16 +108,16 @@ impl BlockStriderState for TempBlockStriderState {
         }
     }
 
-    fn commit_master(&self, block_id: &BlockId, shard_heights: &ShardHeights) {
-        assert!(block_id.is_masterchain());
+    fn commit_master(&self, ctx: CommitMasterBlock<'_>) {
+        assert!(ctx.block_id.is_masterchain());
         let mut commited = self.top_blocks.lock().unwrap();
-        if commited.0.seqno < block_id.seqno {
-            *commited = (*block_id, shard_heights.clone());
+        if commited.0.seqno < ctx.block_id.seqno {
+            *commited = (*ctx.block_id, ctx.shard_heights.clone());
         }
     }
 
-    fn commit_shard(&self, block_id: &BlockId) {
-        assert!(!block_id.is_masterchain());
+    fn commit_shard(&self, ctx: CommitShardBlock<'_>) {
+        assert!(!ctx.block_id.is_masterchain());
         // TODO: Update shard height
     }
 }

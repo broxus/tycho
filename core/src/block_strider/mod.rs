@@ -23,7 +23,10 @@ pub use self::provider::{
 pub use self::starter::{
     ColdBootType, FileZerostateProvider, Starter, StarterConfig, ZerostateProvider,
 };
-pub use self::state::{BlockStriderState, PersistentBlockStriderState, TempBlockStriderState};
+pub use self::state::{
+    BlockStriderState, CommitMasterBlock, CommitShardBlock, PersistentBlockStriderState,
+    TempBlockStriderState,
+};
 pub use self::state_applier::ShardStateApplier;
 #[cfg(any(test, feature = "test"))]
 pub use self::subscriber::test::PrintSubscriber;
@@ -231,7 +234,11 @@ where
         self.subscriber.handle_block(&cx, prepared?).await?;
 
         let shard_heights = ShardHeights::from(shard_heights);
-        self.state.commit_master(&mc_block_id, &shard_heights);
+        self.state.commit_master(CommitMasterBlock {
+            block_id: &mc_block_id,
+            is_key_block,
+            shard_heights: &shard_heights,
+        });
 
         Ok(())
     }
@@ -252,7 +259,7 @@ where
 
         let mut depth = 0;
         let mut result = Vec::new();
-        while top_block_id.seqno > 0 && !self.state.is_commited(&top_block_id) {
+        while top_block_id.seqno > 0 && !self.state.is_committed(&top_block_id) {
             // Download block
             let block = {
                 let _histogram = HistogramGuard::begin("tycho_core_download_sc_block_time");
@@ -329,8 +336,9 @@ where
             let _histogram = HistogramGuard::begin("tycho_core_process_sc_block_time");
 
             self.subscriber.handle_block(&cx, prepared?).await?;
-
-            self.state.commit_shard(cx.block.id());
+            self.state.commit_shard(CommitShardBlock {
+                block_id: cx.block.id(),
+            });
         }
 
         Ok(())
