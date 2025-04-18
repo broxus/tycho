@@ -1,18 +1,17 @@
+use std::pin::pin;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::cell::Cell;
-use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
-use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
-use tycho_storage::{BlockConnection, BlockHandle, NewBlockMeta, Storage, StoreStateHint};
+use tycho_storage::{BlockHandle, Storage, StoreStateHint};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
 use crate::block_strider::{
-    BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
+    BlockSaver, BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 
 #[repr(transparent)]
@@ -27,6 +26,7 @@ where
     pub fn new(storage: Storage, state_subscriber: S) -> Self {
         Self {
             inner: Arc::new(Inner {
+                block_saver: BlockSaver::new(storage.clone()),
                 storage,
                 state_subscriber,
             }),
@@ -36,8 +36,10 @@ where
     async fn prepare_block_impl(
         &self,
         cx: &BlockSubscriberContext,
-    ) -> Result<ShardApplierPrepared> {
+    ) -> Result<StateApplierPrepared> {
         let _histogram = HistogramGuard::begin("tycho_core_state_applier_prepare_block_time");
+
+        let handle = self.inner.block_saver.prepare_block(cx).await?;
 
         tracing::info!(
             mc_block_id = %cx.mc_block_id.as_short_id(),
@@ -46,53 +48,6 @@ where
         );
 
         let state_storage = self.inner.storage.shard_state_storage();
-
-        // Load handle
-        let handle = self
-            .get_block_handle(&cx.mc_block_id, &cx.block, &cx.archive_data)
-            .await?;
-
-        let (prev_id, prev_id_alt) = cx
-            .block
-            .construct_prev_id()
-            .context("failed to construct prev id")?;
-
-        // Update block connections
-        {
-            let block_handles = self.inner.storage.block_handle_storage();
-            let connections = self.inner.storage.block_connection_storage();
-
-            let block_id = cx.block.id();
-
-            let prev_handle = block_handles.load_handle(&prev_id);
-
-            match prev_id_alt {
-                None => {
-                    if let Some(handle) = prev_handle {
-                        let direction = if block_id.shard != prev_id.shard
-                            && prev_id.shard.split().unwrap().1 == block_id.shard
-                        {
-                            // Special case for the right child after split
-                            BlockConnection::Next2
-                        } else {
-                            BlockConnection::Next1
-                        };
-                        connections.store_connection(&handle, direction, block_id);
-                    }
-                    connections.store_connection(&handle, BlockConnection::Prev1, &prev_id);
-                }
-                Some(ref prev_id_alt) => {
-                    if let Some(handle) = prev_handle {
-                        connections.store_connection(&handle, BlockConnection::Next1, block_id);
-                    }
-                    if let Some(handle) = block_handles.load_handle(prev_id_alt) {
-                        connections.store_connection(&handle, BlockConnection::Next1, block_id);
-                    }
-                    connections.store_connection(&handle, BlockConnection::Prev1, &prev_id);
-                    connections.store_connection(&handle, BlockConnection::Prev2, prev_id_alt);
-                }
-            }
-        }
 
         // Load/Apply state
         let (state, handles) = if handle.has_state() {
@@ -105,6 +60,11 @@ where
             (state, RefMcStateHandles::Skip)
         } else {
             // Load previous states
+            let (prev_id, prev_id_alt) = cx
+                .block
+                .construct_prev_id()
+                .context("failed to construct prev id")?;
+
             let (prev_root_cell, handles) = {
                 let prev_state = state_storage
                     .load_state(&prev_id)
@@ -142,7 +102,7 @@ where
             (state, handles)
         };
 
-        Ok(ShardApplierPrepared {
+        Ok(StateApplierPrepared {
             handle,
             state,
             _prev_handles: handles,
@@ -152,7 +112,7 @@ where
     async fn handle_block_impl(
         &self,
         cx: &BlockSubscriberContext,
-        prepared: ShardApplierPrepared,
+        prepared: StateApplierPrepared,
     ) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_core_state_applier_handle_block_time");
 
@@ -179,8 +139,7 @@ where
         }
 
         // Process state
-        let started_at = std::time::Instant::now();
-        let cx = StateSubscriberContext {
+        let scx = StateSubscriberContext {
             mc_block_id: cx.mc_block_id,
             mc_is_key_block: cx.mc_is_key_block,
             is_key_block: cx.is_key_block,
@@ -188,41 +147,21 @@ where
             archive_data: cx.archive_data.clone(), // TODO: rewrite without clone
             state: prepared.state,
         };
-        self.inner.state_subscriber.handle_state(&cx).await?;
-        metrics::histogram!("tycho_core_subscriber_handle_state_time").record(started_at.elapsed());
 
-        // Save block to archive.
-        if self.inner.storage.config().archives_gc.is_some() {
-            tracing::debug!(block_id = %prepared.handle.id(), "saving block into archive");
-            self.inner
-                .storage
-                .block_storage()
-                .move_into_archive(&prepared.handle, cx.mc_is_key_block)
-                .await?;
-        }
+        let subscribers_fut = pin!(async {
+            let _histogram = HistogramGuard::begin("tycho_core_subscriber_handle_state_time");
+            self.inner.state_subscriber.handle_state(&scx).await
+        });
+
+        let block_fut = self.inner.block_saver.handle_block(cx, prepared.handle);
+
+        let (subscribers_res, block_res) =
+            futures_util::future::join(subscribers_fut, block_fut).await;
+        subscribers_res.context("State subscriber failed")?;
+        block_res.context("Block saver failed")?;
 
         // Done
         Ok(())
-    }
-
-    async fn get_block_handle(
-        &self,
-        mc_block_id: &BlockId,
-        block: &BlockStuff,
-        archive_data: &ArchiveData,
-    ) -> Result<BlockHandle> {
-        let block_storage = self.inner.storage.block_storage();
-
-        let info = block.load_info()?;
-        let res = block_storage
-            .store_block_data(block, archive_data, NewBlockMeta {
-                is_key_block: info.key_block,
-                gen_utime: info.gen_utime,
-                ref_by_mc_seqno: mc_block_id.seqno,
-            })
-            .await?;
-
-        Ok(res.handle)
     }
 
     async fn compute_and_store_state_update(
@@ -272,7 +211,7 @@ impl<S> BlockSubscriber for ShardStateApplier<S>
 where
     S: StateSubscriber,
 {
-    type Prepared = ShardApplierPrepared;
+    type Prepared = StateApplierPrepared;
 
     type PrepareBlockFut<'a> = BoxFuture<'a, Result<Self::Prepared>>;
     type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
@@ -290,7 +229,7 @@ where
     }
 }
 
-pub struct ShardApplierPrepared {
+pub struct StateApplierPrepared {
     handle: BlockHandle,
     state: ShardStateStuff,
     _prev_handles: RefMcStateHandles,
@@ -308,4 +247,5 @@ enum RefMcStateHandles {
 struct Inner<S> {
     storage: Storage,
     state_subscriber: S,
+    block_saver: BlockSaver,
 }
