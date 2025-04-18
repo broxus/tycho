@@ -31,6 +31,10 @@ impl ShardStateData {
     pub fn root_cell(&self) -> &Cell {
         &self.inner.root
     }
+
+    pub fn accounts(&self) -> &ShardAccounts {
+        &self.inner.accounts
+    }
 }
 
 #[doc(hidden)]

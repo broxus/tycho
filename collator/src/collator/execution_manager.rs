@@ -8,6 +8,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use humantime::format_duration;
 use rayon::prelude::*;
+use tycho_block_util::state::ShardStateDataId;
 use tycho_executor::{Executor, ExecutorParams, ParsedConfig, TxError};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
@@ -36,7 +37,7 @@ impl MessagesExecutor {
         min_next_lt: u64,
         config: Arc<ParsedConfig>,
         params: Arc<ExecutorParams>,
-        shard_accounts: ShardAccounts,
+        shard_accounts: FastHashMap<u8, ShardAccounts>,
         wu_params_execute: WorkUnitsParamsExecute,
     ) -> Self {
         Self {
@@ -66,7 +67,7 @@ impl MessagesExecutor {
         self,
     ) -> (
         impl ExactSizeIterator<Item = Box<ShardAccountStuff>>,
-        ShardAccounts,
+        FastHashMap<u8, ShardAccounts>,
     ) {
         let AccountsCache {
             shard_accounts,
@@ -355,7 +356,7 @@ impl MessagesExecutor {
 
 struct AccountsCache {
     workchain_id: i8,
-    shard_accounts: ShardAccounts,
+    shard_accounts: FastHashMap<u8, ShardAccounts>,
     items: FastHashMap<AccountId, Box<ShardAccountStuff>>,
 }
 
@@ -375,16 +376,19 @@ impl AccountsCache {
                 }
             }
             Entry::Vacant(entry) => {
-                if let Some((_, state)) = self.shard_accounts.get(account_id)? {
-                    let account_stuff =
-                        ShardAccountStuff::new(self.workchain_id, account_id, state)
-                            .map(Box::new)?;
-                    if f(&account_stuff) {
-                        return Ok(Some(account_stuff));
-                    }
+                let shard_id = ShardStateDataId::from_account(account_id.as_array()).0;
+                if let Some(shard_accounts) = self.shard_accounts.get(&shard_id) {
+                    if let Some((_, state)) = shard_accounts.get(account_id)? {
+                        let account_stuff =
+                            ShardAccountStuff::new(self.workchain_id, account_id, state)
+                                .map(Box::new)?;
+                        if f(&account_stuff) {
+                            return Ok(Some(account_stuff));
+                        }
 
-                    // NOTE: Reuse preloaded account state as it might be used later
-                    entry.insert(account_stuff);
+                        // NOTE: Reuse preloaded account state as it might be used later
+                        entry.insert(account_stuff);
+                    }
                 }
             }
         }
@@ -395,7 +399,13 @@ impl AccountsCache {
     fn get_account_stuff(&self, account_id: &AccountId) -> Result<Box<ShardAccountStuff>> {
         if let Some(account) = self.items.get(account_id) {
             Ok(account.clone())
-        } else if let Some((_depth, shard_account)) = self.shard_accounts.get(account_id)? {
+        } else if let Some((_depth, shard_account)) = self
+            .shard_accounts
+            .get(&ShardStateDataId::from_account(account_id.as_array()).0)
+            .map(|sa| sa.get(account_id))
+            .transpose()?
+            .flatten()
+        {
             ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
         } else {
             Ok(Box::new(ShardAccountStuff::new_empty(

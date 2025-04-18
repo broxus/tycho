@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::{hash_map, BTreeMap};
 use std::sync::Arc;
 use std::time::Duration;
@@ -530,35 +531,12 @@ impl Phase<FinalizeState> {
                 .total_validator_fees
                 .try_sub_assign(&value_flow.recovered)?;
 
-            // Split accounts by shards
-            let new_observable_state_data = {
-                let mut buffer: FastHashMap<u8, ShardAccounts> =
-                    FastHashMap::with_capacity(ShardStateDataId::NUM_SHARDS as usize);
-
-                for item in processed_accounts.shard_accounts.iter() {
-                    let item = item?;
-                    let data_shard_id = ShardStateDataId::from_account(item.0.as_ref()).0;
-
-                    match buffer.entry(data_shard_id) {
-                        hash_map::Entry::Vacant(entry) => {
-                            let mut accounts = ShardAccounts::new();
-                            accounts.set(item.0, item.1, item.2)?;
-                            entry.insert(accounts);
-                        }
-                        hash_map::Entry::Occupied(mut entry) => {
-                            entry.get_mut().set(item.0, item.1, item.2)?;
-                        }
-                    }
-                }
-
-                buffer
-            };
-
             if is_masterchain {
                 new_observable_state.libraries = global_libraries.clone();
             }
 
-            let new_observable_state_data = new_observable_state_data
+            let new_observable_state_data = processed_accounts
+                .shard_accounts
                 .into_iter()
                 .map(|(k, accounts)| ShardStateData::from_accounts(accounts).map(|v| (k, v)))
                 .collect::<Result<FastHashMap<_, _>>>()?;
@@ -1122,50 +1100,61 @@ impl Phase<FinalizeState> {
         let mut account_blocks = BTreeMap::new();
         let mut new_config_params = None;
         let (updated_accounts, shard_accounts) = executor.into_accounts_cache_raw();
-        let mut shard_accounts = RelaxedAugDict::from_full(&shard_accounts);
+
+        let mut shard_accounts = shard_accounts
+            .into_iter()
+            .map(|(k, v)| (k, RelaxedAugDict::from_full(&v)))
+            .collect::<FastHashMap<_, _>>();
 
         for updated_account in updated_accounts {
             if updated_account.transactions.is_empty() {
                 continue;
             }
 
-            if updated_account.exists {
-                shard_accounts.set_any(
-                    &updated_account.account_addr,
-                    &DepthBalanceInfo {
-                        split_depth: 0, // NOTE: will need to set when we implement accounts split/merge logic
-                        balance: updated_account.balance.clone(),
-                    },
-                    &updated_account.shard_account,
-                )?;
-            } else {
-                shard_accounts.remove(&updated_account.account_addr)?;
-            }
+            let data_shard_id =
+                ShardStateDataId::from_account(updated_account.account_addr.as_array()).0;
 
-            if is_masterchain {
-                if &updated_account.account_addr == config_address {
-                    if let Some(Account {
-                        state:
-                            AccountState::Active(StateInit {
-                                data: Some(data), ..
-                            }),
-                        ..
-                    }) = updated_account.shard_account.load_account()?
-                    {
-                        new_config_params = Some(data.parse::<BlockchainConfigParams>()?);
-                    }
+            if let Entry::Occupied(mut shard_accounts) = shard_accounts.entry(data_shard_id) {
+                let shard_accounts = shard_accounts.get_mut();
+
+                if updated_account.exists {
+                    shard_accounts.set_any(
+                        &updated_account.account_addr,
+                        &DepthBalanceInfo {
+                            split_depth: 0, // NOTE: will need to set when we implement accounts split/merge logic
+                            balance: updated_account.balance.clone(),
+                        },
+                        &updated_account.shard_account,
+                    )?;
+                } else {
+                    shard_accounts.remove(&updated_account.account_addr)?;
                 }
 
-                updated_account.update_public_libraries(global_libraries)?;
+                if is_masterchain {
+                    if &updated_account.account_addr == config_address {
+                        if let Some(Account {
+                            state:
+                                AccountState::Active(StateInit {
+                                    data: Some(data), ..
+                                }),
+                            ..
+                        }) = updated_account.shard_account.load_account()?
+                        {
+                            new_config_params = Some(data.parse::<BlockchainConfigParams>()?);
+                        }
+                    }
+
+                    updated_account.update_public_libraries(global_libraries)?;
+                }
+
+                let account_block = AccountBlock {
+                    state_update: updated_account.build_hash_update(),
+                    account: updated_account.account_addr,
+                    transactions: AugDict::try_from_btree(&updated_account.transactions)?,
+                };
+
+                account_blocks.insert(updated_account.account_addr, account_block);
             }
-
-            let account_block = AccountBlock {
-                state_update: updated_account.build_hash_update(),
-                account: updated_account.account_addr,
-                transactions: AugDict::try_from_btree(&updated_account.transactions)?,
-            };
-
-            account_blocks.insert(updated_account.account_addr, account_block);
         }
 
         let accounts_len = account_blocks.len();
@@ -1177,9 +1166,19 @@ impl Phase<FinalizeState> {
                 .map(|(k, v)| (k, v.transactions.root_extra(), v as &dyn Store)),
         )?;
 
+        // let shard_accounts = shard_accounts
+        //     .into_iter()
+        //     .map(|(k, dict)| dict.build().map(|v| (k, v)))
+        //     .collect::<Result<FastHashMap<_, _>>>()?;
+
+        let shard_accounts = shard_accounts
+            .into_iter()
+            .map(|(k, dict)| (k, dict.build().unwrap()))
+            .collect::<FastHashMap<_, _>>();
+
         Ok(ProcessedAccounts {
             account_blocks: account_blocks.build()?,
-            shard_accounts: shard_accounts.build()?,
+            shard_accounts,
             new_config_params,
             accounts_len,
         })
@@ -1359,7 +1358,7 @@ impl Phase<FinalizeState> {
         );
 
         // Previous total shard balance.
-        let from_prev_block = &prev_shard_data.observable_accounts().root_extra().balance;
+        let from_prev_block = &prev_shard_data.observable_accounts_balance()?;
         anyhow::ensure!(
             value_flow.from_prev_block == *from_prev_block,
             "ValueFlow for {} declares from_prev_block={}, \
@@ -1370,9 +1369,16 @@ impl Phase<FinalizeState> {
         );
 
         // Next total shard balance.
-        let to_next_block = &processed_accounts.shard_accounts.root_extra().balance;
+        let to_next_block = processed_accounts
+            .shard_accounts
+            .values()
+            .map(|v| v.root_extra().balance.clone())
+            .try_fold(CurrencyCollection::ZERO, |left, right| {
+                left.checked_add(&right)
+            })?;
+
         anyhow::ensure!(
-            value_flow.to_next_block == *to_next_block,
+            value_flow.to_next_block == to_next_block,
             "ValueFlow for {} declares to_next_block={}, \
             but the total balance present in the new state is {}",
             collation_data.block_id_short,
@@ -1441,7 +1447,7 @@ impl Phase<FinalizeState> {
 #[derive(Default)]
 struct ProcessedAccounts {
     account_blocks: AccountBlocks,
-    shard_accounts: ShardAccounts,
+    shard_accounts: FastHashMap<u8, ShardAccounts>,
     new_config_params: Option<BlockchainConfigParams>,
     accounts_len: usize,
 }

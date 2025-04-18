@@ -134,6 +134,14 @@ impl ShardStateStuff {
             .collect()
     }
 
+    pub fn load_accounts(&self) -> FastHashMap<u8, ShardAccounts> {
+        self.inner
+            .shard_state_data
+            .iter()
+            .map(|(k, v)| (*k, v.accounts().clone()))
+            .collect()
+    }
+
     pub fn shards(&self) -> Result<&ShardHashes> {
         Ok(&self.state_extra()?.shards)
     }
