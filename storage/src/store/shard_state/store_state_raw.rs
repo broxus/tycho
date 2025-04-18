@@ -227,7 +227,7 @@ impl StoreStateContext {
                 let cell = self.cell_storage.load_cell(cell_id)?;
 
                 // TODO: save and load shard state data
-                let data_roots = vec![];
+                let data_roots = FastHashMap::default();
 
                 Ok(ShardStateStuff::from_root(
                     block_id,

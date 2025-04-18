@@ -12,6 +12,7 @@ use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_storage::{BlockHandle, Storage, StoreStateHint};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
+use tycho_util::FastHashMap;
 
 use crate::block_strider::{
     BlockSaver, BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
@@ -88,7 +89,7 @@ where
                         let left_handle = prev_state.ref_mc_state_handle().clone();
                         let right_handle = prev_state_alt.ref_mc_state_handle().clone();
 
-                        let data_cells = vec![];
+                        let data_cells = FastHashMap::default(); // TODO
                         (
                             cell,
                             data_cells,
@@ -97,8 +98,7 @@ where
                     }
                     None => {
                         let cell = prev_state.root_cell().clone();
-                        let data_cells =
-                            prev_state.data_root_cells().into_iter().cloned().collect();
+                        let data_cells = prev_state.data_root_cells();
                         let handle = prev_state.ref_mc_state_handle().clone();
                         (cell, data_cells, RefMcStateHandles::Single(handle))
                     }
@@ -177,7 +177,7 @@ where
         block: &BlockStuff,
         handle: &BlockHandle,
         prev_root: Cell,
-        prev_data_roots: Vec<Cell>,
+        prev_data_roots: FastHashMap<u8, Cell>,
     ) -> Result<ShardStateStuff> {
         let _histogram = HistogramGuard::begin("tycho_core_apply_block_time");
 
@@ -190,20 +190,21 @@ where
             .await
             .context("Failed to apply state update")?;
 
-        let futures = FuturesUnordered::new();
+        let mut futures = FuturesUnordered::new();
         for item in block.as_ref().iter_state_data_updates() {
             let (key, state_data_update) = item?;
-            let prev_data_root = prev_data_roots.get(key as usize).unwrap().clone();
+            let prev_data_root = prev_data_roots.get(&key).unwrap().clone();
             let task = rayon_run(move || {
-                let update = state_data_update.apply(&prev_data_root)?;
-                Ok((key, update))
+                let update = state_data_update.apply(&prev_data_root);
+                (key, update)
             });
             futures.push(task);
         }
 
-        let results = futures.collect::<Vec<Result<(u8, Cell)>>>().await;
-
-        let new_state_data = vec![];
+        let mut new_state_data = FastHashMap::default();
+        while let Some((key, update)) = futures.next().await {
+            new_state_data.insert(key, update?);
+        }
 
         let state_storage = self.inner.storage.shard_state_storage();
 

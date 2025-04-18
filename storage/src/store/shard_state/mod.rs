@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use ahash::HashMapExt;
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
 use everscale_types::models::*;
@@ -10,6 +11,7 @@ use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
 use tycho_block_util::state::*;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::FastHashMap;
 use weedb::rocksdb;
 
 use self::cell_storage::*;
@@ -88,7 +90,7 @@ impl ShardStateStorage {
         self.store_state_root(
             handle,
             state.root_cell().clone(),
-            state.data_root_cells().into_iter().cloned().collect(),
+            state.data_root_cells(),
             hint,
         )
         .await
@@ -98,7 +100,7 @@ impl ShardStateStorage {
         &self,
         handle: &BlockHandle,
         root_cell: Cell,
-        root_data_cells: Vec<Cell>,
+        root_data_cells: FastHashMap<u8, Cell>,
         hint: StoreStateHint,
     ) -> Result<bool> {
         if handle.has_state() {
@@ -138,7 +140,7 @@ impl ShardStateStorage {
 
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
-            for (shard_id, data_root_cell) in root_data_cells.iter().enumerate() {
+            for (data_shard_id, data_root_cell) in root_data_cells.iter() {
                 let data_root_hash = *data_root_cell.repr_hash();
 
                 let cells_count = cell_storage.store_cell(
@@ -152,8 +154,7 @@ impl ShardStateStorage {
                 let mut key = [0u8; tables::ShardAccounts::KEY_LEN];
                 key[..80].copy_from_slice(&block_id.to_vec());
 
-                let mask = ShardAccountsMask::from_shard_id(shard_id).unwrap();
-                key[80] = mask.mask();
+                key[80] = *data_shard_id;
 
                 batch.put_cf(
                     &accounts_cf.bound(),
@@ -215,14 +216,12 @@ impl ShardStateStorage {
         let cell_id = self.load_state_root(block_id)?;
         let cell = self.cell_storage.load_cell(cell_id)?;
 
-        let mut data_roots = Vec::with_capacity(ShardAccountsMask::num_shards());
-        for mask in ShardAccountsMask::iter() {
-            assert_eq!(data_roots.len(), mask.to_shard_id());
-
-            let cell_id = self.load_accounts_root(block_id, mask)?;
+        let mut data_roots = FastHashMap::with_capacity(ShardStateDataId::NUM_SHARDS as usize);
+        for shard_data_id in ShardStateDataId::iter() {
+            let cell_id = self.load_accounts_root(block_id, shard_data_id)?;
             let cell = self.cell_storage.load_cell(cell_id)?;
 
-            data_roots.push(Cell::from(cell as Arc<_>));
+            data_roots.insert(shard_data_id.0, Cell::from(cell as Arc<_>));
         }
 
         ShardStateStuff::from_root(
@@ -406,13 +405,13 @@ impl ShardStateStorage {
     pub fn load_accounts_root(
         &self,
         block_id: &BlockId,
-        mask: ShardAccountsMask,
+        data_shard_id: ShardStateDataId,
     ) -> Result<HashBytes> {
         let shard_accounts = &self.db.shard_accounts;
 
         let mut key = [0u8; tables::ShardAccounts::KEY_LEN];
         key[..80].copy_from_slice(&block_id.to_vec());
-        key[80] = mask.mask();
+        key[80] = data_shard_id.0;
 
         let shard_accounts = shard_accounts.get(key)?;
         match shard_accounts {

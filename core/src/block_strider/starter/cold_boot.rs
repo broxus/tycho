@@ -898,7 +898,7 @@ fn make_shard_state(
     };
 
     // TODO:
-    let data_roots = vec![];
+    let data_roots = FastHashMap::default();
 
     ShardStateStuff::from_root(&block_id, root, data_roots, tracker)
 }

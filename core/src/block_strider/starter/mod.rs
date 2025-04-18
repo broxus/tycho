@@ -8,7 +8,7 @@ use everscale_types::models::{BlockId, ShardStateUnsplit};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::Storage;
-use tycho_util::serde_helpers;
+use tycho_util::{serde_helpers, FastHashMap};
 
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
@@ -129,7 +129,7 @@ fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<Shar
     };
 
     // TODO:
-    let data_roots = vec![];
+    let data_roots = FastHashMap::default();
 
     ShardStateStuff::from_root(&block_id, root, data_roots, tracker)
 }

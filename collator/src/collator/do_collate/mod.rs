@@ -914,7 +914,7 @@ impl CollatorStdImpl {
             let new_state_data_roots = finalized
                 .new_observable_state_data
                 .iter()
-                .map(|x| x.root_cell().clone())
+                .map(|(data_shard_id, state_data)| (*data_shard_id, state_data.root_cell().clone()))
                 .collect();
             let hint = StoreStateHint {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
