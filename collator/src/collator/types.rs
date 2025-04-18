@@ -53,6 +53,7 @@ pub(super) struct PrevData {
 
     pure_states: Vec<ShardStateStuff>,
     pure_state_root: Cell,
+    pure_state_data_roots: FastHashMap<u8, Cell>,
 
     gen_chain_time: u64,
     gen_lt: u64,
@@ -76,6 +77,7 @@ impl PrevData {
 
         let prev_blocks_ids: Vec<_> = prev_states.iter().map(|s| *s.block_id()).collect();
         let pure_prev_state_root = prev_states[0].root_cell().clone();
+        let pure_prev_state_data_roots = prev_states[0].data_root_cells();
         let pure_prev_states = prev_states;
 
         let observable_data_roots = pure_prev_states[0].data_root_cells();
@@ -105,6 +107,7 @@ impl PrevData {
 
             pure_states: pure_prev_states,
             pure_state_root: pure_prev_state_root,
+            pure_state_data_roots: pure_prev_state_data_roots,
 
             gen_chain_time,
             gen_lt,
@@ -179,6 +182,10 @@ impl PrevData {
 
     pub fn pure_state_root(&self) -> &Cell {
         &self.pure_state_root
+    }
+
+    pub fn pure_state_data_roots(&self) -> &FastHashMap<u8, Cell> {
+        &self.pure_state_data_roots
     }
 
     pub fn gen_chain_time(&self) -> u64 {

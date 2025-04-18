@@ -81,26 +81,27 @@ impl ShardStateStuff {
         bytes: &[u8],
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
-        anyhow::ensure!(zerostate_id.seqno == 0, "given id has a non-zero seqno");
-
-        let file_hash = Boc::file_hash_blake(bytes);
-        anyhow::ensure!(
-            zerostate_id.file_hash.as_slice() == file_hash.as_slice(),
-            "file_hash mismatch. Expected: {}, got: {}",
-            hex::encode(file_hash),
-            zerostate_id.file_hash,
-        );
-
-        let root = Boc::decode(bytes)?;
-        anyhow::ensure!(
-            &zerostate_id.root_hash == root.repr_hash(),
-            "root_hash mismatch for {zerostate_id}. Expected: {expected}, got: {got}",
-            expected = zerostate_id.root_hash,
-            got = root.repr_hash(),
-        );
-
-        let data_roots = FastHashMap::default(); // TODO
-        Self::from_root(zerostate_id, root, data_roots, tracker)
+        todo!()
+        // anyhow::ensure!(zerostate_id.seqno == 0, "given id has a non-zero seqno");
+        //
+        // let file_hash = Boc::file_hash_blake(bytes);
+        // anyhow::ensure!(
+        //     zerostate_id.file_hash.as_slice() == file_hash.as_slice(),
+        //     "file_hash mismatch. Expected: {}, got: {}",
+        //     hex::encode(file_hash),
+        //     zerostate_id.file_hash,
+        // );
+        //
+        // let root = Boc::decode(bytes)?;
+        // anyhow::ensure!(
+        //     &zerostate_id.root_hash == root.repr_hash(),
+        //     "root_hash mismatch for {zerostate_id}. Expected: {expected}, got: {got}",
+        //     expected = zerostate_id.root_hash,
+        //     got = root.repr_hash(),
+        // );
+        //
+        // let data_roots = FastHashMap::default(); // TODO
+        // Self::from_root(zerostate_id, root, data_roots, tracker)
     }
 
     pub fn block_id(&self) -> &BlockId {

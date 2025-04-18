@@ -878,29 +878,30 @@ fn make_shard_state(
     shard_ident: ShardIdent,
     now: u32,
 ) -> Result<ShardStateStuff> {
-    let state = ShardStateUnsplit {
-        global_id,
-        shard_ident,
-        gen_utime: now,
-        min_ref_mc_seqno: u32::MAX,
-        ..Default::default()
-    };
-
-    let root = CellBuilder::build_from(&state)?;
-    let root_hash = *root.repr_hash();
-    let file_hash = Boc::file_hash_blake(Boc::encode(&root));
-
-    let block_id = BlockId {
-        shard: state.shard_ident,
-        seqno: state.seqno,
-        root_hash,
-        file_hash,
-    };
-
-    // TODO:
-    let data_roots = FastHashMap::default();
-
-    ShardStateStuff::from_root(&block_id, root, data_roots, tracker)
+    todo!()
+    // let state = ShardStateUnsplit {
+    //     global_id,
+    //     shard_ident,
+    //     gen_utime: now,
+    //     min_ref_mc_seqno: u32::MAX,
+    //     ..Default::default()
+    // };
+    //
+    // let root = CellBuilder::build_from(&state)?;
+    // let root_hash = *root.repr_hash();
+    // let file_hash = Boc::file_hash_blake(Boc::encode(&root));
+    //
+    // let block_id = BlockId {
+    //     shard: state.shard_ident,
+    //     seqno: state.seqno,
+    //     root_hash,
+    //     file_hash,
+    // };
+    //
+    // // TODO:
+    // let data_roots = FastHashMap::default();
+    //
+    // ShardStateStuff::from_root(&block_id, root, data_roots, tracker)
 }
 
 #[derive(Clone)]
