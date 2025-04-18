@@ -124,11 +124,7 @@ impl Producer {
         Ok(Point::new(
             key_pair,
             current_round.round(),
-            proven_vertex
-                .zip(last_own_point)
-                .map(|(_, p)| p.evidence.clone())
-                .unwrap_or_default(),
-            payload,
+            &payload,
             PointData {
                 author: local_id,
                 time,
@@ -138,6 +134,10 @@ impl Producer {
                 anchor_proof,
                 anchor_time,
             },
+            proven_vertex
+                .zip(last_own_point)
+                .map(|(_, p)| p.evidence.clone())
+                .unwrap_or_default(),
             conf,
         ))
     }
