@@ -462,7 +462,12 @@ impl Phase<FinalizeState> {
         let new_state_root;
         let total_validator_fees;
         let finalize_wu_total;
-        let (state_update, new_observable_state, new_observable_state_data) = {
+        let (
+            state_update,
+            state_data_merkle_update,
+            new_observable_state,
+            new_observable_state_data,
+        ) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time",
                 labels,
@@ -555,9 +560,21 @@ impl Phase<FinalizeState> {
                 &usage_tree,
             )?;
 
+            let mut state_data_merkle_update = Dict::new();
+
+            let prev_roots = self.state.prev_shard_data.pure_state_data_roots();
+            for (id, new_state) in &new_observable_state_data {
+                let prev_root = prev_roots.get(id).unwrap();
+                let merkle_update =
+                    create_merkle_update(&shard, prev_root, new_state.root_cell(), &usage_tree)?;
+
+                state_data_merkle_update.set(id, Lazy::new(&merkle_update)?)?;
+            }
+
             build_state_update_elapsed = histogram.finish();
             (
                 merkle_update,
+                state_data_merkle_update,
                 new_observable_state,
                 new_observable_state_data,
             )
@@ -622,7 +639,7 @@ impl Phase<FinalizeState> {
                 info: Lazy::new(&new_block_info)?,
                 value_flow: Lazy::new(&value_flow)?,
                 state_update: Lazy::new(&state_update)?,
-                state_data_updates: Dict::new(),
+                state_data_updates: state_data_merkle_update,
                 // do not use out msgs queue updates
                 out_msg_queue_updates: OutMsgQueueUpdates {
                     diff_hash: *queue_diff.hash(),
