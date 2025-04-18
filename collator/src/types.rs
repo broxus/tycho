@@ -381,9 +381,17 @@ pub struct TopBlockDescription {
     pub proof_funds: ShardFeeCreated,
     #[cfg(feature = "block-creator-stats")]
     pub creators: Vec<HashBytes>,
-    pub processed_to: ProcessedTo,
     pub processed_to_by_partitions: ProcessedToByPartitions,
 }
+
+#[derive(Debug, Clone)]
+pub struct TopShardBlockInfo {
+    pub block_id: BlockId,
+    pub processed_to_by_partitions: ProcessedToByPartitions,
+}
+
+pub type ProcessedTo = BTreeMap<ShardIdent, QueueKey>;
+pub type ProcessedToByPartitions = FastHashMap<QueuePartitionIdx, ProcessedTo>;
 
 #[derive(Debug)]
 pub struct ShortAddr {
@@ -608,16 +616,6 @@ where
         Ok(res)
     }
 }
-
-#[derive(Debug, Clone)]
-pub struct TopShardBlockInfo {
-    pub block_id: BlockId,
-    pub processed_to: ProcessedTo,
-    pub processed_to_by_partitions: ProcessedToByPartitions,
-}
-
-pub type ProcessedTo = BTreeMap<ShardIdent, QueueKey>;
-pub type ProcessedToByPartitions = FastHashMap<QueuePartitionIdx, ProcessedTo>;
 
 pub trait ShardIdentExt {
     fn contains_prefix(&self, workchain_id: i32, prefix_without_tag: u64) -> bool;
