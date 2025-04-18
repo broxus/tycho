@@ -122,7 +122,7 @@ bitflags::bitflags! {
         const HAS_NEXT_2 = 1 << 7;
         const HAS_PREV_1 = 1 << 8;
         const HAS_PREV_2 = 1 << 9;
-        const IS_APPLIED = 1 << 10;
+        const IS_COMMITTED = 1 << 10;
         const IS_KEY_BLOCK = 1 << 11;
         const IS_PERSISTENT = 1 << 12;
 

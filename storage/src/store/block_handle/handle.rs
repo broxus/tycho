@@ -68,8 +68,8 @@ impl BlockHandle {
             || self.inner.id.is_masterchain() && self.inner.id.seqno == 0
     }
 
-    pub fn is_applied(&self) -> bool {
-        self.inner.meta.flags().contains(BlockFlags::IS_APPLIED)
+    pub fn is_committed(&self) -> bool {
+        self.inner.meta.flags().contains(BlockFlags::IS_COMMITTED)
     }
 
     pub fn is_persistent(&self) -> bool {

@@ -29,8 +29,8 @@ impl BlockHandleStorage {
         }
     }
 
-    pub fn set_block_applied(&self, handle: &BlockHandle) -> bool {
-        let updated = handle.meta().add_flags(BlockFlags::IS_APPLIED);
+    pub fn set_block_committed(&self, handle: &BlockHandle) -> bool {
+        let updated = handle.meta().add_flags(BlockFlags::IS_COMMITTED);
         if updated {
             self.store_handle(handle, false);
         }
@@ -399,11 +399,11 @@ mod tests {
 
             assert_eq!(handle.ref_by_mc_seqno(), 456);
             assert!(!handle.is_key_block());
-            assert!(!handle.is_applied());
+            assert!(!handle.is_committed());
 
-            let updated = block_handles.set_block_applied(&handle);
+            let updated = block_handles.set_block_committed(&handle);
             assert!(updated);
-            assert!(handle.is_applied());
+            assert!(handle.is_committed());
 
             // Ensure that handles are reused
             let (handle2, status) = block_handles.create_or_load_handle(&block_id, meta);
@@ -425,7 +425,7 @@ mod tests {
 
             assert_eq!(handle.ref_by_mc_seqno(), 456);
             assert!(!handle.is_key_block());
-            assert!(handle.is_applied());
+            assert!(handle.is_committed());
         }
 
         // Ensure that the handle is dropped

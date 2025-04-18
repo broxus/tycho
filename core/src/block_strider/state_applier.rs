@@ -201,12 +201,6 @@ where
                 .await?;
         }
 
-        // Mark block as applied.
-        self.inner
-            .storage
-            .block_handle_storage()
-            .set_block_applied(&prepared.handle);
-
         // Done
         Ok(())
     }
