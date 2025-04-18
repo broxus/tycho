@@ -274,7 +274,7 @@ impl std::fmt::Display for ThresholdCount {
     }
 }
 
-#[cfg(all(test, feature = "test"))]
+#[cfg(test)]
 mod test {
     use std::sync::Arc;
     use std::time::Duration;
@@ -398,7 +398,6 @@ mod test {
             &keypair,
             round,
             Default::default(),
-            Default::default(),
             PointData {
                 author: PeerId::from(keypair.public_key),
                 includes: Default::default(),
@@ -408,6 +407,7 @@ mod test {
                 time: now + delay,
                 anchor_time: UnixTime::now(),
             },
+            Default::default(),
             conf,
         ));
 

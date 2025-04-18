@@ -56,7 +56,6 @@ impl MempoolMergedConfig {
             &key_pair,
             self.conf.genesis_round,
             Default::default(),
-            Default::default(),
             PointData {
                 author: key_pair.public_key.into(),
                 time: millis,
@@ -66,6 +65,7 @@ impl MempoolMergedConfig {
                 anchor_proof: Link::ToSelf,
                 anchor_time: millis,
             },
+            Default::default(),
             &self.conf,
         )
     }

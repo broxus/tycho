@@ -95,11 +95,7 @@ impl DagPointFuture {
 
                 let dag_point = DagPoint::new_validated(PointInfo::from(&point), cert, &status);
 
-                store.insert_point(
-                    &point,
-                    PointStatusStoredRef::Validated(&status),
-                    round_ctx.conf(),
-                );
+                store.insert_point(&point, PointStatusStoredRef::Validated(&status));
                 state.resolve(&dag_point);
 
                 let signed = state.sign(point.round(), key_pair.as_deref(), round_ctx.conf());
@@ -146,11 +142,7 @@ impl DagPointFuture {
                 state.acquire(&id, &mut status); // only after persisted
 
                 let dag_point = DagPoint::new_ill_formed(id, cert, &status, reason);
-                store.insert_point(
-                    &point,
-                    PointStatusStoredRef::IllFormed(&status),
-                    round_ctx.conf(),
-                );
+                store.insert_point(&point, PointStatusStoredRef::IllFormed(&status));
 
                 state.resolve(&dag_point);
                 dag_point
@@ -188,9 +180,8 @@ impl DagPointFuture {
 
             let store_fn = {
                 let store = store.clone();
-                let ctx = validate_ctx.clone();
                 let status_ref = PointStatusStoredRef::Exists;
-                move || store.insert_point(&point, status_ref, ctx.conf())
+                move || store.insert_point(&point, status_ref)
             };
             let store_task = validate_ctx.task().spawn_blocking_limited(store_fn).await;
 
@@ -275,9 +266,8 @@ impl DagPointFuture {
 
                     let store_fn = {
                         let store = store.clone();
-                        let ctx = into_round_ctx.clone();
                         let status_ref = PointStatusStoredRef::Exists;
-                        move || store.insert_point(&point, status_ref, ctx.conf())
+                        move || store.insert_point(&point, status_ref)
                     };
                     let store_task = into_round_ctx.task().spawn_blocking_limited(store_fn).await;
 
@@ -318,7 +308,7 @@ impl DagPointFuture {
                     let store_fn = move || {
                         let _guard = ctx.span().enter();
                         let status_ref = PointStatusStoredRef::IllFormed(&status);
-                        store.insert_point(&point, status_ref, ctx.conf());
+                        store.insert_point(&point, status_ref);
                         state.resolve(&dag_point);
                         dag_point
                     };

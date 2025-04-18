@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
-use crate::intercom::dto::PeerState;
+use crate::intercom::peer_schedule::PeerState;
 use crate::models::Round;
 
 #[derive(Debug)]

@@ -32,12 +32,7 @@ pub struct MempoolAdapterStore {
 pub struct MempoolStore(Arc<dyn MempoolStoreImpl>);
 
 trait MempoolStoreImpl: Send + Sync {
-    fn insert_point(
-        &self,
-        point: &Point,
-        status: PointStatusStoredRef<'_>,
-        conf: &MempoolConfig,
-    ) -> Result<()>;
+    fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()>;
 
     fn set_status(
         &self,
@@ -145,14 +140,9 @@ impl MempoolStore {
         Self(Arc::new(()))
     }
 
-    pub fn insert_point(
-        &self,
-        point: &Point,
-        status: PointStatusStoredRef<'_>,
-        conf: &MempoolConfig,
-    ) {
+    pub fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) {
         self.0
-            .insert_point(point, status, conf)
+            .insert_point(point, status)
             .with_context(|| format!("id {:?}", point.id().alt()))
             .expect("DB insert point full");
     }
@@ -341,12 +331,7 @@ impl DbCleaner {
 }
 
 impl MempoolStoreImpl for MempoolStorage {
-    fn insert_point(
-        &self,
-        point: &Point,
-        status: PointStatusStoredRef<'_>,
-        conf: &MempoolConfig,
-    ) -> Result<()> {
+    fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_insert_point_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         MempoolStorage::fill_key(point.round().0, point.digest().inner(), &mut key);
@@ -359,16 +344,15 @@ impl MempoolStoreImpl for MempoolStorage {
         // transaction not needed as there is no concurrent puts for the same key,
         // as they occur inside DAG futures whose uniqueness is protected by dash map;
         // in contrast, status are written from random places, but only via `merge_cf()`
-        let mut batch = WriteBatch::default();
+        let mut batch =
+            WriteBatch::with_capacity_bytes(point.serialized().len() + PointInfo::MAX_BYTE_SIZE);
 
-        let mut buffer = Vec::<u8>::with_capacity(conf.point_max_bytes);
-        point.write_to(&mut buffer);
-        batch.put_cf(&points_cf, key.as_slice(), &buffer);
+        let mut buffer = Vec::<u8>::with_capacity(PointInfo::MAX_BYTE_SIZE);
 
-        buffer.clear();
+        batch.put_cf(&points_cf, key.as_slice(), point.serialized());
 
-        let value = PointInfo::serializable_from(point);
-        value.write_to(&mut buffer);
+        let info = PointInfo::serializable_from(point);
+        info.write_to(&mut buffer);
         batch.put_cf(&info_cf, key.as_slice(), &buffer);
 
         buffer.clear();
@@ -427,7 +411,7 @@ impl MempoolStoreImpl for MempoolStorage {
         points
             .get(key.as_slice())
             .context("db get")?
-            .map(|a| tl_proto::deserialize::<Point>(&a).context("deserialize db point"))
+            .map(|a| Point::new_from_bytes(a.to_vec()).context("deserialize db point"))
             .transpose()
     }
 
@@ -451,7 +435,8 @@ impl MempoolStoreImpl for MempoolStorage {
             let option_bytes =
                 result_option_bytes.with_context(|| format!("result for {round:?} {digest:?}"))?;
             let bytes = option_bytes.with_context(|| format!("not found {round:?} {digest:?}"))?;
-            let point = tl_proto::deserialize::<Point>(&bytes)
+            let point = Point::new_from_bytes(bytes)
+                .context("deserialize db point")
                 .with_context(|| format!("deserialize point {round:?} {digest:?}"))?;
             points.push(point);
         }
@@ -549,7 +534,7 @@ impl MempoolStoreImpl for MempoolStorage {
                 if found.insert(key, payload).is_some() {
                     // we panic thus we don't care about performance
                     let full_point =
-                        tl_proto::deserialize::<Point>(bytes).context("deserialize point")?;
+                        Point::new_from_bytes(bytes.to_vec()).context("deserialize point")?;
                     panic!("iter read non-unique point {:?}", full_point.id())
                 }
             }
@@ -743,12 +728,7 @@ impl MempoolStoreImpl for MempoolStorage {
 
 #[cfg(feature = "test")]
 impl MempoolStoreImpl for () {
-    fn insert_point(
-        &self,
-        _: &Point,
-        _: PointStatusStoredRef<'_>,
-        _: &MempoolConfig,
-    ) -> Result<()> {
+    fn insert_point(&self, _: &Point, _: PointStatusStoredRef<'_>) -> Result<()> {
         Ok(())
     }
 

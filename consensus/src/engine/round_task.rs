@@ -367,7 +367,7 @@ impl RoundCtx {
         let no_proof = own_point.is_ok_and(|point| point.evidence().is_empty());
         metrics::counter!("tycho_mempool_points_no_proof_produced").increment(no_proof as _);
 
-        let externals = own_point.map_or(0, |point| point.payload().len());
+        let externals = own_point.map_or(0, |point| point.payload_len());
         metrics::counter!("tycho_mempool_point_payload_count").increment(externals as _);
 
         let payload_bytes = own_point.map_or(0, |point| point.payload_bytes());

@@ -1,9 +1,9 @@
 pub use dispatcher::*;
+pub use query_request::*;
+pub use query_response::*;
 pub use responder::*;
 
-// Note: intercom modules' responsibilities
-//   matches visibility of their internal DTOs
-
 mod dispatcher;
-mod dto;
+mod query_request;
+mod query_response;
 mod responder;
