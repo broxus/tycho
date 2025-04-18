@@ -383,7 +383,7 @@ impl ZerostateConfig {
             update_config_account(&mut accounts, &config)?;
 
             assert_eq!(state.total_balance, accounts.root_extra().balance);
-            state.accounts = Lazy::new(&accounts)?;
+            // state.accounts = Lazy::new(&accounts)?;
 
             // Build lib dict
             let mut libs = Dict::new();

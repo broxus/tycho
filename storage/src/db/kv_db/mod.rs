@@ -129,6 +129,7 @@ weedb::tables! {
         pub package_entries: tables::PackageEntries,
         pub block_data_entries: tables::BlockDataEntries,
         pub shard_states: tables::ShardStates,
+        pub shard_accounts: tables::ShardAccounts,
         pub cells: tables::Cells,
         pub temp_cells: tables::TempCells,
         pub block_connections: tables::BlockConnections,

@@ -85,14 +85,20 @@ impl ShardStateStorage {
             return Err(ShardStateStorageError::BlockHandleIdMismatch.into());
         }
 
-        self.store_state_root(handle, state.root_cell().clone(), hint)
-            .await
+        self.store_state_root(
+            handle,
+            state.root_cell().clone(),
+            state.data_root_cells().into_iter().cloned().collect(),
+            hint,
+        )
+        .await
     }
 
     pub async fn store_state_root(
         &self,
         handle: &BlockHandle,
         root_cell: Cell,
+        root_data_cells: Vec<Cell>,
         hint: StoreStateHint,
     ) -> Result<bool> {
         if handle.has_state() {
@@ -109,6 +115,7 @@ impl ShardStateStorage {
         let block_id = *handle.id();
         let raw_db = self.db.rocksdb().clone();
         let cf = self.db.shard_states.get_unbounded_cf();
+        let accounts_cf = self.db.shard_accounts.get_unbounded_cf();
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
@@ -123,16 +130,40 @@ impl ShardStateStorage {
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
 
-            let new_cell_count = cell_storage.store_cell(
+            let mut new_cell_count = cell_storage.store_cell(
                 &mut batch,
                 root_cell.as_ref(),
                 estimated_merkle_update_size,
             )?;
 
+            batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
+
+            for (shard_id, data_root_cell) in root_data_cells.iter().enumerate() {
+                let data_root_hash = *data_root_cell.repr_hash();
+
+                let cells_count = cell_storage.store_cell(
+                    &mut batch,
+                    data_root_cell.as_ref(),
+                    estimated_merkle_update_size,
+                )?;
+
+                new_cell_count += cells_count;
+
+                let mut key = [0u8; tables::ShardAccounts::KEY_LEN];
+                key[..80].copy_from_slice(&block_id.to_vec());
+
+                let mask = ShardAccountsMask::from_shard_id(shard_id).unwrap();
+                key[80] = mask.mask();
+
+                batch.put_cf(
+                    &accounts_cf.bound(),
+                    block_id.to_vec(),
+                    data_root_hash.as_slice(),
+                );
+            }
+
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
-
-            batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
             let hist = HistogramGuard::begin("tycho_storage_state_update_time");
             metrics::histogram!("tycho_storage_state_update_size_bytes")
@@ -184,7 +215,22 @@ impl ShardStateStorage {
         let cell_id = self.load_state_root(block_id)?;
         let cell = self.cell_storage.load_cell(cell_id)?;
 
-        ShardStateStuff::from_root(block_id, Cell::from(cell as Arc<_>), &self.min_ref_mc_state)
+        let mut data_roots = Vec::with_capacity(ShardAccountsMask::num_shards());
+        for mask in ShardAccountsMask::iter() {
+            assert_eq!(data_roots.len(), mask.to_shard_id());
+
+            let cell_id = self.load_accounts_root(block_id, mask)?;
+            let cell = self.cell_storage.load_cell(cell_id)?;
+
+            data_roots.push(Cell::from(cell as Arc<_>));
+        }
+
+        ShardStateStuff::from_root(
+            block_id,
+            Cell::from(cell as Arc<_>),
+            data_roots,
+            &self.min_ref_mc_state,
+        )
     }
 
     #[tracing::instrument(skip(self))]
@@ -352,6 +398,24 @@ impl ShardStateStorage {
         let shard_states = &self.db.shard_states;
         let shard_state = shard_states.get(block_id.to_vec())?;
         match shard_state {
+            Some(root) => Ok(HashBytes::from_slice(&root[..32])),
+            None => Err(ShardStateStorageError::NotFound.into()),
+        }
+    }
+
+    pub fn load_accounts_root(
+        &self,
+        block_id: &BlockId,
+        mask: ShardAccountsMask,
+    ) -> Result<HashBytes> {
+        let shard_accounts = &self.db.shard_accounts;
+
+        let mut key = [0u8; tables::ShardAccounts::KEY_LEN];
+        key[..80].copy_from_slice(&block_id.to_vec());
+        key[80] = mask.mask();
+
+        let shard_accounts = shard_accounts.get(key)?;
+        match shard_accounts {
             Some(root) => Ok(HashBytes::from_slice(&root[..32])),
             None => Err(ShardStateStorageError::NotFound.into()),
         }

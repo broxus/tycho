@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::cell::Cell;
-use futures_util::future::BoxFuture;
+use everscale_types::models::BlockId;
+use futures_util::future::{join_all, BoxFuture};
+use futures_util::stream::FuturesUnordered;
+use futures_util::StreamExt;
+use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_storage::{BlockHandle, Storage, StoreStateHint};
@@ -64,7 +68,7 @@ where
                 .construct_prev_id()
                 .context("failed to construct prev id")?;
 
-            let (prev_root_cell, handles) = {
+            let (prev_root_cell, prev_data_root_cells, handles) = {
                 let prev_state = state_storage
                     .load_state(&prev_id)
                     .await
@@ -83,19 +87,32 @@ where
                         )?;
                         let left_handle = prev_state.ref_mc_state_handle().clone();
                         let right_handle = prev_state_alt.ref_mc_state_handle().clone();
-                        (cell, RefMcStateHandles::Split(left_handle, right_handle))
+
+                        let data_cells = vec![];
+                        (
+                            cell,
+                            data_cells,
+                            RefMcStateHandles::Split(left_handle, right_handle),
+                        )
                     }
                     None => {
                         let cell = prev_state.root_cell().clone();
+                        let data_cells =
+                            prev_state.data_root_cells().into_iter().cloned().collect();
                         let handle = prev_state.ref_mc_state_handle().clone();
-                        (cell, RefMcStateHandles::Single(handle))
+                        (cell, data_cells, RefMcStateHandles::Single(handle))
                     }
                 }
             };
 
             // Apply state
             let state = self
-                .compute_and_store_state_update(&cx.block, &handle, prev_root_cell)
+                .compute_and_store_state_update(
+                    &cx.block,
+                    &handle,
+                    prev_root_cell,
+                    prev_data_root_cells,
+                )
                 .await?;
 
             (state, handles)
@@ -160,23 +177,43 @@ where
         block: &BlockStuff,
         handle: &BlockHandle,
         prev_root: Cell,
+        prev_data_roots: Vec<Cell>,
     ) -> Result<ShardStateStuff> {
         let _histogram = HistogramGuard::begin("tycho_core_apply_block_time");
 
-        let update = block
+        let state_update = block
             .as_ref()
             .load_state_update()
             .context("Failed to load state update")?;
 
-        let new_state = rayon_run(move || update.apply(&prev_root))
+        let new_state = rayon_run(move || state_update.apply(&prev_root))
             .await
             .context("Failed to apply state update")?;
 
+        let futures = FuturesUnordered::new();
+        for item in block.as_ref().iter_state_data_updates() {
+            let (key, state_data_update) = item?;
+            let prev_data_root = prev_data_roots.get(key as usize).unwrap().clone();
+            let task = rayon_run(move || {
+                let update = state_data_update.apply(&prev_data_root)?;
+                Ok((key, update))
+            });
+            futures.push(task);
+        }
+
+        let results = futures.collect::<Vec<Result<(u8, Cell)>>>().await;
+
+        let new_state_data = vec![];
+
         let state_storage = self.inner.storage.shard_state_storage();
 
-        let new_state =
-            ShardStateStuff::from_root(block.id(), new_state, state_storage.min_ref_mc_state())
-                .context("Failed to create new state")?;
+        let new_state = ShardStateStuff::from_root(
+            block.id(),
+            new_state,
+            new_state_data,
+            state_storage.min_ref_mc_state(),
+        )
+        .context("Failed to create new state")?;
 
         state_storage
             .store_state(handle, &new_state, StoreStateHint {

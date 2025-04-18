@@ -911,6 +911,11 @@ impl CollatorStdImpl {
             let adapter = self.state_node_adapter.clone();
             let labels = labels.clone();
             let new_state_root = finalized.new_state_root.clone();
+            let new_state_data_roots = finalized
+                .new_observable_state_data
+                .iter()
+                .map(|x| x.root_cell().clone())
+                .collect();
             let hint = StoreStateHint {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
             };
@@ -920,7 +925,7 @@ impl CollatorStdImpl {
                     &labels,
                 );
                 adapter
-                    .store_state_root(&block_id, meta, new_state_root, hint)
+                    .store_state_root(&block_id, meta, new_state_root, new_state_data_roots, hint)
                     .await
             }
         });
@@ -957,6 +962,7 @@ impl CollatorStdImpl {
             self.prepare_working_state_update(
                 block_id,
                 finalized.new_observable_state,
+                finalized.new_observable_state_data,
                 finalized.new_state_root,
                 store_new_state_task,
                 new_queue_diff_hash,

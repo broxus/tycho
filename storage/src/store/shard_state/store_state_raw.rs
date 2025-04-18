@@ -224,11 +224,15 @@ impl StoreStateContext {
         match self.db.shard_states.get(shard_state_key)? {
             Some(root) => {
                 let cell_id = HashBytes::from_slice(&root[..32]);
-
                 let cell = self.cell_storage.load_cell(cell_id)?;
+
+                // TODO: save and load shard state data
+                let data_roots = vec![];
+
                 Ok(ShardStateStuff::from_root(
                     block_id,
                     Cell::from(cell as Arc<_>),
+                    data_roots,
                     &self.min_ref_mc_state,
                 )?)
             }

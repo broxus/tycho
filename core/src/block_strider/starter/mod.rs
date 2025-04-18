@@ -128,5 +128,8 @@ fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<Shar
         file_hash,
     };
 
-    ShardStateStuff::from_root(&block_id, root, tracker)
+    // TODO:
+    let data_roots = vec![];
+
+    ShardStateStuff::from_root(&block_id, root, data_roots, tracker)
 }
