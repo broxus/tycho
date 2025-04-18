@@ -666,7 +666,6 @@ impl CollatorStdImpl {
                 proof_funds,
                 #[cfg(feature = "block-creator-stats")]
                 creators,
-                processed_to,
                 processed_to_by_partitions,
             } = top_block_descr;
 
@@ -727,7 +726,6 @@ impl CollatorStdImpl {
 
             let top_shard_block_info = TopShardBlockInfo {
                 block_id,
-                processed_to,
                 processed_to_by_partitions,
             };
 
