@@ -837,7 +837,7 @@ impl CollatorStdImpl {
         let mut collation_data = Box::new(collation_data_builder.build(start_lt, block_limits));
 
         // compute created / minted / recovered / from_prev_block
-        let prev_total_balance = &prev_shard_data.observable_accounts().root_extra().balance;
+        let prev_total_balance = &prev_shard_data.observable_accounts_balance()?;
         Self::init_value_flow(
             &mc_data.config,
             &mc_data.global_balance,

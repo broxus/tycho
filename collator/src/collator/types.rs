@@ -47,7 +47,7 @@ impl WorkingState {
 
 pub(super) struct PrevData {
     observable_states: Vec<ShardStateStuff>,
-    observable_accounts: ShardAccounts,
+    observable_accounts: FastHashMap<u8, ShardAccounts>,
 
     blocks_ids: Vec<BlockId>,
 
@@ -91,8 +91,7 @@ impl PrevData {
 
         let gen_chain_time = observable_states[0].get_gen_chain_time();
         let gen_lt = observable_states[0].state().gen_lt;
-        // let observable_accounts = observable_states[0].state().load_accounts()?;
-        let observable_accounts = ShardAccounts::new();
+        let observable_accounts = observable_states[0].load_accounts();
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
         let wu_used_from_last_anchor = observable_states[0].state().overload_history;
 
@@ -124,7 +123,19 @@ impl PrevData {
         &self.observable_states
     }
 
-    pub fn observable_accounts(&self) -> &ShardAccounts {
+    pub fn observable_accounts_balance(&self) -> Result<CurrencyCollection> {
+        let balance = self
+            .observable_accounts
+            .values()
+            .map(|v| v.root_extra().balance.clone())
+            .try_fold(CurrencyCollection::ZERO, |left, right| {
+                left.checked_add(&right)
+            })?;
+
+        Ok(balance)
+    }
+
+    pub fn observable_accounts(&self) -> &FastHashMap<u8, ShardAccounts> {
         &self.observable_accounts
     }
 
@@ -404,7 +415,7 @@ impl BlockCollationData {
     pub fn finalize_value_flow(
         &mut self,
         account_blocks: &AccountBlocks,
-        shard_accounts: &ShardAccounts,
+        shard_accounts: &FastHashMap<u8, ShardAccounts>,
         in_msgs: &InMsgDescr,
         out_msgs: &OutMsgDescr,
         config: &BlockchainConfig,
@@ -429,7 +440,12 @@ impl BlockCollationData {
         // Finalize value flow.
         Ok(ValueFlow {
             from_prev_block: self.value_flow.from_prev_block.clone(),
-            to_next_block: shard_accounts.root_extra().balance.clone(),
+            to_next_block: shard_accounts
+                .values()
+                .map(|v| v.root_extra().balance.clone())
+                .try_fold(CurrencyCollection::ZERO, |left, right| {
+                    left.checked_add(&right)
+                })?,
             imported: in_msgs.root_extra().value_imported.clone(),
             exported: out_msgs.root_extra().clone(),
             fees_collected: self.value_flow.fees_collected.clone(),

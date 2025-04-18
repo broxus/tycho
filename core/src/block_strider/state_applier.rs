@@ -128,12 +128,13 @@ where
                         let left_handle = prev_state.ref_mc_state_handle().clone();
                         let right_handle = prev_state_alt.ref_mc_state_handle().clone();
 
-                        let data_cells = FastHashMap::default(); // TODO
-                        (
-                            cell,
-                            data_cells,
-                            RefMcStateHandles::Split(left_handle, right_handle),
-                        )
+                        todo!()
+                        // let data_cells = FastHashMap::default(); // TODO
+                        // (
+                        //     cell,
+                        //     data_cells,
+                        //     RefMcStateHandles::Split(left_handle, right_handle),
+                        // )
                     }
                     None => {
                         let cell = prev_state.root_cell().clone();
