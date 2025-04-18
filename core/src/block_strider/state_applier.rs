@@ -1,4 +1,3 @@
-use std::pin::pin;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -39,7 +38,7 @@ where
     ) -> Result<StateApplierPrepared> {
         let _histogram = HistogramGuard::begin("tycho_core_state_applier_prepare_block_time");
 
-        let handle = self.inner.block_saver.prepare_block(cx).await?;
+        let handle = self.inner.block_saver.save_block(cx).await?;
 
         tracing::info!(
             mc_block_id = %cx.mc_block_id.as_short_id(),
@@ -139,26 +138,18 @@ where
         }
 
         // Process state
-        let scx = StateSubscriberContext {
+        let _histogram = HistogramGuard::begin("tycho_core_subscriber_handle_state_time");
+
+        let cx = StateSubscriberContext {
             mc_block_id: cx.mc_block_id,
             mc_is_key_block: cx.mc_is_key_block,
             is_key_block: cx.is_key_block,
-            block: cx.block.clone(), // TODO: rewrite without clone
-            archive_data: cx.archive_data.clone(), // TODO: rewrite without clone
+            block: cx.block.clone(),
+            archive_data: cx.archive_data.clone(),
             state: prepared.state,
+            delayed: cx.delayed.clone(),
         };
-
-        let subscribers_fut = pin!(async {
-            let _histogram = HistogramGuard::begin("tycho_core_subscriber_handle_state_time");
-            self.inner.state_subscriber.handle_state(&scx).await
-        });
-
-        let block_fut = self.inner.block_saver.handle_block(cx, prepared.handle);
-
-        let (subscribers_res, block_res) =
-            futures_util::future::join(subscribers_fut, block_fut).await;
-        subscribers_res.context("State subscriber failed")?;
-        block_res.context("Block saver failed")?;
+        self.inner.state_subscriber.handle_state(&cx).await?;
 
         // Done
         Ok(())

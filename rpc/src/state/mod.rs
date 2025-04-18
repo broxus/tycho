@@ -967,7 +967,7 @@ mod test {
     use everscale_types::models::{Block, BlockId};
     use everscale_types::prelude::HashBytes;
     use tycho_block_util::block::{BlockStuff, BlockStuffAug};
-    use tycho_core::block_strider::{BlockSubscriber, BlockSubscriberContext};
+    use tycho_core::block_strider::{BlockSubscriber, BlockSubscriberContext, DelayedTasks};
     use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService};
     use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
     use tycho_network::{
@@ -1067,18 +1067,22 @@ mod test {
 
         let block = get_block();
 
+        let (delayed_handle, delayed) = DelayedTasks::new();
         let ctx = BlockSubscriberContext {
             mc_block_id: BlockId::default(),
             mc_is_key_block: false,
             is_key_block: false,
             block: block.data,
             archive_data: block.archive_data,
+            delayed,
         };
 
         let (block_subscriber, _) = rpc_state.clone().split();
+        let delayed_handle = delayed_handle.spawn();
         let prepared = block_subscriber.prepare_block(&ctx).await?;
 
         block_subscriber.handle_block(&ctx, prepared).await?;
+        delayed_handle.join().await?;
 
         let account = HashBytes::from_str(
             "d7ce76fcf11423e3eb332e72c5f10e4b2cd45a8f356161c930e391e4023784d3",
@@ -1136,18 +1140,22 @@ mod test {
 
         let block = get_empty_block();
 
+        let (delayed_handle, delayed) = DelayedTasks::new();
         let ctx = BlockSubscriberContext {
             mc_block_id: BlockId::default(),
             mc_is_key_block: false,
             is_key_block: false,
             block: block.data,
             archive_data: block.archive_data,
+            delayed,
         };
 
         let (block_subscriber, _) = rpc_state.clone().split();
+        let delayed_handle = delayed_handle.spawn();
         let prepared = block_subscriber.prepare_block(&ctx).await?;
 
         block_subscriber.handle_block(&ctx, prepared).await?;
+        delayed_handle.join().await?;
 
         Ok(())
     }

@@ -1,6 +1,112 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+
+use anyhow::Result;
+use futures_util::stream::FuturesUnordered;
+use futures_util::StreamExt;
+use tycho_util::futures::JoinTask;
+
+#[derive(Clone)]
+pub struct DelayedTasks {
+    inner: Arc<DelayedTasksInner>,
+}
+
+impl DelayedTasks {
+    pub fn new() -> (DelayedTasksSpawner, Self) {
+        let inner = Arc::new(DelayedTasksInner {
+            state: Mutex::new(DelayedTasksState::BeforeSpawn {
+                make_fns: Vec::new(),
+            }),
+        });
+        let handle = DelayedTasksSpawner {
+            inner: inner.clone(),
+        };
+        (handle, Self { inner })
+    }
+
+    pub fn spawn<F, Fut>(&self, f: F) -> Result<()>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let mut inner = self.inner.state.lock().unwrap();
+        match &mut *inner {
+            DelayedTasksState::BeforeSpawn { make_fns } => {
+                make_fns.push(Box::new(move || JoinTask::new(f())));
+                Ok(())
+            }
+            DelayedTasksState::AfterSpawn { tasks } => {
+                tasks.push(JoinTask::new(f()));
+                Ok(())
+            }
+            DelayedTasksState::Closed => anyhow::bail!("delayed tasks context closed"),
+        }
+    }
+}
+
+pub struct DelayedTasksSpawner {
+    inner: Arc<DelayedTasksInner>,
+}
+
+impl DelayedTasksSpawner {
+    pub fn spawn(self) -> DelayedTasksJoinHandle {
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            let make_fns = match &mut *state {
+                DelayedTasksState::BeforeSpawn { make_fns } => std::mem::take(make_fns),
+                DelayedTasksState::AfterSpawn { .. } | DelayedTasksState::Closed => {
+                    unreachable!("spawn can only be called once");
+                }
+            };
+            *state = DelayedTasksState::AfterSpawn {
+                tasks: make_fns.into_iter().map(|f| f()).collect(),
+            }
+        };
+
+        DelayedTasksJoinHandle { inner: self.inner }
+    }
+}
+
+pub struct DelayedTasksJoinHandle {
+    inner: Arc<DelayedTasksInner>,
+}
+
+impl DelayedTasksJoinHandle {
+    pub async fn join(self) -> Result<()> {
+        let mut tasks = {
+            let mut state = self.inner.state.lock().unwrap();
+            match std::mem::replace(&mut *state, DelayedTasksState::Closed) {
+                DelayedTasksState::AfterSpawn { tasks } => tasks,
+                DelayedTasksState::BeforeSpawn { .. } | DelayedTasksState::Closed => {
+                    unreachable!("join can only be called once");
+                }
+            }
+        };
+
+        while let Some(res) = tasks.next().await {
+            res?;
+        }
+        Ok(())
+    }
+}
+
+struct DelayedTasksInner {
+    state: Mutex<DelayedTasksState>,
+}
+
+enum DelayedTasksState {
+    BeforeSpawn {
+        make_fns: Vec<MakeTaskFn>,
+    },
+    AfterSpawn {
+        tasks: FuturesUnordered<JoinTask<Result<()>>>,
+    },
+    Closed,
+}
+
+type MakeTaskFn = Box<dyn FnOnce() -> JoinTask<Result<()>> + Send + 'static>;
 
 pin_project_lite::pin_project! {
     pub struct OptionPrepareFut<F> {
@@ -70,6 +176,11 @@ mod tests {
     use futures_util::FutureExt;
 
     use super::*;
+
+    #[tokio::test]
+    async fn delayed_tasks() -> anyhow::Result<()> {
+        Ok(())
+    }
 
     #[tokio::test]
     async fn option_futures() {

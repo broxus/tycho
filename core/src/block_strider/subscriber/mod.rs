@@ -9,7 +9,9 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{BlockHandle, Storage};
 
-pub use self::futures::{OptionHandleFut, OptionPrepareFut};
+pub use self::futures::{
+    DelayedTasks, DelayedTasksJoinHandle, DelayedTasksSpawner, OptionHandleFut, OptionPrepareFut,
+};
 pub use self::gc_subscriber::{GcSubscriber, ManualGcTrigger};
 pub use self::metrics_subscriber::MetricsSubscriber;
 pub use self::ps_subscriber::PsSubscriber;
@@ -21,6 +23,7 @@ mod ps_subscriber;
 
 // === trait BlockSubscriber ===
 
+#[derive(Clone)]
 pub struct BlockSubscriberContext {
     /// Related masterchain block id.
     /// In case of context for mc block this id is the same as `block.id()`.
@@ -34,6 +37,8 @@ pub struct BlockSubscriberContext {
     pub block: BlockStuff,
     /// Serialized block data.
     pub archive_data: ArchiveData,
+    /// Delayed tasks to wait before commit.
+    pub delayed: DelayedTasks,
 }
 
 pub trait BlockSubscriber: Send + Sync + 'static {
@@ -146,6 +151,8 @@ pub struct StateSubscriberContext {
     pub archive_data: ArchiveData,
     /// Applied shard state.
     pub state: ShardStateStuff,
+    /// Delayed tasks to wait before commit.
+    pub delayed: DelayedTasks,
 }
 
 pub trait StateSubscriber: Send + Sync + 'static {
