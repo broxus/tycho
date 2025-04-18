@@ -1,7 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{hash_map, BTreeMap};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ahash::HashMapExt;
 use anyhow::{anyhow, Context, Result};
 use everscale_types::cell::Lazy;
 use everscale_types::merkle::*;
@@ -13,7 +14,7 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
-use tycho_block_util::state::{ShardAccountsMask, ShardStateData, ShardStateStuff};
+use tycho_block_util::state::{ShardStateData, ShardStateDataId, ShardStateStuff};
 use tycho_consensus::prelude::ConsensusConfigExt;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
@@ -478,16 +479,26 @@ impl Phase<FinalizeState> {
 
             // Split accounts by shards
             let new_observable_state_data = {
-                let mut buf: Vec<ShardAccounts> =
-                    Vec::with_capacity(ShardAccountsMask::num_shards());
+                let mut buffer: FastHashMap<u8, ShardAccounts> =
+                    FastHashMap::with_capacity(ShardStateDataId::NUM_SHARDS as usize);
 
                 for item in processed_accounts.shard_accounts.iter() {
                     let item = item?;
-                    let shard_id = ShardAccountsMask::from_account(&item.0 .0).to_shard_id();
-                    buf[shard_id].set(item.0, item.1, item.2)?;
+                    let data_shard_id = ShardStateDataId::from_account(item.0.as_ref()).0;
+
+                    match buffer.entry(data_shard_id) {
+                        hash_map::Entry::Vacant(entry) => {
+                            let mut accounts = ShardAccounts::new();
+                            accounts.set(item.0, item.1, item.2)?;
+                            entry.insert(accounts);
+                        }
+                        hash_map::Entry::Occupied(mut entry) => {
+                            entry.get_mut().set(item.0, item.1, item.2)?;
+                        }
+                    }
                 }
 
-                buf
+                buffer
             };
 
             if is_masterchain {
@@ -496,14 +507,8 @@ impl Phase<FinalizeState> {
 
             let new_observable_state_data = new_observable_state_data
                 .into_iter()
-                .enumerate()
-                .map(|(i, accounts)| {
-                    ShardStateData::from_accounts(
-                        accounts,
-                        ShardAccountsMask::from_shard_id(i).unwrap(),
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
+                .map(|(k, accounts)| ShardStateData::from_accounts(accounts).map(|v| (k, v)))
+                .collect::<Result<FastHashMap<_, _>>>()?;
 
             // TODO: update config smc on hard fork
 

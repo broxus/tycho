@@ -4,9 +4,10 @@ use anyhow::Result;
 use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
+use tycho_util::FastHashMap;
 
 use crate::state::shard_state_data::ShardStateData;
-use crate::state::{MinRefMcStateTracker, RefMcStateHandle, ShardAccountsMask};
+use crate::state::{MinRefMcStateTracker, RefMcStateHandle};
 
 /// Parsed shard state.
 #[derive(Clone)]
@@ -27,19 +28,15 @@ impl ShardStateStuff {
     pub fn from_root(
         block_id: &BlockId,
         root: Cell,
-        data_roots: Vec<Cell>,
+        data_roots: FastHashMap<u8, Cell>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
         let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
 
         let shard_state_data = data_roots
             .into_iter()
-            .enumerate()
-            .map(|(shard_id, root)| {
-                let mask = ShardAccountsMask::from_shard_id(shard_id).unwrap();
-                ShardStateData::from_root(root, mask)
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .map(|(k, cell)| ShardStateData::from_root(cell).map(|v| (k, v)))
+            .collect::<Result<FastHashMap<u8, ShardStateData>>>()?;
 
         Self::from_state_and_root(block_id, root, shard_state, shard_state_data, tracker)
     }
@@ -48,7 +45,7 @@ impl ShardStateStuff {
         block_id: &BlockId,
         root: Cell,
         shard_state: Box<ShardStateUnsplit>,
-        shard_state_data: Vec<ShardStateData>,
+        shard_state_data: FastHashMap<u8, ShardStateData>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
         anyhow::ensure!(
@@ -102,7 +99,8 @@ impl ShardStateStuff {
             got = root.repr_hash(),
         );
 
-        Self::from_root(zerostate_id, root, vec![], tracker) // TODO
+        let data_roots = FastHashMap::default(); // TODO
+        Self::from_root(zerostate_id, root, data_roots, tracker)
     }
 
     pub fn block_id(&self) -> &BlockId {
@@ -128,12 +126,12 @@ impl ShardStateStuff {
         &self.inner.root
     }
 
-    pub fn data_root_cells(&self) -> Vec<&Cell> {
+    pub fn data_root_cells(&self) -> FastHashMap<u8, Cell> {
         self.inner
             .shard_state_data
             .iter()
-            .map(|x| x.root_cell())
-            .collect::<Vec<_>>()
+            .map(|(k, v)| (*k, v.root_cell().clone()))
+            .collect()
     }
 
     pub fn shards(&self) -> Result<&ShardHashes> {
@@ -180,7 +178,7 @@ unsafe impl arc_swap::RefCnt for ShardStateStuff {
 pub struct Inner {
     block_id: BlockId,
     shard_state: Box<ShardStateUnsplit>,
-    shard_state_data: Vec<ShardStateData>,
+    shard_state_data: FastHashMap<u8, ShardStateData>,
     shard_state_extra: Option<McStateExtra>,
     handle: RefMcStateHandle,
     root: Cell,

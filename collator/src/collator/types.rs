@@ -78,11 +78,7 @@ impl PrevData {
         let pure_prev_state_root = prev_states[0].root_cell().clone();
         let pure_prev_states = prev_states;
 
-        let observable_data_roots = pure_prev_states[0]
-            .data_root_cells()
-            .into_iter()
-            .cloned()
-            .collect();
+        let observable_data_roots = pure_prev_states[0].data_root_cells();
 
         let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
         let observable_root = usage_tree.track(&pure_prev_state_root);
@@ -1053,7 +1049,7 @@ pub struct FinalizeBlockResult {
     pub old_mc_data: Arc<McData>,
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
-    pub new_observable_state_data: Vec<ShardStateData>,
+    pub new_observable_state_data: FastHashMap<u8, ShardStateData>,
     pub finalize_wu_total: u64,
     pub collation_config: Arc<CollationConfig>,
 }

@@ -45,6 +45,7 @@ mod messages_reader;
 mod types;
 
 pub use error::CollationCancelReason;
+use tycho_util::FastHashMap;
 pub use types::ForceMasterCollation;
 
 #[cfg(test)]
@@ -787,7 +788,7 @@ impl CollatorStdImpl {
         &mut self,
         block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
-        new_observable_state_data: Vec<ShardStateData>,
+        new_observable_state_data: FastHashMap<u8, ShardStateData>,
         new_state_root: Cell,
         store_new_state_task: JoinTask<Result<bool>>,
         new_queue_diff_hash: HashBytes,
@@ -808,7 +809,7 @@ impl CollatorStdImpl {
             BuildFromNewObservable {
                 block_id: BlockId,
                 shard_state: Box<ShardStateUnsplit>,
-                shard_state_data: Vec<ShardStateData>,
+                shard_state_data: FastHashMap<u8, ShardStateData>,
                 root: Cell,
                 tracker: MinRefMcStateTracker,
             },
