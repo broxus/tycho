@@ -1,3 +1,4 @@
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,12 +9,13 @@ use everscale_types::merkle::*;
 use everscale_types::models::{ShardIdent, *};
 use everscale_types::prelude::*;
 use humantime::format_duration;
+use parking_lot::Mutex;
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::state::{ShardStateData, ShardStateStuff};
 use tycho_consensus::prelude::ConsensusConfigExt;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
@@ -49,6 +51,7 @@ pub struct FinalizeBlockContext {
     pub collation_session: Arc<CollationSessionInfo>,
     pub wu_used_from_last_anchor: u64,
     pub usage_tree: UsageTree,
+    pub usage_trees: BTreeMap<u64, UsageTree>,
     pub queue_diff: SerializedQueueDiff,
     pub collator_config: Arc<CollatorConfig>,
     pub processed_upto: ProcessedUptoInfoStuff,
@@ -257,6 +260,7 @@ impl Phase<FinalizeState> {
             collation_session,
             wu_used_from_last_anchor,
             usage_tree,
+            usage_trees,
             queue_diff,
             collator_config,
             processed_upto,
@@ -460,7 +464,12 @@ impl Phase<FinalizeState> {
         let new_state_root;
         let total_validator_fees;
         let finalize_wu_total;
-        let (state_update, new_observable_state) = {
+        let (
+            state_update,
+            state_data_merkle_update,
+            new_observable_state,
+            new_observable_state_data,
+        ) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time",
                 labels,
@@ -513,7 +522,7 @@ impl Phase<FinalizeState> {
                 min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
                 processed_upto: Lazy::new(&processed_upto.clone().try_into()?)?,
                 before_split: new_block_info.before_split,
-                accounts: Lazy::new(&processed_accounts.shard_accounts)?,
+                accounts: Dict::new(),
                 overload_history: new_wu_used_from_last_anchor,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
@@ -534,6 +543,21 @@ impl Phase<FinalizeState> {
                 new_observable_state.libraries = global_libraries.clone();
             }
 
+            let new_observable_state_data = processed_accounts
+                .shard_accounts
+                .into_iter()
+                .map(|(k, accounts)| ShardStateData::from_accounts(accounts).map(|v| (k, v)))
+                .collect::<Result<BTreeMap<_, _>>>()?;
+
+            {
+                let accounts_roots = new_observable_state_data
+                    .iter()
+                    .map(|(k, v)| (*k, *v.root_cell().repr_hash()))
+                    .collect::<BTreeMap<_, _>>();
+
+                new_observable_state.accounts = Dict::try_from_btree(&accounts_roots)?;
+            }
+
             // TODO: update config smc on hard fork
 
             new_state_root = CellBuilder::build_from(&new_observable_state)?;
@@ -548,8 +572,42 @@ impl Phase<FinalizeState> {
                 &usage_tree,
             )?;
 
+            let state_data_merkle_update = Arc::new(Mutex::new(Dict::new()));
+
+            let prev_roots = self.state.prev_shard_data.pure_state_data_roots();
+            rayon::scope(|s| {
+                for (id, new_state) in &new_observable_state_data {
+                    let prev_root = prev_roots.get(id).unwrap();
+                    let usage_tree = usage_trees.get(id).unwrap();
+                    s.spawn(|_| {
+                        let merkle_update = create_merkle_update(
+                            &shard,
+                            prev_root,
+                            new_state.root_cell(),
+                            usage_tree,
+                        )
+                        .unwrap();
+
+                        state_data_merkle_update
+                            .lock()
+                            .set(*id, Lazy::new(&merkle_update).unwrap())
+                            .unwrap();
+                    });
+                }
+            });
+
+            let state_data_merkle_update = Arc::try_unwrap(state_data_merkle_update)
+                .unwrap()
+                .into_inner();
+
             build_state_update_elapsed = histogram.finish();
-            (merkle_update, new_observable_state)
+
+            (
+                merkle_update,
+                state_data_merkle_update,
+                new_observable_state,
+                new_observable_state_data,
+            )
         };
 
         let build_block_elapsed;
@@ -611,6 +669,7 @@ impl Phase<FinalizeState> {
                 info: Lazy::new(&new_block_info)?,
                 value_flow: Lazy::new(&value_flow)?,
                 state_update: Lazy::new(&state_update)?,
+                state_data_updates: state_data_merkle_update,
                 // do not use out msgs queue updates
                 out_msg_queue_updates: OutMsgQueueUpdates {
                     diff_hash: *queue_diff.hash(),
@@ -760,6 +819,7 @@ impl Phase<FinalizeState> {
                 mc_data: new_mc_data,
                 new_state_root,
                 new_observable_state,
+                new_observable_state_data,
                 finalize_wu_total,
                 old_mc_data: self.state.mc_data,
                 collation_config: self.state.collation_config,
@@ -1087,50 +1147,62 @@ impl Phase<FinalizeState> {
         let mut account_blocks = BTreeMap::new();
         let mut new_config_params = None;
         let (updated_accounts, shard_accounts) = executor.into_accounts_cache_raw();
-        let mut shard_accounts = RelaxedAugDict::from_full(&shard_accounts);
+
+        let mut shard_accounts = shard_accounts
+            .into_iter()
+            .map(|(k, v)| (k, RelaxedAugDict::from_full(&v)))
+            .collect::<BTreeMap<_, _>>();
 
         for updated_account in updated_accounts {
             if updated_account.transactions.is_empty() {
                 continue;
             }
 
-            if updated_account.exists {
-                shard_accounts.set_any(
-                    &updated_account.account_addr,
-                    &DepthBalanceInfo {
-                        split_depth: 0, // NOTE: will need to set when we implement accounts split/merge logic
-                        balance: updated_account.balance.clone(),
-                    },
-                    &updated_account.shard_account,
-                )?;
-            } else {
-                shard_accounts.remove(&updated_account.account_addr)?;
-            }
+            let addr = updated_account.make_std_addr();
 
-            if is_masterchain {
-                if &updated_account.account_addr == config_address {
-                    if let Some(Account {
-                        state:
-                            AccountState::Active(StateInit {
-                                data: Some(data), ..
-                            }),
-                        ..
-                    }) = updated_account.shard_account.load_account()?
-                    {
-                        new_config_params = Some(data.parse::<BlockchainConfigParams>()?);
-                    }
+            let shard_prefix = addr.prefix() & (0b1111u64 << 60) | (0b1u64 << 59); // prefix + tag
+
+            if let Entry::Occupied(mut shard_accounts) = shard_accounts.entry(shard_prefix) {
+                let shard_accounts = shard_accounts.get_mut();
+
+                if updated_account.exists {
+                    shard_accounts.set_any(
+                        &updated_account.account_addr,
+                        &DepthBalanceInfo {
+                            split_depth: 0, // NOTE: will need to set when we implement accounts split/merge logic
+                            balance: updated_account.balance.clone(),
+                        },
+                        &updated_account.shard_account,
+                    )?;
+                } else {
+                    shard_accounts.remove(&updated_account.account_addr)?;
                 }
 
-                updated_account.update_public_libraries(global_libraries)?;
+                if is_masterchain {
+                    if &updated_account.account_addr == config_address {
+                        if let Some(Account {
+                            state:
+                                AccountState::Active(StateInit {
+                                    data: Some(data), ..
+                                }),
+                            ..
+                        }) = updated_account.shard_account.load_account()?
+                        {
+                            new_config_params = Some(data.parse::<BlockchainConfigParams>()?);
+                        }
+                    }
+
+                    updated_account.update_public_libraries(global_libraries)?;
+                }
+
+                let account_block = AccountBlock {
+                    state_update: updated_account.build_hash_update(),
+                    account: updated_account.account_addr,
+                    transactions: AugDict::try_from_btree(&updated_account.transactions)?,
+                };
+
+                account_blocks.insert(updated_account.account_addr, account_block);
             }
-
-            let account_block = AccountBlock {
-                state_update: updated_account.build_hash_update(),
-                account: updated_account.account_addr,
-                transactions: AugDict::try_from_btree(&updated_account.transactions)?,
-            };
-
-            account_blocks.insert(updated_account.account_addr, account_block);
         }
 
         let accounts_len = account_blocks.len();
@@ -1142,9 +1214,14 @@ impl Phase<FinalizeState> {
                 .map(|(k, v)| (k, v.transactions.root_extra(), v as &dyn Store)),
         )?;
 
+        let shard_accounts = shard_accounts
+            .into_iter()
+            .map(|(k, dict)| (k, dict.build().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+
         Ok(ProcessedAccounts {
             account_blocks: account_blocks.build()?,
-            shard_accounts: shard_accounts.build()?,
+            shard_accounts,
             new_config_params,
             accounts_len,
         })
@@ -1324,7 +1401,7 @@ impl Phase<FinalizeState> {
         );
 
         // Previous total shard balance.
-        let from_prev_block = &prev_shard_data.observable_accounts().root_extra().balance;
+        let from_prev_block = &prev_shard_data.observable_accounts_balance()?;
         anyhow::ensure!(
             value_flow.from_prev_block == *from_prev_block,
             "ValueFlow for {} declares from_prev_block={}, \
@@ -1335,9 +1412,16 @@ impl Phase<FinalizeState> {
         );
 
         // Next total shard balance.
-        let to_next_block = &processed_accounts.shard_accounts.root_extra().balance;
+        let to_next_block = processed_accounts
+            .shard_accounts
+            .values()
+            .map(|v| v.root_extra().balance.clone())
+            .try_fold(CurrencyCollection::ZERO, |left, right| {
+                left.checked_add(&right)
+            })?;
+
         anyhow::ensure!(
-            value_flow.to_next_block == *to_next_block,
+            value_flow.to_next_block == to_next_block,
             "ValueFlow for {} declares to_next_block={}, \
             but the total balance present in the new state is {}",
             collation_data.block_id_short,
@@ -1406,7 +1490,7 @@ impl Phase<FinalizeState> {
 #[derive(Default)]
 struct ProcessedAccounts {
     account_blocks: AccountBlocks,
-    shard_accounts: ShardAccounts,
+    shard_accounts: BTreeMap<u64, ShardAccounts>,
     new_config_params: Option<BlockchainConfigParams>,
     accounts_len: usize,
 }

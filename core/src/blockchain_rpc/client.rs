@@ -581,7 +581,7 @@ impl BlockchainRpcClient {
 
                 let started_at = Instant::now();
 
-                tracing::debug!(archive_id, offset, "downloading archive chunk");
+                tracing::info!(archive_id, offset, "downloading archive chunk");
                 download_with_retries(
                     Request::from_tl(rpc::GetArchiveChunk { archive_id, offset }),
                     overlay_client,
@@ -770,7 +770,7 @@ async fn download_block_inner(
                 let neighbour = neighbour.clone();
                 let overlay_client = overlay_client.clone();
 
-                tracing::debug!(%block_id, offset, "downloading block data chunk");
+                tracing::info!(%block_id, offset, "downloading block data chunk");
                 JoinTask::new(download_with_retries(
                     Request::from_tl(rpc::GetBlockDataChunk { block_id, offset }),
                     overlay_client,
@@ -910,7 +910,11 @@ async fn download_with_retries(
                 return Ok((h, res.data));
             }
             Err(e) => {
-                tracing::error!("Failed to download archive slice: {e}");
+                tracing::error!(
+                    retries,
+                    is_reliable = neighbour.is_reliable(),
+                    "Failed to download chunk: {e}"
+                );
                 retries += 1;
                 if retries >= max_retries || !neighbour.is_reliable() {
                     return Err(e);

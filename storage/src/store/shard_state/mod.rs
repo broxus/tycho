@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
 use tycho_block_util::state::*;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::FastHashMap;
 use weedb::rocksdb;
 
 use self::cell_storage::*;
@@ -85,14 +87,20 @@ impl ShardStateStorage {
             return Err(ShardStateStorageError::BlockHandleIdMismatch.into());
         }
 
-        self.store_state_root(handle, state.root_cell().clone(), hint)
-            .await
+        self.store_state_root(
+            handle,
+            state.root_cell().clone(),
+            state.data_root_cells(),
+            hint,
+        )
+        .await
     }
 
     pub async fn store_state_root(
         &self,
         handle: &BlockHandle,
         root_cell: Cell,
+        root_data_cells: BTreeMap<u64, Cell>,
         hint: StoreStateHint,
     ) -> Result<bool> {
         if handle.has_state() {
@@ -109,6 +117,8 @@ impl ShardStateStorage {
         let block_id = *handle.id();
         let raw_db = self.cells_db.rocksdb().clone();
         let cf = self.cells_db.shard_states.get_unbounded_cf();
+        let shard_state_data_cf = self.cells_db.shard_state_data.get_unbounded_cf();
+
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
@@ -123,16 +133,33 @@ impl ShardStateStorage {
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
 
-            let new_cell_count = cell_storage.store_cell(
-                &mut batch,
-                root_cell.as_ref(),
-                estimated_merkle_update_size,
-            )?;
+            let mut new_cell_count =
+                cell_storage.store_cell(&mut batch, root_cell.as_ref(), 100)?;
+
+            batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
+
+            for (shard_prefix, data_root_cell) in root_data_cells.iter() {
+                let cells_count = cell_storage.store_cell(
+                    &mut batch,
+                    data_root_cell.as_ref(),
+                    estimated_merkle_update_size / 16,
+                )?;
+
+                let mut key = [0u8; tables::ShardStateData::KEY_LEN];
+                key[..80].copy_from_slice(&block_id.to_vec());
+                key[80..].copy_from_slice(&shard_prefix.to_be_bytes());
+
+                batch.put_cf(
+                    &shard_state_data_cf.bound(),
+                    key,
+                    data_root_cell.repr_hash().as_slice(),
+                );
+
+                new_cell_count += cells_count;
+            }
 
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
-
-            batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
             let hist = HistogramGuard::begin("tycho_storage_state_update_time");
             metrics::histogram!("tycho_storage_state_update_size_bytes")
@@ -182,19 +209,33 @@ impl ShardStateStorage {
 
     pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
         let cell_id = self.load_state_root(block_id)?;
-        let cell = self.cell_storage.load_cell(cell_id)?;
+        let cell = Cell::from(self.cell_storage.load_cell(cell_id)? as Arc<_>);
 
-        ShardStateStuff::from_root(block_id, Cell::from(cell as Arc<_>), &self.min_ref_mc_state)
+        let shard_state = cell.parse::<Box<ShardStateUnsplit>>()?;
+
+        let accounts = &shard_state.accounts;
+
+        let mut accounts_roots = BTreeMap::new();
+        for item in accounts.iter() {
+            let (shard_prefix, cell_id) = item?;
+
+            let cell = self.cell_storage.load_cell(cell_id)?;
+            let shard_state_data = ShardStateData::from_root(Cell::from(cell as Arc<_>))?;
+
+            accounts_roots.insert(shard_prefix, shard_state_data);
+        }
+
+        ShardStateStuff::from_state_and_root(
+            block_id,
+            cell,
+            shard_state,
+            accounts_roots,
+            &self.min_ref_mc_state,
+        )
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn remove_outdated_states(&self, mc_seqno: u32) -> Result<()> {
-        // Compute recent block ids for the specified masterchain seqno
-        let Some(top_blocks) = self.compute_recent_blocks(mc_seqno).await? else {
-            tracing::warn!("recent blocks edge not found");
-            return Ok(());
-        };
-
+    pub async fn remove_outdated_states(&self, top_blocks: &TopBlocks) -> Result<()> {
         tracing::info!(
             target_block_id = %top_blocks.mc_block,
             "started states GC",
@@ -284,6 +325,103 @@ impl ShardStateStorage {
             block_id = %top_blocks.mc_block,
             elapsed_sec = started_at.elapsed().as_secs_f64(),
             "finished states GC",
+        );
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub async fn remove_outdated_state_data(&self, top_blocks: &TopBlocks) -> Result<()> {
+        tracing::info!(
+            target_block_id = %top_blocks.mc_block,
+            "started states data GC",
+        );
+        let started_at = Instant::now();
+
+        let raw = self.cells_db.rocksdb();
+
+        // Manually get required column factory and r/w options
+        let snapshot = raw.snapshot();
+
+        let shard_state_data_cf = self.cells_db.shard_state_data.get_unbounded_cf();
+        let mut state_data_read_options = self.cells_db.shard_state_data.new_read_config();
+        state_data_read_options.set_snapshot(&snapshot);
+
+        let mut alloc = bumpalo::Bump::new();
+
+        // Create iterator
+        let mut iter =
+            raw.raw_iterator_cf_opt(&shard_state_data_cf.bound(), state_data_read_options);
+        iter.seek_to_first();
+
+        // Iterate all states and remove outdated
+        let mut removed_states = 0usize;
+        let mut removed_cells = 0usize;
+        loop {
+            let _hist = HistogramGuard::begin("tycho_storage_state_data_gc_time");
+            let (key, value) = match iter.item() {
+                Some(item) => item,
+                None => match iter.status() {
+                    Ok(()) => break,
+                    Err(e) => return Err(e.into()),
+                },
+            };
+
+            let block_id = BlockId::from_slice(&key[..80]);
+            let root_hash = HashBytes::from_slice(value);
+
+            // Skip blocks from zero state and top blocks
+            if block_id.seqno == 0
+                || top_blocks.contains_shard_seqno(&block_id.shard, block_id.seqno)
+            {
+                iter.next();
+                continue;
+            }
+
+            alloc.reset();
+
+            {
+                let _guard = self.gc_lock.lock().await;
+
+                let db = self.cells_db.clone();
+                let cell_storage = self.cell_storage.clone();
+                let key = key.to_vec();
+
+                let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
+                    let (stats, mut batch) = cell_storage.remove_cell(&alloc, &root_hash)?;
+
+                    batch.delete_cf(&db.shard_state_data.get_unbounded_cf().bound(), key);
+                    db.raw()
+                        .rocksdb()
+                        .write_opt(batch, db.cells.write_config())?;
+
+                    Ok::<_, anyhow::Error>((stats, alloc))
+                })
+                .await??;
+
+                removed_cells += total;
+                alloc = inner_alloc; // Reuse allocation without passing alloc by ref
+
+                tracing::debug!(removed_cells = total, %block_id);
+            }
+
+            removed_states += 1;
+            iter.next();
+
+            metrics::counter!("tycho_storage_state_data_gc_count").increment(1);
+            metrics::counter!("tycho_storage_state_data_gc_cells_count").increment(1);
+            if block_id.is_masterchain() {
+                metrics::gauge!("tycho_gc_state_data_seqno").set(block_id.seqno as f64);
+            }
+            tracing::debug!(removed_states, removed_cells, %block_id, "removed state data");
+        }
+
+        // Done
+        tracing::info!(
+            removed_states,
+            removed_cells,
+            block_id = %top_blocks.mc_block,
+            elapsed_sec = started_at.elapsed().as_secs_f64(),
+            "finished state data GC",
         );
         Ok(())
     }
