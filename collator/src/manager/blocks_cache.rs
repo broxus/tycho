@@ -76,7 +76,6 @@ impl BlocksCache {
                             proof_funds: std::mem::take(&mut shard_cache.data.proof_funds),
                             #[cfg(feature = "block-creator-stats")]
                             creators: std::mem::take(&mut shard_cache.data.creators),
-                            processed_to: Default::default(),
                             processed_to_by_partitions,
                         });
                         break;
