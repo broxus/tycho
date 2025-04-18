@@ -33,9 +33,9 @@ pub use self::state_applier::ShardStateApplier;
 pub use self::subscriber::test::PrintSubscriber;
 pub use self::subscriber::{
     ArchiveSubscriber, ArchiveSubscriberContext, ArchiveSubscriberExt, BlockSubscriber,
-    BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, GcSubscriber, ManualGcTrigger,
-    MetricsSubscriber, NoopSubscriber, PsSubscriber, StateSubscriber, StateSubscriberContext,
-    StateSubscriberExt,
+    BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, DelayedTasks,
+    DelayedTasksJoinHandle, DelayedTasksSpawner, GcSubscriber, ManualGcTrigger, MetricsSubscriber,
+    NoopSubscriber, PsSubscriber, StateSubscriber, StateSubscriberContext, StateSubscriberExt,
 };
 
 mod archive_handler;
@@ -187,6 +187,7 @@ where
         let is_key_block = custom.config.is_some();
 
         // Begin preparing master block in the background
+        let (delayed_handle, delayed) = DelayedTasks::new();
         let prepared_master = {
             let cx = Box::new(BlockSubscriberContext {
                 mc_block_id,
@@ -194,6 +195,7 @@ where
                 is_key_block,
                 block: block.clone(),
                 archive_data,
+                delayed,
             });
             let subscriber = self.subscriber.clone();
             JoinTask::new(async move {
@@ -230,11 +232,16 @@ where
         metrics::histogram!("tycho_core_process_sc_blocks_time").record(started_at.elapsed());
 
         // Finally handle the masterchain block
+        let delayed_handle = delayed_handle.spawn();
         let (cx, prepared) = prepared_master.await;
 
         let _histogram = HistogramGuard::begin("tycho_core_process_mc_block_time");
         self.subscriber.handle_block(&cx, prepared?).await?;
 
+        // Join delayed tasks after all processing is done.
+        delayed_handle.join().await?;
+
+        // Commit only when everything is ok.
         let shard_heights = ShardHeights::from(shard_heights);
         self.state.commit_master(CommitMasterBlock {
             block_id: &mc_block_id,
@@ -313,31 +320,42 @@ where
         mut blocks: Vec<BlockStuffAug>,
     ) -> Result<()> {
         let start_preparing_block = |block: BlockStuffAug| {
+            let (delayed_handle, delayed) = DelayedTasks::new();
+
             let cx = Box::new(BlockSubscriberContext {
                 mc_block_id: *mc_block_id,
                 mc_is_key_block,
                 is_key_block: false,
                 block: block.data,
                 archive_data: block.archive_data,
+                delayed,
             });
             let subscriber = self.subscriber.clone();
             JoinTask::new(async move {
                 let _histogram = HistogramGuard::begin("tycho_core_prepare_sc_block_time");
 
                 let prepared = subscriber.prepare_block(&cx).await;
-                (cx, prepared)
+                (delayed_handle, cx, prepared)
             })
         };
 
         let mut prepare_task = blocks.pop().map(start_preparing_block);
 
         while let Some(prepared) = prepare_task.take() {
-            let (cx, prepared) = prepared.await;
+            let (delayed_handle, cx, prepared) = prepared.await;
+            let delayed_handle = delayed_handle.spawn();
+
             prepare_task = blocks.pop().map(start_preparing_block);
 
             let _histogram = HistogramGuard::begin("tycho_core_process_sc_block_time");
 
+            // Handle block by subscribers chain.
             self.subscriber.handle_block(&cx, prepared?).await?;
+
+            // Join delayed tasks after all processing is done.
+            delayed_handle.join().await?;
+
+            // Commit only when everything is ok.
             self.state.commit_shard(CommitShardBlock {
                 block_id: cx.block.id(),
             });
