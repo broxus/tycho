@@ -254,140 +254,142 @@ impl RpcStorage {
         shard_state: ShardStateStuff,
         split_depth: u8,
     ) -> Result<()> {
-        let shard_ident = shard_state.block_id().shard;
-        let Ok(workchain) = i8::try_from(shard_ident.workchain()) else {
-            return Ok(());
-        };
+        todo!()
 
-        tracing::info!("clearing old code hash indices");
-        let started_at = Instant::now();
-        self.remove_code_hashes(&shard_ident).await?;
-        tracing::info!(
-            elapsed = %humantime::format_duration(started_at.elapsed()),
-            "cleared old code hash indices"
-        );
-
-        // Split on virtual shards
-        let (_state_guard, virtual_shards) = {
-            let guard = shard_state.ref_mc_state_handle().clone();
-
-            let mut virtual_shards = FastHashMap::default();
-            split_shard(
-                &shard_ident,
-                shard_state.state().load_accounts()?.dict(),
-                split_depth,
-                &mut virtual_shards,
-            )
-            .context("failed to split shard state into virtual shards")?;
-
-            // NOTE: Ensure that the root cell is dropped.
-            drop(shard_state);
-            (guard, virtual_shards)
-        };
-
-        let cancelled = CancellationFlag::new();
-        scopeguard::defer! {
-            cancelled.cancel();
-        }
-
-        // Rebuild code hashes
-        let db = self.db.clone();
-        let mut cancelled = cancelled.debounce(10000);
-        let span = tracing::Span::current();
-
-        // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
-        tokio::task::spawn_blocking(move || {
-            let _span = span.enter();
-
-            let guard = scopeguard::guard((), |_| {
-                tracing::warn!("cancelled");
-            });
-
-            tracing::info!(split_depth, "started building new code hash indices");
-            let started_at = Instant::now();
-
-            let raw = db.rocksdb().as_ref();
-            let code_hashes_cf = &db.code_hashes.cf();
-            let code_hashes_by_address_cf = &db.code_hashes_by_address.cf();
-
-            let mut non_empty_batch = false;
-            let mut write_batch = rocksdb::WriteBatch::default();
-
-            // Prepare buffer for code hashes ids
-            let mut code_hashes_key = [0u8; { tables::CodeHashes::KEY_LEN }];
-            code_hashes_key[32] = workchain as u8;
-
-            let mut code_hashes_by_address_key = [0u8; { tables::CodeHashesByAddress::KEY_LEN }];
-            code_hashes_by_address_key[0] = workchain as u8;
-
-            // Iterate all accounts
-            for (virtual_shard, accounts) in virtual_shards {
-                tracing::info!(%virtual_shard, "started collecting code hashes");
-                let started_at = Instant::now();
-
-                for entry in accounts.iter() {
-                    if cancelled.check() {
-                        anyhow::bail!("accounts reset cancelled");
-                    }
-
-                    let (id, (_, account)) = entry?;
-
-                    let code_hash = match extract_code_hash(&account)? {
-                        ExtractedCodeHash::Exact(Some(code_hash)) => code_hash,
-                        ExtractedCodeHash::Exact(None) => continue,
-                        ExtractedCodeHash::Skip => anyhow::bail!("code in account state is pruned"),
-                    };
-
-                    non_empty_batch |= true;
-
-                    // Fill account address in the key buffer
-                    code_hashes_key[..32].copy_from_slice(code_hash.as_slice());
-                    code_hashes_key[33..65].copy_from_slice(id.as_slice());
-
-                    code_hashes_by_address_key[1..33].copy_from_slice(id.as_slice());
-
-                    // Write tx data and indices
-                    write_batch.put_cf(code_hashes_cf, code_hashes_key.as_slice(), []);
-                    write_batch.put_cf(
-                        code_hashes_by_address_cf,
-                        code_hashes_by_address_key.as_slice(),
-                        code_hash.as_slice(),
-                    );
-                }
-
-                tracing::info!(
-                    %virtual_shard,
-                    elapsed = %humantime::format_duration(started_at.elapsed()),
-                    "finished collecting code hashes",
-                );
-            }
-
-            if non_empty_batch {
-                raw.write_opt(write_batch, db.code_hashes.write_config())?;
-            }
-
-            tracing::info!(
-                elapsed = %humantime::format_duration(started_at.elapsed()),
-                "finished building new code hash indices"
-            );
-
-            // Flush indices after delete/insert
-            tracing::info!("started flushing code hash indices");
-            let started_at = Instant::now();
-
-            let bound = Option::<[u8; 0]>::None;
-            raw.compact_range_cf(code_hashes_cf, bound, bound);
-            raw.compact_range_cf(code_hashes_by_address_cf, bound, bound);
-
-            // Done
-            scopeguard::ScopeGuard::into_inner(guard);
-            tracing::info!(
-                elapsed = %humantime::format_duration(started_at.elapsed()),
-                "finished flushing code hash indices"
-            );
-            Ok(())
-        })
-        .await?
+        // let shard_ident = shard_state.block_id().shard;
+        // let Ok(workchain) = i8::try_from(shard_ident.workchain()) else {
+        //     return Ok(());
+        // };
+        //
+        // tracing::info!("clearing old code hash indices");
+        // let started_at = Instant::now();
+        // self.remove_code_hashes(&shard_ident).await?;
+        // tracing::info!(
+        //     elapsed = %humantime::format_duration(started_at.elapsed()),
+        //     "cleared old code hash indices"
+        // );
+        //
+        // // Split on virtual shards
+        // let (_state_guard, virtual_shards) = {
+        //     let guard = shard_state.ref_mc_state_handle().clone();
+        //
+        //     let mut virtual_shards = FastHashMap::default();
+        //     split_shard(
+        //         &shard_ident,
+        //         shard_state.state().load_accounts()?.dict(),
+        //         split_depth,
+        //         &mut virtual_shards,
+        //     )
+        //     .context("failed to split shard state into virtual shards")?;
+        //
+        //     // NOTE: Ensure that the root cell is dropped.
+        //     drop(shard_state);
+        //     (guard, virtual_shards)
+        // };
+        //
+        // let cancelled = CancellationFlag::new();
+        // scopeguard::defer! {
+        //     cancelled.cancel();
+        // }
+        //
+        // // Rebuild code hashes
+        // let db = self.db.clone();
+        // let mut cancelled = cancelled.debounce(10000);
+        // let span = tracing::Span::current();
+        //
+        // // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
+        // tokio::task::spawn_blocking(move || {
+        //     let _span = span.enter();
+        //
+        //     let guard = scopeguard::guard((), |_| {
+        //         tracing::warn!("cancelled");
+        //     });
+        //
+        //     tracing::info!(split_depth, "started building new code hash indices");
+        //     let started_at = Instant::now();
+        //
+        //     let raw = db.rocksdb().as_ref();
+        //     let code_hashes_cf = &db.code_hashes.cf();
+        //     let code_hashes_by_address_cf = &db.code_hashes_by_address.cf();
+        //
+        //     let mut non_empty_batch = false;
+        //     let mut write_batch = rocksdb::WriteBatch::default();
+        //
+        //     // Prepare buffer for code hashes ids
+        //     let mut code_hashes_key = [0u8; { tables::CodeHashes::KEY_LEN }];
+        //     code_hashes_key[32] = workchain as u8;
+        //
+        //     let mut code_hashes_by_address_key = [0u8; { tables::CodeHashesByAddress::KEY_LEN }];
+        //     code_hashes_by_address_key[0] = workchain as u8;
+        //
+        //     // Iterate all accounts
+        //     for (virtual_shard, accounts) in virtual_shards {
+        //         tracing::info!(%virtual_shard, "started collecting code hashes");
+        //         let started_at = Instant::now();
+        //
+        //         for entry in accounts.iter() {
+        //             if cancelled.check() {
+        //                 anyhow::bail!("accounts reset cancelled");
+        //             }
+        //
+        //             let (id, (_, account)) = entry?;
+        //
+        //             let code_hash = match extract_code_hash(&account)? {
+        //                 ExtractedCodeHash::Exact(Some(code_hash)) => code_hash,
+        //                 ExtractedCodeHash::Exact(None) => continue,
+        //                 ExtractedCodeHash::Skip => anyhow::bail!("code in account state is pruned"),
+        //             };
+        //
+        //             non_empty_batch |= true;
+        //
+        //             // Fill account address in the key buffer
+        //             code_hashes_key[..32].copy_from_slice(code_hash.as_slice());
+        //             code_hashes_key[33..65].copy_from_slice(id.as_slice());
+        //
+        //             code_hashes_by_address_key[1..33].copy_from_slice(id.as_slice());
+        //
+        //             // Write tx data and indices
+        //             write_batch.put_cf(code_hashes_cf, code_hashes_key.as_slice(), []);
+        //             write_batch.put_cf(
+        //                 code_hashes_by_address_cf,
+        //                 code_hashes_by_address_key.as_slice(),
+        //                 code_hash.as_slice(),
+        //             );
+        //         }
+        //
+        //         tracing::info!(
+        //             %virtual_shard,
+        //             elapsed = %humantime::format_duration(started_at.elapsed()),
+        //             "finished collecting code hashes",
+        //         );
+        //     }
+        //
+        //     if non_empty_batch {
+        //         raw.write_opt(write_batch, db.code_hashes.write_config())?;
+        //     }
+        //
+        //     tracing::info!(
+        //         elapsed = %humantime::format_duration(started_at.elapsed()),
+        //         "finished building new code hash indices"
+        //     );
+        //
+        //     // Flush indices after delete/insert
+        //     tracing::info!("started flushing code hash indices");
+        //     let started_at = Instant::now();
+        //
+        //     let bound = Option::<[u8; 0]>::None;
+        //     raw.compact_range_cf(code_hashes_cf, bound, bound);
+        //     raw.compact_range_cf(code_hashes_by_address_cf, bound, bound);
+        //
+        //     // Done
+        //     scopeguard::ScopeGuard::into_inner(guard);
+        //     tracing::info!(
+        //         elapsed = %humantime::format_duration(started_at.elapsed()),
+        //         "finished flushing code hash indices"
+        //     );
+        //     Ok(())
+        // })
+        // .await?
     }
 
     #[tracing::instrument(level = "info", name = "remove_old_transactions", skip(self))]

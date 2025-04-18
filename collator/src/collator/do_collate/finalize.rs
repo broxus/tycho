@@ -13,7 +13,7 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::state::{ShardAccountsMask, ShardStateData, ShardStateStuff};
 use tycho_consensus::prelude::ConsensusConfigExt;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
@@ -407,7 +407,7 @@ impl Phase<FinalizeState> {
         let new_state_root;
         let total_validator_fees;
         let finalize_wu_total;
-        let (state_update, new_observable_state) = {
+        let (state_update, new_observable_state, new_observable_state_data) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time",
                 labels,
@@ -460,7 +460,6 @@ impl Phase<FinalizeState> {
                 min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
                 processed_upto: Lazy::new(&processed_upto.clone().try_into()?)?,
                 before_split: new_block_info.before_split,
-                accounts: Lazy::new(&processed_accounts.shard_accounts)?,
                 overload_history: new_wu_used_from_last_anchor,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
@@ -477,9 +476,34 @@ impl Phase<FinalizeState> {
                 .total_validator_fees
                 .try_sub_assign(&value_flow.recovered)?;
 
+            // Split accounts by shards
+            let new_observable_state_data = {
+                let mut buf: Vec<ShardAccounts> =
+                    Vec::with_capacity(ShardAccountsMask::num_shards());
+
+                for item in processed_accounts.shard_accounts.iter() {
+                    let item = item?;
+                    let shard_id = ShardAccountsMask::from_account(&item.0 .0).to_shard_id();
+                    buf[shard_id].set(item.0, item.1, item.2)?;
+                }
+
+                buf
+            };
+
             if is_masterchain {
                 new_observable_state.libraries = global_libraries.clone();
             }
+
+            let new_observable_state_data = new_observable_state_data
+                .into_iter()
+                .enumerate()
+                .map(|(i, accounts)| {
+                    ShardStateData::from_accounts(
+                        accounts,
+                        ShardAccountsMask::from_shard_id(i).unwrap(),
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
 
             // TODO: update config smc on hard fork
 
@@ -496,7 +520,11 @@ impl Phase<FinalizeState> {
             )?;
 
             build_state_update_elapsed = histogram.finish();
-            (merkle_update, new_observable_state)
+            (
+                merkle_update,
+                new_observable_state,
+                new_observable_state_data,
+            )
         };
 
         let build_block_elapsed;
@@ -558,6 +586,7 @@ impl Phase<FinalizeState> {
                 info: Lazy::new(&new_block_info)?,
                 value_flow: Lazy::new(&value_flow)?,
                 state_update: Lazy::new(&state_update)?,
+                state_data_updates: Dict::new(),
                 // do not use out msgs queue updates
                 out_msg_queue_updates: OutMsgQueueUpdates {
                     diff_hash: *queue_diff.hash(),
@@ -726,6 +755,7 @@ impl Phase<FinalizeState> {
                 mc_data: new_mc_data,
                 new_state_root,
                 new_observable_state,
+                new_observable_state_data,
                 finalize_wu_total,
                 old_mc_data: self.state.mc_data,
                 collation_config: self.state.collation_config,

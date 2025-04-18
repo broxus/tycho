@@ -215,6 +215,26 @@ impl ColumnFamilyOptions<Caches> for ShardStates {
     }
 }
 
+/// Maps `BlockId` to root cell hash
+/// - Key: `BlockId` + `u8` (shard id)
+/// - Value: `[u8; 32]`
+pub struct ShardAccounts;
+
+impl ShardAccounts {
+    pub const KEY_LEN: usize = 80 + 1;
+}
+
+impl ColumnFamily for ShardAccounts {
+    const NAME: &'static str = "shard_accounts";
+}
+
+impl ColumnFamilyOptions<Caches> for ShardAccounts {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        default_block_based_table_factory(opts, caches);
+        opts.set_compression_type(DBCompressionType::Zstd);
+    }
+}
+
 /// Stores cells data
 /// - Key: `[u8; 32]` (cell repr hash)
 /// - Value: `StorageCell`

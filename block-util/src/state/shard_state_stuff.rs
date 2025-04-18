@@ -5,7 +5,8 @@ use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 
-use crate::state::{MinRefMcStateTracker, RefMcStateHandle};
+use crate::state::shard_state_data::ShardStateData;
+use crate::state::{MinRefMcStateTracker, RefMcStateHandle, ShardAccountsMask};
 
 /// Parsed shard state.
 #[derive(Clone)]
@@ -26,25 +27,28 @@ impl ShardStateStuff {
     pub fn from_root(
         block_id: &BlockId,
         root: Cell,
+        data_roots: Vec<Cell>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
         let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
-        Self::from_state_and_root(block_id, shard_state, root, tracker)
-    }
 
-    pub fn from_state(
-        block_id: &BlockId,
-        shard_state: Box<ShardStateUnsplit>,
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Self> {
-        let root = CellBuilder::build_from(&shard_state)?;
-        ShardStateStuff::from_state_and_root(block_id, shard_state, root, tracker)
+        let shard_state_data = data_roots
+            .into_iter()
+            .enumerate()
+            .map(|(shard_id, root)| {
+                let mask = ShardAccountsMask::from_shard_id(shard_id).unwrap();
+                ShardStateData::from_root(root, mask)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Self::from_state_and_root(block_id, root, shard_state, shard_state_data, tracker)
     }
 
     pub fn from_state_and_root(
         block_id: &BlockId,
-        shard_state: Box<ShardStateUnsplit>,
         root: Cell,
+        shard_state: Box<ShardStateUnsplit>,
+        shard_state_data: Vec<ShardStateData>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
         anyhow::ensure!(
@@ -68,6 +72,7 @@ impl ShardStateStuff {
                 block_id: *block_id,
                 shard_state_extra: shard_state.load_custom()?,
                 shard_state,
+                shard_state_data,
                 root,
                 handle,
             }),
@@ -97,7 +102,7 @@ impl ShardStateStuff {
             got = root.repr_hash(),
         );
 
-        Self::from_root(zerostate_id, root, tracker)
+        Self::from_root(zerostate_id, root, vec![], tracker) // TODO
     }
 
     pub fn block_id(&self) -> &BlockId {
@@ -121,6 +126,14 @@ impl ShardStateStuff {
 
     pub fn root_cell(&self) -> &Cell {
         &self.inner.root
+    }
+
+    pub fn data_root_cells(&self) -> Vec<&Cell> {
+        self.inner
+            .shard_state_data
+            .iter()
+            .map(|x| x.root_cell())
+            .collect::<Vec<_>>()
     }
 
     pub fn shards(&self) -> Result<&ShardHashes> {
@@ -167,6 +180,7 @@ unsafe impl arc_swap::RefCnt for ShardStateStuff {
 pub struct Inner {
     block_id: BlockId,
     shard_state: Box<ShardStateUnsplit>,
+    shard_state_data: Vec<ShardStateData>,
     shard_state_extra: Option<McStateExtra>,
     handle: RefMcStateHandle,
     root: Cell,

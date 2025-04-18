@@ -14,7 +14,7 @@ use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateData, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
 use tycho_util::futures::JoinTask;
@@ -787,6 +787,7 @@ impl CollatorStdImpl {
         &mut self,
         block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
+        new_observable_state_data: Vec<ShardStateData>,
         new_state_root: Cell,
         store_new_state_task: JoinTask<Result<bool>>,
         new_queue_diff_hash: HashBytes,
@@ -807,6 +808,7 @@ impl CollatorStdImpl {
             BuildFromNewObservable {
                 block_id: BlockId,
                 shard_state: Box<ShardStateUnsplit>,
+                shard_state_data: Vec<ShardStateData>,
                 root: Cell,
                 tracker: MinRefMcStateTracker,
             },
@@ -823,6 +825,7 @@ impl CollatorStdImpl {
                 GetNewShardStateStuff::BuildFromNewObservable {
                     block_id,
                     shard_state: new_observable_state,
+                    shard_state_data: new_observable_state_data,
                     root: new_state_root,
                     tracker,
                 }
@@ -836,9 +839,16 @@ impl CollatorStdImpl {
                 GetNewShardStateStuff::BuildFromNewObservable {
                     block_id,
                     shard_state,
+                    shard_state_data,
                     root,
                     tracker,
-                } => ShardStateStuff::from_state_and_root(&block_id, shard_state, root, &tracker)?,
+                } => ShardStateStuff::from_state_and_root(
+                    &block_id,
+                    root,
+                    shard_state,
+                    shard_state_data,
+                    &tracker,
+                )?,
                 GetNewShardStateStuff::ReloadFromStorage(store_new_state_task) => {
                     store_new_state_task.await?;
                     let load_task = JoinTask::new({

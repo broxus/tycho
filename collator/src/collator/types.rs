@@ -16,7 +16,7 @@ use everscale_types::models::{
 use everscale_types::num::Tokens;
 use tl_proto::TlWrite;
 use tycho_block_util::queue::{QueuePartitionIdx, SerializedQueueDiff};
-use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
+use tycho_block_util::state::{RefMcStateHandle, ShardStateData, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::AccountMeta;
 use tycho_network::PeerId;
@@ -78,17 +78,25 @@ impl PrevData {
         let pure_prev_state_root = prev_states[0].root_cell().clone();
         let pure_prev_states = prev_states;
 
+        let observable_data_roots = pure_prev_states[0]
+            .data_root_cells()
+            .into_iter()
+            .cloned()
+            .collect();
+
         let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
         let observable_root = usage_tree.track(&pure_prev_state_root);
         let observable_states = vec![ShardStateStuff::from_root(
             pure_prev_states[0].block_id(),
             observable_root,
+            observable_data_roots,
             pure_prev_states[0].ref_mc_state_handle().tracker(),
         )?];
 
         let gen_chain_time = observable_states[0].get_gen_chain_time();
         let gen_lt = observable_states[0].state().gen_lt;
-        let observable_accounts = observable_states[0].state().load_accounts()?;
+        // let observable_accounts = observable_states[0].state().load_accounts()?;
+        let observable_accounts = ShardAccounts::new();
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
         let wu_used_from_last_anchor = observable_states[0].state().overload_history;
 
@@ -1045,6 +1053,7 @@ pub struct FinalizeBlockResult {
     pub old_mc_data: Arc<McData>,
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
+    pub new_observable_state_data: Vec<ShardStateData>,
     pub finalize_wu_total: u64,
     pub collation_config: Arc<CollationConfig>,
 }

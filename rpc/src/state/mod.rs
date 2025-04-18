@@ -463,104 +463,105 @@ impl Default for LatestBlockchainConfig {
 
 impl Inner {
     async fn init(self: &Arc<Self>, mc_block_id: &BlockId) -> Result<()> {
-        anyhow::ensure!(mc_block_id.is_masterchain(), "not a masterchain state");
-
-        let blocks = self.storage.block_storage();
-        let block_handles = self.storage.block_handle_storage();
-        let shard_states = self.storage.shard_state_storage();
-
-        // Try to init the latest known key block cache
-        'key_block: {
-            // NOTE: `+ 1` here because the `mc_block_id` might be a key block and we should use it
-            let Some(handle) = block_handles.find_prev_key_block(mc_block_id.seqno + 1) else {
-                break 'key_block;
-            };
-
-            if handle.has_data() {
-                let key_block = blocks.load_block_data(&handle).await?;
-                self.update_mc_block_cache(&key_block)?;
-            } else {
-                let state = shard_states.load_state(handle.id()).await?;
-                let state = state.as_ref();
-
-                let Some(extra) = state.load_custom()? else {
-                    anyhow::bail!("masterchain state without extra");
-                };
-
-                self.update_config(state.global_id, state.seqno, &extra.config);
-                tracing::warn!("no key block found during initialization");
-            }
-        }
-
-        let mut mc_state = shard_states.load_state(mc_block_id).await?;
-        self.update_timings(mc_state.as_ref().gen_utime, mc_state.as_ref().seqno);
-
-        if let Some(rpc_storage) = self.storage.rpc_storage() {
-            let node_instance_id = self.storage.node_state().load_instance_id();
-            let rpc_instance_id = rpc_storage.load_instance_id();
-
-            let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
-                let state_info = state.as_ref();
-                Ok(CachedAccounts {
-                    libraries: Default::default(),
-                    accounts: state_info.load_accounts()?.dict().clone(),
-                    mc_ref_hanlde: state.ref_mc_state_handle().clone(),
-                    timings: GenTimings {
-                        gen_lt: state_info.gen_lt,
-                        gen_utime: state_info.gen_utime,
-                    },
-                })
-            };
-
-            let shards = mc_state.shards()?.clone();
-
-            if node_instance_id != rpc_instance_id || self.config.storage.is_force_reindex() {
-                // Reset masterchain accounts.
-                // NOTE: Consume shard state to prevent if from being fully loaded.
-                rpc_storage
-                    .reset_accounts(mc_state, self.config.shard_split_depth)
-                    .await?;
-
-                for item in shards.latest_blocks() {
-                    let block_id = item?;
-
-                    let state = shard_states.load_state(&block_id).await?;
-
-                    // Reset shard accounts.
-                    // NOTE: Consume shard state to prevent if from being fully loaded.
-                    rpc_storage
-                        .reset_accounts(state, self.config.shard_split_depth)
-                        .await?;
-                }
-
-                // Rewrite RPC instance id
-                rpc_storage.store_instance_id(node_instance_id);
-
-                // Reload mc state.
-                mc_state = shard_states.load_state(mc_block_id).await?;
-            }
-
-            // Fill config.
-            if let Some(config) = load_blockchain_config(&mc_state) {
-                self.blockchain_config.store(config);
-            }
-
-            // Fill masterchain cache
-            *self.mc_accounts.write() = Some(make_cached_accounts(&mc_state)?);
-
-            for item in shards.latest_blocks() {
-                let block_id = item?;
-                let state = shard_states.load_state(&block_id).await?;
-
-                // Fill accounts cache.
-                self.sc_accounts
-                    .write()
-                    .insert(block_id.shard, make_cached_accounts(&state)?);
-            }
-        }
-
-        self.is_ready.store(true, Ordering::Release);
-        Ok(())
+        todo!()
+        // anyhow::ensure!(mc_block_id.is_masterchain(), "not a masterchain state");
+        //
+        // let blocks = self.storage.block_storage();
+        // let block_handles = self.storage.block_handle_storage();
+        // let shard_states = self.storage.shard_state_storage();
+        //
+        // // Try to init the latest known key block cache
+        // 'key_block: {
+        //     // NOTE: `+ 1` here because the `mc_block_id` might be a key block and we should use it
+        //     let Some(handle) = block_handles.find_prev_key_block(mc_block_id.seqno + 1) else {
+        //         break 'key_block;
+        //     };
+        //
+        //     if handle.has_data() {
+        //         let key_block = blocks.load_block_data(&handle).await?;
+        //         self.update_mc_block_cache(&key_block)?;
+        //     } else {
+        //         let state = shard_states.load_state(handle.id()).await?;
+        //         let state = state.as_ref();
+        //
+        //         let Some(extra) = state.load_custom()? else {
+        //             anyhow::bail!("masterchain state without extra");
+        //         };
+        //
+        //         self.update_config(state.global_id, state.seqno, &extra.config);
+        //         tracing::warn!("no key block found during initialization");
+        //     }
+        // }
+        //
+        // let mut mc_state = shard_states.load_state(mc_block_id).await?;
+        // self.update_timings(mc_state.as_ref().gen_utime, mc_state.as_ref().seqno);
+        //
+        // if let Some(rpc_storage) = self.storage.rpc_storage() {
+        //     let node_instance_id = self.storage.node_state().load_instance_id();
+        //     let rpc_instance_id = rpc_storage.load_instance_id();
+        //
+        //     let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
+        //         let state_info = state.as_ref();
+        //         Ok(CachedAccounts {
+        //             libraries: Default::default(),
+        //             accounts: state_info.load_accounts()?.dict().clone(),
+        //             mc_ref_hanlde: state.ref_mc_state_handle().clone(),
+        //             timings: GenTimings {
+        //                 gen_lt: state_info.gen_lt,
+        //                 gen_utime: state_info.gen_utime,
+        //             },
+        //         })
+        //     };
+        //
+        //     let shards = mc_state.shards()?.clone();
+        //
+        //     if node_instance_id != rpc_instance_id || self.config.storage.is_force_reindex() {
+        //         // Reset masterchain accounts.
+        //         // NOTE: Consume shard state to prevent if from being fully loaded.
+        //         rpc_storage
+        //             .reset_accounts(mc_state, self.config.shard_split_depth)
+        //             .await?;
+        //
+        //         for item in shards.latest_blocks() {
+        //             let block_id = item?;
+        //
+        //             let state = shard_states.load_state(&block_id).await?;
+        //
+        //             // Reset shard accounts.
+        //             // NOTE: Consume shard state to prevent if from being fully loaded.
+        //             rpc_storage
+        //                 .reset_accounts(state, self.config.shard_split_depth)
+        //                 .await?;
+        //         }
+        //
+        //         // Rewrite RPC instance id
+        //         rpc_storage.store_instance_id(node_instance_id);
+        //
+        //         // Reload mc state.
+        //         mc_state = shard_states.load_state(mc_block_id).await?;
+        //     }
+        //
+        //     // Fill config.
+        //     if let Some(config) = load_blockchain_config(&mc_state) {
+        //         self.blockchain_config.store(config);
+        //     }
+        //
+        //     // Fill masterchain cache
+        //     *self.mc_accounts.write() = Some(make_cached_accounts(&mc_state)?);
+        //
+        //     for item in shards.latest_blocks() {
+        //         let block_id = item?;
+        //         let state = shard_states.load_state(&block_id).await?;
+        //
+        //         // Fill accounts cache.
+        //         self.sc_accounts
+        //             .write()
+        //             .insert(block_id.shard, make_cached_accounts(&state)?);
+        //     }
+        // }
+        //
+        // self.is_ready.store(true, Ordering::Release);
+        // Ok(())
     }
 
     fn get_account_state(&self, address: &StdAddr) -> Result<LoadedAccountState, RpcStateError> {
@@ -684,81 +685,82 @@ impl Inner {
     }
 
     fn update_accounts_cache(&self, block: &BlockStuff, state: &ShardStateStuff) -> Result<()> {
-        let _histogram = HistogramGuard::begin("tycho_rpc_state_update_accounts_cache_time");
-
-        let shard = block.id().shard;
-
-        // TODO: Get `gen_utime` from somewhere else.
-        let block_info = block.load_info()?;
-
-        let accounts = state.state().load_accounts()?.dict().clone();
-        let libraries = state.state().libraries.clone();
-
-        let cached = CachedAccounts {
-            libraries,
-            accounts,
-            mc_ref_hanlde: state.ref_mc_state_handle().clone(),
-            timings: GenTimings {
-                gen_lt: block_info.end_lt,
-                gen_utime: block_info.gen_utime,
-            },
-        };
-
-        if shard.is_masterchain() {
-            // Fill config.
-            if let Some(config) = load_blockchain_config(state) {
-                self.blockchain_config.store(config);
-            }
-
-            // Update accounts cache.
-            *self.mc_accounts.write() = Some(cached);
-        } else {
-            let mut cache = self.sc_accounts.write();
-
-            cache.insert(shard, cached);
-            if block_info.after_merge || block_info.after_split {
-                tracing::debug!("clearing shard states cache after shards merge/split");
-
-                match block_info.load_prev_ref()? {
-                    // Block after split
-                    //       |
-                    //       *  - block A
-                    //      / \
-                    //     *   *  - blocks B', B"
-                    PrevBlockRef::Single(..) => {
-                        // Compute parent shard of the B' or B"
-                        let parent = shard
-                            .merge()
-                            .ok_or(everscale_types::error::Error::InvalidData)?;
-
-                        let opposite = shard.opposite().expect("after split");
-
-                        // Remove parent shard state
-                        if cache.contains_key(&shard) && cache.contains_key(&opposite) {
-                            cache.remove(&parent);
-                        }
-                    }
-
-                    // Block after merge
-                    //     *   *  - blocks A', A"
-                    //      \ /
-                    //       *  - block B
-                    //       |
-                    PrevBlockRef::AfterMerge { .. } => {
-                        // Compute parent shard of the B' or B"
-                        let (left, right) = shard
-                            .split()
-                            .ok_or(everscale_types::error::Error::InvalidData)?;
-
-                        // Find and remove all parent shards
-                        cache.remove(&left);
-                        cache.remove(&right);
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        todo!()
+        // let _histogram = HistogramGuard::begin("tycho_rpc_state_update_accounts_cache_time");
+        //
+        // let shard = block.id().shard;
+        //
+        // // TODO: Get `gen_utime` from somewhere else.
+        // let block_info = block.load_info()?;
+        //
+        // let accounts = state.state().load_accounts()?.dict().clone();
+        // let libraries = state.state().libraries.clone();
+        //
+        // let cached = CachedAccounts {
+        //     libraries,
+        //     accounts,
+        //     mc_ref_hanlde: state.ref_mc_state_handle().clone(),
+        //     timings: GenTimings {
+        //         gen_lt: block_info.end_lt,
+        //         gen_utime: block_info.gen_utime,
+        //     },
+        // };
+        //
+        // if shard.is_masterchain() {
+        //     // Fill config.
+        //     if let Some(config) = load_blockchain_config(state) {
+        //         self.blockchain_config.store(config);
+        //     }
+        //
+        //     // Update accounts cache.
+        //     *self.mc_accounts.write() = Some(cached);
+        // } else {
+        //     let mut cache = self.sc_accounts.write();
+        //
+        //     cache.insert(shard, cached);
+        //     if block_info.after_merge || block_info.after_split {
+        //         tracing::debug!("clearing shard states cache after shards merge/split");
+        //
+        //         match block_info.load_prev_ref()? {
+        //             // Block after split
+        //             //       |
+        //             //       *  - block A
+        //             //      / \
+        //             //     *   *  - blocks B', B"
+        //             PrevBlockRef::Single(..) => {
+        //                 // Compute parent shard of the B' or B"
+        //                 let parent = shard
+        //                     .merge()
+        //                     .ok_or(everscale_types::error::Error::InvalidData)?;
+        //
+        //                 let opposite = shard.opposite().expect("after split");
+        //
+        //                 // Remove parent shard state
+        //                 if cache.contains_key(&shard) && cache.contains_key(&opposite) {
+        //                     cache.remove(&parent);
+        //                 }
+        //             }
+        //
+        //             // Block after merge
+        //             //     *   *  - blocks A', A"
+        //             //      \ /
+        //             //       *  - block B
+        //             //       |
+        //             PrevBlockRef::AfterMerge { .. } => {
+        //                 // Compute parent shard of the B' or B"
+        //                 let (left, right) = shard
+        //                     .split()
+        //                     .ok_or(everscale_types::error::Error::InvalidData)?;
+        //
+        //                 // Find and remove all parent shards
+        //                 cache.remove(&left);
+        //                 cache.remove(&right);
+        //             }
+        //         }
+        //     }
+        // }
+        //
+        // Ok(())
     }
 }
 
