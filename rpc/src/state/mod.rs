@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -501,9 +502,15 @@ impl Inner {
 
             let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
                 let state_info = state.as_ref();
+                let accounts = state
+                    .load_accounts()
+                    .into_iter()
+                    .map(|(k, v)| (k, v.dict().clone()))
+                    .collect();
+
                 Ok(CachedAccounts {
                     libraries: Default::default(),
-                    accounts: state_info.load_accounts()?.dict().clone(),
+                    accounts,
                     mc_ref_hanlde: state.ref_mc_state_handle().clone(),
                     timings: GenTimings {
                         gen_lt: state_info.gen_lt,
@@ -572,7 +579,7 @@ impl Inner {
                 None => Err(RpcStateError::NotReady),
                 Some(cache) => {
                     let mc_info = self.mc_info.read().clone();
-                    cache.get(mc_info, &address.address)
+                    cache.get(mc_info, address)
                 }
             }
         } else {
@@ -591,7 +598,7 @@ impl Inner {
                 }
 
                 gen_utime = cache.timings.gen_utime;
-                state = cache.get(mc_info.clone(), &address.address);
+                state = cache.get(mc_info.clone(), address);
                 found = true;
             }
 
@@ -691,7 +698,12 @@ impl Inner {
         // TODO: Get `gen_utime` from somewhere else.
         let block_info = block.load_info()?;
 
-        let accounts = state.state().load_accounts()?.dict().clone();
+        let accounts = state
+            .load_accounts()
+            .into_iter()
+            .map(|(k, v)| (k, v.dict().clone()))
+            .collect();
+
         let libraries = state.state().libraries.clone();
 
         let cached = CachedAccounts {
@@ -822,7 +834,7 @@ pub enum LoadedAccountState {
 
 struct CachedAccounts {
     libraries: Dict<HashBytes, LibDescr>,
-    accounts: ShardAccountsDict,
+    accounts: BTreeMap<u64, ShardAccountsDict>,
     mc_ref_hanlde: RefMcStateHandle,
     timings: GenTimings,
 }
@@ -831,20 +843,27 @@ impl CachedAccounts {
     fn get(
         &self,
         mc_info: LatestMcInfo,
-        account: &HashBytes,
+        address: &StdAddr,
     ) -> Result<LoadedAccountState, RpcStateError> {
-        match self.accounts.get(account) {
-            Ok(Some((_, state))) => Ok(LoadedAccountState::Found {
-                mc_block_id: mc_info.block_id,
-                state,
-                mc_ref_handle: self.mc_ref_hanlde.clone(),
-                timings: self.timings.max_by_lt(mc_info.timings),
-            }),
-            Ok(None) => Ok(LoadedAccountState::NotFound {
-                mc_block_id: mc_info.block_id,
-                timings: self.timings.max_by_lt(mc_info.timings),
-            }),
-            Err(e) => Err(RpcStateError::Internal(e.into())),
+        let shard_prefix = address.prefix() & (0b1111u64 << 60) | (0b1u64 << 59); // prefix + tag
+
+        match self.accounts.get(&shard_prefix) {
+            Some(shard) => match shard.get(address.address) {
+                Ok(Some((_, state))) => Ok(LoadedAccountState::Found {
+                    mc_block_id: mc_info.block_id,
+                    state,
+                    mc_ref_handle: self.mc_ref_hanlde.clone(),
+                    timings: self.timings.max_by_lt(mc_info.timings),
+                }),
+                Ok(None) => Ok(LoadedAccountState::NotFound {
+                    mc_block_id: mc_info.block_id,
+                    timings: self.timings.max_by_lt(mc_info.timings),
+                }),
+                Err(e) => Err(RpcStateError::Internal(e.into())),
+            },
+            None => {
+                unreachable!()
+            }
         }
     }
 }
