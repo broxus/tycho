@@ -112,7 +112,7 @@ impl Drop for LimiterGuard<'_> {
     }
 }
 
-#[cfg(all(test, feature = "test"))]
+#[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 

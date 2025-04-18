@@ -16,7 +16,8 @@ use crate::dag::LastOwnPoint;
 use crate::dyn_event;
 use crate::effects::{AltFormat, BroadcastCtx, Ctx, RoundCtx};
 use crate::intercom::broadcast::collector::CollectorSignal;
-use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
+use crate::intercom::core::{BroadcastResponse, QueryRequest, SignatureResponse};
+use crate::intercom::peer_schedule::PeerState;
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{PeerCount, Point, Signature};
 
@@ -90,11 +91,11 @@ impl Broadcaster {
             signatures: Default::default(),
             attempt: 0,
 
-            bcast_request: Dispatcher::broadcast_request(&point),
+            bcast_request: QueryRequest::broadcast(&point),
             bcast_peers,
             bcast_futures: FuturesUnordered::default(),
 
-            sig_request: Dispatcher::signature_request(point.round()),
+            sig_request: QueryRequest::signature(point.round()),
             sig_peers: FastHashSet::default(),
             sig_futures: FuturesUnordered::default(),
 

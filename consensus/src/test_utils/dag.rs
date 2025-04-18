@@ -219,8 +219,7 @@ fn point<const PEER_COUNT: usize>(
     Point::new(
         &peers[idx].1,
         round,
-        evidence,
-        payload,
+        &payload,
         PointData {
             author: peers[idx].0,
             time: max_prev_time.next(),
@@ -230,6 +229,7 @@ fn point<const PEER_COUNT: usize>(
             anchor_proof,
             anchor_time,
         },
+        evidence,
         conf,
     )
 }

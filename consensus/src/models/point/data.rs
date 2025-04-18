@@ -3,10 +3,12 @@ use std::collections::BTreeMap;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
+use crate::engine::MempoolConfig;
 use crate::models::point::{Digest, Round, UnixTime};
 use crate::models::proto_utils::points_btree_map;
+use crate::models::{PeerCount, Signature};
 
-#[derive(Clone, Copy, TlRead, TlWrite, PartialEq, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, TlRead, TlWrite)]
 #[tl(boxed, id = "consensus.pointId", scheme = "proto.tl")]
 pub struct PointId {
     pub author: PeerId,
@@ -18,7 +20,7 @@ impl PointId {
     const MAX_TL_BYTES: usize = 68;
 }
 
-#[derive(Clone, TlWrite, TlRead, Debug)]
+#[derive(Clone, Debug, TlWrite, TlRead)]
 #[cfg_attr(test, derive(PartialEq))]
 #[tl(boxed, id = "consensus.pointData", scheme = "proto.tl")]
 pub struct PointData {
@@ -47,7 +49,7 @@ pub struct PointData {
 #[derive(TlWrite)]
 #[tl(boxed, id = "consensus.pointData", scheme = "proto.tl")]
 /// Note: fields and their order must be the same with [`PointData`]
-pub struct PointDataRef<'a> {
+pub struct PointDataWrite<'a> {
     author: &'a PeerId,
     #[tl(with = "points_btree_map")]
     includes: &'a BTreeMap<PeerId, Digest>,
@@ -59,7 +61,7 @@ pub struct PointDataRef<'a> {
     anchor_time: &'a UnixTime,
 }
 
-impl<'a> From<&'a PointData> for PointDataRef<'a> {
+impl<'a> From<&'a PointData> for PointDataWrite<'a> {
     fn from(data: &'a PointData) -> Self {
         Self {
             author: &data.author,
@@ -73,7 +75,7 @@ impl<'a> From<&'a PointData> for PointDataRef<'a> {
     }
 }
 
-#[derive(Clone, TlRead, TlWrite, PartialEq, Debug)]
+#[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum Link {
     #[tl(id = "point.link.to_self")]
@@ -88,7 +90,7 @@ impl Link {
     pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + 4 + 32;
 }
 
-#[derive(Clone, TlRead, TlWrite, PartialEq, Debug)]
+#[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum Through {
     #[tl(id = "link.through.witness")]
@@ -104,8 +106,77 @@ pub enum AnchorStageRole {
 }
 
 impl PointData {
+    pub(super) const MAX_BYTE_SIZE: usize = {
+        // 4 bytes of PointData tag
+        // 32 bytes of author
+        // Max peer count * (32 + 32) of includes
+        // Max peer count * (32 + 32) of witness
+        // 4 + (32 + 32 + 32) + 4 + 32 of MAX possible anchor_trigger Link
+        // 4 + (32 + 32 + 32) + 4 + 32 of MAX possible anchor proof Link
+        // 8 bytes of time
+        // 8 bytes of anchor time
+
+        let max_possible_includes_witness: usize =
+            PeerCount::MAX.full() * (PeerId::MAX_TL_BYTES + Digest::MAX_TL_BYTES);
+
+        4 + PeerId::MAX_TL_BYTES
+            + (2 * max_possible_includes_witness)
+            + 2 * Link::MAX_TL_BYTES
+            + 2 * UnixTime::MAX_TL_BYTES
+    };
+
     pub fn prev_digest(&self) -> Option<&Digest> {
         self.includes.get(&self.author)
+    }
+
+    pub fn is_well_formed(
+        &self,
+        self_round: Round,
+        payload_len: u32,
+        evidence: &BTreeMap<PeerId, Signature>,
+        conf: &MempoolConfig,
+    ) -> bool {
+        // check for being earlier than genesis takes place with other peer checks
+        #[allow(clippy::nonminimal_bool, reason = "independent logical checks")]
+        let is_special_ok = if self_round == conf.genesis_round {
+            payload_len == 0
+                && self.anchor_trigger == Link::ToSelf
+                && self.anchor_proof == Link::ToSelf
+                && self.time == self.anchor_time
+        } else {
+            // leader must maintain its chain of proofs,
+            // while others must link to previous points (checked at the end of this method);
+            // its decided later (using dag round data) whether current point belongs to leader
+            !(self.anchor_proof == Link::ToSelf && evidence.is_empty())
+                && !(self.anchor_trigger == Link::ToSelf && evidence.is_empty())
+                && self.time > self.anchor_time
+        };
+        is_special_ok
+            // proof for previous point consists of digest and 2F++ evidences
+            // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
+            && evidence.is_empty() != self.includes.contains_key(&self.author)
+            // evidence must contain only signatures of others
+            && !evidence.contains_key(&self.author)
+            // also cannot witness own point
+            && !self.witness.contains_key(&self.author)
+            && self.is_link_well_formed(self_round, AnchorStageRole::Trigger)
+            && self.is_link_well_formed(self_round, AnchorStageRole::Proof)
+    }
+
+    fn is_link_well_formed(&self, self_round: Round, link_field: AnchorStageRole) -> bool {
+        match self.anchor_link(link_field) {
+            Link::ToSelf => true,
+            Link::Direct(Through::Includes(peer)) => self.includes.contains_key(peer),
+            Link::Direct(Through::Witness(peer)) => self.witness.contains_key(peer),
+            Link::Indirect {
+                path: Through::Includes(peer),
+                to,
+            } => self.includes.contains_key(peer) && to.round.next() < self_round,
+            Link::Indirect {
+                path: Through::Witness(peer),
+                to,
+            } => self.witness.contains_key(peer) && to.round.next().next() < self_round,
+        }
     }
 
     /// should be disclosed by wrapping point

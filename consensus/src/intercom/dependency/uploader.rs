@@ -3,7 +3,7 @@ use tycho_network::PeerId;
 
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, Ctx, MempoolStore, RoundCtx};
-use crate::intercom::dto::PointByIdResponse;
+use crate::intercom::core::PointByIdResponse;
 use crate::models::{PointId, PointStatusStored};
 
 pub struct Uploader;

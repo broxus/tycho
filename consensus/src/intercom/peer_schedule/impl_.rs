@@ -17,7 +17,6 @@ use tycho_network::{
 
 use crate::effects::{AltFmt, AltFormat, Task, TaskTracker};
 use crate::engine::MempoolMergedConfig;
-use crate::intercom::dto::PeerState;
 use crate::intercom::peer_schedule::locked::PeerScheduleLocked;
 use crate::intercom::peer_schedule::stateless::PeerScheduleStateless;
 use crate::models::Round;
@@ -38,6 +37,14 @@ struct PeerScheduleInner {
     locked: RwLock<PeerScheduleLocked>,
     atomic: ArcSwap<PeerScheduleStateless>,
     task_tracker: TaskTracker,
+}
+
+#[derive(Copy, Clone, PartialEq, std::fmt::Debug)]
+pub enum PeerState {
+    /// Not yet ready to connect or already disconnected; always includes local peer id.
+    Unknown,
+    /// remote peer ready to connect
+    Resolved,
 }
 
 #[cfg_attr(feature = "test", derive(Clone))]
