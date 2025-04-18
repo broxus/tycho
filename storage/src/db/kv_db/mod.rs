@@ -489,5 +489,6 @@ weedb::tables! {
         pub cells: tables::Cells,
         pub temp_cells: tables::TempCells,
         pub shard_states: tables::ShardStates,
+        pub shard_state_data: tables::ShardStateData,
     }
 }

@@ -1,15 +1,18 @@
-use std::collections::hash_map;
+use std::collections::{hash_map, BTreeMap};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
+use bumpalo::Bump;
 use everscale_crypto::ed25519;
+use everscale_types::boc;
 use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_block_util::state::split_shard;
+use tycho_util::{FastHashMap, FastHashSet, FastHasherState};
 
 use crate::util::{compute_storage_used, print_json};
 
@@ -88,14 +91,37 @@ fn generate_zerostate(
         .add_required_accounts()
         .context("failed to add required accounts")?;
 
-    let state = config
+    let bump = Bump::new();
+
+    let mut boc = boc::ser::BocHeader::<FastHasherState>::with_capacity(33);
+
+    let (state, accounts) = config
         .build_masterchain_state(now)
         .context("failed to build masterchain zerostate")?;
 
-    let boc = CellBuilder::build_from(&state).context("failed to serialize zerostate")?;
+    let state_cell = CellBuilder::build_from(&state).context("failed to serialize zerostate")?;
+    let root_hash = *state_cell.repr_hash();
 
-    let root_hash = *boc.repr_hash();
-    let data = Boc::encode(&boc);
+    boc.add_root(state_cell.as_ref());
+
+    for (prefix, shard_accounts) in &accounts {
+        let prefix_cell = CellBuilder::build_from(prefix).context("failed to serialize prefix")?;
+
+        let cell = &*bump.alloc(prefix_cell);
+        boc.add_root(cell.as_ref());
+
+        let shard_accounts_cell =
+            CellBuilder::build_from(shard_accounts).context("failed to serialize accounts")?;
+
+        let cell = &*bump.alloc(shard_accounts_cell);
+        boc.add_root(cell.as_ref());
+    }
+
+    let boc_size = boc.compute_stats().total_size as usize;
+
+    let mut data = Vec::with_capacity(boc_size);
+    boc.encode(&mut data);
+
     let file_hash = Boc::file_hash_blake(&data);
 
     std::fs::write(output_path, data).context("failed to write masterchain zerostate")?;
@@ -322,7 +348,10 @@ impl ZerostateConfig {
         Ok(())
     }
 
-    fn build_masterchain_state(self, now: u32) -> Result<ShardStateUnsplit> {
+    fn build_masterchain_state(
+        self,
+        now: u32,
+    ) -> Result<(ShardStateUnsplit, BTreeMap<u64, ShardAccounts>)> {
         let mut state = make_shard_state(self.global_id, ShardIdent::MASTERCHAIN, now);
 
         let config = BlockchainConfig {
@@ -330,8 +359,9 @@ impl ZerostateConfig {
             params: self.params.clone(),
         };
 
+        let mut accounts = ShardAccounts::new();
+        let mut splitted_accounts = BTreeMap::new();
         {
-            let mut accounts = ShardAccounts::new();
             let mut libraries = FastHashMap::<HashBytes, (Cell, FastHashSet<HashBytes>)>::default();
             for (account, mut account_state) in self.accounts {
                 let balance = match account_state.as_mut() {
@@ -383,7 +413,21 @@ impl ZerostateConfig {
             update_config_account(&mut accounts, &config)?;
 
             assert_eq!(state.total_balance, accounts.root_extra().balance);
-            state.accounts = Lazy::new(&accounts)?;
+
+            // Split to 16 virtual shards
+            split_shard(
+                &ShardIdent::MASTERCHAIN,
+                &accounts,
+                4,
+                &mut splitted_accounts,
+            )?;
+
+            let accounts_roots = splitted_accounts
+                .iter()
+                .map(|(k, v)| (*k, *CellBuilder::build_from(v).unwrap().repr_hash()))
+                .collect::<BTreeMap<_, _>>();
+
+            state.accounts = Dict::try_from_btree(&accounts_roots)?;
 
             // Build lib dict
             let mut libs = Dict::new();
@@ -465,7 +509,7 @@ impl ZerostateConfig {
             global_balance: state.total_balance.clone(),
         })?);
 
-        Ok(state)
+        Ok((state, splitted_accounts))
     }
 }
 
@@ -485,9 +529,22 @@ impl Default for ZerostateConfig {
 }
 
 fn make_shard_state(global_id: i32, shard_ident: ShardIdent, now: u32) -> ShardStateUnsplit {
+    let accounts = ShardAccounts::new();
+    let mut splitted_accounts = BTreeMap::new();
+
+    split_shard(&shard_ident, &accounts, 4, &mut splitted_accounts).unwrap();
+
+    let accounts_roots = splitted_accounts
+        .into_iter()
+        .map(|(k, v)| (k, *CellBuilder::build_from(v).unwrap().repr_hash()))
+        .collect::<BTreeMap<_, _>>();
+
+    let accounts = Dict::try_from_btree(&accounts_roots).unwrap();
+
     ShardStateUnsplit {
         global_id,
         shard_ident,
+        accounts,
         gen_utime: now,
         min_ref_mc_seqno: u32::MAX,
         ..Default::default()

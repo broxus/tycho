@@ -1,4 +1,4 @@
-use std::collections::hash_map;
+use std::collections::{hash_map, BTreeMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,6 +76,7 @@ impl CollatorStdImpl {
             wu_used_from_last_anchor,
             prev_shard_data,
             usage_tree,
+            usage_trees,
             reader_state,
             ..
         } = *working_state;
@@ -83,6 +84,7 @@ impl CollatorStdImpl {
         let mc_block_id = mc_data.block_id;
         let prev_shard_data = prev_shard_data.unwrap();
         let usage_tree = usage_tree.unwrap();
+        let usage_trees = usage_trees.unwrap();
         let tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
 
         tracing::info!(target: tracing_targets::COLLATOR,
@@ -148,6 +150,7 @@ impl CollatorStdImpl {
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
+                    usage_trees,
                 )
             }
         });
@@ -274,6 +277,7 @@ impl CollatorStdImpl {
         collation_session: Arc<CollationSessionInfo>,
         wu_used_from_last_anchor: u64,
         usage_tree: UsageTree,
+        usage_trees: BTreeMap<u64, UsageTree>,
     ) -> Result<CollationResult, CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
@@ -415,6 +419,7 @@ impl CollatorStdImpl {
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
+                    usage_trees,
                     queue_diff,
                     collator_config,
                     processed_upto,
@@ -878,7 +883,7 @@ impl CollatorStdImpl {
         let mut collation_data = Box::new(collation_data_builder.build(start_lt, block_limits));
 
         // compute created / minted / recovered / from_prev_block
-        let prev_total_balance = &prev_shard_data.observable_accounts().root_extra().balance;
+        let prev_total_balance = &prev_shard_data.observable_accounts_balance()?;
         Self::init_value_flow(
             &mc_data.config,
             &mc_data.global_balance,
@@ -911,6 +916,11 @@ impl CollatorStdImpl {
             let adapter = self.state_node_adapter.clone();
             let labels = labels.clone();
             let new_state_root = finalized.new_state_root.clone();
+            let new_state_data_roots = finalized
+                .new_observable_state_data
+                .iter()
+                .map(|(data_shard_id, state_data)| (*data_shard_id, state_data.root_cell().clone()))
+                .collect();
             let hint = StoreStateHint {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
             };
@@ -920,7 +930,7 @@ impl CollatorStdImpl {
                     &labels,
                 );
                 adapter
-                    .store_state_root(&block_id, meta, new_state_root, hint)
+                    .store_state_root(&block_id, meta, new_state_root, new_state_data_roots, hint)
                     .await
             }
         });
@@ -957,6 +967,7 @@ impl CollatorStdImpl {
             self.prepare_working_state_update(
                 block_id,
                 finalized.new_observable_state,
+                finalized.new_observable_state_data,
                 finalized.new_state_root,
                 store_new_state_task,
                 new_queue_diff_hash,

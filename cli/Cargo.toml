@@ -20,6 +20,7 @@ async-trait = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
+bumpalo = { workspace = true }
 clap = { workspace = true }
 clap-markdown = { workspace = true }
 dirs = { workspace = true }
