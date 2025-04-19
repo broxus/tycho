@@ -16,10 +16,12 @@ use super::types::{
     McBlockSubgraph, McBlockSubgraphExtract,
 };
 use crate::manager::types::{AdditionalShardBlockCacheInfo, BlockCacheEntryData};
+use crate::mempool::MempoolAnchorId;
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
+use crate::types::processed_upto::ProcessedUptoInfoStuff;
 use crate::types::{
-    BlockCandidate, DisplayIntoIter, DisplayIter, McData, ProcessedTo, TopBlockDescription,
+    BlockCandidate, DisplayIntoIter, DisplayIter, ProcessedToByPartitions, TopBlockDescription,
 };
 use crate::validator::ValidationStatus;
 
@@ -27,9 +29,14 @@ use crate::validator::ValidationStatus;
 #[path = "tests/blocks_cache_tests.rs"]
 pub(super) mod tests;
 
-pub struct BlocksCache {
+struct BlocksCacheInner {
     masters: Mutex<MasterBlocksCache>,
     shards: FastDashMap<ShardIdent, ShardBlocksCache>,
+}
+
+#[derive(Clone)]
+pub struct BlocksCache {
+    inner: Arc<BlocksCacheInner>,
 }
 
 impl BlocksCache {
@@ -37,8 +44,10 @@ impl BlocksCache {
         metrics::gauge!("tycho_blocks_count_in_collation_manager_cache").set(0);
 
         Self {
-            masters: Default::default(),
-            shards: Default::default(),
+            inner: Arc::new(BlocksCacheInner {
+                masters: Default::default(),
+                shards: Default::default(),
+            }),
         }
     }
 
@@ -48,14 +57,13 @@ impl BlocksCache {
         next_mc_block_id_short: BlockIdShort,
     ) -> Result<Vec<TopBlockDescription>> {
         let mut result = vec![];
-        for mut shard_cache in self.shards.iter_mut() {
+        for mut shard_cache in self.inner.shards.iter_mut() {
             for (_, entry) in shard_cache.blocks.iter().rev() {
                 if entry.ref_by_mc_seqno == next_mc_block_id_short.seqno {
-                    let processed_to = entry
-                        .int_processed_to()
-                        .iter()
-                        .map(|(shard, queue_key)| (*shard, *queue_key))
-                        .collect();
+                    let processed_to_by_partitions = entry
+                        .data
+                        .processed_upto()
+                        .get_internals_processed_to_by_partitions();
 
                     if let Some(additional_info) =
                         entry.data.get_additional_shard_block_cache_info()?
@@ -68,7 +76,7 @@ impl BlocksCache {
                             proof_funds: std::mem::take(&mut shard_cache.data.proof_funds),
                             #[cfg(feature = "block-creator-stats")]
                             creators: std::mem::take(&mut shard_cache.data.creators),
-                            processed_to,
+                            processed_to_by_partitions,
                         });
                         break;
                     }
@@ -81,13 +89,14 @@ impl BlocksCache {
 
     pub fn get_top_shard_blocks(
         &self,
-        next_mc_block_id_short: BlockIdShort,
+        mc_block_id_short: BlockIdShort,
     ) -> Option<FastHashMap<ShardIdent, BlockSeqno>> {
         if let Some(master) = self
+            .inner
             .masters
             .lock()
             .blocks
-            .get(&next_mc_block_id_short.seqno)
+            .get(&mc_block_id_short.seqno)
         {
             return Some(
                 master
@@ -107,7 +116,7 @@ impl BlocksCache {
     ) -> Result<ConsensusInfo> {
         let consensus_info;
         {
-            let master_cache = self.masters.lock();
+            let master_cache = self.inner.masters.lock();
             let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
                 bail!(
                     "get_consensus_info_for_mc_block: Master block not found in cache! ({})",
@@ -122,7 +131,7 @@ impl BlocksCache {
     }
 
     pub fn reset_top_shard_blocks_additional_info(&self) {
-        for mut shard_cache in self.shards.iter_mut() {
+        for mut shard_cache in self.inner.shards.iter_mut() {
             shard_cache.data.reset_top_shard_block_additional_info();
         }
     }
@@ -130,26 +139,26 @@ impl BlocksCache {
     pub fn get_last_collated_block_and_applied_mc_queue_range(
         &self,
     ) -> (Option<BlockId>, Option<(BlockSeqno, BlockSeqno)>) {
-        let master_cache = self.masters.lock();
+        let master_cache = self.inner.masters.lock();
         (
             master_cache.data.get_last_collated_block_id().cloned(),
             master_cache.data.applied_mc_queue_range,
         )
     }
 
-    pub fn get_all_processed_to_by_mc_block_from_cache(
+    pub fn get_top_blocks_processed_to_by_partitions(
         &self,
         mc_block_key: &BlockCacheKey,
-    ) -> Result<FastHashMap<BlockId, Option<ProcessedTo>>> {
-        let mut all_processed_to = FastHashMap::default();
+    ) -> Result<FastHashMap<BlockId, (bool, Option<ProcessedToByPartitions>)>> {
+        let mut result = FastHashMap::default();
 
         if mc_block_key.seqno == 0 {
-            return Ok(all_processed_to);
+            return Ok(result);
         }
 
-        let updated_top_shard_block_ids;
+        let top_shard_blocks_info;
         {
-            let master_cache = self.masters.lock();
+            let master_cache = self.inner.masters.lock();
             let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
                 bail!(
                     "get_all_processed_to_by_mc_block_from_cache: Master block not found in cache! ({})",
@@ -157,38 +166,51 @@ impl BlocksCache {
                 )
             };
 
-            let processed_to = mc_block_entry.int_processed_to().clone();
+            let processed_to_by_partitions = mc_block_entry
+                .data
+                .processed_upto()
+                .get_internals_processed_to_by_partitions();
+            result.insert(
+                mc_block_entry.block_id,
+                (true, Some(processed_to_by_partitions)),
+            );
 
-            updated_top_shard_block_ids = mc_block_entry
-                .top_shard_blocks_info
-                .iter()
-                .filter(|(_, updated)| *updated)
-                .map(|(id, _)| id)
-                .cloned()
-                .collect::<Vec<_>>();
-            all_processed_to.insert(mc_block_entry.block_id, Some(processed_to));
+            top_shard_blocks_info = mc_block_entry.top_shard_blocks_info.clone();
         }
 
-        for top_sc_block_id in updated_top_shard_block_ids {
+        for (top_sc_block_id, updated) in top_shard_blocks_info {
             if top_sc_block_id.seqno == 0 {
                 continue;
             }
 
-            let mut processed_to_opt = None;
+            let mut processed_to_by_partitions_opt = None;
 
             // try to find in cache
-            if let Some(shard_cache) = self.shards.get(&top_sc_block_id.shard) {
+            if let Some(shard_cache) = self.inner.shards.get(&top_sc_block_id.shard) {
                 if let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno) {
-                    processed_to_opt = Some(sc_block_entry.int_processed_to().clone());
+                    processed_to_by_partitions_opt = Some(
+                        sc_block_entry
+                            .data
+                            .processed_upto()
+                            .get_internals_processed_to_by_partitions(),
+                    );
                 }
             }
 
-            all_processed_to.insert(top_sc_block_id, processed_to_opt);
+            result.insert(top_sc_block_id, (updated, processed_to_by_partitions_opt));
         }
 
-        Ok(all_processed_to)
+        Ok(result)
     }
 
+    /// If we have
+    /// ```
+    /// SB1-SB2-SB3-SB4-SB5
+    ///        \          \
+    ///         MB1--------MB2
+    /// ```
+    /// and MB2 is first applied
+    /// then will return `[MB1, SB2]`
     pub fn read_before_tail_ids_of_mc_block(
         &self,
         mc_block_key: &BlockCacheKey,
@@ -201,7 +223,7 @@ impl BlocksCache {
 
         let mut prev_shard_blocks_ids;
         {
-            let master_cache = self.masters.lock();
+            let master_cache = self.inner.masters.lock();
             let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
                 bail!(
                     "read_before_tail_ids_of_mc_block: Master block not found in cache! ({})",
@@ -231,7 +253,7 @@ impl BlocksCache {
 
             let mut prev_block_ids = None;
             let mut not_found = true;
-            if let Some(shard_cache) = self.shards.get(&prev_sc_block_id.shard) {
+            if let Some(shard_cache) = self.inner.shards.get(&prev_sc_block_id.shard) {
                 if let Some(sc_block_entry) = shard_cache.blocks.get(&prev_sc_block_id.seqno) {
                     not_found = false;
 
@@ -277,7 +299,8 @@ impl BlocksCache {
     pub fn store_collated(
         &self,
         candidate: Box<BlockCandidate>,
-        mc_data: Option<Arc<McData>>,
+        top_shard_blocks_info: Vec<(BlockId, bool)>,
+        top_processed_to_anchor: Option<MempoolAnchorId>,
     ) -> Result<BlockCacheStoreResult> {
         let block_id = *candidate.block.id();
 
@@ -286,17 +309,21 @@ impl BlocksCache {
         let applied_mc_queue_range;
 
         let block_mismatch;
-        if mc_data.is_some() {
-            let mut masters_guard = self.masters.lock();
-            let res = masters_guard.store_collated_block(candidate, mc_data)?;
+        if candidate.block.id().is_masterchain() {
+            let mut masters_guard = self.inner.masters.lock();
+            let res = masters_guard.store_collated_block(
+                candidate,
+                top_shard_blocks_info,
+                top_processed_to_anchor,
+            )?;
             block_mismatch = res.block_mismatch;
             received_and_collated = res.received_and_collated;
             last_collated_mc_block_id = masters_guard.data.get_last_collated_block_id().cloned();
             applied_mc_queue_range = masters_guard.data.applied_mc_queue_range;
         } else {
             let res = {
-                let mut g = self.shards.entry(block_id.shard).or_default();
-                g.store_collated_block(candidate, mc_data)?
+                let mut g = self.inner.shards.entry(block_id.shard).or_default();
+                g.store_collated_block(candidate, top_shard_blocks_info, top_processed_to_anchor)?
             };
 
             received_and_collated = res.received_and_collated;
@@ -320,10 +347,12 @@ impl BlocksCache {
         &self,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         state: ShardStateStuff,
+        processed_upto: ProcessedUptoInfoStuff,
     ) -> Result<Option<BlockCacheStoreResult>> {
         let block_id = *state.block_id();
 
-        let ctx = ReceivedBlockContext::load(state_node_adapter.as_ref(), state).await?;
+        let ctx =
+            ReceivedBlockContext::load(state_node_adapter.as_ref(), state, processed_upto).await?;
 
         let received_and_collated;
         let last_collated_mc_block_id;
@@ -332,7 +361,7 @@ impl BlocksCache {
         let block_mismatch;
         let last_known_synced = 'sync: {
             if block_id.is_masterchain() {
-                let mut masters_guard = self.masters.lock();
+                let mut masters_guard = self.inner.masters.lock();
                 if let Some(last_known_synced) =
                     masters_guard.check_refresh_last_known_synced(block_id.seqno)
                 {
@@ -357,7 +386,7 @@ impl BlocksCache {
                 let ref_by_mc_seqno = ctx.ref_by_mc_seqno;
 
                 let res = {
-                    let mut g = self.shards.entry(block_id.shard).or_default();
+                    let mut g = self.inner.shards.entry(block_id.shard).or_default();
                     if let Some(last_known_synced) =
                         g.check_refresh_last_known_synced(block_id.seqno)
                     {
@@ -371,7 +400,7 @@ impl BlocksCache {
 
                 // if collated block mismatched remove its master and all next from last collated blocks ids
                 if block_mismatch {
-                    let mut masters_guard = self.masters.lock();
+                    let mut masters_guard = self.inner.masters.lock();
                     masters_guard
                         .data
                         .remove_last_collated_block_ids_from(&ref_by_mc_seqno);
@@ -415,7 +444,7 @@ impl BlocksCache {
             new_status,
         );
 
-        let mut guard = self.masters.lock();
+        let mut guard = self.inner.masters.lock();
         let Some(entry) = guard.blocks.get_mut(&block_id.seqno) else {
             tracing::debug!(
                 target: tracing_targets::COLLATION_MANAGER,
@@ -461,7 +490,7 @@ impl BlocksCache {
         let mut extracted_mc_block_entry = None;
         let mut is_last = true;
         {
-            let mut guard = self.masters.lock();
+            let mut guard = self.inner.masters.lock();
             let keys = guard.blocks.keys().copied().collect::<Vec<_>>();
             for key in keys {
                 if key < from_seqno {
@@ -506,7 +535,7 @@ impl BlocksCache {
     pub fn extract_mc_block_subgraph_for_sync(&self, block_id: &BlockId) -> McBlockSubgraphExtract {
         // 1. Find requested master block
         let mc_block_entry = {
-            let mut guard = self.masters.lock();
+            let mut guard = self.inner.masters.lock();
 
             let Some(occupied_entry) = guard.blocks.remove(&block_id.seqno) else {
                 return McBlockSubgraphExtract::AlreadyExtracted;
@@ -561,7 +590,8 @@ impl BlocksCache {
                 continue;
             }
 
-            let Some(mut shard_cache) = self.shards.get_mut(&prev_shard_block_id.shard) else {
+            let Some(mut shard_cache) = self.inner.shards.get_mut(&prev_shard_block_id.shard)
+            else {
                 continue;
             };
 
@@ -608,9 +638,9 @@ impl BlocksCache {
 
         for block_key in to_blocks_keys {
             if block_key.is_masterchain() {
-                let mut guard = self.masters.lock();
+                let mut guard = self.inner.masters.lock();
                 guard.gc_to_boundary = Some(*block_key);
-            } else if let Some(mut shard_cache) = self.shards.get_mut(&block_key.shard) {
+            } else if let Some(mut shard_cache) = self.inner.shards.get_mut(&block_key.shard) {
                 shard_cache.gc_to_boundary = Some(*block_key);
             }
         }
@@ -621,7 +651,7 @@ impl BlocksCache {
 
         // remove master blocks
         {
-            let mut guard = self.masters.lock();
+            let mut guard = self.inner.masters.lock();
             let mut removed_seqno_list = vec![];
             if let Some(gc_to_block_key) = guard.gc_to_boundary {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -650,7 +680,7 @@ impl BlocksCache {
         }
 
         // remove shard blocks
-        for mut shard_cache in self.shards.iter_mut() {
+        for mut shard_cache in self.inner.shards.iter_mut() {
             if let Some(gc_to_block_key) = shard_cache.gc_to_boundary {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     %gc_to_block_key,
@@ -684,7 +714,7 @@ impl BlocksCache {
 
         for block_key in after_blocks_keys {
             if block_key.is_masterchain() {
-                let mut guard = self.masters.lock();
+                let mut guard = self.inner.masters.lock();
                 let mut removed_seqno_list = vec![];
                 guard.blocks.retain(|key, value| {
                     let is_received = matches!(value.data, BlockCacheEntryData::Received { .. });
@@ -705,7 +735,7 @@ impl BlocksCache {
                         .data
                         .remove_last_collated_block_ids_from(&removed_seqno);
                 }
-            } else if let Some(mut shard_cache) = self.shards.get_mut(&block_key.shard) {
+            } else if let Some(mut shard_cache) = self.inner.shards.get_mut(&block_key.shard) {
                 shard_cache.blocks.retain(|key, value| {
                     let is_received = matches!(value.data, BlockCacheEntryData::Received { .. });
                     let retained = key <= &block_key.seqno || is_received;
@@ -742,7 +772,8 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
     fn store_collated_block(
         &mut self,
         candidate: Box<BlockCandidate>,
-        mc_data: Option<Arc<McData>>,
+        top_shard_blocks_info: Vec<(BlockId, bool)>,
+        top_processed_to_anchor: Option<MempoolAnchorId>,
     ) -> Result<StoredBlock> {
         let block_id = *candidate.block.id();
         match self.blocks.entry(block_id.seqno) {
@@ -788,7 +819,11 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
             btree_map::Entry::Vacant(vacant) => {
                 self.data.on_insert_collated(&candidate)?;
 
-                vacant.insert(BlockCacheEntry::from_collated(candidate, mc_data)?);
+                vacant.insert(BlockCacheEntry::from_collated(
+                    candidate,
+                    top_shard_blocks_info,
+                    top_processed_to_anchor,
+                )?);
 
                 metrics::gauge!("tycho_blocks_count_in_collation_manager_cache").increment(1);
 
@@ -833,6 +868,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                         ctx.queue_diff,
                         ctx.out_msgs,
                         ctx.ref_by_mc_seqno,
+                        ctx.processed_upto,
                     )?;
 
                     self.data.on_insert_received(&new_entry)?;
@@ -861,6 +897,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
                     ctx.queue_diff,
                     ctx.out_msgs,
                     ctx.ref_by_mc_seqno,
+                    ctx.processed_upto,
                 )?);
 
                 metrics::gauge!("tycho_blocks_count_in_collation_manager_cache").increment(1);
@@ -1035,6 +1072,7 @@ struct ReceivedBlockContext {
     queue_diff: QueueDiffStuff,
     out_msgs: Lazy<OutMsgDescr>,
     ref_by_mc_seqno: u32,
+    processed_upto: ProcessedUptoInfoStuff,
     // NOTE: `BlockStuff` can also be added here if needed since it's already loaded
 }
 
@@ -1042,6 +1080,7 @@ impl ReceivedBlockContext {
     async fn load(
         state_node_adapter: &dyn StateNodeAdapter,
         state: ShardStateStuff,
+        processed_upto: ProcessedUptoInfoStuff,
     ) -> Result<Self> {
         static EMPTY_OUT_MSGS: OnceLock<Lazy<OutMsgDescr>> = OnceLock::new();
 
@@ -1057,13 +1096,13 @@ impl ReceivedBlockContext {
                     .get_or_init(|| Lazy::new(&OutMsgDescr::new()).unwrap())
                     .clone(),
                 ref_by_mc_seqno: 0,
+                processed_upto: Default::default(),
             });
         }
 
-        let Some(block_handle) = state_node_adapter.load_block_handle(block_id).await? else {
+        let Some(ref_by_mc_seqno) = state_node_adapter.get_ref_by_mc_seqno(block_id).await? else {
             bail!("block not found: {block_id}");
         };
-        let ref_by_mc_seqno = block_handle.ref_by_mc_seqno();
 
         let Some(block_stuff) = state_node_adapter.load_block(block_id).await? else {
             bail!("block not found: {block_id}");
@@ -1088,6 +1127,7 @@ impl ReceivedBlockContext {
             queue_diff,
             out_msgs,
             ref_by_mc_seqno,
+            processed_upto,
         })
     }
 }

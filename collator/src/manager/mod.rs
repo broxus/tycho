@@ -1,8 +1,8 @@
-use std::collections::{hash_map, VecDeque};
+use std::collections::{hash_map, BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use ahash::HashMapExt;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{
@@ -12,7 +12,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_util::metrics::HistogramGuard;
@@ -29,19 +29,23 @@ use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
     ForceMasterCollation,
 };
-use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
-use crate::manager::types::BlockCacheStoreResult;
+use crate::internal_queue::types::{
+    DiffStatistics, DiffZone, EnqueuedMessage, QueueDiffWithMessages,
+};
+use crate::manager::types::{BlockCacheStoreResult, HandledBlockFromBcCtx};
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
     StateUpdateContext,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
-use crate::types::processed_upto::ProcessedUptoInfoExtension;
+use crate::types::processed_upto::{
+    find_min_processed_to_by_shards, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff,
+};
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
-    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedTo, ShardDescriptionExt,
-    ShardDescriptionShort, ShardHashesExt,
+    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
+    ShardDescriptionExt, ShardDescriptionShort, ShardHashesExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -118,7 +122,7 @@ where
     blocks_cache: BlocksCache,
 
     /// Queue of received blocks from bc
-    blocks_from_bc_queue_sender: tokio::sync::mpsc::Sender<ShardStateStuff>,
+    blocks_from_bc_queue_sender: tokio::sync::mpsc::Sender<HandledBlockFromBcCtx>,
 
     /// Used to sync tasks that may cause `sync_to_applied_mc_block`
     ready_to_sync: Arc<Notify>,
@@ -189,11 +193,13 @@ where
         metrics_report_last_applied_block_and_anchor(state, &processed_upto)?;
 
         let state = state.clone();
-        self.enqueue_task(method_to_async_closure!(
-            enqueue_handle_block_from_bc,
-            state
-        ))
-        .await?;
+        let ctx = HandledBlockFromBcCtx {
+            state,
+            processed_upto,
+        };
+
+        self.enqueue_task(method_to_async_closure!(enqueue_handle_block_from_bc, ctx))
+            .await?;
 
         Ok(())
     }
@@ -317,7 +323,7 @@ where
         let validator = Arc::new(validator);
 
         let (blocks_from_bc_queue_sender, blocks_from_bc_queue_receiver) =
-            tokio::sync::mpsc::channel::<ShardStateStuff>(BLOCKS_FROM_BC_QUEUE_LIMIT);
+            tokio::sync::mpsc::channel::<HandledBlockFromBcCtx>(BLOCKS_FROM_BC_QUEUE_LIMIT);
 
         let ready_to_sync = Arc::new(Notify::new());
         ready_to_sync.notify_one();
@@ -469,9 +475,10 @@ where
 
     #[tracing::instrument(skip_all, fields(block_id = %block_id))]
     fn commit_block_queue_diff(
-        &self,
+        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         block_id: &BlockId,
         top_shard_blocks_info: &[(BlockId, bool)],
+        partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {
         if !block_id.is_masterchain() {
             return Ok(());
@@ -481,11 +488,11 @@ where
 
         let mut top_blocks: Vec<_> = top_shard_blocks_info
             .iter()
-            .map(|(id, updated)| (id.as_short_id(), *updated))
+            .map(|(id, updated)| (*id, *updated))
             .collect();
-        top_blocks.push((block_id.as_short_id(), true));
+        top_blocks.push((*block_id, true));
 
-        if let Err(err) = self.mq_adapter.commit_diff(top_blocks) {
+        if let Err(err) = mq_adapter.commit_diff(top_blocks, partitions) {
             bail!(
                 "Error committing message queue diff of block ({}): {:?}",
                 block_id,
@@ -500,22 +507,18 @@ where
         Ok(())
     }
 
+    /// Returns `BlockId` if diff was applied.
+    /// * `first_required_diffs` - contains ids of known first required diffs for queue for each shard
     fn apply_block_queue_diff_from_entry_stuff(
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         block_entry: &BlockCacheEntry,
         min_processed_to: Option<&QueueKey>,
-    ) -> Result<()> {
-        if block_entry.block_id.seqno == 0 {
-            return Ok(());
-        }
+        first_required_diffs: &mut FastHashMap<ShardIdent, BlockId>,
+    ) -> Result<Option<BlockId>> {
+        let block_id = block_entry.block_id;
 
-        // skip already applied diff
-        if mq_adapter.is_diff_exists(&block_entry.block_id.as_short_id()) {
-            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                queue_diff_block_id = %block_entry.block_id.as_short_id(),
-                "queue diff apply skipped because it is already applied",
-            );
-            return Ok(());
+        if block_id.seqno == 0 {
+            return Ok(None);
         }
 
         let queue_diff = match &block_entry.data {
@@ -530,12 +533,24 @@ where
             if queue_diff.as_ref().max_message <= *min_pt {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     "Skipping diff for block {}: max_message {} <= min_processed_to {}",
-                    block_entry.block_id.as_short_id(),
+                    block_id.as_short_id(),
                     queue_diff.as_ref().max_message,
                     min_pt,
                 );
-                return Ok(());
+                return Ok(None);
             }
+        }
+
+        // skip already applied diff
+        if mq_adapter.is_diff_exists(&block_id.as_short_id())? {
+            tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
+                queue_diff_block_id = %block_id.as_short_id(),
+                "queue diff apply skipped because it is already applied",
+            );
+            // if diff for block from bc already applied
+            // then we should check sequense for each next diff
+            first_required_diffs.insert(block_id.shard, BlockId::default());
+            return Ok(None);
         }
 
         // load out_msg
@@ -554,15 +569,35 @@ where
 
         let queue_diff_with_msgs = QueueDiffWithMessages::from_queue_diff(queue_diff, out_msgs)?;
 
-        let statistics = (&queue_diff_with_msgs, queue_diff.block_id().shard).into();
-
-        mq_adapter.apply_diff(
-            queue_diff_with_msgs,
-            queue_diff.block_id().as_short_id(),
-            queue_diff.diff_hash(),
-            statistics,
+        let statistics = DiffStatistics::from_diff(
+            &queue_diff_with_msgs,
+            queue_diff.block_id().shard,
+            queue_diff.as_ref().min_message,
             queue_diff.as_ref().max_message,
-        )
+        );
+
+        let check_sequence = match first_required_diffs.get(&block_id.shard).copied() {
+            None => {
+                // if first required diff was not detected before
+                // we consider that current is first
+                first_required_diffs.insert(block_id.shard, block_id);
+                None
+            }
+            Some(id) if id == block_id => None,
+            _ => Some(DiffZone::Both),
+        };
+
+        mq_adapter
+            .apply_diff(
+                queue_diff_with_msgs,
+                queue_diff.block_id().as_short_id(),
+                queue_diff.diff_hash(),
+                statistics,
+                check_sequence,
+            )
+            .context("apply_block_queue_diff_from_entry_stuff")?;
+
+        Ok(Some(block_id))
     }
 
     #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short))]
@@ -827,9 +862,31 @@ where
 
             store_res
         } else {
-            let store_res = self
-                .blocks_cache
-                .store_collated(collation_result.candidate, collation_result.mc_data.clone())?;
+            let top_shard_blocks_info = collation_result
+                .mc_data
+                .as_ref()
+                .map(|mc_data| {
+                    mc_data
+                        .shards
+                        .iter()
+                        .map(|(shard_id, shard_descr)| {
+                            (
+                                shard_descr.get_block_id(*shard_id),
+                                shard_descr.top_sc_block_updated,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let top_processed_to_anchor = collation_result
+                .mc_data
+                .as_ref()
+                .map(|mc_data| mc_data.top_processed_to_anchor);
+            let store_res = self.blocks_cache.store_collated(
+                collation_result.candidate,
+                top_shard_blocks_info,
+                top_processed_to_anchor,
+            )?;
 
             if store_res.block_mismatch {
                 let labels = [("workchain", block_id.shard.workchain().to_string())];
@@ -1055,8 +1112,8 @@ where
 
     /// Finish active sync if it is not finished yet
     /// and enqueue received block
-    #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
-    pub async fn enqueue_handle_block_from_bc(&self, state: ShardStateStuff) -> Result<()> {
+    #[tracing::instrument(skip_all, fields(block_id = %ctx.state.block_id().as_short_id()))]
+    pub async fn enqueue_handle_block_from_bc(&self, ctx: HandledBlockFromBcCtx) -> Result<()> {
         // TODO: Needs to redesign the task management logic.
         //      Current implementation with strange semaphores
         //      is unclear and may be confusing.
@@ -1066,18 +1123,21 @@ where
         );
 
         let labels = [
-            ("workchain", state.block_id().shard.workchain().to_string()),
+            (
+                "workchain",
+                ctx.state.block_id().shard.workchain().to_string(),
+            ),
             ("src", "01_received".to_string()),
         ];
-        metrics::gauge!("tycho_last_block_seqno", &labels).set(state.block_id().seqno);
+        metrics::gauge!("tycho_last_block_seqno", &labels).set(ctx.state.block_id().seqno);
 
-        self.update_last_received_mc_block_seqno(state.block_id());
+        self.update_last_received_mc_block_seqno(ctx.state.block_id());
 
         // try to finish active sync
-        self.finish_active_sync_to_applied(state.block_id());
+        self.finish_active_sync_to_applied(ctx.state.block_id());
 
         // enqueue received block from processing
-        self.blocks_from_bc_queue_sender.send(state).await?;
+        self.blocks_from_bc_queue_sender.send(ctx).await?;
 
         Ok(())
     }
@@ -1086,7 +1146,7 @@ where
     #[tracing::instrument(skip_all)]
     async fn process_handle_block_from_bc_queue(
         self: Arc<Self>,
-        mut blocks_from_bc_queue_receiver: tokio::sync::mpsc::Receiver<ShardStateStuff>,
+        mut blocks_from_bc_queue_receiver: tokio::sync::mpsc::Receiver<HandledBlockFromBcCtx>,
         cancel_task: CancellationToken,
     ) -> Result<()> {
         const BATCH_SIZE: usize = 300;
@@ -1109,19 +1169,19 @@ where
                     // find last master block in buffer
                     // will skip sync for all master blocks before it
                     let mut last_mc_block_id_opt = None;
-                    for state in batch.iter().rev() {
+                    for HandledBlockFromBcCtx {state, ..} in batch.iter().rev() {
                         if state.block_id().is_masterchain() {
                             last_mc_block_id_opt = Some(*state.block_id());
                         }
                     }
 
-                    for state in batch {
+                    for ctx in batch {
                         let skip_sync = matches!(
-                            last_mc_block_id_opt, Some(last_mc_block_id) if state.block_id() != &last_mc_block_id
+                            last_mc_block_id_opt, Some(last_mc_block_id) if ctx.state.block_id() != &last_mc_block_id
                         );
 
                         // handle block from bc
-                        self.handle_block_from_bc(state, skip_sync).await.map_err(|err| {
+                        self.handle_block_from_bc(ctx, skip_sync).await.map_err(|err| {
                             tracing::error!(target: tracing_targets::COLLATION_MANAGER,
                                 "error handling block from bc: {err:?}",
                             );
@@ -1151,23 +1211,35 @@ where
     /// 3. Commit block if it was collated first
     /// 4. Notify mempool about new master block
     /// 5. Sync to received block if it is far ahead last collated and last synced_to
-    #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
-    async fn handle_block_from_bc(&self, state: ShardStateStuff, skip_sync: bool) -> Result<()> {
+    #[tracing::instrument(skip_all, fields(block_id = %ctx.state.block_id().as_short_id(), skip_sync = skip_sync))]
+    async fn handle_block_from_bc(
+        &self,
+        ctx: HandledBlockFromBcCtx,
+        skip_sync: bool,
+    ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "start processing block from bc",
         );
 
-        let block_id = *state.block_id();
+        let block_id = *ctx.state.block_id();
 
         let _histogram = HistogramGuard::begin("tycho_collator_handle_block_from_bc_time");
+
+        let state = ctx.state;
 
         // sync cache and collator state access
         self.ready_to_sync.notified().await;
         scopeguard::defer!(self.ready_to_sync.notify_one());
 
+        let processed_upto = ProcessedUptoInfoStuff::try_from(ctx.processed_upto)?;
+
         let Some(store_res) = self
             .blocks_cache
-            .store_received(self.state_node_adapter.clone(), state.clone())
+            .store_received(
+                self.state_node_adapter.clone(),
+                state.clone(),
+                processed_upto,
+            )
             .await?
         else {
             return Ok(());
@@ -1435,7 +1507,10 @@ where
             let last_consesus_info = self
                 .blocks_cache
                 .get_consensus_info_for_mc_block(&last_applied_mc_block_key)?;
-            if (mp_cfg_override.genesis_info).overrides(&last_consesus_info.genesis_info) {
+            if mp_cfg_override
+                .genesis_info
+                .overrides(&last_consesus_info.genesis_info)
+            {
                 tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                     prev_genesis_start_round = last_consesus_info.genesis_info.start_round,
                     prev_genesis_time_millis = last_consesus_info.genesis_info.genesis_millis,
@@ -1443,27 +1518,24 @@ where
                     new_genesis_time_millis = mp_cfg_override.genesis_info.genesis_millis,
                     "will drop uncommitted internal messages from queue on new genesis",
                 );
+
                 self.mq_adapter.clear_uncommitted_state()?;
             }
         }
 
-        // internals processed upto
-        let processed_to_by_shards = self
-            .read_min_processed_to_for_mc_block(&last_applied_mc_block_key)
+        // get internals processed_to from master and all shards
+        // for last applied master block
+        let all_shards_processed_to_by_partitions =
+            Self::get_all_shards_processed_to_by_partitions_for_mc_block(
+                &last_applied_mc_block_key,
+                &self.blocks_cache,
+                self.state_node_adapter.clone(),
+            )
             .await?;
 
-        // calc internals processed upto
-        let mut min_processed_to_by_shards = ProcessedTo::default();
-
-        // find min processed to by shards for trim tail
-        for min_processed_to in processed_to_by_shards.values() {
-            for (shard_id, to_key) in min_processed_to.clone() {
-                min_processed_to_by_shards
-                    .entry(shard_id)
-                    .and_modify(|min| *min = std::cmp::min(*min, to_key))
-                    .or_insert(to_key);
-            }
-        }
+        // find internals min processed_to
+        let min_processed_to_by_shards =
+            find_min_processed_to_by_shards(&all_shards_processed_to_by_partitions);
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             ?min_processed_to_by_shards,
@@ -1493,12 +1565,20 @@ where
             metrics::gauge!("tycho_collator_sync_is_running", &labels).set(1);
         }
 
+        // if `fast_sync` is enabled then we will skip already applied queue diffs
         let queue_diffs_applied_to_top_blocks = if self.config.fast_sync {
+            // BACKWARD COMPATIBILITY: `last_committed_mc_block_id` will not exist in queue storage
+            // in previous version. We will receive None and will use all required diffs to restore the queue
             if let Some(applied_to_mc_block_id) =
-                self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)
+                self.get_queue_diffs_applied_to_mc_block_id(last_collated_mc_block_id)?
             {
                 // collect top blocks queue diffs already applied to
-                self.get_top_blocks_seqno(&applied_to_mc_block_id).await?
+                Self::get_top_blocks_seqno(
+                    &applied_to_mc_block_id,
+                    &self.blocks_cache,
+                    self.state_node_adapter.clone(),
+                )
+                .await?
             } else {
                 FastHashMap::default()
             }
@@ -1506,298 +1586,115 @@ where
             FastHashMap::default()
         };
 
-        // try load required previous queue diffs
-        let mut prev_queue_diffs = vec![];
-        for (shard_id, min_processed_to) in &min_processed_to_by_shards {
-            let Some((_, prev_block_ids)) = before_tail_block_ids.get(shard_id) else {
-                continue;
-            };
-            let mut prev_block_ids: VecDeque<_> = prev_block_ids.iter().cloned().collect();
+        // restore queue state and return latest applied master state
+        let queue_restore_res = Self::restore_queue(
+            &self.blocks_cache,
+            self.state_node_adapter.clone(),
+            self.mq_adapter.clone(),
+            applied_range.0,
+            min_processed_to_by_shards,
+            before_tail_block_ids,
+            queue_diffs_applied_to_top_blocks,
+        )
+        .await?;
 
-            while let Some(prev_block_id) = prev_block_ids.pop_front() {
-                if prev_block_id.seqno == 0 {
-                    continue;
-                }
+        let Some(last_mc_state) = queue_restore_res.last_mc_state else {
+            return Ok(false);
+        };
 
-                if let Some(border) = queue_diffs_applied_to_top_blocks.get(shard_id) {
-                    if prev_block_id.seqno <= *border {
-                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                            prev_block_id = %prev_block_id.as_short_id(),
-                            top_applied_seqno = border,
-                            "previous queue diff skipped because it below top applied",
-                        );
-                        continue;
-                    }
-                }
+        // process latest master state: notify mempool and refresh collation session
 
-                let init_mc_block_id = self.state_node_adapter.load_init_block_id();
-
-                if let Some(init_mc_block_id) = init_mc_block_id {
-                    if prev_block_id.is_masterchain() {
-                        if prev_block_id.seqno <= init_mc_block_id.seqno {
-                            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                                prev_block_id = %prev_block_id.as_short_id(),
-                                init_mc_block_id = %init_mc_block_id.as_short_id(),
-                                "queue diff apply skipped because it is below init block from persistent state",
-                            );
-                            continue;
-                        }
-                    } else {
-                        let prev_shard_block_handle = self
-                            .state_node_adapter
-                            .load_block_handle(&prev_block_id)
-                            .await?
-                            .unwrap();
-                        let prev_ref_by_mc_seqno = prev_shard_block_handle.ref_by_mc_seqno();
-                        if prev_ref_by_mc_seqno <= init_mc_block_id.seqno {
-                            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                                prev_block_id = %prev_block_id.as_short_id(),
-                                prev_ref_by_mc_seqno,
-                                init_mc_block_id = %init_mc_block_id.as_short_id(),
-                                "queue diff apply skipped because it is below init block from persistent state",
-                            );
-                            continue;
-                        }
-                    }
-                }
-
-                let Some(queue_diff_stuff) =
-                    self.state_node_adapter.load_diff(&prev_block_id).await?
-                else {
-                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                        prev_block_id = %prev_block_id,
-                        "unable to load prev diff to sync queue state, cancel sync",
-                    );
-
-                    // metrics - sync finished
-                    for shard in before_tail_block_ids.keys() {
-                        let labels = [("workchain", shard.workchain().to_string())];
-                        metrics::gauge!("tycho_collator_sync_is_running", &labels).set(0);
-                    }
-
-                    return Ok(false);
-                };
-                let diff_required = &queue_diff_stuff.as_ref().max_message > min_processed_to;
-                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                    diff_block_id = %prev_block_id.as_short_id(),
-                    diff_required,
-                    max_message = %queue_diff_stuff.as_ref().max_message,
-                    min_processed_to = %min_processed_to,
-                    "check if diff required to restore queue working state on sync:",
-                );
-                if diff_required {
-                    let block_stuff = self
-                        .state_node_adapter
-                        .load_block(&prev_block_id)
-                        .await?
-                        .unwrap();
-                    let out_msgs = block_stuff.load_extra()?.out_msg_description.load()?;
-
-                    let queue_diff_with_messages =
-                        QueueDiffWithMessages::from_queue_diff(&queue_diff_stuff, &out_msgs)?;
-
-                    prev_queue_diffs.push((
-                        queue_diff_with_messages,
-                        *queue_diff_stuff.diff_hash(),
-                        prev_block_id,
-                        queue_diff_stuff.as_ref().max_message,
-                    ));
-
-                    let prev_ids_info = block_stuff.construct_prev_id()?;
-                    prev_block_ids.push_back(prev_ids_info.0);
-                    if let Some(id) = prev_ids_info.1 {
-                        prev_block_ids.push_back(id);
-                    }
-                }
-            }
+        // HACK: do not need to set master block latest chain time from zerostate when using mempool stub
+        //      because anchors from stub have older chain time than in zerostate and it will brake collation
+        if last_mc_state.block_id().seqno != 0 {
+            Self::renew_mc_block_latest_chain_time(
+                &mut self.collation_sync_state.lock(),
+                last_mc_state.get_gen_chain_time(),
+            );
         }
 
-        // apply required previous queue diffs
-        while let Some((diff, diff_hash, block_id, max_message)) = prev_queue_diffs.pop() {
-            let statistics = (&diff, block_id.shard).into();
-            self.mq_adapter.apply_diff(
-                diff,
-                block_id.as_short_id(),
-                &diff_hash,
-                statistics,
-                max_message,
-            )?;
-        }
+        Self::reset_collation_sync_status(&mut self.collation_sync_state.lock());
 
-        // trim diffs tails for all shards
-        for (shard_id, min_processed_to) in &min_processed_to_by_shards {
-            self.mq_adapter.trim_diffs(shard_id, min_processed_to)?;
-        }
+        // update last "synced to" info
+        self.update_last_synced_to_mc_block_id(*last_mc_state.block_id());
 
-        // sync all applied blocks
-        // and refresh collation session by the last one
-        // with re-init of collators state
-        loop {
-            // pop first applied mc block and sync
-            // actually we can sync more mc blocks than known in applied_range
-            // because we can receive new blocks from bc during sync
-            let (mc_block_subgraph_extract, is_last) = self
-                .blocks_cache
-                .pop_front_applied_mc_block_subgraph(applied_range.0)?;
+        // reset top shard blocks info
+        // because next we will start to collate new shard blocks after the sync
+        self.blocks_cache.reset_top_shard_blocks_additional_info();
 
-            let subgraph = match mc_block_subgraph_extract {
-                McBlockSubgraphExtract::Extracted(subgraph) => subgraph,
-                McBlockSubgraphExtract::AlreadyExtracted => {
-                    bail!("mc block subgraph extract result cannot be AlreadyExtracted")
-                }
-            };
+        let mc_data =
+            McData::load_from_state(&last_mc_state, all_shards_processed_to_by_partitions)?;
 
-            let mc_block_entry = &subgraph.master_block;
+        self.blocks_cache
+            .remove_next_collated_blocks_from_cache(&queue_restore_res.synced_to_blocks_keys);
 
-            // apply queue diffs from blocks above 0
-            // skip cached diffs below min_processed_to
-            if subgraph.master_block.block_id.seqno != 0 {
-                for block_entry in [mc_block_entry]
-                    .into_iter()
-                    .chain(subgraph.shard_blocks.iter())
-                {
-                    // do not apply diff if block was collated
-                    if let Some(border) =
-                        queue_diffs_applied_to_top_blocks.get(&block_entry.block_id.shard)
-                    {
-                        if block_entry.block_id.seqno <= *border {
-                            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                                received_block_id = %block_entry.block_id.as_short_id(),
-                                top_applied_seqno = border,
-                                "queue diff apply skipped because it is below top applied",
-                            );
-                            continue;
-                        }
-                    }
+        // notify state update to mempool
+        self.notify_mc_state_update_to_mempool(mc_data.clone())
+            .await?;
 
-                    let min_processed_to =
-                        min_processed_to_by_shards.get(&block_entry.block_id.shard);
+        // when sync cancelled we do not exist sync but skip collation
+        let process_state_update_mode = match cancelled.is_cancelled() {
+            true => ProcessMcStateUpdateMode::SkipCollation,
+            false => ProcessMcStateUpdateMode::StartCollation {
+                reset_collators: true,
+            },
+        };
 
-                    Self::apply_block_queue_diff_from_entry_stuff(
-                        self.mq_adapter.clone(),
-                        block_entry,
-                        min_processed_to,
-                    )?;
-                }
-            }
+        self.process_mc_state_update(mc_data.clone(), process_state_update_mode)
+            .await?;
 
-            // we can gc to current master block when diffs were applied
-            let to_blocks_keys = mc_block_entry.get_top_blocks_keys()?;
-            self.blocks_cache.set_gc_to_boundary(&to_blocks_keys);
+        // handle top processed to anchor in mempool
+        self.notify_top_processed_to_anchor_to_mempool(
+            mc_data.block_id.seqno,
+            mc_data.top_processed_to_anchor,
+        )
+        .await?;
 
-            // on sync finish we commit diffs, notify mempool and refresh collation sessions
-            if is_last {
-                self.commit_block_queue_diff(
-                    &mc_block_entry.block_id,
-                    &mc_block_entry.top_shard_blocks_info,
-                )?;
-
-                // when we run sync by any reason we should drop uncommitted queue updates
-                // after restoring the required state
-                // to avoid panics if next block was already collated before an it is incorrect
-                self.mq_adapter.clear_uncommitted_state()?;
-
-                let state = mc_block_entry.cached_state()?;
-
-                // HACK: do not need to set master block latest chain time from zerostate when using mempool stub
-                //      because anchors from stub have older chain time than in zerostate and it will brake collation
-                if state.block_id().seqno != 0 {
-                    Self::renew_mc_block_latest_chain_time(
-                        &mut self.collation_sync_state.lock(),
-                        state.get_gen_chain_time(),
-                    );
-                }
-
-                Self::reset_collation_sync_status(&mut self.collation_sync_state.lock());
-
-                // update last "synced to" info
-                self.update_last_synced_to_mc_block_id(*state.block_id());
-
-                // reset top shard blocks info
-                // because next we will start to collate new shard blocks after the sync
-                self.blocks_cache.reset_top_shard_blocks_additional_info();
-
-                let mc_data = McData::load_from_state(state, processed_to_by_shards)?;
-
-                self.blocks_cache
-                    .remove_next_collated_blocks_from_cache(&to_blocks_keys);
-
-                // notify state update to mempool
-                self.notify_mc_state_update_to_mempool(mc_data.clone())
-                    .await?;
-
-                // when sync cancelled we do not exist sync but skip collation
-                let process_state_update_mode = match cancelled.is_cancelled() {
-                    true => ProcessMcStateUpdateMode::SkipCollation,
-                    false => ProcessMcStateUpdateMode::StartCollation {
-                        reset_collators: true,
-                    },
-                };
-
-                self.process_mc_state_update(mc_data.clone(), process_state_update_mode)
-                    .await?;
-
-                // handle top processed to anchor in mempool
-                self.notify_top_processed_to_anchor_to_mempool(
-                    mc_data.block_id.seqno,
-                    mc_data.top_processed_to_anchor,
-                )
-                .await?;
-
-                // report last "synced to" blocks to metrics
-                for synced_to_block_id in to_blocks_keys {
-                    let labels = [
-                        (
-                            "workchain",
-                            synced_to_block_id.shard.workchain().to_string(),
-                        ),
-                        ("src", "02_synced_to".to_string()),
-                    ];
-                    metrics::gauge!("tycho_last_block_seqno", &labels)
-                        .set(synced_to_block_id.seqno);
-                }
-
-                break;
-            }
+        // report last "synced to" blocks to metrics
+        for synced_to_block_id in queue_restore_res.synced_to_blocks_keys {
+            let labels = [
+                (
+                    "workchain",
+                    synced_to_block_id.shard.workchain().to_string(),
+                ),
+                ("src", "02_synced_to".to_string()),
+            ];
+            metrics::gauge!("tycho_last_block_seqno", &labels).set(synced_to_block_id.seqno);
         }
 
         Ok(true)
     }
 
-    // Return min processed_to info from master and each shard
-    async fn read_min_processed_to_for_mc_block(
-        &self,
+    async fn get_all_shards_processed_to_by_partitions_for_mc_block(
         mc_block_key: &BlockCacheKey,
-    ) -> Result<FastHashMap<ShardIdent, ProcessedTo>> {
+        blocks_cache: &BlocksCache,
+        state_node_adapter: Arc<dyn StateNodeAdapter>,
+    ) -> Result<FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>> {
         let mut result = FastHashMap::default();
 
         if mc_block_key.seqno == 0 {
             return Ok(result);
         }
 
-        let all_processed_to = self
-            .blocks_cache
-            .get_all_processed_to_by_mc_block_from_cache(mc_block_key)?;
+        let from_cache = blocks_cache.get_top_blocks_processed_to_by_partitions(mc_block_key)?;
 
-        for (top_block_id, processed_to_opt) in all_processed_to {
+        for (top_block_id, (updated, processed_to_opt)) in from_cache {
             let processed_to = match processed_to_opt {
                 Some(processed_to) => processed_to,
                 None => {
-                    // try get from storage
-                    utils::load_only_queue_diff_stuff(
-                        self.state_node_adapter.as_ref(),
-                        &top_block_id,
-                    )
-                    .await?
-                    .as_ref()
-                    .processed_to
-                    .clone()
-                    .into_iter()
-                    .collect()
+                    if top_block_id.seqno == 0 {
+                        FastHashMap::default()
+                    } else {
+                        // get from state
+                        let state = state_node_adapter.load_state(&top_block_id).await?;
+                        let processed_upto = state.state().processed_upto.load()?;
+                        let processed_upto = ProcessedUptoInfoStuff::try_from(processed_upto)?;
+                        processed_upto.get_internals_processed_to_by_partitions()
+                    }
                 }
             };
 
-            result.insert(top_block_id.shard, processed_to.clone());
+            result.insert(top_block_id.shard, (updated, processed_to));
         }
 
         Ok(result)
@@ -1807,9 +1704,14 @@ where
     fn get_queue_diffs_applied_to_mc_block_id(
         &self,
         last_collated_mc_block_id: Option<BlockId>,
-    ) -> Option<BlockId> {
-        self.get_top_mc_block_id_for_next_collation(last_collated_mc_block_id)
-        // TODO: should check for block id of top committed queue diff if top collated or synced_to undefined
+    ) -> Result<Option<BlockId>> {
+        match self.get_top_mc_block_id_for_next_collation(last_collated_mc_block_id) {
+            // return last collated if it exists or last "synced to"
+            Some(block_id) => Ok(Some(block_id)),
+            // otherwise we just started and do not have stored last collated or "synced to"
+            // in this case we read last master block id comitted into queue
+            None => self.mq_adapter.get_last_commited_mc_block_id(),
+        }
     }
 
     /// Return last collated if it is ahead of last received and "synced to".
@@ -1831,6 +1733,261 @@ where
             }
             (Some(mc_block_id), _) | (_, Some(mc_block_id)) => Some(mc_block_id),
             _ => None,
+        }
+    }
+
+    #[tracing::instrument(skip_all, fields(from_mc_block_seqno))]
+    async fn restore_queue(
+        blocks_cache: &BlocksCache,
+        state_node_adapter: Arc<dyn StateNodeAdapter>,
+        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+        from_mc_block_seqno: u32,
+        min_processed_to_by_shards: BTreeMap<ShardIdent, QueueKey>,
+        before_tail_block_ids: BTreeMap<ShardIdent, (Option<BlockId>, Vec<BlockId>)>,
+        queue_diffs_applied_to_top_blocks: FastHashMap<ShardIdent, u32>,
+    ) -> Result<RestoreQueueResult> {
+        let mut res = RestoreQueueResult::default();
+
+        // load init block (from persistent state) to check if required diff was already applied from persistent
+        let init_mc_block_id = state_node_adapter.load_init_block_id();
+        let mut init_mc_block_reached_on = FastHashMap::new();
+
+        // try load required previous queue diffs
+        let mut first_required_diffs = FastHashMap::new();
+        for (shard_id, min_processed_to) in &min_processed_to_by_shards {
+            let mut prev_queue_diffs = vec![];
+            let Some((_, prev_block_ids)) = before_tail_block_ids.get(shard_id) else {
+                continue;
+            };
+            let mut prev_block_ids: VecDeque<_> = prev_block_ids.iter().cloned().collect();
+
+            while let Some(prev_block_id) = prev_block_ids.pop_front() {
+                if prev_block_id.seqno == 0 {
+                    continue;
+                }
+
+                // if diff is below top applied then skip
+                if let Some(border) = queue_diffs_applied_to_top_blocks.get(shard_id) {
+                    if prev_block_id.seqno <= *border {
+                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                            prev_block_id = %prev_block_id.as_short_id(),
+                            top_applied_seqno = border,
+                            "previous queue diff skipped because it below top applied",
+                        );
+                        continue;
+                    }
+                }
+
+                // if diff is before init block (from persistent state)
+                // we do not need to apply it because queue was already restored from persistent
+                if let Some(init_mc_block_id) = init_mc_block_id {
+                    let mut skip_diff = false;
+                    if prev_block_id.is_masterchain() {
+                        if prev_block_id.seqno <= init_mc_block_id.seqno {
+                            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                                prev_block_id = %prev_block_id.as_short_id(),
+                                init_mc_block_id = %init_mc_block_id.as_short_id(),
+                                "master block queue diff apply skipped because it is below init block from persistent state",
+                            );
+                            skip_diff = true;
+                        }
+                    } else {
+                        // check if we already reached init mc block before
+                        let mut init_mc_block_reached = matches!(
+                            init_mc_block_reached_on.get(&prev_block_id.shard),
+                            Some(reached_seqno) if prev_block_id.seqno <= *reached_seqno,
+                        );
+                        if !init_mc_block_reached {
+                            // for shard block we should check it's `ref_by_mc_seqno`
+                            let prev_ref_by_mc_seqno = state_node_adapter
+                                .get_ref_by_mc_seqno(&prev_block_id)
+                                .await?
+                                .unwrap();
+                            init_mc_block_reached = prev_ref_by_mc_seqno <= init_mc_block_id.seqno;
+                            if init_mc_block_reached {
+                                init_mc_block_reached_on
+                                    .insert(prev_block_id.shard, prev_block_id.seqno);
+                            }
+                        }
+                        if init_mc_block_reached {
+                            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                                prev_block_id = %prev_block_id.as_short_id(),
+                                init_mc_block_id = %init_mc_block_id.as_short_id(),
+                                "shard block queue diff apply skipped because it is below init block from persistent state",
+                            );
+                            skip_diff = true;
+                        }
+                    }
+                    if skip_diff {
+                        // if current diff is below init block
+                        // then we should check sequense for each next diff
+                        first_required_diffs.insert(prev_block_id.shard, BlockId::default());
+                        continue;
+                    }
+                }
+
+                // load diff to check if it is required
+                let Some(queue_diff_stuff) = state_node_adapter.load_diff(&prev_block_id).await?
+                else {
+                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                        prev_block_id = %prev_block_id,
+                        "unable to load prev diff to sync queue state, cancel sync",
+                    );
+
+                    // metrics - sync finished
+                    for shard in before_tail_block_ids.keys() {
+                        let labels = [("workchain", shard.workchain().to_string())];
+                        metrics::gauge!("tycho_collator_sync_is_running", &labels).set(0);
+                    }
+
+                    return Ok(res);
+                };
+                let diff_required = &queue_diff_stuff.as_ref().max_message > min_processed_to;
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    diff_block_id = %prev_block_id.as_short_id(),
+                    diff_required,
+                    max_message = %queue_diff_stuff.as_ref().max_message,
+                    min_processed_to = %min_processed_to,
+                    "check if diff required to restore queue working state on sync:",
+                );
+                if diff_required {
+                    // if next diff is not required
+                    // then current will be the first required
+                    first_required_diffs.insert(prev_block_id.shard, prev_block_id);
+
+                    let block_stuff = state_node_adapter
+                        .load_block(&prev_block_id)
+                        .await?
+                        .unwrap();
+                    let out_msgs = block_stuff.load_extra()?.out_msg_description.load()?;
+
+                    let queue_diff_with_messages =
+                        QueueDiffWithMessages::from_queue_diff(&queue_diff_stuff, &out_msgs)?;
+
+                    prev_queue_diffs.push((
+                        queue_diff_with_messages,
+                        *queue_diff_stuff.diff_hash(),
+                        prev_block_id,
+                        queue_diff_stuff.as_ref().min_message,
+                        queue_diff_stuff.as_ref().max_message,
+                    ));
+
+                    let prev_ids_info = block_stuff.construct_prev_id()?;
+                    prev_block_ids.push_back(prev_ids_info.0);
+                    if let Some(id) = prev_ids_info.1 {
+                        prev_block_ids.push_back(id);
+                    }
+                }
+            }
+
+            // apply required previous queue diffs for each shard
+            while let Some((diff, diff_hash, block_id, min_message, max_message)) =
+                prev_queue_diffs.pop()
+            {
+                let statistics =
+                    DiffStatistics::from_diff(&diff, block_id.shard, min_message, max_message);
+
+                // we can skip the sequense check for the first required diff only
+                let check_sequence = match first_required_diffs.get(&block_id.shard) {
+                    Some(id) if *id == block_id => None,
+                    _ => Some(DiffZone::Both),
+                };
+
+                mq_adapter
+                    .apply_diff(
+                        diff,
+                        block_id.as_short_id(),
+                        &diff_hash,
+                        statistics,
+                        check_sequence,
+                    )
+                    .context("sync_to_applied_mc_block")?;
+
+                res.applied_diffs_ids.insert(block_id);
+            }
+        }
+
+        // extract all recevied blocks, apply required diffs
+        // and return latest master state
+        loop {
+            // pop first applied mc block and sync
+            // actually we can sync more mc blocks than known in applied_range
+            // because we can receive new blocks from bc during sync
+            let (mc_block_subgraph_extract, is_last) =
+                blocks_cache.pop_front_applied_mc_block_subgraph(from_mc_block_seqno)?;
+
+            let subgraph = match mc_block_subgraph_extract {
+                McBlockSubgraphExtract::Extracted(subgraph) => subgraph,
+                McBlockSubgraphExtract::AlreadyExtracted => {
+                    bail!("mc block subgraph extract result cannot be AlreadyExtracted")
+                }
+            };
+
+            let mc_block_entry = &subgraph.master_block;
+
+            // apply queue diffs from blocks above 0
+            // skip cached diffs below min_processed_to
+            if subgraph.master_block.block_id.seqno != 0 {
+                for block_entry in [mc_block_entry]
+                    .into_iter()
+                    .chain(subgraph.shard_blocks.iter())
+                {
+                    // if diff is below top applied then skip
+                    if let Some(border) =
+                        queue_diffs_applied_to_top_blocks.get(&block_entry.block_id.shard)
+                    {
+                        if block_entry.block_id.seqno <= *border {
+                            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                                received_block_id = %block_entry.block_id.as_short_id(),
+                                top_applied_seqno = border,
+                                "queue diff apply skipped because it is below top applied",
+                            );
+                            continue;
+                        }
+                    }
+
+                    let min_processed_to =
+                        min_processed_to_by_shards.get(&block_entry.block_id.shard);
+
+                    if let Some(applied_diff_block_id) =
+                        Self::apply_block_queue_diff_from_entry_stuff(
+                            mq_adapter.clone(),
+                            block_entry,
+                            min_processed_to,
+                            &mut first_required_diffs,
+                        )?
+                    {
+                        res.applied_diffs_ids.insert(applied_diff_block_id);
+                    }
+                }
+            }
+
+            // we can gc to current master block when diffs were applied
+            let to_blocks_keys = mc_block_entry.get_top_blocks_keys()?;
+            blocks_cache.set_gc_to_boundary(&to_blocks_keys);
+
+            // on sync finish we commit diffs
+            if is_last {
+                let partitions = subgraph.get_partitions();
+                Self::commit_block_queue_diff(
+                    mq_adapter.clone(),
+                    &mc_block_entry.block_id,
+                    &mc_block_entry.top_shard_blocks_info,
+                    &partitions,
+                )?;
+
+                // when we run sync by any reason we should drop uncommitted queue updates
+                // after restoring the required state
+                // to avoid panics if next block was already collated before an it is incorrect
+                mq_adapter.clear_uncommitted_state()?;
+
+                let state = mc_block_entry.cached_state()?.clone();
+                res.last_mc_state = Some(state);
+
+                res.synced_to_blocks_keys.extend(to_blocks_keys.into_iter());
+
+                return Ok(res);
+            }
         }
     }
 
@@ -2806,11 +2963,15 @@ where
             .blocks_cache
             .extract_mc_block_subgraph_for_sync(mc_block_id)
         {
-            McBlockSubgraphExtract::Extracted(McBlockSubgraph {
-                master_block,
-                shard_blocks,
-            }) => {
+            McBlockSubgraphExtract::Extracted(subgraph) => {
                 extract_elapsed = histogram_extract.finish();
+
+                let partitions = subgraph.get_partitions();
+
+                let McBlockSubgraph {
+                    master_block,
+                    shard_blocks,
+                } = subgraph;
 
                 // we can gc upto to current master block after commit
                 // because we do not need to commit all previous blocks
@@ -2854,9 +3015,11 @@ where
                 let _histogram =
                     HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
 
-                self.commit_block_queue_diff(
+                Self::commit_block_queue_diff(
+                    self.mq_adapter.clone(),
                     &master_block.block_id,
                     &master_block.top_shard_blocks_info,
+                    &partitions,
                 )?;
             }
             McBlockSubgraphExtract::AlreadyExtracted => {
@@ -2912,20 +3075,19 @@ where
     /// Collect top blocks seqno from all shards by master block id.
     /// Master block seqno included
     async fn get_top_blocks_seqno(
-        &self,
         mc_block_id: &BlockId,
+        blocks_cache: &BlocksCache,
+        state_node_adapter: Arc<dyn StateNodeAdapter>,
     ) -> Result<FastHashMap<ShardIdent, BlockSeqno>> {
         let mut result = FastHashMap::default();
 
         result.insert(mc_block_id.shard, mc_block_id.seqno);
 
-        let top_shard_blocks = self
-            .blocks_cache
-            .get_top_shard_blocks(mc_block_id.as_short_id());
+        let top_shard_blocks = blocks_cache.get_top_shard_blocks(mc_block_id.as_short_id());
 
         match top_shard_blocks {
             None => {
-                let state = self.state_node_adapter.load_state(mc_block_id).await?;
+                let state = state_node_adapter.load_state(mc_block_id).await?;
                 for item in state.shards()?.iter() {
                     let (shard_id, shard_descr) = item?;
                     result.insert(shard_id, shard_descr.get_block_id(shard_id).seqno);
@@ -2943,4 +3105,11 @@ where
 enum ProcessMcStateUpdateMode {
     StartCollation { reset_collators: bool },
     SkipCollation,
+}
+
+#[derive(Default)]
+struct RestoreQueueResult {
+    last_mc_state: Option<ShardStateStuff>,
+    synced_to_blocks_keys: Vec<BlockCacheKey>,
+    applied_diffs_ids: FastHashSet<BlockId>,
 }

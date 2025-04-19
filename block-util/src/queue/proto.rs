@@ -165,7 +165,7 @@ pub struct QueueKey {
 }
 
 impl QueueKey {
-    const SIZE_HINT: usize = 8 + 32;
+    pub const SIZE_HINT: usize = 8 + 32;
 
     pub const MIN: Self = Self {
         lt: 0,
@@ -197,8 +197,16 @@ impl QueueKey {
         let mut new_hash = self.hash;
 
         if new_hash.0 == [0xff; 32] {
-            new_lt += 1;
-            new_hash = HashBytes::ZERO;
+            // check if lt is already max then do nothing
+            if new_lt == u64::MAX {
+                return Self {
+                    lt: u64::MAX,
+                    hash: HashBytes([0xff; 32]),
+                };
+            } else {
+                new_lt += 1;
+                new_hash = HashBytes::ZERO;
+            }
         } else {
             let carry = 1u8;
             for byte in new_hash.0.iter_mut().rev() {
@@ -244,13 +252,29 @@ impl std::fmt::Debug for QueueKey {
 
 impl std::fmt::Display for QueueKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut short_hash = [0u8; 8];
-        hex::encode_to_slice(&self.hash.as_array()[..4], &mut short_hash).ok();
-
-        // SAFETY: output is guaranteed to contain only [0-9a-f]
-        let short_hash = unsafe { std::str::from_utf8_unchecked(&short_hash) };
+        let short_hash = get_short_hash_string(&self.hash);
 
         write!(f, "LT_HASH({}_{short_hash})", self.lt)
+    }
+}
+
+pub fn get_short_hash_string(hash: &HashBytes) -> String {
+    let mut short_hash = [0u8; 8];
+    hex::encode_to_slice(&hash.as_array()[..4], &mut short_hash).ok();
+
+    // SAFETY: output is guaranteed to contain only [0-9a-f]
+    let res = unsafe { std::str::from_utf8_unchecked(&short_hash) };
+
+    res.to_owned()
+}
+
+pub fn get_short_addr_string(addr: &IntAddr) -> String {
+    match addr {
+        IntAddr::Std(addr) => {
+            let addr_hash_short = get_short_hash_string(&addr.address);
+            format!("{}:{}", addr.workchain, addr_hash_short)
+        }
+        IntAddr::Var(_) => unreachable!(),
     }
 }
 
@@ -338,7 +362,7 @@ pub type QueuePartitionIdx = u16;
 
 pub type RouterPartitions = BTreeMap<QueuePartitionIdx, BTreeSet<RouterAddr>>;
 
-mod processed_to_map {
+pub mod processed_to_map {
     use tl_proto::{TlPacket, TlResult};
 
     use super::*;
@@ -388,7 +412,7 @@ mod processed_to_map {
     }
 }
 
-mod router_partitions_map {
+pub mod router_partitions_map {
     use tl_proto::{TlPacket, TlResult};
 
     use super::*;

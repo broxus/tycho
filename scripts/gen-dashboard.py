@@ -1383,9 +1383,7 @@ def collator_queue_metrics() -> RowPanel:
             "Queue clean until",
             legend_format=legend_format,
         ),
-        create_counter_panel(
-            "tycho_internal_queue_uncommitted_diffs_count", "Uncommited diffs"
-        ),
+
         create_heatmap_panel(
             "tycho_internal_queue_gc_execute_task_time", "GC execute time"
         ),
@@ -1394,44 +1392,44 @@ def collator_queue_metrics() -> RowPanel:
             "Total GC state size",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_commited_state_iterator_create_time",
-            "Commited iterator init time",
-        ),
-        create_heatmap_panel(
-            "tycho_internal_queue_uncommited_state_iterator_create_time",
-            "Uncommitted iterator init time",
-        ),
-        create_heatmap_panel(
-            "tycho_internal_queue_uncommitted_statistics_load_time",
-            "Uncommited statistics load time",
-        ),
-        create_heatmap_panel(
-            "tycho_internal_queue_committed_statistics_load_time",
+            "tycho_internal_queue_statistics_load_time",
             "Committed statistics load time",
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_apply_diff_add_statistics_time",
-            "Apply statistics time",
-        ),
-        create_heatmap_panel(
-            "tycho_internal_queue_apply_diff_add_messages_time", "Apply messages time"
-        ),
-        create_counter_panel(
-            "tycho_internal_queue_apply_diff_add_statistics_accounts_count",
-            "Statistics accounts count",
-            legend_format=legend_format_partition,
-            by_labels=["instance", "partition"],
-        ),
-        create_heatmap_panel("tycho_internal_queue_snapshot_time", "Snapshot time"),
-        create_heatmap_panel(
-            "tycho_internal_queue_create_iterator_time", "Create iterator time"
-        ),
-        create_heatmap_panel(
-            "tycho_internal_queue_add_messages_with_statistics_write_time",
-            "Write uncommited data time",
+            "tycho_internal_queue_separated_statistics_load_time",
+            "Separated statistics load time",
         ),
         create_counter_panel(
             "tycho_collator_queue_adapter_iterators_count", "Iterators count"
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_create_iterator_time",
+            "Create queue iterator: total time",
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_snapshot_time",
+            "Create queue iterator: incl. snapshot time",
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_commited_state_iterator_create_time",
+            "Create queue iterator: incl. committed state iterator create time",
+        ),
+        create_counter_panel(
+            "tycho_internal_queue_apply_diff_add_statistics_accounts_count",
+            "Apply diff: add statistics accounts count",
+            legend_format=legend_format_partition,
+            by_labels=["instance", "partition"],
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_apply_diff_add_statistics_time", 
+            "Apply diff: add statistics time",
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_apply_diff_add_messages_time",
+            "Apply diff: add messages time",
+        ),
+        create_heatmap_panel(
+            "tycho_internal_queue_write_diff_time", "Apply diff: write diff time"
         ),
     ]
     return create_row("collator: Queue Metrics", metrics)

@@ -315,7 +315,7 @@ fn test_get_anchors_processing_info() {
         consensus_info: Default::default(),
         top_processed_to_anchor: 0,
         ref_mc_state_handle: tracker.insert(0),
-        shards_processed_to: Default::default(),
+        shards_processed_to_by_partitions: Default::default(),
     };
 
     //------

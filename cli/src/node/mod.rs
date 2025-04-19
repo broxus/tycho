@@ -11,11 +11,10 @@ use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
-use tycho_collator::internal_queue::state::commited_state::CommittedStateImplFactory;
-use tycho_collator::internal_queue::state::uncommitted_state::UncommittedStateImplFactory;
+use tycho_collator::internal_queue::state::storage::QueueStateImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
-use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
+use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollatorConfig;
 use tycho_collator::validator::{
@@ -317,16 +316,18 @@ impl Node {
         // Create collator
         tracing::info!("starting collator");
 
-        let session_state_factory = UncommittedStateImplFactory::new(self.storage.clone());
-        let persistent_state_factory = CommittedStateImplFactory::new(self.storage.clone());
+        let queue_state_factory = QueueStateImplFactory::new(self.storage.clone());
 
         let queue_factory = QueueFactoryStdImpl {
-            uncommitted_state_factory: session_state_factory,
-            committed_state_factory: persistent_state_factory,
+            state: queue_state_factory,
             config: self.internal_queue_config,
         };
         let queue = queue_factory.create();
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
+
+        // We should clear uncommitted queue state because it may contain incorrect diffs
+        // that were created before node restart. We will restore queue strictly above last committed state
+        message_queue_adapter.clear_uncommitted_state()?;
 
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {

@@ -664,11 +664,13 @@ impl ExternalsReader {
                             }
 
                             // check by previous partitions
-                            for prev_partitions_reader in prev_partitions_readers.values() {
-                                for prev_reader in prev_partitions_reader.range_readers().values() {
-                                    if prev_reader.reader_state.buffer.msgs_count() > 0 {
+                            for prev_par_reader in prev_partitions_readers.values() {
+                                for prev_par_range_reader in
+                                    prev_par_reader.range_readers().values()
+                                {
+                                    if prev_par_range_reader.reader_state.buffer.msgs_count() > 0 {
                                         check_ops_count.saturating_add_assign(1);
-                                        if prev_reader
+                                        if prev_par_range_reader
                                             .reader_state
                                             .buffer
                                             .account_messages_count(account_id)
@@ -677,15 +679,15 @@ impl ExternalsReader {
                                             return (true, check_ops_count);
                                         }
                                     }
-                                    if !prev_reader.fully_read {
-                                        check_ops_count.saturating_add_assign(1);
-                                        if prev_reader
-                                            .reader_state
-                                            .contains_account_addr_in_remaning_msgs_stats(&dst_addr)
-                                        {
-                                            return (true, check_ops_count);
-                                        }
-                                    }
+                                }
+                                // check stats in previous partition
+                                check_ops_count.saturating_add_assign(1);
+                                if prev_par_reader
+                                    .remaning_msgs_stats
+                                    .statistics()
+                                    .contains_key(&dst_addr)
+                                {
+                                    return (true, check_ops_count);
                                 }
                             }
 

@@ -19,6 +19,7 @@ use tycho_util::sync::rayon_run;
 use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::tracing_targets;
+use crate::types::processed_upto::BlockSeqno;
 use crate::types::{ArcSignature, BlockStuffForSync};
 
 // FACTORY
@@ -70,6 +71,8 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn load_block_by_handle(&self, handle: &BlockHandle) -> Result<Option<BlockStuff>>;
     /// Return block handle by its id from node local state
     async fn load_block_handle(&self, block_id: &BlockId) -> Result<Option<BlockHandle>>;
+    /// Return `ref_by_mc_seqno` from block handle by its id from node local state
+    async fn get_ref_by_mc_seqno(&self, block_id: &BlockId) -> Result<Option<BlockSeqno>>;
     /// Accept block:
     /// 1. (TODO) Broadcast block to blockchain network
     /// 2. Provide block to the block strider
@@ -240,6 +243,13 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     async fn load_block_handle(&self, block_id: &BlockId) -> Result<Option<BlockHandle>> {
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load block handle: {}", block_id.as_short_id());
         Ok(self.storage.block_handle_storage().load_handle(block_id))
+    }
+
+    async fn get_ref_by_mc_seqno(&self, block_id: &BlockId) -> Result<Option<BlockSeqno>> {
+        Ok(self
+            .load_block_handle(block_id)
+            .await?
+            .map(|block_handle| block_handle.ref_by_mc_seqno()))
     }
 
     fn accept_block(&self, block: Arc<BlockStuffForSync>) -> Result<()> {

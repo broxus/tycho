@@ -19,7 +19,7 @@ use crate::collator::messages_buffer::{
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::state::state_iterator::MessageExt;
 use crate::internal_queue::types::{
-    InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
+    AccountStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
 };
 use crate::tracing_targets;
 use crate::types::ProcessedTo;
@@ -51,17 +51,15 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         &self.partition_router
     }
 
-    pub fn init_partition_router<'a>(
+    pub fn init_partition_router(
         &mut self,
         partition_id: QueuePartitionIdx,
-        partition_all_ranges_msgs_stats: impl Iterator<Item = &'a QueueStatistics>,
+        cumulative_partition_stats: &AccountStatistics,
     ) {
-        for stats in partition_all_ranges_msgs_stats {
-            for account_addr in stats.statistics().keys() {
-                self.partition_router
-                    .insert_dst(account_addr, partition_id)
-                    .unwrap();
-            }
+        for account_addr in cumulative_partition_stats.keys() {
+            self.partition_router
+                .insert_dst(account_addr, partition_id)
+                .unwrap();
         }
     }
 
@@ -167,8 +165,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                         buffer: Default::default(),
 
                         // we do not use messages satistics when reading new messages
-                        msgs_stats: Default::default(),
-                        remaning_msgs_stats: Default::default(),
+                        msgs_stats: None,
+                        remaning_msgs_stats: None,
+                        read_stats: Default::default(),
 
                         shards: new_shard_reader_states,
                         skip_offset: 0,

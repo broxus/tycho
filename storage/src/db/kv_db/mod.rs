@@ -132,10 +132,19 @@ weedb::tables! {
         pub cells: tables::Cells,
         pub temp_cells: tables::TempCells,
         pub block_connections: tables::BlockConnections,
+        pub internal_message_var: tables::InternalMessageVar,
+        pub internal_message_diffs_tail: tables::InternalMessageDiffsTail,
+        pub internal_message_diff_info: tables::InternalMessageDiffInfo,
+        pub internal_message_commit_pointer: tables::InternalMessageCommitPointer,
+        pub internal_message_stats: tables::InternalMessageStatistics,
         pub shard_internal_messages: tables::ShardInternalMessages,
-        pub shard_internal_messages_uncommitted: tables::ShardInternalMessagesUncommited,
-        pub internal_message_stats: tables::InternalMessageStats,
-        pub internal_message_stats_uncommitted: tables::InternalMessageStatsUncommited,
+
+        // tables are empty, but they cannot be deleted because they are in a storage config
+        _shard_internal_messages: tables::ShardInternalMessagesOld,
+        _int_msg_stats_uncommited: tables::InternalMessageStatsUncommitedOld,
+        _shard_int_msgs_uncommited: tables::ShardInternalMessagesUncommitedOld,
+        _internal_message_stats: tables::InternalMessageStatsOld,
+
     }
 }
 
