@@ -19,8 +19,9 @@ use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Ctx, DownloadCtx};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::{ConsensusConfigExt, MempoolConfig};
+use crate::intercom::core::{PointByIdResponse, QueryRequest};
 use crate::intercom::dependency::limiter::Limiter;
-use crate::intercom::dto::{PeerState, PointByIdResponse};
+use crate::intercom::peer_schedule::PeerState;
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{PeerCount, Point, PointId};
 
@@ -165,7 +166,7 @@ impl Downloader {
             parent: self.clone(),
             _phantom: PhantomData,
             ctx,
-            request: Dispatcher::point_by_id_request(point_id),
+            request: QueryRequest::point_by_id(point_id),
             point_id: *point_id,
             peer_count,
             not_found: 0, // this node is +1 to 2F

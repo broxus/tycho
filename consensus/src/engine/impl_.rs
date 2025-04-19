@@ -100,11 +100,10 @@ impl Engine {
         let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();
             let overlay_id = merged_conf.overlay_id;
-            let conf = conf.clone();
             move || {
                 store.init_storage(&overlay_id);
                 if let Some(genesis) = accessible_genesis {
-                    store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
+                    store.insert_point(&genesis, PointStatusStoredRef::Exists);
                 }
                 fix_history // just pass further
             }
