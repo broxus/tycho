@@ -463,6 +463,9 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
         // build queue diff
         let min_internals_processed_to = self.get_min_internals_processed_to_by_shards();
+
+        let shard_processed_to_by_partitions = self.collect_internals_processed_to();
+
         let mut queue_diff_with_msgs = self
             .new_messages
             .into_queue_diff_with_messages(min_internals_processed_to);
@@ -480,12 +483,23 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             .cloned()
             .unwrap_or_default();
 
+        // reduce stats of processed diffs
+        self.internal_queue_statistics
+            .handle_processed_to_update(self.for_shard_id, shard_processed_to_by_partitions);
+
+        let mut aggregated_stats = self.internal_queue_statistics.get_aggregated_result();
+
+        // add new messages to aggregated stats
+        for msg in queue_diff_with_msgs.messages.values() {
+            aggregated_stats.increment_for_account(msg.destination().clone(), 1);
+        }
+
         // reset queue diff partition router
         // according to actual aggregated stats
         let moved_from_par_0_accounts = Self::reset_partition_router_by_stats(
             &self.msgs_exec_params,
             &mut queue_diff_with_msgs.partition_router,
-            self.internal_queue_statistics.get_aggregated_result(),
+            aggregated_stats,
             self.for_shard_id,
             other_updated_top_shard_diffs_info,
         )?;
@@ -537,8 +551,6 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             internals: internals_reader_state,
         };
 
-        let processed_upto = reader_state.get_updated_processed_upto();
-
         // get current queue diff messages stats and merge with aggregated stats
         let queue_diff_msgs_stats = DiffStatistics::from_diff(
             &queue_diff_with_msgs,
@@ -554,11 +566,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             queue_diff_msgs_stats,
         );
 
-        // reduce stats of processed diffs
-        self.internal_queue_statistics.handle_processed_to_update(
-            self.for_shard_id,
-            processed_upto.get_internals_processed_to_by_partitions(),
-        );
+        let processed_upto = reader_state.get_updated_processed_upto();
 
         // add updated cumulative stats
         reader_state.internals.cumulative_statistics = Some(self.internal_queue_statistics);
@@ -570,6 +578,19 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             anchors_cache,
             queue_diff_with_msgs,
         })
+    }
+
+    fn collect_internals_processed_to(&self) -> ProcessedToByPartitions {
+        let mut res: ProcessedToByPartitions = FastHashMap::default();
+
+        for (par_id, par_reader) in &self.internals_partition_readers {
+            for (processed_shard, msg_key) in &par_reader.reader_state().processed_to {
+                res.entry(*par_id)
+                    .or_default()
+                    .insert(*processed_shard, *msg_key);
+            }
+        }
+        res
     }
 
     pub fn reset_partition_router_by_stats(
