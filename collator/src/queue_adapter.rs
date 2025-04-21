@@ -17,7 +17,7 @@ use crate::internal_queue::types::{
     QueueShardRange, QueueStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::tracing_targets;
-use crate::types::{DisplayIter, DisplayTupleRef};
+use crate::types::{DebugDisplayOpt, DebugIter, DisplayIter, DisplayTupleRef};
 
 pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
     queue: QueueImpl<QueueStateStdImpl, V>,
@@ -114,16 +114,14 @@ impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdImpl<V> {
-    #[instrument(skip_all, fields(%for_shard_id, partition, ranges = ?ranges))]
+    #[instrument(skip_all, fields(%for_shard_id, partition, ?ranges))]
     fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
         partition: QueuePartitionIdx,
         mut ranges: Vec<QueueShardRange>,
     ) -> Result<Box<dyn QueueIterator<V>>> {
-        let _histogram = HistogramGuard::begin("tycho_internal_queue_create_iterator_time");
-
-        let start_time = std::time::Instant::now();
+        let histogram = HistogramGuard::begin("tycho_internal_queue_create_iterator_time");
 
         for range in ranges.iter_mut() {
             range.from = range.from.next_value();
@@ -136,16 +134,16 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let states_iterators_manager = StatesIteratorsManager::new(state_iterator);
         let iterator = QueueIteratorImpl::new(states_iterators_manager, for_shard_id)?;
 
-        let elapsed = start_time.elapsed();
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
+        let elapsed = histogram.finish();
+        tracing::debug!(target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
             "create_iterator completed"
         );
+
         Ok(Box::new(iterator))
     }
 
-    #[instrument(skip_all, fields(partition, ranges = ?ranges))]
+    #[instrument(skip_all, fields(?partitions, ?ranges))]
     fn get_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
@@ -169,8 +167,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let stats = QueueStatistics::with_statistics(result);
 
         let elapsed = start_time.elapsed();
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
+        tracing::debug!(target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
             "get_statistics completed"
         );
@@ -178,7 +175,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(stats)
     }
 
-    #[instrument(skip_all, fields(%block_id_short, %diff_hash, check_sequence = ?check_sequence))]
+    #[instrument(skip_all, fields(%block_id_short, %diff_hash, ?check_sequence))]
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
@@ -187,27 +184,29 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         statistics: DiffStatistics,
         check_sequence: Option<DiffZone>,
     ) -> Result<()> {
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
-            min_message = ?diff.min_message(),
-            max_message = ?diff.max_message(),
+        let start_time = std::time::Instant::now();
+
+        tracing::debug!(target: tracing_targets::MQ_ADAPTER,
             "apply_diff started"
         );
 
-        let start_time = std::time::Instant::now();
-        let len = diff.messages.len();
+        let new_messages_len = diff.messages.len();
+        let min_message = diff.min_message().copied();
+        let max_message = diff.max_message().copied();
         let processed_to = diff.processed_to.clone();
+
         self.queue
             .apply_diff(diff, block_id_short, diff_hash, statistics, check_sequence)?;
 
         let elapsed = start_time.elapsed();
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
-            new_messages_len = len,
+        tracing::info!(target: tracing_targets::MQ_ADAPTER,
+            new_messages_len,
+            ?min_message, ?max_message,
+            ?processed_to,
             elapsed = %humantime::format_duration(elapsed),
-            processed_to = ?processed_to,
             "apply_diff completed"
         );
+
         Ok(())
     }
 
@@ -223,12 +222,12 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         self.queue.commit_diff(&mc_top_blocks, partitions)?;
 
         let elapsed = start_time.elapsed();
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
+        tracing::info!(target: tracing_targets::MQ_ADAPTER,
             mc_top_blocks = %DisplayIter(mc_top_blocks.iter().map(DisplayTupleRef)),
             elapsed = %humantime::format_duration(elapsed),
             "commit_diff completed"
         );
+
         Ok(())
     }
 
@@ -267,7 +266,9 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
     #[instrument(skip_all)]
     fn clear_uncommitted_state(&self) -> Result<()> {
-        tracing::info!(
+        let start_time = std::time::Instant::now();
+
+        tracing::debug!(
             target: tracing_targets::MQ_ADAPTER,
             "clear_uncommitted_state started"
         );
@@ -275,37 +276,29 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         // TODO: get partitions from queue state
         let partitions = &vec![0, 1].into_iter().collect();
 
-        let start_time = std::time::Instant::now();
         self.queue.clear_uncommitted_state(partitions)?;
-        let elapsed = start_time.elapsed();
 
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
+        let elapsed = start_time.elapsed();
+        tracing::info!(target: tracing_targets::MQ_ADAPTER,
+            ?partitions,
             elapsed = %humantime::format_duration(elapsed),
             "clear_uncommitted_state completed"
         );
+
         Ok(())
     }
 
-    #[instrument(skip_all, fields(%shard_ident, seqno, zone = ?zone))]
+    #[instrument(skip_all, fields(%shard_ident, seqno, ?zone))]
     fn get_diff_info(
         &self,
         shard_ident: &ShardIdent,
         seqno: u32,
         zone: DiffZone,
     ) -> Result<Option<DiffInfo>> {
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
-            shard_ident = %shard_ident,
-            seqno,
-            zone = ?zone,
-            "get_diff_info started"
-        );
         let start_time = std::time::Instant::now();
         let diff = self.queue.get_diff_info(shard_ident, seqno, zone)?;
         let elapsed = start_time.elapsed();
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
+        tracing::debug!(target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
             "get_diff_info completed"
         );
@@ -317,8 +310,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let start_time = std::time::Instant::now();
         let exists = self.queue.is_diff_exists(block_id_short)?;
         let elapsed = start_time.elapsed();
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
+        tracing::info!(target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
             exists,
             "is_diff_exists completed"
@@ -326,25 +318,26 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(exists)
     }
 
+    #[instrument(skip_all)]
     fn get_last_commited_mc_block_id(&self) -> Result<Option<BlockId>> {
         let start_time = std::time::Instant::now();
         let block_id = self.queue.get_last_committed_mc_block_id()?;
         let elapsed = start_time.elapsed();
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
+        tracing::info!(target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
+            block_id = ?DebugDisplayOpt(block_id),
             "get_last_commited_mc_block_id completed"
         );
         Ok(block_id)
     }
 
+    #[instrument(skip_all, fields(%shard_ident, %from))]
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32 {
         let start_time = std::time::Instant::now();
         let from = from.next_value();
         let tail_len = self.queue.get_diffs_tail_len(shard_ident, &from);
         let elapsed = start_time.elapsed();
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
+        tracing::info!(target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
             tail_len,
             "get_diffs_tail_len completed"
@@ -352,19 +345,37 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         tail_len
     }
 
+    #[instrument(skip_all, fields(?partitions, ?range))]
     fn load_separated_diff_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
         range: &QueueShardRange,
     ) -> Result<SeparatedStatisticsByPartitions> {
+        let start_time = std::time::Instant::now();
+
         let mut range = range.clone();
         range.from = range.from.next_value();
         range.to = range.to.next_value();
 
-        self.queue
-            .load_separated_diff_statistics(partitions, &range)
+        tracing::debug!(target: tracing_targets::MQ_ADAPTER,
+            "load_separated_diff_statistics started"
+        );
+
+        let res = self
+            .queue
+            .load_separated_diff_statistics(partitions, &range)?;
+
+        let elapsed = start_time.elapsed();
+        tracing::info!(target: tracing_targets::MQ_ADAPTER,
+            stats_len = ?DebugIter(res.iter().map(|(par_id, map)| (*par_id, map.len()))),
+            elapsed = %humantime::format_duration(elapsed),
+            "load_separated_diff_statistics completed"
+        );
+
+        Ok(res)
     }
 
+    #[instrument(skip_all, fields(%block_id_short, partition))]
     fn get_router_and_statistics(
         &self,
         block_id_short: &BlockIdShort,
@@ -404,8 +415,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
         let elapsed = start_time.elapsed();
 
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
+        tracing::debug!(target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
             "get_router_and_statistics completed"
         );

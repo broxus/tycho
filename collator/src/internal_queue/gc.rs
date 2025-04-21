@@ -98,6 +98,12 @@ fn gc_task<V: InternalMessageValue>(
                     to: *current_last_key,
                 }];
 
+                tracing::info!(target: tracing_targets::MQ,
+                    %shard,
+                    last_queue_key = %current_last_key,
+                    "executing messages queue GC"
+                );
+
                 if let Err(e) = queue_state.delete(*partition, range.as_slice()) {
                     tracing::error!(target: tracing_targets::MQ, "failed to delete messages: {e:?}");
                 }
