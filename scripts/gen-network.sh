@@ -129,7 +129,6 @@ echo "${zerostate}" > "${base_dir}/zerostate.json"
 zerostate_id=$(
     $tycho_bin tool gen-zerostate "${base_dir}/zerostate.json" \
         --output "${base_dir}/zerostate.boc" \
-        --accounts-output "${base_dir}/accounts.boc" \
         --force
 )
 

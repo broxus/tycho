@@ -32,10 +32,6 @@ pub struct Cmd {
     #[clap(short, long, required_unless_present = "init_config")]
     output: Option<PathBuf>,
 
-    /// path to the accounts output file
-    #[clap(short, long, required_unless_present = "init_config")]
-    accounts_output: Option<PathBuf>,
-
     /// explicit unix timestamp of the zero state
     #[clap(long)]
     now: Option<u32>,
@@ -51,7 +47,6 @@ impl Cmd {
             None => generate_zerostate(
                 &self.config.unwrap(),
                 &self.output.unwrap(),
-                &self.accounts_output.unwrap(),
                 self.now.unwrap_or_else(tycho_util::time::now_sec),
                 self.force,
             ),
@@ -72,7 +67,6 @@ fn write_default_config(config_path: &PathBuf, force: bool) -> Result<()> {
 fn generate_zerostate(
     config_path: &PathBuf,
     output_path: &PathBuf,
-    accounts_output_path: &PathBuf,
     now: u32,
     force: bool,
 ) -> Result<()> {
@@ -115,7 +109,7 @@ fn generate_zerostate(
         let boc = CellBuilder::build_from(&accounts).context("failed to serialize accounts")?;
         let data = Boc::encode(&boc);
 
-        std::fs::write(accounts_output_path, data)
+        std::fs::write("/var/node/data/accounts.boc", data)
             .context("failed to write masterchain accounts")?;
     }
 
