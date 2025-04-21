@@ -22,7 +22,7 @@ use tarpc::server::Channel;
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tycho_block_util::config::build_elections_data_to_sign;
-use tycho_block_util::state::RefMcStateHandle;
+use tycho_block_util::state::{RefMcStateHandle, ShardStateDataId};
 use tycho_core::block_strider::{
     GcSubscriber, ManualGcTrigger, StateSubscriber, StateSubscriberContext,
 };
@@ -507,73 +507,79 @@ impl proto::ControlServer for ControlServer {
         _: Context,
         req: proto::AccountStateRequest,
     ) -> ServerResult<proto::AccountStateResponse> {
-        todo!()
-        // let (block_handle, account) = 'state: {
-        //     // Try fast path first.
-        //     let (block_handle, tracker_handle) = {
-        //         // NOTE: Extending lifetimes of guards here.
-        //         let mc_guard;
-        //         let sc_guard;
-        //         let cached = if req.address.is_masterchain() {
-        //             mc_guard = self.inner.mc_accounts.read();
-        //             mc_guard.as_ref()
-        //         } else {
-        //             sc_guard = self.inner.sc_accounts.read();
-        //             sc_guard.iter().find_map(|(s, cached)| {
-        //                 s.contains_account(&req.address.address).then_some(cached)
-        //             })
-        //         };
-        //
-        //         let Some(cached) = cached else {
-        //             return Err(ServerError::new("shard state not found"));
-        //         };
-        //
-        //         let block_handle = cached.block_handle.clone();
-        //         match cached.try_get(&req.address.address)? {
-        //             // No cached accounts map, so we need to load the state (go to slow path)
-        //             CacheItem::Unavailable => (block_handle, cached.tracker_handle.clone()),
-        //             // No account state by the latest known block (fast path done)
-        //             CacheItem::NotFound => break 'state (block_handle, None),
-        //             // Found an account state (fast path done)
-        //             CacheItem::Loaded(account) => break 'state (block_handle, Some(account)),
-        //         }
-        //     };
-        //
-        //     // Fallback to slow path
-        //
-        //     // Load the state
-        //     let state = self
-        //         .inner
-        //         .storage
-        //         .shard_state_storage()
-        //         .load_state(block_handle.id())
-        //         .await?;
-        //
-        //     // Find the account state in it
-        //     match state.as_ref().load_accounts()?.get(req.address.address)? {
-        //         None => (block_handle, None),
-        //         Some((_, account)) => (
-        //             block_handle,
-        //             Some(LoadedAccount {
-        //                 account,
-        //                 tracker_handle,
-        //             }),
-        //         ),
-        //     }
-        // };
-        //
-        // // TODO: Store serialized instead?
-        // let state = BocRepr::encode_rayon(match &account {
-        //     None => empty_shard_account(),
-        //     Some(account) => &account.account,
-        // })?
-        // .into();
-        //
-        // Ok(proto::AccountStateResponse {
-        //     mc_seqno: block_handle.ref_by_mc_seqno(),
-        //     gen_utime: block_handle.gen_utime(),
-        //     state,
-        // })
+        let (block_handle, account) = 'state: {
+            // Try fast path first.
+            let (block_handle, tracker_handle) = {
+                // NOTE: Extending lifetimes of guards here.
+                let mc_guard;
+                let sc_guard;
+                let cached = if req.address.is_masterchain() {
+                    mc_guard = self.inner.mc_accounts.read();
+                    mc_guard.as_ref()
+                } else {
+                    sc_guard = self.inner.sc_accounts.read();
+                    sc_guard.iter().find_map(|(s, cached)| {
+                        s.contains_account(&req.address.address).then_some(cached)
+                    })
+                };
+
+                let Some(cached) = cached else {
+                    return Err(ServerError::new("shard state not found"));
+                };
+
+                let block_handle = cached.block_handle.clone();
+                match cached.try_get(&req.address.address)? {
+                    // No cached accounts map, so we need to load the state (go to slow path)
+                    CacheItem::Unavailable => (block_handle, cached.tracker_handle.clone()),
+                    // No account state by the latest known block (fast path done)
+                    CacheItem::NotFound => break 'state (block_handle, None),
+                    // Found an account state (fast path done)
+                    CacheItem::Loaded(account) => break 'state (block_handle, Some(account)),
+                }
+            };
+
+            // Fallback to slow path
+
+            // Load the state
+            let state = self
+                .inner
+                .storage
+                .shard_state_storage()
+                .load_state(block_handle.id())
+                .await?;
+
+            // Find the account state in it
+            let data_shard_id = ShardStateDataId::from_account(req.address.address.as_array()).0;
+
+            match state
+                .load_accounts()
+                .get(&data_shard_id)
+                .unwrap()
+                .get(req.address.address)?
+            {
+                None => (block_handle, None),
+                Some((_, account)) => (
+                    block_handle,
+                    Some(LoadedAccount {
+                        account,
+                        tracker_handle,
+                    }),
+                ),
+            }
+        };
+
+        // TODO: Store serialized instead?
+        let state = BocRepr::encode_rayon(match &account {
+            None => empty_shard_account(),
+            Some(account) => &account.account,
+        })?
+        .into();
+
+        Ok(proto::AccountStateResponse {
+            mc_seqno: block_handle.ref_by_mc_seqno(),
+            gen_utime: block_handle.gen_utime(),
+            state,
+        })
     }
 
     async fn get_blockchain_config(
@@ -769,49 +775,53 @@ struct Inner {
 
 impl Inner {
     fn handle_state_impl(&self, cx: &StateSubscriberContext) -> Result<()> {
-        todo!()
-        // let block_id = cx.block.id();
-        // let block_handle = self
-        //     .storage
-        //     .block_handle_storage()
-        //     .load_handle(block_id)
-        //     .context("block handle not found")?;
-        //
-        // // Get a weak reference to the accounts dictionary root.
-        // let accounts_dict_root = {
-        //     let accounts = cx.state.as_ref().load_accounts()?;
-        //     let (dict_root, _) = accounts.into_parts();
-        //     dict_root.into_root().as_ref().map(Cell::downgrade)
-        // };
-        //
-        // // Store a tracker handle to delay the GC.
-        // let tracker_handle = cx.state.ref_mc_state_handle().clone();
-        //
-        // let cached = CachedAccounts {
-        //     block_handle,
-        //     accounts_dict_root,
-        //     tracker_handle,
-        // };
-        //
-        // // Update the cache.
-        // if block_id.is_masterchain() {
-        //     *self.mc_accounts.write() = Some(cached);
-        //
-        //     // Update config response cache
-        //     let config = cx.state.config_params()?;
-        //     let config_response = Arc::new(proto::BlockchainConfigResponse {
-        //         global_id: cx.state.as_ref().global_id,
-        //         mc_seqno: block_id.seqno,
-        //         gen_utime: cx.state.as_ref().gen_utime,
-        //         config: BocRepr::encode_rayon(config)?.into(),
-        //     });
-        //     self.config_response.store(Some(config_response));
-        // } else {
-        //     // TODO: Handle split/merge like in `tycho-rpc`.
-        //     self.sc_accounts.write().insert(block_id.shard, cached);
-        // }
-        //
-        // Ok(())
+        let block_id = cx.block.id();
+        let block_handle = self
+            .storage
+            .block_handle_storage()
+            .load_handle(block_id)
+            .context("block handle not found")?;
+
+        // Get a weak reference to the accounts dictionary root.
+        let accounts_dict_roots = {
+            cx.state
+                .load_accounts()
+                .into_iter()
+                .map(|(k, v)| {
+                    let (dict_root, _) = v.into_parts();
+                    (k, dict_root.into_root().as_ref().map(Cell::downgrade))
+                })
+                .collect()
+        };
+
+        // Store a tracker handle to delay the GC.
+        let tracker_handle = cx.state.ref_mc_state_handle().clone();
+
+        let cached = CachedAccounts {
+            block_handle,
+            accounts_dict_roots,
+            tracker_handle,
+        };
+
+        // Update the cache.
+        if block_id.is_masterchain() {
+            *self.mc_accounts.write() = Some(cached);
+
+            // Update config response cache
+            let config = cx.state.config_params()?;
+            let config_response = Arc::new(proto::BlockchainConfigResponse {
+                global_id: cx.state.as_ref().global_id,
+                mc_seqno: block_id.seqno,
+                gen_utime: cx.state.as_ref().gen_utime,
+                config: BocRepr::encode_rayon(config)?.into(),
+            });
+            self.config_response.store(Some(config_response));
+        } else {
+            // TODO: Handle split/merge like in `tycho-rpc`.
+            self.sc_accounts.write().insert(block_id.shard, cached);
+        }
+
+        Ok(())
     }
 }
 
@@ -838,13 +848,19 @@ impl From<proto::TriggerGcRequest> for ManualGcTrigger {
 /// A bit more weak version of `CachedAccounts` from the `tycho-rpc`.
 struct CachedAccounts {
     block_handle: BlockHandle,
-    accounts_dict_root: Option<WeakCell>,
+    accounts_dict_roots: FastHashMap<u8, Option<WeakCell>>,
     tracker_handle: RefMcStateHandle,
 }
 
 impl CachedAccounts {
     fn try_get(&self, addr: &HashBytes) -> Result<CacheItem> {
-        let Some(dict_root) = &self.accounts_dict_root else {
+        let data_shard_id = ShardStateDataId::from_account(addr.as_array()).0;
+
+        let Some(dict_root) = self.accounts_dict_roots.get(&data_shard_id) else {
+            return Ok(CacheItem::NotFound);
+        };
+
+        let Some(dict_root) = dict_root else {
             return Ok(CacheItem::NotFound);
         };
 
