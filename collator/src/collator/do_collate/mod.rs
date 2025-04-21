@@ -76,6 +76,7 @@ impl CollatorStdImpl {
             wu_used_from_last_anchor,
             prev_shard_data,
             usage_tree,
+            usage_trees,
             reader_state,
             ..
         } = *working_state;
@@ -83,6 +84,7 @@ impl CollatorStdImpl {
         let mc_block_id = mc_data.block_id;
         let prev_shard_data = prev_shard_data.unwrap();
         let usage_tree = usage_tree.unwrap();
+        let usage_trees = usage_trees.unwrap();
         let tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
 
         tracing::info!(target: tracing_targets::COLLATOR,
@@ -148,6 +150,7 @@ impl CollatorStdImpl {
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
+                    usage_trees,
                 )
             }
         });
@@ -274,6 +277,7 @@ impl CollatorStdImpl {
         collation_session: Arc<CollationSessionInfo>,
         wu_used_from_last_anchor: u64,
         usage_tree: UsageTree,
+        usage_trees: FastHashMap<u8, UsageTree>,
     ) -> Result<CollationResult, CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
@@ -415,6 +419,7 @@ impl CollatorStdImpl {
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
+                    usage_trees,
                     queue_diff,
                     collator_config,
                     processed_upto,

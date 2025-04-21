@@ -777,11 +777,13 @@ impl CollatorStdImpl {
         // update working state
         tracing::debug!(target: tracing_targets::COLLATOR, "updating working state...");
 
-        let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
+        let (prev_shard_data, usage_tree, usage_trees) =
+            PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
         // set new prev shard data and usage tree
         working_state.prev_shard_data = Some(prev_shard_data);
         working_state.usage_tree = Some(usage_tree);
+        working_state.usage_trees = Some(usage_trees);
 
         Ok(())
     }
@@ -865,7 +867,7 @@ impl CollatorStdImpl {
 
             let prev_states = vec![new_state_stuff];
             let prev_queue_diff_hashes = vec![new_queue_diff_hash];
-            let (prev_shard_data, usage_tree) =
+            let (prev_shard_data, usage_tree, usage_trees) =
                 PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
             let next_block_id_short = calc_next_block_id_short(prev_shard_data.blocks_ids());
@@ -877,6 +879,7 @@ impl CollatorStdImpl {
                 wu_used_from_last_anchor: prev_shard_data.wu_used_from_last_anchor(),
                 prev_shard_data: Some(prev_shard_data),
                 usage_tree: Some(usage_tree),
+                usage_trees: Some(usage_trees),
                 has_unprocessed_messages: Some(has_unprocessed_messages),
                 reader_state,
             }))
@@ -953,7 +956,8 @@ impl CollatorStdImpl {
     ) -> Result<Box<WorkingState>> {
         // TODO: consider split/merge
 
-        let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
+        let (prev_shard_data, usage_tree, usage_trees) =
+            PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
         let next_block_id_short = calc_next_block_id_short(prev_shard_data.blocks_ids());
 
@@ -966,6 +970,7 @@ impl CollatorStdImpl {
             reader_state: ReaderState::new(prev_shard_data.processed_upto()),
             prev_shard_data: Some(prev_shard_data),
             usage_tree: Some(usage_tree),
+            usage_trees: Some(usage_trees),
             has_unprocessed_messages: None,
             collation_config,
         }))

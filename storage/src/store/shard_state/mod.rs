@@ -156,11 +156,7 @@ impl ShardStateStorage {
 
                 key[80] = *data_shard_id;
 
-                batch.put_cf(
-                    &accounts_cf.bound(),
-                    block_id.to_vec(),
-                    data_root_hash.as_slice(),
-                );
+                batch.put_cf(&accounts_cf.bound(), key, data_root_hash.as_slice());
             }
 
             in_mem_store.finish();
@@ -416,7 +412,10 @@ impl ShardStateStorage {
         let shard_accounts = shard_accounts.get(key)?;
         match shard_accounts {
             Some(root) => Ok(HashBytes::from_slice(&root[..32])),
-            None => Err(ShardStateStorageError::NotFound.into()),
+            None => {
+                tracing::error!(?data_shard_id, ?block_id, "load_accounts_root");
+                Err(ShardStateStorageError::NotFound.into())
+            }
         }
     }
 

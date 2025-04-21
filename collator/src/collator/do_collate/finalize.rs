@@ -1,9 +1,8 @@
 use std::collections::hash_map::Entry;
-use std::collections::{hash_map, BTreeMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ahash::HashMapExt;
 use anyhow::{anyhow, Context, Result};
 use everscale_types::cell::Lazy;
 use everscale_types::merkle::*;
@@ -51,6 +50,7 @@ pub struct FinalizeBlockContext {
     pub collation_session: Arc<CollationSessionInfo>,
     pub wu_used_from_last_anchor: u64,
     pub usage_tree: UsageTree,
+    pub usage_trees: FastHashMap<u8, UsageTree>,
     pub queue_diff: SerializedQueueDiff,
     pub collator_config: Arc<CollatorConfig>,
     pub processed_upto: ProcessedUptoInfoStuff,
@@ -259,6 +259,7 @@ impl Phase<FinalizeState> {
             collation_session,
             wu_used_from_last_anchor,
             usage_tree,
+            usage_trees,
             queue_diff,
             collator_config,
             processed_upto,
@@ -564,11 +565,23 @@ impl Phase<FinalizeState> {
 
             let prev_roots = self.state.prev_shard_data.pure_state_data_roots();
             for (id, new_state) in &new_observable_state_data {
-                let prev_root = prev_roots.get(id).unwrap();
-                let merkle_update =
-                    create_merkle_update(&shard, prev_root, new_state.root_cell(), &usage_tree)?;
+                rayon::scope(|s| {
+                    let prev_root = prev_roots.get(id).unwrap();
+                    let usage_tree = usage_trees.get(id).unwrap();
+                    s.spawn(|_| {
+                        let merkle_update = create_merkle_update(
+                            &shard,
+                            prev_root,
+                            new_state.root_cell(),
+                            usage_tree,
+                        )
+                        .unwrap();
 
-                state_data_merkle_update.set(id, Lazy::new(&merkle_update)?)?;
+                        state_data_merkle_update
+                            .set(id, Lazy::new(&merkle_update).unwrap())
+                            .unwrap();
+                    });
+                });
             }
 
             build_state_update_elapsed = histogram.finish();
@@ -1182,11 +1195,6 @@ impl Phase<FinalizeState> {
                 .iter()
                 .map(|(k, v)| (k, v.transactions.root_extra(), v as &dyn Store)),
         )?;
-
-        // let shard_accounts = shard_accounts
-        //     .into_iter()
-        //     .map(|(k, dict)| dict.build().map(|v| (k, v)))
-        //     .collect::<Result<FastHashMap<_, _>>>()?;
 
         let shard_accounts = shard_accounts
             .into_iter()

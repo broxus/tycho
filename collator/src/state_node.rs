@@ -189,6 +189,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             .shard_state_storage()
             .load_state(block_id)
             .await?;
+
         Ok(state)
     }
 

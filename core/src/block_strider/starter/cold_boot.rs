@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tycho_block_util::archive::{ArchiveData, WithArchiveData};
 use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateDataId, ShardStateStuff};
 use tycho_storage::{
     BlockHandle, FileBuilder, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
     PersistentStateKind, Storage,
@@ -878,30 +878,32 @@ fn make_shard_state(
     shard_ident: ShardIdent,
     now: u32,
 ) -> Result<ShardStateStuff> {
-    todo!()
-    // let state = ShardStateUnsplit {
-    //     global_id,
-    //     shard_ident,
-    //     gen_utime: now,
-    //     min_ref_mc_seqno: u32::MAX,
-    //     ..Default::default()
-    // };
-    //
-    // let root = CellBuilder::build_from(&state)?;
-    // let root_hash = *root.repr_hash();
-    // let file_hash = Boc::file_hash_blake(Boc::encode(&root));
-    //
-    // let block_id = BlockId {
-    //     shard: state.shard_ident,
-    //     seqno: state.seqno,
-    //     root_hash,
-    //     file_hash,
-    // };
-    //
-    // // TODO:
-    // let data_roots = FastHashMap::default();
-    //
-    // ShardStateStuff::from_root(&block_id, root, data_roots, tracker)
+    let state = ShardStateUnsplit {
+        global_id,
+        shard_ident,
+        gen_utime: now,
+        min_ref_mc_seqno: u32::MAX,
+        ..Default::default()
+    };
+
+    let root = CellBuilder::build_from(&state)?;
+    let root_hash = *root.repr_hash();
+    let file_hash = Boc::file_hash_blake(Boc::encode(&root));
+
+    let block_id = BlockId {
+        shard: state.shard_ident,
+        seqno: state.seqno,
+        root_hash,
+        file_hash,
+    };
+
+    let mut data_roots = FastHashMap::default();
+    for shard_data_id in ShardStateDataId::iter() {
+        let accs = ShardAccounts::new();
+        data_roots.insert(shard_data_id.0, accs);
+    }
+
+    ShardStateStuff::from_root_and_accounts(&block_id, root, data_roots, tracker)
 }
 
 #[derive(Clone)]

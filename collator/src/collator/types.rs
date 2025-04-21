@@ -44,6 +44,7 @@ pub(super) struct WorkingState {
     pub wu_used_from_last_anchor: u64,
     pub prev_shard_data: Option<PrevData>,
     pub usage_tree: Option<UsageTree>,
+    pub usage_trees: Option<FastHashMap<u8, UsageTree>>,
     pub has_unprocessed_messages: Option<bool>,
     pub reader_state: ReaderState,
 }
@@ -78,7 +79,7 @@ impl PrevData {
     pub fn build(
         prev_states: Vec<ShardStateStuff>,
         prev_queue_diff_hashes: Vec<HashBytes>,
-    ) -> Result<(Self, UsageTree)> {
+    ) -> Result<(Self, UsageTree, FastHashMap<u8, UsageTree>)> {
         // TODO: make real implementation
         // consider split/merge logic
         //  Collator::prepare_data()
@@ -89,10 +90,19 @@ impl PrevData {
         let pure_prev_state_data_roots = prev_states[0].data_root_cells();
         let pure_prev_states = prev_states;
 
-        let observable_data_roots = pure_prev_states[0].data_root_cells();
-
         let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
         let observable_root = usage_tree.track(&pure_prev_state_root);
+
+        let mut usage_trees = FastHashMap::default();
+        let mut observable_data_roots = pure_prev_states[0].data_root_cells();
+        for (id, root) in pure_prev_states[0].data_root_cells() {
+            let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
+            let observable_root = usage_tree.track(&root);
+
+            usage_trees.insert(id, usage_tree);
+            observable_data_roots.insert(id, observable_root);
+        }
+
         let observable_states = vec![ShardStateStuff::from_root(
             pure_prev_states[0].block_id(),
             observable_root,
@@ -128,7 +138,7 @@ impl PrevData {
             prev_queue_diff_hashes,
         };
 
-        Ok((prev_data, usage_tree))
+        Ok((prev_data, usage_tree, usage_trees))
     }
 
     pub fn observable_states(&self) -> &Vec<ShardStateStuff> {

@@ -32,6 +32,10 @@ pub struct Cmd {
     #[clap(short, long, required_unless_present = "init_config")]
     output: Option<PathBuf>,
 
+    /// path to the accounts output file
+    #[clap(short, long, required_unless_present = "init_config")]
+    accounts_output: Option<PathBuf>,
+
     /// explicit unix timestamp of the zero state
     #[clap(long)]
     now: Option<u32>,
@@ -47,6 +51,7 @@ impl Cmd {
             None => generate_zerostate(
                 &self.config.unwrap(),
                 &self.output.unwrap(),
+                &self.accounts_output.unwrap(),
                 self.now.unwrap_or_else(tycho_util::time::now_sec),
                 self.force,
             ),
@@ -67,6 +72,7 @@ fn write_default_config(config_path: &PathBuf, force: bool) -> Result<()> {
 fn generate_zerostate(
     config_path: &PathBuf,
     output_path: &PathBuf,
+    accounts_output_path: &PathBuf,
     now: u32,
     force: bool,
 ) -> Result<()> {
@@ -88,7 +94,7 @@ fn generate_zerostate(
         .add_required_accounts()
         .context("failed to add required accounts")?;
 
-    let state = config
+    let (state, accounts) = config
         .build_masterchain_state(now)
         .context("failed to build masterchain zerostate")?;
 
@@ -104,6 +110,14 @@ fn generate_zerostate(
         "root_hash": root_hash,
         "file_hash": file_hash,
     });
+
+    {
+        let boc = CellBuilder::build_from(&accounts).context("failed to serialize accounts")?;
+        let data = Boc::encode(&boc);
+
+        std::fs::write(accounts_output_path, data)
+            .context("failed to write masterchain accounts")?;
+    }
 
     print_json(hashes)
 }
@@ -322,7 +336,7 @@ impl ZerostateConfig {
         Ok(())
     }
 
-    fn build_masterchain_state(self, now: u32) -> Result<ShardStateUnsplit> {
+    fn build_masterchain_state(self, now: u32) -> Result<(ShardStateUnsplit, ShardAccounts)> {
         let mut state = make_shard_state(self.global_id, ShardIdent::MASTERCHAIN, now);
 
         let config = BlockchainConfig {
@@ -330,8 +344,8 @@ impl ZerostateConfig {
             params: self.params.clone(),
         };
 
+        let mut accounts = ShardAccounts::new();
         {
-            let mut accounts = ShardAccounts::new();
             let mut libraries = FastHashMap::<HashBytes, (Cell, FastHashSet<HashBytes>)>::default();
             for (account, mut account_state) in self.accounts {
                 let balance = match account_state.as_mut() {
@@ -465,7 +479,7 @@ impl ZerostateConfig {
             global_balance: state.total_balance.clone(),
         })?);
 
-        Ok(state)
+        Ok((state, accounts))
     }
 }
 
