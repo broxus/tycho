@@ -370,8 +370,6 @@ impl Phase<FinalizeState> {
         }
 
         // build master state extra or get a ref to last applied master block
-        // TODO: extract min_ref_mc_seqno from processed_upto info when we have many shards
-        // collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
         let build_mc_state_extra_elapsed;
         let (mc_state_extra, master_ref) = if is_masterchain {
             let histogram = HistogramGuard::begin_with_labels(
