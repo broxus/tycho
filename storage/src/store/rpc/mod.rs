@@ -254,7 +254,7 @@ impl RpcStorage {
         shard_state: ShardStateStuff,
         split_depth: u8,
     ) -> Result<()> {
-        todo!()
+        Ok(())
 
         // let shard_ident = shard_state.block_id().shard;
         // let Ok(workchain) = i8::try_from(shard_ident.workchain()) else {
