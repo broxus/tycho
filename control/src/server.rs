@@ -9,7 +9,8 @@ use bytes::Bytes;
 use everscale_crypto::ed25519;
 use everscale_types::cell::Lazy;
 use everscale_types::models::{
-    AccountState, DepthBalanceInfo, Message, OptionalAccount, ShardAccount, ShardIdent, StdAddr,
+    AccountState, Addr, DepthBalanceInfo, Message, OptionalAccount, ShardAccount, ShardIdent,
+    StdAddr,
 };
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
@@ -22,7 +23,7 @@ use tarpc::server::Channel;
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tycho_block_util::config::build_elections_data_to_sign;
-use tycho_block_util::state::{RefMcStateHandle, ShardStateDataId};
+use tycho_block_util::state::RefMcStateHandle;
 use tycho_core::block_strider::{
     GcSubscriber, ManualGcTrigger, StateSubscriber, StateSubscriberContext,
 };
@@ -548,12 +549,12 @@ impl proto::ControlServer for ControlServer {
                 .load_state(block_handle.id())
                 .await?;
 
-            // Find the account state in it
-            let data_shard_id = ShardStateDataId::from_account(req.address.address.as_array()).0;
+            let shard_id = ShardIdent::new(req.address.workchain(), req.address.prefix())
+                .context("invalid address")?;
 
             match state
                 .load_accounts()
-                .get(&data_shard_id)
+                .get(&shard_id)
                 .unwrap()
                 .get(req.address.address)?
             {
@@ -783,13 +784,16 @@ impl Inner {
             .context("block handle not found")?;
 
         // Get a weak reference to the accounts dictionary root.
-        let accounts_dict_roots = {
+        let accounts_roots = {
             cx.state
                 .load_accounts()
                 .into_iter()
                 .map(|(k, v)| {
                     let (dict_root, _) = v.into_parts();
-                    (k, dict_root.into_root().as_ref().map(Cell::downgrade))
+                    (
+                        k.prefix(),
+                        dict_root.into_root().as_ref().map(Cell::downgrade),
+                    )
                 })
                 .collect()
         };
@@ -799,7 +803,7 @@ impl Inner {
 
         let cached = CachedAccounts {
             block_handle,
-            accounts_dict_roots,
+            accounts_roots,
             tracker_handle,
         };
 
@@ -848,15 +852,15 @@ impl From<proto::TriggerGcRequest> for ManualGcTrigger {
 /// A bit more weak version of `CachedAccounts` from the `tycho-rpc`.
 struct CachedAccounts {
     block_handle: BlockHandle,
-    accounts_dict_roots: FastHashMap<u8, Option<WeakCell>>,
+    accounts_roots: FastHashMap<u64, Option<WeakCell>>,
     tracker_handle: RefMcStateHandle,
 }
 
 impl CachedAccounts {
     fn try_get(&self, addr: &HashBytes) -> Result<CacheItem> {
-        let data_shard_id = ShardStateDataId::from_account(addr.as_array()).0;
+        let prefix = u64::from_be_bytes(*addr.first_chunk());
 
-        let Some(dict_root) = self.accounts_dict_roots.get(&data_shard_id) else {
+        let Some(dict_root) = self.accounts_roots.get(&prefix) else {
             return Ok(CacheItem::NotFound);
         };
 

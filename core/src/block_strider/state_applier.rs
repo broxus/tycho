@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::cell::Cell;
-use everscale_types::models::BlockId;
-use futures_util::future::{join_all, BoxFuture};
+use everscale_types::models::{BlockId, ShardIdent};
+use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tycho_block_util::archive::ArchiveData;
@@ -76,26 +76,8 @@ where
                     .context("failed to load prev shard state")?;
 
                 match &prev_id_alt {
-                    Some(prev_id) => {
-                        let prev_state_alt = state_storage
-                            .load_state(prev_id)
-                            .await
-                            .context("failed to load alt prev shard state")?;
-
-                        let cell = ShardStateStuff::construct_split_root(
-                            prev_state.root_cell().clone(),
-                            prev_state_alt.root_cell().clone(),
-                        )?;
-                        let left_handle = prev_state.ref_mc_state_handle().clone();
-                        let right_handle = prev_state_alt.ref_mc_state_handle().clone();
-
+                    Some(_prev_id) => {
                         todo!()
-                        // let data_cells = FastHashMap::default(); // TODO
-                        // (
-                        //     cell,
-                        //     data_cells,
-                        //     RefMcStateHandles::Split(left_handle, right_handle),
-                        // )
                     }
                     None => {
                         let cell = prev_state.root_cell().clone();
@@ -178,7 +160,7 @@ where
         block: &BlockStuff,
         handle: &BlockHandle,
         prev_root: Cell,
-        prev_data_roots: FastHashMap<u8, Cell>,
+        prev_data_roots: FastHashMap<ShardIdent, Cell>,
     ) -> Result<ShardStateStuff> {
         let _histogram = HistogramGuard::begin("tycho_core_apply_block_time");
 
@@ -191,13 +173,17 @@ where
             .await
             .context("Failed to apply state update")?;
 
+        let workchain = block.id().shard.workchain();
+
         let mut futures = FuturesUnordered::new();
         for item in block.as_ref().iter_state_data_updates() {
-            let (key, state_data_update) = item?;
-            let prev_data_root = prev_data_roots.get(&key).unwrap().clone();
+            let (shard, state_data_update) = item?;
+            let shard_id = unsafe { ShardIdent::new_unchecked(workchain, shard) };
+
+            let prev_data_root = prev_data_roots.get(&shard_id).unwrap().clone();
             let task = rayon_run(move || {
                 let update = state_data_update.apply(&prev_data_root);
-                (key, update)
+                (shard_id, update)
             });
             futures.push(task);
         }

@@ -277,7 +277,7 @@ impl CollatorStdImpl {
         collation_session: Arc<CollationSessionInfo>,
         wu_used_from_last_anchor: u64,
         usage_tree: UsageTree,
-        usage_trees: FastHashMap<u8, UsageTree>,
+        usage_trees: FastHashMap<ShardIdent, UsageTree>,
     ) -> Result<CollationResult, CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];

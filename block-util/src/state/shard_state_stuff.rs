@@ -1,14 +1,13 @@
-use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tycho_util::FastHashMap;
 
 use crate::state::shard_state_data::ShardStateData;
-use crate::state::{MinRefMcStateTracker, RefMcStateHandle, ShardStateDataId};
+use crate::state::{MinRefMcStateTracker, RefMcStateHandle};
 
 /// Parsed shard state.
 #[derive(Clone)]
@@ -29,7 +28,7 @@ impl ShardStateStuff {
     pub fn from_root(
         block_id: &BlockId,
         root: Cell,
-        data_roots: FastHashMap<u8, Cell>,
+        data_roots: FastHashMap<ShardIdent, Cell>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
         let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
@@ -37,7 +36,7 @@ impl ShardStateStuff {
         let shard_state_data = data_roots
             .into_iter()
             .map(|(k, cell)| ShardStateData::from_root(cell).map(|v| (k, v)))
-            .collect::<Result<FastHashMap<u8, ShardStateData>>>()?;
+            .collect::<Result<FastHashMap<ShardIdent, ShardStateData>>>()?;
 
         Self::from_state_and_root(block_id, root, shard_state, shard_state_data, tracker)
     }
@@ -45,7 +44,7 @@ impl ShardStateStuff {
     pub fn from_root_and_accounts(
         block_id: &BlockId,
         root: Cell,
-        state_data: FastHashMap<u8, ShardAccounts>,
+        state_data: FastHashMap<ShardIdent, ShardAccounts>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
         let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
@@ -53,7 +52,7 @@ impl ShardStateStuff {
         let shard_state_data = state_data
             .into_iter()
             .map(|(k, acc)| ShardStateData::from_accounts(acc).map(|v| (k, v)))
-            .collect::<Result<FastHashMap<u8, ShardStateData>>>()?;
+            .collect::<Result<FastHashMap<ShardIdent, ShardStateData>>>()?;
 
         Self::from_state_and_root(block_id, root, shard_state, shard_state_data, tracker)
     }
@@ -62,7 +61,7 @@ impl ShardStateStuff {
         block_id: &BlockId,
         root: Cell,
         shard_state: Box<ShardStateUnsplit>,
-        shard_state_data: FastHashMap<u8, ShardStateData>,
+        shard_state_data: FastHashMap<ShardIdent, ShardStateData>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
         anyhow::ensure!(
@@ -93,59 +92,6 @@ impl ShardStateStuff {
         })
     }
 
-    pub fn deserialize_zerostate(
-        zerostate_id: &BlockId,
-        bytes: &[u8],
-        accounts_bytes: &[u8],
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Self> {
-        anyhow::ensure!(zerostate_id.seqno == 0, "given id has a non-zero seqno");
-
-        let file_hash = Boc::file_hash_blake(bytes);
-        anyhow::ensure!(
-            zerostate_id.file_hash.as_slice() == file_hash.as_slice(),
-            "file_hash mismatch. Expected: {}, got: {}",
-            hex::encode(file_hash),
-            zerostate_id.file_hash,
-        );
-
-        let root = Boc::decode(bytes)?;
-        anyhow::ensure!(
-            &zerostate_id.root_hash == root.repr_hash(),
-            "root_hash mismatch for {zerostate_id}. Expected: {expected}, got: {got}",
-            expected = zerostate_id.root_hash,
-            got = root.repr_hash(),
-        );
-
-        let mut data_roots: FastHashMap<u8, ShardAccounts> = FastHashMap::default();
-        {
-            let root = Boc::decode(accounts_bytes)?;
-
-            let accounts = root
-                .parse::<ShardAccounts>()
-                .context("failed to parse accounts")?;
-
-            for item in accounts.iter() {
-                let account = item?;
-                let data_shard_id = ShardStateDataId::from_account(account.0.as_array()).0;
-
-                match data_roots.entry(data_shard_id) {
-                    Entry::Occupied(mut entry) => {
-                        entry.get_mut().set(account.0, account.1, account.2)?;
-                    }
-                    Entry::Vacant(entry) => {
-                        let mut accs = ShardAccounts::new();
-                        accs.set(account.0, account.1, account.2)?;
-                        entry.insert(accs);
-                    }
-                }
-            }
-        };
-
-        let data_roots = FastHashMap::default(); // TODO
-        Self::from_root_and_accounts(zerostate_id, root, data_roots, tracker)
-    }
-
     pub fn block_id(&self) -> &BlockId {
         &self.inner.block_id
     }
@@ -169,7 +115,7 @@ impl ShardStateStuff {
         &self.inner.root
     }
 
-    pub fn data_root_cells(&self) -> FastHashMap<u8, Cell> {
+    pub fn data_root_cells(&self) -> FastHashMap<ShardIdent, Cell> {
         self.inner
             .shard_state_data
             .iter()
@@ -177,7 +123,7 @@ impl ShardStateStuff {
             .collect()
     }
 
-    pub fn load_accounts(&self) -> FastHashMap<u8, ShardAccounts> {
+    pub fn load_accounts(&self) -> FastHashMap<ShardIdent, ShardAccounts> {
         self.inner
             .shard_state_data
             .iter()
@@ -229,7 +175,7 @@ unsafe impl arc_swap::RefCnt for ShardStateStuff {
 pub struct Inner {
     block_id: BlockId,
     shard_state: Box<ShardStateUnsplit>,
-    shard_state_data: FastHashMap<u8, ShardStateData>,
+    shard_state_data: FastHashMap<ShardIdent, ShardStateData>,
     shard_state_extra: Option<McStateExtra>,
     handle: RefMcStateHandle,
     root: Cell,

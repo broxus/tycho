@@ -9,6 +9,7 @@ use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
+use tycho_block_util::state::split_shard;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::util::{compute_storage_used, print_json};
@@ -106,11 +107,22 @@ fn generate_zerostate(
     });
 
     {
-        let boc = CellBuilder::build_from(&accounts).context("failed to serialize accounts")?;
-        let data = Boc::encode(&boc);
+        let root_path = output_path
+            .parent()
+            .context("failed to get zerostate root directory")?;
 
-        std::fs::write("/var/node/data/accounts.boc", data)
-            .context("failed to write masterchain accounts")?;
+        for (id, shard_accounts) in accounts {
+            let boc =
+                CellBuilder::build_from(&shard_accounts).context("failed to serialize accounts")?;
+            let data = Boc::encode(&boc);
+
+            let mut filename = id.to_string();
+            filename.push(':');
+            filename.push_str(boc.repr_hash().to_string().as_str());
+
+            let path = root_path.join(filename);
+            std::fs::write(path, data).context("failed to write masterchain accounts")?;
+        }
     }
 
     print_json(hashes)
@@ -330,7 +342,10 @@ impl ZerostateConfig {
         Ok(())
     }
 
-    fn build_masterchain_state(self, now: u32) -> Result<(ShardStateUnsplit, ShardAccounts)> {
+    fn build_masterchain_state(
+        self,
+        now: u32,
+    ) -> Result<(ShardStateUnsplit, FastHashMap<ShardIdent, ShardAccounts>)> {
         let mut state = make_shard_state(self.global_id, ShardIdent::MASTERCHAIN, now);
 
         let config = BlockchainConfig {
@@ -339,6 +354,7 @@ impl ZerostateConfig {
         };
 
         let mut accounts = ShardAccounts::new();
+        let mut splitted_accounts = FastHashMap::default();
         {
             let mut libraries = FastHashMap::<HashBytes, (Cell, FastHashSet<HashBytes>)>::default();
             for (account, mut account_state) in self.accounts {
@@ -391,7 +407,22 @@ impl ZerostateConfig {
             update_config_account(&mut accounts, &config)?;
 
             assert_eq!(state.total_balance, accounts.root_extra().balance);
-            // state.accounts = Lazy::new(&accounts)?;
+
+            // Split to 16 virtual shards
+            split_shard(
+                &ShardIdent::MASTERCHAIN,
+                &accounts,
+                4,
+                &mut splitted_accounts,
+            )?;
+
+            let mut sorted_accounts = splitted_accounts
+                .iter()
+                .map(|(k, v)| (k.prefix(), *CellBuilder::build_from(v).unwrap().repr_hash()))
+                .collect::<Vec<_>>();
+            sorted_accounts.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+            state.accounts = Dict::try_from_sorted_slice(&sorted_accounts)?;
 
             // Build lib dict
             let mut libs = Dict::new();
@@ -473,7 +504,7 @@ impl ZerostateConfig {
             global_balance: state.total_balance.clone(),
         })?);
 
-        Ok((state, accounts))
+        Ok((state, splitted_accounts))
     }
 }
 
@@ -493,9 +524,23 @@ impl Default for ZerostateConfig {
 }
 
 fn make_shard_state(global_id: i32, shard_ident: ShardIdent, now: u32) -> ShardStateUnsplit {
+    let accounts = ShardAccounts::new();
+    let mut splitted_accounts = FastHashMap::default();
+
+    split_shard(&shard_ident, &accounts, 4, &mut splitted_accounts).unwrap();
+
+    let mut sorted_accounts = splitted_accounts
+        .into_iter()
+        .map(|(k, v)| (k.prefix(), *CellBuilder::build_from(v).unwrap().repr_hash()))
+        .collect::<Vec<_>>();
+    sorted_accounts.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let accounts = Dict::try_from_sorted_slice(&sorted_accounts).unwrap();
+
     ShardStateUnsplit {
         global_id,
         shard_ident,
+        accounts,
         gen_utime: now,
         min_ref_mc_seqno: u32::MAX,
         ..Default::default()

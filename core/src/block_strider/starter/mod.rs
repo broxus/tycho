@@ -1,14 +1,12 @@
-use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use everscale_types::boc::Boc;
-use everscale_types::cell::Cell;
-use everscale_types::models::{BlockId, ShardAccounts, ShardStateUnsplit};
+use everscale_types::models::{BlockId, ShardAccounts, ShardIdent, ShardStateUnsplit};
 use serde::{Deserialize, Serialize};
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateDataId, ShardStateStuff};
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::Storage;
 use tycho_util::{serde_helpers, FastHashMap};
 
@@ -106,17 +104,11 @@ impl ZerostateProvider for FileZerostateProvider {
         &self,
         tracker: &MinRefMcStateTracker,
     ) -> impl Iterator<Item = Result<ShardStateStuff>> {
-        self.0.iter().map(move |path| {
-            load_zerostate(tracker, path, &PathBuf::from("/var/node/data/accounts.boc"))
-        })
+        self.0.iter().map(move |path| load_zerostate(tracker, path))
     }
 }
 
-fn load_zerostate(
-    tracker: &MinRefMcStateTracker,
-    path: &PathBuf,
-    accounts_path: &PathBuf,
-) -> Result<ShardStateStuff> {
+fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<ShardStateStuff> {
     let data = std::fs::read(path).context("failed to read file")?;
     let file_hash = Boc::file_hash_blake(&data);
 
@@ -136,37 +128,30 @@ fn load_zerostate(
         file_hash,
     };
 
-    let mut data_roots: FastHashMap<u8, ShardAccounts> = FastHashMap::default();
+    let root_path = path.parent().context("invalid zerostate root path")?;
 
-    for shard_data_id in ShardStateDataId::iter() {
-        let accs = ShardAccounts::new();
-        data_roots.insert(shard_data_id.0, accs);
-    }
+    let mut shard_accounts: FastHashMap<ShardIdent, ShardAccounts> = FastHashMap::default();
 
-    {
-        let data = std::fs::read(accounts_path).context("failed to read file")?;
-        let root = Boc::decode(data).context("failed to decode BOC")?;
+    let workchain = state.shard_ident.workchain();
 
+    for item in state.accounts.iter() {
+        let (shard, root_hash) = item?;
+        let shard_id = unsafe { ShardIdent::new_unchecked(workchain, shard) };
+
+        let mut filename = shard_id.to_string();
+        filename.push(':');
+        filename.push_str(&root_hash.to_string());
+
+        let accounts_path = root_path.join(filename);
+
+        let data = std::fs::read(accounts_path).context("failed to read accounts file")?;
+        let root = Boc::decode(data).context("failed to decode accounts BOC")?;
         let accounts = root
             .parse::<ShardAccounts>()
             .context("failed to parse accounts")?;
 
-        for item in accounts.iter() {
-            let account = item?;
-            let data_shard_id = ShardStateDataId::from_account(account.0.as_array()).0;
+        shard_accounts.insert(shard_id, accounts);
+    }
 
-            match data_roots.entry(data_shard_id) {
-                Entry::Occupied(mut entry) => {
-                    entry.get_mut().set(account.0, account.1, account.2)?;
-                }
-                Entry::Vacant(entry) => {
-                    let mut accs = ShardAccounts::new();
-                    accs.set(account.0, account.1, account.2)?;
-                    entry.insert(accs);
-                }
-            }
-        }
-    };
-
-    ShardStateStuff::from_root_and_accounts(&block_id, root, data_roots, tracker)
+    ShardStateStuff::from_root_and_accounts(&block_id, root, shard_accounts, tracker)
 }

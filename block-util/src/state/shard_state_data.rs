@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
+use tycho_util::FastHashMap;
 
 /// Parsed shard state accounts.
 #[derive(Clone)]
@@ -43,26 +44,53 @@ pub struct Inner {
     root: Cell,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ShardStateDataId(pub u8);
+pub fn split_shard(
+    shard: &ShardIdent,
+    accounts: &ShardAccounts,
+    depth: u8,
+    shards: &mut FastHashMap<ShardIdent, ShardAccounts>,
+) -> Result<()> {
+    fn split_shard_impl(
+        shard: &ShardIdent,
+        accounts: &ShardAccounts,
+        depth: u8,
+        shards: &mut FastHashMap<ShardIdent, ShardAccounts>,
+        builder: &mut CellBuilder,
+    ) -> Result<()> {
+        let (left_shard_ident, right_shard_ident) = 'split: {
+            if depth > 0 {
+                if let Some((left, right)) = shard.split() {
+                    break 'split (left, right);
+                }
+            }
+            shards.insert(*shard, accounts.clone());
+            return Ok(());
+        };
 
-impl ShardStateDataId {
-    pub const NUM_SHARDS: u8 = 16;
-    const SHARD_MASK: u8 = 0xF0;
+        let (left_accounts, right_accounts) = {
+            builder.rewind(builder.size_bits()).unwrap();
+            let prefix_len = shard.prefix_len();
+            if prefix_len > 0 {
+                builder.store_uint(shard.prefix() >> (64 - prefix_len), prefix_len)?;
+            }
+            accounts.split_by_prefix(&builder.as_data_slice())?
+        };
 
-    pub fn new(id: u8) -> Option<Self> {
-        if id < Self::NUM_SHARDS {
-            Some(Self(id))
-        } else {
-            None
-        }
+        split_shard_impl(
+            &left_shard_ident,
+            &left_accounts,
+            depth - 1,
+            shards,
+            builder,
+        )?;
+        split_shard_impl(
+            &right_shard_ident,
+            &right_accounts,
+            depth - 1,
+            shards,
+            builder,
+        )
     }
 
-    pub fn from_account(account: &[u8; 32]) -> Self {
-        Self(account[0] & Self::SHARD_MASK)
-    }
-
-    pub fn iter() -> impl Iterator<Item = Self> {
-        (0..Self::NUM_SHARDS).map(|id| Self(id << 4))
-    }
+    split_shard_impl(shard, accounts, depth, shards, &mut CellBuilder::new())
 }

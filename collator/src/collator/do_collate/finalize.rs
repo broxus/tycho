@@ -14,7 +14,7 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
-use tycho_block_util::state::{ShardStateData, ShardStateDataId, ShardStateStuff};
+use tycho_block_util::state::{ShardStateData, ShardStateStuff};
 use tycho_consensus::prelude::ConsensusConfigExt;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
@@ -50,7 +50,7 @@ pub struct FinalizeBlockContext {
     pub collation_session: Arc<CollationSessionInfo>,
     pub wu_used_from_last_anchor: u64,
     pub usage_tree: UsageTree,
-    pub usage_trees: FastHashMap<u8, UsageTree>,
+    pub usage_trees: FastHashMap<ShardIdent, UsageTree>,
     pub queue_diff: SerializedQueueDiff,
     pub collator_config: Arc<CollatorConfig>,
     pub processed_upto: ProcessedUptoInfoStuff,
@@ -521,6 +521,7 @@ impl Phase<FinalizeState> {
                 min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
                 processed_upto: Lazy::new(&processed_upto.clone().try_into()?)?,
                 before_split: new_block_info.before_split,
+                accounts: Dict::new(),
                 overload_history: new_wu_used_from_last_anchor,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
@@ -546,6 +547,17 @@ impl Phase<FinalizeState> {
                 .into_iter()
                 .map(|(k, accounts)| ShardStateData::from_accounts(accounts).map(|v| (k, v)))
                 .collect::<Result<FastHashMap<_, _>>>()?;
+
+            {
+                let mut sorted_accounts = new_observable_state_data
+                    .iter()
+                    .map(|(k, v)| (k.prefix(), *v.root_cell().repr_hash()))
+                    .collect::<Vec<_>>();
+
+                sorted_accounts.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+                new_observable_state.accounts = Dict::try_from_sorted_slice(&sorted_accounts)?;
+            }
 
             // TODO: update config smc on hard fork
 
@@ -578,7 +590,7 @@ impl Phase<FinalizeState> {
                         .unwrap();
 
                         state_data_merkle_update
-                            .set(id, Lazy::new(&merkle_update).unwrap())
+                            .set(id.prefix(), Lazy::new(&merkle_update).unwrap())
                             .unwrap();
                     });
                 });
@@ -1141,10 +1153,10 @@ impl Phase<FinalizeState> {
                 continue;
             }
 
-            let data_shard_id =
-                ShardStateDataId::from_account(updated_account.account_addr.as_array()).0;
+            let addr = updated_account.make_std_addr();
+            let shard_id = unsafe { ShardIdent::new_unchecked(addr.workchain(), addr.prefix()) };
 
-            if let Entry::Occupied(mut shard_accounts) = shard_accounts.entry(data_shard_id) {
+            if let Entry::Occupied(mut shard_accounts) = shard_accounts.entry(shard_id) {
                 let shard_accounts = shard_accounts.get_mut();
 
                 if updated_account.exists {
@@ -1472,7 +1484,7 @@ impl Phase<FinalizeState> {
 #[derive(Default)]
 struct ProcessedAccounts {
     account_blocks: AccountBlocks,
-    shard_accounts: FastHashMap<u8, ShardAccounts>,
+    shard_accounts: FastHashMap<ShardIdent, ShardAccounts>,
     new_config_params: Option<BlockchainConfigParams>,
     accounts_len: usize,
 }

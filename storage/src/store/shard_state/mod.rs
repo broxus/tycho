@@ -100,7 +100,7 @@ impl ShardStateStorage {
         &self,
         handle: &BlockHandle,
         root_cell: Cell,
-        root_data_cells: FastHashMap<u8, Cell>,
+        root_data_cells: FastHashMap<ShardIdent, Cell>,
         hint: StoreStateHint,
     ) -> Result<bool> {
         if handle.has_state() {
@@ -117,7 +117,6 @@ impl ShardStateStorage {
         let block_id = *handle.id();
         let raw_db = self.db.rocksdb().clone();
         let cf = self.db.shard_states.get_unbounded_cf();
-        let accounts_cf = self.db.shard_accounts.get_unbounded_cf();
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
@@ -140,9 +139,7 @@ impl ShardStateStorage {
 
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
-            for (data_shard_id, data_root_cell) in root_data_cells.iter() {
-                let data_root_hash = *data_root_cell.repr_hash();
-
+            for (_, data_root_cell) in root_data_cells.iter() {
                 let cells_count = cell_storage.store_cell(
                     &mut batch,
                     data_root_cell.as_ref(),
@@ -150,13 +147,6 @@ impl ShardStateStorage {
                 )?;
 
                 new_cell_count += cells_count;
-
-                let mut key = [0u8; tables::ShardAccounts::KEY_LEN];
-                key[..80].copy_from_slice(&block_id.to_vec());
-
-                key[80] = *data_shard_id;
-
-                batch.put_cf(&accounts_cf.bound(), key, data_root_hash.as_slice());
             }
 
             in_mem_store.finish();
@@ -210,20 +200,29 @@ impl ShardStateStorage {
 
     pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
         let cell_id = self.load_state_root(block_id)?;
-        let cell = self.cell_storage.load_cell(cell_id)?;
+        let cell = Cell::from(self.cell_storage.load_cell(cell_id)? as Arc<_>);
 
-        let mut data_roots = FastHashMap::with_capacity(ShardStateDataId::NUM_SHARDS as usize);
-        for shard_data_id in ShardStateDataId::iter() {
-            let cell_id = self.load_accounts_root(block_id, shard_data_id)?;
+        let shard_state = cell.parse::<Box<ShardStateUnsplit>>()?;
+
+        let accounts = &shard_state.accounts;
+        let workchain = block_id.shard.workchain();
+
+        let mut accounts_roots = FastHashMap::with_capacity(accounts.iter().count());
+        for item in accounts.iter() {
+            let (shard, cell_id) = item?;
+            let shard_id = unsafe { ShardIdent::new_unchecked(workchain, shard) };
+
             let cell = self.cell_storage.load_cell(cell_id)?;
+            let shard_state_data = ShardStateData::from_root(Cell::from(cell as Arc<_>))?;
 
-            data_roots.insert(shard_data_id.0, Cell::from(cell as Arc<_>));
+            accounts_roots.insert(shard_id, shard_state_data);
         }
 
-        ShardStateStuff::from_root(
+        ShardStateStuff::from_state_and_root(
             block_id,
-            Cell::from(cell as Arc<_>),
-            data_roots,
+            cell,
+            shard_state,
+            accounts_roots,
             &self.min_ref_mc_state,
         )
     }
@@ -395,27 +394,6 @@ impl ShardStateStorage {
         match shard_state {
             Some(root) => Ok(HashBytes::from_slice(&root[..32])),
             None => Err(ShardStateStorageError::NotFound.into()),
-        }
-    }
-
-    pub fn load_accounts_root(
-        &self,
-        block_id: &BlockId,
-        data_shard_id: ShardStateDataId,
-    ) -> Result<HashBytes> {
-        let shard_accounts = &self.db.shard_accounts;
-
-        let mut key = [0u8; tables::ShardAccounts::KEY_LEN];
-        key[..80].copy_from_slice(&block_id.to_vec());
-        key[80] = data_shard_id.0;
-
-        let shard_accounts = shard_accounts.get(key)?;
-        match shard_accounts {
-            Some(root) => Ok(HashBytes::from_slice(&root[..32])),
-            None => {
-                tracing::error!(?data_shard_id, ?block_id, "load_accounts_root");
-                Err(ShardStateStorageError::NotFound.into())
-            }
         }
     }
 

@@ -44,7 +44,7 @@ pub(super) struct WorkingState {
     pub wu_used_from_last_anchor: u64,
     pub prev_shard_data: Option<PrevData>,
     pub usage_tree: Option<UsageTree>,
-    pub usage_trees: Option<FastHashMap<u8, UsageTree>>,
+    pub usage_trees: Option<FastHashMap<ShardIdent, UsageTree>>,
     pub has_unprocessed_messages: Option<bool>,
     pub reader_state: ReaderState,
 }
@@ -57,13 +57,13 @@ impl WorkingState {
 
 pub(super) struct PrevData {
     observable_states: Vec<ShardStateStuff>,
-    observable_accounts: FastHashMap<u8, ShardAccounts>,
+    observable_accounts: FastHashMap<ShardIdent, ShardAccounts>,
 
     blocks_ids: Vec<BlockId>,
 
     pure_states: Vec<ShardStateStuff>,
     pure_state_root: Cell,
-    pure_state_data_roots: FastHashMap<u8, Cell>,
+    pure_state_data_roots: FastHashMap<ShardIdent, Cell>,
 
     gen_chain_time: u64,
     gen_lt: u64,
@@ -79,7 +79,7 @@ impl PrevData {
     pub fn build(
         prev_states: Vec<ShardStateStuff>,
         prev_queue_diff_hashes: Vec<HashBytes>,
-    ) -> Result<(Self, UsageTree, FastHashMap<u8, UsageTree>)> {
+    ) -> Result<(Self, UsageTree, FastHashMap<ShardIdent, UsageTree>)> {
         // TODO: make real implementation
         // consider split/merge logic
         //  Collator::prepare_data()
@@ -157,7 +157,7 @@ impl PrevData {
         Ok(balance)
     }
 
-    pub fn observable_accounts(&self) -> &FastHashMap<u8, ShardAccounts> {
+    pub fn observable_accounts(&self) -> &FastHashMap<ShardIdent, ShardAccounts> {
         &self.observable_accounts
     }
 
@@ -203,7 +203,7 @@ impl PrevData {
         &self.pure_state_root
     }
 
-    pub fn pure_state_data_roots(&self) -> &FastHashMap<u8, Cell> {
+    pub fn pure_state_data_roots(&self) -> &FastHashMap<ShardIdent, Cell> {
         &self.pure_state_data_roots
     }
 
@@ -461,7 +461,7 @@ impl BlockCollationData {
     pub fn finalize_value_flow(
         &mut self,
         account_blocks: &AccountBlocks,
-        shard_accounts: &FastHashMap<u8, ShardAccounts>,
+        shard_accounts: &FastHashMap<ShardIdent, ShardAccounts>,
         in_msgs: &InMsgDescr,
         out_msgs: &OutMsgDescr,
         config: &BlockchainConfig,
@@ -1111,7 +1111,7 @@ pub struct FinalizeBlockResult {
     pub old_mc_data: Arc<McData>,
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
-    pub new_observable_state_data: FastHashMap<u8, ShardStateData>,
+    pub new_observable_state_data: FastHashMap<ShardIdent, ShardStateData>,
     pub finalize_wu_total: u64,
     pub collation_config: Arc<CollationConfig>,
 }
