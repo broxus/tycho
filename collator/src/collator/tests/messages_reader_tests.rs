@@ -17,8 +17,8 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use super::{
-    FinalizedMessagesReader, GetNextMessageGroupMode, MessagesReader, MessagesReaderContext,
-    ReaderState,
+    CumulativeStatsCalcParams, FinalizedMessagesReader, GetNextMessageGroupMode, MessagesReader,
+    MessagesReaderContext, ReaderState,
 };
 use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::types::{AnchorsCache, ParsedMessage};
@@ -605,6 +605,10 @@ impl<V: InternalMessageValue> TestCollator<V> {
             .collect();
         self.last_mc_top_shards_blocks_info = mc_top_shards_blocks_info;
 
+        let cumulative_stats_calc_params = Some(CumulativeStatsCalcParams {
+            all_shards_processed_to_by_partitions,
+        });
+
         // create primary reader
         let mut primary_messages_reader = self.create_primary_reader(
             MessagesReaderContext {
@@ -617,9 +621,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 mc_top_shards_end_lts: mc_top_shards_end_lts.clone(),
                 reader_state,
                 anchors_cache,
-                all_shards_processed_to_by_partitions: all_shards_processed_to_by_partitions
-                    .clone(),
                 is_first_block_after_prev_master,
+                cumulative_stats_calc_params: cumulative_stats_calc_params.clone(),
             },
             self.primary_mq_adapter.clone(),
         )?;
@@ -639,7 +642,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 mc_top_shards_end_lts,
                 reader_state: secondary_reader_state,
                 anchors_cache: secondary_anchors_cache,
-                all_shards_processed_to_by_partitions,
+                cumulative_stats_calc_params,
                 is_first_block_after_prev_master: true,
             },
             self.secondary_mq_adapter.clone(),
@@ -819,7 +822,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
             prev_state_gen_lt = cx.prev_state_gen_lt,
             mc_state_gen_lt = cx.mc_state_gen_lt,
             mc_top_shards_end_lts = ?cx.mc_top_shards_end_lts,
-            all_shards_processed_to_by_partitions = ?cx.all_shards_processed_to_by_partitions,
+            cumulative_stats_calc_params = ?cx.cumulative_stats_calc_params,
         );
         MessagesReader::new(cx, mq_adapter)
     }
@@ -836,7 +839,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
             prev_state_gen_lt = cx.prev_state_gen_lt,
             mc_state_gen_lt = cx.mc_state_gen_lt,
             mc_top_shards_end_lts = ?cx.mc_top_shards_end_lts,
-            all_shards_processed_to_by_partitions = ?cx.all_shards_processed_to_by_partitions,
+            cumulative_stats_calc_params = ?cx.cumulative_stats_calc_params,
         );
         MessagesReader::new(cx, mq_adapter)
     }
