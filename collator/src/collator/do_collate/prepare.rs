@@ -9,7 +9,9 @@ use super::phase::{Phase, PhaseState};
 use crate::collator::do_collate::phase::ActualState;
 use crate::collator::error::CollatorError;
 use crate::collator::execution_manager::MessagesExecutor;
-use crate::collator::messages_reader::{MessagesReader, MessagesReaderContext, ReaderState};
+use crate::collator::messages_reader::{
+    CumulativeStatsCalcParams, MessagesReader, MessagesReaderContext, ReaderState,
+};
 use crate::collator::types::AnchorsCache;
 use crate::collator::CollationCancelReason;
 use crate::internal_queue::types::EnqueuedMessage;
@@ -130,7 +132,10 @@ impl Phase<PrepareState> {
                 mc_state_gen_lt: self.state.mc_data.gen_lt,
                 prev_state_gen_lt: self.state.prev_shard_data.gen_lt(),
                 mc_top_shards_end_lts,
-                all_shards_processed_to_by_partitions,
+                cumulative_stats_calc_params: Some(CumulativeStatsCalcParams {
+                    all_shards_processed_to_by_partitions: all_shards_processed_to_by_partitions
+                        .clone(),
+                }),
                 reader_state: self.extra.reader_state,
                 anchors_cache: self.extra.anchors_cache,
                 is_first_block_after_prev_master: self.state.is_first_block_after_prev_master,
