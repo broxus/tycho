@@ -682,12 +682,13 @@ impl ExternalsReader {
                                 }
                                 // check stats in previous partition
                                 check_ops_count.saturating_add_assign(1);
-                                if prev_par_reader
-                                    .remaning_msgs_stats
-                                    .statistics()
-                                    .contains_key(&dst_addr)
+
+                                if let Some(remaning_msgs_stats) =
+                                    &prev_par_reader.remaning_msgs_stats
                                 {
-                                    return (true, check_ops_count);
+                                    if remaning_msgs_stats.statistics().contains_key(&dst_addr) {
+                                        return (true, check_ops_count);
+                                    }
                                 }
                             }
 

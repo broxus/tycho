@@ -27,9 +27,7 @@ use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
-use crate::types::processed_upto::{
-    build_all_shards_processed_to_by_partitions, ProcessedUptoInfoExtension,
-};
+use crate::types::processed_upto::ProcessedUptoInfoExtension;
 use crate::types::{
     BlockCollationResult, CollationSessionId, CollationSessionInfo, CollatorConfig, DebugDisplay,
     DisplayBlockIdsIntoIter, McData, TopBlockDescription,
@@ -1291,23 +1289,6 @@ impl CollatorStdImpl {
 
         // finally check if has pending messages in iterators
 
-        let all_shards_processed_to_by_partitions = build_all_shards_processed_to_by_partitions(
-            working_state.next_block_id_short,
-            working_state
-                .reader_state
-                .get_updated_processed_upto()
-                .get_internals_processed_to_by_partitions(),
-            working_state
-                .mc_data
-                .processed_upto
-                .get_internals_processed_to_by_partitions(),
-            working_state
-                .mc_data
-                .shards_processed_to_by_partitions
-                .clone(),
-            &working_state.mc_data.shards,
-        );
-
         // create reader
         let mut messages_reader = MessagesReader::new(
             MessagesReaderContext {
@@ -1323,7 +1304,7 @@ impl CollatorStdImpl {
                     .iter()
                     .map(|(k, v)| (*k, v.end_lt))
                     .collect(),
-                all_shards_processed_to_by_partitions,
+                cumulative_stats_calc_params: None,
                 // extract reader state to use in the reader
                 reader_state: std::mem::take(&mut working_state.reader_state),
                 // do not use anchors cache because we need to check
