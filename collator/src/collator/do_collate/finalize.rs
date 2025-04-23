@@ -1154,7 +1154,9 @@ impl Phase<FinalizeState> {
             }
 
             let addr = updated_account.make_std_addr();
-            let shard_id = unsafe { ShardIdent::new_unchecked(addr.workchain(), addr.prefix()) };
+
+            let shard_prefix = addr.prefix() & (0b1111u64 << 60) | (0b1u64 << 59); // prefix + tag
+            let shard_id = unsafe { ShardIdent::new_unchecked(addr.workchain(), shard_prefix) };
 
             if let Entry::Occupied(mut shard_accounts) = shard_accounts.entry(shard_id) {
                 let shard_accounts = shard_accounts.get_mut();

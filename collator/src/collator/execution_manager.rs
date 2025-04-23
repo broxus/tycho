@@ -376,7 +376,8 @@ impl AccountsCache {
             }
             Entry::Vacant(entry) => {
                 let workchain = self.workchain_id as i32;
-                let prefix = u64::from_be_bytes(*account_id.first_chunk());
+                let prefix = u64::from_be_bytes(*account_id.first_chunk()) & (0b1111u64 << 60)
+                    | (0b1u64 << 59); // prefix + tag
                 let shard_id = unsafe { ShardIdent::new_unchecked(workchain, prefix) };
 
                 if let Some(shard_accounts) = self.shard_accounts.get(&shard_id) {
@@ -403,7 +404,8 @@ impl AccountsCache {
             Ok(account.clone())
         } else {
             let workchain = self.workchain_id as i32;
-            let prefix = u64::from_be_bytes(*account_id.first_chunk());
+            let prefix =
+                u64::from_be_bytes(*account_id.first_chunk()) & (0b1111u64 << 60) | (0b1u64 << 59); // prefix + tag
             let shard_id = unsafe { ShardIdent::new_unchecked(workchain, prefix) };
 
             if let Some((_depth, shard_account)) = self

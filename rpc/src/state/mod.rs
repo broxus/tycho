@@ -844,7 +844,8 @@ impl CachedAccounts {
         mc_info: LatestMcInfo,
         address: &StdAddr,
     ) -> Result<LoadedAccountState, RpcStateError> {
-        let shard_id = unsafe { ShardIdent::new_unchecked(address.workchain(), address.prefix()) };
+        let shard_prefix = address.prefix() & (0b1111u64 << 60) | (0b1u64 << 59); // prefix + tag
+        let shard_id = unsafe { ShardIdent::new_unchecked(address.workchain(), shard_prefix) };
 
         match self.accounts.get(&shard_id) {
             Some(shard) => match shard.get(address.address) {
