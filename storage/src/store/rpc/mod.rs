@@ -674,29 +674,44 @@ impl RpcStorage {
             let extra = block.load_extra()?;
             let account_blocks = extra.account_blocks.load()?;
 
-            let accounts = if account_blocks.is_empty() {
-                Dict::new()
-            } else {
-                let merkle_update = block.as_ref().state_update.load()?;
-
-                // Accounts dict is stored in the second cell.
-                let get_accounts = |cell: Cell| {
-                    let mut cs = cell.as_slice()?;
-                    cs.skip_first(0, 1)?;
-                    cs.load_reference_cloned().map(Cell::virtualize)
-                };
-
-                let old_accounts = get_accounts(merkle_update.old)?;
-                let new_accounts = get_accounts(merkle_update.new)?;
-
-                if old_accounts.repr_hash() == new_accounts.repr_hash() {
-                    Dict::new()
-                } else {
-                    let accounts = Lazy::<ShardAccounts>::from_raw(new_accounts)?.load()?;
-                    let (accounts, _) = accounts.into_parts();
-                    accounts
-                }
-            };
+            // TODO: update code hashes
+            // let accounts = if account_blocks.is_empty() {
+            //     Dict::new()
+            // } else {
+            //     for item in block.as_ref().state_data_updates.iter() {
+            //         let (_, merkle_update) = item?;
+            //         let update = merkle_update.load()?;
+            //
+            //         if update.old.repr_hash() == update.new.repr_hash() {
+            //             Dict::new()
+            //         } else {
+            //             let accounts = Lazy::<ShardAccounts>::from_raw(new_accounts)?.load()?;
+            //             let (accounts, _) = accounts.into_parts();
+            //             accounts
+            //         }
+            //
+            //     }
+            //
+            //     let merkle_updates = block.as_ref().state_data_updates;
+            //
+            //     // Accounts dict is stored in the second cell.
+            //     let get_accounts = |cell: Cell| {
+            //         let mut cs = cell.as_slice()?;
+            //         cs.skip_first(0, 1)?;
+            //         cs.load_reference_cloned().map(Cell::virtualize)
+            //     };
+            //
+            //     let old_accounts = get_accounts(merkle_update.old)?;
+            //     let new_accounts = get_accounts(merkle_update.new)?;
+            //
+            //     if old_accounts.repr_hash() == new_accounts.repr_hash() {
+            //         Dict::new()
+            //     } else {
+            //         let accounts = Lazy::<ShardAccounts>::from_raw(new_accounts)?.load()?;
+            //         let (accounts, _) = accounts.into_parts();
+            //         accounts
+            //     }
+            // };
 
             let mut write_batch = rocksdb::WriteBatch::default();
             let tx_cf = &db.transactions.cf();
@@ -828,17 +843,17 @@ impl RpcStorage {
                     None
                 };
 
-                // Apply the update if any
-                if let Some(remove) = update {
-                    Self::update_code_hash(
-                        &db,
-                        workchain,
-                        &account,
-                        &accounts,
-                        remove,
-                        &mut write_batch,
-                    )?;
-                }
+                // // Apply the update if any
+                // if let Some(remove) = update {
+                //     Self::update_code_hash(
+                //         &db,
+                //         workchain,
+                //         &account,
+                //         &accounts,
+                //         remove,
+                //         &mut write_batch,
+                //     )?;
+                // }
             }
 
             drop(prepare_batch_histogram);
