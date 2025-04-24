@@ -412,8 +412,9 @@ impl Phase<FinalizeState> {
         };
 
         // HACK: make every 3-d block incorrect on debug if env variable defined
+        //      use command `RUSTFLAGS="--cfg tycho_unstable" cargo ...` to activate it
         let version =
-            if cfg!(debug_assertions) && self.state.collation_data.block_id_short.seqno % 3 == 0 {
+            if cfg!(tycho_unstable) && self.state.collation_data.block_id_short.seqno % 3 == 0 {
                 let val = std::env::var("HACK_MISMATCH_BLOCK_VER").unwrap_or_default();
                 val.parse::<u32>().unwrap_or(0)
             } else {
