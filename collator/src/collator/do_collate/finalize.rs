@@ -1,4 +1,4 @@
-use std::collections::hash_map::Entry;
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,7 +50,7 @@ pub struct FinalizeBlockContext {
     pub collation_session: Arc<CollationSessionInfo>,
     pub wu_used_from_last_anchor: u64,
     pub usage_tree: UsageTree,
-    pub usage_trees: FastHashMap<ShardIdent, UsageTree>,
+    pub usage_trees: BTreeMap<u64, UsageTree>,
     pub queue_diff: SerializedQueueDiff,
     pub collator_config: Arc<CollatorConfig>,
     pub processed_upto: ProcessedUptoInfoStuff,
@@ -546,17 +546,15 @@ impl Phase<FinalizeState> {
                 .shard_accounts
                 .into_iter()
                 .map(|(k, accounts)| ShardStateData::from_accounts(accounts).map(|v| (k, v)))
-                .collect::<Result<FastHashMap<_, _>>>()?;
+                .collect::<Result<BTreeMap<_, _>>>()?;
 
             {
-                let mut sorted_accounts = new_observable_state_data
+                let accounts_roots = new_observable_state_data
                     .iter()
-                    .map(|(k, v)| (k.prefix(), *v.root_cell().repr_hash()))
-                    .collect::<Vec<_>>();
+                    .map(|(k, v)| (*k, *v.root_cell().repr_hash()))
+                    .collect::<BTreeMap<_, _>>();
 
-                sorted_accounts.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-                new_observable_state.accounts = Dict::try_from_sorted_slice(&sorted_accounts)?;
+                new_observable_state.accounts = Dict::try_from_btree(&accounts_roots)?;
             }
 
             // TODO: update config smc on hard fork
@@ -590,7 +588,7 @@ impl Phase<FinalizeState> {
                         .unwrap();
 
                         state_data_merkle_update
-                            .set(id.prefix(), Lazy::new(&merkle_update).unwrap())
+                            .set(*id, Lazy::new(&merkle_update).unwrap())
                             .unwrap();
                     });
                 });
@@ -1146,7 +1144,7 @@ impl Phase<FinalizeState> {
         let mut shard_accounts = shard_accounts
             .into_iter()
             .map(|(k, v)| (k, RelaxedAugDict::from_full(&v)))
-            .collect::<FastHashMap<_, _>>();
+            .collect::<BTreeMap<_, _>>();
 
         for updated_account in updated_accounts {
             if updated_account.transactions.is_empty() {
@@ -1156,9 +1154,8 @@ impl Phase<FinalizeState> {
             let addr = updated_account.make_std_addr();
 
             let shard_prefix = addr.prefix() & (0b1111u64 << 60) | (0b1u64 << 59); // prefix + tag
-            let shard_id = unsafe { ShardIdent::new_unchecked(addr.workchain(), shard_prefix) };
 
-            if let Entry::Occupied(mut shard_accounts) = shard_accounts.entry(shard_id) {
+            if let Entry::Occupied(mut shard_accounts) = shard_accounts.entry(shard_prefix) {
                 let shard_accounts = shard_accounts.get_mut();
 
                 if updated_account.exists {
@@ -1213,7 +1210,7 @@ impl Phase<FinalizeState> {
         let shard_accounts = shard_accounts
             .into_iter()
             .map(|(k, dict)| (k, dict.build().unwrap()))
-            .collect::<FastHashMap<_, _>>();
+            .collect::<BTreeMap<_, _>>();
 
         Ok(ProcessedAccounts {
             account_blocks: account_blocks.build()?,
@@ -1486,7 +1483,7 @@ impl Phase<FinalizeState> {
 #[derive(Default)]
 struct ProcessedAccounts {
     account_blocks: AccountBlocks,
-    shard_accounts: FastHashMap<ShardIdent, ShardAccounts>,
+    shard_accounts: BTreeMap<u64, ShardAccounts>,
     new_config_params: Option<BlockchainConfigParams>,
     accounts_len: usize,
 }

@@ -1,4 +1,4 @@
-use std::collections::hash_map;
+use std::collections::{hash_map, BTreeMap};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -345,7 +345,7 @@ impl ZerostateConfig {
     fn build_masterchain_state(
         self,
         now: u32,
-    ) -> Result<(ShardStateUnsplit, FastHashMap<ShardIdent, ShardAccounts>)> {
+    ) -> Result<(ShardStateUnsplit, BTreeMap<u64, ShardAccounts>)> {
         let mut state = make_shard_state(self.global_id, ShardIdent::MASTERCHAIN, now);
 
         let config = BlockchainConfig {
@@ -354,7 +354,7 @@ impl ZerostateConfig {
         };
 
         let mut accounts = ShardAccounts::new();
-        let mut splitted_accounts = FastHashMap::default();
+        let mut splitted_accounts = BTreeMap::new();
         {
             let mut libraries = FastHashMap::<HashBytes, (Cell, FastHashSet<HashBytes>)>::default();
             for (account, mut account_state) in self.accounts {
@@ -416,13 +416,12 @@ impl ZerostateConfig {
                 &mut splitted_accounts,
             )?;
 
-            let mut sorted_accounts = splitted_accounts
+            let accounts_roots = splitted_accounts
                 .iter()
-                .map(|(k, v)| (k.prefix(), *CellBuilder::build_from(v).unwrap().repr_hash()))
-                .collect::<Vec<_>>();
-            sorted_accounts.sort_by(|(a, _), (b, _)| a.cmp(b));
+                .map(|(k, v)| (*k, *CellBuilder::build_from(v).unwrap().repr_hash()))
+                .collect::<BTreeMap<_, _>>();
 
-            state.accounts = Dict::try_from_sorted_slice(&sorted_accounts)?;
+            state.accounts = Dict::try_from_btree(&accounts_roots)?;
 
             // Build lib dict
             let mut libs = Dict::new();
@@ -525,17 +524,16 @@ impl Default for ZerostateConfig {
 
 fn make_shard_state(global_id: i32, shard_ident: ShardIdent, now: u32) -> ShardStateUnsplit {
     let accounts = ShardAccounts::new();
-    let mut splitted_accounts = FastHashMap::default();
+    let mut splitted_accounts = BTreeMap::new();
 
     split_shard(&shard_ident, &accounts, 4, &mut splitted_accounts).unwrap();
 
-    let mut sorted_accounts = splitted_accounts
+    let accounts_roots = splitted_accounts
         .into_iter()
-        .map(|(k, v)| (k.prefix(), *CellBuilder::build_from(v).unwrap().repr_hash()))
-        .collect::<Vec<_>>();
-    sorted_accounts.sort_by(|(a, _), (b, _)| a.cmp(b));
+        .map(|(k, v)| (k, *CellBuilder::build_from(v).unwrap().repr_hash()))
+        .collect::<BTreeMap<_, _>>();
 
-    let accounts = Dict::try_from_sorted_slice(&sorted_accounts).unwrap();
+    let accounts = Dict::try_from_btree(&accounts_roots).unwrap();
 
     ShardStateUnsplit {
         global_id,

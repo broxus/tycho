@@ -9,8 +9,7 @@ use bytes::Bytes;
 use everscale_crypto::ed25519;
 use everscale_types::cell::Lazy;
 use everscale_types::models::{
-    AccountState, Addr, DepthBalanceInfo, Message, OptionalAccount, ShardAccount, ShardIdent,
-    StdAddr,
+    AccountState, DepthBalanceInfo, Message, OptionalAccount, ShardAccount, ShardIdent, StdAddr,
 };
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
@@ -549,12 +548,11 @@ impl proto::ControlServer for ControlServer {
                 .load_state(block_handle.id())
                 .await?;
 
-            let shard_id = ShardIdent::new(req.address.workchain(), req.address.prefix())
-                .context("invalid address")?;
+            let shard_prefix = req.address.prefix() & (0b1111u64 << 60) | (0b1u64 << 59); // prefix + tag
 
             match state
                 .load_accounts()
-                .get(&shard_id)
+                .get(&shard_prefix)
                 .unwrap()
                 .get(req.address.address)?
             {
@@ -790,10 +788,7 @@ impl Inner {
                 .into_iter()
                 .map(|(k, v)| {
                     let (dict_root, _) = v.into_parts();
-                    (
-                        k.prefix(),
-                        dict_root.into_root().as_ref().map(Cell::downgrade),
-                    )
+                    (k, dict_root.into_root().as_ref().map(Cell::downgrade))
                 })
                 .collect()
         };

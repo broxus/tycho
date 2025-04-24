@@ -1,5 +1,6 @@
 use std::cmp;
 use std::collections::hash_map::Entry;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,7 +37,7 @@ impl MessagesExecutor {
         min_next_lt: u64,
         config: Arc<ParsedConfig>,
         params: Arc<ExecutorParams>,
-        shard_accounts: FastHashMap<ShardIdent, ShardAccounts>,
+        shard_accounts: BTreeMap<u64, ShardAccounts>,
         wu_params_execute: WorkUnitsParamsExecute,
     ) -> Self {
         Self {
@@ -66,7 +67,7 @@ impl MessagesExecutor {
         self,
     ) -> (
         impl ExactSizeIterator<Item = Box<ShardAccountStuff>>,
-        FastHashMap<ShardIdent, ShardAccounts>,
+        BTreeMap<u64, ShardAccounts>,
     ) {
         let AccountsCache {
             shard_accounts,
@@ -355,7 +356,7 @@ impl MessagesExecutor {
 
 struct AccountsCache {
     workchain_id: i8,
-    shard_accounts: FastHashMap<ShardIdent, ShardAccounts>,
+    shard_accounts: BTreeMap<u64, ShardAccounts>,
     items: FastHashMap<AccountId, Box<ShardAccountStuff>>,
 }
 
@@ -375,12 +376,11 @@ impl AccountsCache {
                 }
             }
             Entry::Vacant(entry) => {
-                let workchain = self.workchain_id as i32;
-                let prefix = u64::from_be_bytes(*account_id.first_chunk()) & (0b1111u64 << 60)
+                let shard_prefix = u64::from_be_bytes(*account_id.first_chunk())
+                    & (0b1111u64 << 60)
                     | (0b1u64 << 59); // prefix + tag
-                let shard_id = unsafe { ShardIdent::new_unchecked(workchain, prefix) };
 
-                if let Some(shard_accounts) = self.shard_accounts.get(&shard_id) {
+                if let Some(shard_accounts) = self.shard_accounts.get(&shard_prefix) {
                     if let Some((_, state)) = shard_accounts.get(account_id)? {
                         let account_stuff =
                             ShardAccountStuff::new(self.workchain_id, account_id, state)
@@ -403,14 +403,12 @@ impl AccountsCache {
         if let Some(account) = self.items.get(account_id) {
             Ok(account.clone())
         } else {
-            let workchain = self.workchain_id as i32;
-            let prefix =
+            let shard_prefix =
                 u64::from_be_bytes(*account_id.first_chunk()) & (0b1111u64 << 60) | (0b1u64 << 59); // prefix + tag
-            let shard_id = unsafe { ShardIdent::new_unchecked(workchain, prefix) };
 
             if let Some((_depth, shard_account)) = self
                 .shard_accounts
-                .get(&shard_id)
+                .get(&shard_prefix)
                 .map(|sa| sa.get(account_id))
                 .transpose()?
                 .flatten()

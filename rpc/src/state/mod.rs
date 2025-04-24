@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -833,7 +834,7 @@ pub enum LoadedAccountState {
 
 struct CachedAccounts {
     libraries: Dict<HashBytes, LibDescr>,
-    accounts: FastHashMap<ShardIdent, ShardAccountsDict>,
+    accounts: BTreeMap<u64, ShardAccountsDict>,
     mc_ref_hanlde: RefMcStateHandle,
     timings: GenTimings,
 }
@@ -845,9 +846,8 @@ impl CachedAccounts {
         address: &StdAddr,
     ) -> Result<LoadedAccountState, RpcStateError> {
         let shard_prefix = address.prefix() & (0b1111u64 << 60) | (0b1u64 << 59); // prefix + tag
-        let shard_id = unsafe { ShardIdent::new_unchecked(address.workchain(), shard_prefix) };
 
-        match self.accounts.get(&shard_id) {
+        match self.accounts.get(&shard_prefix) {
             Some(shard) => match shard.get(address.address) {
                 Ok(Some((_, state))) => Ok(LoadedAccountState::Found {
                     mc_block_id: mc_info.block_id,

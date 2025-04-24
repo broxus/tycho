@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::pin::pin;
 use std::sync::Arc;
@@ -886,7 +887,7 @@ fn make_shard_state(
         ..Default::default()
     });
 
-    let mut shard_accounts = FastHashMap::default();
+    let mut shard_accounts = BTreeMap::new();
 
     tycho_block_util::state::split_shard(
         &shard_ident,
@@ -895,18 +896,17 @@ fn make_shard_state(
         &mut shard_accounts,
     )?; // Split to 16 shards
 
-    let mut sorted_accounts = shard_accounts
+    let shard_accounts_roots = shard_accounts
         .iter()
-        .map(|(k, v)| (k.prefix(), *CellBuilder::build_from(v).unwrap().repr_hash()))
-        .collect::<Vec<_>>();
-    sorted_accounts.sort_by(|(a, _), (b, _)| a.cmp(b));
+        .map(|(k, v)| (k, *CellBuilder::build_from(v).unwrap().repr_hash()))
+        .collect();
 
-    state.accounts = Dict::try_from_sorted_slice(&sorted_accounts)?;
+    state.accounts = Dict::try_from_btree(&shard_accounts_roots)?;
 
     let shard_state_data = shard_accounts
         .into_iter()
         .map(|(k, acc)| ShardStateData::from_accounts(acc).map(|v| (k, v)))
-        .collect::<Result<FastHashMap<ShardIdent, ShardStateData>>>()?;
+        .collect::<Result<BTreeMap<u64, ShardStateData>>>()?;
 
     let root = CellBuilder::build_from(&state)?;
     let root_hash = *root.repr_hash();

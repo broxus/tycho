@@ -1,8 +1,9 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::cell::Cell;
-use everscale_types::models::{BlockId, ShardIdent};
+use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
@@ -12,7 +13,6 @@ use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_storage::{BlockHandle, Storage, StoreStateHint};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
-use tycho_util::FastHashMap;
 
 use crate::block_strider::{
     BlockSaver, BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
@@ -160,7 +160,7 @@ where
         block: &BlockStuff,
         handle: &BlockHandle,
         prev_root: Cell,
-        prev_data_roots: FastHashMap<ShardIdent, Cell>,
+        prev_data_roots: BTreeMap<u64, Cell>,
     ) -> Result<ShardStateStuff> {
         let _histogram = HistogramGuard::begin("tycho_core_apply_block_time");
 
@@ -173,22 +173,19 @@ where
             .await
             .context("Failed to apply state update")?;
 
-        let workchain = block.id().shard.workchain();
-
         let mut futures = FuturesUnordered::new();
         for item in block.as_ref().iter_state_data_updates() {
-            let (shard, state_data_update) = item?;
-            let shard_id = unsafe { ShardIdent::new_unchecked(workchain, shard) };
+            let (shard_prefix, state_data_update) = item?;
 
-            let prev_data_root = prev_data_roots.get(&shard_id).unwrap().clone();
+            let prev_data_root = prev_data_roots.get(&shard_prefix).unwrap().clone();
             let task = rayon_run(move || {
                 let update = state_data_update.apply(&prev_data_root);
-                (shard_id, update)
+                (shard_prefix, update)
             });
             futures.push(task);
         }
 
-        let mut new_state_data = FastHashMap::default();
+        let mut new_state_data = BTreeMap::new();
         while let Some((key, update)) = futures.next().await {
             new_state_data.insert(key, update?);
         }

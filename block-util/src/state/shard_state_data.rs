@@ -1,9 +1,9 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use tycho_util::FastHashMap;
 
 /// Parsed shard state accounts.
 #[derive(Clone)]
@@ -48,13 +48,13 @@ pub fn split_shard(
     shard: &ShardIdent,
     accounts: &ShardAccounts,
     depth: u8,
-    shards: &mut FastHashMap<ShardIdent, ShardAccounts>,
+    shards: &mut BTreeMap<u64, ShardAccounts>,
 ) -> Result<()> {
     fn split_shard_impl(
         shard: &ShardIdent,
         accounts: &ShardAccounts,
         depth: u8,
-        shards: &mut FastHashMap<ShardIdent, ShardAccounts>,
+        shards: &mut BTreeMap<u64, ShardAccounts>,
         builder: &mut CellBuilder,
     ) -> Result<()> {
         let (left_shard_ident, right_shard_ident) = 'split: {
@@ -63,7 +63,7 @@ pub fn split_shard(
                     break 'split (left, right);
                 }
             }
-            shards.insert(*shard, accounts.clone());
+            shards.insert(shard.prefix(), accounts.clone());
             return Ok(());
         };
 

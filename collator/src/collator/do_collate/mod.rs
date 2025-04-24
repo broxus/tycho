@@ -1,4 +1,4 @@
-use std::collections::hash_map;
+use std::collections::{hash_map, BTreeMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -277,7 +277,7 @@ impl CollatorStdImpl {
         collation_session: Arc<CollationSessionInfo>,
         wu_used_from_last_anchor: u64,
         usage_tree: UsageTree,
-        usage_trees: FastHashMap<ShardIdent, UsageTree>,
+        usage_trees: BTreeMap<u64, UsageTree>,
     ) -> Result<CollationResult, CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];

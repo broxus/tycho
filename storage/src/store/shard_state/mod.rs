@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -100,7 +101,7 @@ impl ShardStateStorage {
         &self,
         handle: &BlockHandle,
         root_cell: Cell,
-        root_data_cells: FastHashMap<ShardIdent, Cell>,
+        root_data_cells: BTreeMap<u64, Cell>,
         hint: StoreStateHint,
     ) -> Result<bool> {
         if handle.has_state() {
@@ -205,17 +206,15 @@ impl ShardStateStorage {
         let shard_state = cell.parse::<Box<ShardStateUnsplit>>()?;
 
         let accounts = &shard_state.accounts;
-        let workchain = block_id.shard.workchain();
 
-        let mut accounts_roots = FastHashMap::with_capacity(accounts.iter().count());
+        let mut accounts_roots = BTreeMap::new();
         for item in accounts.iter() {
-            let (shard, cell_id) = item?;
-            let shard_id = unsafe { ShardIdent::new_unchecked(workchain, shard) };
+            let (shard_prefix, cell_id) = item?;
 
             let cell = self.cell_storage.load_cell(cell_id)?;
             let shard_state_data = ShardStateData::from_root(Cell::from(cell as Arc<_>))?;
 
-            accounts_roots.insert(shard_id, shard_state_data);
+            accounts_roots.insert(shard_prefix, shard_state_data);
         }
 
         ShardStateStuff::from_state_and_root(

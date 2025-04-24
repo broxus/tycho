@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufWriter, Read, Seek, Write};
 use std::sync::Arc;
@@ -226,8 +227,8 @@ impl StoreStateContext {
                 let cell_id = HashBytes::from_slice(&root[..32]);
                 let cell = self.cell_storage.load_cell(cell_id)?;
 
-                // TODO: save and load shard state data
-                let data_roots = FastHashMap::default();
+                // TODO: load shard state data
+                let data_roots = BTreeMap::new();
 
                 Ok(ShardStateStuff::from_root(
                     block_id,

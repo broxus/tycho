@@ -1,14 +1,15 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use everscale_types::boc::Boc;
-use everscale_types::models::{BlockId, ShardAccounts, ShardIdent, ShardStateUnsplit};
+use everscale_types::models::{BlockId, ShardAccounts, ShardStateUnsplit};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::Storage;
-use tycho_util::{serde_helpers, FastHashMap};
+use tycho_util::serde_helpers;
 
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
@@ -130,15 +131,12 @@ fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<Shar
 
     let root_path = path.parent().context("invalid zerostate root path")?;
 
-    let mut shard_accounts: FastHashMap<ShardIdent, ShardAccounts> = FastHashMap::default();
-
-    let workchain = state.shard_ident.workchain();
+    let mut shard_accounts = BTreeMap::new();
 
     for item in state.accounts.iter() {
-        let (shard, root_hash) = item?;
-        let shard_id = unsafe { ShardIdent::new_unchecked(workchain, shard) };
+        let (shard_prefix, root_hash) = item?;
 
-        let mut filename = shard_id.to_string();
+        let mut filename = shard_prefix.to_string();
         filename.push(':');
         filename.push_str(&root_hash.to_string());
 
@@ -150,7 +148,7 @@ fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<Shar
             .parse::<ShardAccounts>()
             .context("failed to parse accounts")?;
 
-        shard_accounts.insert(shard_id, accounts);
+        shard_accounts.insert(shard_prefix, accounts);
     }
 
     ShardStateStuff::from_root_and_accounts(&block_id, root, shard_accounts, tracker)

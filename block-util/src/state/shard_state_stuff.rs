@@ -1,10 +1,10 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use tycho_util::FastHashMap;
 
 use crate::state::shard_state_data::ShardStateData;
 use crate::state::{MinRefMcStateTracker, RefMcStateHandle};
@@ -28,7 +28,7 @@ impl ShardStateStuff {
     pub fn from_root(
         block_id: &BlockId,
         root: Cell,
-        data_roots: FastHashMap<ShardIdent, Cell>,
+        data_roots: BTreeMap<u64, Cell>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
         let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
@@ -36,7 +36,7 @@ impl ShardStateStuff {
         let shard_state_data = data_roots
             .into_iter()
             .map(|(k, cell)| ShardStateData::from_root(cell).map(|v| (k, v)))
-            .collect::<Result<FastHashMap<ShardIdent, ShardStateData>>>()?;
+            .collect::<Result<BTreeMap<u64, ShardStateData>>>()?;
 
         Self::from_state_and_root(block_id, root, shard_state, shard_state_data, tracker)
     }
@@ -44,7 +44,7 @@ impl ShardStateStuff {
     pub fn from_root_and_accounts(
         block_id: &BlockId,
         root: Cell,
-        state_data: FastHashMap<ShardIdent, ShardAccounts>,
+        state_data: BTreeMap<u64, ShardAccounts>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
         let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
@@ -52,7 +52,7 @@ impl ShardStateStuff {
         let shard_state_data = state_data
             .into_iter()
             .map(|(k, acc)| ShardStateData::from_accounts(acc).map(|v| (k, v)))
-            .collect::<Result<FastHashMap<ShardIdent, ShardStateData>>>()?;
+            .collect::<Result<BTreeMap<_, _>>>()?;
 
         Self::from_state_and_root(block_id, root, shard_state, shard_state_data, tracker)
     }
@@ -61,7 +61,7 @@ impl ShardStateStuff {
         block_id: &BlockId,
         root: Cell,
         shard_state: Box<ShardStateUnsplit>,
-        shard_state_data: FastHashMap<ShardIdent, ShardStateData>,
+        shard_state_data: BTreeMap<u64, ShardStateData>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
         anyhow::ensure!(
@@ -115,7 +115,7 @@ impl ShardStateStuff {
         &self.inner.root
     }
 
-    pub fn data_root_cells(&self) -> FastHashMap<ShardIdent, Cell> {
+    pub fn data_root_cells(&self) -> BTreeMap<u64, Cell> {
         self.inner
             .shard_state_data
             .iter()
@@ -123,7 +123,7 @@ impl ShardStateStuff {
             .collect()
     }
 
-    pub fn load_accounts(&self) -> FastHashMap<ShardIdent, ShardAccounts> {
+    pub fn load_accounts(&self) -> BTreeMap<u64, ShardAccounts> {
         self.inner
             .shard_state_data
             .iter()
@@ -175,7 +175,7 @@ unsafe impl arc_swap::RefCnt for ShardStateStuff {
 pub struct Inner {
     block_id: BlockId,
     shard_state: Box<ShardStateUnsplit>,
-    shard_state_data: FastHashMap<ShardIdent, ShardStateData>,
+    shard_state_data: BTreeMap<u64, ShardStateData>,
     shard_state_extra: Option<McStateExtra>,
     handle: RefMcStateHandle,
     root: Cell,
