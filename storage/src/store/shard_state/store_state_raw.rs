@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::cell::*;
-use everscale_types::models::BlockId;
+use everscale_types::models::{BlockId, ShardStateUnsplit};
 use everscale_types::util::ArrayVec;
 use tycho_block_util::state::*;
 use tycho_util::io::ByteOrderRead;
@@ -225,15 +225,27 @@ impl StoreStateContext {
         match self.db.shard_states.get(shard_state_key)? {
             Some(root) => {
                 let cell_id = HashBytes::from_slice(&root[..32]);
-                let cell = self.cell_storage.load_cell(cell_id)?;
+                let root_cell = Cell::from(self.cell_storage.load_cell(cell_id)? as Arc<_>);
 
-                // TODO: load shard state data
-                let data_roots = BTreeMap::new();
+                let shard_state = root_cell.parse::<Box<ShardStateUnsplit>>()?;
 
-                Ok(ShardStateStuff::from_root(
+                let mut data_roots = BTreeMap::new();
+                for item in shard_state.accounts.iter() {
+                    let (shard_prefix, cell) = item?;
+                    let cell = self.cell_storage.load_cell(cell)?;
+                    data_roots.insert(shard_prefix, Cell::from(cell as Arc<_>));
+                }
+
+                let shard_state_data = data_roots
+                    .into_iter()
+                    .map(|(k, cell)| ShardStateData::from_root(cell).map(|v| (k, v)))
+                    .collect::<Result<BTreeMap<u64, ShardStateData>>>()?;
+
+                Ok(ShardStateStuff::from_state_and_root(
                     block_id,
-                    Cell::from(cell as Arc<_>),
-                    data_roots,
+                    root_cell,
+                    shard_state,
+                    shard_state_data,
                     &self.min_ref_mc_state,
                 )?)
             }

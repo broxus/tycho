@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use ahash::HashMapExt;
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
 use everscale_types::models::*;
