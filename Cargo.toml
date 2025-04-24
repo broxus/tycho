@@ -141,6 +141,7 @@ everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev =
 future_incompatible = "warn"
 nonstandard_style = "warn"
 rust_2018_idioms = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tycho_unstable)'] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
