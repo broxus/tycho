@@ -117,6 +117,7 @@ impl ShardStateStorage {
         let block_id = *handle.id();
         let raw_db = self.db.rocksdb().clone();
         let cf = self.db.shard_states.get_unbounded_cf();
+        let shard_state_data_cf = self.db.shard_state_data.get_unbounded_cf();
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
@@ -139,12 +140,22 @@ impl ShardStateStorage {
 
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
-            for (_, data_root_cell) in root_data_cells.iter() {
+            for (shard_prefix, data_root_cell) in root_data_cells.iter() {
                 let cells_count = cell_storage.store_cell(
                     &mut batch,
                     data_root_cell.as_ref(),
                     estimated_merkle_update_size,
                 )?;
+
+                let mut key = [0u8; tables::ShardStateData::KEY_LEN];
+                key[..80].copy_from_slice(&block_id.to_vec());
+                key[80..].copy_from_slice(&shard_prefix.to_be_bytes());
+
+                batch.put_cf(
+                    &shard_state_data_cf.bound(),
+                    block_id.to_vec(),
+                    data_root_cell.repr_hash().as_slice(),
+                );
 
                 new_cell_count += cells_count;
             }
@@ -226,13 +237,7 @@ impl ShardStateStorage {
     }
 
     #[tracing::instrument(skip(self))]
-    pub async fn remove_outdated_states(&self, mc_seqno: u32) -> Result<()> {
-        // Compute recent block ids for the specified masterchain seqno
-        let Some(top_blocks) = self.compute_recent_blocks(mc_seqno).await? else {
-            tracing::warn!("recent blocks edge not found");
-            return Ok(());
-        };
-
+    pub async fn remove_outdated_states(&self, top_blocks: &TopBlocks) -> Result<()> {
         tracing::info!(
             target_block_id = %top_blocks.mc_block,
             "started states GC",
@@ -243,6 +248,7 @@ impl ShardStateStorage {
 
         // Manually get required column factory and r/w options
         let snapshot = raw.snapshot();
+
         let shard_states_cf = self.db.shard_states.get_unbounded_cf();
         let mut states_read_options = self.db.shard_states.new_read_config();
         states_read_options.set_snapshot(&snapshot);
@@ -322,6 +328,103 @@ impl ShardStateStorage {
             block_id = %top_blocks.mc_block,
             elapsed_sec = started_at.elapsed().as_secs_f64(),
             "finished states GC",
+        );
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub async fn remove_outdated_state_data(&self, top_blocks: &TopBlocks) -> Result<()> {
+        tracing::info!(
+            target_block_id = %top_blocks.mc_block,
+            "started states data GC",
+        );
+        let started_at = Instant::now();
+
+        let raw = self.db.rocksdb();
+
+        // Manually get required column factory and r/w options
+        let snapshot = raw.snapshot();
+
+        let shard_state_data_cf = self.db.shard_state_data.get_unbounded_cf();
+        let mut state_data_read_options = self.db.shard_state_data.new_read_config();
+        state_data_read_options.set_snapshot(&snapshot);
+
+        let mut alloc = bumpalo::Bump::new();
+
+        // Create iterator
+        let mut iter =
+            raw.raw_iterator_cf_opt(&shard_state_data_cf.bound(), state_data_read_options);
+        iter.seek_to_first();
+
+        // Iterate all states and remove outdated
+        let mut removed_states = 0usize;
+        let mut removed_cells = 0usize;
+        loop {
+            let _hist = HistogramGuard::begin("tycho_storage_state_data_gc_time");
+            let (key, value) = match iter.item() {
+                Some(item) => item,
+                None => match iter.status() {
+                    Ok(()) => break,
+                    Err(e) => return Err(e.into()),
+                },
+            };
+
+            let block_id = BlockId::from_slice(&key[..32]);
+            let root_hash = HashBytes::from_slice(value);
+
+            // Skip blocks from zero state and top blocks
+            if block_id.seqno == 0
+                || top_blocks.contains_shard_seqno(&block_id.shard, block_id.seqno)
+            {
+                iter.next();
+                continue;
+            }
+
+            alloc.reset();
+
+            {
+                let _guard = self.gc_lock.lock().await;
+
+                let db = self.db.clone();
+                let cell_storage = self.cell_storage.clone();
+                let key = key.to_vec();
+
+                let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
+                    let (stats, mut batch) = cell_storage.remove_cell(&alloc, &root_hash)?;
+
+                    batch.delete_cf(&db.shard_state_data.get_unbounded_cf().bound(), key);
+                    db.raw()
+                        .rocksdb()
+                        .write_opt(batch, db.cells.write_config())?;
+
+                    Ok::<_, anyhow::Error>((stats, alloc))
+                })
+                .await??;
+
+                removed_cells += total;
+                alloc = inner_alloc; // Reuse allocation without passing alloc by ref
+
+                tracing::debug!(removed_cells = total, %block_id);
+            }
+
+            removed_states += 1;
+            iter.next();
+
+            metrics::counter!("tycho_storage_state_data_gc_count").increment(1);
+            metrics::counter!("tycho_storage_state_data_gc_cells_count").increment(1);
+            if block_id.is_masterchain() {
+                metrics::gauge!("tycho_gc_state_data_seqno").set(block_id.seqno as f64);
+            }
+            tracing::debug!(removed_states, removed_cells, %block_id, "removed state data");
+        }
+
+        // Done
+        tracing::info!(
+            removed_states,
+            removed_cells,
+            block_id = %top_blocks.mc_block,
+            elapsed_sec = started_at.elapsed().as_secs_f64(),
+            "finished state data GC",
         );
         Ok(())
     }
