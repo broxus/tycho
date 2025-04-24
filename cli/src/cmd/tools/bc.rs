@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use everscale_crypto::ed25519;
 use everscale_types::abi::extend_signature_with_id;
 use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, CellBuilder, CellSliceRange};
+use everscale_types::cell::{Cell, CellBuilder};
 use everscale_types::models::{
     AccountState, BlockchainConfigParams, ExtInMsgInfo, GlobalCapability, MsgInfo, OwnedMessage,
     StdAddr,
@@ -340,7 +340,6 @@ fn create_message(
     builder.prepend_raw(&signature, 512)?;
 
     let body = builder.build()?;
-    let body_range = CellSliceRange::full(body.as_ref());
 
     let message = Box::new(OwnedMessage {
         info: MsgInfo::ExtIn(ExtInMsgInfo {
@@ -348,7 +347,7 @@ fn create_message(
             ..Default::default()
         }),
         init: None,
-        body: (body, body_range),
+        body: body.into(),
         layout: None,
     });
 

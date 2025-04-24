@@ -275,12 +275,10 @@ mod test {
             let body = make_big_tree(8, &mut count, ExtMsgRepr::MAX_MSG_CELLS as u16 - 100);
             println!("{count}");
 
-            let body_range = CellSliceRange::full(body.as_ref());
-
             CellBuilder::build_from(OwnedMessage {
                 info: MsgInfo::ExtIn(Default::default()),
                 init: None,
-                body: (body, body_range),
+                body: body.into(),
                 layout: None,
             })?
         });
@@ -294,12 +292,11 @@ mod test {
             let body = MerkleProof::create(leaf_proof.as_ref(), AlwaysInclude)
                 .build()
                 .and_then(CellBuilder::build_from)?;
-            let body_range = CellSliceRange::full(body.as_ref());
 
             CellBuilder::build_from(OwnedMessage {
                 info: MsgInfo::ExtIn(Default::default()),
                 init: None,
-                body: (body, body_range),
+                body: body.into(),
                 layout: Some(MessageLayout {
                     body_to_cell: true,
                     init_to_cell: false,
@@ -429,12 +426,10 @@ mod test {
         let mut count = 0;
         let body = make_big_tree(8, &mut count, ExtMsgRepr::MAX_MSG_CELLS as u16 + 100);
 
-        let body_range = CellSliceRange::full(body.as_ref());
-
         let cell = CellBuilder::build_from(OwnedMessage {
             info: MsgInfo::ExtIn(Default::default()),
             init: None,
-            body: (body, body_range),
+            body: body.into(),
             layout: None,
         })?;
 
@@ -453,12 +448,11 @@ mod test {
         let body = MerkleProof::create(inner_proof.as_ref(), AlwaysInclude)
             .build()
             .and_then(CellBuilder::build_from)?;
-        let body_range = CellSliceRange::full(body.as_ref());
 
         let cell = CellBuilder::build_from(OwnedMessage {
             info: MsgInfo::ExtIn(Default::default()),
             init: None,
-            body: (body, body_range),
+            body: body.into(),
             layout: Some(MessageLayout {
                 body_to_cell: true,
                 init_to_cell: false,

@@ -1,4 +1,4 @@
-use everscale_types::cell::{Cell, CellBuilder, CellSliceRange};
+use everscale_types::cell::{Cell, CellBuilder};
 use everscale_types::models::{MsgInfo, OwnedMessage};
 use tycho_block_util::message::ExtMsgRepr;
 
@@ -6,12 +6,10 @@ pub fn create_big_message() -> anyhow::Result<Cell> {
     let mut count = 0;
     let body = make_big_tree(8, &mut count, ExtMsgRepr::MAX_MSG_CELLS as u16 - 100);
 
-    let body_range = CellSliceRange::full(body.as_ref());
-
     let cell = CellBuilder::build_from(OwnedMessage {
         info: MsgInfo::ExtIn(Default::default()),
         init: None,
-        body: (body, body_range),
+        body: body.into(),
         layout: None,
     })?;
 
