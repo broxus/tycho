@@ -369,7 +369,7 @@ impl ShardStateStorage {
                 },
             };
 
-            let block_id = BlockId::from_slice(&key[..32]);
+            let block_id = BlockId::from_slice(&key[..80]);
             let root_hash = HashBytes::from_slice(value);
 
             // Skip blocks from zero state and top blocks
