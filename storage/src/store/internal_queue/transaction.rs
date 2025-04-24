@@ -245,19 +245,6 @@ impl InternalQueueTransaction {
         let db = self.db.rocksdb().as_ref();
         db.write(batch)?;
 
-        for (start_key, end_key) in msgs_to_compact {
-            db.compact_range_cf(messages_cf, Some(start_key), Some(end_key));
-        }
-        for (start_key, end_key) in stats_to_compact {
-            db.compact_range_cf(stats_cf, Some(start_key), Some(end_key));
-        }
-        for (start_key, end_key) in diffs_tail_to_compact {
-            db.compact_range_cf(diffs_tail_cf, Some(start_key), Some(end_key));
-        }
-        for (start_key, end_key) in diff_info_to_compact {
-            db.compact_range_cf(diff_info_cf, Some(start_key), Some(end_key));
-        }
-
         Ok(())
     }
 

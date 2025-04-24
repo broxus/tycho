@@ -53,30 +53,6 @@ impl ColumnFamilyOptions<Caches> for ArchiveBlockIds {
     }
 }
 
-/// Stores split archives
-/// - Key: `u32 (BE)` (archive id) + `u64 (BE)` (chunk index)
-/// - Value: `Vec<u8>` (archive data chunk)
-pub struct Archives;
-
-impl Archives {
-    pub const KEY_LEN: usize = 4 + 8;
-}
-
-impl ColumnFamily for Archives {
-    const NAME: &'static str = "archives";
-}
-
-impl ColumnFamilyOptions<Caches> for Archives {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
-        optimize_for_level_compaction(opts, ByteSize::mib(512u64));
-
-        // data is already compressed
-        opts.set_compression_type(DBCompressionType::None);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
-    }
-}
-
 /// Maps block root hash to block meta
 /// - Key: `[u8; 32]`
 /// - Value: `BlockMeta`
@@ -139,6 +115,36 @@ impl ColumnFamilyOptions<Caches> for FullBlockIds {
     }
 }
 
+// === HEAVY STUFF ===
+
+/// Stores split archives
+/// - Key: `u32 (BE)` (archive id) + `u64 (BE)` (chunk index)
+/// - Value: `Vec<u8>` (archive data chunk)
+pub struct Archives;
+
+impl Archives {
+    pub const KEY_LEN: usize = 4 + 8;
+}
+
+impl ColumnFamily for Archives {
+    const NAME: &'static str = "archives";
+}
+
+impl ColumnFamilyOptions<Caches> for Archives {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        default_block_based_table_factory(opts, caches);
+        optimize_for_level_compaction(opts, ByteSize::mib(512u64));
+
+        // data is already compressed
+        opts.set_compression_type(DBCompressionType::None);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
+
+        opts.set_max_write_buffer_number(8); // 8 * 512MB = 4GB;
+        opts.set_write_buffer_size(512 * 1024 * 1024); // 512 per memtable
+        opts.set_min_write_buffer_number_to_merge(2); // allow early flush
+    }
+}
+
 /// Maps package entry id to entry data
 /// - Key: `BlockIdShort (16 bytes), [u8; 32], package type (1 byte)` <=> (`PackageEntryKey`)
 /// - Value: `Vec<u8>` (block/proof/queue diff data)
@@ -157,61 +163,11 @@ impl ColumnFamilyOptions<Caches> for PackageEntries {
         default_block_based_table_factory(opts, caches);
         opts.set_compression_type(DBCompressionType::Zstd);
 
-        // This flag specifies that the implementation should optimize the filters
-        // mainly for cases where keys are found rather than also optimize for keys
-        // missed. This would be used in cases where the application knows that
-        // there are very few misses or the performance in the case of misses is not
-        // important.
-        //
-        // For now, this flag allows us to not store filters for the last level i.e
-        // the largest level which contains data of the LSM store. For keys which
-        // are hits, the filters in this level are not useful because we will search
-        // for the data anyway. NOTE: the filters in other levels are still useful
-        // even for key hit because they tell us whether to look in that level or go
-        // to the higher level.
-        // https://github.com/facebook/rocksdb/blob/81aeb15988e43c49952c795e32e5c8b224793589/include/rocksdb/advanced_options.h#L846
-        opts.set_optimize_filters_for_hits(true);
+        opts.set_max_write_buffer_number(8); // 8 * 512MB = 4GB;
+        opts.set_write_buffer_size(512 * 1024 * 1024); // 512 per memtable
+        opts.set_min_write_buffer_number_to_merge(2); // allow early flush
+
         with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::Zstd);
-    }
-}
-
-/// Maps block id to compressed block data
-/// - Key: `BlockIdShort (16 bytes), [u8; 32], chunk index (4 byte)`
-/// - Value: `Vec<u8>`
-pub struct BlockDataEntries;
-
-impl BlockDataEntries {
-    pub const KEY_LEN: usize = 4 + 8 + 4 + 32 + 4;
-}
-
-impl ColumnFamily for BlockDataEntries {
-    const NAME: &'static str = "block_data_entries";
-}
-
-impl ColumnFamilyOptions<Caches> for BlockDataEntries {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
-        optimize_for_level_compaction(opts, ByteSize::mib(512u64));
-
-        // data is already compressed
-        opts.set_compression_type(DBCompressionType::None);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
-    }
-}
-
-/// Maps `BlockId` to root cell hash
-/// - Key: `BlockId`
-/// - Value: `[u8; 32]`
-pub struct ShardStates;
-
-impl ColumnFamily for ShardStates {
-    const NAME: &'static str = "shard_states";
-}
-
-impl ColumnFamilyOptions<Caches> for ShardStates {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
-        opts.set_compression_type(DBCompressionType::Zstd);
     }
 }
 
@@ -333,6 +289,48 @@ impl ColumnFamilyOptions<Caches> for Cells {
     }
 }
 
+// === HEAVY STUFF END ===
+
+/// Maps block id to compressed block data
+/// - Key: `BlockIdShort (16 bytes), [u8; 32], chunk index (4 byte)`
+/// - Value: `Vec<u8>`
+pub struct BlockDataEntries;
+
+impl BlockDataEntries {
+    pub const KEY_LEN: usize = 4 + 8 + 4 + 32 + 4;
+}
+
+impl ColumnFamily for BlockDataEntries {
+    const NAME: &'static str = "block_data_entries";
+}
+
+impl ColumnFamilyOptions<Caches> for BlockDataEntries {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        default_block_based_table_factory(opts, caches);
+        optimize_for_level_compaction(opts, ByteSize::mib(512u64));
+
+        // data is already compressed
+        opts.set_compression_type(DBCompressionType::None);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
+    }
+}
+
+/// Maps `BlockId` to root cell hash
+/// - Key: `BlockId`
+/// - Value: `[u8; 32]`
+pub struct ShardStates;
+
+impl ColumnFamily for ShardStates {
+    const NAME: &'static str = "shard_states";
+}
+
+impl ColumnFamilyOptions<Caches> for ShardStates {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        default_block_based_table_factory(opts, caches);
+        opts.set_compression_type(DBCompressionType::Zstd);
+    }
+}
+
 /// Stores temp cells data
 /// - Key: `ton_types::UInt256` (cell repr hash)
 /// - Value: `StorageCell`
@@ -421,7 +419,6 @@ fn internal_queue_options(opts: &mut Options, caches: &mut Caches) {
     block_factory.set_format_version(6);
 
     opts.set_block_based_table_factory(&block_factory);
-    opts.set_disable_auto_compactions(true);
     opts.set_compression_type(DBCompressionType::None);
 
     opts.set_level_compaction_dynamic_level_bytes(true);

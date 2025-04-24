@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
@@ -347,6 +348,15 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
             .set(diff.messages.len() as f64);
 
         tx.write()?;
+
+        let elapsed = _histogram.finish();
+        if elapsed > Duration::from_secs(2) {
+            tracing::warn!(
+                "batchwrite len: {batch_len}, size_bytes: {}, elapsed: {}",
+                bytesize::ByteSize::b(batch_size as u64),
+                elapsed.as_secs_f64(),
+            );
+        }
 
         Ok(())
     }
