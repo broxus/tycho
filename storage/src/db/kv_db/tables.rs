@@ -395,14 +395,7 @@ impl ColumnFamily for ShardInternalMessages {
 
 impl ColumnFamilyOptions<Caches> for ShardInternalMessages {
     fn options(opts: &mut Options, caches: &mut Caches) {
-        let mut block_factory = BlockBasedOptions::default();
-        block_factory.set_block_cache(&caches.block_cache);
-        opts.set_block_based_table_factory(&block_factory);
-
-        // we will trigger compactions manually
-        opts.set_disable_auto_compactions(true);
-        // it's temporary fifo like storage, so we don't need to compress it
-        opts.set_compression_type(DBCompressionType::None);
+        internal_queue_options(opts, caches);
         with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
     }
 }
@@ -418,8 +411,25 @@ impl ColumnFamily for InternalMessageStatistics {
 
 impl ColumnFamilyOptions<Caches> for InternalMessageStatistics {
     fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+        internal_queue_options(opts, caches);
     }
+}
+
+fn internal_queue_options(opts: &mut Options, caches: &mut Caches) {
+    let mut block_factory = BlockBasedOptions::default();
+    block_factory.set_block_cache(&caches.block_cache);
+    block_factory.set_format_version(6);
+
+    opts.set_block_based_table_factory(&block_factory);
+    opts.set_disable_auto_compactions(true);
+    opts.set_compression_type(DBCompressionType::None);
+
+    opts.set_level_compaction_dynamic_level_bytes(true);
+
+    // optimize for bulk inserts and single writer
+    opts.set_max_write_buffer_number(8); // 8 * 512MB = 4GB
+    opts.set_min_write_buffer_number_to_merge(2); // allow early flush
+    opts.set_write_buffer_size(256 * 1024 * 1024); // 512 per memtable
 }
 
 // TODO should be deleted
@@ -488,7 +498,7 @@ impl ColumnFamily for InternalMessageVar {
 
 impl ColumnFamilyOptions<Caches> for InternalMessageVar {
     fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+        internal_queue_options(opts, caches);
     }
 }
 pub struct InternalMessageDiffsTail;
@@ -502,7 +512,7 @@ impl ColumnFamily for InternalMessageDiffsTail {
 
 impl ColumnFamilyOptions<Caches> for InternalMessageDiffsTail {
     fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+        internal_queue_options(opts, caches);
     }
 }
 
@@ -517,7 +527,7 @@ impl ColumnFamily for InternalMessageDiffInfo {
 
 impl ColumnFamilyOptions<Caches> for InternalMessageDiffInfo {
     fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+        internal_queue_options(opts, caches);
     }
 }
 
@@ -532,25 +542,9 @@ impl ColumnFamily for InternalMessageCommitPointer {
 
 impl ColumnFamilyOptions<Caches> for InternalMessageCommitPointer {
     fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+        internal_queue_options(opts, caches);
     }
 }
-
-pub struct InternalMessageDiffInfoUncommitted;
-impl ColumnFamily for InternalMessageDiffInfoUncommitted {
-    const NAME: &'static str = "int_msg_diff_info_uncommitted";
-
-    fn read_options(opts: &mut ReadOptions) {
-        opts.set_verify_checksums(true);
-    }
-}
-
-impl ColumnFamilyOptions<Caches> for InternalMessageDiffInfoUncommitted {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-    }
-}
-
 fn archive_data_merge(
     _: &[u8],
     current_value: Option<&[u8]>,
@@ -596,7 +590,7 @@ fn default_block_based_table_factory(opts: &mut Options, caches: &Caches) {
     opts.set_level_compaction_dynamic_level_bytes(true);
     let mut block_factory = BlockBasedOptions::default();
     block_factory.set_block_cache(&caches.block_cache);
-    block_factory.set_format_version(5);
+    block_factory.set_format_version(6);
     opts.set_block_based_table_factory(&block_factory);
 }
 

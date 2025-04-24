@@ -1431,6 +1431,18 @@ def collator_queue_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_internal_queue_write_diff_time", "Apply diff: write diff time"
         ),
+        create_gauge_panel(
+            "tycho_internal_queue_write_diff_batch_len",
+            "Apply diff: write diff batch len",
+        ),
+        create_gauge_panel(
+            "tycho_internal_queue_write_diff_batch_size",
+            "Apply diff: write diff batch size",
+        ),
+        create_gauge_panel(
+            "tycho_internal_queue_write_diff_messages_count",
+            "Apply diff: write diff messages count",
+        ),
     ]
     return create_row("collator: Queue Metrics", metrics)
 

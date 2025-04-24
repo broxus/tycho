@@ -20,6 +20,10 @@ pub struct InternalQueueTransaction {
 }
 
 impl InternalQueueTransaction {
+    pub fn size(&self) -> (usize, usize) {
+        (self.batch.len(), self.batch.size_in_bytes())
+    }
+
     pub fn write(self) -> Result<()> {
         self.db
             .rocksdb()
