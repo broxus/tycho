@@ -9,6 +9,7 @@ use everscale_types::merkle::*;
 use everscale_types::models::{ShardIdent, *};
 use everscale_types::prelude::*;
 use humantime::format_duration;
+use parking_lot::Mutex;
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
@@ -571,11 +572,11 @@ impl Phase<FinalizeState> {
                 &usage_tree,
             )?;
 
-            let mut state_data_merkle_update = Dict::new();
+            let state_data_merkle_update = Arc::new(Mutex::new(Dict::new()));
 
             let prev_roots = self.state.prev_shard_data.pure_state_data_roots();
-            for (id, new_state) in &new_observable_state_data {
-                rayon::scope(|s| {
+            rayon::scope(|s| {
+                for (id, new_state) in &new_observable_state_data {
                     let prev_root = prev_roots.get(id).unwrap();
                     let usage_tree = usage_trees.get(id).unwrap();
                     s.spawn(|_| {
@@ -588,13 +589,19 @@ impl Phase<FinalizeState> {
                         .unwrap();
 
                         state_data_merkle_update
+                            .lock()
                             .set(*id, Lazy::new(&merkle_update).unwrap())
                             .unwrap();
                     });
-                });
-            }
+                }
+            });
+
+            let state_data_merkle_update = Arc::try_unwrap(state_data_merkle_update)
+                .unwrap()
+                .into_inner();
 
             build_state_update_elapsed = histogram.finish();
+
             (
                 merkle_update,
                 state_data_merkle_update,
