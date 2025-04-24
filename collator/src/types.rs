@@ -40,9 +40,13 @@ impl Default for CollatorConfig {
             min_mc_block_delta_from_bc_to_sync: 3,
             check_value_flow: false,
             validate_config: true,
-            fast_sync: false,
+            fast_sync: true,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize)]
@@ -50,7 +54,7 @@ struct PartialCollatorConfig {
     min_mc_block_delta_from_bc_to_sync: u32,
     check_value_flow: bool,
     validate_config: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     fast_sync: bool,
 }
 
