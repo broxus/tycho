@@ -70,6 +70,7 @@ impl Phase<PrepareState> {
                 disable_delete_frozen_accounts: true,
                 full_body_in_bounced: capabilities.contains(GlobalCapability::CapFullBodyInBounced),
                 charge_action_fees_on_fail: true,
+                strict_extra_currency: true,
                 vm_modifiers: tycho_vm::BehaviourModifiers {
                     signature_with_id: capabilities
                         .contains(GlobalCapability::CapSignatureWithId)

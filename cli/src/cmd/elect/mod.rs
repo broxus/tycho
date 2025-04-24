@@ -969,7 +969,6 @@ impl Wallet {
             .with_pubkey(&self.public)
             .build_input()?
             .sign(&self.secret, self.signature_id)?;
-        let body_range = CellSliceRange::full(body.as_ref());
 
         let message = OwnedMessage {
             info: MsgInfo::ExtIn(ExtInMsgInfo {
@@ -978,7 +977,7 @@ impl Wallet {
                 ..Default::default()
             }),
             init,
-            body: (body, body_range),
+            body: body.into(),
             layout: None,
         };
         let message_cell = CellBuilder::build_from(message)?;

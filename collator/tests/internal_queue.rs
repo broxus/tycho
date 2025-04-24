@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use everscale_types::cell::{Cell, CellSliceRange, HashBytes, Lazy};
+use everscale_types::cell::{Cell, HashBytes, Lazy};
 use everscale_types::models::{
     AccountStatus, BlockId, BlockIdShort, ComputePhase, ComputePhaseSkipReason, CurrencyCollection,
     HashUpdate, IntAddr, IntMsgInfo, IntermediateAddr, MsgEnvelope, MsgInfo, OrdinaryTxInfo,
@@ -900,15 +900,13 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
         .unwrap(),
     };
 
-    let message_body = Cell::default();
-
     let message1 = Lazy::new(&OwnedMessage {
         info: MsgInfo::Int(IntMsgInfo {
             created_lt: 0x01,
             ..Default::default()
         }),
         init: None,
-        body: (message_body.clone(), CellSliceRange::default()),
+        body: Default::default(),
         layout: None,
     })
     .unwrap();
@@ -929,7 +927,7 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
             ..Default::default()
         }),
         init: None,
-        body: (message_body.clone(), CellSliceRange::default()),
+        body: Default::default(),
         layout: None,
     })
     .unwrap();
@@ -950,7 +948,7 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
             ..Default::default()
         }),
         init: None,
-        body: (message_body.clone(), CellSliceRange::default()),
+        body: Default::default(),
         layout: None,
     })
     .unwrap();
