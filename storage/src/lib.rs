@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tycho_util::metrics::spawn_metrics_loop;
 use weedb::rocksdb;
+use weedb::rocksdb::Env;
 
 pub use self::config::*;
 pub use self::db::*;
@@ -72,8 +73,20 @@ impl StorageBuilder {
             opts.create_missing_column_families(true);
 
             // cpu
-            opts.set_max_background_jobs(std::cmp::max((threads as i32) / 2, 2));
-            opts.increase_parallelism(threads as i32);
+            // https://github.com/facebook/rocksdb/blob/0560544e86c1f97f8d1da348f2647aadaefbd095/options/options.cc#L680-L685
+            // docs are lying as always
+            // so fuck this deprecation warning
+            #[allow(deprecated)]
+            opts.set_max_background_flushes(threads as i32 / 2);
+            #[allow(deprecated)]
+            opts.set_max_background_compactions(threads as i32 / 2);
+
+            let mut env = Env::new().expect("Failed to create rocksdb env");
+            env.set_background_threads(threads as i32 / 2);
+            env.set_low_priority_background_threads(threads as i32 / 2);
+            env.set_high_priority_background_threads(threads as i32 / 2);
+
+            opts.set_env(&env);
 
             opts.set_allow_concurrent_memtable_write(false);
 
