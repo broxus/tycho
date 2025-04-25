@@ -74,6 +74,10 @@ impl ColumnFamilyOptions<Caches> for Archives {
         // data is already compressed
         opts.set_compression_type(DBCompressionType::None);
         with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
+
+        opts.set_max_write_buffer_number(8); // 8 * 512MB = 4GB;
+        opts.set_write_buffer_size(512 * 1024 * 1024); // 512 per memtable
+        opts.set_min_write_buffer_number_to_merge(2); // allow early flush
     }
 }
 
@@ -157,6 +161,12 @@ impl ColumnFamilyOptions<Caches> for PackageEntries {
         default_block_based_table_factory(opts, caches);
         opts.set_compression_type(DBCompressionType::Zstd);
 
+        opts.set_max_write_buffer_number(8); // 8 * 512MB = 4GB;
+        opts.set_write_buffer_size(512 * 1024 * 1024); // 512 per memtable
+        opts.set_min_write_buffer_number_to_merge(2); // allow early flush
+
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::Zstd);
+
         // This flag specifies that the implementation should optimize the filters
         // mainly for cases where keys are found rather than also optimize for keys
         // missed. This would be used in cases where the application knows that
@@ -171,7 +181,6 @@ impl ColumnFamilyOptions<Caches> for PackageEntries {
         // to the higher level.
         // https://github.com/facebook/rocksdb/blob/81aeb15988e43c49952c795e32e5c8b224793589/include/rocksdb/advanced_options.h#L846
         opts.set_optimize_filters_for_hits(true);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::Zstd);
     }
 }
 
