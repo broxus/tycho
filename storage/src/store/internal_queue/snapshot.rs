@@ -12,7 +12,7 @@ use crate::model::{
 };
 use crate::store::internal_queue::iterator::InternalQueueMessagesIter;
 use crate::util::StoredValue;
-use crate::{BaseDb, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY};
+use crate::{InternalQueueDB, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY};
 
 pub type AccountStatistics = FastHashMap<IntAddr, u64>;
 pub type SeparatedStatisticsByPartitions =
@@ -20,7 +20,7 @@ pub type SeparatedStatisticsByPartitions =
 
 /// Represents a snapshot of the internal queue in the database.
 pub struct InternalQueueSnapshot {
-    pub db: BaseDb,
+    pub db: InternalQueueDB,
     pub snapshot: OwnedSnapshot,
 }
 
