@@ -12,14 +12,18 @@ use crate::model::{
     ShardsInternalMessagesKey, StatKey,
 };
 use crate::util::StoredValue;
-use crate::{BaseDb, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY};
+use crate::{InternalQueueDB, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY};
 pub struct InternalQueueTransaction {
-    pub db: BaseDb,
+    pub db: InternalQueueDB,
     pub batch: WriteBatch,
     pub buffer: Vec<u8>,
 }
 
 impl InternalQueueTransaction {
+    pub fn size(&self) -> (usize, usize) {
+        (self.batch.len(), self.batch.size_in_bytes())
+    }
+
     pub fn write(self) -> Result<()> {
         self.db
             .rocksdb()

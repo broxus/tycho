@@ -28,6 +28,7 @@ const BASE_DB_SUBDIR: &str = "base";
 const RPC_DB_SUBDIR: &str = "rpc";
 const FILES_SUBDIR: &str = "files";
 const MEMPOOL_SUBDIR: &str = "mempool";
+const INT_QUEUE_SUBDIR: &str = "int_queue";
 
 pub struct StorageBuilder {
     config: StorageConfig,
@@ -156,12 +157,20 @@ impl StorageBuilder {
 
         let rpc_state = rpc_db.map(RpcStorage::new);
 
-        let internal_queue_storage = InternalQueueStorage::new(base_db.clone());
-
         temp_file_storage.remove_outdated_files().await?;
 
         block_storage.finish_block_data().await?;
         block_storage.preload_archive_ids().await?;
+
+        let internal_queue_db = InternalQueueDB::builder_prepared(
+            self.config.root_dir.join(INT_QUEUE_SUBDIR),
+            caches.clone(),
+        )
+        .with_metrics_enabled(self.config.rocksdb_enable_metrics)
+        .with_options(|opts, _| update_options(opts, threads, fdlimit))
+        .build()?;
+
+        let internal_queue_storage = InternalQueueStorage::new(internal_queue_db);
 
         let mempool_db =
             MempoolDb::builder_prepared(self.config.root_dir.join(MEMPOOL_SUBDIR), caches)
