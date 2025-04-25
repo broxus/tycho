@@ -336,7 +336,19 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
 
         let _histogram = HistogramGuard::begin("tycho_internal_queue_write_diff_time");
 
-        tx.write()
+        let labels = [("workchain", block_id_short.shard.workchain().to_string())];
+
+        let (batch_len, batch_size) = tx.size();
+
+        metrics::gauge!("tycho_internal_queue_write_diff_batch_len", &labels).set(batch_len as f64);
+        metrics::gauge!("tycho_internal_queue_write_diff_batch_size", &labels)
+            .set(batch_size as f64);
+        metrics::gauge!("tycho_internal_queue_write_diff_messages_count", &labels)
+            .set(diff.messages.len() as f64);
+
+        tx.write()?;
+
+        Ok(())
     }
 
     fn clear_uncommitted(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()> {

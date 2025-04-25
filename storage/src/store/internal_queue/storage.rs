@@ -12,14 +12,16 @@ use crate::model::{
 use crate::store::internal_queue::snapshot::InternalQueueSnapshot;
 use crate::store::internal_queue::transaction::InternalQueueTransaction;
 use crate::util::StoredValue;
-use crate::{BaseDb, MappedFile, QueueStateReader, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY};
+use crate::{
+    InternalQueueDB, MappedFile, QueueStateReader, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY,
+};
 #[derive(Clone)]
 pub struct InternalQueueStorage {
-    db: BaseDb,
+    db: InternalQueueDB,
 }
 
 impl InternalQueueStorage {
-    pub fn new(db: BaseDb) -> Self {
+    pub fn new(db: InternalQueueDB) -> Self {
         Self { db }
     }
 

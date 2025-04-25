@@ -132,19 +132,12 @@ weedb::tables! {
         pub cells: tables::Cells,
         pub temp_cells: tables::TempCells,
         pub block_connections: tables::BlockConnections,
-        pub internal_message_var: tables::InternalMessageVar,
-        pub internal_message_diffs_tail: tables::InternalMessageDiffsTail,
-        pub internal_message_diff_info: tables::InternalMessageDiffInfo,
-        pub internal_message_commit_pointer: tables::InternalMessageCommitPointer,
-        pub internal_message_stats: tables::InternalMessageStatistics,
-        pub shard_internal_messages: tables::ShardInternalMessages,
 
         // tables are empty, but they cannot be deleted because they are in a storage config
         _shard_internal_messages: tables::ShardInternalMessagesOld,
         _int_msg_stats_uncommited: tables::InternalMessageStatsUncommitedOld,
         _shard_int_msgs_uncommited: tables::ShardInternalMessagesUncommitedOld,
         _internal_message_stats: tables::InternalMessageStatsOld,
-
     }
 }
 
@@ -442,5 +435,33 @@ impl VersionProvider for StateVersionProvider {
         state.insert(Self::DB_NAME_KEY, self.db_name.as_bytes())?;
         state.insert(Self::DB_VERSION_KEY, version)?;
         Ok(())
+    }
+}
+
+// ===  Internal Queue DB ===
+
+pub type InternalQueueDB = WeeDb<InternalQueueTables>;
+
+impl WithMigrations for crate::InternalQueueDB {
+    const NAME: &'static str = "int_queue";
+    const VERSION: Semver = [0, 0, 1];
+
+    fn register_migrations(
+        _migrations: &mut Migrations<Self>,
+        _cancelled: CancellationFlag,
+    ) -> Result<(), MigrationError> {
+        // TODO: register migrations here
+        Ok(())
+    }
+}
+
+weedb::tables! {
+    pub struct InternalQueueTables<Caches> {
+        pub internal_message_var: tables::InternalMessageVar,
+        pub internal_message_diffs_tail: tables::InternalMessageDiffsTail,
+        pub internal_message_diff_info: tables::InternalMessageDiffInfo,
+        pub internal_message_commit_pointer: tables::InternalMessageCommitPointer,
+        pub internal_message_stats: tables::InternalMessageStatistics,
+        pub shard_internal_messages: tables::ShardInternalMessages,
     }
 }
