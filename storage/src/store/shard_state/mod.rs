@@ -153,7 +153,7 @@ impl ShardStateStorage {
 
                 batch.put_cf(
                     &shard_state_data_cf.bound(),
-                    block_id.to_vec(),
+                    key,
                     data_root_cell.repr_hash().as_slice(),
                 );
 
