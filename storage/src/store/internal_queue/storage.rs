@@ -25,6 +25,10 @@ impl InternalQueueStorage {
         Self { db }
     }
 
+    pub fn db(&self) -> &InternalQueueDB {
+        &self.db
+    }
+
     pub fn begin_transaction(&self) -> InternalQueueTransaction {
         InternalQueueTransaction {
             db: self.db.clone(),
