@@ -436,9 +436,9 @@ fn internal_queue_options(opts: &mut Options, caches: &mut Caches) {
     opts.set_level_compaction_dynamic_level_bytes(true);
 
     // optimize for bulk inserts and single writer
-    opts.set_max_write_buffer_number(8); // 8 * 512MB = 4GB
+    opts.set_max_write_buffer_number(2); // 2 * 256MB = 512MB
     opts.set_min_write_buffer_number_to_merge(2); // allow early flush
-    opts.set_write_buffer_size(256 * 1024 * 1024); // 512 per memtable
+    opts.set_write_buffer_size(256 * 1024 * 1024); // 256 per memtable
 }
 
 // TODO should be deleted
