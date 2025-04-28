@@ -164,6 +164,10 @@ pub fn is_systemd_child() -> bool {
     #[cfg(target_os = "linux")]
     unsafe {
         libc::getppid() == 1
+            || std::env::var("SYSTEMD_EXEC_PID")
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+                .is_some()
     }
 
     #[cfg(not(target_os = "linux"))]
