@@ -3,11 +3,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::cell::Cell;
-use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_storage::{BlockHandle, Storage, StoreStateHint};
