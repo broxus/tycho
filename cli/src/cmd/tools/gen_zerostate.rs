@@ -3,14 +3,16 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
+use bumpalo::Bump;
 use everscale_crypto::ed25519;
+use everscale_types::boc;
 use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::state::split_shard;
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::{FastHashMap, FastHashSet, FastHasherState};
 
 use crate::util::{compute_storage_used, print_json};
 
@@ -89,14 +91,37 @@ fn generate_zerostate(
         .add_required_accounts()
         .context("failed to add required accounts")?;
 
+    let bump = Bump::new();
+
+    let mut boc = boc::ser::BocHeader::<FastHasherState>::with_capacity(33);
+
     let (state, accounts) = config
         .build_masterchain_state(now)
         .context("failed to build masterchain zerostate")?;
 
-    let boc = CellBuilder::build_from(&state).context("failed to serialize zerostate")?;
+    let state_cell = CellBuilder::build_from(&state).context("failed to serialize zerostate")?;
+    let root_hash = *state_cell.repr_hash();
 
-    let root_hash = *boc.repr_hash();
-    let data = Boc::encode(&boc);
+    boc.add_root(state_cell.as_ref());
+
+    for (prefix, shard_accounts) in &accounts {
+        let prefix_cell = CellBuilder::build_from(prefix).context("failed to serialize prefix")?;
+
+        let cell = &*bump.alloc(prefix_cell);
+        boc.add_root(cell.as_ref());
+
+        let shard_accounts_cell =
+            CellBuilder::build_from(shard_accounts).context("failed to serialize accounts")?;
+
+        let cell = &*bump.alloc(shard_accounts_cell);
+        boc.add_root(cell.as_ref());
+    }
+
+    let boc_size = boc.compute_stats().total_size as usize;
+
+    let mut data = Vec::with_capacity(boc_size);
+    boc.encode(&mut data);
+
     let file_hash = Boc::file_hash_blake(&data);
 
     std::fs::write(output_path, data).context("failed to write masterchain zerostate")?;
@@ -105,25 +130,6 @@ fn generate_zerostate(
         "root_hash": root_hash,
         "file_hash": file_hash,
     });
-
-    {
-        let root_path = output_path
-            .parent()
-            .context("failed to get zerostate root directory")?;
-
-        for (id, shard_accounts) in accounts {
-            let boc =
-                CellBuilder::build_from(&shard_accounts).context("failed to serialize accounts")?;
-            let data = Boc::encode(&boc);
-
-            let mut filename = id.to_string();
-            filename.push(':');
-            filename.push_str(boc.repr_hash().to_string().as_str());
-
-            let path = root_path.join(filename);
-            std::fs::write(path, data).context("failed to write masterchain accounts")?;
-        }
-    }
 
     print_json(hashes)
 }
