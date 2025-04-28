@@ -486,20 +486,38 @@ impl Phase<FinalizeState> {
             );
 
             // compute total wu used from last anchor
-            let new_wu_used_from_last_anchor = wu_used_from_last_anchor
+            let mut new_wu_used_from_last_anchor = wu_used_from_last_anchor
                 .saturating_add(self.extra.execute_result.prepare_msg_groups_wu.total_wu)
                 .saturating_add(self.extra.execute_result.execute_groups_wu_total)
                 .saturating_add(finalize_wu_total);
 
+            // total wu used should cover max the number of rounds
+            // which mempool can be ahead of last applied master block
+            // because mempool will not produce more anchors
+            let max_consensus_lag_rounds = self
+                .state
+                .mc_data
+                .config
+                .get_consensus_config()?
+                .max_consensus_lag_rounds as u64;
+            let wu_used_to_import_next_anchor =
+                self.state.collation_config.wu_used_to_import_next_anchor;
+            let max_wu_used_limit = max_consensus_lag_rounds
+                .saturating_div(4)
+                .saturating_mul(wu_used_to_import_next_anchor);
+
             tracing::info!(target: tracing_targets::COLLATOR,
-                "wu_used_from_last_anchor: old={}, new={}, \
+                "wu_used_from_last_anchor update: old={}, new={}, max_limit={}, \
                 prepare_msg_groups_wu_total={}, execute_groups_wu_total={}, finalize_wu_total={}",
                 wu_used_from_last_anchor,
                 new_wu_used_from_last_anchor,
+                max_wu_used_limit,
                 self.extra.execute_result.prepare_msg_groups_wu.total_wu,
                 self.extra.execute_result.execute_groups_wu_total,
                 finalize_wu_total,
             );
+
+            new_wu_used_from_last_anchor = new_wu_used_from_last_anchor.min(max_wu_used_limit);
 
             // build new state
             let mut new_observable_state = Box::new(ShardStateUnsplit {
