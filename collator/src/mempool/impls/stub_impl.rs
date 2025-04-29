@@ -182,11 +182,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         Ok(())
     }
 
-    async fn get_anchor_by_id(
-        &self,
-        _: MempoolAnchorId,
-        anchor_id: MempoolAnchorId,
-    ) -> Result<GetAnchorResult> {
+    async fn get_anchor_by_id(&self, anchor_id: MempoolAnchorId) -> Result<GetAnchorResult> {
         let mut last_attempt_at = None;
         loop {
             let Some(anchor) = self.anchors_cache.read().get(&anchor_id).cloned() else {
@@ -263,11 +259,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         }
     }
 
-    async fn get_next_anchor(
-        &self,
-        _: MempoolAnchorId,
-        prev_anchor_id: MempoolAnchorId,
-    ) -> Result<GetAnchorResult> {
+    async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<GetAnchorResult> {
         let range = (
             std::ops::Bound::Excluded(prev_anchor_id),
             std::ops::Bound::Unbounded,
@@ -491,30 +483,28 @@ mod tests {
         let adapter =
             MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener), None);
 
-        const STUB: MempoolAnchorId = 0;
-
         // try get existing anchor by id
-        let result = adapter.get_anchor_by_id(STUB, 3).await?;
+        let result = adapter.get_anchor_by_id(3).await?;
         assert!(result.anchor().is_some());
         assert_eq!(result.anchor().unwrap().id, 3);
 
         // try get next anchor after (id: 3)
-        let result = adapter.get_next_anchor(STUB, 3).await?;
+        let result = adapter.get_next_anchor(3).await?;
         assert!(result.anchor().is_some());
         assert_eq!(result.anchor().unwrap().id, 4);
 
         // try get next anchor after (id: 5), will wait some time
-        let result = adapter.get_next_anchor(STUB, 5).await?;
+        let result = adapter.get_next_anchor(5).await?;
         assert!(result.anchor().is_some());
         assert_eq!(result.anchor().unwrap().id, 6);
 
         // test clear anchors cache
         adapter.clear_anchors_cache(6)?;
-        let result = adapter.get_anchor_by_id(STUB, 3).await?;
+        let result = adapter.get_anchor_by_id(3).await?;
         assert!(result.anchor().is_none());
-        let result = adapter.get_anchor_by_id(STUB, 4).await?;
+        let result = adapter.get_anchor_by_id(4).await?;
         assert!(result.anchor().is_none());
-        let result = adapter.get_anchor_by_id(STUB, 6).await?;
+        let result = adapter.get_anchor_by_id(6).await?;
         assert!(result.anchor().is_some());
         assert_eq!(result.anchor().unwrap().id, 6);
 

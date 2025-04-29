@@ -9,7 +9,7 @@ use everscale_types::models::{
 use tycho_block_util::state::MinRefMcStateTracker;
 
 use crate::collator::types::AnchorsCache;
-use crate::collator::{CollatorStdImpl, InitAnchorSource};
+use crate::collator::{CollatorStdImpl, ImportInitAnchorsResult, InitAnchorSource};
 use crate::mempool::{MempoolAdapterStubImpl, MempoolAnchor, MempoolEventListener};
 use crate::test_utils::try_init_test_tracing;
 use crate::types::processed_upto::{
@@ -60,22 +60,30 @@ async fn test_import_init_anchors() {
     let processed_to_anchor_id = 9;
     let processed_to_msgs_offset = 0;
     let last_block_chain_time = 20832;
+    let current_shard_last_imported_chain_time = 19096;
 
-    let anchors_info = CollatorStdImpl::import_init_anchors(
+    let ImportInitAnchorsResult {
+        anchors_info,
+        anchors_count_above_last_imported_in_current_shard,
+    } = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
         processed_to_msgs_offset,
         last_block_chain_time,
+        current_shard_last_imported_chain_time,
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
-        0,
     )
     .await
     .unwrap();
 
     let anchors_info = filter_imported(anchors_info);
 
-    tracing::debug!("imported anchors on init: {:?}", anchors_info.as_slice());
+    tracing::debug!(
+        "imported anchors on init (count_above_last = {}): {:?}",
+        anchors_count_above_last_imported_in_current_shard,
+        anchors_info.as_slice(),
+    );
 
     assert_eq!(anchors_info.len(), 4);
     assert_eq!(anchors_info[0].id, 9);
@@ -87,6 +95,7 @@ async fn test_import_init_anchors() {
     assert_eq!(last_imported_ct, 20832);
     assert_eq!(anchors_cache.len(), 3);
     assert!(anchors_cache.has_pending_externals());
+    assert_eq!(anchors_count_above_last_imported_in_current_shard, 1);
 
     // =========================================================================
     // Get all anchors from mempool. processed_to anchor is fully read
@@ -96,22 +105,30 @@ async fn test_import_init_anchors() {
     let processed_to_anchor_id = 9;
     let processed_to_msgs_offset = 4;
     let last_block_chain_time = 20832;
+    let current_shard_last_imported_chain_time = 20832;
 
-    let anchors_info = CollatorStdImpl::import_init_anchors(
+    let ImportInitAnchorsResult {
+        anchors_info,
+        anchors_count_above_last_imported_in_current_shard,
+    } = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
         processed_to_msgs_offset,
         last_block_chain_time,
+        current_shard_last_imported_chain_time,
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
-        0,
     )
     .await
     .unwrap();
 
     let anchors_info = filter_imported(anchors_info);
 
-    tracing::debug!("imported anchors on init: {:?}", anchors_info.as_slice());
+    tracing::debug!(
+        "imported anchors on init (count_above_last = {}): {:?}",
+        anchors_count_above_last_imported_in_current_shard,
+        anchors_info.as_slice(),
+    );
 
     assert_eq!(anchors_info.len(), 4);
     assert_eq!(anchors_info[0].id, 9);
@@ -123,6 +140,7 @@ async fn test_import_init_anchors() {
     assert_eq!(last_imported_ct, 20832);
     assert_eq!(anchors_cache.len(), 2);
     assert!(anchors_cache.has_pending_externals());
+    assert_eq!(anchors_count_above_last_imported_in_current_shard, 0);
 
     // =========================================================================
     // processed_to anchor exists in cache, get some anchors from cache, rest from mempool
@@ -131,22 +149,30 @@ async fn test_import_init_anchors() {
     let processed_to_anchor_id = 12;
     let processed_to_msgs_offset = 1;
     let last_block_chain_time = 24304;
+    let current_shard_last_imported_chain_time = 20832;
 
-    let anchors_info = CollatorStdImpl::import_init_anchors(
+    let ImportInitAnchorsResult {
+        anchors_info,
+        anchors_count_above_last_imported_in_current_shard,
+    } = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
         processed_to_msgs_offset,
         last_block_chain_time,
+        current_shard_last_imported_chain_time,
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
-        0,
     )
     .await
     .unwrap();
 
     let anchors_info = filter_imported(anchors_info);
 
-    tracing::debug!("imported anchors on init: {:?}", anchors_info.as_slice());
+    tracing::debug!(
+        "imported anchors on init (count_above_last = {}): {:?}",
+        anchors_count_above_last_imported_in_current_shard,
+        anchors_info.as_slice(),
+    );
 
     assert_eq!(anchors_info.len(), 2);
     assert_eq!(anchors_info[0].id, 13);
@@ -158,6 +184,7 @@ async fn test_import_init_anchors() {
     assert_eq!(last_imported_ct, 24304);
     assert_eq!(anchors_cache.len(), 4);
     assert!(anchors_cache.has_pending_externals());
+    assert_eq!(anchors_count_above_last_imported_in_current_shard, 2);
 
     // =========================================================================
     // processed_to anchor exists in cache, get all from cache
@@ -166,22 +193,30 @@ async fn test_import_init_anchors() {
     let processed_to_anchor_id = 11;
     let processed_to_msgs_offset = 2;
     let last_block_chain_time = 24304;
+    let current_shard_last_imported_chain_time = 24304;
 
-    let anchors_info = CollatorStdImpl::import_init_anchors(
+    let ImportInitAnchorsResult {
+        anchors_info,
+        anchors_count_above_last_imported_in_current_shard,
+    } = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
         processed_to_msgs_offset,
         last_block_chain_time,
+        current_shard_last_imported_chain_time,
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
-        0,
     )
     .await
     .unwrap();
 
     let anchors_info = filter_imported(anchors_info);
 
-    tracing::debug!("imported anchors on init: {:?}", anchors_info.as_slice());
+    tracing::debug!(
+        "imported anchors on init (count_above_last = {}): {:?}",
+        anchors_count_above_last_imported_in_current_shard,
+        anchors_info.as_slice(),
+    );
 
     assert_eq!(anchors_info.len(), 0);
     let (anchor_id, _) = anchors_cache.get(0).unwrap();
@@ -192,6 +227,7 @@ async fn test_import_init_anchors() {
     assert_eq!(last_imported_ct, 24304);
     assert_eq!(anchors_cache.len(), 4);
     assert!(anchors_cache.has_pending_externals());
+    assert_eq!(anchors_count_above_last_imported_in_current_shard, 0);
 
     // =========================================================================
     // processed_to anchor is before all anchors in cache, should clear cache and load all required from mempool
@@ -200,22 +236,30 @@ async fn test_import_init_anchors() {
     let processed_to_anchor_id = 9;
     let processed_to_msgs_offset = 2;
     let last_block_chain_time = 20832;
+    let current_shard_last_imported_chain_time = 15624;
 
-    let anchors_info = CollatorStdImpl::import_init_anchors(
+    let ImportInitAnchorsResult {
+        anchors_info,
+        anchors_count_above_last_imported_in_current_shard,
+    } = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
         processed_to_msgs_offset,
         last_block_chain_time,
+        current_shard_last_imported_chain_time,
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
-        0,
     )
     .await
     .unwrap();
 
     let anchors_info = filter_imported(anchors_info);
 
-    tracing::debug!("imported anchors on init: {:?}", anchors_info.as_slice());
+    tracing::debug!(
+        "imported anchors on init (count_above_last = {}): {:?}",
+        anchors_count_above_last_imported_in_current_shard,
+        anchors_info.as_slice(),
+    );
 
     assert_eq!(anchors_info.len(), 4);
     assert_eq!(anchors_info[0].id, 9);
@@ -227,6 +271,7 @@ async fn test_import_init_anchors() {
     assert_eq!(last_imported_ct, 20832);
     assert_eq!(anchors_cache.len(), 3);
     assert!(anchors_cache.has_pending_externals());
+    assert_eq!(anchors_count_above_last_imported_in_current_shard, 3);
 
     // =========================================================================
     // processed_to anchor is after all anchors in cache, should clear cache and load all required from mempool
@@ -235,22 +280,30 @@ async fn test_import_init_anchors() {
     let processed_to_anchor_id = 13;
     let processed_to_msgs_offset = 3;
     let last_block_chain_time = 29512;
+    let current_shard_last_imported_chain_time = 26040;
 
-    let anchors_info = CollatorStdImpl::import_init_anchors(
+    let ImportInitAnchorsResult {
+        anchors_info,
+        anchors_count_above_last_imported_in_current_shard,
+    } = CollatorStdImpl::import_init_anchors(
         processed_to_anchor_id,
         processed_to_msgs_offset,
         last_block_chain_time,
+        current_shard_last_imported_chain_time,
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
-        0,
     )
     .await
     .unwrap();
 
     let anchors_info = filter_imported(anchors_info);
 
-    tracing::debug!("imported anchors on init: {:?}", anchors_info.as_slice());
+    tracing::debug!(
+        "imported anchors on init (count_above_last = {}): {:?}",
+        anchors_count_above_last_imported_in_current_shard,
+        anchors_info.as_slice(),
+    );
 
     assert_eq!(anchors_info.len(), 5);
     assert_eq!(anchors_info[0].id, 13);
@@ -262,6 +315,7 @@ async fn test_import_init_anchors() {
     assert_eq!(last_imported_ct, 29512);
     assert_eq!(anchors_cache.len(), 4);
     assert!(anchors_cache.has_pending_externals());
+    assert_eq!(anchors_count_above_last_imported_in_current_shard, 2);
 }
 
 #[test]

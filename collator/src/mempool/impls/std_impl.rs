@@ -297,14 +297,9 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         Ok(())
     }
 
-    async fn get_anchor_by_id(
-        &self,
-        top_processed_to_anchor: MempoolAnchorId,
-        anchor_id: MempoolAnchorId,
-    ) -> Result<GetAnchorResult> {
+    async fn get_anchor_by_id(&self, anchor_id: MempoolAnchorId) -> Result<GetAnchorResult> {
         tracing::debug!(
             target: tracing_targets::MEMPOOL_ADAPTER,
-            %top_processed_to_anchor,
             %anchor_id,
             "get_anchor_by_id"
         );
@@ -317,14 +312,9 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         Ok(result)
     }
 
-    async fn get_next_anchor(
-        &self,
-        top_processed_to_anchor: MempoolAnchorId,
-        prev_anchor_id: MempoolAnchorId,
-    ) -> Result<GetAnchorResult> {
+    async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<GetAnchorResult> {
         tracing::debug!(
             target: tracing_targets::MEMPOOL_ADAPTER,
-            %top_processed_to_anchor,
             %prev_anchor_id,
             "get_next_anchor"
         );
