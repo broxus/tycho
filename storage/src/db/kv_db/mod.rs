@@ -121,7 +121,6 @@ impl WithMigrations for BaseDb {
 weedb::tables! {
     pub struct BaseTables<Caches> {
         pub state: tables::State,
-        pub archives: tables::Archives,
         pub archive_block_ids: tables::ArchiveBlockIds,
         pub block_handles: tables::BlockHandles,
         pub key_blocks: tables::KeyBlocks,
