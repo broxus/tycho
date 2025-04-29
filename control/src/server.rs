@@ -505,7 +505,7 @@ impl proto::ControlServer for ControlServer {
     async fn get_account_state(
         self,
         _: Context,
-        req: proto::AccountStatezRequest,
+        req: proto::AccountStateRequest,
     ) -> ServerResult<proto::AccountStateResponse> {
         let (block_handle, account) = 'state: {
             // Try fast path first.
