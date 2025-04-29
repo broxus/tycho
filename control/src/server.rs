@@ -28,7 +28,7 @@ use tycho_core::block_strider::{
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_network::Network;
-use tycho_storage::{ArchiveId, BlockHandle, Storage};
+use tycho_storage::{ArchiveMeta, BlockHandle, Storage};
 use tycho_util::FastHashMap;
 
 use crate::collator::Collator;
@@ -649,19 +649,19 @@ impl proto::ControlServer for ControlServer {
     ) -> ServerResult<proto::ArchiveInfoResponse> {
         let blocks = self.inner.storage.block_storage();
 
-        let id = match blocks.get_archive_id(req.mc_seqno) {
-            ArchiveId::Found(id) => id,
-            ArchiveId::TooNew => return Ok(proto::ArchiveInfoResponse::TooNew),
-            ArchiveId::NotFound => return Ok(proto::ArchiveInfoResponse::NotFound),
+        let (id, size) = match blocks.get_archive_meta(req.mc_seqno) {
+            ArchiveMeta::Found { mc_block_id, len } => (mc_block_id, len),
+            ArchiveMeta::TooNew => {
+                return Ok(proto::ArchiveInfoResponse::TooNew);
+            }
+            ArchiveMeta::NotFound => {
+                return Ok(proto::ArchiveInfoResponse::NotFound);
+            }
         };
 
-        let Some(size) = blocks.get_archive_size(id)? else {
-            return Ok(proto::ArchiveInfoResponse::NotFound);
-        };
-
-        Ok(proto::ArchiveInfoResponse::Found(proto::ArchiveInfo {
+        Ok(proto::ArchiveInfoResponse::Found(ArchiveInfo {
             id,
-            size: NonZeroU64::new(size as _).unwrap(),
+            size: NonZeroU64::new(size).unwrap(),
             chunk_size: blocks.archive_chunk_size(),
         }))
     }
@@ -686,8 +686,7 @@ impl proto::ControlServer for ControlServer {
             .list_archive_ids()
             .into_iter()
             .filter_map(|id| {
-                let size = storage.get_archive_size(id).unwrap()?;
-                Some(ArchiveInfo {
+                storage.get_archive_meta(id).size().map(|size| ArchiveInfo {
                     id,
                     size: NonZeroU64::new(size as _).unwrap(),
                     chunk_size: storage.archive_chunk_size(),

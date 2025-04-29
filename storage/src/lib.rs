@@ -134,21 +134,22 @@ impl StorageBuilder {
         base_db.apply_migrations().await?;
 
         let temp_file_storage = TempFileStorage::new(&file_db)?;
+        let node_state_storage = NodeStateStorage::new(base_db.clone());
 
-        let blocks_storage_config = BlockStorageConfig {
-            archive_chunk_size: self.config.archive_chunk_size,
-            blocks_cache: self.config.blocks_cache,
-            split_block_tasks: self.config.split_block_tasks,
-        };
         let block_handle_storage = Arc::new(BlockHandleStorage::new(base_db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(base_db.clone()));
-        let block_storage = Arc::new(BlockStorage::new(
-            base_db.clone(),
-            blocks_storage_config,
-            block_handle_storage.clone(),
-            block_connection_storage.clone(),
-            self.config.archive_chunk_size,
-        ));
+        let block_storage = Arc::new(
+            BlockStorage::new(
+                base_db.clone(),
+                &self.config,
+                &file_db,
+                block_handle_storage.clone(),
+                block_connection_storage.clone(),
+                self.config.archive_chunk_size,
+                node_state_storage.clone(),
+            )
+            .await?,
+        );
         let shard_state_storage = ShardStateStorage::new(
             base_db.clone(),
             block_handle_storage.clone(),
@@ -166,14 +167,11 @@ impl StorageBuilder {
 
         persistent_state_storage.preload().await?;
 
-        let node_state_storage = NodeStateStorage::new(base_db.clone());
-
         let rpc_state = rpc_db.map(RpcStorage::new);
 
         temp_file_storage.remove_outdated_files().await?;
 
         block_storage.finish_block_data().await?;
-        block_storage.preload_archive_ids().await?;
 
         let internal_queue_db = InternalQueueDB::builder_prepared(
             self.config.root_dir.join(INT_QUEUE_SUBDIR),
