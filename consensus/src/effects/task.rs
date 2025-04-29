@@ -1,19 +1,11 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures_util::FutureExt;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, TryAcquireError};
 use tokio::task::JoinHandle;
-
-use crate::engine::NodeConfig;
-
-static LIMIT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
-    Arc::new(Semaphore::new(
-        NodeConfig::get().max_blocking_tasks as usize,
-    ))
-});
 
 #[derive(thiserror::Error, Debug, Copy, Clone)]
 #[error("task is cancelled")]
@@ -65,23 +57,6 @@ impl TaskCtx<'_> {
             handle: self.0.spawn_blocking(task),
             completed: false,
         }
-    }
-
-    pub async fn spawn_blocking_limited<F, R>(&self, task: F) -> Task<R>
-    where
-        F: FnOnce() -> R,
-        F: Send + 'static,
-        R: Send + 'static,
-    {
-        let permit = match LIMIT.clone().acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_closed) => return Task::aborted(),
-        };
-        self.spawn_blocking(move || {
-            let res = task();
-            drop(permit);
-            res
-        })
     }
 }
 
@@ -136,5 +111,46 @@ impl<T> Future for Task<T> {
             // Blocking task can be cancelled only until it starts running
             Err(_) => Err(Cancelled()),
         })
+    }
+}
+
+pub struct SpawnLimit(Arc<Semaphore>);
+impl SpawnLimit {
+    pub fn new(limit: usize) -> Self {
+        Self(Arc::new(Semaphore::new(limit)))
+    }
+
+    pub async fn spawn_blocking<F, R>(&self, ctx: TaskCtx<'_>, task: F) -> Task<R>
+    where
+        F: FnOnce() -> R,
+        F: Send + 'static,
+        R: Send + 'static,
+    {
+        let permit = match self.0.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_closed) => return Task::aborted(),
+        };
+        ctx.spawn_blocking(move || {
+            let res = task();
+            drop(permit);
+            res
+        })
+    }
+
+    pub fn try_spawn_blocking<F, R>(&self, ctx: TaskCtx<'_>, task: F) -> Option<Task<R>>
+    where
+        F: FnOnce() -> R,
+        F: Send + 'static,
+        R: Send + 'static,
+    {
+        let permit = match self.0.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::Closed | TryAcquireError::NoPermits) => return None,
+        };
+        Some(ctx.spawn_blocking(move || {
+            let res = task();
+            drop(permit);
+            res
+        }))
     }
 }
