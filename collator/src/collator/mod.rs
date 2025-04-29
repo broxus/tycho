@@ -353,7 +353,7 @@ impl CollatorStdImpl {
         tracing::info!(target: tracing_targets::COLLATOR, "initializing...");
 
         // init working state
-        let working_state = Self::init_working_state(
+        let mut working_state = Self::init_working_state(
             &self.next_block_info,
             self.state_node_adapter.clone(),
             mc_data,
@@ -408,7 +408,10 @@ impl CollatorStdImpl {
                 }
             };
 
-            let anchors_info = match import_init_anchors_res {
+            let ImportInitAnchorsResult {
+                anchors_info,
+                mut anchors_count_above_last_imported_in_current_shard,
+            } = match import_init_anchors_res {
                 Err(CollatorError::Cancelled(reason)) => {
                     self.listener
                         .on_cancelled(
@@ -428,6 +431,20 @@ impl CollatorStdImpl {
                     "imported anchors on init: {:?}",
                     anchors_info.as_slice()
                 );
+
+                // reduce accumulated wu used from last anchor on
+                // the number of anchors imported after last in current shard
+                // if shard was not updated in last master block
+                let wu_used = &mut working_state.wu_used_from_last_anchor;
+                let wu_step = working_state.collation_config.wu_used_to_import_next_anchor;
+                while anchors_count_above_last_imported_in_current_shard > 0 {
+                    anchors_count_above_last_imported_in_current_shard -= 1;
+                    if let Some(new_wu_used) = wu_used.checked_sub(wu_step) {
+                        *wu_used = new_wu_used;
+                    } else {
+                        break;
+                    }
+                }
             }
         }
 
@@ -450,7 +467,7 @@ impl CollatorStdImpl {
         &mut self,
         working_state: &WorkingState,
         anchors_proc_info: AnchorsProcessingInfo,
-    ) -> Result<Vec<InitAnchorSource>, CollatorError> {
+    ) -> Result<ImportInitAnchorsResult, CollatorError> {
         // get overrided genesis info if present or last know from state
         let genesis_info = self
             .mempool_config_override
@@ -499,20 +516,22 @@ impl CollatorStdImpl {
 
         if import_init_anchors {
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "importing anchors from processed to anchor ({}) with offset ({}) to chain_time {}",
+                "importing anchors from processed to anchor ({}) with offset ({}) to chain_time {} \
+                (current_shard_last_imported_chain_time = {})",
                 anchors_proc_info.processed_to_anchor_id,
                 anchors_proc_info.processed_to_msgs_offset,
                 anchors_proc_info.last_imported_chain_time,
+                anchors_proc_info.current_shard_last_imported_chain_time,
             );
 
             Self::import_init_anchors(
                 anchors_proc_info.processed_to_anchor_id,
                 anchors_proc_info.processed_to_msgs_offset,
                 anchors_proc_info.last_imported_chain_time,
+                anchors_proc_info.current_shard_last_imported_chain_time,
                 self.shard_id,
                 &mut self.anchors_cache,
                 self.mpool_adapter.clone(),
-                working_state.mc_data.top_processed_to_anchor,
             )
             .await
         } else {
@@ -538,7 +557,7 @@ impl CollatorStdImpl {
             self.anchors_cache
                 .set_last_imported_anchor_info(anchor_info);
 
-            Ok(vec![])
+            Ok(Default::default())
         }
     }
 
@@ -639,7 +658,7 @@ impl CollatorStdImpl {
                 &working_state.next_block_id_short.shard,
                 &working_state.mc_data,
                 &prev_block_id,
-                prev_shard_data.gen_chain_time(),
+                prev_shard_data_gen_chain_time,
                 prev_shard_data
                     .processed_upto()
                     .get_min_externals_processed_to()?,
@@ -679,7 +698,10 @@ impl CollatorStdImpl {
                     }
                 };
 
-                let mut anchors_info = match import_init_anchors_res {
+                let ImportInitAnchorsResult {
+                    anchors_info,
+                    mut anchors_count_above_last_imported_in_current_shard,
+                } = match import_init_anchors_res {
                     Err(CollatorError::Cancelled(reason)) => {
                         self.listener
                             .on_cancelled(
@@ -701,15 +723,13 @@ impl CollatorStdImpl {
                         anchors_info.as_slice(),
                     );
 
+                    // reduce accumulated wu used from last anchor on
+                    // the number of anchors imported after last in current shard
+                    // if shard was not updated in last master block
                     let wu_used = &mut working_state.wu_used_from_last_anchor;
                     let wu_step = working_state.collation_config.wu_used_to_import_next_anchor;
-
-                    while let Some(anchor_info) = anchors_info.pop() {
-                        // TODO: Use `break` instead if `anchors_info` if sorted by `ct`.
-                        if anchor_info.into_inner().ct <= prev_shard_data_gen_chain_time {
-                            continue;
-                        }
-
+                    while anchors_count_above_last_imported_in_current_shard > 0 {
+                        anchors_count_above_last_imported_in_current_shard -= 1;
                         if let Some(new_wu_used) = wu_used.checked_sub(wu_step) {
                             *wu_used = new_wu_used;
                         } else {
@@ -993,6 +1013,7 @@ impl CollatorStdImpl {
                                 processed_to_msgs_offset: mc_processed_to_msgs_offset,
                                 last_imported_chain_time: mc_data.gen_chain_time,
                                 last_imported_in_block_id: mc_data.block_id,
+                                current_shard_last_imported_chain_time: prev_gen_chain_time,
                             });
                         }
                         break;
@@ -1009,6 +1030,7 @@ impl CollatorStdImpl {
                     processed_to_msgs_offset,
                     last_imported_chain_time: prev_gen_chain_time,
                     last_imported_in_block_id: *prev_block_id,
+                    current_shard_last_imported_chain_time: prev_gen_chain_time,
                 })
             }
             _ => None,
@@ -1063,9 +1085,7 @@ impl CollatorStdImpl {
             return Ok(ImportNextAnchor::Skipped);
         }
 
-        let get_anchor_result = mpool_adapter
-            .get_next_anchor(top_processed_to_anchor, prev_anchor_id)
-            .await?;
+        let get_anchor_result = mpool_adapter.get_next_anchor(prev_anchor_id).await?;
 
         let has_our_externals = match &get_anchor_result {
             GetAnchorResult::Exist(next_anchor) => {
@@ -1110,14 +1130,15 @@ impl CollatorStdImpl {
         processed_to_anchor_id: MempoolAnchorId,
         processed_to_msgs_offset: u64,
         last_block_chain_time: u64,
+        current_shard_last_imported_chain_time: u64,
         shard_id: ShardIdent,
         anchors_cache: &mut AnchorsCache,
         mpool_adapter: Arc<dyn MempoolAdapter>,
-        top_processed_to_anchor: MempoolAnchorId,
-    ) -> Result<Vec<InitAnchorSource>, CollatorError> {
+    ) -> Result<ImportInitAnchorsResult, CollatorError> {
         let labels = [("workchain", shard_id.workchain().to_string())];
 
-        let mut anchors_info = vec![];
+        let mut res = ImportInitAnchorsResult::default();
+
         let mut last_anchor = None;
         let mut all_anchors_are_taken_from_cache = false;
         let mut processed_to_anchor_exists_in_cache = false;
@@ -1165,10 +1186,11 @@ impl CollatorStdImpl {
                 // and keep others
                 let our_exts_count = anchor.count_externals_for(&shard_id, offset);
                 total_our_exts_count = total_our_exts_count.saturating_add(our_exts_count);
-                anchors_info.push(InitAnchorSource::FromCache(AnchorInfo::from_anchor(
-                    anchor.clone(),
-                    our_exts_count,
-                )));
+                res.anchors_info
+                    .push(InitAnchorSource::FromCache(AnchorInfo::from_anchor(
+                        anchor.clone(),
+                        our_exts_count,
+                    )));
 
                 // in next anchors after processed_to will count from 0
                 offset = 0;
@@ -1181,7 +1203,7 @@ impl CollatorStdImpl {
         // we have all required anchors in cache
         if all_anchors_are_taken_from_cache {
             // update last imported anchor info
-            let Some(InitAnchorSource::FromCache(anchor_info)) = anchors_info.last() else {
+            let Some(InitAnchorSource::FromCache(anchor_info)) = res.anchors_info.last() else {
                 return Err(CollatorError::Anyhow(anyhow::anyhow!(
                     "`anchors_info` should contain almost one `FromCache` here"
                 )));
@@ -1189,7 +1211,7 @@ impl CollatorStdImpl {
             anchors_cache.set_last_imported_anchor_info(anchor_info.clone());
             anchors_cache.set_has_pending_externals(total_our_exts_count > 0);
 
-            return Ok(anchors_info);
+            return Ok(res);
         }
 
         // clear cache if processed_to_anchor_id does not exist in cache
@@ -1208,7 +1230,7 @@ impl CollatorStdImpl {
             }
             None => {
                 let GetAnchorResult::Exist(anchor) = mpool_adapter
-                    .get_anchor_by_id(top_processed_to_anchor, processed_to_anchor_id)
+                    .get_anchor_by_id(processed_to_anchor_id)
                     .await?
                 else {
                     return Err(CollatorError::Cancelled(
@@ -1227,10 +1249,11 @@ impl CollatorStdImpl {
                 let our_exts_count = anchor.count_externals_for(&shard_id, offset);
                 total_our_exts_count = total_our_exts_count.saturating_add(our_exts_count);
                 anchors_cache.insert(anchor.clone(), our_exts_count);
-                anchors_info.push(InitAnchorSource::Imported(AnchorInfo::from_anchor(
-                    anchor,
-                    our_exts_count,
-                )));
+                res.anchors_info
+                    .push(InitAnchorSource::Imported(AnchorInfo::from_anchor(
+                        anchor,
+                        our_exts_count,
+                    )));
 
                 metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
                     .increment(our_exts_count as u64);
@@ -1241,14 +1264,18 @@ impl CollatorStdImpl {
             // in next anchors after processed_to will count from 0
             offset = 0;
 
+            // count number of anchors imported above last chain time for current shard
+            if last_imported_anchor_ct > current_shard_last_imported_chain_time {
+                res.anchors_count_above_last_imported_in_current_shard += 1;
+            }
+
             // import next anchor if last block chain time not reached
             if last_imported_anchor_ct >= last_block_chain_time {
                 break;
             }
 
-            let GetAnchorResult::Exist(anchor) = mpool_adapter
-                .get_next_anchor(top_processed_to_anchor, prev_anchor_id)
-                .await?
+            let GetAnchorResult::Exist(anchor) =
+                mpool_adapter.get_next_anchor(prev_anchor_id).await?
             else {
                 return Err(CollatorError::Cancelled(
                     CollationCancelReason::NextAnchorNotFound(prev_anchor_id),
@@ -1262,7 +1289,7 @@ impl CollatorStdImpl {
 
         anchors_cache.set_has_pending_externals(total_our_exts_count > 0);
 
-        Ok(anchors_info)
+        Ok(res)
     }
 
     fn check_has_unprocessed_messages(&mut self, working_state: &mut WorkingState) -> Result<bool> {
@@ -2043,6 +2070,12 @@ struct AnchorsProcessingInfo {
     pub processed_to_msgs_offset: u64,
     pub last_imported_chain_time: u64,
     pub last_imported_in_block_id: BlockId,
+    /// The chain time of last imported anchor in current shard.
+    /// For master block will always be equal to `last_imported_chain_time`.
+    /// For shard block may be below `last_imported_chain_time` if there
+    /// were no shard blocks between last and previous master (shard was not
+    /// updated in last master block)
+    pub current_shard_last_imported_chain_time: u64,
 }
 impl std::fmt::Debug for AnchorsProcessingInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2058,6 +2091,10 @@ impl std::fmt::Display for AnchorsProcessingInfo {
             .field(
                 "last_imported_in_block_id",
                 &DebugDisplay(&self.last_imported_in_block_id),
+            )
+            .field(
+                "current_shard_last_imported_chain_time",
+                &self.current_shard_last_imported_chain_time,
             )
             .finish()
     }
@@ -2079,10 +2116,11 @@ enum InitAnchorSource {
     Imported(AnchorInfo),
 }
 
-impl InitAnchorSource {
-    fn into_inner(self) -> AnchorInfo {
-        match self {
-            Self::FromCache(inner) | Self::Imported(inner) => inner,
-        }
-    }
+#[derive(Default)]
+struct ImportInitAnchorsResult {
+    anchors_info: Vec<InitAnchorSource>,
+    /// Number of anchors that were imported
+    /// after "last imported in current shard"
+    /// up to "top last imported anchor"
+    anchors_count_above_last_imported_in_current_shard: usize,
 }
