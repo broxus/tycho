@@ -1,5 +1,5 @@
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
 
 use ahash::HashMapExt;
@@ -15,14 +15,18 @@ use tycho_util::FastHashMap;
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, IllFormedReason, ValidateResult, Verifier};
 use crate::effects::{
-    AltFormat, Ctx, DownloadCtx, MempoolStore, RoundCtx, TaskResult, ValidateCtx,
+    AltFormat, Ctx, DownloadCtx, MempoolStore, RoundCtx, SpawnLimit, TaskResult, ValidateCtx,
 };
+use crate::engine::NodeConfig;
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::{
     Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo, PointRestore,
     PointStatusIllFormed, PointStatusNotFound, PointStatusStored, PointStatusStoredRef,
     PointStatusValidated, WeakCert,
 };
+
+static LIMIT: LazyLock<SpawnLimit> =
+    LazyLock::new(|| SpawnLimit::new(NodeConfig::get().max_blocking_tasks as usize));
 
 #[derive(Clone)]
 pub struct DagPointFuture(DagPointFutureType);
@@ -106,7 +110,7 @@ impl DagPointFuture {
                 );
                 dag_point
             };
-            ctx.task().spawn_blocking_limited(full_fn).await
+            LIMIT.spawn_blocking(ctx.task(), full_fn).await
         });
 
         Self(DagPointFutureType::Validate {
@@ -147,7 +151,7 @@ impl DagPointFuture {
                 state.resolve(&dag_point);
                 dag_point
             };
-            ctx.task().spawn_blocking_limited(full_fn).await
+            LIMIT.spawn_blocking(ctx.task(), full_fn).await
         });
 
         Self(DagPointFutureType::Validate {
@@ -182,7 +186,7 @@ impl DagPointFuture {
                 let status_ref = PointStatusStoredRef::Exists;
                 move || store.insert_point(&point, status_ref)
             };
-            let store_task = validate_ctx.task().spawn_blocking_limited(store_fn).await;
+            let store_task = LIMIT.spawn_blocking(validate_ctx.task(), store_fn).await;
 
             let validated = Verifier::validate(
                 info.clone(),
@@ -204,7 +208,7 @@ impl DagPointFuture {
                 state.resolve(&dag_point);
                 dag_point
             };
-            let store_task = validate_ctx.task().spawn_blocking_limited(store_fn).await;
+            let store_task = LIMIT.spawn_blocking(validate_ctx.task(), store_fn).await;
 
             Ok(store_task)
         });
@@ -266,7 +270,7 @@ impl DagPointFuture {
                         let status_ref = PointStatusStoredRef::Exists;
                         move || store.insert_point(&point, status_ref)
                     };
-                    let store_task = into_round_ctx.task().spawn_blocking_limited(store_fn).await;
+                    let store_task = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn).await;
 
                     let validate_ctx = ValidateCtx::new(&into_round_ctx, &info);
                     let validated = Verifier::validate(
@@ -291,7 +295,7 @@ impl DagPointFuture {
                         state.resolve(&dag_point);
                         dag_point
                     };
-                    let store_task = into_round_ctx.task().spawn_blocking_limited(store_fn).await;
+                    let store_task = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn).await;
 
                     Ok(store_task)
                 }
@@ -308,7 +312,7 @@ impl DagPointFuture {
                         state.resolve(&dag_point);
                         dag_point
                     };
-                    let store_task = into_round_ctx.task().spawn_blocking_limited(store_fn).await;
+                    let store_task = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn).await;
 
                     Ok(store_task)
                 }
@@ -330,7 +334,7 @@ impl DagPointFuture {
                         state.resolve(&dag_point);
                         dag_point
                     };
-                    let store_task = into_round_ctx.task().spawn_blocking_limited(store_fn).await;
+                    let store_task = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn).await;
 
                     Ok(store_task)
                 }
@@ -442,7 +446,7 @@ impl DagPointFuture {
                         state.resolve(&dag_point);
                         dag_point
                     };
-                    let store_task = round_ctx.task().spawn_blocking_limited(store_fn).await;
+                    let store_task = LIMIT.spawn_blocking(round_ctx.task(), store_fn).await;
 
                     Ok(store_task)
                 };

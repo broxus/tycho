@@ -182,6 +182,9 @@ pub struct MempoolNodeConfig {
     /// [`Tycho tread pool config`](tycho_util::cli::config::ThreadPoolConfig)
     /// does not have a corresponding parameter and does not change tokio's default value.
     pub max_blocking_tasks: u16,
+
+    /// Max simultaneous point search tasks fulfilling download request
+    pub max_upload_tasks: u16,
 }
 
 impl Default for MempoolNodeConfig {
@@ -191,6 +194,7 @@ impl Default for MempoolNodeConfig {
             clean_db_period_rounds: NonZeroU16::new(105).unwrap(),
             cache_future_broadcasts_rounds: 105,
             max_blocking_tasks: 300,
+            max_upload_tasks: 30,
         }
     }
 }
