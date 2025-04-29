@@ -411,7 +411,7 @@ impl MempoolStoreImpl for MempoolStorage {
         points
             .get(key.as_slice())
             .context("db get")?
-            .map(|a| Point::new_from_bytes(a.to_vec()).context("deserialize db point"))
+            .map(|a| Point::from_bytes(a.to_vec()).context("deserialize db point"))
             .transpose()
     }
 
@@ -435,7 +435,7 @@ impl MempoolStoreImpl for MempoolStorage {
             let option_bytes =
                 result_option_bytes.with_context(|| format!("result for {round:?} {digest:?}"))?;
             let bytes = option_bytes.with_context(|| format!("not found {round:?} {digest:?}"))?;
-            let point = Point::new_from_bytes(bytes)
+            let point = Point::from_bytes(bytes)
                 .context("deserialize db point")
                 .with_context(|| format!("deserialize point {round:?} {digest:?}"))?;
             points.push(point);
@@ -534,7 +534,7 @@ impl MempoolStoreImpl for MempoolStorage {
                 if found.insert(key, payload).is_some() {
                     // we panic thus we don't care about performance
                     let full_point =
-                        Point::new_from_bytes(bytes.to_vec()).context("deserialize point")?;
+                        Point::from_bytes(bytes.to_vec()).context("deserialize point")?;
                     panic!("iter read non-unique point {:?}", full_point.id())
                 }
             }

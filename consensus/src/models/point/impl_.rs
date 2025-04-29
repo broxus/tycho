@@ -6,7 +6,7 @@ use bumpalo::Bump;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::ConsensusConfig;
-use tl_proto::{TlError, TlRead, TlResult, TlWrite};
+use tl_proto::{TlError, TlRead, TlWrite};
 use tycho_network::PeerId;
 
 use crate::engine::MempoolConfig;
@@ -15,6 +15,17 @@ use crate::models::point::serde_helpers::{
 };
 use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature};
 use crate::models::{PeerCount, PointInfo};
+
+#[derive(Debug, thiserror::Error)]
+pub enum PointIntegrityError {
+    #[error("hash mismatch")]
+    BadHash,
+    /// The point may be created by someone else:
+    /// blame every dependent point author and the sender of this point,
+    /// do not use the author from point's body
+    #[error("signature does not match author")]
+    BadSig,
+}
 
 #[derive(Clone)]
 pub struct Point(Arc<PointInner>);
@@ -39,28 +50,6 @@ struct PointParsed {
     /// the node may prove its vertex@r-1 with its point@r+0 only; contains signatures from
     /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
     evidence: BTreeMap<PeerId, Signature>,
-}
-
-impl<'tl> TlRead<'tl> for PointParsed {
-    type Repr = tl_proto::Boxed;
-
-    fn read_from(packet: &mut &'tl [u8]) -> TlResult<Self> {
-        let read = PointRead::read_from(packet)?;
-
-        let payload_len = u32::try_from(read.body.payload.len()).unwrap_or(u32::MAX);
-        let payload_bytes = u32::try_from(read.body.payload.iter().fold(0, |acc, b| acc + b.len()))
-            .unwrap_or(u32::MAX);
-
-        Ok(Self {
-            digest: read.digest,
-            signature: read.signature,
-            round: read.body.round,
-            payload_len,
-            payload_bytes,
-            data: read.body.data,
-            evidence: read.body.evidence,
-        })
-    }
 }
 
 impl Debug for Point {
@@ -145,9 +134,47 @@ impl Point {
         Self(Arc::new(PointInner { parsed, serialized }))
     }
 
-    pub fn new_from_bytes(serialized: Vec<u8>) -> Result<Self, TlError> {
-        let parsed = PointParsed::read_from(&mut serialized.as_ref())?;
+    pub fn from_bytes(serialized: Vec<u8>) -> Result<Self, TlError> {
+        let slice = &mut &serialized[..];
+        let read = PointRead::read_from(slice)?;
+
+        let payload_len = u32::try_from(read.body.payload.len()).unwrap_or(u32::MAX);
+        let payload_bytes = u32::try_from(read.body.payload.iter().fold(0, |acc, b| acc + b.len()))
+            .unwrap_or(u32::MAX);
+
+        let parsed = PointParsed {
+            digest: read.digest,
+            signature: read.signature,
+            round: read.body.round,
+            payload_len,
+            payload_bytes,
+            data: read.body.data,
+            evidence: read.body.evidence,
+        };
+
         Ok(Self(Arc::new(PointInner { parsed, serialized })))
+    }
+
+    pub fn parse(serialized: Vec<u8>) -> Result<Result<Self, PointIntegrityError>, TlError> {
+        fn is_hash_ok(data: &[u8]) -> Result<bool, TlError> {
+            let data = &mut &data[..];
+            let read = PointRawRead::<'_>::read_from(data)?;
+            Ok(read.digest == Digest::new(read.body.as_ref()))
+        }
+        fn is_sig_ok(point: &Point) -> bool {
+            (point.signature()).verifies(&point.data().author, point.digest())
+        }
+
+        if !is_hash_ok(&serialized)? {
+            return Ok(Err(PointIntegrityError::BadHash));
+        };
+
+        let point = Self::from_bytes(serialized)?;
+
+        if !is_sig_ok(&point) {
+            return Ok(Err(PointIntegrityError::BadSig));
+        }
+        Ok(Ok(point))
     }
 
     pub fn serialized(&self) -> &[u8] {
@@ -208,14 +235,6 @@ impl Point {
         })
     }
 
-    /// Failed integrity means the point may be created by someone else.
-    /// blame every dependent point author and the sender of this point,
-    /// do not use the author from point's body
-    pub fn is_integrity_ok(&self) -> bool {
-        let parsed = &self.0.parsed;
-        (parsed.signature).verifies(&parsed.data.author, &parsed.digest)
-    }
-
     /// blame author and every dependent point's author
     /// must be checked right after integrity, before any manipulations with the point
     pub fn is_well_formed(&self, conf: &MempoolConfig) -> bool {
@@ -257,20 +276,6 @@ impl Point {
             .into_iter()
             .map(|item| &*bump.alloc_slice_copy(item))
             .collect())
-    }
-
-    pub fn verify_hash(&self) -> Result<(), TlError> {
-        Self::verify_hash_inner(&self.0.serialized)
-    }
-
-    pub fn verify_hash_inner(data: &[u8]) -> Result<(), TlError> {
-        let data = &mut &data[..];
-        let read = PointRawRead::<'_>::read_from(data)?;
-        if read.digest == Digest::new(read.body.as_ref()) {
-            Ok(())
-        } else {
-            Err(TlError::InvalidData)
-        }
     }
 }
 
@@ -394,8 +399,7 @@ mod tests {
         let conf = default_test_config().conf;
         let point = point(&new_key_pair(), &payload(&conf), &conf);
 
-        let point_2 =
-            Point::new_from_bytes(point.serialized().to_vec()).context("parse point bytes")?;
+        let point_2 = Point::parse(point.serialized().to_vec()).context("parse point bytes")??;
         ensure!(point.0 == point_2.0, "point serde roundtrip");
 
         let info = PointInfo::from(&point);
@@ -526,7 +530,7 @@ mod tests {
 
         let timer = Instant::now();
         for bytes in serialized {
-            if let Err(e) = Point::new_from_bytes(bytes) {
+            if let Err(e) = Point::from_bytes(bytes) {
                 println!("error {e:?}");
                 return;
             }

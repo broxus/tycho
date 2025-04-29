@@ -296,8 +296,6 @@ impl RoundTaskReady {
         let task_ctx = round_ctx.task();
         let round_ctx = round_ctx.clone();
         task_ctx.spawn(async move {
-            point.verify_hash().expect("Hash is invalid for own point");
-
             if let Err(error) = Verifier::verify(&point, &peer_schedule, round_ctx.conf()) {
                 let _guard = round_ctx.span().enter();
                 panic!("Failed to verify own point: {error}, {:?}", point)

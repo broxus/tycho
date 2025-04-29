@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
-use futures_util::future;
+use futures_util::future::BoxFuture;
+use futures_util::{future, FutureExt};
 use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::dag::DagHead;
@@ -55,13 +56,12 @@ impl Responder {
 
 impl Service<ServiceRequest> for Responder {
     type QueryResponse = Response;
-    type OnQueryFuture = future::Ready<Option<Self::QueryResponse>>;
+    type OnQueryFuture = BoxFuture<'static, Option<Self::QueryResponse>>;
     type OnMessageFuture = future::Ready<()>;
 
     #[inline]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
-        let inner = self.0.load_full();
-        future::ready(Self::handle_query(inner, req))
+        self.clone().handle_query(req).boxed()
     }
 
     #[inline]
@@ -71,7 +71,7 @@ impl Service<ServiceRequest> for Responder {
 }
 
 impl Responder {
-    fn handle_query(inner: Option<Arc<ResponderInner>>, req: ServiceRequest) -> Option<Response> {
+    async fn handle_query(self, req: ServiceRequest) -> Option<Response> {
         let task_start = Instant::now();
 
         let raw_query = match QueryRequestRaw::new(req.body) {
@@ -86,8 +86,22 @@ impl Responder {
             }
         };
 
-        let Some(inner) = inner else {
-            return Some(match raw_query.tag {
+        let raw_query_tag = raw_query.tag;
+        let query = match raw_query.parse().await {
+            Ok(query) => query,
+            Err(error) => {
+                tracing::error!(
+                    tag = ?raw_query_tag,
+                    peer_id = display(req.metadata.peer_id.alt()),
+                    %error,
+                    "bad query",
+                );
+                return None;
+            }
+        };
+
+        let Some(inner) = self.0.load_full() else {
+            return Some(match raw_query_tag {
                 QueryRequestTag::Broadcast => {
                     // do nothing: sender has retry loop via signature request
                     QueryResponse::broadcast(task_start)
@@ -99,20 +113,6 @@ impl Responder {
                     QueryResponse::signature(task_start, SignatureResponse::TryLater)
                 }
             });
-        };
-
-        let raw_query_tag = raw_query.tag;
-        let query = match raw_query.parse() {
-            Ok(query) => query,
-            Err(error) => {
-                tracing::error!(
-                    tag = ?raw_query_tag,
-                    peer_id = display(req.metadata.peer_id.alt()),
-                    %error,
-                    "bad query",
-                );
-                return None;
-            }
         };
 
         Some(match query {
@@ -131,11 +131,12 @@ impl Responder {
                 task_start,
                 Uploader::find(
                     &req.metadata.peer_id,
-                    &point_id,
+                    point_id,
                     &inner.head,
                     &inner.store,
                     &inner.round_ctx,
-                ),
+                )
+                .await,
             ),
             QueryRequest::Signature(round) => QueryResponse::signature(
                 task_start,

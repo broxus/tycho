@@ -49,7 +49,9 @@ impl Engine {
         let conf = &merged_conf.conf;
         let genesis = merged_conf.genesis();
 
-        (genesis.verify_hash()).expect("failed to verify genesis hash");
+        Point::parse(genesis.serialized().to_vec())
+            .expect("parse genesis: point tl serde is broken")
+            .expect("parse genesis: integrity check is broken");
         Verifier::verify(&genesis, &net.peer_schedule, conf).expect("failed to verify genesis");
 
         let consensus_round = RoundWatch::default();
@@ -299,7 +301,6 @@ impl Engine {
                             .par_iter()
                             .map(|point| {
                                 if Verifier::verify(point, &peer_schedule, round_ctx.conf()).is_ok()
-                                    && point.verify_hash().is_ok()
                                 {
                                     // return back as they were, now with prev_proof filled
                                     PointRestore::Exists(point.into(), point.prev_proof())

@@ -2,11 +2,12 @@ use std::fmt::{Display, Formatter};
 use std::time::Instant;
 
 use bytes::Buf;
-use tl_proto::{TlError, TlRead, TlWrite};
+use tl_proto::{TlError, TlRead, TlResult, TlWrite};
 use tycho_network::Response;
+use tycho_util::sync::rayon_run_fifo;
 
 use crate::effects::{AltFmt, AltFormat};
-use crate::models::{Point, Signature};
+use crate::models::{Point, PointIntegrityError, Signature};
 
 #[derive(Debug, TlWrite, TlRead)]
 #[tl(boxed, id = "intercom.broadcastResponse", scheme = "proto.tl")]
@@ -83,7 +84,7 @@ impl QueryResponse {
         response
     }
 
-    pub fn parse_signature(response: &Response) -> Result<SignatureResponse, TlError> {
+    pub fn parse_signature(response: &Response) -> TlResult<SignatureResponse> {
         SignatureResponse::read_from(&mut &response.body[..])
     }
 
@@ -104,14 +105,18 @@ impl QueryResponse {
         response
     }
 
-    pub fn parse_point_by_id(mut response: Response) -> Result<PointByIdResponse<Point>, TlError> {
+    pub async fn parse_point_by_id(
+        mut response: Response,
+    ) -> TlResult<PointByIdResponse<Result<Point, PointIntegrityError>>> {
         let interim = PointByIdResponse::<&[u8]>::read_from(&mut &response.body[..])?;
         Ok(match interim {
             PointByIdResponse::Defined(data) => {
                 let data_offset = response.body.len() - data.len();
                 response.body.advance(data_offset);
-                Point::verify_hash_inner(&response.body)?;
-                PointByIdResponse::Defined(Point::new_from_bytes(response.body.into())?)
+                let response_body = response.body;
+                PointByIdResponse::Defined(
+                    rayon_run_fifo(|| Point::parse(response_body.into())).await?,
+                )
             }
             PointByIdResponse::DefinedNone => PointByIdResponse::DefinedNone,
             PointByIdResponse::TryLater => PointByIdResponse::TryLater,

@@ -19,7 +19,7 @@ use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Ctx, DownloadCtx};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::{ConsensusConfigExt, MempoolConfig};
-use crate::intercom::core::{PointByIdResponse, QueryRequest};
+use crate::intercom::core::{PointByIdResponse, PointQueryResult, QueryRequest};
 use crate::intercom::dependency::limiter::Limiter;
 use crate::intercom::peer_schedule::PeerState;
 use crate::intercom::{Dispatcher, PeerSchedule};
@@ -208,8 +208,7 @@ struct DownloadTask<T> {
     updates: broadcast::Receiver<(PeerId, PeerState)>,
 
     undone_peers: FastHashMap<PeerId, PeerStatus>,
-    downloading:
-        FuturesUnordered<BoxFuture<'static, (PeerId, anyhow::Result<PointByIdResponse<Point>>)>>,
+    downloading: FuturesUnordered<BoxFuture<'static, (PeerId, PointQueryResult)>>,
 
     attempt: u8,
 }
@@ -314,14 +313,10 @@ impl<T: DownloadType> DownloadTask<T> {
         );
     }
 
-    fn verify(
-        &mut self,
-        peer_id: &PeerId,
-        result: anyhow::Result<PointByIdResponse<Point>>,
-    ) -> Option<DownloadResult> {
+    fn verify(&mut self, peer_id: &PeerId, result: PointQueryResult) -> Option<DownloadResult> {
         let defined_response =
             match result {
-                Ok(PointByIdResponse::Defined(point)) => Some(point),
+                Ok(PointByIdResponse::Defined(point_result)) => Some(point_result),
                 Ok(PointByIdResponse::DefinedNone) => None,
                 Ok(PointByIdResponse::TryLater) => {
                     let status = self.undone_peers.get_mut(peer_id).unwrap_or_else(|| {
@@ -369,7 +364,18 @@ impl<T: DownloadType> DownloadTask<T> {
                 );
                 None
             }
-            Some(point) if point.id() != self.point_id => {
+            Some(Err(parse_error)) => {
+                // reliable peer won't return unverifiable point
+                self.not_found = self.not_found.saturating_add(1);
+                DownloadCtx::meter_unreliable();
+                tracing::error!(
+                    result = display(parse_error),
+                    peer = display(peer_id.alt()),
+                    "downloaded",
+                );
+                None
+            }
+            Some(Ok(point)) if point.id() != self.point_id => {
                 // it's a ban
                 self.not_found = self.not_found.saturating_add(1);
                 DownloadCtx::meter_unreliable();
@@ -382,20 +388,9 @@ impl<T: DownloadType> DownloadTask<T> {
                 );
                 None
             }
-            Some(point) => {
+            Some(Ok(point)) => {
                 match Verifier::verify(&point, &self.parent.inner.peer_schedule, self.ctx.conf()) {
                     Ok(()) => Some(DownloadResult::Verified(point)), // `Some` breaks outer loop
-                    Err(error @ VerifyError::BadSig) => {
-                        // reliable peer won't return unverifiable point
-                        self.not_found = self.not_found.saturating_add(1);
-                        DownloadCtx::meter_unreliable();
-                        tracing::error!(
-                            result = display(error),
-                            peer = display(peer_id.alt()),
-                            "downloaded",
-                        );
-                        None
-                    }
                     Err(VerifyError::IllFormed(reason)) => {
                         tracing::error!(
                             error = display(&reason),
