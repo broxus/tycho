@@ -2,16 +2,16 @@ use bytes::Bytes;
 use tycho_network::PeerId;
 
 use crate::dag::DagHead;
-use crate::effects::{AltFormat, Ctx, MempoolStore, RoundCtx};
+use crate::effects::{AltFormat, Cancelled, Ctx, MempoolStore, RoundCtx};
 use crate::intercom::core::PointByIdResponse;
 use crate::models::{PointId, PointStatusStored};
 
 pub struct Uploader;
 
 impl Uploader {
-    pub fn find(
+    pub async fn find(
         peer_id: &PeerId,
-        point_id: &PointId,
+        point_id: PointId,
         head: &DagHead,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
@@ -19,38 +19,44 @@ impl Uploader {
         let (status_opt, result) = if point_id.round > head.current().round() {
             (None, PointByIdResponse::TryLater)
         } else {
-            let status_opt = store.get_status(point_id.round, &point_id.digest);
-            let result = match &status_opt {
-                Some(PointStatusStored::Validated(usable))
-                    if usable.is_valid | usable.is_certified =>
-                {
-                    match store.get_point_raw(point_id.round, &point_id.digest) {
-                        None => PointByIdResponse::DefinedNone,
-                        Some(slice) => PointByIdResponse::Defined(slice),
+            let store = store.clone();
+            let last_back_bottom = head.last_back_bottom();
+            let task = round_ctx.task().spawn_blocking(move || {
+                let status_opt = store.get_status(point_id.round, &point_id.digest);
+                let result = match &status_opt {
+                    Some(PointStatusStored::Validated(usable))
+                        if usable.is_valid | usable.is_certified =>
+                    {
+                        match store.get_point_raw(point_id.round, &point_id.digest) {
+                            None => PointByIdResponse::DefinedNone,
+                            Some(slice) => PointByIdResponse::Defined(slice),
+                        }
                     }
-                }
-                Some(PointStatusStored::IllFormed(ill)) if ill.is_certified => {
-                    PointByIdResponse::TryLater
-                }
-                Some(PointStatusStored::NotFound(not_found)) if not_found.is_certified => {
-                    PointByIdResponse::TryLater
-                }
-                Some(PointStatusStored::Exists) | None => {
-                    if head.last_back_bottom() <= point_id.round {
-                        // may be downloading, unknown or resolving - dag may be incomplete
+                    Some(PointStatusStored::IllFormed(ill)) if ill.is_certified => {
                         PointByIdResponse::TryLater
-                    } else {
-                        // must have been stored and committed, may be too old and deleted
-                        PointByIdResponse::DefinedNone
                     }
-                }
-                Some(
-                    PointStatusStored::IllFormed(_)
-                    | PointStatusStored::NotFound(_)
-                    | PointStatusStored::Validated(_),
-                ) => PointByIdResponse::DefinedNone,
-            };
-            (status_opt, result)
+                    Some(PointStatusStored::NotFound(not_found)) if not_found.is_certified => {
+                        PointByIdResponse::TryLater
+                    }
+                    Some(PointStatusStored::Exists) | None => {
+                        if last_back_bottom <= point_id.round {
+                            // may be downloading, unknown or resolving - dag may be incomplete
+                            PointByIdResponse::TryLater
+                        } else {
+                            // must have been stored and committed, may be too old and deleted
+                            PointByIdResponse::DefinedNone
+                        }
+                    }
+                    Some(
+                        PointStatusStored::IllFormed(_)
+                        | PointStatusStored::NotFound(_)
+                        | PointStatusStored::Validated(_),
+                    ) => PointByIdResponse::DefinedNone,
+                };
+                (status_opt, result)
+            });
+            task.await
+                .unwrap_or_else(|Cancelled()| (None, PointByIdResponse::TryLater))
         };
         tracing::debug!(
             parent: round_ctx.span(),

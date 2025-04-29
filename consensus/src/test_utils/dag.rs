@@ -123,7 +123,9 @@ pub async fn populate_points<const PEER_COUNT: usize>(
     }
 
     for point in points.values() {
-        point.verify_hash().unwrap();
+        Point::parse(point.serialized().to_vec())
+            .expect("point tl serde is broken")
+            .expect("point integrity check is broken");
         Verifier::verify(point, peer_schedule, round_ctx.conf()).expect("well-formed point");
         let info = PointInfo::from(point);
         let validate_ctx = ValidateCtx::new(round_ctx, &info);

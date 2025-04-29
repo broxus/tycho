@@ -44,8 +44,6 @@ pub enum PointMap {
 pub enum VerifyError {
     #[error("cannot verify: {0}")]
     Fail(VerifyFailReason),
-    #[error("signature does not match author")]
-    BadSig,
     #[error("ill-formed: {0}")]
     IllFormed(IllFormedReason),
 }
@@ -103,11 +101,7 @@ impl Verifier {
     ) -> Result<(), VerifyError> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_verify_time");
 
-        let result = if !point.is_integrity_ok() {
-            Err(VerifyError::BadSig)
-        } else {
-            Self::verify_impl(point, peer_schedule, conf).map_or(Ok(()), Err)
-        };
+        let result = Self::verify_impl(point, peer_schedule, conf).map_or(Ok(()), Err);
 
         ValidateCtx::verified(&result);
         result
@@ -535,9 +529,8 @@ impl Verifier {
         }
 
         // check size only now, as config seems up to date
-        let payload_bytes = point.payload_bytes();
-        if payload_bytes > conf.consensus.payload_batch_bytes {
-            let reason = IllFormedReason::TooLargePayload(payload_bytes);
+        if point.payload_bytes() > conf.consensus.payload_batch_bytes {
+            let reason = IllFormedReason::TooLargePayload(point.payload_bytes());
             return Some(VerifyError::IllFormed(reason));
         }
 
@@ -644,12 +637,11 @@ impl Verifier {
     }
 
     fn links_across_genesis(point: &Point, conf: &MempoolConfig) -> Option<IllFormedReason> {
-        let genesis_round = conf.genesis_round;
         let proof_round = point.anchor_round(AnchorStageRole::Proof);
         let trigger_round = point.anchor_round(AnchorStageRole::Trigger);
         match (
-            proof_round.cmp(&genesis_round),
-            trigger_round.cmp(&genesis_round),
+            proof_round.cmp(&conf.genesis_round),
+            trigger_round.cmp(&conf.genesis_round),
         ) {
             (cmp::Ordering::Less, _) | (_, cmp::Ordering::Less) => {
                 Some(IllFormedReason::LinksAcrossGenesis)
@@ -707,7 +699,6 @@ impl ValidateCtx {
         let label = match result {
             Err(VerifyError::Fail(_)) => "failed",
             Err(VerifyError::IllFormed(IllFormedReason::UnknownPeers(_))) => "bad_peer",
-            Err(VerifyError::BadSig) => "bad_sig",
             Err(VerifyError::IllFormed(_)) => "ill_formed",
             Ok(_) => {
                 metrics::counter!("tycho_mempool_points_verify_ok").increment(1);

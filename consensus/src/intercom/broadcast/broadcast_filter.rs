@@ -118,8 +118,6 @@ enum CheckError {
     SenderNotAuthor(PeerId),
     #[error("failed to verify: {0}")]
     Fail(VerifyFailReason),
-    #[error("point signature mismatch, sender {}", .0.alt())]
-    BadSigSender(PeerId),
 }
 
 impl BroadcastFilterInner {
@@ -168,7 +166,6 @@ impl BroadcastFilterInner {
                 } else {
                     ByAuthorItem::IllFormed(point.clone(), reason)
                 }),
-                Err(VerifyError::BadSig) => Err(CheckError::BadSigSender(*sender)),
                 Err(VerifyError::Fail(reason)) => Err(CheckError::Fail(reason)),
             }
         };
