@@ -4,17 +4,18 @@ use tycho_network::PeerId;
 use tycho_storage::point_status::{AnchorFlags, StatusFlags};
 
 use crate::effects::{AltFmt, AltFormat};
-use crate::models::{Digest, PointId, PointInfo, PrevPointProof, Round};
+use crate::models::{Digest, PointId, PointInfo, Round};
 
 pub enum PointRestoreSelect {
     /// Note: currently all points with `Exists` statuses must repeat `verify()`,
-    ///       as this status also represents an error during merge of DB statuses
+    ///       as this status also represents an error during merge of DB statuses;
+    ///       also config or `v_set` may have changed after reboot if node lagged too far
     NeedsVerify(Round, Digest),
     Ready(PointRestore),
 }
 pub enum PointRestore {
     /// non-terminal status can be found in DB if point task was aborted before validation
-    Exists(PointInfo, Option<PrevPointProof>),
+    Exists(PointInfo),
     Validated(PointInfo, PointStatusValidated),
     IllFormed(PointId, PointStatusIllFormed),
     NotFound(Round, Digest, PointStatusNotFound),
@@ -31,7 +32,7 @@ impl PointRestore {
             priority
         }
         let desc = match self {
-            PointRestore::Exists(_, _) => 0,
+            PointRestore::Exists(_) => 0,
             PointRestore::Validated(_, status) => order_desc(status),
             PointRestore::IllFormed(_, status) => order_desc(status),
             PointRestore::NotFound(_, _, status) => order_desc(status),
@@ -40,21 +41,21 @@ impl PointRestore {
     }
     pub fn round(&self) -> Round {
         match self {
-            Self::Exists(info, _) | Self::Validated(info, _) => info.round(),
+            Self::Exists(info) | Self::Validated(info, _) => info.round(),
             Self::IllFormed(id, _) => id.round,
             Self::NotFound(round, _, _) => *round,
         }
     }
     pub fn author(&self) -> &PeerId {
         match self {
-            Self::Exists(info, _) | Self::Validated(info, _) => &info.data().author,
+            Self::Exists(info) | Self::Validated(info, _) => &info.data().author,
             Self::IllFormed(id, _) => &id.author,
             Self::NotFound(_, _, status) => &status.author,
         }
     }
     pub fn digest(&self) -> &Digest {
         match self {
-            Self::Exists(info, _) | Self::Validated(info, _) => info.digest(),
+            Self::Exists(info) | Self::Validated(info, _) => info.digest(),
             Self::IllFormed(id, _) => &id.digest,
             Self::NotFound(_, digest, _) => digest,
         }
@@ -74,11 +75,8 @@ impl Debug for AltFmt<'_, PointRestore> {
         let inner = AltFormat::unpack(self);
         write!(f, "Restore {{ {:?} ", inner.id().alt())?;
         match inner {
-            PointRestore::Exists(_, Some(prev)) => {
-                write!(f, "Exists prev # {}", prev.digest.alt())?;
-            }
-            PointRestore::Exists(_, None) => {
-                f.write_str("Exists prev # None")?;
+            PointRestore::Exists(_) => {
+                write!(f, "Exists")?;
             }
             PointRestore::Validated(_, status) => {
                 write!(f, "{status}")?;

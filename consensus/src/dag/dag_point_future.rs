@@ -176,7 +176,6 @@ impl DagPointFuture {
 
         let nested = round_ctx.task().spawn(async move {
             let point_id = point.id();
-            let prev_proof = point.prev_proof();
 
             let store_fn = {
                 let store = store.clone();
@@ -187,7 +186,6 @@ impl DagPointFuture {
 
             let validated = Verifier::validate(
                 info.clone(),
-                prev_proof,
                 point_dag_round,
                 downloader,
                 store.clone(),
@@ -262,7 +260,6 @@ impl DagPointFuture {
             match downloaded {
                 Some(DownloadResult::Verified(point)) => {
                     let info = PointInfo::from(&point);
-                    let prev_proof = point.prev_proof();
 
                     let store_fn = {
                         let store = store.clone();
@@ -274,7 +271,6 @@ impl DagPointFuture {
                     let validate_ctx = ValidateCtx::new(&into_round_ctx, &info);
                     let validated = Verifier::validate(
                         info.clone(),
-                        prev_proof,
                         point_dag_round,
                         downloader,
                         store.clone(),
@@ -363,7 +359,7 @@ impl DagPointFuture {
         if let Some((includes, witness)) = match &point_restore {
             PointRestore::Validated(info, _) => Some((&info.data().includes, &info.data().witness)),
             PointRestore::IllFormed(_, _) // will not certify its dependencies, can be certified
-            | PointRestore::Exists(_, _) | PointRestore::NotFound(_, _, _) => None,
+            | PointRestore::Exists(_) | PointRestore::NotFound(_, _, _) => None,
         } {
             let mut cert_deps = CertDirectDeps {
                 includes: FastHashMap::with_capacity(point_dag_round.peer_count().full()),
@@ -386,7 +382,7 @@ impl DagPointFuture {
             cert.set_deps(cert_deps);
         }
         if match &point_restore {
-            PointRestore::Exists(_, _) => false,
+            PointRestore::Exists(_) => false,
             PointRestore::Validated(_, status) => status.is_certified,
             PointRestore::IllFormed(_, status) => status.is_certified,
             PointRestore::NotFound(_, _, status) => status.is_certified,
@@ -396,7 +392,7 @@ impl DagPointFuture {
 
         // keep this section sync so that call site may not wait for each result to resolve
         let validate_or_restore = match point_restore {
-            PointRestore::Exists(info, prev_proof) => Either::Left((info, prev_proof)),
+            PointRestore::Exists(info) => Either::Left(info),
             PointRestore::Validated(info, status) => {
                 let dag_point = DagPoint::new_validated(info, cert, &status);
                 state.acquire_restore(&dag_point.id(), &status);
@@ -416,7 +412,7 @@ impl DagPointFuture {
         };
 
         match validate_or_restore {
-            Either::Left((verified, prev_proof)) => {
+            Either::Left(verified) => {
                 let point_dag_round = point_dag_round.downgrade();
                 let state = state.clone();
                 let downloader = downloader.clone();
@@ -429,7 +425,6 @@ impl DagPointFuture {
                     let validate_ctx = ValidateCtx::new(&round_ctx, &verified);
                     let validated = Verifier::validate(
                         verified.clone(),
-                        prev_proof,
                         point_dag_round,
                         downloader,
                         store.clone(),
