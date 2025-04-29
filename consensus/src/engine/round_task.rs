@@ -304,7 +304,6 @@ impl RoundTaskReady {
             let validate_ctx = ValidateCtx::new(&round_ctx, &info);
             let validate = Verifier::validate(
                 info,
-                point.prev_proof(),
                 point_round,
                 downloader,
                 store,
