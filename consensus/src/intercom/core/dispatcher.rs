@@ -1,4 +1,3 @@
-use anyhow::Result;
 use futures_util::future::BoxFuture;
 use tycho_network::{Network, PeerId, PrivateOverlay, Request};
 use tycho_util::metrics::HistogramGuard;
@@ -6,13 +5,16 @@ use tycho_util::metrics::HistogramGuard;
 use crate::intercom::core::{
     BroadcastResponse, PointByIdResponse, QueryResponse, SignatureResponse,
 };
-use crate::models::Point;
+use crate::models::{Point, PointIntegrityError};
 
 #[derive(Clone)]
 pub struct Dispatcher {
     overlay: PrivateOverlay,
     network: Network,
 }
+
+pub type PointQueryResult = anyhow::Result<PointByIdResponse<Result<Point, PointIntegrityError>>>;
+
 impl Dispatcher {
     pub fn new(network: &Network, private_overlay: &PrivateOverlay) -> Self {
         Self {
@@ -25,7 +27,7 @@ impl Dispatcher {
         &self,
         peer_id: &PeerId,
         request: &Request,
-    ) -> BoxFuture<'static, (PeerId, Result<BroadcastResponse>)> {
+    ) -> BoxFuture<'static, (PeerId, anyhow::Result<BroadcastResponse>)> {
         let peer_id = *peer_id;
         let metric = HistogramGuard::begin("tycho_mempool_broadcast_query_dispatcher_time");
         let overlay = self.overlay.clone();
@@ -39,8 +41,8 @@ impl Dispatcher {
                 Ok(response) => response,
                 Err(e) => return (peer_id, Err(e)),
             };
-            let result = QueryResponse::parse_broadcast(&response).map_err(Into::into);
-            (peer_id, result)
+            let result = QueryResponse::parse_broadcast(&response);
+            (peer_id, result.map_err(Into::into))
         };
         Box::pin(future)
     }
@@ -50,7 +52,7 @@ impl Dispatcher {
         peer_id: &PeerId,
         after_bcast: bool,
         request: &Request,
-    ) -> BoxFuture<'static, (PeerId, bool, Result<SignatureResponse>)> {
+    ) -> BoxFuture<'static, (PeerId, bool, anyhow::Result<SignatureResponse>)> {
         let peer_id = *peer_id;
         let metric = HistogramGuard::begin("tycho_mempool_signature_query_dispatcher_time");
         let overlay = self.overlay.clone();
@@ -64,8 +66,8 @@ impl Dispatcher {
                 Ok(response) => response,
                 Err(e) => return (peer_id, after_bcast, Err(e)),
             };
-            let result = QueryResponse::parse_signature(&response).map_err(Into::into);
-            (peer_id, after_bcast, result)
+            let result = QueryResponse::parse_signature(&response);
+            (peer_id, after_bcast, result.map_err(Into::into))
         };
         Box::pin(future)
     }
@@ -74,7 +76,7 @@ impl Dispatcher {
         &self,
         peer_id: &PeerId,
         request: &Request,
-    ) -> BoxFuture<'static, (PeerId, Result<PointByIdResponse<Point>>)> {
+    ) -> BoxFuture<'static, (PeerId, PointQueryResult)> {
         let peer_id = *peer_id;
         let metric = HistogramGuard::begin("tycho_mempool_download_query_dispatcher_time");
         let overlay = self.overlay.clone();
@@ -88,8 +90,8 @@ impl Dispatcher {
                 Ok(response) => response,
                 Err(e) => return (peer_id, Err(e)),
             };
-            let result = QueryResponse::parse_point_by_id(response).map_err(Into::into);
-            (peer_id, result)
+            let result = QueryResponse::parse_point_by_id(response).await;
+            (peer_id, result.map_err(Into::into))
         };
         Box::pin(future)
     }
