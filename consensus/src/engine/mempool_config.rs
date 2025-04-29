@@ -1,4 +1,4 @@
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU8};
 use std::sync::OnceLock;
 
 use anyhow::{ensure, Context, Result};
@@ -181,7 +181,10 @@ pub struct MempoolNodeConfig {
     ///
     /// [`Tycho tread pool config`](tycho_util::cli::config::ThreadPoolConfig)
     /// does not have a corresponding parameter and does not change tokio's default value.
-    pub max_blocking_tasks: u16,
+    pub max_blocking_tasks: NonZeroU16,
+
+    /// Max simultaneous point search tasks fulfilling download request
+    pub max_upload_tasks: NonZeroU8,
 }
 
 impl Default for MempoolNodeConfig {
@@ -190,7 +193,8 @@ impl Default for MempoolNodeConfig {
             log_truncate_long_values: true,
             clean_db_period_rounds: NonZeroU16::new(105).unwrap(),
             cache_future_broadcasts_rounds: 105,
-            max_blocking_tasks: 300,
+            max_blocking_tasks: NonZeroU16::new(250).unwrap(),
+            max_upload_tasks: NonZeroU8::new(50).unwrap(),
         }
     }
 }
