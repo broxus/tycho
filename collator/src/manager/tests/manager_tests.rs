@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, CellBuilder, CellFamily, CellSliceRange, HashBytes, Lazy};
+use everscale_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Lazy};
 use everscale_types::merkle::MerkleUpdate;
 use everscale_types::models::{
     Block, BlockExtra, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig, ConsensusInfo,
@@ -2785,7 +2785,7 @@ fn build_out_msg_description<V: InternalMessageValue>(
                 message: Lazy::new(&OwnedMessage {
                     info: MsgInfo::Int(msg.info().clone()),
                     init: None,
-                    body: (msg.cell().clone(), CellSliceRange::default()),
+                    body: msg.cell().clone().into(),
                     layout: None,
                 })?,
             })?,
