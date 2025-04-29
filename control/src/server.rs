@@ -505,7 +505,7 @@ impl proto::ControlServer for ControlServer {
     async fn get_account_state(
         self,
         _: Context,
-        req: proto::AccountStateRequest,
+        req: proto::AccountStatezRequest,
     ) -> ServerResult<proto::AccountStateResponse> {
         let (block_handle, account) = 'state: {
             // Try fast path first.
@@ -853,9 +853,10 @@ struct CachedAccounts {
 
 impl CachedAccounts {
     fn try_get(&self, addr: &HashBytes) -> Result<CacheItem> {
-        let prefix = u64::from_be_bytes(*addr.first_chunk());
+        let shard_prefix =
+            u64::from_be_bytes(*addr.first_chunk()) & (0b1111u64 << 60) | (0b1u64 << 59);
 
-        let Some(dict_root) = self.accounts_roots.get(&prefix) else {
+        let Some(dict_root) = self.accounts_roots.get(&shard_prefix) else {
             return Ok(CacheItem::NotFound);
         };
 

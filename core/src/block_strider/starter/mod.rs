@@ -154,13 +154,9 @@ fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<Shar
 
     let mut shard_accounts = BTreeMap::new();
     while let Some(root_prefix) = parsed.next() {
-        tracing::info!("try to load prefix");
-
         let shard_prefix = root_prefix
             .parse::<u64>()
             .context("failed to parse shard prefix")?;
-
-        tracing::info!("try to load accounts");
 
         let root_shard_accounts = parsed.next().unwrap();
         let accounts = root_shard_accounts
