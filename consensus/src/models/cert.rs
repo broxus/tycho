@@ -4,7 +4,6 @@ use std::sync::{atomic, Arc, Weak};
 
 use ahash::HashMapExt;
 use parking_lot::Mutex;
-use tokio::sync::Notify;
 use tycho_util::FastHashMap;
 
 use crate::models::Digest;
@@ -17,8 +16,6 @@ pub struct WeakCert(Weak<CertInner>);
 struct CertInner {
     is_certified: AtomicBool,
     has_deps: AtomicBool,
-    /// when owner gets certified regardless its dependencies
-    notify: Notify,
     /// set at most once; taken at most once only if certified
     direct_deps: Mutex<DepsLifeCycle>,
 }
@@ -39,14 +36,6 @@ pub struct CertDirectDeps {
 impl Cert {
     pub fn is_certified(&self) -> bool {
         self.0.is_certified.load(atomic::Ordering::Acquire)
-    }
-
-    pub async fn wait_certified(&self) {
-        let notified = self.0.notify.notified();
-        if self.is_certified() {
-            return;
-        }
-        notified.await;
     }
 
     /// must be used at most once
@@ -118,7 +107,7 @@ impl WeakCert {
 
 impl CertInner {
     fn try_certify(&self) {
-        let is_first = (self.is_certified)
+        let _ = (self.is_certified)
             .compare_exchange(
                 false,
                 true,
@@ -126,9 +115,6 @@ impl CertInner {
                 atomic::Ordering::Relaxed,
             )
             .is_ok();
-        if is_first {
-            self.notify.notify_waiters();
-        }
     }
 
     fn try_take_deps(&self) -> Option<CertDirectDeps> {

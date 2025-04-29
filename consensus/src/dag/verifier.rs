@@ -6,7 +6,6 @@ use futures_util::StreamExt;
 use tracing::Instrument;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run_fifo;
 use tycho_util::FastHashMap;
 
 use crate::dag::dag_location::DagLocation;
@@ -17,7 +16,7 @@ use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
     AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, Link, PeerCount, Point, PointInfo,
-    PrevPointProof, Round, UnixTime,
+    Round, UnixTime,
 };
 
 // Note on equivocation.
@@ -70,8 +69,6 @@ pub enum IllFormedReason {
     SelfLink,
     #[error("anchor link")]
     AnchorLink,
-    #[error("bad signature in evidence map")]
-    EvidenceSig,
     #[error("{0:?} peer map must be empty")]
     MustBeEmpty(PointMap),
     #[error("unknown peers in {:?} map: {}", .0.1, .0.0.as_slice().alt())]
@@ -111,8 +108,7 @@ impl Verifier {
     ///
     /// We do not require the whole `Point` to avoid OOM as during sync Dag can grow large.
     pub async fn validate(
-        info: PointInfo, // @ r+0
-        prev_proof: Option<PrevPointProof>,
+        info: PointInfo,   // @ r+0
         r_0: WeakDagRound, // r+0
         downloader: Downloader,
         store: MempoolStore,
@@ -160,34 +156,6 @@ impl Verifier {
         drop(r_0_pre);
         drop(span_guard);
 
-        // certified flag aborts proof check; checked proof mark dependencies as certified;
-        // check depender's sig before new (down)load point futures are spawned
-        let proven_by_cert = if cert.is_certified() {
-            Some(true) // do not spawn rayon task if we know it will be aborted
-        } else if let Some(proof) = prev_proof {
-            let mut signatures_fut = std::pin::pin!({
-                rayon_run_fifo(move || proof.signatures_match()).instrument(ctx.span().clone())
-            });
-            let mut wait_certified = std::pin::pin!(cert.wait_certified());
-            let certified = tokio::select! {
-                biased;
-                _ = &mut wait_certified => {
-                    true // the whole current point and all its deps are certified
-                },
-                is_sig_ok = &mut signatures_fut => {
-                    if is_sig_ok {
-                        false // not certified; certifies only own previous point and its deps
-                    } else {
-                        let reason = IllFormedReason::EvidenceSig;
-                        return ctx.validated(&cert, ValidateResult::IllFormed(reason));
-                    }
-                }
-            };
-            Some(certified)
-        } else {
-            None
-        };
-
         let span_guard = ctx.span().enter();
 
         let Some(r_0) = r_0.upgrade() else {
@@ -209,9 +177,7 @@ impl Verifier {
         let (direct_deps, cert_deps) =
             Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &ctx);
 
-        // if None - do nothing; if Some(true) - wii certify all deps when they are set
-        if proven_by_cert == Some(false) {
-            let prev_digest = (info.data().prev_digest()).expect("prev digest must be defined");
+        if let Some(prev_digest) = info.data().prev_digest() {
             let weak_cert =
                 (cert_deps.includes.get(prev_digest)).expect("prev cert must be included");
             // cannot be dropped because futures keep strong refs to Cert, but nevertheless

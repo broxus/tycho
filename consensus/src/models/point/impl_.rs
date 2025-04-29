@@ -25,6 +25,10 @@ pub enum PointIntegrityError {
     /// do not use the author from point's body
     #[error("signature does not match author")]
     BadSig,
+    #[error("bad signature in evidence map")]
+    EvidenceSig,
+    #[error("unusable due to some maps issue")]
+    BadMaps, // TODO: separate error for each violation
 }
 
 #[derive(Clone)]
@@ -164,6 +168,11 @@ impl Point {
         fn is_sig_ok(point: &Point) -> bool {
             (point.signature()).verifies(&point.data().author, point.digest())
         }
+        fn is_evidence_ok(point: &Point) -> bool {
+            (point.data()).prev_digest().is_none_or(|prev_proof| {
+                (point.evidence().iter()).all(|(peer, sig)| sig.verifies(peer, prev_proof))
+            })
+        }
 
         if !is_hash_ok(&serialized)? {
             return Ok(Err(PointIntegrityError::BadHash));
@@ -174,6 +183,15 @@ impl Point {
         if !is_sig_ok(&point) {
             return Ok(Err(PointIntegrityError::BadSig));
         }
+
+        if !(point.data()).has_well_formed_maps(point.round(), point.evidence()) {
+            return Ok(Err(PointIntegrityError::BadMaps));
+        }
+
+        if !is_evidence_ok(&point) {
+            return Ok(Err(PointIntegrityError::EvidenceSig));
+        }
+
         Ok(Ok(point))
     }
 
@@ -227,14 +245,6 @@ impl Point {
         })
     }
 
-    pub fn prev_proof(&self) -> Option<PrevPointProof> {
-        let parsed = &self.0.parsed;
-        Some(PrevPointProof {
-            digest: *parsed.data.prev_digest()?,
-            evidence: parsed.evidence.clone(),
-        })
-    }
-
     /// blame author and every dependent point's author
     /// must be checked right after integrity, before any manipulations with the point
     pub fn is_well_formed(&self, conf: &MempoolConfig) -> bool {
@@ -276,21 +286,6 @@ impl Point {
             .into_iter()
             .map(|item| &*bump.alloc_slice_copy(item))
             .collect())
-    }
-}
-
-#[derive(Debug)]
-pub struct PrevPointProof {
-    pub digest: Digest,
-    pub evidence: BTreeMap<PeerId, Signature>,
-}
-
-impl PrevPointProof {
-    pub fn signatures_match(&self) -> bool {
-        // according to the rule of thumb to yield every 0.01-0.1 ms,
-        // and that each signature check takes near 0.03 ms,
-        // every check deserves its own async task - delegate to rayon as a whole
-        (self.evidence.iter()).all(|(peer, sig)| sig.verifies(peer, &self.digest))
     }
 }
 

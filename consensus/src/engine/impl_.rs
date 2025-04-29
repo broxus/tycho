@@ -303,7 +303,7 @@ impl Engine {
                                 if Verifier::verify(point, &peer_schedule, round_ctx.conf()).is_ok()
                                 {
                                     // return back as they were, now with prev_proof filled
-                                    PointRestore::Exists(point.into(), point.prev_proof())
+                                    PointRestore::Exists(point.into())
                                 } else {
                                     PointRestore::IllFormed(point.id(), Default::default())
                                 }

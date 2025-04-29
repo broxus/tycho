@@ -131,7 +131,6 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         let validate_ctx = ValidateCtx::new(round_ctx, &info);
         let validated = Verifier::validate(
             info,
-            point.prev_proof(),
             dag_round.downgrade(),
             downloader.clone(),
             store.clone(),

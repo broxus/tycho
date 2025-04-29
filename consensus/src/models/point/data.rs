@@ -129,6 +129,8 @@ impl PointData {
         self.includes.get(&self.author)
     }
 
+    /// counterpart of [`Self::has_well_formed_maps`] that must be called later
+    /// and allows to link this [`Point`] with its dependencies for validation and commit
     pub fn is_well_formed(
         &self,
         self_round: Round,
@@ -138,7 +140,7 @@ impl PointData {
     ) -> bool {
         // check for being earlier than genesis takes place with other peer checks
         #[allow(clippy::nonminimal_bool, reason = "independent logical checks")]
-        let is_special_ok = if self_round == conf.genesis_round {
+        if self_round == conf.genesis_round {
             payload_len == 0
                 && self.anchor_trigger == Link::ToSelf
                 && self.anchor_proof == Link::ToSelf
@@ -150,17 +152,25 @@ impl PointData {
             !(self.anchor_proof == Link::ToSelf && evidence.is_empty())
                 && !(self.anchor_trigger == Link::ToSelf && evidence.is_empty())
                 && self.time > self.anchor_time
-        };
-        is_special_ok
-            // proof for previous point consists of digest and 2F++ evidences
-            // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
-            && evidence.is_empty() != self.includes.contains_key(&self.author)
-            // evidence must contain only signatures of others
-            && !evidence.contains_key(&self.author)
-            // also cannot witness own point
-            && !self.witness.contains_key(&self.author)
-            && self.is_link_well_formed(self_round, AnchorStageRole::Trigger)
-            && self.is_link_well_formed(self_round, AnchorStageRole::Proof)
+        }
+    }
+
+    /// counterpart of [`Self::is_well_formed`] that must be called earlier,
+    /// does not require config and allows to use [`Point`] methods
+    pub fn has_well_formed_maps(
+        &self,
+        self_round: Round,
+        evidence: &BTreeMap<PeerId, Signature>,
+    ) -> bool {
+        // proof for previous point consists of digest and 2F++ evidences
+        // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
+        evidence.is_empty() != self.includes.contains_key(&self.author)
+        // evidence must contain only signatures of others
+        && !evidence.contains_key(&self.author)
+        // also cannot witness own point
+        && !self.witness.contains_key(&self.author)
+        && self.is_link_well_formed(self_round, AnchorStageRole::Trigger)
+        && self.is_link_well_formed(self_round, AnchorStageRole::Proof)
     }
 
     fn is_link_well_formed(&self, self_round: Round, link_field: AnchorStageRole) -> bool {
