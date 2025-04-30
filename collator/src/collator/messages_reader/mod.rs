@@ -890,6 +890,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         tracing::debug!(target: tracing_targets::COLLATOR,
             ?read_mode,
             current_next_lt,
+            readers_stages = ?DebugIter(self.readers_stages.iter()),
             "start collecting next message group",
         );
 
@@ -918,6 +919,10 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 MessagesReaderStage::FinishPreviousExternals
                     | MessagesReaderStage::FinishCurrentExternals
             ) {
+                tracing::trace!(target: tracing_targets::COLLATOR,
+                    "has {:?} stage in partition_id={}",
+                    par_reader_stage, par_id,
+                );
                 has_finish_externals_stage = true;
             }
 
@@ -967,6 +972,9 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                     .externals_reader
                     .last_range_offsets_reached_in_all_partitions()
             {
+                tracing::trace!(target: tracing_targets::COLLATOR,
+                    "externals reader: last_range_offsets_reached_in_all_partitions=true",
+                );
                 break 'read_externals;
             }
 
@@ -1138,7 +1146,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             && ((read_mode == GetNextMessageGroupMode::Refill && all_prev_processed_offset_reached)
                 // or we do not have messages in buffers and no pending new messages and all ranges fully read
                 // so we cannot read more messages into buffers and then collect them
-                || !self.can_read_and_collect_more_messages()
+                || (read_mode == GetNextMessageGroupMode::Continue && !self.can_read_and_collect_more_messages())
             )
         {
             Ok(None)
@@ -1193,7 +1201,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
         // collect externals
         if !ext_prev_processed_offsets_reached_on_refill {
-            all_read_externals_collected_before = !externals_reader.has_messages_in_buffers();
+            all_read_externals_collected_before = externals_reader.all_read_externals_collected();
 
             let CollectExternalsResult { metrics } = externals_reader.collect_messages(
                 par_reader.partition_id,
@@ -1232,7 +1240,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         // switch to the next reader stage if required
 
         // if all read externals collected
-        let all_read_externals_collected = !externals_reader.has_messages_in_buffers();
+        let all_read_externals_collected = externals_reader.all_read_externals_collected();
         if all_read_externals_collected {
             // finalize externals read state
             {

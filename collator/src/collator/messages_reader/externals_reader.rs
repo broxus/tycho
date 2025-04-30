@@ -239,12 +239,21 @@ impl ExternalsReader {
     }
 
     pub fn all_ranges_read_and_collected(&self) -> bool {
-        self.range_readers.values().all(|v| {
-            v.fully_read
-                && v.reader_state
-                    .by_partitions
-                    .values()
-                    .all(|par| par.buffer.msgs_count() == 0)
+        self.all_ranges_fully_read && !self.has_messages_in_buffers()
+    }
+
+    pub fn all_read_externals_collected(&self) -> bool {
+        self.range_readers.values().all(|r| {
+            r.reader_state.by_partitions.iter().all(|(par_id, s)| {
+                s.buffer.msgs_count() == 0
+                    && self
+                        .reader_state
+                        .by_partitions
+                        .get(par_id)
+                        .map(|r_s| r_s.curr_processed_offset)
+                        .unwrap_or_default()
+                        >= s.skip_offset
+            })
         })
     }
 
@@ -387,7 +396,6 @@ impl ExternalsReader {
         };
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            for_shard_id = %self.for_shard_id,
             seqno = reader.seqno,
             fully_read = reader.fully_read,
             reader_state = ?DebugExternalsRangeReaderState(&reader.reader_state),
@@ -449,7 +457,6 @@ impl ExternalsReader {
         };
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            for_shard_id = %self.for_shard_id,
             seqno = reader.seqno,
             fully_read = reader.fully_read,
             reader_state = ?DebugExternalsRangeReaderState(&reader.reader_state),
@@ -468,6 +475,9 @@ impl ExternalsReader {
 
         // skip if all open ranges fully read
         if self.all_ranges_fully_read {
+            tracing::trace!(target: tracing_targets::COLLATOR,
+                "externals reader: all_ranges_fully_read=true",
+            );
             return metrics_by_partitions;
         }
 
@@ -493,6 +503,13 @@ impl ExternalsReader {
                     )
                 );
 
+                tracing::trace!(target: tracing_targets::COLLATOR,
+                    seqno,
+                    fully_read = range_reader.fully_read,
+                    range_reader_state = ?DebugExternalsRangeReaderState(&range_reader.reader_state),
+                    "externals reader: try to read externals from range,"
+                );
+
                 // remember last existing range
                 last_seqno = seqno;
 
@@ -503,6 +520,27 @@ impl ExternalsReader {
 
                 // on refill skip last range reader created in this block
                 if read_mode == GetNextMessageGroupMode::Refill && seqno == self.block_seqno {
+                    all_ranges_fully_read = false;
+                    continue;
+                }
+
+                // Do not read range until skip offset reached. In any partition.
+                // Current offset is updated after reading and before collecting,
+                // so if current offset == skip offset here, it will be greater on collecting,
+                // and in this case we need to read messages
+                if self.reader_state.by_partitions.iter().all(|(par_id, s)| {
+                    s.curr_processed_offset
+                        < range_reader
+                            .reader_state
+                            .by_partitions
+                            .get(par_id)
+                            .map(|s| s.skip_offset)
+                            .unwrap_or_default()
+                }) {
+                    tracing::trace!(target: tracing_targets::COLLATOR,
+                        externals_reader_state = ?DebugIter(self.reader_state.by_partitions.iter()),
+                        "externals reader: skip offset not reached in all partitions",
+                    );
                     all_ranges_fully_read = false;
                     continue;
                 }
@@ -796,7 +834,7 @@ impl ExternalsRangeReader {
         Ok((fill_state_by_count, fill_state_by_slots))
     }
 
-    #[tracing::instrument(skip_all, fields(for_shard_id = %self.for_shard_id, seqno = self.seqno))]
+    #[tracing::instrument(skip_all)]
     fn read_externals_into_buffers(
         &mut self,
         anchors_cache: &mut AnchorsCache,
