@@ -61,20 +61,6 @@ where
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
 
-    /// Add new messages to the iterator
-    fn add_message_to_iterator(
-        &self,
-        iterator: &mut dyn QueueIterator<V>,
-        message: V,
-    ) -> Result<()>;
-    /// Commit processed messages in the iterator
-    /// Save last message position for each shard
-    fn commit_messages_to_iterator(
-        &self,
-        iterator: &mut dyn QueueIterator<V>,
-        messages: &[(ShardIdent, QueueKey)],
-    ) -> Result<()>;
-
     fn clear_uncommitted_state(&self) -> Result<()>;
     /// Get diff for the given block from committed and uncommitted state
     fn get_diff_info(
@@ -132,7 +118,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
         let state_iterator = self.queue.iterator(partition, &ranges, for_shard_id)?;
         let states_iterators_manager = StatesIteratorsManager::new(state_iterator);
-        let iterator = QueueIteratorImpl::new(states_iterators_manager, for_shard_id)?;
+        let iterator = QueueIteratorImpl::new(states_iterators_manager)?;
 
         let elapsed = histogram.finish();
         tracing::debug!(target: tracing_targets::MQ_ADAPTER,
@@ -228,39 +214,6 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
             "commit_diff completed"
         );
 
-        Ok(())
-    }
-
-    fn add_message_to_iterator(
-        &self,
-        iterator: &mut dyn QueueIterator<V>,
-        message: V,
-    ) -> Result<()> {
-        let start_time = std::time::Instant::now();
-        iterator.add_message(message)?;
-        let elapsed = start_time.elapsed();
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
-            elapsed = %humantime::format_duration(elapsed),
-            "add_message_to_iterator completed"
-        );
-        Ok(())
-    }
-
-    fn commit_messages_to_iterator(
-        &self,
-        iterator: &mut dyn QueueIterator<V>,
-        messages: &[(ShardIdent, QueueKey)],
-    ) -> Result<()> {
-        let start_time = std::time::Instant::now();
-        iterator.commit(messages)?;
-        let elapsed = start_time.elapsed();
-
-        tracing::info!(
-            target: tracing_targets::MQ_ADAPTER,
-            elapsed = %humantime::format_duration(elapsed),
-            "commit_messages_to_iterator completed"
-        );
         Ok(())
     }
 
