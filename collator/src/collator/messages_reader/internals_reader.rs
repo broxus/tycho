@@ -116,6 +116,19 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
         reader.create_existing_range_readers(remaning_msgs_stats_just_loaded)?;
 
+        if remaning_msgs_stats_just_loaded {
+            if let Some(remaning_msgs_stats) = &reader.remaning_msgs_stats {
+                tracing::trace!(target: tracing_targets::COLLATOR,
+                    partition_id = reader.partition_id,
+                    remaning_msgs_stats = ?DebugIter(remaning_msgs_stats.statistics().iter().map(|item| {
+                        let (addr, count) = item.pair();
+                        (get_short_addr_string(addr), *count)
+                    })),
+                    "reduced cumulative remaning_msgs_stats",
+                );
+            }
+        }
+
         Ok(reader)
     }
 
@@ -419,7 +432,6 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             partition_id = reader.partition_id,
-            for_shard_id = %reader.for_shard_id,
             seqno = reader.seqno,
             fully_read = reader.fully_read,
             reader_state = ?DebugInternalsRangeReaderState(&reader.reader_state),
@@ -607,7 +619,6 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             partition_id = reader.partition_id,
-            for_shard_id = %reader.for_shard_id,
             seqno = reader.seqno,
             fully_read = reader.fully_read,
             reader_state = ?DebugInternalsRangeReaderState(&reader.reader_state),
@@ -629,18 +640,6 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         let mut ranges_seqno: VecDeque<_> = self.range_readers.keys().copied().collect();
         let mut last_seqno = 0;
 
-        let log_span = tracing::debug_span!(
-            target: tracing_targets::COLLATOR,
-            "internals_reader",
-            partition_id = self.partition_id,
-            block_seqno = self.block_seqno,
-            for_shard_id = %self.for_shard_id,
-            open_ranges_limit = self.msgs_exec_params.open_ranges_limit,
-            read_mode = ?read_mode,
-        );
-
-        let _guard = log_span.enter();
-
         'main_loop: loop {
             // take next not fully read range and continue reading
             let mut all_ranges_fully_read = true;
@@ -655,10 +654,6 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 // remember last existing range
                 last_seqno = seqno;
 
-                let log_span2 = tracing::debug_span!("internals_reader", last_seqno = seqno,);
-
-                let _guard2 = log_span2.enter();
-
                 // skip fully read ranges
                 if range_reader.fully_read {
                     continue;
@@ -666,6 +661,15 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
                 // on refill skip last range reader created in this block
                 if read_mode == GetNextMessageGroupMode::Refill && seqno == self.block_seqno {
+                    all_ranges_fully_read = false;
+                    continue;
+                }
+
+                // Do not read range until skip offset reached.
+                // Current offset is updated after reading and before collecting,
+                // so if current offset == skip offset here, it will be greater on collecting,
+                // and in this case we need to read messages
+                if self.reader_state.curr_processed_offset < range_reader.reader_state.skip_offset {
                     all_ranges_fully_read = false;
                     continue;
                 }
@@ -710,7 +714,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                         }
 
                         if matches!(fill_state_by_slots, BufferFillStateBySlots::CanFill) {
-                            tracing::debug!(
+                            tracing::debug!(target: tracing_targets::COLLATOR,
+                                partition_id = self.partition_id,
+                                last_seqno = seqno,
                                 reader_state = ?DebugInternalsRangeReaderState(&range_reader.reader_state),
                                 "internals reader: can fill message group on ({}x{})",
                                 self.max_limits.slots_count, self.max_limits.slot_vert_size,
@@ -718,7 +724,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                             // do not need to read other ranges if we can already fill messages group
                             break 'main_loop;
                         } else {
-                            tracing::debug!(
+                            tracing::debug!(target: tracing_targets::COLLATOR,
+                                partition_id = self.partition_id,
+                                last_seqno = seqno,
                                 reader_state = ?DebugInternalsRangeReaderState(&range_reader.reader_state),
                                 "internals reader: message buffer filled on {}/{}",
                                 range_reader.reader_state.buffer.msgs_count(), self.max_limits.max_count,
@@ -809,7 +817,10 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
             // do not create next range reader on refill
             if read_mode == GetNextMessageGroupMode::Refill {
-                tracing::debug!("internals reader: do not create next range reader on Refill");
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    partition_id = self.partition_id,
+                    "internals reader: do not create next range reader on Refill",
+                );
                 self.all_ranges_fully_read = true;
                 break;
             }
@@ -817,7 +828,11 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             // should not create next range reader
             // if open ranges limit reached in current partition or others
             let mut should_create_next_range = if self.open_ranges_limit_reached() {
-                tracing::debug!("internals reader: open ranges limit reached in current partition");
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    partition_id = self.partition_id,
+                    open_ranges_limit = self.msgs_exec_params.open_ranges_limit,
+                    "internals reader: open ranges limit reached in current partition",
+                );
                 false
             } else {
                 let limit_reached_in_other_parts = other_par_readers
@@ -825,8 +840,10 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                     .any(|par| par.open_ranges_limit_reached());
 
                 if limit_reached_in_other_parts {
-                    tracing::debug!(
-                        "internals reader: open ranges limit reached in other partitions"
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        partition_id = self.partition_id,
+                        open_ranges_limit = self.msgs_exec_params.open_ranges_limit,
+                        "internals reader: open ranges limit reached in other partitions",
                     );
                     false
                 } else {
@@ -843,7 +860,8 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                     if let Some(intersected_account) =
                         partitions_have_intersecting_accounts(self, other)?
                     {
-                        tracing::debug!(
+                        tracing::debug!(target: tracing_targets::COLLATOR,
+                            partition_id = self.partition_id,
                             intersected_account = get_short_addr_string(&intersected_account),
                             "internals reader: account with remaining messages is intersected with other partitions"
                         );
@@ -853,8 +871,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 }
             }
 
-            tracing::debug!(
-                "internals reader: create next range reader = {}",
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                partition_id = self.partition_id,
+                "internals reader: should create next range reader = {}",
                 should_create_next_range
             );
 
@@ -1079,7 +1098,6 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             partition_id = self.partition_id,
-            for_shard_id = %self.for_shard_id,
             seqno = self.seqno,
             fully_read = self.fully_read,
             "internals reader: initialized range reader",
