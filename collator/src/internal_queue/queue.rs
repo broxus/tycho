@@ -18,10 +18,9 @@ use crate::internal_queue::state::storage::{
     QueueState, QueueStateFactory, QueueStateImplFactory, QueueStateStdImpl,
 };
 use crate::internal_queue::types::{
-    AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter,
-    QueueDiffWithMessages, QueueShardRange,
+    AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, QueueDiffWithMessages,
+    QueueShardRange,
 };
-use crate::types::ProcessedTo;
 use crate::{internal_queue, tracing_targets};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -135,60 +134,6 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
             _phantom_data: Default::default(),
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct ShortQueueDiff {
-    inner: Arc<ShortQueueDiffInner>,
-}
-
-impl ShortQueueDiff {
-    pub fn new(
-        processed_to: ProcessedTo,
-        max_message: QueueKey,
-        router: PartitionRouter,
-        hash: HashBytes,
-        statistics: DiffStatistics,
-    ) -> Self {
-        Self {
-            inner: Arc::new(ShortQueueDiffInner {
-                processed_to,
-                max_message,
-                router,
-                hash,
-                statistics,
-            }),
-        }
-    }
-
-    pub fn processed_to(&self) -> &ProcessedTo {
-        &self.inner.processed_to
-    }
-
-    pub fn max_message(&self) -> &QueueKey {
-        &self.inner.max_message
-    }
-
-    pub fn router(&self) -> &PartitionRouter {
-        &self.inner.router
-    }
-
-    pub fn hash(&self) -> &HashBytes {
-        &self.inner.hash
-    }
-
-    pub fn statistics(&self) -> &DiffStatistics {
-        &self.inner.statistics
-    }
-}
-
-#[derive(Debug)]
-pub struct ShortQueueDiffInner {
-    pub processed_to: ProcessedTo,
-    pub max_message: QueueKey,
-    pub router: PartitionRouter,
-    pub hash: HashBytes,
-    pub statistics: DiffStatistics,
 }
 
 pub struct QueueImpl<P, V>
