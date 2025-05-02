@@ -40,6 +40,7 @@ struct PeerScheduleInner {
     task_tracker: TaskTracker,
 }
 
+#[derive(Clone)]
 pub struct InitPeers {
     pub prev_start_round: u32,
     pub prev_v_set: Vec<PeerId>,
