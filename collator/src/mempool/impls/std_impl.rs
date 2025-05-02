@@ -61,7 +61,7 @@ impl MempoolAdapterStdImpl {
             config: Mutex::new(ConfigAdapter {
                 builder: config_builder,
                 state_update_queue: Default::default(),
-                engine_running: None,
+                engine_session: None,
             }),
             store: MempoolAdapterStore::new(mempool_storage.clone(), RoundWatch::default()),
             input_buffer: InputBuffer::default(),
@@ -88,7 +88,7 @@ impl MempoolAdapterStdImpl {
         let span = tracing::error_span!("mc_state_update", seq_no = new_cx.mc_block_id.seqno);
         let _guard = span.enter();
 
-        if let Some(engine) = config_guard.engine_running.as_ref() {
+        if let Some(session) = config_guard.engine_session.as_ref() {
             tracing::debug!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 id = %new_cx.mc_block_id.as_short_id(),
@@ -97,21 +97,20 @@ impl MempoolAdapterStdImpl {
             );
 
             // when genesis doesn't change - just (re-)schedule v_set change as defined by collator
-            if engine.handle().merged_conf().genesis_info() == new_cx.consensus_info.genesis_info {
-                let init_peers = ConfigAdapter::init_peers(new_cx)?;
-                engine.handle().set_peers(&init_peers);
+            if session.genesis_info() == new_cx.consensus_info.genesis_info {
+                session.set_peers(ConfigAdapter::init_peers(new_cx)?);
                 return Ok(());
             }
 
             // Genesis is changed at runtime - restart immediately:
             // block is signed by majority, so old mempool session and its anchors are not needed
 
-            let engine = (config_guard.engine_running.take())
+            let session = (config_guard.engine_session.take())
                 .context("cannot happen: engine must be started")?;
             self.cache.reset();
 
             drop(_guard);
-            engine.stop().instrument(span.clone()).await;
+            session.stop().instrument(span.clone()).await;
             let _guard = span.enter();
 
             // a new genesis is created even when overlay-related part of config stays the same
@@ -120,7 +119,7 @@ impl MempoolAdapterStdImpl {
             (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
 
             let merged_config = config_guard.builder.build()?;
-            config_guard.engine_running = Some(self.run(&merged_config, new_cx)?);
+            config_guard.engine_session = Some(self.start(&merged_config, new_cx)?);
 
             return Ok(());
         }
@@ -172,17 +171,17 @@ impl MempoolAdapterStdImpl {
         };
 
         let merged_config = config_guard.builder.build()?;
-        config_guard.engine_running = Some(self.run(&merged_config, new_cx)?);
+        config_guard.engine_session = Some(self.start(&merged_config, new_cx)?);
 
         Ok(())
     }
 
-    /// Runs mempool engine
-    fn run(
+    /// Runs mempool engine session
+    fn start(
         &self,
         merged_conf: &MempoolMergedConfig,
         ctx: &StateUpdateContext,
-    ) -> Result<EngineRunning> {
+    ) -> Result<EngineSession> {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Starting mempool engine...");
 
         let (anchor_tx, anchor_rx) = mpsc::unbounded_channel();
@@ -199,9 +198,6 @@ impl MempoolAdapterStdImpl {
             top_known_anchor: self.top_known_anchor.clone(),
             output: anchor_tx,
         };
-
-        let init_peers = ConfigAdapter::init_peers(ctx)?;
-        let engine = EngineCreated::new(bind, &self.net_args, merged_conf, &init_peers);
 
         // actual oldest sync round will be not less than this
         let estimated_sync_bottom = ctx
@@ -221,7 +217,13 @@ impl MempoolAdapterStdImpl {
         );
 
         let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
-        let engine = engine.run(engine_stop_tx);
+        let session = EngineSession::new(
+            bind,
+            &self.net_args,
+            merged_conf,
+            ConfigAdapter::init_peers(ctx)?,
+            engine_stop_tx,
+        );
 
         let mut anchor_task = AnchorHandler::new(merged_conf.consensus(), anchor_rx)
             .run(self.cache.clone(), self.store.clone())
@@ -245,7 +247,7 @@ impl MempoolAdapterStdImpl {
 
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Mempool started");
 
-        Ok(engine)
+        Ok(session)
     }
 
     pub fn send_external(&self, message: Bytes) {

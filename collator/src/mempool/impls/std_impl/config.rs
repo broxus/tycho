@@ -1,4 +1,4 @@
-use tycho_consensus::prelude::{EngineRunning, InitPeers, MempoolConfigBuilder};
+use tycho_consensus::prelude::{EngineSession, InitPeers, MempoolConfigBuilder};
 
 use super::state_update_queue::StateUpdateQueue;
 use crate::mempool::StateUpdateContext;
@@ -6,7 +6,7 @@ use crate::mempool::StateUpdateContext;
 pub struct ConfigAdapter {
     pub builder: MempoolConfigBuilder,
     pub state_update_queue: StateUpdateQueue,
-    pub engine_running: Option<EngineRunning>,
+    pub engine_session: Option<EngineSession>,
 }
 
 // TODO keep track of last applied v_set hash and round

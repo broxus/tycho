@@ -11,7 +11,7 @@ use tokio::signal::unix;
 use tokio::sync::{mpsc, oneshot};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::{
-    EngineBinding, EngineCreated, EngineNetworkArgs, InitPeers, InputBuffer, MempoolAdapterStore,
+    EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolAdapterStore,
     MempoolConfigBuilder, MempoolMergedConfig,
 };
 use tycho_consensus::test_utils::{test_logger, AnchorConsumer, LastAnchorFile};
@@ -137,13 +137,13 @@ impl CmdRun {
         let file_storage = Mempool::file_storage(&mempool.storage)?;
 
         loop {
-            let (engine, anchor_consumer) = mempool.boot().await.context("init mempool")?;
+            let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
+
+            let (session, anchor_consumer) =
+                mempool.boot(engine_stop_tx).await.context("init mempool")?;
 
             let mut last_anchor_file = LastAnchorFile::reopen_in(&file_storage)?;
             (anchor_consumer.top_known_anchor).set_max_raw(last_anchor_file.read()?);
-
-            let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
-            let engine = engine.run(engine_stop_tx);
 
             let drain_anchors = JoinTask::new(anchor_consumer.drain(last_anchor_file));
 
@@ -154,7 +154,7 @@ impl CmdRun {
                 stop = stop_fut.recv() => match stop {
                     Some(signal) => {
                         drop(drain_anchors);
-                        engine.stop().await;
+                        session.stop().await;
                         restarts_remain = restarts_remain.saturating_sub(1);
                         tracing::warn!(?signal, ?restarts_remain, "received termination");
                         if restarts_remain == 0 {
@@ -293,7 +293,10 @@ impl Mempool {
         storage.root().create_subdir("mempool_files")
     }
 
-    pub async fn boot(&self) -> Result<(EngineCreated, AnchorConsumer)> {
+    pub async fn boot(
+        &self,
+        engine_stop_tx: oneshot::Sender<()>,
+    ) -> Result<(EngineSession, AnchorConsumer)> {
         let local_id = self.net_args.network.peer_id();
 
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
@@ -310,11 +313,17 @@ impl Mempool {
             output: committed_tx,
         };
 
-        let engine = EngineCreated::new(bind, &self.net_args, &self.merged_conf, &self.init_peers);
+        let session = EngineSession::new(
+            bind,
+            &self.net_args,
+            &self.merged_conf,
+            self.init_peers.clone(),
+            engine_stop_tx,
+        );
 
         tracing::info!("mempool engine initialized");
 
-        Ok((engine, anchor_consumer))
+        Ok((session, anchor_consumer))
     }
 }
 

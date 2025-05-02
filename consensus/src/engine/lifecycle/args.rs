@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use everscale_crypto::ed25519::KeyPair;
 use tokio::sync::mpsc;
-use tycho_network::{Network, OverlayId, OverlayService, PeerId, PeerResolver, PrivateOverlay};
+use tycho_network::{Network, OverlayService, PeerResolver, PrivateOverlay};
 
-use crate::effects::{MempoolAdapterStore, TaskTracker};
+use crate::effects::{AltFormat, MempoolAdapterStore, TaskTracker};
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
 use crate::engine::{InputBuffer, MempoolMergedConfig};
 use crate::intercom::{Dispatcher, InitPeers, PeerSchedule, Responder};
@@ -18,7 +18,7 @@ pub struct EngineBinding {
     pub output: mpsc::UnboundedSender<MempoolOutput>,
 }
 
-// may derive 'Clone' if needed
+#[derive(Clone)]
 pub struct EngineNetworkArgs {
     pub key_pair: Arc<KeyPair>,
     pub network: Network,
@@ -32,9 +32,6 @@ pub struct EngineNetwork {
     pub dispatcher: Dispatcher,
     /// dropped at full restart
     pub responder: Responder,
-    pub(super) peer_id: PeerId,
-    overlay_service: OverlayService,
-    pub(super) overlay_id: OverlayId,
 }
 
 impl EngineNetwork {
@@ -45,9 +42,8 @@ impl EngineNetwork {
         init_peers: &InitPeers,
     ) -> Self {
         let responder = Responder::default();
-        let overlay_id = merged_conf.overlay_id;
 
-        let private_overlay = PrivateOverlay::builder(overlay_id)
+        let private_overlay = PrivateOverlay::builder(merged_conf.overlay_id)
             .with_peer_resolver(net_args.peer_resolver.clone())
             .named("tycho-consensus")
             .build(responder.clone());
@@ -56,8 +52,8 @@ impl EngineNetwork {
         overlay_service.add_private_overlay(&private_overlay);
 
         tracing::info!(
-            peer_id = %net_args.network.peer_id(),
-            %overlay_id,
+            peer_id = %net_args.network.peer_id().alt(),
+            overlay_id = %merged_conf.overlay_id,
             "mempool overlay added"
         );
 
@@ -70,17 +66,7 @@ impl EngineNetwork {
             peer_schedule,
             dispatcher,
             responder,
-            peer_id: net_args.key_pair.public_key.into(),
-            overlay_service,
-            overlay_id,
         }
-    }
-}
-
-impl Drop for EngineNetwork {
-    fn drop(&mut self) {
-        self.overlay_service
-            .remove_private_overlay(&self.overlay_id);
     }
 }
 
