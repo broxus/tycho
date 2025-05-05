@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
+use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
@@ -133,18 +134,25 @@ impl ShardStateStorage {
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
 
-            let mut new_cell_count =
-                cell_storage.store_cell(&mut batch, root_cell.as_ref(), 100)?;
+            let ctx = cell_storage.create_store_ctx(estimated_update_size_bytes);
+            CellStorage::store_cell(root_cell.as_ref(), &ctx)?;
 
+            rayon::scope(|s| {
+                for (_, data_root_cell) in root_data_cells.iter() {
+                    s.spawn(|_| {
+                        CellStorage::store_cell(data_root_cell.as_ref(), &ctx).unwrap();
+                    });
+                }
+            });
+
+            let new_cell_count = ctx.finalize(&mut batch);
+
+            in_mem_store.finish();
+            metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
+
+            // Write state roots
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
-
             for (shard_prefix, data_root_cell) in root_data_cells.iter() {
-                let cells_count = cell_storage.store_cell(
-                    &mut batch,
-                    data_root_cell.as_ref(),
-                    estimated_merkle_update_size / 16,
-                )?;
-
                 let mut key = [0u8; tables::ShardStateData::KEY_LEN];
                 key[..80].copy_from_slice(&block_id.to_vec());
                 key[80..].copy_from_slice(&shard_prefix.to_be_bytes());
@@ -154,12 +162,7 @@ impl ShardStateStorage {
                     key,
                     data_root_cell.repr_hash().as_slice(),
                 );
-
-                new_cell_count += cells_count;
             }
-
-            in_mem_store.finish();
-            metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
             let hist = HistogramGuard::begin("tycho_storage_state_update_time");
             metrics::histogram!("tycho_storage_state_update_size_bytes")

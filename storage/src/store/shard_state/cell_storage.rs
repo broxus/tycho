@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use bumpalo::Bump;
 use bytesize::ByteSize;
+use dashmap::mapref::entry::Entry;
+use dashmap::Map;
 use everscale_types::cell::*;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
@@ -20,11 +22,11 @@ use crate::db::*;
 
 pub struct CellStorage {
     db: CellsDb,
-    cells_cache: Arc<CellsIndex>,
+    cells_cache: Arc<CellsCache>,
     raw_cells_cache: Arc<RawCellsCache>,
 }
 
-type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
+type CellsCache = FastDashMap<HashBytes, Weak<StorageCell>>;
 
 impl CellStorage {
     pub fn new(db: CellsDb, cache_size_bytes: ByteSize) -> Arc<Self> {
@@ -42,6 +44,10 @@ impl CellStorage {
             cells_cache,
             raw_cells_cache,
         })
+    }
+
+    pub fn create_store_ctx(&self, capacity: usize) -> StoreContext {
+        StoreContext::new(&self.db, &self.raw_cells_cache, capacity)
     }
 
     pub fn apply_temp_cell(&self, root: &HashBytes) -> Result<()> {
@@ -253,123 +259,34 @@ impl CellStorage {
         Ok(())
     }
 
-    pub fn store_cell(
-        &self,
-        batch: &mut WriteBatch,
-        root: &DynCell,
-        estimated_cell_count: usize,
-    ) -> Result<usize, CellStorageError> {
-        struct AddedCell<'a> {
-            old_rc: i64,
-            additions: u32,
-            data: Option<&'a [u8]>,
+    pub fn store_cell(root: &DynCell, ctx: &StoreContext) -> Result<(), CellStorageError> {
+        // Check root cell
+        if !ctx.insert_cell(root.as_ref(), 0)? {
+            return Ok(());
         }
 
-        struct Context<'a> {
-            db: &'a CellsDb,
-            raw_cells_cache: &'a RawCellsCache,
-            alloc: &'a Bump,
-            transaction: FastHashMap<&'a HashBytes, AddedCell<'a>>,
-            buffer: Vec<u8>,
-        }
+        let mut stack = Vec::with_capacity(16);
+        stack.push(root.references());
 
-        impl<'a> Context<'a> {
-            fn insert_cell(
-                &mut self,
-                cell: &'a DynCell,
-                depth: usize,
-            ) -> Result<bool, CellStorageError> {
-                let key = cell.repr_hash();
-                Ok(match self.transaction.entry(key) {
-                    hash_map::Entry::Occupied(mut value) => {
-                        value.get_mut().additions += 1;
-                        false
-                    }
-                    hash_map::Entry::Vacant(entry) => {
-                        let old_rc = self
-                            .raw_cells_cache
-                            .get_rc_for_insert(self.db, key, depth)?;
+        // Check other cells
+        'outer: loop {
+            let depth = stack.len();
+            let Some(iter) = stack.last_mut() else {
+                break;
+            };
 
-                        let is_new = old_rc == 0;
-                        let data = if is_new {
-                            self.buffer.clear();
-                            if StorageCell::serialize_to(cell, &mut self.buffer).is_err() {
-                                return Err(CellStorageError::InvalidCell);
-                            }
-                            Some(self.alloc.alloc_slice_copy(self.buffer.as_slice()) as &[u8])
-                        } else {
-                            None
-                        };
-
-                        entry.insert(AddedCell {
-                            old_rc,
-                            additions: 1,
-                            data,
-                        });
-                        is_new
-                    }
-                })
-            }
-
-            fn finalize(mut self, batch: &mut rocksdb::WriteBatch) -> usize {
-                let total = self.transaction.len();
-                let cells_cf = &self.db.cells.cf();
-
-                for (key, item) in self.transaction {
-                    self.buffer.clear();
-                    refcount::add_positive_refount(item.additions, item.data, &mut self.buffer);
-                    batch.merge_cf(cells_cf, key.as_slice(), &self.buffer);
-
-                    let new_rc = item.old_rc + item.additions as i64;
-                    self.raw_cells_cache.on_insert_cell(key, new_rc, item.data);
+            for child in &mut *iter {
+                if ctx.insert_cell(child, depth)? {
+                    stack.push(child.references());
+                    continue 'outer;
                 }
-
-                total
             }
-        }
 
-        let alloc = bumpalo::Bump::new();
-
-        // Prepare context and handles
-        let mut ctx = Context {
-            db: &self.db,
-            raw_cells_cache: &self.raw_cells_cache,
-            alloc: &alloc,
-            transaction: FastHashMap::with_capacity_and_hasher(
-                estimated_cell_count,
-                Default::default(),
-            ),
-            buffer: Vec::with_capacity(512),
-        };
-
-        'visit: {
-            // Check root cell
-            if !ctx.insert_cell(root.as_ref(), 0)? {
-                break 'visit;
-            }
-            let mut stack = Vec::with_capacity(16);
-            stack.push(root.references());
-
-            // Check other cells
-            'outer: loop {
-                let depth = stack.len();
-                let Some(iter) = stack.last_mut() else {
-                    break;
-                };
-
-                for child in &mut *iter {
-                    if ctx.insert_cell(child, depth)? {
-                        stack.push(child.references());
-                        continue 'outer;
-                    }
-                }
-
-                stack.pop();
-            }
+            stack.pop();
         }
 
         // Write transaction to the `WriteBatch`
-        Ok(ctx.finalize(batch))
+        Ok(())
     }
 
     pub fn load_cell(
@@ -515,6 +432,128 @@ impl CellStorage {
     }
 }
 
+struct CellWithRefs {
+    rc: u32,
+    data: Option<Vec<u8>>,
+}
+
+pub struct StoreContext {
+    db: CellsDb,
+    raw_cache: Arc<RawCellsCache>,
+    transaction: FastDashMap<HashBytes, CellWithRefs>,
+}
+
+impl StoreContext {
+    fn new(db: &CellsDb, raw_cache: &Arc<RawCellsCache>, capacity: usize) -> Self {
+        Self {
+            db: db.clone(),
+            raw_cache: raw_cache.clone(),
+            transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
+                capacity,
+                Default::default(),
+                512,
+            ),
+        }
+    }
+
+    fn insert_cell(&self, cell: &DynCell, depth: usize) -> Result<bool, CellStorageError> {
+        let mut buffer = [0; 512];
+
+        let key = cell.repr_hash();
+        Ok(match self.transaction.entry(*key) {
+            Entry::Occupied(mut value) => {
+                value.get_mut().rc += 1;
+                false
+            }
+            Entry::Vacant(entry) => {
+                // A constant which tells since which depth we should start to use cache.
+                // This method is used mostly for inserting new states, so we can assume
+                // that first N levels will mostly be new.
+                //
+                // This value was chosen empirically.
+                const NEW_CELLS_DEPTH_THRESHOLD: usize = 4;
+
+                let (old_rc, has_value) = 'value: {
+                    if depth >= NEW_CELLS_DEPTH_THRESHOLD {
+                        // NOTE: `get` here is used to affect a "hotness" of the value, because
+                        // there is a big chance that we will need it soon during state processing
+                        if let Some(entry) = self.raw_cache.inner.get(key) {
+                            let rc = entry.header.header.load(Ordering::Acquire);
+                            break 'value (rc, rc > 0);
+                        }
+                    }
+
+                    match self.db.cells.get(key).map_err(CellStorageError::Internal)? {
+                        Some(value) => {
+                            let (rc, value) = refcount::decode_value_with_rc(value.as_ref());
+                            (rc, value.is_some())
+                        }
+                        None => (0, false),
+                    }
+                };
+
+                // TODO: lower to `debug_assert` when sure
+                assert!(has_value && old_rc > 0 || !has_value && old_rc == 0);
+
+                let data = if !has_value {
+                    match StorageCell::serialize_to(cell, &mut buffer) {
+                        Err(_) => return Err(CellStorageError::InvalidCell),
+                        Ok(size) => Some(buffer[..size].to_vec()),
+                    }
+                } else {
+                    None
+                };
+                entry.insert(CellWithRefs { rc: 1, data });
+                !has_value
+            }
+        })
+    }
+
+    pub fn finalize(self, batch: &mut WriteBatch) -> usize {
+        std::thread::scope(|s| {
+            let number_shards = self.transaction._shard_count();
+            // safety: we hold only read locks
+            let shards = unsafe { (0..number_shards).map(|i| self.transaction._get_read_shard(i)) };
+            let cache = &self.raw_cache;
+
+            // todo: clamp to number of cpus x2
+            for shard in shards {
+                // spawned threads will be joined at the end of the scope, so we don't need to store them
+                s.spawn(move || {
+                    for (key, value) in shard {
+                        let value = value.get();
+                        let rc = value.rc;
+                        if let Some(data) = &value.data {
+                            cache.insert(key, rc, data);
+                        } else {
+                            cache.add_refs(key, rc);
+                        }
+                    }
+                });
+            }
+
+            let batch_update = s.spawn(|| {
+                let mut buffer = Vec::with_capacity(512);
+                let total = self.transaction.len();
+                let cells_cf = &self.db.cells.cf();
+                for kv in self.transaction.iter() {
+                    let key = kv.key();
+                    let value = kv.value();
+                    let rc = value.rc;
+                    let data = value.data.as_deref();
+
+                    buffer.clear();
+                    refcount::add_positive_refount(rc, data, &mut buffer);
+                    batch.merge_cf(cells_cf, key.as_slice(), &buffer);
+                }
+                total
+            });
+
+            batch_update.join().expect("thread panicked")
+        })
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum CellStorageError {
     #[error("Cell not found in cell db")]
@@ -617,34 +656,49 @@ impl StorageCell {
         true
     }
 
-    pub fn serialize_to(cell: &DynCell, target: &mut Vec<u8>) -> Result<()> {
+    pub fn serialize_to(cell: &DynCell, target: &mut [u8]) -> Result<usize> {
         let descriptor = cell.descriptor();
         let hash_count = descriptor.hash_count();
         let ref_count = descriptor.reference_count();
 
-        target.reserve(
-            4usize
-                + descriptor.byte_len() as usize
-                + (32 + 2) * hash_count as usize
-                + 32 * ref_count as usize,
-        );
+        let expected_len = 4usize
+            + descriptor.byte_len() as usize
+            + (32 + 2) * hash_count as usize
+            + 32 * ref_count as usize;
+        assert!(target.len() >= expected_len);
 
-        target.extend_from_slice(&[descriptor.d1, descriptor.d2]);
-        target.extend_from_slice(&cell.bit_len().to_le_bytes());
-        target.extend_from_slice(cell.data());
+        let mut cursor = 0;
+
+        // Copy descriptor bytes
+        target[cursor..cursor + 2].copy_from_slice(&[descriptor.d1, descriptor.d2]);
+        cursor += 2;
+
+        // Copy bit length
+        target[cursor..cursor + 2].copy_from_slice(&cell.bit_len().to_le_bytes());
+        cursor += 2;
+
+        // Copy cell data
+        let data_len = descriptor.byte_len() as usize;
+        target[cursor..cursor + data_len].copy_from_slice(cell.data());
+        cursor += data_len;
+
         assert_eq!(cell.data().len(), descriptor.byte_len() as usize);
 
-        for i in 0..descriptor.hash_count() {
-            target.extend_from_slice(cell.hash(i).as_array());
-            target.extend_from_slice(&cell.depth(i).to_le_bytes());
+        for i in 0..hash_count {
+            target[cursor..cursor + 32].copy_from_slice(cell.hash(i).as_array());
+            cursor += 32;
+
+            target[cursor..cursor + 2].copy_from_slice(&cell.depth(i).to_le_bytes());
+            cursor += 2;
         }
 
-        for i in 0..descriptor.reference_count() {
+        for i in 0..ref_count {
             let cell = cell.reference(i).context("Child not found")?;
-            target.extend_from_slice(cell.repr_hash().as_array());
+            target[cursor..cursor + 32].copy_from_slice(cell.repr_hash().as_array());
+            cursor += 32;
         }
 
-        Ok(())
+        Ok(cursor)
     }
 
     pub fn reference_raw(&self, index: u8) -> Option<&Arc<StorageCell>> {
@@ -1089,6 +1143,18 @@ impl RawCellsCache {
         };
 
         v.header.header.store(rc, Ordering::Release);
+    }
+
+    fn insert(&self, key: &HashBytes, refs: u32, value: &[u8]) {
+        let value = RawCellsCacheItem::from_header_and_slice(AtomicI64::new(refs as _), value);
+        self.inner.insert(*key, value);
+    }
+
+    fn add_refs(&self, key: &HashBytes, refs: u32) {
+        // NOTE: `peek` here is used to avoid affecting a "hotness" of the value
+        if let Some(v) = self.inner.peek(key) {
+            v.header.header.fetch_add(refs as i64, Ordering::Release);
+        }
     }
 
     fn refresh_metrics(&self) {

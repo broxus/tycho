@@ -1172,7 +1172,7 @@ impl Phase<FinalizeState> {
         let mut new_config_params = None;
         let (updated_accounts, shard_accounts) = executor.into_accounts_cache_raw();
 
-        let mut shard_accounts = shard_accounts
+        let shard_accounts = shard_accounts
             .into_iter()
             .map(|(k, v)| (k, RelaxedAugDict::from_full(&v)))
             .collect::<BTreeMap<_, _>>();
@@ -1237,21 +1237,37 @@ impl Phase<FinalizeState> {
 
         account_updates.par_sort_by(|(a, ..), (b, ..)| a.cmp(b));
 
-        let account_updates_by_shards = account_updates
-            .into_iter()
-            .group_by(|(account, _)| {
-                u64::from_be_bytes(*account.first_chunk()) & (0b1111u64 << 60) | (0b1u64 << 59)
-            })
-            .into_iter()
-            .map(|(prefix, group)| (prefix, group.collect::<Vec<_>>()))
-            .collect::<FastHashMap<_, _>>();
+        let account_updates_by_shards = Arc::new(Mutex::new(
+            account_updates
+                .into_iter()
+                .group_by(|(account, _)| {
+                    u64::from_be_bytes(*account.first_chunk()) & (0b1111u64 << 60) | (0b1u64 << 59)
+                })
+                .into_iter()
+                .map(|(prefix, group)| (prefix, group.collect::<Vec<_>>()))
+                .collect::<FastHashMap<_, _>>(),
+        ));
 
-        for (prefix, account_updates) in account_updates_by_shards {
-            let shard_accounts = shard_accounts.get_mut(&prefix).unwrap();
-            shard_accounts
-                .modify_with_sorted_iter(account_updates)
-                .context("failed to modify accounts dict")?;
-        }
+        let updated_shard_accounts = Arc::new(Mutex::new(BTreeMap::new()));
+
+        rayon::scope(|s| {
+            for (prefix, mut shard_accounts) in shard_accounts {
+                let account_updates_by_shards = Arc::clone(&account_updates_by_shards);
+                let updated_shard_accounts = Arc::clone(&updated_shard_accounts);
+                s.spawn(move |_| {
+                    let account_updates = account_updates_by_shards.lock().remove(&prefix);
+                    if let Some(account_updates) = account_updates {
+                        shard_accounts
+                            .modify_with_sorted_iter(account_updates)
+                            .context("failed to modify accounts dict")
+                            .unwrap();
+                    }
+
+                    let dict = shard_accounts.build().unwrap();
+                    updated_shard_accounts.lock().insert(prefix, dict);
+                });
+            }
+        });
 
         let accounts_len = account_blocks.len();
 
@@ -1267,10 +1283,9 @@ impl Phase<FinalizeState> {
             .finalize()
             .context("failed to finalize public libraries dict")?;
 
-        let shard_accounts = shard_accounts
-            .into_iter()
-            .map(|(k, dict)| (k, dict.build().unwrap()))
-            .collect::<BTreeMap<_, _>>();
+        let shard_accounts = Arc::try_unwrap(updated_shard_accounts)
+            .map_err(|_e| anyhow::anyhow!("Failed to unwrap Arc"))?
+            .into_inner();
 
         Ok(ProcessedAccounts {
             account_blocks: account_blocks.build()?,
