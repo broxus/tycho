@@ -4134,6 +4134,7 @@ dependencies = [
  "parking_lot_core",
  "quick_cache",
  "rand 0.8.5",
+ "rayon",
  "rlimit",
  "scopeguard",
  "serde",

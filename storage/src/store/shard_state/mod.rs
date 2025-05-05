@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
+use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
@@ -129,45 +130,61 @@ impl ShardStateStorage {
             let estimated_merkle_update_size = hint.estimate_cell_count();
 
             let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
-            let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
+            let mut batch = rocksdb::WriteBatch::with_capacity_bytes(100);
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
 
-            let mut new_cell_count =
-                cell_storage.store_cell(&mut batch, root_cell.as_ref(), 100)?;
+            let new_cell_count = cell_storage.store_cell(&mut batch, root_cell.as_ref(), 100)?;
+
+            let new_cell_count = AtomicUsize::new(new_cell_count);
 
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
-            for (shard_prefix, data_root_cell) in root_data_cells.iter() {
-                let cells_count = cell_storage.store_cell(
-                    &mut batch,
-                    data_root_cell.as_ref(),
-                    estimated_merkle_update_size / 16,
-                )?;
+            raw_db.write(batch)?;
 
-                let mut key = [0u8; tables::ShardStateData::KEY_LEN];
-                key[..80].copy_from_slice(&block_id.to_vec());
-                key[80..].copy_from_slice(&shard_prefix.to_be_bytes());
+            rayon::scope(|s| {
+                for (shard_prefix, data_root_cell) in root_data_cells.iter() {
+                    s.spawn(|_| {
+                        let mut batch = rocksdb::WriteBatch::with_capacity_bytes(
+                            estimated_update_size_bytes / 16,
+                        );
 
-                batch.put_cf(
-                    &shard_state_data_cf.bound(),
-                    key,
-                    data_root_cell.repr_hash().as_slice(),
-                );
+                        let cells_count = cell_storage
+                            .store_cell(
+                                &mut batch,
+                                data_root_cell.as_ref(),
+                                estimated_merkle_update_size / 16,
+                            )
+                            .unwrap();
 
-                new_cell_count += cells_count;
-            }
+                        let mut key = [0u8; tables::ShardStateData::KEY_LEN];
+                        key[..80].copy_from_slice(&block_id.to_vec());
+                        key[80..].copy_from_slice(&shard_prefix.to_be_bytes());
+
+                        batch.put_cf(
+                            &shard_state_data_cf.bound(),
+                            key,
+                            data_root_cell.repr_hash().as_slice(),
+                        );
+
+                        raw_db.write(batch).unwrap();
+
+                        new_cell_count.fetch_add(cells_count, Ordering::Release);
+                    });
+                }
+            });
 
             in_mem_store.finish();
-            metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
+            metrics::histogram!("tycho_storage_cell_count")
+                .record(new_cell_count.load(Ordering::Acquire) as f64);
 
             let hist = HistogramGuard::begin("tycho_storage_state_update_time");
-            metrics::histogram!("tycho_storage_state_update_size_bytes")
-                .record(batch.size_in_bytes() as f64);
+            // metrics::histogram!("tycho_storage_state_update_size_bytes")
+            //     .record(batch.size_in_bytes() as f64);
             metrics::histogram!("tycho_storage_state_update_size_predicted_bytes")
                 .record(estimated_update_size_bytes as f64);
 
-            raw_db.write(batch)?;
+            // raw_db.write(batch)?;
 
             drop(root_cell);
 
@@ -178,7 +195,7 @@ impl ShardStateStorage {
                 block_handle_storage.store_handle(&handle, false);
             }
 
-            Ok::<_, anyhow::Error>((new_cell_count, updated))
+            Ok::<_, anyhow::Error>((new_cell_count.load(Ordering::Acquire), updated))
         })
         .await??;
 
