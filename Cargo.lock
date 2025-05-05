@@ -430,9 +430,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.20"
+version = "1.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04da6a0d40b948dfc4fa8f5bbf402b0fc1a64a28dbf7d12ffd683550f2c1b63a"
+checksum = "8691782945451c1c383942c4874dbe63814f61cb57ef773cda2972682b7bb3c0"
 dependencies = [
  "jobserver",
  "libc",
@@ -510,9 +510,9 @@ dependencies = [
 
 [[package]]
 name = "clap-markdown"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ebc67e6266e14f8b31541c2f204724fa2ac7ad5c17d6f5908fbb92a60f42cff"
+checksum = "d2a2617956a06d4885b490697b5307ebb09fec10b088afc18c81762d848c2339"
 dependencies = [
  "clap",
 ]
@@ -981,7 +981,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=69de1584821f43ac4f622b5d1ef5ecbb906c1a1c#69de1584821f43ac4f622b5d1ef5ecbb906c1a1c"
+source = "git+https://github.com/broxus/everscale-types.git?rev=9b0694bf66cfbbd1dad6e664435a3b9abe4e7e5a#9b0694bf66cfbbd1dad6e664435a3b9abe4e7e5a"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1011,7 +1011,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-abi-proc"
 version = "0.1.0"
-source = "git+https://github.com/broxus/everscale-types.git?rev=69de1584821f43ac4f622b5d1ef5ecbb906c1a1c#69de1584821f43ac4f622b5d1ef5ecbb906c1a1c"
+source = "git+https://github.com/broxus/everscale-types.git?rev=9b0694bf66cfbbd1dad6e664435a3b9abe4e7e5a#9b0694bf66cfbbd1dad6e664435a3b9abe4e7e5a"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -1022,7 +1022,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=69de1584821f43ac4f622b5d1ef5ecbb906c1a1c#69de1584821f43ac4f622b5d1ef5ecbb906c1a1c"
+source = "git+https://github.com/broxus/everscale-types.git?rev=9b0694bf66cfbbd1dad6e664435a3b9abe4e7e5a#9b0694bf66cfbbd1dad6e664435a3b9abe4e7e5a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1268,9 +1268,9 @@ checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
 
 [[package]]
 name = "h2"
-version = "0.4.9"
+version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75249d144030531f8dee69fe9cea04d3edf809a017ae445e2abdff6629e86633"
+checksum = "a9421a676d1b147b16b82c9225157dc629087ef8ec4d5e2960f9437a90dac0a5"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -1312,9 +1312,9 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.15.2"
+version = "0.15.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
+checksum = "84b26c544d002229e640969970a2e74021aadf6e2f96372b9c58eff97de08eb3"
 
 [[package]]
 name = "heck"
@@ -1667,7 +1667,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cea70ddb795996207ad57735b50c5982d8844f38ba9ee5f1aedcfb708a2aa11e"
 dependencies = [
  "equivalent",
- "hashbrown 0.15.2",
+ "hashbrown 0.15.3",
 ]
 
 [[package]]
@@ -2470,7 +2470,7 @@ checksum = "287e56aac5a2b4fb25a6fb050961d157635924c8696305a5c937a76f29841a0f"
 dependencies = [
  "ahash",
  "equivalent",
- "hashbrown 0.15.2",
+ "hashbrown 0.15.3",
  "parking_lot",
 ]
 
@@ -2516,9 +2516,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.11"
+version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "541d0f57c6ec747a90738a52741d3221f7960e8ac2f0ff4b1a63680e033b4ab5"
+checksum = "ee4e529991f949c5e25755532370b8af5d114acae52326361d68d47af64aa842"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -2652,9 +2652,9 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.5.11"
+version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2f103c6d277498fbceb16e84d317e2a400f160f46904d5f5410848c829511a3"
+checksum = "928fca9cf2aa042393a8325b9ead81d2f0df4cb12e1e24cef072922ccd99c5af"
 dependencies = [
  "bitflags",
 ]
@@ -2833,9 +2833,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.0.5"
+version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d97817398dd4bb2e6da002002db259209759911da105da92bec29ccb12cf58bf"
+checksum = "c71e83d6afe7ff64890ec6b71d6a69bb8a610ab78ce364b3352876bb4c801266"
 dependencies = [
  "bitflags",
  "errno",
@@ -3056,9 +3056,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.10.8"
+version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures",
@@ -3196,9 +3196,9 @@ dependencies = [
 
 [[package]]
 name = "synstructure"
-version = "0.13.1"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8af7666ab7b6390ab78131fb5b0fce11d6b7a6951602017c35fa82800708971"
+checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3279,7 +3279,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.3.2",
  "once_cell",
- "rustix 1.0.5",
+ "rustix 1.0.7",
  "windows-sys 0.59.0",
 ]
 
@@ -3289,7 +3289,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "45c6481c4829e4cc63825e62c49186a34538b7b2750b73b266581ffb612fb5ed"
 dependencies = [
- "rustix 1.0.5",
+ "rustix 1.0.7",
  "windows-sys 0.59.0",
 ]
 
@@ -3565,7 +3565,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "futures-util",
- "hashbrown 0.15.2",
+ "hashbrown 0.15.3",
  "pin-project-lite",
  "slab",
  "tokio",
@@ -3855,6 +3855,7 @@ dependencies = [
  "futures-util",
  "humantime",
  "indexmap 2.9.0",
+ "itertools 0.12.1",
  "metrics",
  "parking_lot",
  "rand 0.8.5",
@@ -3981,7 +3982,7 @@ dependencies = [
 [[package]]
 name = "tycho-executor"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git?rev=e3c1473a8749cde50cbf5c57166169de09e41000#e3c1473a8749cde50cbf5c57166169de09e41000"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=f166e4bdfdeff84c5947b3c30d2b33c1d317e66d#f166e4bdfdeff84c5947b3c30d2b33c1d317e66d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4190,7 +4191,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git?rev=e3c1473a8749cde50cbf5c57166169de09e41000#e3c1473a8749cde50cbf5c57166169de09e41000"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=f166e4bdfdeff84c5947b3c30d2b33c1d317e66d#f166e4bdfdeff84c5947b3c30d2b33c1d317e66d"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4211,7 +4212,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm-proc"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git?rev=e3c1473a8749cde50cbf5c57166169de09e41000#e3c1473a8749cde50cbf5c57166169de09e41000"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=f166e4bdfdeff84c5947b3c30d2b33c1d317e66d#f166e4bdfdeff84c5947b3c30d2b33c1d317e66d"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -4438,9 +4439,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "0.26.9"
+version = "0.26.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29aad86cec885cafd03e8305fd727c418e970a521322c91688414d5b8efba16b"
+checksum = "37493cadf42a2a939ed404698ded7fb378bf301b5011f973361779a3a74f8c93"
 dependencies = [
  "rustls-pki-types",
 ]

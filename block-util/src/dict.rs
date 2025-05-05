@@ -1,7 +1,7 @@
 use everscale_types::cell::Lazy;
 use everscale_types::dict::{
-    aug_dict_insert, aug_dict_remove_owned, build_aug_dict_from_sorted_iter, AugDictExtra, DictKey,
-    SetMode,
+    aug_dict_insert, aug_dict_modify_from_sorted_iter, aug_dict_remove_owned,
+    build_aug_dict_from_sorted_iter, AugDictExtra, DictKey, SetMode,
 };
 use everscale_types::error::Error;
 use everscale_types::prelude::*;
@@ -42,13 +42,13 @@ impl<K, A: Default, V> RelaxedAugDict<K, A, V> {
 
 impl<K, A, V> RelaxedAugDict<K, A, V>
 where
-    K: Store + DictKey,
+    K: StoreDictKey + DictKey,
     for<'a> A: AugDictExtra + Store + Load<'a>,
 {
     pub fn try_from_sorted_iter_lazy<'a, I>(iter: I) -> Result<Self, Error>
     where
         I: IntoIterator<Item = (&'a K, &'a A, &'a Lazy<V>)>,
-        K: Ord + 'a,
+        K: StoreDictKey + Ord + 'a,
         A: 'a,
         V: 'a,
     {
@@ -59,7 +59,6 @@ where
                     let value = v.inner().as_slice_allow_exotic();
                     (k, a, value)
                 }),
-                K::BITS,
                 A::comp_add,
                 Cell::empty_context(),
             )?,
@@ -67,21 +66,36 @@ where
         })
     }
 
-    pub fn try_from_sorted_iter_any<'a, I>(iter: I) -> Result<Self, Error>
+    pub fn try_from_sorted_iter_any<I>(iter: I) -> Result<Self, Error>
     where
-        I: IntoIterator<Item = (&'a K, &'a A, &'a dyn Store)>,
-        K: Ord + 'a,
-        A: 'a,
+        I: IntoIterator<Item = (K, A, V)>,
+        K: StoreDictKey + Ord,
+        V: Store,
     {
         Ok(Self {
-            dict_root: build_aug_dict_from_sorted_iter(
-                iter,
-                K::BITS,
-                A::comp_add,
-                Cell::empty_context(),
-            )?,
+            dict_root: build_aug_dict_from_sorted_iter(iter, A::comp_add, Cell::empty_context())?,
             _marker: std::marker::PhantomData,
         })
+    }
+
+    /// Applies a sorted list of inserts/removes to the dictionary.
+    /// Use this when you have a large set of known changes.
+    ///
+    /// Uses custom extracts for values.
+    pub fn modify_with_sorted_iter<I>(&mut self, entries: I) -> Result<bool, Error>
+    where
+        I: IntoIterator<Item = (K, Option<(A, V)>)>,
+        K: Clone + StoreDictKey + Ord,
+        V: Store,
+    {
+        aug_dict_modify_from_sorted_iter(
+            &mut self.dict_root,
+            entries,
+            |(key, _)| key.clone(),
+            |(_, value)| Ok(value),
+            A::comp_add,
+            Cell::empty_context(),
+        )
     }
 
     pub fn set_as_lazy(&mut self, key: &K, extra: &A, value: &Lazy<V>) -> Result<bool, Error> {
@@ -89,12 +103,10 @@ where
     }
 
     pub fn set_any(&mut self, key: &K, extra: &A, value: &dyn Store) -> Result<bool, Error> {
-        let cx = Cell::empty_context();
+        let mut key_builder = CellDataBuilder::new();
+        key.store_into_data(&mut key_builder)?;
 
-        let mut key_builder = CellBuilder::new();
-        key.store_into(&mut key_builder, cx)?;
-
-        let inserted = aug_dict_insert(
+        aug_dict_insert(
             &mut self.dict_root,
             &mut key_builder.as_data_slice(),
             K::BITS,
@@ -102,17 +114,13 @@ where
             value,
             SetMode::Set,
             A::comp_add,
-            cx,
-        )?;
-
-        Ok(inserted)
+            Cell::empty_context(),
+        )
     }
 
     pub fn remove(&mut self, key: &K) -> Result<bool, Error> {
-        let cx = Cell::empty_context();
-
-        let mut key_builder = CellBuilder::new();
-        key.store_into(&mut key_builder, cx)?;
+        let mut key_builder = CellDataBuilder::new();
+        key.store_into_data(&mut key_builder)?;
 
         let removed = aug_dict_remove_owned(
             &mut self.dict_root,
@@ -120,7 +128,7 @@ where
             K::BITS,
             false,
             A::comp_add,
-            cx,
+            Cell::empty_context(),
         )?;
 
         Ok(removed.is_some())

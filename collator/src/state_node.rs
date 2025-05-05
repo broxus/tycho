@@ -660,7 +660,6 @@ fn process_signatures(
                     signature: Signature(*value.as_ref()),
                 })
             }),
-        16,
         Cell::empty_context(),
     )?);
 
