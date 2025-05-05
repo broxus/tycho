@@ -1,11 +1,10 @@
 use futures_util::FutureExt;
 use tracing::Span;
-use tycho_network::PeerId;
 
 use crate::effects::{AltFormat, TaskTracker};
 use crate::engine::lifecycle::args::{EngineBinding, EngineNetwork};
 use crate::engine::MempoolMergedConfig;
-use crate::models::Round;
+use crate::intercom::InitPeers;
 
 /// Keep handle alive to keep engine running
 // Note: do not impl Clone to keep all refs counted for restart
@@ -22,14 +21,8 @@ impl EngineHandle {
         &self.merged_conf
     }
 
-    pub fn set_next_peers(&self, set: &[PeerId], subset: Option<(u32, &[PeerId])>) {
-        if let Some((switch_round, subset)) = subset {
-            if !(self.net.peer_schedule).set_next_subset(set, Round(switch_round), subset) {
-                tracing::trace!("cannot schedule outdated round {switch_round} and set");
-            }
-        } else {
-            self.net.peer_schedule.set_next_set(set);
-        }
+    pub fn set_peers(&self, peers: &InitPeers) {
+        self.net.peer_schedule.set_peers(peers);
     }
 
     pub(super) fn stop_tracing_span(&self) -> Span {

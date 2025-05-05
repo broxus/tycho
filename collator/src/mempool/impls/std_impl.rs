@@ -98,9 +98,8 @@ impl MempoolAdapterStdImpl {
 
             // when genesis doesn't change - just (re-)schedule v_set change as defined by collator
             if engine.handle().merged_conf().genesis_info() == new_cx.consensus_info.genesis_info {
-                ConfigAdapter::apply_prev_vset(engine.handle(), new_cx)?;
-                ConfigAdapter::apply_curr_vset(engine.handle(), new_cx)?;
-                ConfigAdapter::apply_next_vset(engine.handle(), new_cx);
+                let init_peers = ConfigAdapter::init_peers(new_cx)?;
+                engine.handle().set_peers(&init_peers);
                 return Ok(());
             }
 
@@ -201,7 +200,7 @@ impl MempoolAdapterStdImpl {
             output: anchor_tx,
         };
 
-        let init_peers = ConfigAdapter::init_peers(ctx);
+        let init_peers = ConfigAdapter::init_peers(ctx)?;
         let engine = EngineCreated::new(bind, &self.net_args, merged_conf, &init_peers);
 
         // actual oldest sync round will be not less than this
