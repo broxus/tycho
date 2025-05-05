@@ -128,12 +128,12 @@ weedb::tables! {
         pub full_block_ids: tables::FullBlockIds,
         pub package_entries: tables::PackageEntries,
         pub block_data_entries: tables::BlockDataEntries,
-        pub shard_states: tables::ShardStates,
-        pub cells: tables::Cells,
-        pub temp_cells: tables::TempCells,
         pub block_connections: tables::BlockConnections,
 
         // tables are empty, but they cannot be deleted because they are in a storage config
+        cells: tables::Cells,
+        _temp_cells: tables::TempCells,
+        _shard_states: tables::ShardStates,
         _shard_internal_messages: tables::ShardInternalMessagesOld,
         _int_msg_stats_uncommited: tables::InternalMessageStatsUncommitedOld,
         _shard_int_msgs_uncommited: tables::ShardInternalMessagesUncommitedOld,
@@ -442,7 +442,7 @@ impl VersionProvider for StateVersionProvider {
 
 pub type InternalQueueDB = WeeDb<InternalQueueTables>;
 
-impl WithMigrations for crate::InternalQueueDB {
+impl WithMigrations for InternalQueueDB {
     const NAME: &'static str = "int_queue";
     const VERSION: Semver = [0, 0, 1];
 
@@ -463,5 +463,30 @@ weedb::tables! {
         pub internal_message_commit_pointer: tables::InternalMessageCommitPointer,
         pub internal_message_stats: tables::InternalMessageStatistics,
         pub shard_internal_messages: tables::ShardInternalMessages,
+    }
+}
+
+// ===  Cells Db ===
+
+pub type CellsDb = WeeDb<CellsTables>;
+
+impl WithMigrations for CellsDb {
+    const NAME: &'static str = "cells";
+    const VERSION: Semver = [0, 0, 1];
+
+    fn register_migrations(
+        _migrations: &mut Migrations<Self>,
+        _cancelled: CancellationFlag,
+    ) -> Result<(), MigrationError> {
+        // TODO: register migrations here
+        Ok(())
+    }
+}
+
+weedb::tables! {
+    pub struct CellsTables<Caches> {
+        pub cells: tables::Cells,
+        pub temp_cells: tables::TempCells,
+        pub shard_states: tables::ShardStates,
     }
 }
