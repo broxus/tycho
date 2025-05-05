@@ -53,6 +53,9 @@ impl StateUpdateContext {
         )
     }
 
+    // NOTE: do not try to calculate subset from next set
+    //  because it is impossible without known future session_update_round
+
     fn compute_subset(
         validator_set: &ValidatorSet,
         session_start_round: u32,
