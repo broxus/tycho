@@ -11,10 +11,10 @@ use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::FastHashMap;
 
-use crate::db::{BaseDb, FileDb};
+use crate::db::{CellsDb, FileDb};
 
 pub struct ShardStateWriter<'a> {
-    db: &'a BaseDb,
+    db: &'a CellsDb,
     states_dir: &'a FileDb,
     block_id: &'a BlockId,
 }
@@ -35,7 +35,7 @@ impl<'a> ShardStateWriter<'a> {
         PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
     }
 
-    pub fn new(db: &'a BaseDb, states_dir: &'a FileDb, block_id: &'a BlockId) -> Self {
+    pub fn new(db: &'a CellsDb, states_dir: &'a FileDb, block_id: &'a BlockId) -> Self {
         Self {
             db,
             states_dir,

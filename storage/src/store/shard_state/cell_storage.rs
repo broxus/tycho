@@ -22,7 +22,7 @@ use weedb::{rocksdb, BoundedCfHandle};
 use crate::db::*;
 
 pub struct CellStorage {
-    db: BaseDb,
+    db: CellsDb,
     cells_cache: Arc<CellsIndex>,
     raw_cells_cache: Arc<RawCellsCache>,
 }
@@ -30,7 +30,7 @@ pub struct CellStorage {
 type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
 
 impl CellStorage {
-    pub fn new(db: BaseDb, cache_size_bytes: ByteSize) -> Arc<Self> {
+    pub fn new(db: CellsDb, cache_size_bytes: ByteSize) -> Arc<Self> {
         let cells_cache = Default::default();
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
 
@@ -92,7 +92,7 @@ impl CellStorage {
 
         struct Context<'a> {
             cells_cf: BoundedCfHandle<'a>,
-            db: &'a BaseDb,
+            db: &'a CellsDb,
             buffer: Vec<u8>,
             transaction: FastHashMap<HashBytes, TempCell>,
             new_cells_batch: rocksdb::WriteBatch,
@@ -101,7 +101,7 @@ impl CellStorage {
         }
 
         impl<'a> Context<'a> {
-            fn new(db: &'a BaseDb, raw_cache: &'a RawCellsCache) -> Self {
+            fn new(db: &'a CellsDb, raw_cache: &'a RawCellsCache) -> Self {
                 Self {
                     cells_cf: db.cells.cf(),
                     db,
@@ -534,7 +534,7 @@ impl CellStorage {
         }
 
         struct Context<'a> {
-            db: &'a BaseDb,
+            db: &'a CellsDb,
             raw_cells_cache: &'a RawCellsCache,
             alloc: &'a Bump,
             transaction: FastHashMap<&'a HashBytes, AddedCell<'a>>,
@@ -1476,7 +1476,7 @@ impl RawCellsCache {
 
     fn get_raw(
         &self,
-        db: &BaseDb,
+        db: &CellsDb,
         key: &HashBytes,
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
         use quick_cache::sync::GuardResult;
@@ -1513,7 +1513,7 @@ impl RawCellsCache {
 
     fn get_rc_for_insert(
         &self,
-        db: &BaseDb,
+        db: &CellsDb,
         key: &HashBytes,
         depth: usize,
     ) -> Result<i64, CellStorageError> {
@@ -1551,7 +1551,7 @@ impl RawCellsCache {
 
     fn get_rc_for_delete(
         &self,
-        db: &BaseDb,
+        db: &CellsDb,
         key: &HashBytes,
         refs_buffer: &mut Vec<HashBytes>,
     ) -> Result<i64, CellStorageError> {
