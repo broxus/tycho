@@ -8,6 +8,7 @@ use everscale_types::merkle::*;
 use everscale_types::models::{ShardIdent, *};
 use everscale_types::prelude::*;
 use humantime::format_duration;
+use rayon::slice::ParallelSliceMut;
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
@@ -967,14 +968,19 @@ impl Phase<FinalizeState> {
 
                 // calculate next validator subset and hash
                 let current_vset = current_vset.parse::<ValidatorSet>()?;
-                let (_, validator_list_hash_short) = current_vset.compute_mc_subset(
-                    next_session_start_round,
-                    collation_config.shuffle_mc_validators,
-                ).ok_or_else(|| anyhow!(
-                    "Error calculating subset of validators for next session (shard_id = {}, session_seqno = {})",
-                    ShardIdent::MASTERCHAIN,
-                    next_session_start_round,
-                ))?;
+                let (_, validator_list_hash_short) = current_vset
+                    .compute_mc_subset(
+                        next_session_start_round,
+                        collation_config.shuffle_mc_validators,
+                    )
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Error calculating subset of validators for next session \
+                            (shard_id = {}, session_seqno = {})",
+                            ShardIdent::MASTERCHAIN,
+                            next_session_start_round,
+                        )
+                    })?;
 
                 validator_info = Some(ValidatorInfo {
                     validator_list_hash_short,
@@ -1089,24 +1095,14 @@ impl Phase<FinalizeState> {
         let (updated_accounts, shard_accounts) = executor.into_accounts_cache_raw();
         let mut shard_accounts = RelaxedAugDict::from_full(&shard_accounts);
 
+        // TODO: `par_iter` might be added here but the filter closure is quite heavy.
+        let mut account_updates = Vec::with_capacity(updated_accounts.len());
         for updated_account in updated_accounts {
             if updated_account.transactions.is_empty() {
                 continue;
             }
 
-            if updated_account.exists {
-                shard_accounts.set_any(
-                    &updated_account.account_addr,
-                    &DepthBalanceInfo {
-                        split_depth: 0, // NOTE: will need to set when we implement accounts split/merge logic
-                        balance: updated_account.balance.clone(),
-                    },
-                    &updated_account.shard_account,
-                )?;
-            } else {
-                shard_accounts.remove(&updated_account.account_addr)?;
-            }
-
+            // Handle masterchain account libraries and config change.
             if is_masterchain {
                 if &updated_account.account_addr == config_address {
                     if let Some(Account {
@@ -1121,25 +1117,49 @@ impl Phase<FinalizeState> {
                     }
                 }
 
-                updated_account.update_public_libraries(global_libraries)?;
+                // TODO: Collect modifications and apply them all at once.
+                updated_account
+                    .update_public_libraries(global_libraries)
+                    .context("failed to update public libraries")?;
             }
 
+            // Add account block.
+            let transactions = AugDict::try_from_btree(&updated_account.transactions)
+                .context("failed to build account block transactions")?;
             let account_block = AccountBlock {
                 state_update: updated_account.build_hash_update(),
                 account: updated_account.account_addr,
-                transactions: AugDict::try_from_btree(&updated_account.transactions)?,
+                transactions,
             };
-
             account_blocks.insert(updated_account.account_addr, account_block);
+
+            // Prepare modification.
+            let key = updated_account.account_addr;
+            let op = if updated_account.exists {
+                let extra = DepthBalanceInfo {
+                    // NOTE: will need to set when we implement accounts split/merge logic
+                    split_depth: 0,
+                    balance: updated_account.balance.clone(),
+                };
+                let value = updated_account.shard_account;
+                Some((extra, value))
+            } else {
+                None
+            };
+            account_updates.push((key, op));
         }
+
+        account_updates.par_sort_by(|(a, ..), (b, ..)| a.cmp(b));
+        shard_accounts
+            .modify_with_sorted_iter(account_updates)
+            .context("failed to modify accounts dict")?;
 
         let accounts_len = account_blocks.len();
 
-        // TODO: Somehow consume accounts inside an iterator
         let account_blocks = RelaxedAugDict::try_from_sorted_iter_any(
             account_blocks
-                .iter()
-                .map(|(k, v)| (k, v.transactions.root_extra(), v as &dyn Store)),
+                .into_iter()
+                .map(|(k, v)| (k, v.transactions.root_extra().clone(), v)),
         )?;
 
         Ok(ProcessedAccounts {
