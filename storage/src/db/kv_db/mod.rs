@@ -128,12 +128,12 @@ weedb::tables! {
         pub full_block_ids: tables::FullBlockIds,
         pub package_entries: tables::PackageEntries,
         pub block_data_entries: tables::BlockDataEntries,
-        pub shard_states: tables::ShardStates,
-        pub cells: tables::Cells,
-        pub temp_cells: tables::TempCells,
         pub block_connections: tables::BlockConnections,
 
         // tables are empty, but they cannot be deleted because they are in a storage config
+        _cells: tables::Cells,
+        _temp_cells: tables::TempCells,
+        _shard_states: tables::ShardStates,
         _shard_internal_messages: tables::ShardInternalMessagesOld,
         _int_msg_stats_uncommited: tables::InternalMessageStatsUncommitedOld,
         _shard_int_msgs_uncommited: tables::ShardInternalMessagesUncommitedOld,
@@ -146,7 +146,6 @@ mod base_migrations {
 
     use everscale_types::boc::Boc;
     use tycho_block_util::archive::ArchiveEntryType;
-    use weedb::rocksdb::CompactOptions;
 
     use super::*;
     use crate::util::StoredValue;
@@ -201,20 +200,22 @@ mod base_migrations {
         Ok(())
     }
 
-    pub fn v_0_0_2_to_v_0_0_3(db: &BaseDb) -> Result<(), MigrationError> {
-        let mut opts = CompactOptions::default();
-        opts.set_exclusive_manual_compaction(true);
-        let null = Option::<&[u8]>::None;
+    pub fn v_0_0_2_to_v_0_0_3(_db: &BaseDb) -> Result<(), MigrationError> {
+        // Do nothing since cells moved to separate DB instance
 
-        let started_at = Instant::now();
-        tracing::info!("started cells compaction");
-        db.cells
-            .db()
-            .compact_range_cf_opt(&db.cells.cf(), null, null, &opts);
-        tracing::info!(
-            elapsed = %humantime::format_duration(started_at.elapsed()),
-            "finished cells compaction"
-        );
+        // let mut opts = CompactOptions::default();
+        // opts.set_exclusive_manual_compaction(true);
+        // let null = Option::<&[u8]>::None;
+        //
+        // let started_at = Instant::now();
+        // tracing::info!("started cells compaction");
+        // db.cells
+        //     .db()
+        //     .compact_range_cf_opt(&db.cells.cf(), null, null, &opts);
+        // tracing::info!(
+        //     elapsed = %humantime::format_duration(started_at.elapsed()),
+        //     "finished cells compaction"
+        // );
 
         Ok(())
     }
@@ -442,7 +443,7 @@ impl VersionProvider for StateVersionProvider {
 
 pub type InternalQueueDB = WeeDb<InternalQueueTables>;
 
-impl WithMigrations for crate::InternalQueueDB {
+impl WithMigrations for InternalQueueDB {
     const NAME: &'static str = "int_queue";
     const VERSION: Semver = [0, 0, 1];
 
@@ -463,5 +464,30 @@ weedb::tables! {
         pub internal_message_commit_pointer: tables::InternalMessageCommitPointer,
         pub internal_message_stats: tables::InternalMessageStatistics,
         pub shard_internal_messages: tables::ShardInternalMessages,
+    }
+}
+
+// ===  Cells Db ===
+
+pub type CellsDb = WeeDb<CellsTables>;
+
+impl WithMigrations for CellsDb {
+    const NAME: &'static str = "cells";
+    const VERSION: Semver = [0, 0, 1];
+
+    fn register_migrations(
+        _migrations: &mut Migrations<Self>,
+        _cancelled: CancellationFlag,
+    ) -> Result<(), MigrationError> {
+        // TODO: register migrations here
+        Ok(())
+    }
+}
+
+weedb::tables! {
+    pub struct CellsTables<Caches> {
+        pub cells: tables::Cells,
+        pub temp_cells: tables::TempCells,
+        pub shard_states: tables::ShardStates,
     }
 }

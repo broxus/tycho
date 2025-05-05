@@ -30,6 +30,7 @@ const RPC_DB_SUBDIR: &str = "rpc";
 const FILES_SUBDIR: &str = "files";
 const MEMPOOL_SUBDIR: &str = "mempool";
 const INT_QUEUE_SUBDIR: &str = "int_queue";
+const CELLS_DB_SUBDIR: &str = "cells";
 
 pub struct StorageBuilder {
     config: StorageConfig,
@@ -133,6 +134,12 @@ impl StorageBuilder {
         base_db.normalize_version()?; // TODO: Remove on testnet reset
         base_db.apply_migrations().await?;
 
+        let cells_db =
+            CellsDb::builder_prepared(self.config.root_dir.join(CELLS_DB_SUBDIR), caches.clone())
+                .with_metrics_enabled(self.config.rocksdb_enable_metrics)
+                .with_options(|opts, _| update_options(opts, threads, fdlimit))
+                .build()?;
+
         let temp_file_storage = TempFileStorage::new(&file_db)?;
 
         let blocks_storage_config = BlockStorageConfig {
@@ -150,14 +157,14 @@ impl StorageBuilder {
             self.config.archive_chunk_size,
         ));
         let shard_state_storage = ShardStateStorage::new(
-            base_db.clone(),
+            cells_db.clone(),
             block_handle_storage.clone(),
             block_storage.clone(),
             temp_file_storage.clone(),
             self.config.cells_cache_size,
         )?;
         let persistent_state_storage = PersistentStateStorage::new(
-            base_db.clone(),
+            cells_db.clone(),
             &file_db,
             block_handle_storage.clone(),
             block_storage.clone(),
@@ -196,6 +203,7 @@ impl StorageBuilder {
         let inner = Arc::new(Inner {
             root,
             base_db,
+            cells_db,
             config: self.config,
             block_handle_storage,
             block_storage,
@@ -270,6 +278,10 @@ impl Storage {
         &self.inner.base_db
     }
 
+    pub fn cells_db(&self) -> &CellsDb {
+        &self.inner.cells_db
+    }
+
     pub fn mempool_db(&self) -> &MempoolDb {
         &self.inner.mempool_storage.db
     }
@@ -326,6 +338,7 @@ impl Storage {
 struct Inner {
     root: FileDb,
     base_db: BaseDb,
+    cells_db: CellsDb,
     config: StorageConfig,
 
     block_handle_storage: Arc<BlockHandleStorage>,
