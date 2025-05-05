@@ -86,7 +86,7 @@ impl BaseDbExt for BaseDb {
 
         // Check if the DB is NOT EMPTY
         {
-            let mut package_entires_iter = self.package_entries.raw_iterator();
+            let mut package_entires_iter = self.cells.raw_iterator(); // todo: why are we doing this?
             package_entires_iter.seek_to_first();
             package_entires_iter.status()?;
             if package_entires_iter.item().is_none() {
@@ -125,8 +125,8 @@ weedb::tables! {
         pub block_handles: tables::BlockHandles,
         pub key_blocks: tables::KeyBlocks,
         pub full_block_ids: tables::FullBlockIds,
-        pub package_entries: tables::PackageEntries,
-        pub block_data_entries: tables::BlockDataEntries,
+        // pub package_entries: tables::PackageEntries,
+        // pub block_data_entries: tables::BlockDataEntries,
         pub shard_states: tables::ShardStates,
         pub cells: tables::Cells,
         pub temp_cells: tables::TempCells,
@@ -145,13 +145,15 @@ mod base_migrations {
 
     use everscale_types::boc::Boc;
     use tycho_block_util::archive::ArchiveEntryType;
-    use weedb::rocksdb::CompactOptions;
+    use weedb::rocksdb::{CompactOptions, DBRawIterator};
 
     use super::*;
     use crate::util::StoredValue;
 
     pub fn v0_0_1_to_0_0_2(db: &BaseDb, cancelled: CancellationFlag) -> Result<(), MigrationError> {
-        let mut block_data_iter = db.package_entries.raw_iterator();
+        return Ok(());
+        // let mut block_data_iter = db.package_entries.raw_iterator();
+        let mut block_data_iter: DBRawIterator = todo!();
         block_data_iter.seek_to_first();
 
         tracing::info!("stated migrating package entries");

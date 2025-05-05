@@ -17,7 +17,7 @@ pub struct ArchiveEntryHeader {
 
 pub const ARCHIVE_ENTRY_HEADER_LEN: usize = 4 + 4 + 8 + 4 + 32 + 32 + 4 + 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, TlRead, TlWrite)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, TlRead, TlWrite, Ord, PartialOrd)]
 #[tl(boxed, scheme = "proto.tl")]
 #[repr(u8)]
 pub enum ArchiveEntryType {

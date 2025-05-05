@@ -5,7 +5,6 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bytes::{Buf, Bytes};
@@ -29,14 +28,14 @@ use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::{rayon_run, CancellationFlag};
 use tycho_util::{FastHashSet, FastHasherState};
-use weedb::{rocksdb, ColumnFamily, OwnedPinnableSlice};
+use weedb::rocksdb;
 
 pub use self::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId};
 use crate::db::*;
 use crate::util::*;
 use crate::{
-    BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage,
-    BlocksCacheConfig, HandleCreationStatus, NewBlockMeta, NodeStateStorage, StorageConfig,
+    BlockConnectionStorage, BlockFlags, BlockHandle, BlockHandleStorage, BlocksCacheConfig,
+    HandleCreationStatus, NewBlockMeta, NodeStateStorage, StorageConfig,
 };
 
 mod package_entry;
@@ -65,9 +64,10 @@ pub struct BlockStorage {
     in_progress_archives: FileDb,
 }
 
+#[derive(Clone)]
 pub struct BlobDbs {
     pub archives: cassadilia::Bubs<u32>,
-    pub package_entries: cassadilia::Bubs<String>,
+    pub package_entries: cassadilia::Bubs<PackageEntryKey>,
 }
 
 impl BlobDbs {
@@ -91,21 +91,35 @@ impl BlobDbs {
             }
         }
 
-        struct NOOPEncoder;
+        struct PackageEntryEncoder;
 
-        impl cassadilia::KeyEncoder<String> for NOOPEncoder {
-            fn encode(&self, key: &String) -> Result<Vec<u8>> {
-                todo!()
+        impl cassadilia::KeyEncoder<PackageEntryKey> for PackageEntryEncoder {
+            fn encode(&self, key: &PackageEntryKey) -> Result<Vec<u8>> {
+                let mut buf = Vec::with_capacity(PackageEntryKey::SIZE_HINT);
+                key.serialize(&mut buf);
+
+                Ok(buf)
             }
 
-            fn decode(&self, data: &[u8]) -> Result<String> {
-                todo!()
+            fn decode(&self, data: &[u8]) -> Result<PackageEntryKey> {
+                if data.len() != PackageEntryKey::SIZE_HINT {
+                    return Err(anyhow::anyhow!("Invalid length for PackageEntryKey"));
+                }
+                let mut slice = data;
+                let key = PackageEntryKey::deserialize(&mut slice);
+                anyhow::ensure!(slice.is_empty(), "Invalid length for PackageEntryKey");
+                Ok(key)
             }
         }
 
-        let archives = cassadilia::Bubs::open(db_root.join("archives"), U32Encoder).unwrap();
+        let config = cassadilia::Config {
+            sync_mode: cassadilia::SyncMode::Async,
+        };
+        let archives =
+            cassadilia::Bubs::open(db_root.join("archives"), U32Encoder, config.clone()).unwrap();
         let package_entries =
-            cassadilia::Bubs::open(db_root.join("package_entries"), NOOPEncoder).unwrap();
+            cassadilia::Bubs::open(db_root.join("package_entries"), PackageEntryEncoder, config)
+                .unwrap();
 
         BlobDbs {
             archives,
@@ -132,18 +146,8 @@ impl BlockStorage {
         archive_chunk_size: ByteSize,
         node_state_storage: NodeStateStorage,
     ) -> Result<Self> {
-        fn weigher(_key: &BlockId, value: &BlockStuff) -> u32 {
-            const BLOCK_STUFF_OVERHEAD: u32 = 1024; // 1 KB
-
-            size_of::<BlockId>() as u32
-                + BLOCK_STUFF_OVERHEAD
-                + value.data_size().try_into().unwrap_or(u32::MAX)
-        }
-
         let blocks_cache = moka::sync::Cache::builder()
-            .time_to_live(config.blocks_cache.ttl)
-            .max_capacity(config.blocks_cache.size.as_u64())
-            .weigher(weigher)
+            .time_to_idle(config.blocks_cache.ttl)
             .build_with_hasher(Default::default());
 
         let in_progress_archives = file_db.create_subdir("archive_ids")?;
@@ -234,77 +238,6 @@ impl BlockStorage {
         NonZeroU32::new(BLOCK_DATA_CHUNK_SIZE).unwrap()
     }
 
-    pub async fn finish_block_data(&self) -> Result<()> {
-        let started_at = Instant::now();
-
-        tracing::info!("started finishing compressed block data");
-
-        let mut iter = self.db.block_data_entries.raw_iterator();
-        iter.seek_to_first();
-
-        let mut blocks_to_finish = Vec::new();
-
-        loop {
-            let Some(key) = iter.key() else {
-                if let Err(e) = iter.status() {
-                    tracing::error!("failed to iterate through compressed block data: {e:?}");
-                }
-                break;
-            };
-
-            let key = BlockDataEntryKey::from_slice(key);
-
-            const _: () = const {
-                // Rely on the specific order of these constants
-                assert!(BLOCK_DATA_STARTED_MAGIC < BLOCK_DATA_SIZE_MAGIC);
-            };
-
-            // Chunk keys are sorted by offset.
-            match key.chunk_index {
-                // "Started" magic comes first, and indicates that the block exists.
-                BLOCK_DATA_STARTED_MAGIC => {
-                    blocks_to_finish.push(key.block_id);
-                }
-                // "Size" magic comes last, and indicates that the block data is finished.
-                BLOCK_DATA_SIZE_MAGIC => {
-                    // Last block id is already finished
-                    let last = blocks_to_finish.pop();
-                    anyhow::ensure!(last == Some(key.block_id), "invalid block data SIZE entry");
-                }
-                _ => {}
-            }
-
-            iter.next();
-        }
-
-        drop(iter);
-
-        for block_id in blocks_to_finish {
-            tracing::info!(?block_id, "found unfinished block");
-
-            let key = PackageEntryKey {
-                block_id,
-                ty: ArchiveEntryType::Block,
-            };
-
-            let data = match self.db.package_entries.get(key.to_vec())? {
-                Some(data) => data,
-                None => return Err(BlockStorageError::BlockDataNotFound.into()),
-            };
-
-            let permit = self.split_block_semaphore.clone().acquire_owned().await?;
-            self.spawn_split_block_data(&block_id, &data, permit)
-                .await??;
-        }
-
-        tracing::info!(
-            elapsed = %humantime::format_duration(started_at.elapsed()),
-            "finished handling unfinished blocks"
-        );
-
-        Ok(())
-    }
-
     // === Subscription stuff ===
 
     pub async fn wait_for_block(&self, block_id: &BlockId) -> Result<BlockStuffAug> {
@@ -367,7 +300,7 @@ impl BlockStorage {
 
             let _lock = handle.block_data_lock().write().await;
             if !handle.has_data() {
-                self.add_block_data_and_split(&archive_id, data).await?;
+                self.add_block_data_compressed(&archive_id, data).await?;
                 if handle.meta().add_flags(BlockFlags::HAS_DATA) {
                     self.block_handle_storage.store_handle(&handle, false);
                     updated = true;
@@ -407,23 +340,19 @@ impl BlockStorage {
             return Ok(block.clone());
         }
 
-        let FullBlockDataGuard { _lock, data } = self
-            .get_data_ref(handle, &PackageEntryKey::block(handle.id()))
+        let data = self
+            .get_data(handle, &PackageEntryKey::block(handle.id()))
             .await?;
 
         if data.len() > BIG_DATA_THRESHOLD {
             BlockStuff::deserialize(handle.id(), data.as_ref())
         } else {
             let handle = handle.clone();
-
-            // SAFETY: `data` was created by the `self.db` RocksDB instance.
-            let owned_data =
-                unsafe { weedb::OwnedPinnableSlice::new(self.db.rocksdb().clone(), data) };
-            rayon_run(move || BlockStuff::deserialize(handle.id(), owned_data.as_ref())).await
+            rayon_run(move || BlockStuff::deserialize(handle.id(), data.as_ref())).await
         }
     }
 
-    pub async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<OwnedPinnableSlice> {
+    pub async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Bytes> {
         if !handle.has_data() {
             return Err(BlockStorageError::BlockDataNotFound.into());
         }
@@ -435,123 +364,65 @@ impl BlockStorage {
         &self,
         continuation: Option<BlockIdShort>,
     ) -> Result<(Vec<BlockId>, Option<BlockIdShort>)> {
-        const LIMIT: usize = 1000; // Max blocks per response
-        const MAX_BYTES: usize = 1 << 20; // 1 MB processed per response
+        const LIMIT: usize = 1000;
 
-        let continuation = continuation.map(|block_id| {
-            PackageEntryKey::block(&BlockId {
-                shard: block_id.shard,
-                seqno: block_id.seqno,
-                root_hash: HashBytes::ZERO,
-                file_hash: HashBytes::ZERO,
-            })
-            .to_vec()
-        });
+        let all_blocks: BTreeSet<BlockId> = self
+            .blob_dbs
+            .package_entries
+            .index_snapshot()
+            .into_iter()
+            .filter(|(k, _)| k.ty == ArchiveEntryType::Block)
+            .map(|(k, v)| k.block_id.make_full(HashBytes::from_slice(v.as_ref())))
+            .collect();
 
-        let mut iter = {
-            let mut readopts = rocksdb::ReadOptions::default();
-            tables::PackageEntries::read_options(&mut readopts);
-            if let Some(key) = &continuation {
-                readopts.set_iterate_lower_bound(key.as_slice());
-            }
-            self.db
-                .rocksdb()
-                .raw_iterator_cf_opt(&self.db.package_entries.cf(), readopts)
-        };
-
-        // NOTE: Despite setting the lower bound we must still seek to the exact key.
-        match continuation {
-            None => iter.seek_to_first(),
-            Some(key) => iter.seek(key),
-        }
-
-        let mut bytes = 0;
-        let mut blocks = Vec::new();
-
-        let continuation = loop {
-            let (key, value) = match iter.item() {
-                Some(item) => item,
-                None => {
-                    iter.status()?;
-                    break None;
-                }
+        let page_iter = if let Some(cont_short) = continuation.as_ref() {
+            let start_bound = BlockId {
+                shard: cont_short.shard,
+                seqno: cont_short.seqno,
+                root_hash: Default::default(),
+                file_hash: Default::default(),
             };
-
-            let id = PackageEntryKey::from_slice(key);
-            if id.ty != ArchiveEntryType::Block {
-                // Ignore non-block entries
-                iter.next();
-                continue;
-            }
-
-            if blocks.len() >= LIMIT || bytes >= MAX_BYTES {
-                break Some(id.block_id.as_short_id());
-            }
-
-            let file_hash = Boc::file_hash_blake(value);
-            let block_id = id.block_id.make_full(file_hash);
-
-            bytes += value.len();
-            blocks.push(block_id);
-
-            iter.next();
+            either::Either::Left(all_blocks.range(start_bound..).skip_while(|block| {
+                block.shard < cont_short.shard
+                    || (block.shard == cont_short.shard && block.seqno <= cont_short.seqno)
+            }))
+        } else {
+            either::Either::Right(all_blocks.iter())
         };
 
-        Ok((blocks, continuation))
+        let mut result_blocks: Vec<BlockId> = page_iter.take(LIMIT + 1).cloned().collect();
+
+        let next_continuation = if result_blocks.len() > LIMIT {
+            result_blocks.pop().map(|block| block.as_short_id())
+        } else {
+            None
+        };
+
+        Ok((result_blocks, next_continuation))
     }
 
-    pub fn list_archive_ids(&self) -> Vec<u32> {
-        let mut keys = self.blob_dbs.archives.known_keys();
-        keys.sort_unstable();
-        keys
-    }
-
-    pub async fn load_block_data_raw_ref<'a>(
-        &'a self,
-        handle: &'a BlockHandle,
-    ) -> Result<impl AsRef<[u8]> + 'a> {
-        if !handle.has_data() {
-            return Err(BlockStorageError::BlockDataNotFound.into());
-        }
-        self.get_data_ref(handle, &PackageEntryKey::block(handle.id()))
-            .await
+    pub fn list_archive_ids(&self) -> BTreeSet<u32> {
+        self.blob_dbs.archives.known_keys()
     }
 
     pub fn find_mc_block_data(&self, mc_seqno: u32) -> Result<Option<Block>> {
-        let package_entries = &self.db.package_entries;
-
-        let bound = BlockId {
-            shard: ShardIdent::MASTERCHAIN,
-            seqno: mc_seqno,
-            root_hash: HashBytes::ZERO,
-            file_hash: HashBytes::ZERO,
+        let Some(key) = self
+            .blob_dbs
+            .package_entries
+            .known_keys()
+            .iter()
+            .find(|k| k.block_id.shard == ShardIdent::MASTERCHAIN && k.block_id.seqno == mc_seqno)
+            .cloned()
+        else {
+            return Ok(None);
         };
 
-        let mut bound = PackageEntryKey::block(&bound);
+        let block_data = match self.blob_dbs.package_entries.get(&key)? {
+            None => return Ok(None),
+            Some(data) => Self::load_package_entry(&self.blob_dbs.package_entries, &key)?,
+        };
 
-        let mut readopts = package_entries.new_read_config();
-        readopts.set_iterate_lower_bound(bound.to_vec().into_vec());
-        bound.block_id.seqno += 1;
-        readopts.set_iterate_upper_bound(bound.to_vec().into_vec());
-
-        let mut iter = self
-            .db
-            .rocksdb()
-            .raw_iterator_cf_opt(&package_entries.cf(), readopts);
-
-        iter.seek_to_first();
-        loop {
-            let Some((key, value)) = iter.item() else {
-                iter.status()?;
-                return Ok(None);
-            };
-
-            let Some(ArchiveEntryType::Block) = extract_entry_type(key) else {
-                continue;
-            };
-
-            return Ok(Some(BocRepr::decode::<Block, _>(value)?));
-        }
+        Ok(Some(BocRepr::decode(block_data)?))
     }
 
     // === Block proof ===
@@ -580,7 +451,7 @@ impl BlockStorage {
 
             let _lock = handle.proof_data_lock().write().await;
             if !handle.has_proof() {
-                self.add_data(&archive_id, data)?;
+                self.add_block_data_compressed(&archive_id, data).await?;
                 if handle.meta().add_flags(BlockFlags::HAS_PROOF) {
                     self.block_handle_storage.store_handle(&handle, false);
                     updated = true;
@@ -596,28 +467,16 @@ impl BlockStorage {
     }
 
     pub async fn load_block_proof(&self, handle: &BlockHandle) -> Result<BlockProofStuff> {
-        let raw_proof = self.load_block_proof_raw_ref(handle).await?;
+        let raw_proof = self.load_block_proof_raw(handle).await?;
         BlockProofStuff::deserialize(handle.id(), raw_proof.as_ref())
     }
 
-    pub async fn load_block_proof_raw(&self, handle: &BlockHandle) -> Result<OwnedPinnableSlice> {
+    pub async fn load_block_proof_raw(&self, handle: &BlockHandle) -> Result<Bytes> {
         if !handle.has_proof() {
             return Err(BlockStorageError::BlockProofNotFound.into());
         }
 
         self.get_data(handle, &PackageEntryKey::proof(handle.id()))
-            .await
-    }
-
-    pub async fn load_block_proof_raw_ref<'a>(
-        &'a self,
-        handle: &'a BlockHandle,
-    ) -> Result<impl AsRef<[u8]> + 'a> {
-        if !handle.has_proof() {
-            return Err(BlockStorageError::BlockProofNotFound.into());
-        }
-
-        self.get_data_ref(handle, &PackageEntryKey::proof(handle.id()))
             .await
     }
 
@@ -647,7 +506,7 @@ impl BlockStorage {
 
             let _lock = handle.queue_diff_data_lock().write().await;
             if !handle.has_queue_diff() {
-                self.add_data(&archive_id, data)?;
+                self.add_block_data_compressed(&archive_id, data).await?;
                 if handle.meta().add_flags(BlockFlags::HAS_QUEUE_DIFF) {
                     self.block_handle_storage.store_handle(&handle, false);
                     updated = true;
@@ -663,27 +522,16 @@ impl BlockStorage {
     }
 
     pub async fn load_queue_diff(&self, handle: &BlockHandle) -> Result<QueueDiffStuff> {
-        let raw_diff = self.load_queue_diff_raw_ref(handle).await?;
+        let raw_diff = self.load_queue_diff_raw(handle).await?;
         QueueDiffStuff::deserialize(handle.id(), raw_diff.as_ref())
     }
 
-    pub async fn load_queue_diff_raw(&self, handle: &BlockHandle) -> Result<OwnedPinnableSlice> {
+    pub async fn load_queue_diff_raw(&self, handle: &BlockHandle) -> Result<Bytes> {
         if !handle.has_queue_diff() {
             return Err(BlockStorageError::QueueDiffNotFound.into());
         }
 
         self.get_data(handle, &PackageEntryKey::queue_diff(handle.id()))
-            .await
-    }
-
-    pub async fn load_queue_diff_raw_ref<'a>(
-        &'a self,
-        handle: &'a BlockHandle,
-    ) -> Result<impl AsRef<[u8]> + 'a> {
-        if !handle.has_queue_diff() {
-            return Err(BlockStorageError::QueueDiffNotFound.into());
-        }
-        self.get_data_ref(handle, &PackageEntryKey::queue_diff(handle.id()))
             .await
     }
 
@@ -704,10 +552,8 @@ impl BlockStorage {
         let archive_block_ids_cf = self.db.archive_block_ids.cf();
 
         // Prepare archive
-        let archive_id = self.prepare_archive_id(
-            handle.ref_by_mc_seqno(),
-            mc_is_key_block || handle.is_key_block(),
-        );
+        let force_split = mc_is_key_block || handle.is_key_block();
+        let archive_id = self.prepare_archive_id(handle.ref_by_mc_seqno(), force_split);
         let archive_id_bytes = archive_id.id.to_be_bytes();
 
         // 0. Create transaction
@@ -718,8 +564,7 @@ impl BlockStorage {
 
         self.db.rocksdb().write(batch)?;
 
-        tracing::debug!(block_id = %handle.id(), ?archive_id,  "saved block id into archive");
-        // Block will be removed after blocks gc
+        tracing::debug!(block_id = %handle.id(), ?archive_id, force_split,  "saved block id into archive");
 
         if let Some(to_commit) = archive_id.to_commit {
             let mut should_start_commit = true;
@@ -761,15 +606,56 @@ impl BlockStorage {
 
     /// Returns a corresponding archive id for the specified masterchain seqno.
     pub fn get_archive_meta(&self, mc_seqno: u32) -> ArchiveMeta {
+        let archive_ids: BTreeSet<u32> = self.blob_dbs.archives.known_keys();
+
+        // Find the largest archive ID that is less than or equal to mc_seqno.
+        // This is our candidate archive.
+        let maybe_candidate_id_and_end = archive_ids
+            .range(..=mc_seqno)
+            .next_back()
+            .map(|&id| (id, id.saturating_add(ARCHIVE_PACKAGE_SIZE)));
+
+        // 1. Check if mc_seqno falls into an existing, retrievable archive package
+        if let Some((candidate_id, archive_end_exclusive)) = maybe_candidate_id_and_end {
+            if mc_seqno < archive_end_exclusive {
+                // mc_seqno is within this candidate package's theoretical range.
+                // Now check if the data actually exists.
+                return match self.blob_dbs.archives.size(&candidate_id) {
+                    Ok(Some(len)) => ArchiveMeta::Found {
+                        mc_block_id: candidate_id,
+                        len,
+                    },
+                    Ok(None) => {
+                        tracing::warn!(
+                            archive_id = candidate_id,
+                            target_mc_seqno = mc_seqno,
+                            "archive was present in known_keys but size not found (deleted by gc or index corrupted?)"
+                        );
+                        ArchiveMeta::NotFound // Treat as not found if data is gone
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            archive_id = candidate_id,
+                            target_mc_seqno = mc_seqno,
+                            error = %e,
+                            "Failed to get archive size"
+                        );
+                        ArchiveMeta::NotFound // Or introduce an ArchiveMeta::Error variant
+                    }
+                };
+            }
+            // If mc_seqno >= archive_end_exclusive, it's after this candidate's package.
+            // Fall through to determine if TooNew or NotFound (gap).
+        }
+
+        // 2. If not found in a retrievable package, determine if TooNew or NotFound.
         let Some(last_mc_block) = self.node_state_storage.load_last_mc_block_id() else {
-            return ArchiveMeta::TooNew; // Node has no known masterchain blocks yet
+            // Node has no known masterchain blocks yet. Any request is TooNew relative to node state.
+            return ArchiveMeta::TooNew;
         };
 
-        // If mc_seqno is too far ahead of the latest known block, it's too new.
-        // Example: last_mc_block.seqno = 500, ARCHIVE_PACKAGE_SIZE = 100.
-        // If mc_seqno = 300, 500 - 300 = 200. 200 - 100 = 100. is_some(). OK.
-        // If mc_seqno = 450, 500 - 450 = 50. 50 - 100 = None. TooNew.
-        // If mc_seqno = 600, 500 - 600 = None. TooNew.
+        // Global "TooNew" check: Is mc_seqno too recent relative to the node's latest block?
+        // This is the original logic from your snippet.
         if last_mc_block
             .seqno
             .checked_sub(mc_seqno)
@@ -779,84 +665,35 @@ impl BlockStorage {
             return ArchiveMeta::TooNew;
         }
 
-        // Assuming self.blob_dbs.archives.known_keys() now returns a BTreeSet<u32>
-        let archive_ids: BTreeSet<u32> = self.blob_dbs.archives.known_keys();
+        // At this point:
+        // - Not found in a specific, existing, covering archive package (step 1).
+        // - Not "globally too new" according to last_mc_block and ARCHIVE_PACKAGE_SIZE.
+        // Now distinguish "NotFound" (gap, or older than any archive)
+        // from "TooNew" (newer than the *last existing* archive).
 
         if archive_ids.is_empty() {
-            return ArchiveMeta::NotFound; // No archives at all
+            // No archives exist at all, and it's not globally TooNew. So, it's NotFound.
+            return ArchiveMeta::NotFound;
         }
 
-        // Find the largest archive ID that is less than or equal to mc_seqno.
-        // This is our candidate archive, as mc_seqno could potentially fall into its range.
-        // BTreeSet::range(..=value) gives an iterator to elements <= value.
-        // .next_back() gives the largest of these.
-        let Some(&candidate_id) = archive_ids.range(..=mc_seqno).next_back() else {
-            // All archive IDs in the set are > mc_seqno.
-            // This means mc_seqno is smaller than the ID of the very first archive.
-            // Example: mc_seqno = 5, archive_ids = {10, 20} -> range(..=5) is empty.
-            return ArchiveMeta::NotFound;
-        };
-
-        // Now `candidate_id` is the largest archive ID <= `mc_seqno`.
-        // Example: mc_seqno = 15, archive_ids = {10, 20} -> candidate_id = 10.
-        // Example: mc_seqno = 10, archive_ids = {10, 20} -> candidate_id = 10.
-        // Example: mc_seqno = 25, archive_ids = {10, 20} -> candidate_id = 20.
-
-        // Check if mc_seqno is within the range covered by this candidate archive package.
-        // The range is [candidate_id, candidate_id + ARCHIVE_PACKAGE_SIZE).
-        let archive_end_exclusive = candidate_id.saturating_add(ARCHIVE_PACKAGE_SIZE);
-
-        if mc_seqno < archive_end_exclusive {
-            // mc_seqno falls within the candidate package's range.
-            match self.blob_dbs.archives.size(&candidate_id) {
-                Ok(Some(len)) => ArchiveMeta::Found {
-                    mc_block_id: candidate_id,
-                    len,
-                },
-                Ok(None) => {
-                    // Archive ID existed in keys, but size() returned None (deleted by GC?)
-                    tracing::warn!(
-                        archive_id = candidate_id,
-                        target_mc_seqno = mc_seqno,
-                        "archive was present in known_keys but size not found (deleted by gc or index corrupted?)"
-                    );
-                    ArchiveMeta::NotFound // Treat as not found if data is gone
-                }
-                Err(e) => {
-                    tracing::error!(
-                        archive_id = candidate_id,
-                        target_mc_seqno = mc_seqno,
-                        error = %e,
-                        "Failed to get archive size"
-                    );
-                    ArchiveMeta::NotFound // Or introduce an ArchiveMeta::Error variant
+        match maybe_candidate_id_and_end {
+            Some((candidate_id, _)) => {
+                // A candidate_id (largest archive_id <= mc_seqno) was found,
+                // but mc_seqno was >= its package end (handled in step 1 fall-through).
+                if Some(&candidate_id) == archive_ids.last() {
+                    // mc_seqno is after the *last existing* archive package.
+                    // Since it's not globally TooNew, it implies an expectation for an archive
+                    // that isn't present yet. Consistent with original logic's "TooNew".
+                    ArchiveMeta::TooNew
+                } else {
+                    // mc_seqno is after candidate_id's package, but candidate_id is NOT the last archive.
+                    // This means mc_seqno falls into a gap between existing archive packages.
+                    ArchiveMeta::NotFound
                 }
             }
-        } else {
-            // mc_seqno is >= candidate_id + ARCHIVE_PACKAGE_SIZE.
-            // It falls *after* the range covered by the candidate package.
-            // Now we need to distinguish: is it in a gap, or truly too new (newer than the latest archive)?
-
-            // Check if the candidate we found was the *last* known archive ID in the set.
-            // BTreeSet::last() returns an Option<&T> to the largest element.
-            // We know archive_ids is not empty here, so .last() will be Some.
-            if Some(&candidate_id) == archive_ids.last() {
-                // Yes, `candidate_id` is the ID of the last archive package.
-                // Since `mc_seqno` is outside its range (and it's the last archive),
-                // it's newer than any known archive package.
-                // Example: mc_seqno = 1025, archive_ids = {10, 20}, ARCHIVE_PACKAGE_SIZE = 1000.
-                // candidate_id = 20. archive_end_exclusive = 1020. 1025 < 1020 is false.
-                // archive_ids.last() = Some(20). Some(&20) == Some(&20). -> TooNew.
-                ArchiveMeta::TooNew
-            } else {
-                // No, `candidate_id` is not the last archive ID in the set.
-                // This means there's another archive ID after `candidate_id`
-                // (e.g., *archive_ids.range((candidate_id+1)..).next() would yield a value).
-                // `mc_seqno` falls into a gap between the package starting
-                // at `candidate_id` and the next package.
-                // Example: mc_seqno=1015, archive_ids={10, 1020}, ARCHIVE_PACKAGE_SIZE=1000.
-                // candidate_id = 10. archive_end_exclusive = 1010. 1015 < 1010 is false.
-                // archive_ids.last() = Some(1020). Some(&10) != Some(&1020). -> NotFound (gap).
+            None => {
+                // No candidate_id (all archive_ids in the non-empty set are > mc_seqno).
+                // This means mc_seqno is older than the very first archive.
                 ArchiveMeta::NotFound
             }
         }
@@ -871,39 +708,22 @@ impl BlockStorage {
             .ok_or(BlockStorageError::ArchiveNotFound)?)
     }
 
-    pub fn get_block_data_size(&self, block_id: &BlockId) -> Result<Option<u32>> {
-        let key = BlockDataEntryKey {
-            block_id: block_id.into(),
-            chunk_index: BLOCK_DATA_SIZE_MAGIC,
-        };
-        let size = self
-            .db
-            .block_data_entries
-            .get(key.to_vec())?
-            .map(|slice| u32::from_le_bytes(slice.as_ref().try_into().unwrap()));
-
-        Ok(size)
+    pub fn get_block_data_size(&self, block_id: &BlockId) -> Result<Option<u64>> {
+        self.blob_dbs
+            .package_entries
+            .size(&PackageEntryKey::block(block_id))
     }
 
-    pub fn get_block_data_chunk(
-        &self,
-        block_id: &BlockId,
-        offset: u32,
-    ) -> Result<Option<OwnedPinnableSlice>> {
+    pub fn get_block_data_chunk(&self, block_id: &BlockId, offset: u32) -> Result<Option<Bytes>> {
         let chunk_size = self.block_data_chunk_size().get();
         if offset % chunk_size != 0 {
             return Err(BlockStorageError::InvalidOffset.into());
         }
 
-        let key = BlockDataEntryKey {
-            block_id: block_id.into(),
-            chunk_index: offset / chunk_size,
-        };
-
-        Ok(self.db.block_data_entries.get(key.to_vec())?.map(|value| {
-            // SAFETY: A value was received from the same RocksDB instance.
-            unsafe { OwnedPinnableSlice::new(self.db.rocksdb().clone(), value) }
-        }))
+        let key = PackageEntryKey::block(block_id);
+        self.blob_dbs
+            .package_entries
+            .get_range(&key, offset as u64, (offset + chunk_size) as u64)
     }
 
     pub fn subscribe_to_archive_ids(&self) -> broadcast::Receiver<u32> {
@@ -956,6 +776,7 @@ impl BlockStorage {
         let span = tracing::Span::current();
         let cancelled = cancelled.clone();
         let db = self.db.clone();
+        let blob_dbs = self.blob_dbs.clone();
 
         let BlockGcStats {
             mc_blocks_removed,
@@ -969,6 +790,7 @@ impl BlockStorage {
 
             let stats = remove_blocks(
                 db,
+                blob_dbs,
                 max_blocks_per_batch,
                 mc_seqno,
                 shard_heights,
@@ -991,35 +813,13 @@ impl BlockStorage {
 
     #[tracing::instrument(skip(self))]
     pub fn remove_outdated_archives(&self, until_id: u32) -> Result<()> {
-        tracing::trace!("started archives GC");
+        tracing::debug!("started archives GC");
 
-        let mut archive_ids = self.blob_dbs.archives.known_keys();
-        archive_ids.sort_unstable();
-
-        // Find the index up to which we need to remove IDs (exclusive of until_id)
-        let partition_idx = archive_ids.partition_point(|&id| id < until_id);
-
-        // Collect IDs to remove
-        let removed_ids: Vec<u32> = archive_ids.drain(..partition_idx).collect();
-
-        if removed_ids.is_empty() {
-            tracing::info!("nothing to remove, until_id: {}", until_id);
-            return Ok(());
-        }
-
-        let first = *removed_ids.first().unwrap(); // Safe due to is_empty check
-        let last = *removed_ids.last().unwrap(); // Safe due to is_empty check
-        let len = removed_ids.len();
-
-        for id_to_remove in &removed_ids {
-            self.blob_dbs.archives.remove(id_to_remove)?;
-        }
+        let removed = self.blob_dbs.archives.remove_range(0..until_id)?;
 
         tracing::info!(
-            archive_count = len,
-            first,
-            last,
-            until_id,
+            removed_count = removed,
+            gc_threshold_id = until_id,
             "finished archives GC"
         );
         Ok(())
@@ -1027,68 +827,49 @@ impl BlockStorage {
 
     // === Internal ===
 
-    fn add_data(&self, id: &PackageEntryKey, data: &[u8]) -> Result<(), rocksdb::Error> {
-        self.db.package_entries.insert(id.to_vec(), data)
-    }
-
-    async fn add_block_data_and_split(&self, id: &PackageEntryKey, data: &[u8]) -> Result<()> {
-        let mut batch = rocksdb::WriteBatch::default();
-
-        batch.put_cf(&self.db.package_entries.cf(), id.to_vec(), data);
-
-        // Store info that new block was started
-        let key = BlockDataEntryKey {
-            block_id: id.block_id,
-            chunk_index: BLOCK_DATA_STARTED_MAGIC,
+    async fn get_data(&self, handle: &BlockHandle, id: &PackageEntryKey) -> Result<Bytes> {
+        tracing::info!(id =? id,"loading data");
+        let (lock, would_block) = match id.ty {
+            ArchiveEntryType::Block => (handle.block_data_lock(), true),
+            ArchiveEntryType::Proof => (handle.proof_data_lock(), false),
+            ArchiveEntryType::QueueDiff => (handle.queue_diff_data_lock(), false),
         };
-        batch.put_cf(&self.db.block_data_entries.cf(), key.to_vec(), []);
+        let _lock = lock.read().await;
 
-        self.db.rocksdb().write(batch)?;
-
-        // Start splitting block data
-        let permit = self.split_block_semaphore.clone().acquire_owned().await?;
-        let _handle = self.spawn_split_block_data(&id.block_id, data, permit);
-
-        Ok(())
-    }
-
-    async fn get_data(
-        &self,
-        handle: &BlockHandle,
-        id: &PackageEntryKey,
-    ) -> Result<OwnedPinnableSlice> {
-        let _lock = match id.ty {
-            ArchiveEntryType::Block => handle.block_data_lock(),
-            ArchiveEntryType::Proof => handle.proof_data_lock(),
-            ArchiveEntryType::QueueDiff => handle.queue_diff_data_lock(),
-        }
-        .read()
-        .await;
-
-        match self.db.package_entries.get(id.to_vec())? {
-            // SAFETY: A value was received from the same RocksDB instance.
-            Some(value) => Ok(unsafe { OwnedPinnableSlice::new(self.db.rocksdb().clone(), value) }),
-            None => Err(BlockStorageError::PackageEntryNotFound.into()),
+        if would_block {
+            {
+                let db = self.blob_dbs.package_entries.clone();
+                let id = id.clone();
+                Ok(
+                    tokio::task::spawn_blocking(move || Self::load_package_entry(&db, &id))
+                        .await??,
+                )
+            }
+        } else {
+            Self::load_package_entry(&self.blob_dbs.package_entries, id)
         }
     }
 
-    async fn get_data_ref<'a, 'b: 'a>(
-        &'a self,
-        handle: &'b BlockHandle,
-        id: &PackageEntryKey,
-    ) -> Result<FullBlockDataGuard<'a>> {
-        let lock = match id.ty {
-            ArchiveEntryType::Block => handle.block_data_lock(),
-            ArchiveEntryType::Proof => handle.proof_data_lock(),
-            ArchiveEntryType::QueueDiff => handle.queue_diff_data_lock(),
-        }
-        .read()
-        .await;
+    fn load_package_entry(db: &Bubs<PackageEntryKey>, id: &PackageEntryKey) -> Result<Bytes> {
+        let block = db.get(id)?.ok_or(BlockStorageError::PackageEntryNotFound)?;
 
-        match self.db.package_entries.get(id.to_vec())? {
-            Some(data) => Ok(FullBlockDataGuard { _lock: lock, data }),
-            None => Err(BlockStorageError::PackageEntryNotFound.into()),
-        }
+        // zstd -e10  -b1 res.blob
+        //  1#res.blob          :   1750269 ->   1458151 (x1.200),  421.5 MB/s, 2424.7 MB/s
+        //  2#res.blob          :   1750269 ->   1417723 (x1.235),  395.7 MB/s, 3359.8 MB/s
+        //  3#res.blob          :   1750269 ->   1356087 (x1.291),  229.6 MB/s, 3166.9 MB/s
+        //  4#res.blob          :   1750269 ->   1339545 (x1.307),  190.7 MB/s, 3088.6 MB/s
+        //  5#res.blob          :   1750269 ->   1334660 (x1.311),  125.4 MB/s, 3162.7 MB/s
+        //  6#res.blob          :   1750269 ->   1327555 (x1.318),  103.9 MB/s, 3241.7 MB/s
+        //  7#res.blob          :   1750269 ->   1325189 (x1.321),   96.8 MB/s, 3266.1 MB/s
+        //  8#res.blob          :   1750269 ->   1324270 (x1.322),   94.8 MB/s  3246.1 MB/s
+        Ok(match id.ty {
+            ArchiveEntryType::Block => {
+                let mut out = Vec::with_capacity(block.len() * 2); // best compression ratio
+                tycho_util::compression::zstd_decompress(&block, &mut out)?;
+                Bytes::from(out)
+            }
+            ArchiveEntryType::Proof | ArchiveEntryType::QueueDiff => block,
+        })
     }
 
     fn prepare_archive_id(&self, mc_seqno: u32, force_split_archive: bool) -> PreparedArchiveId {
@@ -1122,7 +903,7 @@ impl BlockStorage {
 
     #[tracing::instrument(skip(self))]
     fn spawn_commit_archive(&self, archive_id: u32) -> CommitArchiveTask {
-        let blob_db = self.blob_dbs.archives.clone();
+        let blob_db = self.blob_dbs.clone();
         let db = self.db.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let chunk_size = self.archive_chunk_size().get() as u64;
@@ -1164,7 +945,8 @@ impl BlockStorage {
                     .ok_or(BlockStorageError::ArchiveNotFound)?;
                 assert_eq!(raw_block_ids.len() % BlockId::SIZE_HINT, 0);
 
-                let mut writer = ArchiveWriter::new(&blob_db, &db, archive_id, chunk_size)?;
+                let mut writer =
+                    ArchiveWriter::new(&blob_db.archives, &db, archive_id, chunk_size)?;
                 let mut header_buffer = Vec::with_capacity(ARCHIVE_ENTRY_HEADER_LEN);
 
                 // Write archive prefix
@@ -1204,8 +986,13 @@ impl BlockStorage {
                         }
 
                         let key = PackageEntryKey::from((block_id, ty));
-                        let Some(data) = db.package_entries.get(key.to_vec()).unwrap() else {
-                            return Err(BlockStorageError::BlockDataNotFound.into());
+
+                        let data = match Self::load_package_entry(&blob_db.package_entries, &key) {
+                            Ok(data) => data,
+                            Err(e) => {
+                                tracing::error!("failed to load package entry: {e:?}");
+                                return Err(BlockStorageError::BlockDataNotFound.into());
+                            }
                         };
 
                         // Serialize entry header
@@ -1254,53 +1041,68 @@ impl BlockStorage {
         }
     }
 
-    #[tracing::instrument(skip(self, data))]
-    fn spawn_split_block_data(
+    async fn add_block_data_compressed(&self, id: &PackageEntryKey, data: &[u8]) -> Result<()> {
+        let permit = self.split_block_semaphore.clone().acquire_owned().await?;
+        // should take 50 ms to compress 20mib block
+        self.spawn_compress_block_data(id, data, permit).await??; //  20117649 ->  16075134 (x1.251),  425.8 MB/s, 2292.9 MB/s
+
+        Ok(())
+    }
+
+    fn spawn_compress_block_data(
         &self,
-        block_id: &PartialBlockId,
+        block_id: &PackageEntryKey,
         data: &[u8],
         permit: OwnedSemaphorePermit,
     ) -> JoinHandle<Result<()>> {
-        let db = self.db.clone();
-        let chunk_size = self.block_data_chunk_size().get() as usize;
-
+        let db = self.blob_dbs.package_entries.clone();
         let span = tracing::Span::current();
-        let handle = tokio::task::spawn_blocking({
-            let block_id = *block_id;
+
+        tokio::task::spawn_blocking({
+            let block_id = block_id.clone();
             let data = data.to_vec();
 
             move || {
                 let _span = span.enter();
-
                 let _histogram = HistogramGuard::begin("tycho_storage_split_block_data_time");
 
-                let mut compressed = Vec::new();
-                tycho_util::compression::zstd_compress(&data, &mut compressed, 3);
-
-                let chunks = compressed.chunks(chunk_size);
-                for (index, chunk) in chunks.enumerate() {
-                    let key = BlockDataEntryKey {
-                        block_id,
-                        chunk_index: index as u32,
-                    };
-
-                    db.block_data_entries.insert(key.to_vec(), chunk)?;
+                // Only compress and write if block doesn't exist
+                if db.contains_key(&block_id) {
+                    drop(permit);
+                    return Ok(());
                 }
 
-                let key = BlockDataEntryKey {
-                    block_id,
-                    chunk_index: BLOCK_DATA_SIZE_MAGIC,
-                };
-                db.block_data_entries
-                    .insert(key.to_vec(), (compressed.len() as u32).to_le_bytes())?;
+                // Compression
+                let start = std::time::Instant::now();
+                let mut compressed = Vec::new();
+
+                // only blocks are big enough to compress
+                if block_id.ty != ArchiveEntryType::Block {
+                    compressed = data;
+                } else if data.len() as u64 > bytesize::MIB * 2 {
+                    let mut compressor = ZstdCompressStream::new(1, data.len() as _)?;
+                    compressor.multithreaded(std::thread::available_parallelism()?.get() as _)?;
+
+                    compressor.write(&data, &mut compressed)?;
+                    compressor.finish(&mut compressed)?;
+                } else {
+                    tycho_util::compression::zstd_compress(&data, &mut compressed, 1);
+                }
+                let elapsed = start.elapsed().as_secs_f64();
+                tracing::info!(took = elapsed, "COMPRESS_BLOCK");
+
+                // Writing
+                let start = std::time::Instant::now();
+                let mut tx = db.put(block_id)?;
+                tx.write(&compressed)?;
+                tx.finish()?;
+                let elapsed = start.elapsed().as_secs_f64();
+                tracing::info!(took = elapsed, "WRITE_BLOCK");
 
                 drop(permit);
-
                 Ok(())
             }
-        });
-
-        handle
+        })
     }
 }
 
@@ -1442,6 +1244,7 @@ impl ArchiveMeta {
 
 fn remove_blocks(
     db: BaseDb,
+    blob_dbs: BlobDbs,
     max_blocks_per_batch: Option<usize>,
     mc_seqno: u32,
     shard_heights: ShardHeights,
@@ -1452,13 +1255,10 @@ fn remove_blocks(
     let raw = db.rocksdb().as_ref();
     let full_block_ids_cf = db.full_block_ids.cf();
     let block_connections_cf = db.block_connections.cf();
-    let package_entries_cf = db.package_entries.cf();
-    let block_data_entries_cf = db.block_data_entries.cf();
+    let package_entries = &blob_dbs.package_entries;
     let block_handles_cf = db.block_handles.cf();
 
-    // Create batch
     let mut batch = rocksdb::WriteBatch::default();
-    let mut batch_len = 0;
 
     // Iterate all entries and find expired items
     let mut blocks_iter =
@@ -1492,15 +1292,7 @@ fn remove_blocks(
             let mut range_to = *range_from;
             range_to[12..16].copy_from_slice(&to.seqno.saturating_add(1).to_be_bytes());
 
-            // At this point we have two keys:
-            // [workchain, shard, from_seqno, 0...]
-            // [workchain, shard, to_seqno + 1, 0...]
-            //
-            // It will delete all entries in range [from_seqno, to_seqno) for this shard.
-            // Note that package entry keys are the same as block connection keys.
             batch.delete_range_cf(&full_block_ids_cf, &*range_from, &range_to);
-            batch.delete_range_cf(&package_entries_cf, &*range_from, &range_to);
-            batch.delete_range_cf(&block_data_entries_cf, &*range_from, &range_to);
             batch.delete_range_cf(&block_connections_cf, &*range_from, &range_to);
 
             tracing::debug!(%from, %to, "delete_range");
@@ -1508,6 +1300,7 @@ fn remove_blocks(
 
     let mut cancelled = cancelled.map(|c| c.debounce(100));
     let mut current_range = None::<(BlockIdShort, BlockIdShort)>;
+
     loop {
         let key = match blocks_iter.key() {
             Some(key) => key,
@@ -1530,68 +1323,109 @@ fn remove_blocks(
         let root_hash: &[u8; 32] = key[16..48].try_into().unwrap();
         let is_masterchain = block_id.shard.is_masterchain();
 
+        // --- Filtering Logic ---
         // Don't gc latest blocks, key blocks or persistent blocks
-        if block_id.seqno == 0
-            || is_masterchain && block_id.seqno >= mc_seqno
-            || !is_masterchain
-                && shard_heights.contains_shard_seqno(&block_id.shard, block_id.seqno)
-            || is_persistent(root_hash)?
-        {
-            // Remove the current range
+        let should_keep = block_id.seqno == 0
+            || (is_masterchain && block_id.seqno >= mc_seqno)
+            || (!is_masterchain
+                && shard_heights.contains_shard_seqno(&block_id.shard, block_id.seqno))
+            || is_persistent(root_hash)?;
+
+        if should_keep {
+            // Block should be kept. If we were tracking a range of blocks to delete,
+            // finalize that range now.
             if let Some((from, to)) = current_range.take() {
                 delete_range(&mut batch, &from, &to);
-                batch_len += 1; // Ensure that we flush the batch
             }
             blocks_iter.next();
             continue;
         }
 
+        // --- Deletion Logic ---
+        // Block should be removed.
+
+        // Update or start the delete range for CFs handled by delete_range
         match &mut current_range {
-            // Delete the previous range and start a new one
-            Some((from, to)) if from.shard != block_id.shard => {
-                delete_range(&mut batch, from, to);
-                *from = block_id;
+            Some((from, to)) if from.shard == block_id.shard => {
+                // Extend the current range for the same shard
                 *to = block_id;
             }
-            // Update the current range
-            Some((_, to)) => *to = block_id,
-            // Start a new range
-            None => current_range = Some((block_id, block_id)),
+            _ => {
+                // Finalize the previous range (if any) because the shard changed or no range existed
+                if let Some((from, to)) = current_range.take() {
+                    delete_range(&mut batch, &from, &to);
+                }
+                // Start a new range
+                current_range = Some((block_id, block_id));
+            }
         }
 
-        // Count entry
+        // --- Individual Deletions ---
+
+        // 1. Delete from block_handles_cf (using the RocksDB batch)
+        batch.delete_cf(&block_handles_cf, root_hash);
+
+        // 2. Delete corresponding entries from package_entries (using its own remove method)
+        let partial_block_id = PartialBlockId {
+            shard: block_id.shard,
+            seqno: block_id.seqno,
+            root_hash: HashBytes(*root_hash),
+        };
+
+        for ty in [
+            ArchiveEntryType::Block,
+            ArchiveEntryType::Proof,
+            ArchiveEntryType::QueueDiff,
+        ] {
+            let key = PackageEntryKey {
+                block_id: partial_block_id,
+                ty,
+            };
+            package_entries.remove(&key)?;
+        }
+
+        // --- Update Stats ---
         stats.total_blocks_removed += 1;
         if is_masterchain {
             stats.mc_blocks_removed += 1;
         }
 
-        batch.delete_cf(&block_handles_cf, root_hash);
-
-        batch_len += 1;
+        // --- Batch Flushing ---
         if matches!(
             max_blocks_per_batch,
-            Some(max_blocks_per_batch) if batch_len >= max_blocks_per_batch
+            Some(limit) if batch.len() >= limit // Compare with items *in the RocksDB batch*
         ) {
+            // Finalize the current range before flushing the batch
+            if let Some((from, to)) = current_range.take() {
+                delete_range(&mut batch, &from, &to);
+            }
+
             tracing::info!(
+                batch_len = batch.len(), // Log actual batch size
                 total_blocks_removed = stats.total_blocks_removed,
                 "applying intermediate batch",
             );
-            let batch = std::mem::take(&mut batch);
-            raw.write(batch)?;
-            batch_len = 0;
+            let batch_to_write = std::mem::take(&mut batch);
+            raw.write(batch_to_write)
+                .context("Failed to write intermediate batch")?;
         }
 
         blocks_iter.next();
-    }
+    } // End loop
 
+    // Finalize any remaining range
     if let Some((from, to)) = current_range.take() {
         delete_range(&mut batch, &from, &to);
-        batch_len += 1; // Ensure that we flush the batch
     }
 
-    if batch_len > 0 {
-        tracing::info!("applying final batch");
-        raw.write(batch)?;
+    // Write the final batch if it contains anything
+    if !batch.is_empty() {
+        tracing::info!(
+            batch_len = batch.len(),
+            total_blocks_removed = stats.total_blocks_removed,
+            "applying final batch",
+        );
+        raw.write(batch).context("Failed to write final batch")?;
     }
 
     // Done
@@ -1610,28 +1444,8 @@ pub struct BlockGcStats {
     pub total_blocks_removed: usize,
 }
 
-struct FullBlockDataGuard<'a> {
-    _lock: BlockDataGuard<'a>,
-    data: rocksdb::DBPinnableSlice<'a>,
-}
-
-impl AsRef<[u8]> for FullBlockDataGuard<'_> {
-    fn as_ref(&self) -> &[u8] {
-        self.data.as_ref()
-    }
-}
-
-fn extract_entry_type(key: &[u8]) -> Option<ArchiveEntryType> {
-    key.get(48).copied().and_then(ArchiveEntryType::from_byte)
-}
-
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 const BLOCK_DATA_CHUNK_SIZE: u32 = 1024 * 1024; // 1MB
-
-// Reserved key in which the compressed block size is stored
-const BLOCK_DATA_SIZE_MAGIC: u32 = u32::MAX;
-// Reserved key in which we store the fact that compressed block was started
-const BLOCK_DATA_STARTED_MAGIC: u32 = u32::MAX - 2;
 
 #[derive(Default, Debug)]
 pub struct PreparedArchiveId {
@@ -1814,7 +1628,9 @@ mod tests {
                 });
 
                 for ty in ENTRY_TYPES {
-                    blocks.add_data(&(block_id, ty).into(), GARBAGE)?;
+                    blocks
+                        .add_block_data_compressed(&(block_id, ty).into(), GARBAGE)
+                        .await?;
                 }
                 for direction in CONNECTION_TYPES {
                     block_connections.store_connection(&handle, direction, &block_id);
@@ -1828,6 +1644,7 @@ mod tests {
         // Remove some blocks
         let stats = remove_blocks(
             blocks.db.clone(),
+            blocks.blob_dbs.clone(),
             None,
             70,
             [(ShardIdent::BASECHAIN, 50)].into(),
@@ -1860,7 +1677,7 @@ mod tests {
 
                 for ty in ENTRY_TYPES {
                     let key = PackageEntryKey::from((block_id, ty));
-                    let stored = blocks.db.package_entries.get(key.to_vec())?;
+                    let stored = blocks.blob_dbs.package_entries.get(&key)?;
                     assert_eq!(stored.is_none(), must_be_removed);
                 }
 
@@ -1874,6 +1691,7 @@ mod tests {
         // Remove single block
         let stats = remove_blocks(
             blocks.db.clone(),
+            blocks.blob_dbs.clone(),
             None,
             71,
             [(ShardIdent::BASECHAIN, 51)].into(),
@@ -1887,6 +1705,7 @@ mod tests {
         // Remove no blocks
         let stats = remove_blocks(
             blocks.db.clone(),
+            blocks.blob_dbs.clone(),
             None,
             71,
             [(ShardIdent::BASECHAIN, 51)].into(),

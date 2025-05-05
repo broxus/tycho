@@ -17,9 +17,10 @@ bitflags = { workspace = true }
 bumpalo = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
-cassadilia = { git = "https://github.com/0xdeafbeef/cassadilia.git", rev = "a3a4d730" }
+cassadilia = { git = "https://github.com/0xdeafbeef/cassadilia.git", rev = "36961a988918" }
 crc32c = { workspace = true }
 dashmap = { workspace = true }
+either = { workspace = true }
 everscale-types = { workspace = true, features = ["tycho", "stats"] }
 fdlimit = { workspace = true }
 humantime = { workspace = true }

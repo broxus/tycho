@@ -171,8 +171,6 @@ impl StorageBuilder {
 
         temp_file_storage.remove_outdated_files().await?;
 
-        block_storage.finish_block_data().await?;
-
         let internal_queue_db = InternalQueueDB::builder_prepared(
             self.config.root_dir.join(INT_QUEUE_SUBDIR),
             caches.clone(),

@@ -61,7 +61,10 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
             .store_block_proof(&proof, handle.into())
             .await?
             .handle;
-        let bp = blocks.load_block_proof(&handle).await?;
+        let bp = blocks
+            .load_block_proof(&handle)
+            .await
+            .context("Failed to load proof")?;
 
         assert_eq!(bp.is_link(), proof.is_link());
         assert_eq!(bp.proof().root, proof.as_ref().root);

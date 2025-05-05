@@ -616,20 +616,18 @@ impl<B> Inner<B> {
             return Ok(BlockFull::NotFound);
         };
 
-        let data_chunk_size = block_storage.block_data_chunk_size();
-        let data_size = if data.len() < data_chunk_size.get() as usize {
-            // NOTE: Skip one RocksDB read for relatively small blocks
-            //       Average block size is 4KB, while the chunk size is 1MB.
-            data.len() as u32
-        } else {
-            match block_storage.get_block_data_size(block_id)? {
-                Some(size) => size,
-                None => return Ok(BlockFull::NotFound),
-            }
+        let data_size = match block_storage.get_block_data_size(block_id)? {
+            Some(size) => size,
+            None => return Ok(BlockFull::NotFound),
         };
 
+        let data_chunk_size = block_storage.block_data_chunk_size();
+        let data_size = data_size
+            .try_into()
+            .with_context(|| format!("block {} len is > u32::MAX", block_id))?;
+
         let block = BlockData {
-            data: Bytes::from_owner(data),
+            data,
             size: NonZeroU32::new(data_size).expect("shouldn't happen"),
             chunk_size: data_chunk_size,
         };

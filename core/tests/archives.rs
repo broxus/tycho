@@ -147,12 +147,12 @@ struct ArchiveHandlerInner {}
 
 impl ArchiveHandlerInner {
     fn handle(cx: &ArchiveSubscriberContext<'_>) -> Result<()> {
+        tracing::info!(id = ?cx.archive_id, "checking archive chunks");
+
         let mut file = cx
             .storage
             .block_storage()
             .archive_chunks_iterator(cx.archive_id)?;
-
-        tracing::info!(id = ?cx.archive_id, "checking archive chunks");
 
         let mut zstd_decoder = ZstdDecompressStream::new(BLOCK_DATA_CHUNK_SIZE)?;
 
@@ -648,14 +648,28 @@ async fn check_archive(
     let original_len = original_decompressed.len();
     let got_len = got_decompressed.len();
 
-    // assert_eq!(len as usize, original_archive.len(), "Size mismatch");
-    // assert_eq!(got_archive.len(), len as usize, "Retrieved size mismatch");
-    // assert_eq!(original_archive, &got_archive, "Content mismatch");
-    // assert_eq!(
-    //     original_decompressed, got_decompressed,
-    //     "Decompressed mismatch"
-    // );
-    // assert_eq!(original_len, got_len, "Decompressed size mismatch");
+    if len as usize != original_archive.len() {
+        std::fs::write(project_root()?.join("archive_new.bin"), &got_archive)?;
+        std::fs::write(project_root()?.join("archive.bin"), original_archive)?;
+    }
+    let orign_entry = Archive::new(original_decompressed.clone())?;
+    let got_entry = Archive::new(got_decompressed.clone())?;
+
+    for block in orign_entry.mc_block_ids.keys() {
+        got_entry
+            .mc_block_ids
+            .get(block)
+            .unwrap_or_else(|| panic!("block {block} not found"));
+    }
+
+    assert_eq!(len as usize, original_archive.len(), "Size mismatch");
+    assert_eq!(got_archive.len(), len as usize, "Retrieved size mismatch");
+    assert_eq!(original_archive, &got_archive, "Content mismatch");
+    assert_eq!(
+        original_decompressed, got_decompressed,
+        "Decompressed mismatch"
+    );
+    assert_eq!(original_len, got_len, "Decompressed size mismatch");
 
     Ok(())
 }
