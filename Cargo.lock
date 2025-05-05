@@ -428,7 +428,7 @@ dependencies = [
 [[package]]
 name = "cassadilia"
 version = "0.1.0"
-source = "git+https://github.com/0xdeafbeef/cassadilia.git?rev=a3a4d730#a3a4d730bc91bc738a7d64ef8fc9dc4de04febe7"
+source = "git+https://github.com/0xdeafbeef/cassadilia.git?rev=36961a988918#36961a98891850b89becd6d27078830670e8bc8e"
 dependencies = [
  "anyhow",
  "bincode 2.0.1",
@@ -923,9 +923,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.13.0"
+version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60b1af1c220855b6ceac025d3f6ecdd2b7c4894bfe9cd9bda4fbb4bc7c0d4cf0"
+checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "endian-type"
@@ -3908,6 +3908,7 @@ dependencies = [
  "cassadilia",
  "crc32c",
  "dashmap",
+ "either",
  "everscale-types",
  "fdlimit",
  "futures-util",

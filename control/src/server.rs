@@ -5,7 +5,6 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
 use arc_swap::ArcSwapOption;
-use bytes::Bytes;
 use everscale_crypto::ed25519;
 use everscale_types::cell::Lazy;
 use everscale_types::models::{
@@ -597,10 +596,7 @@ impl proto::ControlServer for ControlServer {
             return Ok(proto::BlockResponse::NotFound);
         };
 
-        let data = {
-            let data = blocks.load_block_data_raw_ref(&handle).await?;
-            Bytes::copy_from_slice(data.as_ref())
-        };
+        let data = blocks.load_block_data_raw(&handle).await?;
         Ok(proto::BlockResponse::Found { data })
     }
 
@@ -616,10 +612,8 @@ impl proto::ControlServer for ControlServer {
             return Ok(proto::BlockResponse::NotFound);
         };
 
-        let data = {
-            let data = blocks.load_block_proof_raw_ref(&handle).await?;
-            Bytes::copy_from_slice(data.as_ref())
-        };
+        let data = blocks.load_block_proof_raw(&handle).await?;
+
         Ok(proto::BlockResponse::Found { data })
     }
 
@@ -635,10 +629,8 @@ impl proto::ControlServer for ControlServer {
             return Ok(proto::BlockResponse::NotFound);
         };
 
-        let data = {
-            let data = blocks.load_queue_diff_raw_ref(&handle).await?;
-            Bytes::copy_from_slice(data.as_ref())
-        };
+        let data = blocks.load_queue_diff_raw(&handle).await?;
+
         Ok(proto::BlockResponse::Found { data })
     }
 
@@ -672,11 +664,8 @@ impl proto::ControlServer for ControlServer {
         req: proto::ArchiveSliceRequest,
     ) -> ServerResult<proto::ArchiveSliceResponse> {
         let blocks = self.inner.storage.block_storage();
+        let data = blocks.get_archive_chunk(req.archive_id, req.offset).await?;
 
-        let data = {
-            let data = blocks.get_archive_chunk(req.archive_id, req.offset).await?;
-            Bytes::copy_from_slice(data.as_ref())
-        };
         Ok(proto::ArchiveSliceResponse { data })
     }
 
