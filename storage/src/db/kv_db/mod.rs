@@ -131,9 +131,6 @@ weedb::tables! {
         pub block_connections: tables::BlockConnections,
 
         // tables are empty, but they cannot be deleted because they are in a storage config
-        _cells: tables::Cells,
-        _temp_cells: tables::TempCells,
-        _shard_states: tables::ShardStates,
         _shard_internal_messages: tables::ShardInternalMessagesOld,
         _int_msg_stats_uncommited: tables::InternalMessageStatsUncommitedOld,
         _shard_int_msgs_uncommited: tables::ShardInternalMessagesUncommitedOld,
