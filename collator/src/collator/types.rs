@@ -11,15 +11,15 @@ use everscale_types::models::{
     BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg,
     InMsgDescr, IntAddr, LibDescr, MsgInfo, MsgsExecutionParams, OptionalAccount, OutMsg,
     OutMsgDescr, OwnedMessage, PrevBlockRef, ShardAccount, ShardAccounts, ShardDescription,
-    ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit, SimpleLib,
-    SpecialFlags, StateInit, StdAddr, Transaction, ValueFlow,
+    ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit, SpecialFlags,
+    StateInit, StdAddr, Transaction, ValueFlow,
 };
 use everscale_types::num::Tokens;
 use tl_proto::TlWrite;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
-use tycho_executor::AccountMeta;
+use tycho_executor::{AccountMeta, PublicLibraryChange};
 use tycho_network::PeerId;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 
@@ -647,8 +647,7 @@ pub(super) struct ShardAccountStuff {
     pub special: SpecialFlags,
     pub initial_state_hash: HashBytes,
     pub balance: CurrencyCollection,
-    pub initial_libraries: Dict<HashBytes, SimpleLib>,
-    pub libraries: Dict<HashBytes, SimpleLib>,
+    pub public_libs_diff: FastHashMap<HashBytes, Option<Cell>>,
     pub exists: bool,
     pub transactions: BTreeMap<u64, (CurrencyCollection, Lazy<Transaction>)>,
 }
@@ -661,19 +660,15 @@ impl ShardAccountStuff {
     ) -> Result<Self> {
         let initial_state_hash = *shard_account.account.inner().repr_hash();
 
-        let mut libraries = Dict::new();
         let mut special = SpecialFlags::default();
         let balance;
         let exists;
 
         if let Some(account) = shard_account.load_account()? {
             if let AccountState::Active(StateInit {
-                libraries: acc_libs,
-                special: acc_flags,
-                ..
+                special: acc_flags, ..
             }) = account.state
             {
-                libraries = acc_libs;
                 special = acc_flags.unwrap_or_default();
             }
             balance = account.balance;
@@ -690,8 +685,7 @@ impl ShardAccountStuff {
             special,
             initial_state_hash,
             balance,
-            initial_libraries: libraries.clone(),
-            libraries,
+            public_libs_diff: FastHashMap::new(),
             exists,
             transactions: Default::default(),
         })
@@ -717,8 +711,7 @@ impl ShardAccountStuff {
             special: Default::default(),
             initial_state_hash,
             balance: CurrencyCollection::ZERO,
-            initial_libraries: Dict::new(),
-            libraries: Dict::new(),
+            public_libs_diff: FastHashMap::new(),
             exists: false,
             transactions: Default::default(),
         }
@@ -746,38 +739,70 @@ impl ShardAccountStuff {
         total_fees: Tokens,
         account_meta: AccountMeta,
         tx: Lazy<Transaction>,
+        mut public_libs_diff: Vec<PublicLibraryChange>,
     ) {
+        use std::collections::hash_map;
+
+        let is_masterchain = self.workchain_id as i32 == ShardIdent::MASTERCHAIN.workchain();
+        debug_assert!(
+            is_masterchain || public_libs_diff.is_empty(),
+            "non-empty public libs diff for a non-masterchain account"
+        );
+
         self.transactions.insert(lt, (total_fees.into(), tx));
         self.balance = account_meta.balance;
-        self.libraries = account_meta.libraries;
         self.exists = account_meta.exists;
+
+        if is_masterchain {
+            // Sort diff in reverse order (sort must be stable here).
+            public_libs_diff.sort_by(|a, b| a.lib_hash().cmp(b.lib_hash()).reverse());
+
+            // Merge diff with the previous.
+            let mut prev_hash = None::<HashBytes>;
+            for op in public_libs_diff {
+                let hash = op.lib_hash();
+                if matches!(&prev_hash, Some(prev_hash) if prev_hash == hash) {
+                    // Skip duplicates (only the last change will be used because of reverse order).
+                    continue;
+                }
+                prev_hash = Some(*hash);
+
+                match self.public_libs_diff.entry(*hash) {
+                    hash_map::Entry::Vacant(entry) => {
+                        entry.insert(match op {
+                            PublicLibraryChange::Add(cell) => Some(cell),
+                            PublicLibraryChange::Remove(_) => None,
+                        });
+                    }
+                    hash_map::Entry::Occupied(entry) => match (entry.get(), op) {
+                        // Removed before, added later -> no diff.
+                        // Added before, removed later -> no diff.
+                        (None, PublicLibraryChange::Add(_))
+                        | (Some(_), PublicLibraryChange::Remove(_)) => {
+                            entry.remove();
+                        }
+                        // Removed before, removed now -> diff persists.
+                        // Added before, added now -> diff persists.
+                        (None, PublicLibraryChange::Remove(_))
+                        | (Some(_), PublicLibraryChange::Add(_)) => {}
+                    },
+                }
+            }
+        }
     }
 
     pub fn update_public_libraries(
         &self,
         global_libraries: &mut Dict<HashBytes, LibDescr>,
     ) -> Result<()> {
-        if self.libraries.root() == self.initial_libraries.root() {
+        if self.public_libs_diff.is_empty() {
             return Ok(());
         }
 
-        for entry in self.libraries.iter_union(&self.initial_libraries) {
-            let (ref key, new_value, old_value) = entry?;
-            match (new_value, old_value) {
-                (Some(new), Some(old)) => {
-                    if new.public && !old.public {
-                        self.add_public_library(key, &new.root, global_libraries)?;
-                    } else if !new.public && old.public {
-                        self.remove_public_library(key, global_libraries)?;
-                    }
-                }
-                (Some(new), None) if new.public => {
-                    self.add_public_library(key, &new.root, global_libraries)?;
-                }
-                (None, Some(old)) if old.public => {
-                    self.remove_public_library(key, global_libraries)?;
-                }
-                _ => {}
+        for (key, new_lib) in self.public_libs_diff.iter() {
+            match new_lib {
+                None => self.remove_public_library(key, global_libraries)?,
+                Some(library) => self.add_public_library(key, library, global_libraries)?,
             }
         }
         Ok(())

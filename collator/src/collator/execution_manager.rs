@@ -8,7 +8,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use humantime::format_duration;
 use rayon::prelude::*;
-use tycho_executor::{Executor, ExecutorParams, ParsedConfig, TxError};
+use tycho_executor::{Executor, ExecutorInspector, ExecutorParams, ParsedConfig, TxError};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
@@ -459,17 +459,20 @@ fn execute_ordinary_transaction_impl(
 
     let is_external = matches!(in_message.info, MsgInfo::ExtIn(_));
 
+    let mut inspector = ExecutorInspector::default();
     let uncommited = Executor::new(params, config)
         .with_min_lt(min_lt)
-        .begin_ordinary(
+        .begin_ordinary_ext(
             &account_stuff.make_std_addr(),
             is_external,
             in_message.cell.clone(),
             &account_stuff.shard_account,
+            Some(&mut inspector),
         );
 
     let output = match uncommited {
         Ok(uncommited) => uncommited.commit()?,
+        // TODO: Export `inspector.exit_code` to metrics.
         Err(TxError::Skipped) if is_external => {
             return Ok(ExecutedOrdinaryTransaction {
                 result: None,
@@ -487,6 +490,7 @@ fn execute_ordinary_transaction_impl(
         output.transaction_meta.total_fees,
         output.new_state_meta,
         output.transaction.clone(),
+        inspector.public_libs_diff,
     );
 
     Ok(ExecutedOrdinaryTransaction {
@@ -517,12 +521,14 @@ fn execute_ticktock_transaction(
 
     let _histogram = HistogramGuard::begin("tycho_collator_execute_ticktock_time");
 
+    let mut inspector = ExecutorInspector::default();
     let uncommited = Executor::new(params, config)
         .with_min_lt(min_lt)
-        .begin_tick_tock(
+        .begin_tick_tock_ext(
             &account_stuff.make_std_addr(),
             kind,
             &account_stuff.shard_account,
+            Some(&mut inspector),
         );
 
     let output = match uncommited {
@@ -539,6 +545,7 @@ fn execute_ticktock_transaction(
         output.transaction_meta.total_fees,
         output.new_state_meta,
         output.transaction.clone(),
+        inspector.public_libs_diff,
     );
 
     Ok(Some(ExecutedTransaction {
