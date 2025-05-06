@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use ahash::HashMapExt;
 use anyhow::{anyhow, bail, Context, Result};
-use everscale_types::cell::{Cell, HashBytes, Lazy, UsageTree, UsageTreeMode};
-use everscale_types::dict::Dict;
+use everscale_types::cell::{Cell, CellFamily, HashBytes, Lazy, UsageTree, UsageTreeMode};
+use everscale_types::dict::{self, Dict};
 use everscale_types::models::{
     AccountBlocks, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
     BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg,
@@ -647,10 +647,12 @@ pub(super) struct ShardAccountStuff {
     pub special: SpecialFlags,
     pub initial_state_hash: HashBytes,
     pub balance: CurrencyCollection,
-    pub public_libs_diff: FastHashMap<HashBytes, Option<Cell>>,
+    pub public_libs_diff: AccountPublicLibsDiff,
     pub exists: bool,
     pub transactions: BTreeMap<u64, (CurrencyCollection, Lazy<Transaction>)>,
 }
+
+pub type AccountPublicLibsDiff = FastHashMap<HashBytes, Option<Cell>>;
 
 impl ShardAccountStuff {
     pub fn new(
@@ -790,118 +792,169 @@ impl ShardAccountStuff {
             }
         }
     }
+}
 
-    pub fn update_public_libraries(
-        &self,
-        global_libraries: &mut Dict<HashBytes, LibDescr>,
-    ) -> Result<()> {
-        if self.public_libs_diff.is_empty() {
-            return Ok(());
+pub struct PublicLibsDiff {
+    pub original: Dict<HashBytes, LibDescr>,
+    pub changes: BTreeMap<HashBytes, PublicLibrariesDiffItem>,
+}
+
+impl PublicLibsDiff {
+    pub fn new(original: Dict<HashBytes, LibDescr>) -> Self {
+        Self {
+            original,
+            changes: BTreeMap::new(),
         }
+    }
 
-        for (key, new_lib) in self.public_libs_diff.iter() {
-            match new_lib {
-                None => self.remove_public_library(key, global_libraries)?,
-                Some(library) => self.add_public_library(key, library, global_libraries)?,
+    pub fn finalize(mut self) -> Result<Dict<HashBytes, LibDescr>> {
+        const SMALL_CHANGES: usize = 3;
+
+        match self.changes.len() {
+            0 => {}
+            // Simple set is faster on a small number of changes.
+            1..=SMALL_CHANGES => {
+                for (lib_hash, change) in self.changes {
+                    match change.finalize()? {
+                        None => {
+                            self.original.remove(lib_hash)?;
+                        }
+                        Some(new_descr) => {
+                            self.original.set(lib_hash, new_descr)?;
+                        }
+                    }
+                }
+            }
+            // Otherwise apply a full modify.
+            _ => {
+                self.original.modify_with_sorted_iter_ext(
+                    self.changes.into_iter(),
+                    |(key, _)| *key,
+                    |(_, value)| value.finalize(),
+                    Cell::empty_context(),
+                )?;
             }
         }
-        Ok(())
+
+        Ok(self.original)
     }
 
-    pub fn remove_public_library(
-        &self,
-        key: &HashBytes,
-        global_libraries: &mut Dict<HashBytes, LibDescr>,
-    ) -> Result<()> {
-        tracing::trace!(
-            account_addr = %self.account_addr,
-            library = %key,
-            "removing public library",
-        );
+    pub fn merge(&mut self, account: &HashBytes, diff: AccountPublicLibsDiff) -> Result<()> {
+        use std::collections::btree_map;
 
-        let Some(mut lib_descr) = global_libraries.get(key)? else {
-            anyhow::bail!(
-                "cannot remove public library {key} of account {} because this public \
-                library did not exist",
-                self.account_addr
-            )
-        };
+        for (lib_hash, new_lib) in diff {
+            match self.changes.entry(lib_hash) {
+                // A first change of this library in the block.
+                btree_map::Entry::Vacant(entry) => {
+                    // Find an existing published library first.
+                    let existing = self.original.get(lib_hash)?;
 
-        anyhow::ensure!(
-            lib_descr.lib.repr_hash() == key,
-            "cannot remove public library {key} of account {} because this public library \
-            LibDescr record does not contain a library root cell with required hash",
-            self.account_addr
-        );
+                    let (origin, add) = match (existing, new_lib) {
+                        // Trying to remove a non-existing library does nothing.
+                        // TODO: Check if this even possible, maybe panic/error instead.
+                        (None, None) => {
+                            tracing::warn!(
+                                target: tracing_targets::COLLATOR,
+                                %account, %lib_hash,
+                                "removing a nonexisting library",
+                            );
+                            continue;
+                        }
+                        // Publishing a new library.
+                        (None, Some(new_lib)) => (PublicLibraryOrigin::New(new_lib), true),
+                        // Library exists, only update publishers.
+                        (Some(existing), new_lib) => {
+                            (PublicLibraryOrigin::Existing(existing), new_lib.is_some())
+                        }
+                    };
 
-        anyhow::ensure!(
-            lib_descr.publishers.remove(self.account_addr)?.is_some(),
-            "cannot remove public library {key} of account {} because this public library \
-            LibDescr record does not list this account as one of publishers",
-            self.account_addr
-        );
+                    entry.insert(PublicLibrariesDiffItem {
+                        origin,
+                        publishers: vec![(*account, add)],
+                    });
+                }
+                // Changes to this library by multiple accounts.
+                btree_map::Entry::Occupied(mut entry) => {
+                    let entry = entry.get_mut();
+                    if let PublicLibraryOrigin::New(_) = &entry.origin {
+                        // Trying to remove a non-existing library does nothing.
+                        // TODO: Check if this even possible, maybe panic/error instead.
+                        if new_lib.is_none() {
+                            tracing::warn!(
+                                target: tracing_targets::COLLATOR,
+                                %account, %lib_hash,
+                                "removing a nonexisting library",
+                            );
+                            continue;
+                        }
+                    }
 
-        if lib_descr.publishers.is_empty() {
-            tracing::debug!(
-                account_addr = %self.account_addr,
-                library = %key,
-                "library has no publishers left, removing altogether",
-            );
-            global_libraries.remove(key)?;
-        } else {
-            global_libraries.set(key, &lib_descr)?;
+                    entry.publishers.push((*account, new_lib.is_some()));
+                }
+            }
         }
 
         Ok(())
     }
+}
 
-    pub fn add_public_library(
-        &self,
-        key: &HashBytes,
-        library: &Cell,
-        global_libraries: &mut Dict<HashBytes, LibDescr>,
-    ) -> Result<()> {
-        tracing::trace!(
-            account_addr = %self.account_addr,
-            library = %key,
-            "adding public library",
-        );
+pub struct PublicLibrariesDiffItem {
+    pub origin: PublicLibraryOrigin,
+    pub publishers: Vec<(HashBytes, bool)>,
+}
 
-        anyhow::ensure!(
-            library.repr_hash() == key,
-            "cannot add library {key} because its root has a different hash",
-        );
+impl PublicLibrariesDiffItem {
+    pub fn finalize(mut self) -> Result<Option<LibDescr>, everscale_types::error::Error> {
+        match self.origin {
+            // New `LibDescr` can be simply built from a list of publishers.
+            PublicLibraryOrigin::New(lib) => {
+                if self.publishers.is_empty() {
+                    // Might be unreachable but handle just in case.
+                    return Ok(None);
+                }
 
-        let lib_descr = if let Some(mut old_lib_descr) = global_libraries.get(key)? {
-            anyhow::ensure!(
-                old_lib_descr.lib.repr_hash() == library.repr_hash(),
-                "cannot add public library {key} of account {} because existing LibDescr \
-                data has a different root cell hash",
-                self.account_addr,
-            );
+                self.publishers.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+                let root = dict::build_dict_from_sorted_iter(
+                    self.publishers.into_iter().map(|(key, add)| {
+                        debug_assert!(add, "must not remove publishers from nonexisting libraries");
+                        (key, ())
+                    }),
+                    Cell::empty_context(),
+                )?;
+                debug_assert!(root.is_some());
 
-            anyhow::ensure!(
-                old_lib_descr.publishers.get(self.account_addr)?.is_none(),
-                "cannot add public library {key} of account {} because this public library's \
-                LibDescr record already lists this account as a publisher",
-                self.account_addr,
-            );
-
-            old_lib_descr.publishers.set(self.account_addr, ())?;
-            old_lib_descr
-        } else {
-            let mut dict = Dict::new();
-            dict.set(self.account_addr, ())?;
-            LibDescr {
-                lib: library.clone(),
-                publishers: dict,
+                Ok(Some(LibDescr {
+                    lib,
+                    publishers: Dict::from_raw(root),
+                }))
             }
-        };
+            // Existing `LibDescr` must be modified.
+            PublicLibraryOrigin::Existing(mut descr) => {
+                if self.publishers.is_empty() {
+                    return Ok(Some(descr));
+                }
 
-        global_libraries.set(key, &lib_descr)?;
+                self.publishers.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+                descr.publishers.modify_with_sorted_iter_ext(
+                    self.publishers,
+                    |(key, _)| *key,
+                    |(_, add)| Ok(add.then_some(())),
+                    Cell::empty_context(),
+                )?;
+                if descr.publishers.is_empty() {
+                    // All publishers were removed so the library should also be removed.
+                    return Ok(None);
+                }
 
-        Ok(())
+                Ok(Some(descr))
+            }
+        }
     }
+}
+
+pub enum PublicLibraryOrigin {
+    Existing(LibDescr),
+    New(Cell),
 }
 
 pub trait ShardDescriptionExt {
