@@ -155,17 +155,17 @@ impl DagRound {
         round_ctx: &RoundCtx,
     ) -> DagPointFuture {
         assert_eq!(
-            point.round(),
+            point.info().round(),
             self.round(),
             "Coding error: point round does not match dag round"
         );
-        self.edit(&point.data().author, |loc| {
+        self.edit(&point.info().author(), |loc| {
             loc.versions
-                .entry(*point.digest())
+                .entry(*point.info().digest())
                 .and_modify(|_| {
                     panic!(
                         "local point must be created only once. {:?}",
-                        point.id().alt()
+                        point.info().id().alt()
                     )
                 })
                 .or_insert_with(|| {
@@ -183,13 +183,13 @@ impl DagRound {
         round_ctx: &RoundCtx,
     ) {
         assert_eq!(
-            point.round(),
+            point.info().round(),
             self.round(),
             "Coding error: point round does not match dag round"
         );
-        self.edit(&point.data().author, |loc| {
+        self.edit(&point.info().author(), |loc| {
             loc.versions
-                .entry(*point.digest())
+                .entry(*point.info().digest())
                 .and_modify(|first| first.resolve_download(point, Some(reason)))
                 .or_insert_with(|| {
                     DagPointFuture::new_ill_formed_broadcast(
@@ -209,13 +209,13 @@ impl DagRound {
     ) {
         let _guard = round_ctx.span().enter();
         assert_eq!(
-            point.round(),
+            point.info().round(),
             self.round(),
             "Coding error: point round does not match dag round"
         );
-        self.edit(&point.data().author, |loc| {
+        self.edit(&point.info().author(), |loc| {
             loc.versions
-                .entry(*point.digest())
+                .entry(*point.info().digest())
                 .and_modify(|first| first.resolve_download(point, None))
                 .or_insert_with(|| {
                     DagPointFuture::new_broadcast(
@@ -288,7 +288,7 @@ impl DagRound {
             self.round(),
             "Coding error: point restore round does not match dag round"
         );
-        let author = *point_restore.author();
+        let author = point_restore.author();
         self.edit(&author, |loc| {
             loc.versions
                 .entry(*point_restore.digest())

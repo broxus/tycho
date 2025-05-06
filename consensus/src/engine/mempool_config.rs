@@ -54,18 +54,18 @@ impl MempoolMergedConfig {
         let millis = UnixTime::from_millis(self.genesis_info.genesis_millis);
         Point::new(
             &key_pair,
+            PeerId::from(key_pair.public_key),
             self.conf.genesis_round,
             Default::default(),
             PointData {
-                author: key_pair.public_key.into(),
                 time: millis,
                 includes: Default::default(),
                 witness: Default::default(),
+                evidence: Default::default(),
                 anchor_trigger: Link::ToSelf,
                 anchor_proof: Link::ToSelf,
                 anchor_time: millis,
             },
-            Default::default(),
             &self.conf,
         )
     }

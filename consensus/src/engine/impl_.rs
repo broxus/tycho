@@ -52,7 +52,8 @@ impl Engine {
         Point::parse(genesis.serialized().to_vec())
             .expect("parse genesis: point tl serde is broken")
             .expect("parse genesis: integrity check is broken");
-        Verifier::verify(&genesis, &net.peer_schedule, conf).expect("failed to verify genesis");
+        Verifier::verify(genesis.info(), &net.peer_schedule, conf)
+            .expect("failed to verify genesis");
 
         let consensus_round = RoundWatch::default();
         consensus_round.set_max(conf.genesis_round);
@@ -244,7 +245,7 @@ impl Engine {
                         let last = store
                             .get_point(last_id.round, &last_id.digest)
                             .expect("last bcast by id");
-                        let prev = last.prev_id().map(|id| {
+                        let prev = last.info().prev_id().map(|id| {
                             store
                                 .get_point(id.round, &id.digest)
                                 .expect("prev bcast by id")
@@ -254,7 +255,7 @@ impl Engine {
                 });
                 let (last, prev) = task.await?;
                 // if there's a broadcast at two last DB rounds - then it's round will be current
-                (last.round().next(), Some((last, prev)))
+                (last.info().round().next(), Some((last, prev)))
             }
         };
         (self.dag).fill_to_top(
@@ -295,17 +296,17 @@ impl Engine {
                 let verified = need_verify
                     .chunks(1000) // seems enough for any case
                     .flat_map(|keys| {
-                        use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+                        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
                         store
-                            .multi_get_points(keys) // assume load result is sorted
-                            .par_iter()
-                            .map(|point| {
-                                if Verifier::verify(point, &peer_schedule, round_ctx.conf()).is_ok()
+                            .multi_get_info(keys) // assume load result is sorted
+                            .into_par_iter()
+                            .map(|info| {
+                                if Verifier::verify(&info, &peer_schedule, round_ctx.conf()).is_ok()
                                 {
                                     // return back as they were, now with prev_proof filled
-                                    PointRestore::Exists(point.into())
+                                    PointRestore::Exists(info)
                                 } else {
-                                    PointRestore::IllFormed(point.id(), Default::default())
+                                    PointRestore::IllFormed(info.id(), Default::default())
                                 }
                             })
                             .collect::<Vec<_>>()

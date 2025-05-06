@@ -132,8 +132,8 @@ impl BroadcastCtx {
             span: parent.span().in_scope(|| {
                 tracing::error_span!(
                     "broadcast",
-                    round = point.round().0,
-                    digest = display(point.digest().alt())
+                    round = point.info().round().0,
+                    digest = display(point.info().digest().alt())
                 )
             }),
             parent: parent.clone(),
@@ -223,7 +223,7 @@ impl ValidateCtx {
         let span = round_ctx.span().in_scope(|| {
             tracing::error_span!(
                 "validate",
-                author = display(info.data().author.alt()),
+                author = display(info.author().alt()),
                 round = info.round().0,
                 digest = display(info.digest().alt()),
             )

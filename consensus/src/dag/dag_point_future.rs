@@ -86,19 +86,20 @@ impl DagPointFuture {
 
                 let mut status = PointStatusValidated::default();
                 status.is_valid = true;
-                state.acquire(&point.id(), &mut status); // only after persisted
+                state.acquire(&point.info().id(), &mut status); // only after persisted
 
                 assert!(
                     status.is_first_valid,
                     "local point must be first valid, got {status}"
                 );
 
-                let dag_point = DagPoint::new_validated(PointInfo::from(&point), cert, &status);
+                let dag_point = DagPoint::new_validated(point.info().clone(), cert, &status);
 
                 store.insert_point(&point, PointStatusStoredRef::Validated(&status));
                 state.resolve(&dag_point);
 
-                let signed = state.sign(point.round(), key_pair.as_deref(), round_ctx.conf());
+                let signed =
+                    state.sign(point.info().round(), key_pair.as_deref(), round_ctx.conf());
                 assert!(
                     signed.as_ref().is_some_and(|sig| sig.is_ok()),
                     "Coding or configuration error: local point cannot be signed; got {:?}",
@@ -136,7 +137,7 @@ impl DagPointFuture {
             let ctx = round_ctx.clone();
             let full_fn = move || {
                 let _span = round_ctx.span().enter();
-                let id = point.id();
+                let id = point.info().id();
 
                 let mut status = PointStatusIllFormed::default();
                 state.acquire(&id, &mut status); // only after persisted
@@ -165,7 +166,7 @@ impl DagPointFuture {
         round_ctx: &RoundCtx,
     ) -> Self {
         let point_dag_round = point_dag_round.downgrade();
-        let info = PointInfo::from(point);
+        let info = point.info().clone();
         let point = point.clone();
         let state = state.clone();
         let downloader = downloader.clone();
@@ -175,7 +176,7 @@ impl DagPointFuture {
         let cert_clone = cert.clone();
 
         let nested = round_ctx.task().spawn(async move {
-            let point_id = point.id();
+            let point_id = point.info().id();
 
             let store_fn = {
                 let store = store.clone();
@@ -259,7 +260,7 @@ impl DagPointFuture {
                 .await;
             match downloaded {
                 Some(DownloadResult::Verified(point)) => {
-                    let info = PointInfo::from(&point);
+                    let info = point.info().clone();
 
                     let store_fn = {
                         let store = store.clone();
@@ -298,7 +299,8 @@ impl DagPointFuture {
                 Some(DownloadResult::IllFormed(point, reason)) => {
                     let mut status = PointStatusIllFormed::default();
                     state.acquire(&point_id, &mut status);
-                    let dag_point = DagPoint::new_ill_formed(point.id(), cert, &status, reason);
+                    let dag_point =
+                        DagPoint::new_ill_formed(point.info().id(), cert, &status, reason);
                     let ctx = into_round_ctx.clone();
 
                     let store_fn = move || {
@@ -357,7 +359,7 @@ impl DagPointFuture {
         let cert_clone = cert.clone();
 
         if let Some((includes, witness)) = match &point_restore {
-            PointRestore::Validated(info, _) => Some((&info.data().includes, &info.data().witness)),
+            PointRestore::Validated(info, _) => Some((info.includes(), info.witness())),
             PointRestore::IllFormed(_, _) // will not certify its dependencies, can be certified
             | PointRestore::Exists(_) | PointRestore::NotFound(_, _, _) => None,
         } {

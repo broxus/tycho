@@ -361,7 +361,7 @@ impl Signable {
                         metrics::counter!(POSTPONED, "kind" => "round").increment(1);
                         return None; // retry later
                     }
-                    if self.valid.info().data().time - UnixTime::now()
+                    if self.valid.info().time() - UnixTime::now()
                         >= UnixTime::from_millis(conf.consensus.clock_skew_millis as _)
                     {
                         metrics::counter!(POSTPONED, "kind" => "time").increment(1);

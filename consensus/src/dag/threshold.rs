@@ -100,10 +100,10 @@ impl Threshold {
         while ready.len() < self.target_count {
             let (info, is_from_channel) = tokio::select! {
                 Some(info) = receiver.recv() => {
-                    let mut to_delay = info.data().time - max_time;
+                    let mut to_delay = info.time() - max_time;
                     if to_delay.millis() > 0 {
                         max_time = UnixTime::now() + self.clock_skew;
-                        to_delay = info.data().time - max_time;
+                        to_delay = info.time() - max_time;
                     }
 
                     if to_delay.millis() > 0 {
@@ -144,7 +144,7 @@ impl Threshold {
             };
             // manually re-check expiration
             let info = work.delayed.remove(&next_key).into_inner();
-            let to_delay = info.data().time - max_time;
+            let to_delay = info.time() - max_time;
             if to_delay.millis() > 0 {
                 work.delayed
                     .insert(info, Duration::from_millis(to_delay.millis()));
@@ -158,7 +158,7 @@ impl Threshold {
             removed_from_channel = removed_from_channel
                 .checked_add(1)
                 .expect("cannot overflow");
-            let to_delay = info.data().time - max_time;
+            let to_delay = info.time() - max_time;
             if to_delay.millis() > 0 {
                 work.delayed
                     .insert(info, Duration::from_millis(to_delay.millis()));
@@ -179,7 +179,7 @@ impl Threshold {
 
     fn push_ready(ready: &mut FastHashMap<PeerId, PointInfo>, info: PointInfo) {
         ready
-            .entry(info.data().author)
+            .entry(info.author())
             .and_modify(|old| {
                 panic!(
                     "cannot add to threshold same author twice: exists {:?} new digest {}",
@@ -394,23 +394,23 @@ mod test {
 
         let delay = UnixTime::from_millis(thread_rng().gen_range(1000..8000));
 
-        let info = PointInfo::from(&Point::new(
+        let point = Point::new(
             &keypair,
+            PeerId::from(keypair.public_key),
             round,
             Default::default(),
             PointData {
-                author: PeerId::from(keypair.public_key),
                 includes: Default::default(),
                 witness: Default::default(),
+                evidence: Default::default(),
                 anchor_trigger: Link::ToSelf,
                 anchor_proof: Link::ToSelf,
                 time: now + delay,
                 anchor_time: UnixTime::now(),
             },
-            Default::default(),
             conf,
-        ));
+        );
 
-        DagPoint::new_validated(info, Cert::default(), &status)
+        DagPoint::new_validated(point.info().clone(), Cert::default(), &status)
     }
 }
