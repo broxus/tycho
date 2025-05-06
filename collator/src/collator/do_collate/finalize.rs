@@ -27,7 +27,7 @@ use crate::collator::execution_manager::MessagesExecutor;
 use crate::collator::messages_reader::{FinalizedMessagesReader, MessagesReader};
 use crate::collator::types::{
     BlockCollationData, ExecuteResult, FinalizeBlockResult, FinalizeMessagesReaderResult,
-    PreparedInMsg, PreparedOutMsg,
+    PreparedInMsg, PreparedOutMsg, PublicLibsDiff,
 };
 use crate::internal_queue::types::{DiffStatistics, DiffZone, EnqueuedMessage};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -282,7 +282,7 @@ impl Phase<FinalizeState> {
         let executor = self.extra.executor;
 
         // update shard accounts tree and prepare accounts blocks
-        let mut global_libraries = executor.executor_params().libraries.clone();
+        let mut public_libraries = executor.executor_params().libraries.clone();
 
         let is_masterchain = shard.is_masterchain();
         let config_address = &self.state.mc_data.config.address;
@@ -333,7 +333,7 @@ impl Phase<FinalizeState> {
                 executor,
                 is_masterchain,
                 config_address,
-                &mut global_libraries,
+                &mut public_libraries,
             );
             build_account_blocks_elapsed = histogram.finish();
         });
@@ -550,7 +550,7 @@ impl Phase<FinalizeState> {
                 .try_sub_assign(&value_flow.recovered)?;
 
             if is_masterchain {
-                new_observable_state.libraries = global_libraries.clone();
+                new_observable_state.libraries = public_libraries.clone();
             }
 
             // TODO: update config smc on hard fork
@@ -706,7 +706,7 @@ impl Phase<FinalizeState> {
                     prev_key_block_seqno,
                     gen_lt: new_block_info.end_lt,
                     gen_chain_time: self.state.collation_data.get_gen_chain_time(),
-                    libraries: global_libraries,
+                    libraries: public_libraries,
                     total_validator_fees,
 
                     global_balance: extra.global_balance.clone(),
@@ -1106,16 +1106,18 @@ impl Phase<FinalizeState> {
         executor: MessagesExecutor,
         is_masterchain: bool,
         config_address: &HashBytes,
-        global_libraries: &mut Dict<HashBytes, LibDescr>,
+        public_libraries: &mut Dict<HashBytes, LibDescr>,
     ) -> Result<ProcessedAccounts> {
         let mut account_blocks = BTreeMap::new();
         let mut new_config_params = None;
         let (updated_accounts, shard_accounts) = executor.into_accounts_cache_raw();
         let mut shard_accounts = RelaxedAugDict::from_full(&shard_accounts);
 
+        let mut public_libraries_diff = PublicLibsDiff::new(public_libraries.clone());
+
         // TODO: `par_iter` might be added here but the filter closure is quite heavy.
         let mut account_updates = Vec::with_capacity(updated_accounts.len());
-        for updated_account in updated_accounts {
+        for mut updated_account in updated_accounts {
             if updated_account.transactions.is_empty() {
                 continue;
             }
@@ -1135,10 +1137,12 @@ impl Phase<FinalizeState> {
                     }
                 }
 
-                // TODO: Collect modifications and apply them all at once.
-                updated_account
-                    .update_public_libraries(global_libraries)
-                    .context("failed to update public libraries")?;
+                public_libraries_diff
+                    .merge(
+                        &updated_account.account_addr,
+                        std::mem::take(&mut updated_account.public_libs_diff),
+                    )
+                    .context("failed to add public libraries diff")?;
             }
 
             // Add account block.
@@ -1179,6 +1183,12 @@ impl Phase<FinalizeState> {
                 .into_iter()
                 .map(|(k, v)| (k, v.transactions.root_extra().clone(), v)),
         )?;
+
+        // TODO: Can be moved into a rayon `s.spawn` to update libraries in parallel with accounts.
+        //       But this might add some visible overhead since we need to wait for a free worker.
+        *public_libraries = public_libraries_diff
+            .finalize()
+            .context("failed to finalize public libraries dict")?;
 
         Ok(ProcessedAccounts {
             account_blocks: account_blocks.build()?,
