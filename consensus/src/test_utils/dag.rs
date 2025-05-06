@@ -17,8 +17,8 @@ use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
 use crate::models::{
-    AnchorStageRole, Cert, Digest, Link, PeerCount, Point, PointData, PointId, PointInfo, Round,
-    Signature, Through, UnixTime,
+    AnchorStageRole, Cert, Digest, Link, PeerCount, Point, PointData, PointId, Round, Signature,
+    Through, UnixTime,
 };
 
 pub fn make_engine_parts<const PEER_COUNT: usize>(
@@ -90,17 +90,17 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         .expect("last trigger must exist");
     let max_prev_time = prev_points
         .iter()
-        .map(|point| point.data().time)
+        .map(|point| point.time())
         .max()
         .expect("prev time must exist");
     let max_anchor_time = prev_points
         .iter()
-        .map(|point| point.data().anchor_time)
+        .map(|point| point.anchor_time())
         .max()
         .expect("prev anchor_time must exist");
     let includes = prev_points
         .iter()
-        .map(|point| (point.data().author, *point.digest()))
+        .map(|point| (point.author(), *point.digest()))
         .collect::<BTreeMap<_, _>>();
 
     let mut points = FastHashMap::default();
@@ -119,18 +119,17 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             msg_bytes,
             round_ctx.conf(),
         );
-        points.insert(point.data().author, point);
+        points.insert(point.info().author(), point);
     }
 
     for point in points.values() {
         Point::parse(point.serialized().to_vec())
             .expect("point tl serde is broken")
             .expect("point integrity check is broken");
-        Verifier::verify(point, peer_schedule, round_ctx.conf()).expect("well-formed point");
-        let info = PointInfo::from(point);
-        let validate_ctx = ValidateCtx::new(round_ctx, &info);
+        Verifier::verify(point.info(), peer_schedule, round_ctx.conf()).expect("well-formed point");
+        let validate_ctx = ValidateCtx::new(round_ctx, point.info());
         let validated = Verifier::validate(
-            info,
+            point.info().clone(),
             dag_round.downgrade(),
             downloader.clone(),
             store.clone(),
@@ -219,18 +218,18 @@ fn point<const PEER_COUNT: usize>(
 
     Point::new(
         &peers[idx].1,
+        peers[idx].0,
         round,
         &payload,
         PointData {
-            author: peers[idx].0,
             time: max_prev_time.next(),
             includes: includes.clone(),
             witness: Default::default(),
+            evidence,
             anchor_trigger,
             anchor_proof,
             anchor_time,
         },
-        evidence,
         conf,
     )
 }

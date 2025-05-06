@@ -89,7 +89,7 @@ impl Shuttle {
         let anchor_id: MempoolAnchorId = committed.anchor.round().0;
         metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor_id);
 
-        let chain_time = committed.anchor.data().time.millis();
+        let chain_time = committed.anchor.time().millis();
         let is_executable =
             (self.first_after_gap.as_ref()).is_none_or(|first_id| anchor_id >= *first_id);
 
@@ -118,7 +118,7 @@ impl Shuttle {
                     id: anchor_id,
                     prev_id: committed.prev_anchor.map(|round| round.0),
                     chain_time,
-                    author: committed.anchor.data().author,
+                    author: committed.anchor.author(),
                     externals: unique_messages,
                 }));
             }

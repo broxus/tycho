@@ -69,7 +69,7 @@ impl Broadcaster {
             // `atomic` can be updated only under write lock, so view under read lock is consistent
             let signers = peer_schedule
                 .atomic()
-                .peers_for(point.round().next())
+                .peers_for(point.info().round().next())
                 .clone();
             let bcast_peers = guard.data.broadcast_receivers().clone();
             (signers, bcast_peers, guard.updates())
@@ -95,7 +95,7 @@ impl Broadcaster {
             bcast_peers,
             bcast_futures: FuturesUnordered::default(),
 
-            sig_request: QueryRequest::signature(point.round()),
+            sig_request: QueryRequest::signature(point.info().round()),
             sig_peers: FastHashSet::default(),
             sig_futures: FuturesUnordered::default(),
 
@@ -160,10 +160,10 @@ impl Broadcaster {
             }
         }
         Arc::new(LastOwnPoint {
-            digest: *self.point.digest(),
+            digest: *self.point.info().digest(),
             evidence: mem::take(&mut self.signatures).into_iter().collect(),
-            includes: self.point.data().includes.clone(),
-            round: self.point.round(),
+            includes: self.point.info().includes().clone(),
+            round: self.point.info().round(),
             signers: self.signers_count,
         })
     }
@@ -319,7 +319,7 @@ impl Broadcaster {
                 match response {
                     SignatureResponse::Signature(signature) => {
                         if self.signers.contains(peer_id) {
-                            if signature.verifies(peer_id, self.point.digest()) {
+                            if signature.verifies(peer_id, self.point.info().digest()) {
                                 self.signatures.insert(*peer_id, signature);
                                 BroadcastCtx::sig_collected();
                             } else {

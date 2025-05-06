@@ -410,8 +410,8 @@ impl DagBack {
             (conf.genesis_round.next()).max(anchor.round() - conf.consensus.commit_history_rounds);
 
         let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]
-        extend(&mut r[0], &anchor.data().includes); // points @ r+0
-        extend(&mut r[1], &anchor.data().witness); // points @ r-1
+        extend(&mut r[0], anchor.includes()); // points @ r+0
+        extend(&mut r[1], anchor.witness()); // points @ r-1
 
         let mut rng = rand_pcg::Pcg64::from_seed(*anchor.digest().inner());
         let mut uncommitted = VecDeque::new();
@@ -443,8 +443,8 @@ impl DagBack {
                     Self::ready_valid_point(point_round, node, digest, "point")?;
                 // select only uncommitted ones
                 if !global.is_committed().load(atomic::Ordering::Relaxed) {
-                    extend(&mut r[1], &global.info().data().includes); // points @ r-1
-                    extend(&mut r[2], &global.info().data().witness); // points @ r-2
+                    extend(&mut r[1], global.info().includes()); // points @ r-1
+                    extend(&mut r[2], global.info().witness()); // points @ r-2
                     uncommitted.push_front(global);
                 }
             }
@@ -482,7 +482,7 @@ impl DagBack {
                     // take any suitable
                     .filter_map_ok(move |dag_point| match dag_point {
                         DagPoint::Valid(valid) => {
-                            if valid.info().data().anchor_trigger == Link::ToSelf {
+                            if valid.info().anchor_trigger() == &Link::ToSelf {
                                 Some(Ok(valid))
                             } else {
                                 None
