@@ -95,7 +95,7 @@ enum ByAuthorItem {
 impl ByAuthorItem {
     fn digest(&self) -> &Digest {
         match self {
-            Self::Ok(point) | Self::IllFormed(point, _) => point.digest(),
+            Self::Ok(point) | Self::IllFormed(point, _) => point.info().digest(),
             Self::OkPruned(digest) | Self::IllFormedPruned(digest, _) => digest,
         }
     }
@@ -145,7 +145,7 @@ impl BroadcastFilterInner {
             author,
             round,
             digest,
-        } = point.id();
+        } = point.info().id();
 
         // head may be outdated during Engine round switch
         let top_round = head.next().round();
@@ -155,7 +155,7 @@ impl BroadcastFilterInner {
         } else {
             // have to cache every point when the node lags behind consensus
             let prune_after = top_round + NodeConfig::get().cache_future_broadcasts_rounds;
-            match Verifier::verify(point, &self.peer_schedule, round_ctx.conf()) {
+            match Verifier::verify(point.info(), &self.peer_schedule, round_ctx.conf()) {
                 Ok(()) => Ok(if round > prune_after {
                     ByAuthorItem::OkPruned(digest)
                 } else {
@@ -218,7 +218,7 @@ impl BroadcastFilterInner {
                                 let old_digest = *existing.get().item.digest();
                                 let duplicates = &mut existing.get_mut().duplicates;
 
-                                let equivocation = if &old_digest == point.digest() {
+                                let equivocation = if &old_digest == point.info().digest() {
                                     *duplicates = duplicates.saturating_add(1);
                                     None
                                 } else {

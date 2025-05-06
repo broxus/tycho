@@ -1,10 +1,8 @@
-use std::collections::BTreeMap;
-
-use tl_proto::{RawBytes, TlRead, TlWrite};
+use tl_proto::{RawBytes, TlRead, TlResult, TlWrite};
 use tycho_network::PeerId;
 
-use crate::models::point::{Digest, PointData, Round, Signature};
-use crate::models::proto_utils::evidence_btree_map;
+use crate::models::point::{Digest, PointData, Signature};
+use crate::models::Round;
 
 #[derive(TlWrite)]
 #[tl(boxed, id = "consensus.point", scheme = "proto.tl")]
@@ -29,16 +27,8 @@ pub struct PointRead<'tl> {
 #[tl(boxed, id = "consensus.point", scheme = "proto.tl")]
 pub struct PointRawRead<'tl> {
     pub digest: Digest,
-    _signature: Signature,
+    pub signature: Signature,
     pub body: RawBytes<'tl, tl_proto::Boxed>,
-}
-
-#[derive(TlRead)]
-#[tl(boxed, id = "consensus.point", scheme = "proto.tl")]
-pub struct PointPrefixRead<'tl> {
-    _digest: Digest,
-    _signature: Signature,
-    pub body: PointBodyPrefixRead<'tl>,
 }
 
 #[derive(TlWrite)]
@@ -47,29 +37,41 @@ pub struct PointBodyWrite<'a, T>
 where
     T: AsRef<[u8]>,
 {
-    pub round: Round, // let it be @ r+0
+    pub author: PeerId,
+    pub round: Round,
     pub payload: &'a [T],
     pub data: &'a PointData,
-    #[tl(with = "evidence_btree_map")]
-    /// signatures for own point from previous round (if one exists, else empty map):
-    /// the node may prove its vertex@r-1 with its point@r+0 only; contains signatures from
-    /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
-    pub evidence: &'a BTreeMap<PeerId, Signature>,
 }
 
 #[derive(TlRead)]
 #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
 pub struct PointBodyRead<'tl> {
+    pub author: PeerId,
     pub round: Round,
     pub payload: Vec<&'tl [u8]>,
     pub data: PointData,
-    #[tl(with = "evidence_btree_map")]
-    pub evidence: BTreeMap<PeerId, Signature>,
 }
 
-#[derive(TlRead)]
-#[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
-pub struct PointBodyPrefixRead<'tl> {
-    _round: Round,
-    pub payload: Vec<&'tl [u8]>,
+impl PointRawRead<'_> {
+    pub fn author(&self) -> TlResult<PeerId> {
+        #[derive(TlRead)]
+        #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
+        struct PointBodyPrefix {
+            author: PeerId,
+        }
+        let body = <PointBodyPrefix>::read_from(&mut self.body.as_ref())?;
+        Ok(body.author)
+    }
+
+    pub fn payload(&self) -> TlResult<Vec<&[u8]>> {
+        #[derive(TlRead)]
+        #[tl(boxed, id = "consensus.pointBody", scheme = "proto.tl")]
+        struct PointBodyPrefix<'tl> {
+            _author: &'tl PeerId,
+            _round: Round,
+            payload: Vec<&'tl [u8]>,
+        }
+        let body = <PointBodyPrefix<'_>>::read_from(&mut self.body.as_ref())?;
+        Ok(body.payload)
+    }
 }

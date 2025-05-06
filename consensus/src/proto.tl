@@ -2,9 +2,9 @@
 * Representation of PointData
 */
 consensus.pointData
-    author:int256
     includes:(vector consensus.peerDigestPair)
     witness:(vector consensus.peerDigestPair)
+    evidence:(vector consensus.peerSignaturePair)
     anchor_trigger:point.Link
     anchor_proof:point.Link
     time:int
@@ -12,10 +12,10 @@ consensus.pointData
     = consensus.PointData;
 
 consensus.pointBody
+    author:int256
     round:int
     payload:(vector bytes)
     pointData:consensus.pointData
-    evidence:(vector consensus.peerSignaturePair)
     = consensus.PointBody;
 
 consensus.pointId
@@ -30,11 +30,15 @@ consensus.point
     body:consensus.pointBody
     = consensus.PointInner;
 
-consensus.pointInfoInner
-    round:int
+consensus.pointInfo
     digest:int256
+    signature:bytes
+    author:int256
+    round:int
+    payloadLen:int
+    payloadBytes:int
     data:consensus.pointData
-    = consensus.PointInfoInner;
+    = consensus.PointInfo;
 
 /**
 * Representation of BTreeMap<PeerId, Digest>

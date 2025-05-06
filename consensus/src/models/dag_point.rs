@@ -106,8 +106,8 @@ impl DagPoint {
 
     pub fn author(&self) -> PeerId {
         match self {
-            Self::Valid(valid) => valid.info().data().author,
-            Self::Invalid(invalid) => invalid.info().data().author,
+            Self::Valid(valid) => valid.info().author(),
+            Self::Invalid(invalid) => invalid.info().author(),
             Self::IllFormed(ill) => ill.id().author,
             Self::NotFound(not_found) => not_found.id().author,
         }

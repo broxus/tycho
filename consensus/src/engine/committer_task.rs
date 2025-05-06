@@ -234,7 +234,7 @@ impl RoundCtx {
                     format!(
                         "anchor {:?} time {} : [ {history} ]",
                         data.anchor.id().alt(),
-                        data.anchor.data().time
+                        data.anchor.time()
                     )
                 })
                 .join("  ;  ");

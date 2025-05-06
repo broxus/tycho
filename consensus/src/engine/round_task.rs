@@ -226,7 +226,7 @@ impl RoundTaskReady {
 
             async move {
                 let own_point_result = produce_point_fut.await?;
-                round_ctx.own_point(own_point_result.as_ref());
+                round_ctx.own_point(own_point_result.as_ref().map(|p| p.info()));
                 if let Ok(own_point) = own_point_result {
                     let self_check = Self::expect_own_valid_point(
                         own_point_round,
@@ -296,14 +296,13 @@ impl RoundTaskReady {
         let task_ctx = round_ctx.task();
         let round_ctx = round_ctx.clone();
         task_ctx.spawn(async move {
-            if let Err(error) = Verifier::verify(&point, &peer_schedule, round_ctx.conf()) {
+            if let Err(error) = Verifier::verify(point.info(), &peer_schedule, round_ctx.conf()) {
                 let _guard = round_ctx.span().enter();
                 panic!("Failed to verify own point: {error}, {:?}", point)
             }
-            let info = PointInfo::from(&point);
-            let validate_ctx = ValidateCtx::new(&round_ctx, &info);
+            let validate_ctx = ValidateCtx::new(&round_ctx, point.info());
             let validate = Verifier::validate(
-                info,
+                point.info().clone(),
                 point_round,
                 downloader,
                 store,
@@ -358,16 +357,16 @@ impl RoundCtx {
         metrics::gauge!("tycho_mempool_produced_point_time_skew").set(diff);
     }
 
-    fn own_point(&self, own_point: Result<&Point, &ProduceError>) {
+    fn own_point(&self, own_point: Result<&PointInfo, &ProduceError>) {
         metrics::counter!("tycho_mempool_points_produced").increment(own_point.is_ok() as _);
 
-        let no_proof = own_point.is_ok_and(|point| point.evidence().is_empty());
+        let no_proof = own_point.is_ok_and(|info| info.evidence().is_empty());
         metrics::counter!("tycho_mempool_points_no_proof_produced").increment(no_proof as _);
 
-        let externals = own_point.map_or(0, |point| point.payload_len());
+        let externals = own_point.map_or(0, |info| info.payload_len());
         metrics::counter!("tycho_mempool_point_payload_count").increment(externals as _);
 
-        let payload_bytes = own_point.map_or(0, |point| point.payload_bytes());
+        let payload_bytes = own_point.map_or(0, |info| info.payload_bytes());
         metrics::counter!("tycho_mempool_point_payload_bytes").increment(payload_bytes as _);
 
         if own_point.is_err() {
@@ -376,14 +375,14 @@ impl RoundCtx {
         }
 
         match own_point {
-            Ok(own_point) => {
+            Ok(own_info) => {
                 tracing::info!(
                     parent: self.span(),
-                    digest = display(own_point.digest().alt()),
+                    digest = display(own_info.digest().alt()),
                     externals,
                     payload_bytes,
-                    is_proof = (own_point.data().anchor_proof == Link::ToSelf).then_some(true),
-                    is_trigger = (own_point.data().anchor_trigger == Link::ToSelf).then_some(true),
+                    is_proof = (own_info.anchor_proof() == &Link::ToSelf).then_some(true),
+                    is_trigger = (own_info.anchor_trigger() == &Link::ToSelf).then_some(true),
                     "produced point"
                 );
                 tracing::debug!(

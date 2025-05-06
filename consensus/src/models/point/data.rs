@@ -5,7 +5,7 @@ use tycho_network::PeerId;
 
 use crate::engine::MempoolConfig;
 use crate::models::point::{Digest, Round, UnixTime};
-use crate::models::proto_utils::points_btree_map;
+use crate::models::proto_utils::{evidence_btree_map, points_btree_map};
 use crate::models::{PeerCount, Signature};
 
 #[derive(Clone, Copy, Debug, PartialEq, TlRead, TlWrite)]
@@ -24,18 +24,21 @@ impl PointId {
 #[cfg_attr(test, derive(PartialEq))]
 #[tl(boxed, id = "consensus.pointData", scheme = "proto.tl")]
 pub struct PointData {
-    pub author: PeerId,
-    #[tl(with = "points_btree_map")]
     /// `>= 2F+1` points @ r-1,
     /// signed by author @ r-1 with some additional points just mentioned;
     /// mandatory includes author's own vertex iff proof is given.
     /// Repeatable order on every node is needed for commit; map is used during validation
-    pub includes: BTreeMap<PeerId, Digest>,
-
     #[tl(with = "points_btree_map")]
+    pub includes: BTreeMap<PeerId, Digest>,
     /// `>= 0` points @ r-2, signed by author @ r-1
     /// Repeatable order on every node needed for commit; map is used during validation
+    #[tl(with = "points_btree_map")]
     pub witness: BTreeMap<PeerId, Digest>,
+    /// signatures for own point from previous round (if one exists, else empty map):
+    /// the node may prove its vertex@r-1 with its point@r+0 only; contains signatures from
+    /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
+    #[tl(with = "evidence_btree_map")]
+    pub evidence: BTreeMap<PeerId, Signature>,
     /// last included by author; defines author's last committed anchor
     pub anchor_trigger: Link,
     /// last included by author; maintains anchor chain linked without explicit DAG traverse
@@ -44,35 +47,6 @@ pub struct PointData {
     pub time: UnixTime,
     /// time of previous anchor candidate, linked through its proof
     pub anchor_time: UnixTime,
-}
-
-#[derive(TlWrite)]
-#[tl(boxed, id = "consensus.pointData", scheme = "proto.tl")]
-/// Note: fields and their order must be the same with [`PointData`]
-pub struct PointDataWrite<'a> {
-    author: &'a PeerId,
-    #[tl(with = "points_btree_map")]
-    includes: &'a BTreeMap<PeerId, Digest>,
-    #[tl(with = "points_btree_map")]
-    witness: &'a BTreeMap<PeerId, Digest>,
-    anchor_trigger: &'a Link,
-    anchor_proof: &'a Link,
-    time: &'a UnixTime,
-    anchor_time: &'a UnixTime,
-}
-
-impl<'a> From<&'a PointData> for PointDataWrite<'a> {
-    fn from(data: &'a PointData) -> Self {
-        Self {
-            author: &data.author,
-            includes: &data.includes,
-            witness: &data.witness,
-            anchor_trigger: &data.anchor_trigger,
-            anchor_proof: &data.anchor_proof,
-            time: &data.time,
-            anchor_time: &data.anchor_time,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
@@ -108,39 +82,33 @@ pub enum AnchorStageRole {
 impl PointData {
     pub(super) const MAX_BYTE_SIZE: usize = {
         // 4 bytes of PointData tag
-        // 32 bytes of author
         // Max peer count * (32 + 32) of includes
         // Max peer count * (32 + 32) of witness
+        // Max peer count * (32 + 64) of evidence
         // 4 + (32 + 32 + 32) + 4 + 32 of MAX possible anchor_trigger Link
         // 4 + (32 + 32 + 32) + 4 + 32 of MAX possible anchor proof Link
         // 8 bytes of time
         // 8 bytes of anchor time
 
-        let max_possible_includes_witness: usize =
-            PeerCount::MAX.full() * (PeerId::MAX_TL_BYTES + Digest::MAX_TL_BYTES);
+        let max_possible_maps: usize = PeerCount::MAX.full()
+            * ((PeerId::MAX_TL_BYTES + Digest::MAX_TL_BYTES)
+                + (PeerId::MAX_TL_BYTES + Digest::MAX_TL_BYTES)
+                + (PeerId::MAX_TL_BYTES + Signature::MAX_TL_BYTES));
 
-        4 + PeerId::MAX_TL_BYTES
-            + (2 * max_possible_includes_witness)
-            + 2 * Link::MAX_TL_BYTES
-            + 2 * UnixTime::MAX_TL_BYTES
+        4 + max_possible_maps + 2 * Link::MAX_TL_BYTES + 2 * UnixTime::MAX_TL_BYTES
     };
-
-    pub fn prev_digest(&self) -> Option<&Digest> {
-        self.includes.get(&self.author)
-    }
 
     /// counterpart of [`Self::has_well_formed_maps`] that must be called later
     /// and allows to link this [`Point`] with its dependencies for validation and commit
-    pub fn is_well_formed(
+    pub(super) fn is_well_formed(
         &self,
-        self_round: Round,
+        round: Round,
         payload_len: u32,
-        evidence: &BTreeMap<PeerId, Signature>,
         conf: &MempoolConfig,
     ) -> bool {
         // check for being earlier than genesis takes place with other peer checks
         #[allow(clippy::nonminimal_bool, reason = "independent logical checks")]
-        if self_round == conf.genesis_round {
+        if round == conf.genesis_round {
             payload_len == 0
                 && self.anchor_trigger == Link::ToSelf
                 && self.anchor_proof == Link::ToSelf
@@ -149,31 +117,27 @@ impl PointData {
             // leader must maintain its chain of proofs,
             // while others must link to previous points (checked at the end of this method);
             // its decided later (using dag round data) whether current point belongs to leader
-            !(self.anchor_proof == Link::ToSelf && evidence.is_empty())
-                && !(self.anchor_trigger == Link::ToSelf && evidence.is_empty())
+            !(self.anchor_proof == Link::ToSelf && self.evidence.is_empty())
+                && !(self.anchor_trigger == Link::ToSelf && self.evidence.is_empty())
                 && self.time > self.anchor_time
         }
     }
 
     /// counterpart of [`Self::is_well_formed`] that must be called earlier,
     /// does not require config and allows to use [`Point`] methods
-    pub fn has_well_formed_maps(
-        &self,
-        self_round: Round,
-        evidence: &BTreeMap<PeerId, Signature>,
-    ) -> bool {
+    pub(super) fn has_well_formed_maps(&self, author: PeerId, round: Round) -> bool {
         // proof for previous point consists of digest and 2F++ evidences
         // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
-        evidence.is_empty() != self.includes.contains_key(&self.author)
+        self.evidence.is_empty() != self.includes.contains_key(&author)
         // evidence must contain only signatures of others
-        && !evidence.contains_key(&self.author)
+        && !self.evidence.contains_key(&author)
         // also cannot witness own point
-        && !self.witness.contains_key(&self.author)
-        && self.is_link_well_formed(self_round, AnchorStageRole::Trigger)
-        && self.is_link_well_formed(self_round, AnchorStageRole::Proof)
+        && !self.witness.contains_key(&author)
+        && self.is_link_well_formed(AnchorStageRole::Trigger, round)
+        && self.is_link_well_formed(AnchorStageRole::Proof, round)
     }
 
-    fn is_link_well_formed(&self, self_round: Round, link_field: AnchorStageRole) -> bool {
+    fn is_link_well_formed(&self, link_field: AnchorStageRole, round: Round) -> bool {
         match self.anchor_link(link_field) {
             Link::ToSelf => true,
             Link::Direct(Through::Includes(peer)) => self.includes.contains_key(peer),
@@ -181,11 +145,11 @@ impl PointData {
             Link::Indirect {
                 path: Through::Includes(peer),
                 to,
-            } => self.includes.contains_key(peer) && to.round.next() < self_round,
+            } => self.includes.contains_key(peer) && to.round.next() < round,
             Link::Indirect {
                 path: Through::Witness(peer),
                 to,
-            } => self.witness.contains_key(peer) && to.round.next().next() < self_round,
+            } => self.witness.contains_key(peer) && to.round.next().next() < round,
         }
     }
 

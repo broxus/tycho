@@ -99,7 +99,7 @@ impl Producer {
             last.evidence.len() >= last.signers.reliable_minority()
         }));
 
-        let prev_info = (includes.iter()).find(|point| point.data().author == local_id);
+        let prev_info = (includes.iter()).find(|point| point.author() == local_id);
 
         Self::check_prev_point(prev_info, proven_vertex)?;
 
@@ -107,7 +107,7 @@ impl Producer {
 
         let includes = includes
             .into_iter()
-            .map(|point| (point.data().author, *point.digest()))
+            .map(|info| (info.author(), *info.digest()))
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(
@@ -118,26 +118,28 @@ impl Producer {
 
         let witness = witness
             .into_iter()
-            .map(|point| (point.data().author, *point.digest()))
+            .map(|info| (info.author(), *info.digest()))
             .collect::<BTreeMap<_, _>>();
+
+        let evidence = proven_vertex
+            .zip(last_own_point)
+            .map(|(_, p)| p.evidence.clone())
+            .unwrap_or_default();
 
         Ok(Point::new(
             key_pair,
+            local_id,
             current_round.round(),
             &payload,
             PointData {
-                author: local_id,
                 time,
                 includes,
                 witness,
+                evidence,
                 anchor_trigger,
                 anchor_proof,
                 anchor_time,
             },
-            proven_vertex
-                .zip(last_own_point)
-                .map(|(_, p)| p.evidence.clone())
-                .unwrap_or_default(),
             conf,
         ))
     }
@@ -207,19 +209,19 @@ impl Producer {
             _ => {}
         }
 
-        let point = includes
+        let info = includes
             .iter()
             .max_by_key(|point| point.anchor_round(link_field))
             .expect("non-empty list of includes for own point");
 
-        if point.round() == current_round.round().prev()
-            && point.anchor_link(link_field) == &Link::ToSelf
+        if info.round() == current_round.round().prev()
+            && info.anchor_link(link_field) == &Link::ToSelf
         {
-            Link::Direct(Through::Includes(point.data().author))
+            Link::Direct(Through::Includes(info.author()))
         } else {
             Link::Indirect {
-                to: point.anchor_id(link_field),
-                path: Through::Includes(point.data().author),
+                to: info.anchor_id(link_field),
+                path: Through::Includes(info.author()),
             }
         }
     }
@@ -235,7 +237,7 @@ impl Producer {
             Link::Indirect { to, .. } => to.round,
         };
 
-        let Some(point) = witness
+        let Some(info) = witness
             .iter()
             .filter(|point| point.anchor_round(link_field) > link_round)
             .max_by_key(|point| point.anchor_round(link_field))
@@ -243,14 +245,14 @@ impl Producer {
             return;
         };
 
-        if point.round() == current_round.prev().prev()
-            && point.anchor_link(link_field) == &Link::ToSelf
+        if info.round() == current_round.prev().prev()
+            && info.anchor_link(link_field) == &Link::ToSelf
         {
-            *link = Link::Direct(Through::Witness(point.data().author));
+            *link = Link::Direct(Through::Witness(info.author()));
         } else {
             *link = Link::Indirect {
-                to: point.anchor_id(link_field),
-                path: Through::Witness(point.data().author),
+                to: info.anchor_id(link_field),
+                path: Through::Witness(info.author()),
             };
         }
     }
@@ -263,9 +265,9 @@ impl Producer {
     ) -> (UnixTime, UnixTime) {
         let anchor_time = match anchor_proof {
             Link::ToSelf => {
-                let point = prev_info.expect("anchor candidate should exist");
+                let info = prev_info.expect("anchor candidate should exist");
 
-                point.data().time
+                info.time()
             }
             Link::Direct(through) | Link::Indirect { path: through, .. } => {
                 let (peer_id, through) = match through {
@@ -273,18 +275,18 @@ impl Producer {
                     Through::Witness(peer_id) => (peer_id, &witness),
                 };
 
-                let point = through
+                let info = through
                     .iter()
-                    .find(|point| point.data().author == peer_id)
+                    .find(|point| point.author() == peer_id)
                     .expect("path to anchor proof should exist in new point dependencies");
 
-                point.data().anchor_time
+                info.anchor_time()
             }
         };
 
         let deps_time = match prev_info {
             None => anchor_time,
-            Some(info) => anchor_time.max(info.data().time),
+            Some(info) => anchor_time.max(info.time()),
         };
 
         let now = UnixTime::now();

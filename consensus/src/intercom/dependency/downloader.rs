@@ -375,21 +375,25 @@ impl<T: DownloadType> DownloadTask<T> {
                 );
                 None
             }
-            Some(Ok(point)) if point.id() != self.point_id => {
+            Some(Ok(point)) if point.info().id() != self.point_id => {
                 // it's a ban
                 self.not_found = self.not_found.saturating_add(1);
                 DownloadCtx::meter_unreliable();
                 tracing::error!(
                     peer_id = display(peer_id.alt()),
-                    author = display(point.data().author.alt()),
-                    round = point.round().0,
-                    digest = display(point.digest().alt()),
+                    author = display(point.info().author().alt()),
+                    round = point.info().round().0,
+                    digest = display(point.info().digest().alt()),
                     "returned wrong point",
                 );
                 None
             }
             Some(Ok(point)) => {
-                match Verifier::verify(&point, &self.parent.inner.peer_schedule, self.ctx.conf()) {
+                match Verifier::verify(
+                    point.info(),
+                    &self.parent.inner.peer_schedule,
+                    self.ctx.conf(),
+                ) {
                     Ok(()) => Some(DownloadResult::Verified(point)), // `Some` breaks outer loop
                     Err(VerifyError::IllFormed(reason)) => {
                         tracing::error!(
@@ -402,7 +406,7 @@ impl<T: DownloadType> DownloadTask<T> {
                     Err(VerifyError::Fail(error)) => {
                         panic!(
                             "should not receive {error} for downloaded {:?}",
-                            point.id().alt()
+                            point.info().id().alt()
                         )
                     }
                 }

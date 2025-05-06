@@ -45,7 +45,7 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn get_point(&self, round: Round, digest: &Digest) -> Result<Option<Point>>;
 
-    fn multi_get_points(&self, keys: &[(Round, Digest)]) -> Result<Vec<Point>>;
+    fn multi_get_info(&self, keys: &[(Round, Digest)]) -> Result<Vec<PointInfo>>;
 
     fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<Bytes>>;
 
@@ -99,8 +99,8 @@ impl MempoolAdapterStore {
                 "anchor {:?} history {} points rounds [{}..{}]",
                 anchor.id().alt(),
                 history.len(),
-                history.first().map(|p| p.round().0).unwrap_or_default(),
-                history.last().map(|p| p.round().0).unwrap_or_default()
+                history.first().map(|i| i.round().0).unwrap_or_default(),
+                history.last().map(|i| i.round().0).unwrap_or_default()
             )
         }
 
@@ -143,7 +143,7 @@ impl MempoolStore {
     pub fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) {
         self.0
             .insert_point(point, status)
-            .with_context(|| format!("id {:?}", point.id().alt()))
+            .with_context(|| format!("id {:?}", point.info().id().alt()))
             .expect("DB insert point full");
     }
 
@@ -168,8 +168,8 @@ impl MempoolStore {
             .expect("DB get point raw")
     }
 
-    pub fn multi_get_points(&self, keys: &[(Round, Digest)]) -> Vec<Point> {
-        self.0.multi_get_points(keys).expect("DB multi get points")
+    pub fn multi_get_info(&self, keys: &[(Round, Digest)]) -> Vec<PointInfo> {
+        self.0.multi_get_info(keys).expect("DB multi get points")
     }
 
     #[allow(dead_code, reason = "idiomatic getter may come in useful")]
@@ -334,7 +334,11 @@ impl MempoolStoreImpl for MempoolStorage {
     fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_insert_point_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        MempoolStorage::fill_key(point.round().0, point.digest().inner(), &mut key);
+        MempoolStorage::fill_key(
+            point.info().round().0,
+            point.info().digest().inner(),
+            &mut key,
+        );
 
         let db = self.db.rocksdb();
         let points_cf = self.db.points.cf();
@@ -351,8 +355,7 @@ impl MempoolStoreImpl for MempoolStorage {
 
         batch.put_cf(&points_cf, key.as_slice(), point.serialized());
 
-        let info = PointInfo::serializable_from(point);
-        info.write_to(&mut buffer);
+        point.info().write_to(&mut buffer);
         batch.put_cf(&info_cf, key.as_slice(), &buffer);
 
         buffer.clear();
@@ -415,7 +418,7 @@ impl MempoolStoreImpl for MempoolStorage {
             .transpose()
     }
 
-    fn multi_get_points(&self, keys: &[(Round, Digest)]) -> Result<Vec<Point>> {
+    fn multi_get_info(&self, keys: &[(Round, Digest)]) -> Result<Vec<PointInfo>> {
         let key_bytes = {
             let mut b_keys = Vec::with_capacity(keys.len());
             let mut buf = [0_u8; MempoolStorage::KEY_LEN];
@@ -426,21 +429,23 @@ impl MempoolStoreImpl for MempoolStorage {
             b_keys
         };
 
-        let mut points = Vec::with_capacity(keys.len());
-        for (result_option_bytes, (round, digest)) in (self.db.points)
-            .multi_get(&key_bytes)
+        anyhow::ensure!(key_bytes.is_sorted(), "key bytes must be sorted");
+
+        let mut infos = Vec::with_capacity(keys.len());
+        for (result_option_bytes, (round, digest)) in (self.db.points_info)
+            .batched_multi_get(&key_bytes, true)
             .into_iter()
             .zip_eq(keys)
         {
             let option_bytes =
                 result_option_bytes.with_context(|| format!("result for {round:?} {digest:?}"))?;
             let bytes = option_bytes.with_context(|| format!("not found {round:?} {digest:?}"))?;
-            let point = Point::from_bytes(bytes)
+            let point = tl_proto::deserialize::<PointInfo>(&bytes)
                 .context("deserialize db point")
-                .with_context(|| format!("deserialize point {round:?} {digest:?}"))?;
-            points.push(point);
+                .with_context(|| format!("deserialize point info {round:?} {digest:?}"))?;
+            infos.push(point);
         }
-        Ok(points)
+        Ok(infos)
     }
 
     fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<Bytes>> {
@@ -535,7 +540,7 @@ impl MempoolStoreImpl for MempoolStorage {
                     // we panic thus we don't care about performance
                     let full_point =
                         Point::from_bytes(bytes.to_vec()).context("deserialize point")?;
-                    panic!("iter read non-unique point {:?}", full_point.id())
+                    panic!("iter read non-unique point {:?}", full_point.info().id())
                 }
             }
             if keys.is_empty() {
@@ -744,7 +749,7 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn multi_get_points(&self, _: &[(Round, Digest)]) -> Result<Vec<Point>> {
+    fn multi_get_info(&self, _: &[(Round, Digest)]) -> Result<Vec<PointInfo>> {
         anyhow::bail!("should not be used in tests")
     }
 

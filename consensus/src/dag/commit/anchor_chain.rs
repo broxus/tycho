@@ -66,7 +66,7 @@ impl Debug for AltFmt<'_, AnchorChain> {
             write!(
                 f,
                 "anchor {} @ {} # {},",
-                el.anchor.data().author.alt(),
+                el.anchor.author().alt(),
                 el.anchor.round().0,
                 el.anchor.digest().alt()
             )?;
@@ -74,7 +74,7 @@ impl Debug for AltFmt<'_, AnchorChain> {
             write!(
                 f,
                 "proof {} @ {} # {},",
-                el.proof.data().author.alt(),
+                el.proof.author().alt(),
                 el.proof.round().0,
                 el.proof.digest().alt()
             )?;
@@ -84,7 +84,7 @@ impl Debug for AltFmt<'_, AnchorChain> {
                 Some(tr) => write!(
                     f,
                     "trigger {} @ {} # {}",
-                    tr.data().author.alt(),
+                    tr.author().alt(),
                     tr.round().0,
                     tr.digest().alt()
                 )?,
