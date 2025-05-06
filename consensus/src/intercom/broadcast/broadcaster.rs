@@ -214,6 +214,7 @@ impl Broadcaster {
         &mut self,
         collector_signal: Result<CollectorSignal, watch::error::RecvError>,
     ) -> bool {
+        self.attempt = self.attempt.wrapping_add(1);
         let result = match collector_signal {
             Err(_) => true, // exited
             Ok(CollectorSignal::Retry { .. }) => {
@@ -223,12 +224,13 @@ impl Broadcaster {
                     };
                     true
                 } else {
-                    if self.signatures.len() >= self.signers_count.majority_of_others() {
+                    if self.attempt > 2 // artificial delay for stable point rate
+                        && self.signatures.len() >= self.signers_count.majority_of_others()
+                    {
                         if let Some(sender) = mem::take(&mut self.bcaster_signal) {
                             _ = sender.send(BroadcasterSignal::Ok);
                         };
                     }
-                    self.attempt = self.attempt.wrapping_add(1);
                     if self.attempt == 0 {
                         // network is stuck, give all broadcast filters a push; forget rejections
                         self.sig_peers.clear();
