@@ -23,7 +23,7 @@ pub use self::queue_state::writer::QueueStateWriter;
 pub use self::shard_state::reader::{BriefBocHeader, ShardStateReader};
 pub use self::shard_state::writer::ShardStateWriter;
 use super::{KeyBlocksDirection, ShardStateStorage};
-use crate::db::{BaseDb, FileDb, MappedFile};
+use crate::db::{CellsDb, FileDb, MappedFile};
 use crate::store::{BlockHandle, BlockHandleStorage, BlockStorage};
 
 mod queue_state {
@@ -83,7 +83,7 @@ pub struct PersistentStateStorage {
 
 impl PersistentStateStorage {
     pub fn new(
-        db: BaseDb,
+        db: CellsDb,
         files_dir: &FileDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
@@ -634,7 +634,7 @@ impl PersistentStateStorage {
 }
 
 struct Inner {
-    db: BaseDb,
+    db: CellsDb,
     storage_dir: FileDb,
     block_handles: Arc<BlockHandleStorage>,
     blocks: Arc<BlockStorage>,

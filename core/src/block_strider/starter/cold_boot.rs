@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::pin::pin;
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use tokio::sync::mpsc;
 use tycho_block_util::archive::{ArchiveData, WithArchiveData};
 use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateData, ShardStateStuff};
 use tycho_storage::{
     BlockHandle, FileBuilder, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
     PersistentStateKind, Storage,
@@ -878,13 +879,34 @@ fn make_shard_state(
     shard_ident: ShardIdent,
     now: u32,
 ) -> Result<ShardStateStuff> {
-    let state = ShardStateUnsplit {
+    let mut state = Box::new(ShardStateUnsplit {
         global_id,
         shard_ident,
         gen_utime: now,
         min_ref_mc_seqno: u32::MAX,
         ..Default::default()
-    };
+    });
+
+    let mut shard_accounts = BTreeMap::new();
+
+    tycho_block_util::state::split_shard(
+        &shard_ident,
+        &ShardAccounts::new(),
+        4,
+        &mut shard_accounts,
+    )?; // Split to 16 shards
+
+    let shard_accounts_roots = shard_accounts
+        .iter()
+        .map(|(k, v)| (k, *CellBuilder::build_from(v).unwrap().repr_hash()))
+        .collect();
+
+    state.accounts = Dict::try_from_btree(&shard_accounts_roots)?;
+
+    let shard_state_data = shard_accounts
+        .into_iter()
+        .map(|(k, acc)| ShardStateData::from_accounts(acc).map(|v| (k, v)))
+        .collect::<Result<BTreeMap<u64, ShardStateData>>>()?;
 
     let root = CellBuilder::build_from(&state)?;
     let root_hash = *root.repr_hash();
@@ -897,7 +919,7 @@ fn make_shard_state(
         file_hash,
     };
 
-    ShardStateStuff::from_root(&block_id, root, tracker)
+    ShardStateStuff::from_state_and_root(&block_id, root, state, shard_state_data, tracker)
 }
 
 #[derive(Clone)]

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateData, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
 use tycho_util::futures::JoinTask;
@@ -46,7 +47,7 @@ mod messages_reader;
 mod types;
 
 pub use error::CollationCancelReason;
-pub use types::{ForceMasterCollation, ShardDescriptionExt};
+pub use types::ForceMasterCollation;
 
 #[cfg(test)]
 #[path = "tests/collator_tests.rs"]
@@ -796,11 +797,13 @@ impl CollatorStdImpl {
         // update working state
         tracing::debug!(target: tracing_targets::COLLATOR, "updating working state...");
 
-        let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
+        let (prev_shard_data, usage_tree, usage_trees) =
+            PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
         // set new prev shard data and usage tree
         working_state.prev_shard_data = Some(prev_shard_data);
         working_state.usage_tree = Some(usage_tree);
+        working_state.usage_trees = Some(usage_trees);
 
         Ok(())
     }
@@ -811,6 +814,7 @@ impl CollatorStdImpl {
         &mut self,
         block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
+        new_observable_state_data: BTreeMap<u64, ShardStateData>,
         new_state_root: Cell,
         store_new_state_task: JoinTask<Result<bool>>,
         new_queue_diff_hash: HashBytes,
@@ -831,6 +835,7 @@ impl CollatorStdImpl {
             BuildFromNewObservable {
                 block_id: BlockId,
                 shard_state: Box<ShardStateUnsplit>,
+                shard_state_data: BTreeMap<u64, ShardStateData>,
                 root: Cell,
                 tracker: MinRefMcStateTracker,
             },
@@ -847,6 +852,7 @@ impl CollatorStdImpl {
                 GetNewShardStateStuff::BuildFromNewObservable {
                     block_id,
                     shard_state: new_observable_state,
+                    shard_state_data: new_observable_state_data,
                     root: new_state_root,
                     tracker,
                 }
@@ -860,9 +866,16 @@ impl CollatorStdImpl {
                 GetNewShardStateStuff::BuildFromNewObservable {
                     block_id,
                     shard_state,
+                    shard_state_data,
                     root,
                     tracker,
-                } => ShardStateStuff::from_state_and_root(&block_id, shard_state, root, &tracker)?,
+                } => ShardStateStuff::from_state_and_root(
+                    &block_id,
+                    root,
+                    shard_state,
+                    shard_state_data,
+                    &tracker,
+                )?,
                 GetNewShardStateStuff::ReloadFromStorage(store_new_state_task) => {
                     store_new_state_task.await?;
                     let load_task = JoinTask::new({
@@ -874,7 +887,7 @@ impl CollatorStdImpl {
 
             let prev_states = vec![new_state_stuff];
             let prev_queue_diff_hashes = vec![new_queue_diff_hash];
-            let (prev_shard_data, usage_tree) =
+            let (prev_shard_data, usage_tree, usage_trees) =
                 PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
             let next_block_id_short = calc_next_block_id_short(prev_shard_data.blocks_ids());
@@ -886,6 +899,7 @@ impl CollatorStdImpl {
                 wu_used_from_last_anchor: prev_shard_data.wu_used_from_last_anchor(),
                 prev_shard_data: Some(prev_shard_data),
                 usage_tree: Some(usage_tree),
+                usage_trees: Some(usage_trees),
                 has_unprocessed_messages: Some(has_unprocessed_messages),
                 reader_state,
             }))
@@ -962,7 +976,8 @@ impl CollatorStdImpl {
     ) -> Result<Box<WorkingState>> {
         // TODO: consider split/merge
 
-        let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
+        let (prev_shard_data, usage_tree, usage_trees) =
+            PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
         let next_block_id_short = calc_next_block_id_short(prev_shard_data.blocks_ids());
 
@@ -975,6 +990,7 @@ impl CollatorStdImpl {
             reader_state: ReaderState::new(prev_shard_data.processed_upto()),
             prev_shard_data: Some(prev_shard_data),
             usage_tree: Some(usage_tree),
+            usage_trees: Some(usage_trees),
             has_unprocessed_messages: None,
             collation_config,
         }))
