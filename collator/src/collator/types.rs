@@ -1062,9 +1062,6 @@ pub struct ExecuteResult {
 
     /// Accumulated messages reader metrics across all partitions
     pub msgs_reader_metrics: MessagesReaderMetrics,
-
-    // TODO: msgs-v3: take from ReaderState instead
-    pub last_read_to_anchor_chain_time: Option<u64>,
 }
 
 pub struct FinalizeBlockResult {

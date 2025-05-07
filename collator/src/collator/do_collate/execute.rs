@@ -159,9 +159,6 @@ impl Phase<ExecuteState> {
         metrics::histogram!("tycho_do_collate_process_txs_total_time", &labels)
             .record(process_txs_total_elapsed);
 
-        let last_read_to_anchor_chain_time =
-            self.extra.messages_reader.last_read_to_anchor_chain_time();
-
         let process_txs_wu = calc_process_txs_wu(
             &self.state.collation_data,
             &self.state.collation_config.work_units_params.execute,
@@ -188,7 +185,6 @@ impl Phase<ExecuteState> {
             execute_msgs_total_elapsed,
             process_txs_total_elapsed,
             msgs_reader_metrics: msgs_reader_metrics_total,
-            last_read_to_anchor_chain_time,
         });
 
         Ok(())

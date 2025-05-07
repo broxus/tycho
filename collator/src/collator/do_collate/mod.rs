@@ -187,6 +187,8 @@ impl CollatorStdImpl {
             res => res?,
         };
 
+        let last_read_to_anchor_chain_time = reader_state.externals.last_read_to_anchor_chain_time;
+
         self.anchors_cache = anchors_cache;
 
         let block_id = *finalized.block_candidate.block.id();
@@ -245,10 +247,8 @@ impl CollatorStdImpl {
         };
 
         // block time diff from min ext chain time
-        let diff_time = now_millis() as i64
-            - execute_result
-                .last_read_to_anchor_chain_time
-                .unwrap_or(next_chain_time) as i64;
+        let diff_time =
+            now_millis() as i64 - last_read_to_anchor_chain_time.unwrap_or(next_chain_time) as i64;
         metrics::gauge!("tycho_do_collate_ext_msgs_time_diff", &labels)
             .set(diff_time as f64 / 1000.0);
 

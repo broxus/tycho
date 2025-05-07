@@ -159,8 +159,6 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             .peekable();
         let mut max_processed_offset = 0;
         while let Some((seqno, mut range_reader)) = range_readers.next() {
-            // TODO: msgs-v3: update offset in the last range reader on the go?
-
             // otherwise update offset in the last range reader state
             // if current offset is greater than the maximum stored one among all ranges
             max_processed_offset =
@@ -358,6 +356,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
             ranges.push(QueueShardRange {
                 shard_ident: *shard_id,
+                // TODO: may be we should pass `from` here because we should load stats for the full range
                 from: shard_reader_state.current_position,
                 to: shard_range_to,
             });
