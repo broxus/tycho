@@ -15,6 +15,18 @@ if ! [ -f "$keys_path" ]; then
     $tycho_bin tool gen-key > "$keys_path"
 fi
 
-public_key=$(jq '.public' "$keys_path")
-config=$(jq ".config_public_key = $public_key | .minter_public_key = $public_key" "$config_path")
+public_key=$(jq -r '.public' "$keys_path")
+
+giver_address="1111111111111111111111111111111111111111111111111111111111111111"
+giver_state=$(
+    $tycho_bin tool gen-account wallet --pubkey $public_key --balance 1000000000 | \
+    jq -r ".boc"
+)
+
+config=$(
+    jq ".config_public_key = \"$public_key\"
+    | .minter_public_key = \"$public_key\"
+    | .accounts[\"$giver_address\"] = \"$giver_state\"" \
+    "$config_path"
+)
 echo "$config" > "$config_path"
