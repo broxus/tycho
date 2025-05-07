@@ -320,11 +320,16 @@ impl std::fmt::Display for DisplayRangeReaderStateByPartition<'_> {
     }
 }
 
-// TODO: msgs-v3: implement simplified Debug
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExternalKey {
     pub anchor_id: MempoolAnchorId,
     pub msgs_offset: u64,
+}
+
+impl std::fmt::Debug for ExternalKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, {})", self.anchor_id, self.msgs_offset)
+    }
 }
 
 impl From<(MempoolAnchorId, u64)> for ExternalKey {

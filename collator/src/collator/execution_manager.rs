@@ -94,7 +94,6 @@ impl MessagesExecutor {
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
         let mut ext_msgs_skipped = 0;
 
-        // TODO: msgs-v3: rename to group_slots_count
         let group_horizontal_size = msg_group.len();
         let group_messages_count = msg_group.messages_count();
         let group_mean_vert_size: usize = group_messages_count
