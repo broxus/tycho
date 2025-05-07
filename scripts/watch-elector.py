@@ -3,9 +3,11 @@ import argparse
 from datetime import datetime
 import nekoton as nt
 
-parser = argparse.ArgumentParser(prog="Watch Elector")
+parser = argparse.ArgumentParser(description="Watch Elector")
 parser.add_argument("direction", help="Direction of traversing", choices=["old", "new"])
-parser.add_argument("--rpc", required=True, help="JRPC endpoint URL")
+parser.add_argument(
+    "--rpc", required=False, help="JRPC endpoint URL", default="http://127.0.0.1:8001"
+)
 parser.add_argument("--all", help="Show all transactions", action="store_true")
 parser.add_argument("--since", help="Unix timestamp of range lower bound", type=int)
 parser.add_argument("--until", help="Unix timestamp of range upper bound", type=int)
