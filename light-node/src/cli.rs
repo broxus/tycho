@@ -322,7 +322,8 @@ impl<C> Node<C> {
             .storage
             .shard_state_storage()
             .load_state(last_block_id)
-            .await?;
+            .await
+            .with_context(|| format!("failed to load state for {}", last_block_id))?;
 
         let validator_subscriber = self
             .blockchain_rpc_client

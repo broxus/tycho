@@ -449,7 +449,9 @@ impl BlockStorage {
         if !handle.has_proof() {
             let data = proof.as_new_archive_data()?;
 
+            let start = std::time::Instant::now();
             let _lock = handle.proof_data_lock().write().await;
+            tracing::info!("lock proof data lock took {:?}", start.elapsed());
             if !handle.has_proof() {
                 self.add_block_data_compressed(&archive_id, data).await?;
                 if handle.meta().add_flags(BlockFlags::HAS_PROOF) {
