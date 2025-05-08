@@ -67,10 +67,6 @@ impl PeerScheduleLocked {
     }
 
     pub(super) fn set_next_set(&mut self, parent: WeakPeerSchedule, validator_set: &[PeerId]) {
-        if validator_set.is_empty() {
-            return;
-        }
-
         self.resolve_peers_task = None;
 
         meter(validator_set.contains(&self.local_id));

@@ -89,29 +89,36 @@ impl PeerSchedule {
             &[merged_conf.genesis_author()],
             "Init genesis pseudo validator subset",
         );
+        self.apply_scheduled_impl(&mut locked, genesis_round.prev());
 
         let after_genesis = merged_conf.conf.genesis_round.next();
 
         if init.curr_start_round > after_genesis.0 {
+            let prev_start = Round(init.prev_start_round).max(after_genesis);
             self.set_next_subset(
                 &mut locked,
                 &init.prev_v_set,
-                Round(init.prev_start_round).max(after_genesis),
+                prev_start,
                 &init.prev_v_subset,
                 "Init prev validator subset",
             );
+            self.apply_scheduled_impl(&mut locked, prev_start);
         }
 
+        let curr_start = Round(init.curr_start_round).max(after_genesis);
         self.set_next_subset(
             &mut locked,
             &init.curr_v_set,
-            Round(init.curr_start_round).max(after_genesis),
+            curr_start,
             &init.curr_v_subset,
             "Init current validator subset",
         );
+        self.apply_scheduled_impl(&mut locked, curr_start);
 
-        tracing::info!(vset_len = init.next_v_set.len(), "Init next validator set");
-        locked.set_next_set(self.downgrade(), &init.next_v_set);
+        if !init.next_v_set.is_empty() {
+            tracing::info!(vset_len = init.next_v_set.len(), "Init next validator set");
+            locked.set_next_set(self.downgrade(), &init.next_v_set);
+        }
     }
 
     pub fn set_peers(&self, peers: &InitPeers) {
@@ -124,6 +131,7 @@ impl PeerSchedule {
             &peers.prev_v_subset,
             "Apply prev validator subset",
         );
+        self.apply_scheduled_impl(&mut locked, Round(peers.prev_start_round));
 
         self.set_next_subset(
             &mut locked,
@@ -134,13 +142,14 @@ impl PeerSchedule {
         );
 
         if !peers.next_v_set.is_empty() {
+            // current v_set is applied when DAG is advanced unless there is a next one
+            self.apply_scheduled_impl(&mut locked, Round(peers.curr_start_round));
             tracing::info!(
                 vset_len = peers.next_v_set.len(),
                 "Apply next validator set"
             );
+            locked.set_next_set(self.downgrade(), &peers.next_v_set);
         }
-
-        locked.set_next_set(self.downgrade(), &peers.next_v_set);
     }
 
     pub fn read(&self) -> RwLockReadGuard<'_, RawRwLock, PeerScheduleLocked> {
@@ -194,13 +203,11 @@ impl PeerSchedule {
             self.atomic().alt(),
             tracing::enabled!(tracing::Level::TRACE).then_some(&locked.data),
         );
-
-        self.apply_scheduled_impl(locked, next_round);
     }
 
     pub fn apply_scheduled(&self, current: Round) {
         if (self.atomic().next_epoch_start).is_none_or(|scheduled| scheduled > current) {
-            return;
+            return; // will double-check because arc-swap is racy with `self.set_next_subset()`
         }
         let mut locked = self.write();
         self.apply_scheduled_impl(&mut locked, current);
@@ -209,7 +216,7 @@ impl PeerSchedule {
     /// on peer set change
     fn apply_scheduled_impl(&self, locked: &mut PeerScheduleLocked, current: Round) {
         if (locked.data.next_epoch_start).is_none_or(|scheduled| scheduled > current) {
-            return; // double-check because arc-swap is racy with `self.set_next_subset()`
+            return;
         }
 
         tracing::debug!(
