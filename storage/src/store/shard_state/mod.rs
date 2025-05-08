@@ -14,6 +14,7 @@ use tycho_block_util::state::*;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 use weedb::rocksdb;
+use weedb::rocksdb::WriteBatch;
 
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
@@ -293,12 +294,21 @@ impl ShardStateStorage {
                 let key = key.to_vec();
 
                 let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
+                    let start = std::time::Instant::now();
                     let (stats, mut batch) = cell_storage.remove_cell(&alloc, &root_hash)?;
+
+                    let finished = start.elapsed().as_millis();
 
                     batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
                     db.raw()
                         .rocksdb()
                         .write_opt(batch, db.cells.write_config())?;
+
+                    tracing::info!(
+                        ms = finished,
+                        full_ms = start.elapsed().as_millis(),
+                        "remove_cell_time"
+                    );
 
                     Ok::<_, anyhow::Error>((stats, alloc))
                 })
@@ -359,6 +369,10 @@ impl ShardStateStorage {
         // Iterate all states and remove outdated
         let mut removed_states = 0usize;
         let mut removed_cells = 0usize;
+
+        let mut cur_block_id = BlockId::default();
+        let mut data_roots = Vec::with_capacity(16);
+
         loop {
             let _hist = HistogramGuard::begin("tycho_storage_state_data_gc_time");
             let (key, value) = match iter.item() {
@@ -380,6 +394,16 @@ impl ShardStateStorage {
                 continue;
             }
 
+            if cur_block_id == block_id {
+                data_roots.push(root_hash);
+
+                iter.next();
+                continue;
+            }
+
+            cur_block_id = block_id;
+            data_roots.clear();
+
             alloc.reset();
 
             {
@@ -387,17 +411,44 @@ impl ShardStateStorage {
 
                 let db = self.cells_db.clone();
                 let cell_storage = self.cell_storage.clone();
+
                 let key = key.to_vec();
+                let data_roots = data_roots.clone();
 
                 let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
-                    let (stats, mut batch) = cell_storage.remove_cell(&alloc, &root_hash)?;
+                    let start = std::time::Instant::now();
 
-                    batch.delete_cf(&db.shard_state_data.get_unbounded_cf().bound(), key);
+                    let ctx = cell_storage.create_remove_ctx();
+                    rayon::scope(|s| {
+                        for data_root in data_roots.iter() {
+                            s.spawn(|_| {
+                                ctx.remove_cell(data_root).unwrap();
+                            });
+                        }
+                    });
+
+                    let mut batch = WriteBatch::with_capacity_bytes(ctx.len() * (32 + 8 + 8));
+
+                    let total = ctx.finalize(&mut batch);
+
+                    let finished = start.elapsed().as_millis();
+
+                    batch.delete_cf(
+                        &db.shard_state_data.get_unbounded_cf().bound(),
+                        key.as_slice(),
+                    );
+
                     db.raw()
                         .rocksdb()
                         .write_opt(batch, db.cells.write_config())?;
 
-                    Ok::<_, anyhow::Error>((stats, alloc))
+                    tracing::info!(
+                        ms = finished,
+                        full_ms = start.elapsed().as_millis(),
+                        "accounts remove_cell_time"
+                    );
+
+                    Ok::<_, anyhow::Error>((total, alloc))
                 })
                 .await??;
 

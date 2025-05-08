@@ -50,6 +50,10 @@ impl CellStorage {
         StoreContext::new(&self.db, &self.raw_cells_cache, capacity)
     }
 
+    pub fn create_remove_ctx(&self) -> RemoveContext {
+        RemoveContext::new(&self.db, &self.raw_cells_cache)
+    }
+
     pub fn apply_temp_cell(&self, root: &HashBytes) -> Result<()> {
         const MAX_NEW_CELLS_BATCH_SIZE: usize = 10000;
 
@@ -546,6 +550,148 @@ impl StoreContext {
                     refcount::add_positive_refount(rc, data, &mut buffer);
                     batch.merge_cf(cells_cf, key.as_slice(), &buffer);
                 }
+                total
+            });
+
+            batch_update.join().expect("thread panicked")
+        })
+    }
+}
+
+#[derive(Clone)]
+struct RemovedCell {
+    old_rc: i64,
+    removes: u32,
+    refs: Vec<HashBytes>,
+}
+
+impl<'a> RemovedCell {
+    fn remove(&'a mut self) -> Result<Option<&'a [HashBytes]>, CellStorageError> {
+        self.removes += 1;
+        if self.removes as i64 <= self.old_rc {
+            Ok(self.next_refs())
+        } else {
+            Err(CellStorageError::CounterMismatch)
+        }
+    }
+
+    fn next_refs(&'a self) -> Option<&'a [HashBytes]> {
+        if self.old_rc > self.removes as i64 {
+            None
+        } else {
+            Some(&self.refs)
+        }
+    }
+}
+
+pub struct RemoveContext {
+    db: CellsDb,
+    raw_cache: Arc<RawCellsCache>,
+    transaction: FastDashMap<HashBytes, RemovedCell>,
+}
+
+impl RemoveContext {
+    fn new(db: &CellsDb, raw_cache: &Arc<RawCellsCache>) -> Self {
+        Self {
+            db: db.clone(),
+            raw_cache: raw_cache.clone(),
+            transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
+                128 * 16,
+                Default::default(),
+                512,
+            ),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.transaction.len()
+    }
+
+    pub fn remove_cell(&self, hash: &HashBytes) -> Result<(), CellStorageError> {
+        let mut stack = Vec::with_capacity(16);
+        stack.push(vec![*hash]);
+
+        let mut buffer = Vec::with_capacity(4);
+
+        // While some cells left
+        'outer: loop {
+            let Some(iter) = stack.last_mut() else {
+                break;
+            };
+
+            while let Some(cell_id) = iter.pop() {
+                // Process the current cell.
+                let refs = match self.transaction.entry(cell_id) {
+                    Entry::Occupied(mut v) => v.get_mut().remove()?.map(|v| v.to_vec()),
+                    Entry::Vacant(v) => {
+                        let old_rc =
+                            self.raw_cache
+                                .get_rc_for_delete(&self.db, &cell_id, &mut buffer)?;
+                        debug_assert!(old_rc > 0);
+
+                        v.insert(RemovedCell {
+                            old_rc,
+                            removes: 1,
+                            refs: buffer.clone(),
+                        })
+                        .next_refs()
+                        .map(|v| v.to_vec())
+                    }
+                };
+
+                if let Some(refs) = refs {
+                    // And proceed to its refs if any.
+                    stack.push(refs);
+                    continue 'outer;
+                }
+            }
+
+            // Drop the current cell when all of its children were processed.
+            stack.pop();
+        }
+
+        // Clear big chunks of data before finalization
+        drop(stack);
+
+        Ok(())
+    }
+
+    pub fn finalize(self, batch: &mut WriteBatch) -> usize {
+        std::thread::scope(|s| {
+            let number_shards = self.transaction._shard_count();
+            // safety: we hold only read locks
+            let shards = unsafe { (0..number_shards).map(|i| self.transaction._get_read_shard(i)) };
+            let cache = &self.raw_cache;
+
+            // todo: clamp to number of cpus x2
+            for shard in shards {
+                // spawned threads will be joined at the end of the scope, so we don't need to store them
+                s.spawn(move || {
+                    for (key, item) in shard {
+                        let value = item.get();
+
+                        let new_rc = value.old_rc - value.removes as i64;
+                        cache.on_remove_cell(key, new_rc);
+                    }
+                });
+            }
+
+            let batch_update = s.spawn(|| {
+                let cells_cf = &self.db.cells.cf();
+
+                let total = self.transaction.len();
+
+                for kv in self.transaction.iter() {
+                    let key = kv.key();
+                    let value = kv.value();
+
+                    batch.merge_cf(
+                        cells_cf,
+                        key.as_slice(),
+                        refcount::encode_negative_refcount(value.removes),
+                    );
+                }
+
                 total
             });
 

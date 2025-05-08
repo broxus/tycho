@@ -636,7 +636,7 @@ mod test {
         Ok(())
     }
 
-    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CellsDB) -> Result<()> {
+    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CellsDb) -> Result<()> {
         let states_iterator = db.shard_states.iterator(IteratorMode::Start);
         let bump = bumpalo::Bump::new();
 
@@ -730,9 +730,12 @@ mod test {
             let new_dict_cell = CellBuilder::build_from(dict.clone())?;
 
             let cell_hash = new_dict_cell.repr_hash();
+
+            let ctx = cell_storage.create_store_ctx(1);
+            CellStorage::store_cell(new_dict_cell.as_ref(), &ctx)?;
+
             let mut batch = WriteBatch::new();
-            let traversed =
-                cell_storage.store_cell(&mut batch, new_dict_cell.as_ref(), MODIFY_COUNT * 3)?;
+            let traversed = ctx.finalize(&mut batch);
 
             cell_keys.push(*cell_hash);
 
@@ -752,7 +755,12 @@ mod test {
 
             traverse_cell((cell as Arc<DynCell>).as_ref());
 
-            let (res, batch) = cell_storage.remove_cell(&bump, &key)?;
+            let ctx = cell_storage.create_remove_ctx();
+            ctx.remove_cell(&key).unwrap();
+
+            let mut batch = WriteBatch::with_capacity_bytes(ctx.len() * (32 + 8 + 8));
+            let res = ctx.finalize(&mut batch);
+
             cells_db
                 .rocksdb()
                 .write_opt(batch, cells_db.cells.write_config())?;
