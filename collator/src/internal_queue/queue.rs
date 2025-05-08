@@ -11,6 +11,7 @@ use tycho_storage::model::DiffInfo;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
+use super::gc::GcEndKey;
 use super::types::SeparatedStatisticsByPartitions;
 use crate::internal_queue::gc::GcManager;
 use crate::internal_queue::state::state_iterator::StateIterator;
@@ -317,13 +318,18 @@ where
             // Update gc ranges
             if *top_shard_block_changed {
                 for (shard_ident, processed_to_key) in diff.processed_to.iter() {
-                    let last_key = gc_ranges
+                    gc_ranges
                         .entry(*shard_ident)
-                        .or_insert_with(|| *processed_to_key);
-
-                    if processed_to_key < last_key {
-                        *last_key = *processed_to_key;
-                    }
+                        .and_modify(|last: &mut GcEndKey| {
+                            if processed_to_key < &last.end_key {
+                                last.end_key = *processed_to_key;
+                                last.on_top_block_id = *block_id;
+                            }
+                        })
+                        .or_insert(GcEndKey {
+                            end_key: *processed_to_key,
+                            on_top_block_id: *block_id,
+                        });
                 }
             }
         }
@@ -332,9 +338,9 @@ where
         self.state.commit(&commit_pointer, mc_block_id)?;
 
         // run GC for each found partition in routers
-        for partition in partitions {
-            for (shard, end_key) in &gc_ranges {
-                self.gc.update_delete_until(*partition, *shard, *end_key);
+        for (shard, gc_end_key) in gc_ranges {
+            for partition in partitions {
+                self.gc.update_delete_until(*partition, shard, gc_end_key);
             }
         }
 

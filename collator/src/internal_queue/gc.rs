@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use ahash::HashMapExt;
-use everscale_types::models::ShardIdent;
+use everscale_types::models::{BlockId, ShardIdent};
 use tokio::task::AbortHandle;
 use tokio::time::Duration;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
@@ -58,14 +58,14 @@ impl GcManager {
         &self,
         partitions: QueuePartitionIdx,
         shard: ShardIdent,
-        end_key: QueueKey,
+        gc_end_key: GcEndKey,
     ) {
         self.delete_until
             .lock()
             .unwrap()
             .entry(partitions)
             .or_default()
-            .insert(shard, end_key);
+            .insert(shard, gc_end_key);
     }
 }
 
@@ -89,18 +89,20 @@ fn gc_task<V: InternalMessageValue>(
                 .get(partition)
                 .unwrap_or(&FastHashMap::default())
                 .get(shard)
-                .is_none_or(|last_key| *current_last_key > *last_key);
+                .is_none_or(|last_key| current_last_key.end_key > last_key.end_key);
 
             if can_delete {
                 let range = vec![QueueShardRange {
                     shard_ident: *shard,
                     from: QueueKey::default(),
-                    to: *current_last_key,
+                    to: current_last_key.end_key,
                 }];
 
                 tracing::info!(target: tracing_targets::MQ,
+                    %partition,
                     %shard,
-                    last_queue_key = %current_last_key,
+                    last_queue_key = %current_last_key.end_key,
+                    on_top_block_id = %current_last_key.on_top_block_id.as_short_id(),
                     "executing messages queue GC"
                 );
 
@@ -110,7 +112,7 @@ fn gc_task<V: InternalMessageValue>(
 
                 let labels = [("workchain", shard.workchain().to_string())];
                 metrics::gauge!("tycho_internal_queue_processed_upto", &labels)
-                    .set(current_last_key.lt as f64);
+                    .set(current_last_key.end_key.lt as f64);
 
                 gc_state
                     .entry(*partition)
@@ -125,4 +127,12 @@ fn gc_task<V: InternalMessageValue>(
     metrics::gauge!("tycho_internal_queue_gc_state_size").set(total_entries as f64);
 }
 
-type GcRange = FastHashMap<QueuePartitionIdx, FastHashMap<ShardIdent, QueueKey>>;
+#[derive(Debug, Clone, Copy)]
+pub struct GcEndKey {
+    /// Upto this key queue will be cleaned.
+    pub end_key: QueueKey,
+    /// Top block id from which `processed_to` the `end_key` was taken.
+    pub on_top_block_id: BlockId,
+}
+
+type GcRange = FastHashMap<QueuePartitionIdx, FastHashMap<ShardIdent, GcEndKey>>;

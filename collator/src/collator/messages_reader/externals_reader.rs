@@ -89,8 +89,6 @@ impl ExternalsReader {
         let mut range_readers = self.range_readers.into_iter().peekable();
         let mut max_processed_offsets = BTreeMap::<QueuePartitionIdx, u32>::new();
         while let Some((seqno, mut range_reader)) = range_readers.next() {
-            // TODO: msgs-v3: update offset in the last range reader on the go?
-
             // update offset in the last range reader state for partition
             // if current offset is greater than the maximum stored one among all ranges
             for (par_id, par) in &self.reader_state.by_partitions {
@@ -133,10 +131,6 @@ impl ExternalsReader {
 
     pub fn get_partition_ids(&self) -> Vec<QueuePartitionIdx> {
         self.reader_state.by_partitions.keys().copied().collect()
-    }
-
-    pub fn last_read_to_anchor_chain_time(&self) -> Option<u64> {
-        self.reader_state.last_read_to_anchor_chain_time
     }
 
     pub(super) fn drop_last_read_to_anchor_chain_time(&mut self) {
@@ -470,7 +464,7 @@ impl ExternalsReader {
         &mut self,
         read_mode: GetNextMessageGroupMode,
         partition_router: &PartitionRouter,
-    ) -> MessagesReaderMetricsByPartitions {
+    ) -> Result<MessagesReaderMetricsByPartitions> {
         let mut metrics_by_partitions = MessagesReaderMetricsByPartitions::default();
 
         // skip if all open ranges fully read
@@ -478,7 +472,7 @@ impl ExternalsReader {
             tracing::trace!(target: tracing_targets::COLLATOR,
                 "externals reader: all_ranges_fully_read=true",
             );
-            return metrics_by_partitions;
+            return Ok(metrics_by_partitions);
         }
 
         let processed_to_by_partitions: BTreeMap<_, _> = self
@@ -557,7 +551,7 @@ impl ExternalsReader {
                     read_mode,
                     partition_router,
                     &processed_to_by_partitions,
-                );
+                )?;
 
                 metrics_by_partitions.append(std::mem::take(&mut read_res.metrics_by_partitions));
 
@@ -652,7 +646,7 @@ impl ExternalsReader {
             }
         }
 
-        metrics_by_partitions
+        Ok(metrics_by_partitions)
     }
 
     pub fn collect_messages<V: InternalMessageValue>(
@@ -841,7 +835,7 @@ impl ExternalsRangeReader {
         read_mode: ReadNextExternalsMode,
         partition_router: &PartitionRouter,
         processed_to_by_partitions: &BTreeMap<QueuePartitionIdx, ExternalKey>,
-    ) -> ReadExternalsRangeResult {
+    ) -> Result<ReadExternalsRangeResult> {
         let labels = [("workchain", self.for_shard_id.workchain().to_string())];
 
         let next_chain_time = self.reader_state.range.chain_time;
@@ -867,7 +861,7 @@ impl ExternalsRangeReader {
         // check if buffer is full
         // or we can already fill required slots
         let (mut max_fill_state_by_count, mut max_fill_state_by_slots) =
-            self.get_max_buffers_fill_state().unwrap(); // TODO: msgsv-v3: return error instead of panic
+            self.get_max_buffers_fill_state()?;
         let mut has_filled_buffer = matches!(
             (&max_fill_state_by_count, &max_fill_state_by_slots),
             (BufferFillStateByCount::IsFull, _) | (_, BufferFillStateBySlots::CanFill)
@@ -1038,7 +1032,10 @@ impl ExternalsRangeReader {
                                 .reader_state
                                 .by_partitions
                                 .get_mut(&target_partition)
-                                .unwrap(); // TODO: msgs-v3: return error instead of panic
+                                .with_context(|| format!(
+                                    "target partition {} should exist in range reader state (seqno={})",
+                                    target_partition, self.seqno,
+                                ))?;
                             reader_state_by_partition
                                 .buffer
                                 .add_message(Box::new(ParsedMessage {
@@ -1068,7 +1065,7 @@ impl ExternalsRangeReader {
                         // check if buffer is full
                         // or we can already fill required slots
                         (max_fill_state_by_count, max_fill_state_by_slots) =
-                            self.get_max_buffers_fill_state().unwrap(); // TODO: msgs-v3: return error instead of panic
+                            self.get_max_buffers_fill_state()?;
                         has_filled_buffer = matches!(
                             (&max_fill_state_by_count, &max_fill_state_by_slots),
                             (BufferFillStateByCount::IsFull, _)
@@ -1132,11 +1129,11 @@ impl ExternalsRangeReader {
             );
         }
 
-        // TODO: msgs-v3: try to merge `has_pending_externals` and a `fully_read` flag
-
         // check if we still have pending externals
         let has_pending_externals =
             if read_mode == ReadNextExternalsMode::ToPreviuosReadTo && prev_to_reached {
+                // TODO: msgs-v3: here we should check the remanining anchors in cache
+
                 // when was reading to prev_to and reached it we consider then
                 // we do not have pending externals in the range
                 false
@@ -1178,13 +1175,13 @@ impl ExternalsRangeReader {
             par_0_metrics.read_ext_messages_timer.total_elapsed -= add_to_msgs_groups_total_elapsed;
         }
 
-        ReadExternalsRangeResult {
+        Ok(ReadExternalsRangeResult {
             has_pending_externals,
             last_read_to_anchor_chain_time,
             max_fill_state_by_count,
             max_fill_state_by_slots,
             metrics_by_partitions,
-        }
+        })
     }
 }
 

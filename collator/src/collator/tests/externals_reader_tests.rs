@@ -136,8 +136,9 @@ fn test_read_externals() {
 
     // read 1 for block 1
     println!("read 1 for block  1");
-    let metrics =
-        externals_reader.read_into_buffers(GetNextMessageGroupMode::Continue, &partition_router);
+    let metrics = externals_reader
+        .read_into_buffers(GetNextMessageGroupMode::Continue, &partition_router)
+        .unwrap();
     let metrics = metrics.get_total();
     println!("read_ext_msgs_count: {}", metrics.read_ext_msgs_count);
     print_state(&externals_reader);
@@ -279,8 +280,9 @@ fn test_read_externals() {
 
     // refill after restart on block 2
     println!("refill after restart on block 2");
-    let metrics =
-        externals_reader.read_into_buffers(GetNextMessageGroupMode::Refill, &partition_router);
+    let metrics = externals_reader
+        .read_into_buffers(GetNextMessageGroupMode::Refill, &partition_router)
+        .unwrap();
     let metrics = metrics.get_total();
     println!("read_ext_msgs_count: {}", metrics.read_ext_msgs_count);
     print_state(&externals_reader);
@@ -343,8 +345,9 @@ fn test_read_externals() {
 
     // continue reading on block 2
     println!("continue reading 1 on block 2");
-    let metrics =
-        externals_reader.read_into_buffers(GetNextMessageGroupMode::Continue, &partition_router);
+    let metrics = externals_reader
+        .read_into_buffers(GetNextMessageGroupMode::Continue, &partition_router)
+        .unwrap();
     let metrics = metrics.get_total();
     println!("read_ext_msgs_count: {}", metrics.read_ext_msgs_count);
     print_state(&externals_reader);
@@ -656,8 +659,9 @@ fn test_read_externals() {
 
     // continue reading 1 on block 3
     println!("continue reading on block 3");
-    let metrics =
-        externals_reader.read_into_buffers(GetNextMessageGroupMode::Continue, &partition_router);
+    let metrics = externals_reader
+        .read_into_buffers(GetNextMessageGroupMode::Continue, &partition_router)
+        .unwrap();
     let metrics = metrics.get_total();
     println!("read_ext_msgs_count: {}", metrics.read_ext_msgs_count);
     print_state(&externals_reader);
@@ -907,8 +911,9 @@ fn test_read_externals() {
     // read and collect 4 times
     for i in 1..=4 {
         println!("read messages on refill {}", i);
-        let metrics =
-            externals_reader.read_into_buffers(GetNextMessageGroupMode::Refill, &partition_router);
+        let metrics = externals_reader
+            .read_into_buffers(GetNextMessageGroupMode::Refill, &partition_router)
+            .unwrap();
         let metrics = metrics.get_total();
         println!("read_ext_msgs_count: {}", metrics.read_ext_msgs_count);
 

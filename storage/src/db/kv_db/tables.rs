@@ -673,8 +673,6 @@ impl ColumnFamily for TransactionsByHash {
 impl ColumnFamilyOptions<Caches> for TransactionsByHash {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
-
-        rpc_options_high_traffic(opts);
     }
 }
 
@@ -690,8 +688,6 @@ impl ColumnFamily for TransactionsByInMsg {
 impl ColumnFamilyOptions<Caches> for TransactionsByInMsg {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
-
-        rpc_options_high_traffic(opts);
     }
 }
 
@@ -711,7 +707,6 @@ impl ColumnFamily for CodeHashes {
 impl ColumnFamilyOptions<Caches> for CodeHashes {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
-        rpc_options_high_traffic(opts);
     }
 }
 
@@ -808,6 +803,10 @@ fn rpc_options_high_traffic(opts: &mut Options) {
 
 fn with_blob_db(opts: &mut Options, min_value_size: u64, compression_type: DBCompressionType) {
     opts.set_enable_blob_files(true);
+    opts.set_enable_blob_gc(true);
+
+    opts.set_min_blob_size(min_value_size);
+
     opts.set_enable_blob_gc(true);
 
     opts.set_min_blob_size(min_value_size);

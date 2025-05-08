@@ -195,16 +195,6 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 .set(buffer_limits.slot_vert_size as f64);
         }
 
-        // TODO: msgs-v3: remove if we do not need this field
-        let _msg_group_max_limits = MessagesBufferLimits {
-            max_count: msgs_buffer_max_count,
-            slots_count: externals_buffer_limits_by_partitions
-                .values()
-                .map(|l| l.slots_count)
-                .sum(),
-            slot_vert_size: group_vert_size,
-        };
-
         let mut new_messages = NewMessagesState::new(cx.for_shard_id);
 
         let mut cumulative_statistics = None;
@@ -741,10 +731,6 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         Ok(moved_from_par_0_accounts)
     }
 
-    pub fn last_read_to_anchor_chain_time(&self) -> Option<u64> {
-        self.externals_reader.last_read_to_anchor_chain_time()
-    }
-
     pub fn metrics_by_partitions(&self) -> &MessagesReaderMetricsByPartitions {
         &self.metrics_by_partitions
     }
@@ -980,7 +966,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
             let read_metrics = self
                 .externals_reader
-                .read_into_buffers(read_mode, self.new_messages.partition_router());
+                .read_into_buffers(read_mode, self.new_messages.partition_router())?;
             metrics_by_partitions.append(read_metrics);
         }
 

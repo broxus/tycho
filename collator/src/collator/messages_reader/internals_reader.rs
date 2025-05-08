@@ -11,7 +11,7 @@ use super::{
     DebugInternalsRangeReaderState, GetNextMessageGroupMode, InternalsPartitionReaderState,
     InternalsRangeReaderState, MessagesReaderMetrics, MessagesReaderStage, ShardReaderState,
 };
-use crate::collator::error::{CollationCancelReason, CollatorError};
+use crate::collator::error::CollatorError;
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
     MessagesBuffer, MessagesBufferLimits, SaturatingAddAssign,
@@ -159,8 +159,6 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             .peekable();
         let mut max_processed_offset = 0;
         while let Some((seqno, mut range_reader)) = range_readers.next() {
-            // TODO: msgs-v3: update offset in the last range reader on the go?
-
             // otherwise update offset in the last range reader state
             // if current offset is greater than the maximum stored one among all ranges
             max_processed_offset =
@@ -358,6 +356,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
             ranges.push(QueueShardRange {
                 shard_ident: *shard_id,
+                // TODO: may be we should pass `from` here because we should load stats for the full range
                 from: shard_reader_state.current_position,
                 to: shard_range_to,
             });
@@ -529,22 +528,24 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 let mut messages_count = 0;
 
                 while next_seqno < self.block_seqno {
-                    let diff = self
-                        .mq_adapter
-                        .get_diff_info(&self.for_shard_id, next_seqno, DiffZone::Both)?
-                        .ok_or_else(|| {
-                            let diff_block_id = BlockIdShort {
-                                shard: self.for_shard_id,
-                                seqno: next_seqno,
-                            };
-                            tracing::warn!(target: tracing_targets::COLLATOR,
-                                "check range limit: cannot get diff with stats from queue for block {}",
-                                diff_block_id,
-                            );
-                            CollatorError::Cancelled(CollationCancelReason::DiffNotFoundInQueue(
-                                diff_block_id,
-                            ))
-                        })?;
+                    let Some(diff) = self.mq_adapter.get_diff_info(
+                        &self.for_shard_id,
+                        next_seqno,
+                        DiffZone::Both,
+                    )?
+                    else {
+                        let diff_block_id = BlockIdShort {
+                            shard: self.for_shard_id,
+                            seqno: next_seqno,
+                        };
+                        tracing::warn!(target: tracing_targets::COLLATOR,
+                            "check range limit: cannot get diff with stats from queue for block {}",
+                            diff_block_id,
+                        );
+
+                        next_seqno += 1;
+                        continue;
+                    };
 
                     range_to = diff.max_message;
 

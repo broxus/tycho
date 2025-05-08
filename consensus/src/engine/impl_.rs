@@ -7,7 +7,6 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, TryStreamExt};
 use itertools::{Either, Itertools};
-use rayon::prelude::IntoParallelRefIterator;
 use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
@@ -17,13 +16,14 @@ use crate::effects::{
     AltFormat, Ctx, DbCleaner, EngineCtx, MempoolStore, RoundCtx, Task, TaskResult, TaskTracker,
 };
 use crate::engine::committer_task::CommitterTask;
-use crate::engine::lifecycle::{EngineError, EngineHandle, FixHistoryFlag};
+use crate::engine::lifecycle::{EngineError, EngineNetwork, FixHistoryFlag};
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
-use crate::engine::ConsensusConfigExt;
+use crate::engine::{ConsensusConfigExt, MempoolMergedConfig};
 use crate::models::{
     DagPoint, MempoolOutput, Point, PointRestore, PointRestoreSelect, PointStatusStoredRef, Round,
 };
+use crate::prelude::EngineBinding;
 
 pub type EngineResult<T> = std::result::Result<T, EngineError>;
 
@@ -40,35 +40,17 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(
-        handle: &EngineHandle,
         task_tracker: &TaskTracker,
+        bind: &EngineBinding,
+        net: &EngineNetwork,
+        merged_conf: &MempoolMergedConfig,
         fix_history: FixHistoryFlag,
     ) -> Engine {
-        let EngineHandle {
-            bind,
-            net,
-            merged_conf,
-            ..
-        } = handle;
-
         let conf = &merged_conf.conf;
-        let accessible_genesis = {
-            if (net.peer_schedule.atomic().peers_for(conf.genesis_round)).is_empty() {
-                // during fix history re-runs the genesis round may be evicted from schedule;
-                // consensus config change creates new genesis and resets fix history flag to false
-                assert!(
-                    fix_history.0,
-                    "genesis round must be accessible at the first mempool run in recovery loop"
-                );
-                None
-            } else {
-                let genesis = merged_conf.genesis();
-                (genesis.verify_hash()).expect("failed to verify genesis hash");
-                Verifier::verify(&genesis, &net.peer_schedule, conf)
-                    .expect("failed to verify genesis");
-                Some(genesis)
-            }
-        };
+        let genesis = merged_conf.genesis();
+
+        (genesis.verify_hash()).expect("failed to verify genesis hash");
+        Verifier::verify(&genesis, &net.peer_schedule, conf).expect("failed to verify genesis");
 
         let consensus_round = RoundWatch::default();
         consensus_round.set_max(conf.genesis_round);
@@ -103,9 +85,7 @@ impl Engine {
             let conf = conf.clone();
             move || {
                 store.init_storage(&overlay_id);
-                if let Some(genesis) = accessible_genesis {
-                    store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
-                }
+                store.insert_point(&genesis, PointStatusStoredRef::Exists, &conf);
                 fix_history // just pass further
             }
         });
@@ -314,7 +294,7 @@ impl Engine {
                 let verified = need_verify
                     .chunks(1000) // seems enough for any case
                     .flat_map(|keys| {
-                        use rayon::iter::ParallelIterator;
+                        use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
                         store
                             .multi_get_points(keys) // assume load result is sorted
                             .par_iter()
