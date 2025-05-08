@@ -841,7 +841,8 @@ where
                 "collator was cancelled before",
             );
 
-            self.mq_adapter.clear_uncommitted_state()?;
+            let top_shards = self.blocks_cache.get_last_top_shards();
+            self.mq_adapter.clear_uncommitted_state(&top_shards)?;
 
             let (last_collated_mc_block_id, applied_mc_queue_range) = self
                 .blocks_cache
@@ -910,7 +911,8 @@ where
                     }
                 }
 
-                self.mq_adapter.clear_uncommitted_state()?;
+                let top_shards = self.blocks_cache.get_last_top_shards();
+                self.mq_adapter.clear_uncommitted_state(&top_shards)?;
 
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
@@ -1272,7 +1274,8 @@ where
                 }
             }
 
-            self.mq_adapter.clear_uncommitted_state()?;
+            let top_shards = self.blocks_cache.get_last_top_shards();
+            self.mq_adapter.clear_uncommitted_state(&top_shards)?;
 
             tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                 ?store_res,
@@ -1519,7 +1522,8 @@ where
                     "will drop uncommitted internal messages from queue on new genesis",
                 );
 
-                self.mq_adapter.clear_uncommitted_state()?;
+                let top_shards = self.blocks_cache.get_last_top_shards();
+                self.mq_adapter.clear_uncommitted_state(&top_shards)?;
             }
         }
 
@@ -1979,7 +1983,8 @@ where
                 // when we run sync by any reason we should drop uncommitted queue updates
                 // after restoring the required state
                 // to avoid panics if next block was already collated before an it is incorrect
-                mq_adapter.clear_uncommitted_state()?;
+                let top_shards = blocks_cache.get_last_top_shards();
+                mq_adapter.clear_uncommitted_state(&top_shards)?;
 
                 let state = mc_block_entry.cached_state()?.clone();
                 res.last_mc_state = Some(state);

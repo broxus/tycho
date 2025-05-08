@@ -128,7 +128,12 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
         hash: HashBytes,
         diff: QueueDiffWithMessages<V>,
     ) -> Result<()>;
-    fn clear_uncommitted(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()>;
+
+    fn clear_uncommitted(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        top_shards: &[ShardIdent],
+    ) -> Result<()>;
 }
 
 // IMPLEMENTATION
@@ -351,11 +356,15 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         Ok(())
     }
 
-    fn clear_uncommitted(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()> {
+    fn clear_uncommitted(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        top_shards: &[ShardIdent],
+    ) -> Result<()> {
         let snapshot = self.storage.internal_queue_storage().make_snapshot();
         let pointers = snapshot.read_commit_pointers()?;
         let tx = self.storage.internal_queue_storage().begin_transaction();
-        tx.clear_uncommitted(partitions, &pointers)?;
+        tx.clear_uncommitted(partitions, &pointers, top_shards)?;
         tx.write()
     }
 }

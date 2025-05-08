@@ -686,7 +686,7 @@ async fn test_queue() -> anyhow::Result<()> {
         dest_2_low_priority,
         dest_3_normal_priority,
     )?;
-    queue.clear_uncommitted_state(&vec![0, 1].into_iter().collect())?;
+    queue.clear_uncommitted_state(&vec![0, 1].into_iter().collect(), &[])?;
     test_statistics_check_statistics(
         &queue,
         dest_1_low_priority,
@@ -985,8 +985,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
         from: QueueKey {
             lt: 1,
             hash: HashBytes::default(),
-        }
-        .next_value(),
+        },
         to: QueueKey {
             lt: 4,
             hash: HashBytes::default(),
@@ -1000,14 +999,21 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     let iterators = queue.iterator(partition, &ranges, ShardIdent::new_full(1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
-    assert!(iterator_manager.next().ok().is_some());
+    let msg = iterator_manager.next()?;
+    println!("iterator next msg before clean = {:?}", msg);
+    assert!(msg.is_some());
 
-    queue.clear_uncommitted_state(&vec![0, 1].into_iter().collect())?;
+    queue.clear_uncommitted_state(&vec![0, 1].into_iter().collect(), &[
+        ShardIdent::MASTERCHAIN,
+        ShardIdent::new_full(0),
+    ])?;
 
     let iterators = queue.iterator(partition, &ranges, ShardIdent::new_full(1))?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
-    assert!(iterator_manager.next()?.is_none());
+    let msg = iterator_manager.next()?;
+    println!("iterator next msg after clean = {:?}", msg);
+    assert!(msg.is_none());
 
     Ok(())
 }
@@ -1404,7 +1410,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // -- test case 4
     // clear uncommitted state with second diff
-    queue.clear_uncommitted_state(&vec![0, 1].into_iter().collect())?;
+    queue.clear_uncommitted_state(&vec![0, 1].into_iter().collect(), &[])?;
 
     let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &QueueKey::MIN);
     // uncommitted: 0; committed: 1

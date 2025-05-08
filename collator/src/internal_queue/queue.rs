@@ -90,8 +90,12 @@ where
         mc_top_blocks: &[(BlockId, bool)],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
-    /// remove all data in uncommitted zone storage
-    fn clear_uncommitted_state(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()>;
+    /// Remove all data in uncommitted zone storage
+    fn clear_uncommitted_state(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        top_shards: &[ShardIdent],
+    ) -> Result<()>;
     /// Get diffs tail len from uncommitted state and committed state
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
     /// Load statistics for the given range by accounts
@@ -347,10 +351,14 @@ where
         Ok(())
     }
 
-    fn clear_uncommitted_state(&self, partitions: &FastHashSet<QueuePartitionIdx>) -> Result<()> {
+    fn clear_uncommitted_state(
+        &self,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        top_shards: &[ShardIdent],
+    ) -> Result<()> {
         // Take global lock
         let _global_write_guard = self.global_lock.write().unwrap_or_else(|e| e.into_inner());
-        self.state.clear_uncommitted(partitions)
+        self.state.clear_uncommitted(partitions, top_shards)
     }
 
     fn load_diff_statistics(

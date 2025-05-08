@@ -61,7 +61,8 @@ where
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
 
-    fn clear_uncommitted_state(&self) -> Result<()>;
+    fn clear_uncommitted_state(&self, top_shards: &[ShardIdent]) -> Result<()>;
+
     /// Get diff for the given block from committed and uncommitted state
     fn get_diff_info(
         &self,
@@ -218,7 +219,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     }
 
     #[instrument(skip_all)]
-    fn clear_uncommitted_state(&self) -> Result<()> {
+    fn clear_uncommitted_state(&self, top_shards: &[ShardIdent]) -> Result<()> {
         let start_time = std::time::Instant::now();
 
         tracing::debug!(
@@ -229,7 +230,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         // TODO: get partitions from queue state
         let partitions = &vec![0, 1].into_iter().collect();
 
-        self.queue.clear_uncommitted_state(partitions)?;
+        self.queue.clear_uncommitted_state(partitions, top_shards)?;
 
         let elapsed = start_time.elapsed();
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
