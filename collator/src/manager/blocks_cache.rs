@@ -110,6 +110,24 @@ impl BlocksCache {
         None
     }
 
+    /// Returns top shards from last master block
+    pub fn get_last_top_shards(&self) -> Vec<ShardIdent> {
+        let mut res = vec![];
+
+        if let Some((_, master)) = self.inner.masters.lock().blocks.last_key_value() {
+            res.push(master.block_id.shard);
+            for top_shard_id in master
+                .top_shard_blocks_info
+                .iter()
+                .map(|(block_id, _)| block_id.shard)
+            {
+                res.push(top_shard_id);
+            }
+        }
+
+        res
+    }
+
     pub fn get_consensus_info_for_mc_block(
         &self,
         mc_block_key: &BlockCacheKey,

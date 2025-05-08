@@ -1054,7 +1054,10 @@ async fn test_queue_restore_on_sync() {
 
     // clear uncommitted state because of block mismatch
     assert!(store_res.block_mismatch);
-    test_adapter.mq_adapter.clear_uncommitted_state().unwrap();
+    test_adapter
+        .mq_adapter
+        .clear_uncommitted_state(&[])
+        .unwrap();
 
     // shard processed to shard block 07
     test_adapter
@@ -1479,7 +1482,10 @@ async fn test_queue_restore_on_sync() {
     ));
 
     // we should clear queue uncommitted state on node start
-    test_adapter.mq_adapter.clear_uncommitted_state().unwrap();
+    test_adapter
+        .mq_adapter
+        .clear_uncommitted_state(&[])
+        .unwrap();
 
     // shard processed to shard block 11
     test_adapter
@@ -1786,7 +1792,10 @@ async fn test_queue_restore_on_sync() {
     test_adapter.save_last_info(&last_mc_block_stuff);
 
     // we should clear queue uncommitted state on node start
-    test_adapter.mq_adapter.clear_uncommitted_state().unwrap();
+    test_adapter
+        .mq_adapter
+        .clear_uncommitted_state(&[])
+        .unwrap();
 
     // shard processed to shard block 15
     test_adapter

@@ -107,10 +107,12 @@ impl InternalQueueTransaction {
     ///
     /// - `commit_pointers`: a map of (`ShardIdent` -> last committed `QueueKey`)
     /// - `partitions`: a list of partitions (e.g. 0..255) to clear
+    /// - `top_shards`: a list of all shards for backoff when no commit pointers
     pub fn clear_uncommitted(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
         commit_pointers: &FastHashMap<ShardIdent, CommitPointerValue>,
+        top_shards: &[ShardIdent],
     ) -> Result<()> {
         let mut ranges = Vec::new();
 
@@ -127,6 +129,21 @@ impl InternalQueueTransaction {
                     from,
                     to,
                 });
+            }
+        }
+
+        // backoff: if no commit pointers (no any committed diff)
+        //          create full ranges for delete for each shard
+        if ranges.is_empty() {
+            for &shard_ident in top_shards {
+                for &partition in partitions {
+                    ranges.push(QueueRange {
+                        shard_ident,
+                        partition,
+                        from: QueueKey::MIN,
+                        to: QueueKey::MAX,
+                    });
+                }
             }
         }
 
