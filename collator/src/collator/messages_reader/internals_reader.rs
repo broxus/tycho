@@ -13,8 +13,8 @@ use super::{
 };
 use crate::collator::error::CollatorError;
 use crate::collator::messages_buffer::{
-    BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
-    MessagesBuffer, MessagesBufferLimits, SaturatingAddAssign,
+    BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, IncludeAllMessages,
+    MessageGroup, MessagesBuffer, MessagesBufferLimits, SaturatingAddAssign,
 };
 use crate::collator::types::{
     ConcurrentQueueStatistics, MsgsExecutionParamsExtension, ParsedMessage,
@@ -745,6 +745,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                                 special_origin: None,
                                 block_seqno: None,
                                 from_same_shard: Some(int_msg.item.source == self.for_shard_id),
+                                ext_msg_chain_time: None,
                             });
 
                             metrics.add_to_message_groups_timer.start();
@@ -1117,7 +1118,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
         let FillMessageGroupResult {
             collected_queue_msgs_keys,
             ops_count,
-        } = self.reader_state.buffer.fill_message_group(
+        } = self.reader_state.buffer.fill_message_group::<_, _>(
             msg_group,
             self.buffer_limits.slots_count,
             self.buffer_limits.slot_vert_size,
@@ -1186,6 +1187,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
 
                 (false, check_ops_count)
             },
+            IncludeAllMessages,
         );
 
         CollectMessagesFromRangeReaderResult {

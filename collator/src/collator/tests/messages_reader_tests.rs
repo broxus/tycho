@@ -53,7 +53,7 @@ async fn test_refill_messages() -> Result<()> {
     let one_to_many_address = IntAddr::Std(StdAddr::new(0, HashBytes([255; 32])));
 
     // non existed account address
-    let non_existed_account_address = IntAddr::Std(StdAddr::new(0, HashBytes([254; 32])));
+    let non_existed_account_address = IntAddr::Std(StdAddr::new(0, HashBytes([200; 32])));
 
     // dex pairs addresses
     let dex_pairs: BTreeMap<u8, IntAddr> = [
@@ -147,6 +147,7 @@ async fn test_refill_messages() -> Result<()> {
         primary_working_state: Some(TestWorkingState {
             anchors_cache: AnchorsCache::default(),
             reader_state: ReaderState::new(&processed_upto),
+            has_unprocessed_messages: None,
         }),
 
         primary_mq_adapter: primary_mq_adapter.clone(),
@@ -170,6 +171,7 @@ async fn test_refill_messages() -> Result<()> {
         primary_working_state: Some(TestWorkingState {
             anchors_cache: AnchorsCache::default(),
             reader_state: ReaderState::new(&processed_upto),
+            has_unprocessed_messages: None,
         }),
 
         primary_mq_adapter,
@@ -193,7 +195,10 @@ async fn test_refill_messages() -> Result<()> {
         .create_messages_to_non_existed_account(&non_existed_account_address, 1)?;
     test_adapter.import_anchor_with_messages(messages);
     // collate block and check refill
-    test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
 
     //--------------
     // TEST CASE 002:
@@ -211,7 +216,10 @@ async fn test_refill_messages() -> Result<()> {
         .create_transfer_messages(&transfers_wallets, 14)?;
     test_adapter.import_anchor_with_messages(transfer_messages);
     // 20 of 28 messages will be executed, 8 new messages will be added to queue
-    test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
 
     // process anchor with 40 externals (5 transfer and 35 dummy)
     let mut transfer_messages = test_adapter
@@ -228,16 +236,24 @@ async fn test_refill_messages() -> Result<()> {
     test_adapter.import_anchor_with_messages(messages);
     // 8 existing internals collected first, then will be collected already read externals,
     // then will be collecting externals and new messages
-    test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
 
     // and process empty anchor to check refill
     test_adapter.import_anchor_with_messages(vec![]);
-    test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
 
     while let TestCollateResult {
         has_unprocessed_messages: true,
-    } = test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?
-    {
+    } = test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )? {
         // process all messages
     }
 
@@ -258,7 +274,7 @@ async fn test_refill_messages() -> Result<()> {
         .create_transfer_messages(&transfers_wallets, 25)?;
     test_adapter.import_anchor_with_messages(transfer_messages);
     // some unprocessed new messages will be added to queue
-    test_adapter.test_collate_shards(40)?;
+    test_adapter.test_collate_shards(40, &TestAssertsParams::default())?;
 
     // process anchor with lot of externals (transfer < dummy)
     let mut transfer_messages = test_adapter
@@ -278,23 +294,25 @@ async fn test_refill_messages() -> Result<()> {
     // will start read new anchor, then all existing internals will be collected,
     // then will be collected previously read externals,
     // then will read and collect externals and new messages minimum 2 times
-    test_adapter.test_collate_shards(60)?;
+    test_adapter.test_collate_shards(60, &TestAssertsParams::default())?;
 
     // will open new externals range, read some externals
     // will collect all existing internals
     // then will start to collect previously read externals
     // finally we will have 2 externals open ranges
     test_adapter.import_anchor_with_messages(vec![]);
-    test_adapter.test_collate_shards(40)?;
+    test_adapter.test_collate_shards(40, &TestAssertsParams::default())?;
 
     // we should correctly read externals in 2 ranges on refill
     test_adapter.import_anchor_with_messages(vec![]);
-    test_adapter.test_collate_shards(40)?;
+    test_adapter.test_collate_shards(40, &TestAssertsParams::default())?;
 
     while let TestCollateResult {
         has_unprocessed_messages: true,
-    } = test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?
-    {
+    } = test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )? {
         // process all messages
     }
 
@@ -309,10 +327,11 @@ async fn test_refill_messages() -> Result<()> {
         .create_one_to_many_start_message(one_to_many_address.clone())?;
     test_adapter.import_anchor_with_messages(messages);
 
-    test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
-
-    for _ in 0..3 {
-        test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+    for _ in 0..4 {
+        test_adapter.test_collate_shards(
+            DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+            &TestAssertsParams::default(),
+        )?;
     }
 
     //--------------
@@ -325,7 +344,10 @@ async fn test_refill_messages() -> Result<()> {
             .msgs_factory
             .create_swap_messages(&dex_wallets, 10)?;
         test_adapter.import_anchor_with_messages(messages);
-        test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+        test_adapter.test_collate_shards(
+            DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+            &TestAssertsParams::default(),
+        )?;
     }
 
     //--------------
@@ -333,7 +355,9 @@ async fn test_refill_messages() -> Result<()> {
     //--------------
     tracing::trace!("TEST CASE 006: RUN SWAPS AND TRANSFERS");
 
-    for _ in 0..20 {
+    for i in 0..20 {
+        tracing::trace!("TEST CASE 006: STEP {}", i + 1);
+
         // we create such amout of externals per anchor so that they do not fit one buffer limit
         let target_total_msgs_count = (msgs_exec_params.buffer_limit + 10) as usize;
         let target_swap_msgs_count = target_total_msgs_count / 3;
@@ -346,14 +370,31 @@ async fn test_refill_messages() -> Result<()> {
             .create_transfer_messages(&transfers_wallets, target_transfer_msgs_count)?;
         messages.append(&mut transfer_messages);
         test_adapter.import_anchor_with_messages(messages);
-        test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+        test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT, &TestAssertsParams {
+            expired_ext_msgs_count: match i + 1 {
+                16 => Some(53),
+                17 => Some(37),
+                19 => Some(85),
+                _ => Some(0),
+            },
+        })?;
     }
 
-    while let TestCollateResult {
-        has_unprocessed_messages: true,
-    } = test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?
-    {
-        // process all messages
+    // process all remaining messages in queue
+    let mut i = 0;
+    loop {
+        i += 1;
+        tracing::trace!("TEST CASE 006: REMAINING STEP {}", i);
+        if let TestCollateResult {
+            has_unprocessed_messages: false,
+        } = test_adapter.test_collate_shards(
+            DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+            &TestAssertsParams {
+                expired_ext_msgs_count: Some(0),
+            },
+        )? {
+            break;
+        }
     }
 
     //--------------
@@ -371,15 +412,17 @@ async fn test_refill_messages() -> Result<()> {
     }
 
     // import anchor with one-to-many start message
+    let one_to_many_address = IntAddr::Std(StdAddr::new(0, HashBytes([254; 32])));
     let messages = test_adapter
         .msgs_factory
         .create_one_to_many_start_message(one_to_many_address.clone())?;
     test_adapter.import_anchor_with_messages(messages);
 
-    test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
-
-    for _ in 0..2 {
-        test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+    for _ in 0..3 {
+        test_adapter.test_collate_shards(
+            DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+            &TestAssertsParams::default(),
+        )?;
     }
 
     for i in 0..10 {
@@ -392,18 +435,85 @@ async fn test_refill_messages() -> Result<()> {
 
         // collate after importing 2 anchors
         if i % 2 != 0 {
-            test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?;
+            test_adapter.test_collate_shards(
+                DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+                &TestAssertsParams::default(),
+            )?;
+        }
+    }
+
+    // process all remaining messages in queue
+    let mut i = 0;
+    loop {
+        i += 1;
+        tracing::trace!("TEST CASE 007: REMAINING STEP {}", i);
+        if let TestCollateResult {
+            has_unprocessed_messages: false,
+        } = test_adapter.test_collate_shards(
+            DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+            &TestAssertsParams::default(),
+        )? {
+            break;
         }
     }
 
     //--------------
-    // PROCESS THE REST OF MESSAGES QUEUES
+    // TEST CASE 008: START NEW one-to-many AND RUN TRANSFERS FROM one-to-many ADDRESS
+    //                  to check ext messages expiration from buffers
     //--------------
-    while let TestCollateResult {
-        has_unprocessed_messages: true,
-    } = test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT)?
-    {
-        // process all messages
+    tracing::trace!(
+        "TEST CASE 008: START NEW one-to-many AND RUN TRANSFERS FROM one-to-many ADDRESS"
+    );
+
+    // import anchor with one-to-many start message
+    let one_to_many_address = IntAddr::Std(StdAddr::new(0, HashBytes([253; 32])));
+    let messages = test_adapter
+        .msgs_factory
+        .create_one_to_many_start_message(one_to_many_address.clone())?;
+    test_adapter.import_anchor_with_messages(messages);
+
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
+
+    let wallets: BTreeMap<_, _> = [(0, one_to_many_address.clone())].into_iter().collect();
+    let transfer_messages = test_adapter
+        .msgs_factory
+        .create_transfer_messages(&wallets, 10)?;
+    test_adapter.import_anchor_with_messages(transfer_messages);
+
+    tracing::trace!("TEST CASE 008: STEP 1");
+    for _ in 0..5 {
+        test_adapter.import_anchor_with_messages(vec![]);
+    }
+    test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT, &TestAssertsParams {
+        expired_ext_msgs_count: Some(0),
+    })?;
+
+    tracing::trace!("TEST CASE 008: STEP 2 - SKIP EXPIRED");
+    for _ in 0..5 {
+        test_adapter.import_anchor_with_messages(vec![]);
+    }
+    test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT, &TestAssertsParams {
+        expired_ext_msgs_count: Some(10),
+    })?;
+
+    // process all remaining messages in queue
+    let mut i = 0;
+    loop {
+        i += 1;
+        tracing::trace!("TEST CASE 008: REMAINING STEP {}", i);
+        if let TestCollateResult {
+            has_unprocessed_messages: false,
+        } = test_adapter.test_collate_shards(
+            DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+            &TestAssertsParams {
+                expired_ext_msgs_count: Some(0),
+            },
+        )? {
+            break;
+        }
     }
 
     Ok(())
@@ -425,7 +535,11 @@ where
     V: InternalMessageValue,
     F: Fn(IntMsgInfo, Cell) -> V,
 {
-    fn test_collate_shards(&mut self, block_tx_limit: usize) -> Result<TestCollateResult> {
+    fn test_collate_shards(
+        &mut self,
+        block_tx_limit: usize,
+        assert_params: &TestAssertsParams,
+    ) -> Result<TestCollateResult> {
         let collate_master_every = 3;
 
         let all_shards_processed_to_by_partitions =
@@ -444,6 +558,7 @@ where
             )],
             all_shards_processed_to_by_partitions,
             (self.sc_collator.block_seqno + 1) % collate_master_every == 1,
+            assert_params,
         )?;
 
         // collate master every 3 shard blocks
@@ -463,7 +578,14 @@ where
                 )],
                 all_shards_processed_to,
                 true, // every master is first after previous
+                &TestAssertsParams::default(),
             )?;
+            has_unprocessed_messages = has_unprocessed_messages || mc_has_unprocessed_messages;
+        } else if let Some(TestWorkingState {
+            has_unprocessed_messages: Some(mc_has_unprocessed_messages),
+            ..
+        }) = self.mc_collator.primary_working_state
+        {
             has_unprocessed_messages = has_unprocessed_messages || mc_has_unprocessed_messages;
         }
 
@@ -537,6 +659,11 @@ where
     }
 }
 
+#[derive(Default)]
+struct TestAssertsParams {
+    expired_ext_msgs_count: Option<u64>,
+}
+
 struct TestCollateResult {
     has_unprocessed_messages: bool,
 }
@@ -570,6 +697,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument("test_collate", skip_all, fields(block_id = %BlockIdShort { shard: self.shard_id, seqno: self.block_seqno + 1 }))]
     fn test_collate_block_and_check_refill<F>(
         &mut self,
@@ -582,6 +710,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
             (bool, ProcessedToByPartitions),
         >,
         is_first_block_after_prev_master: bool,
+        assert_params: &TestAssertsParams,
     ) -> Result<TestCollateResult>
     where
         F: Fn(IntMsgInfo, Cell) -> V,
@@ -589,6 +718,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         let TestWorkingState {
             anchors_cache,
             reader_state,
+            ..
         } = self.primary_working_state.take().unwrap();
 
         let processed_upto = reader_state.get_updated_processed_upto();
@@ -731,6 +861,12 @@ impl<V: InternalMessageValue> TestCollator<V> {
             }
         }
 
+        // check reader metrics
+        let metrics = primary_messages_reader.metrics_by_partitions().get_total();
+        if let Some(expired_ext_msgs_count) = assert_params.expired_ext_msgs_count {
+            assert_eq!(metrics.expired_ext_msgs_count, expired_ext_msgs_count);
+        }
+
         // finalize test block and update message queue
 
         // finalize reader
@@ -803,6 +939,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         self.primary_working_state = Some(TestWorkingState {
             anchors_cache,
             reader_state,
+            has_unprocessed_messages: Some(has_unprocessed_messages),
         });
 
         Ok(TestCollateResult {
@@ -987,6 +1124,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
 struct TestWorkingState {
     anchors_cache: AnchorsCache,
     reader_state: ReaderState,
+    has_unprocessed_messages: Option<bool>,
 }
 
 pub struct TestMessageFactory<V: InternalMessageValue, F>
@@ -1008,7 +1146,7 @@ where
 
     create_int_msg_value_func: F,
 
-    one_to_many_counter: usize,
+    one_to_many_counters: FastHashMap<IntAddr, usize>,
 
     dex_pairs: BTreeMap<u8, IntAddr>,
 }
@@ -1036,7 +1174,7 @@ where
 
             create_int_msg_value_func,
 
-            one_to_many_counter: 0,
+            one_to_many_counters: FastHashMap::default(),
 
             dex_pairs,
         }
@@ -1165,14 +1303,15 @@ where
         let mut res = vec![];
 
         for _ in 0..5 {
-            if self.one_to_many_counter >= 200 {
+            let one_to_many_counter = self.one_to_many_counters.entry(dst.clone()).or_default();
+            if *one_to_many_counter >= 200 {
                 // do not create new one-to-many messages
                 // balance finished
                 break;
             }
 
             // create one-to-many internal message
-            self.one_to_many_counter += 1;
+            *one_to_many_counter += 1;
 
             let idx = self.next_int_idx;
             self.next_int_idx += 1;
@@ -1181,7 +1320,6 @@ where
 
             let body = {
                 let mut builder = CellBuilder::new();
-                builder.store_u64(idx)?;
                 builder.store_u32(msg_type.as_u32())?;
                 builder.build()?
             };
@@ -1249,7 +1387,6 @@ where
 
         let body = {
             let mut builder = CellBuilder::new();
-            builder.store_u64(idx)?;
             builder.store_u32(msg_type.as_u32())?;
             builder.store_u32(route as u32)?;
             target_addr.store_into(&mut builder, Cell::empty_context())?;
@@ -1303,7 +1440,6 @@ where
 
         let body = {
             let mut builder = CellBuilder::new();
-            builder.store_u64(idx)?;
             builder.store_u32(msg_type.as_u32())?;
             src.store_into(&mut builder, Cell::empty_context())?;
             dst.store_into(&mut builder, Cell::empty_context())?;
@@ -1479,7 +1615,6 @@ where
 
         let body = {
             let mut builder = CellBuilder::new();
-            builder.store_u64(idx)?;
             builder.store_u32(msg_type.as_u32())?;
             builder.build()?
         };
@@ -1518,7 +1653,6 @@ where
 
             let body = {
                 let mut builder = CellBuilder::new();
-                builder.store_u64(idx)?;
                 builder.store_u32(msg_type.as_u32())?;
                 builder.store_u32(route as u32)?;
                 builder.build()?
@@ -1646,7 +1780,6 @@ where
 
             let body = {
                 let mut builder = CellBuilder::new();
-                builder.store_u64(idx)?;
                 builder.store_u32(msg_type.as_u32())?;
                 dst_wallet.store_into(&mut builder, Cell::empty_context())?;
                 builder.build()?
@@ -1700,7 +1833,6 @@ where
 
             let body = {
                 let mut builder = CellBuilder::new();
-                builder.store_u64(idx)?;
                 builder.store_u32(msg_type.as_u32())?;
                 builder.build()?
             };
@@ -1735,7 +1867,6 @@ where
 
             let body = {
                 let mut builder = CellBuilder::new();
-                builder.store_u64(idx)?;
                 builder.store_u32(msg_type.as_u32())?;
                 builder.build()?
             };

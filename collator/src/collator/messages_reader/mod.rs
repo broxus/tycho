@@ -1107,6 +1107,9 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         par_0_metrics.add_to_message_groups_timer.stop();
 
         tracing::debug!(target: tracing_targets::COLLATOR,
+            expired_ext_msgs_count = ?DebugIter(
+                metrics_by_partitions.inner.iter().map(|(par_id, m)| (par_id, m.expired_ext_msgs_count))
+            ),
             has_not_fully_read_externals_ranges = self.has_not_fully_read_externals_ranges(),
             has_not_fully_read_internals_ranges = self.has_not_fully_read_internals_ranges(),
             has_pending_new_messages = self.has_pending_new_messages(),
@@ -1450,6 +1453,9 @@ pub(super) struct MessagesReaderMetrics {
     /// num of external messages read
     pub read_ext_msgs_count: u64,
 
+    /// num of expired external messages
+    pub expired_ext_msgs_count: u64,
+
     pub add_to_msgs_groups_ops_count: u64,
 }
 
@@ -1467,6 +1473,8 @@ impl MessagesReaderMetrics {
         self.read_existing_msgs_count += other.read_existing_msgs_count;
         self.read_new_msgs_count += other.read_new_msgs_count;
         self.read_ext_msgs_count += other.read_ext_msgs_count;
+
+        self.expired_ext_msgs_count += other.expired_ext_msgs_count;
 
         self.add_to_msgs_groups_ops_count = self
             .add_to_msgs_groups_ops_count
