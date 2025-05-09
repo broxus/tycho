@@ -411,7 +411,7 @@ pub struct ShardStateStorageMetrics {
 }
 
 #[derive(thiserror::Error, Debug)]
-enum ShardStateStorageError {
+pub enum ShardStateStorageError {
     #[error("Not found")]
     NotFound,
     #[error("Block handle id mismatch")]

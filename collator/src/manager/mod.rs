@@ -15,6 +15,7 @@ use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::MempoolGlobalConfig;
+use tycho_storage::ShardStateStorageError;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 use types::{
@@ -3092,7 +3093,19 @@ where
 
         match top_shard_blocks {
             None => {
-                let state = state_node_adapter.load_state(mc_block_id).await?;
+                let state = match state_node_adapter.load_state(mc_block_id).await {
+                    Err(err) => match err.downcast_ref::<ShardStateStorageError>() {
+                        Some(ShardStateStorageError::NotFound) => {
+                            tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
+                                %mc_block_id,
+                                "master state not found in get_top_blocks_seqno",
+                            );
+                            return Ok(FastHashMap::default());
+                        }
+                        _ => Err(err),
+                    },
+                    state => state,
+                }?;
                 for item in state.shards()?.iter() {
                     let (shard_id, shard_descr) = item?;
                     result.insert(shard_id, shard_descr.get_block_id(shard_id).seqno);
