@@ -745,6 +745,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                                 special_origin: None,
                                 block_seqno: None,
                                 from_same_shard: Some(int_msg.item.source == self.for_shard_id),
+                                ext_msg_chain_time: None,
                             });
 
                             metrics.add_to_message_groups_timer.start();
@@ -1186,6 +1187,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
 
                 (false, check_ops_count)
             },
+            |_| false,
         );
 
         CollectMessagesFromRangeReaderResult {

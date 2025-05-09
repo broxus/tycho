@@ -15,7 +15,9 @@ use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
     MessagesBufferLimits, SaturatingAddAssign,
 };
-use crate::collator::types::{AnchorsCache, MsgsExecutionParamsExtension, ParsedMessage};
+use crate::collator::types::{
+    AnchorsCache, MsgsExecutionParamsExtension, ParsedMessage, ParsedMessageKind,
+};
 use crate::internal_queue::types::{InternalMessageValue, PartitionRouter};
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
@@ -665,6 +667,25 @@ impl ExternalsReader {
             .get_state_by_partition(par_id)?
             .curr_processed_offset;
 
+        // find actual chain time from range readers according to current processed offset
+        // to check expired externals in buffers during collect
+        let mut next_chain_time = 0;
+        for reader in self.range_readers.values() {
+            let range_reader_state_by_partition =
+                reader.reader_state.get_state_by_partition(par_id)?;
+            if curr_processed_offset > range_reader_state_by_partition.skip_offset {
+                next_chain_time = reader.reader_state.range.chain_time;
+            }
+        }
+        if next_chain_time == 0 {
+            next_chain_time = self.next_chain_time;
+        }
+        anyhow::ensure!(next_chain_time > 0);
+
+        let externals_expire_timeout_ms =
+            self.msgs_exec_params.externals_expire_timeout as u64 * 1000;
+        let mut expired_msgs_count = 0;
+
         // extract range readers from state to use previous readers buffers and stats
         // to check for account skip on collecting messages from the next
         let mut range_readers = BTreeMap::<BlockSeqno, ExternalsRangeReader>::new();
@@ -741,6 +762,16 @@ impl ExternalsReader {
 
                             (false, check_ops_count)
                         },
+                        |msg| match msg.kind() {
+                            ParsedMessageKind::ExtIn { chain_time }
+                                if next_chain_time.saturating_sub(chain_time)
+                                    > externals_expire_timeout_ms =>
+                            {
+                                expired_msgs_count += 1;
+                                true
+                            }
+                            _ => false,
+                        },
                     );
                 res.metrics
                     .add_to_msgs_groups_ops_count
@@ -760,6 +791,11 @@ impl ExternalsReader {
         }
         // return range readers to state
         self.set_range_readers(range_readers);
+
+        // metrics: expired externals
+        let labels = [("workchain", self.for_shard_id.workchain().to_string())];
+        metrics::counter!("tycho_do_collate_ext_msgs_expired_count", &labels)
+            .increment(expired_msgs_count);
 
         Ok(res)
     }
@@ -1045,6 +1081,7 @@ impl ExternalsRangeReader {
                                     special_origin: None,
                                     block_seqno: None,
                                     from_same_shard: None,
+                                    ext_msg_chain_time: Some(anchor.chain_time),
                                 }));
                             par_metrics
                                 .add_to_msgs_groups_ops_count

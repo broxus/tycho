@@ -29,6 +29,7 @@ pub(crate) fn make_stub_internal_parsed_message(
         special_origin: None,
         block_seqno: None,
         from_same_shard: (!is_new).then(|| dst_wc == src_shard.workchain()),
+        ext_msg_chain_time: None,
     };
     Box::new(msg)
 }
@@ -47,6 +48,7 @@ pub(crate) fn make_stub_external_parsed_message(
         special_origin: None,
         block_seqno: None,
         from_same_shard: None,
+        ext_msg_chain_time: Some(chain_time),
     })
 }
 
@@ -232,15 +234,22 @@ fn test_message_group_filling_from_buffers() {
 
     let mut timer = TimerHelper::start();
 
+    // dummy msg check
+    let check_skip_msg = |_: &ParsedMessage| false;
+
     // 1. ==========
     // fill first message group
     let mut msg_group = MessageGroup::default();
 
     // first fill group with internals from partition 0
     // all 5 normal slots should be fully filled
-    int_buffer_par_0.fill_message_group(&mut msg_group, group_limit - 3, group_vert_size, |_| {
-        (false, 0)
-    });
+    int_buffer_par_0.fill_message_group(
+        &mut msg_group,
+        group_limit - 3,
+        group_vert_size,
+        |_| (false, 0),
+        check_skip_msg.clone(),
+    );
     println!(
         "\r\n1.1: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
@@ -258,6 +267,7 @@ fn test_message_group_filling_from_buffers() {
         group_limit - 2,
         group_vert_size,
         |account_id| (int_buffer_par_0.msgs.contains_key(account_id), 1),
+        check_skip_msg.clone(),
     );
     println!(
         "\r\n1.2: int_buffer_par_1: {:?}",
@@ -272,10 +282,14 @@ fn test_message_group_filling_from_buffers() {
     // then append externals from range 1
     // should fully fill slots 7 and 8
     // should append messages to slots 1-4, 6
-    // should not append messaged to slot 5
-    ext_buffer_range_1.fill_message_group(&mut msg_group, group_limit, group_vert_size + 1, |_| {
-        (false, 0)
-    });
+    // should not append messages to slot 5
+    ext_buffer_range_1.fill_message_group(
+        &mut msg_group,
+        group_limit,
+        group_vert_size + 1,
+        |_| (false, 0),
+        check_skip_msg.clone(),
+    );
     println!(
         "\r\n1.3: ext_buffer_range_1: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_1)
@@ -293,6 +307,7 @@ fn test_message_group_filling_from_buffers() {
         group_limit,
         group_vert_size + 1,
         |account_id| (ext_buffer_range_1.msgs.contains_key(account_id), 1),
+        check_skip_msg.clone(),
     );
     println!(
         "\r\n1.4: ext_buffer_range_2: {:?}",
@@ -310,9 +325,13 @@ fn test_message_group_filling_from_buffers() {
 
     // first fill group with internals from partition 0
     // all 5 normal slots should be fully filled
-    int_buffer_par_0.fill_message_group(&mut msg_group, group_limit - 3, group_vert_size, |_| {
-        (false, 0)
-    });
+    int_buffer_par_0.fill_message_group(
+        &mut msg_group,
+        group_limit - 3,
+        group_vert_size,
+        |_| (false, 0),
+        check_skip_msg.clone(),
+    );
     println!(
         "\r\n2.1: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
@@ -330,6 +349,7 @@ fn test_message_group_filling_from_buffers() {
         group_limit - 2,
         group_vert_size,
         |account_id| (int_buffer_par_0.msgs.contains_key(account_id), 1),
+        check_skip_msg.clone(),
     );
     println!(
         "\r\n2.2: int_buffer_par_1: {:?}",
@@ -344,10 +364,14 @@ fn test_message_group_filling_from_buffers() {
     // then append externals from range 1
     // should fully fill slots 7 and 8
     // should append messages to slots 1, 2, 6
-    // should not append messaged to slot 3-5
-    ext_buffer_range_1.fill_message_group(&mut msg_group, group_limit, group_vert_size + 1, |_| {
-        (false, 0)
-    });
+    // should not append messages to slot 3-5
+    ext_buffer_range_1.fill_message_group(
+        &mut msg_group,
+        group_limit,
+        group_vert_size + 1,
+        |_| (false, 0),
+        check_skip_msg.clone(),
+    );
     println!(
         "\r\n2.3: ext_buffer_range_1: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_1)
@@ -365,6 +389,7 @@ fn test_message_group_filling_from_buffers() {
         group_limit,
         group_vert_size + 1,
         |account_id| (ext_buffer_range_1.msgs.contains_key(account_id), 1),
+        check_skip_msg.clone(),
     );
     println!(
         "\r\n2.4: ext_buffer_range_2: {:?}",
@@ -383,9 +408,13 @@ fn test_message_group_filling_from_buffers() {
     // first fill group with internals from partition 0
     // should fully fill slots 1, 3-5
     // should not fully fill slot 2
-    int_buffer_par_0.fill_message_group(&mut msg_group, group_limit - 3, group_vert_size, |_| {
-        (false, 0)
-    });
+    int_buffer_par_0.fill_message_group(
+        &mut msg_group,
+        group_limit - 3,
+        group_vert_size,
+        |_| (false, 0),
+        check_skip_msg.clone(),
+    );
     println!(
         "\r\n3.1: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
@@ -403,6 +432,7 @@ fn test_message_group_filling_from_buffers() {
         group_limit - 2,
         group_vert_size,
         |account_id| (int_buffer_par_0.msgs.contains_key(account_id), 1),
+        check_skip_msg.clone(),
     );
     println!(
         "\r\n3.2: int_buffer_par_1: {:?}",
@@ -419,9 +449,13 @@ fn test_message_group_filling_from_buffers() {
     // should not fully fill slot 7
     // should append messages to slots 1, 2
     // should not append messages to slots 3-6
-    ext_buffer_range_1.fill_message_group(&mut msg_group, group_limit, group_vert_size + 1, |_| {
-        (false, 0)
-    });
+    ext_buffer_range_1.fill_message_group(
+        &mut msg_group,
+        group_limit,
+        group_vert_size + 1,
+        |_| (false, 0),
+        check_skip_msg.clone(),
+    );
     println!(
         "\r\n3.3: ext_buffer_range_1: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_1)
@@ -439,6 +473,7 @@ fn test_message_group_filling_from_buffers() {
         group_limit,
         group_vert_size + 1,
         |account_id| (ext_buffer_range_1.msgs.contains_key(account_id), 1),
+        check_skip_msg.clone(),
     );
     println!(
         "\r\n3.4: ext_buffer_range_2: {:?}",
@@ -458,9 +493,13 @@ fn test_message_group_filling_from_buffers() {
     // should fully fill slots 1, 3, 4
     // should not fully fill slot 2
     // should not fill slot 5
-    int_buffer_par_0.fill_message_group(&mut msg_group, group_limit - 3, group_vert_size, |_| {
-        (false, 0)
-    });
+    int_buffer_par_0.fill_message_group(
+        &mut msg_group,
+        group_limit - 3,
+        group_vert_size,
+        |_| (false, 0),
+        check_skip_msg.clone(),
+    );
     println!(
         "\r\n4.1: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
@@ -478,6 +517,7 @@ fn test_message_group_filling_from_buffers() {
         group_limit - 2,
         group_vert_size,
         |account_id| (int_buffer_par_0.msgs.contains_key(account_id), 1),
+        check_skip_msg.clone(),
     );
     println!(
         "\r\n4.2: int_buffer_par_1: {:?}",
@@ -494,9 +534,13 @@ fn test_message_group_filling_from_buffers() {
     // should not fill slot 8
     // should append messages to slots 1, 6
     // should not append messages to slots 2-5
-    ext_buffer_range_1.fill_message_group(&mut msg_group, group_limit, group_vert_size + 1, |_| {
-        (false, 0)
-    });
+    ext_buffer_range_1.fill_message_group(
+        &mut msg_group,
+        group_limit,
+        group_vert_size + 1,
+        |_| (false, 0),
+        check_skip_msg.clone(),
+    );
     println!(
         "\r\n4.3: ext_buffer_range_1: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_1)
@@ -516,6 +560,7 @@ fn test_message_group_filling_from_buffers() {
         group_limit,
         group_vert_size + 1,
         |account_id| (ext_buffer_range_1.msgs.contains_key(account_id), 1),
+        check_skip_msg.clone(),
     );
     println!(
         "\r\n4.4: ext_buffer_range_2: {:?}",
@@ -534,9 +579,13 @@ fn test_message_group_filling_from_buffers() {
     // first fill group with internals from partition 0
     // should fully fill slots 1, 2
     // should not fill slots 3-5
-    int_buffer_par_0.fill_message_group(&mut msg_group, group_limit - 3, group_vert_size, |_| {
-        (false, 0)
-    });
+    int_buffer_par_0.fill_message_group(
+        &mut msg_group,
+        group_limit - 3,
+        group_vert_size,
+        |_| (false, 0),
+        check_skip_msg.clone(),
+    );
     println!(
         "\r\n5.1: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
@@ -554,6 +603,7 @@ fn test_message_group_filling_from_buffers() {
         group_limit - 2,
         group_vert_size,
         |account_id| (int_buffer_par_0.msgs.contains_key(account_id), 1),
+        check_skip_msg.clone(),
     );
     println!(
         "\r\n5.2: int_buffer_par_1: {:?}",
@@ -570,9 +620,13 @@ fn test_message_group_filling_from_buffers() {
     // should not fill slots 6-8
     // should append messages to slot 1
     // should not append messages to slots 2, 3
-    ext_buffer_range_1.fill_message_group(&mut msg_group, group_limit, group_vert_size + 1, |_| {
-        (false, 0)
-    });
+    ext_buffer_range_1.fill_message_group(
+        &mut msg_group,
+        group_limit,
+        group_vert_size + 1,
+        |_| (false, 0),
+        check_skip_msg.clone(),
+    );
     println!(
         "\r\n5.3: ext_buffer_range_1: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_1)
@@ -593,6 +647,7 @@ fn test_message_group_filling_from_buffers() {
         group_limit,
         group_vert_size + 1,
         |account_id| (ext_buffer_range_1.msgs.contains_key(account_id), 1),
+        check_skip_msg.clone(),
     );
     println!(
         "\r\n5.4: ext_buffer_range_2: {:?}",
@@ -616,9 +671,13 @@ fn test_message_group_filling_from_buffers() {
 
     // first fill group with internals from partition 0
     // should fully fill 5 normal slots
-    int_buffer_par_0.fill_message_group(&mut msg_group, group_limit - 3, group_vert_size, |_| {
-        (false, 0)
-    });
+    int_buffer_par_0.fill_message_group(
+        &mut msg_group,
+        group_limit - 3,
+        group_vert_size,
+        |_| (false, 0),
+        check_skip_msg.clone(),
+    );
     println!(
         "\r\n6.1: int_buffer_par_0: {:?}",
         DebugMessagesBuffer(&int_buffer_par_0)
@@ -636,6 +695,7 @@ fn test_message_group_filling_from_buffers() {
         group_limit - 2,
         group_vert_size,
         |account_id| (int_buffer_par_0.msgs.contains_key(account_id), 1),
+        check_skip_msg.clone(),
     );
     println!(
         "\r\n6.2: int_buffer_par_1: {:?}",
@@ -649,9 +709,13 @@ fn test_message_group_filling_from_buffers() {
 
     // then append externals from range 1
     // should append to slot 1
-    ext_buffer_range_1.fill_message_group(&mut msg_group, group_limit, group_vert_size + 1, |_| {
-        (false, 0)
-    });
+    ext_buffer_range_1.fill_message_group(
+        &mut msg_group,
+        group_limit,
+        group_vert_size + 1,
+        |_| (false, 0),
+        check_skip_msg.clone(),
+    );
     println!(
         "\r\n6.3: ext_buffer_range_1: {:?}",
         DebugMessagesBuffer(&ext_buffer_range_1)
@@ -669,6 +733,7 @@ fn test_message_group_filling_from_buffers() {
         group_limit,
         group_vert_size + 1,
         |account_id| (ext_buffer_range_1.msgs.contains_key(account_id), 1),
+        check_skip_msg.clone(),
     );
     println!(
         "\r\n6.4: ext_buffer_range_2: {:?}",
