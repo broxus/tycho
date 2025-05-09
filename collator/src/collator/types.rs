@@ -1013,6 +1013,7 @@ pub struct ParsedMessage {
     pub special_origin: Option<SpecialOrigin>,
     pub block_seqno: Option<BlockSeqno>,
     pub from_same_shard: Option<bool>,
+    pub ext_msg_chain_time: Option<u64>,
 }
 
 impl ParsedMessage {
@@ -1020,8 +1021,15 @@ impl ParsedMessage {
         match (&self.info, self.special_origin) {
             (_, Some(SpecialOrigin::Recover)) => ParsedMessageKind::Recover,
             (_, Some(SpecialOrigin::Mint)) => ParsedMessageKind::Mint,
-            (MsgInfo::ExtIn(_), _) => ParsedMessageKind::ExtIn,
-            (MsgInfo::Int(_), _) => ParsedMessageKind::Int,
+            (MsgInfo::ExtIn(_), _) => ParsedMessageKind::ExtIn {
+                chain_time: self.ext_msg_chain_time.unwrap(),
+            },
+            (MsgInfo::Int(int_msg_info), _) => ParsedMessageKind::Int {
+                queue_key: QueueKey {
+                    lt: int_msg_info.created_lt,
+                    hash: *self.cell.repr_hash(),
+                },
+            },
             (MsgInfo::ExtOut(_), _) => ParsedMessageKind::ExtOut,
         }
     }
@@ -1035,8 +1043,8 @@ impl ParsedMessage {
 pub enum ParsedMessageKind {
     Recover,
     Mint,
-    ExtIn,
-    Int,
+    ExtIn { chain_time: u64 },
+    Int { queue_key: QueueKey },
     ExtOut,
 }
 

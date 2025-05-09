@@ -476,7 +476,7 @@ fn test_read_externals() {
     assert_eq!(by_par.processed_offset, 1);
 
     let by_par = range_reader.reader_state.get_state_by_partition(1).unwrap();
-    assert_eq!(by_par.buffer.msgs_count(), 3);
+    assert_eq!(by_par.buffer.msgs_count(), 2); // 1 ext msg expired in buffer
     assert_eq!(by_par.skip_offset, 1);
     assert_eq!(by_par.processed_offset, 1);
 
@@ -510,7 +510,7 @@ fn test_read_externals() {
     let msg_group = msg_groups.get(&0).unwrap();
     assert_eq!(msg_group.messages_count(), 1);
     let msg_group = msg_groups.get(&1).unwrap();
-    assert_eq!(msg_group.messages_count(), 3);
+    assert_eq!(msg_group.messages_count(), 2);
 
     let by_par = externals_reader
         .reader_state
