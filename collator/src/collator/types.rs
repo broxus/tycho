@@ -1064,6 +1064,7 @@ pub struct ParsedMessage {
     pub special_origin: Option<SpecialOrigin>,
     pub block_seqno: Option<BlockSeqno>,
     pub from_same_shard: Option<bool>,
+    pub ext_msg_chain_time: Option<u64>,
 }
 
 impl ParsedMessage {
