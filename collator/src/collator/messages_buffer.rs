@@ -6,7 +6,7 @@ use rayon::iter::IntoParallelIterator;
 use tycho_block_util::queue::QueueKey;
 use tycho_util::{FastHashMap, FastHashSet};
 
-use super::types::ParsedMessage;
+use super::types::{ParsedMessage, ParsedMessageKind};
 use crate::types::{DebugIter, DisplayIter};
 
 #[cfg(test)]
@@ -113,15 +113,17 @@ impl MessagesBuffer {
     }
 
     /// Returns queue keys of collected internal queue messages.
-    pub fn fill_message_group<F>(
+    pub fn fill_message_group<FA, FM>(
         &mut self,
         msg_group: &mut MessageGroup,
         slots_count: usize,
         slot_vert_size: usize,
-        check_skip_account: F,
+        check_skip_account: FA,
+        mut check_skip_msg: FM,
     ) -> FillMessageGroupResult
     where
-        F: Fn(&HashBytes) -> (bool, u64),
+        FA: Fn(&HashBytes) -> (bool, u64),
+        FM: FnMut(&ParsedMessage) -> bool,
     {
         // evaluate ops count for wu calculation
         let mut ops_count = 0;
@@ -184,6 +186,7 @@ impl MessagesBuffer {
                         &mut slot_cx,
                         &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
+                        &mut check_skip_msg,
                     );
                     ops_count.saturating_add_assign(move_ops_count);
 
@@ -261,6 +264,7 @@ impl MessagesBuffer {
                         &mut slot_cx,
                         &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
+                        &mut check_skip_msg,
                     );
                     ops_count.saturating_add_assign(move_ops_count);
 
@@ -294,6 +298,7 @@ impl MessagesBuffer {
                         &mut slot_cx,
                         &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
+                        &mut check_skip_msg,
                     );
                     ops_count.saturating_add_assign(move_ops_count);
 
@@ -346,20 +351,29 @@ impl MessagesBuffer {
         }
     }
 
-    fn move_account_messages_to_slot(
+    fn move_account_messages_to_slot<FM>(
         &mut self,
         account_id: HashBytes,
         msg_group: &mut MessageGroup,
         slot_cx: &mut SlotContext<'_>,
         collected_queue_msgs_keys: &mut Vec<QueueKey>,
         slots_index_updates: &mut BTreeMap<SlotId, SlotIndexUpdate>,
-    ) -> u64 {
+        check_skip_msg: &mut FM,
+    ) -> u64
+    where
+        FM: FnMut(&ParsedMessage) -> bool,
+    {
         // evaluate ops count for wu calculation
         let mut ops_count = 0;
 
         let mut amount = 0;
-        let mut int_count = 0;
-        let mut ext_count = 0;
+
+        let mut int_collected_count = 0;
+        let mut int_skipped_count = 0;
+        let mut ext_collected_count = 0;
+        let mut ext_skipped_count = 0;
+
+        let mut should_add_account_to_slot_index = false;
 
         if let Some(account_msgs) = self.msgs.get_mut(&account_id) {
             ops_count.saturating_add_assign(1);
@@ -372,22 +386,38 @@ impl MessagesBuffer {
             let slot_account_msgs = msg_group.msgs.entry(account_id).or_default();
             ops_count.saturating_add_assign(1);
 
-            if slot_account_msgs.is_empty() {
-                slot_cx.slot.accounts.push(account_id);
-            }
+            should_add_account_to_slot_index = slot_account_msgs.is_empty();
 
             slot_account_msgs.reserve(amount);
-            for msg in account_msgs.drain(..amount) {
-                match (&msg.info, &msg.special_origin) {
-                    (MsgInfo::Int(int_msg_info), None) => {
-                        let queue_key = QueueKey {
-                            lt: int_msg_info.created_lt,
-                            hash: *msg.cell.repr_hash(),
-                        };
-                        collected_queue_msgs_keys.push(queue_key);
-                        int_count += 1;
+            while int_collected_count + ext_collected_count < amount {
+                let Some(msg) = account_msgs.pop_front() else {
+                    break;
+                };
+                ops_count.saturating_add_assign(1);
+
+                // check and skip message if required
+                if check_skip_msg(&msg) {
+                    match msg.kind() {
+                        ParsedMessageKind::Int { .. } => {
+                            int_skipped_count += 1;
+                        }
+                        ParsedMessageKind::ExtIn { .. } => {
+                            ext_skipped_count += 1;
+                        }
+                        _ => unreachable!("must contain only Int and ExtIn messages"),
                     }
-                    (MsgInfo::ExtIn(_), None) => ext_count += 1,
+                    continue;
+                }
+
+                // collect message if it was not skipped
+                match msg.kind() {
+                    ParsedMessageKind::Int { queue_key } => {
+                        collected_queue_msgs_keys.push(queue_key);
+                        int_collected_count += 1;
+                    }
+                    ParsedMessageKind::ExtIn { .. } => {
+                        ext_collected_count += 1;
+                    }
                     _ => unreachable!("must contain only Int and ExtIn messages"),
                 }
                 slot_account_msgs.push(msg);
@@ -399,15 +429,23 @@ impl MessagesBuffer {
         }
 
         // update buffer msgs counter
-        self.int_count -= int_count;
-        self.ext_count -= ext_count;
+        self.int_count -= int_collected_count;
+        self.int_count -= int_skipped_count;
+        self.ext_count -= ext_collected_count;
+        self.ext_count -= ext_skipped_count;
 
         // update slot msgs counter
-        slot_cx.slot.int_count += int_count;
-        slot_cx.slot.ext_count += ext_count;
+        slot_cx.slot.int_count += int_collected_count;
+        slot_cx.slot.ext_count += ext_collected_count;
 
         // calc remaining capacity
-        slot_cx.remaning_capacity -= amount;
+        let collected_count = int_collected_count + ext_collected_count;
+        slot_cx.remaning_capacity -= collected_count;
+
+        // add account to slot index if any message collected
+        if should_add_account_to_slot_index && collected_count > 0 {
+            slot_cx.slot.accounts.push(account_id);
+        }
 
         // collect slot index updates
         slots_index_updates

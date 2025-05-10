@@ -327,6 +327,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                             special_origin: None,
                             block_seqno: Some(block_seqno),
                             from_same_shard: Some(msg.source == for_shard_id),
+                            ext_msg_chain_time: None,
                         }));
                     res.metrics
                         .add_to_msgs_groups_ops_count
