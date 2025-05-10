@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use governor::clock::QuantaClock;
+use governor::state::{InMemoryState, NotKeyed};
 use tokio_util::codec::{FramedRead, FramedWrite};
+use tycho_util::io::ratelimit::{RatelimitAsyncWriteExt, RatelimitedWriter};
 use tycho_util::metrics::{GaugeGuard, HistogramGuard};
 
 use crate::network::config::NetworkConfig;
@@ -25,11 +28,18 @@ const METRIC_OUT_MESSAGES: &str = "tycho_net_out_messages";
 pub struct Peer {
     connection: Connection,
     config: Arc<NetworkConfig>,
+    rate_limiter: Arc<governor::RateLimiter<NotKeyed, InMemoryState, QuantaClock>>,
 }
 
 impl Peer {
     pub(crate) fn new(connection: Connection, config: Arc<NetworkConfig>) -> Self {
-        Self { connection, config }
+        Self {
+            connection,
+            rate_limiter: Arc::new(
+                tycho_util::io::ratelimit::rate_limiter(config.bandwidth_cap).unwrap(),
+            ),
+            config,
+        }
     }
 
     pub fn peer_id(&self) -> &PeerId {
@@ -42,12 +52,13 @@ impl Peer {
         let _histogram = HistogramGuard::begin(METRIC_OUT_QUERIES_TIME);
 
         let (send_stream, recv_stream) = self.connection.open_bi().await?;
+        let send_stream = send_stream.ratelimit_write(&self.rate_limiter);
+        let send_stream = std::pin::pin!(send_stream);
         let mut send_stream = FramedWrite::new(send_stream, make_codec(&self.config));
         let mut recv_stream = FramedRead::new(recv_stream, make_codec(&self.config));
 
         send_request(&mut send_stream, request).await?;
-        send_stream.get_mut().finish()?;
-
+        RatelimitedWriter::get_mut(send_stream.into_inner()).finish()?;
         recv_response(&mut recv_stream).await.map_err(Into::into)
     }
 
