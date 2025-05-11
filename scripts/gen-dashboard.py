@@ -999,42 +999,42 @@ def jrpc_timings() -> RowPanel:
 def collator_finalize_block() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_collator_finalize_block_time",
+            "tycho_collator_finalize_block_time_high",
             "Total time to finalize block",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_account_blocks_and_msgs_time",
+            "tycho_collator_finalize_build_account_blocks_and_msgs_time_high",
             "Build in parallel account blocks, InMsgDescr, OutMsgDescr",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_account_blocks_time",
+            "tycho_collator_finalize_build_account_blocks_time_high",
             "only Build account blocks",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_in_msgs_time",
+            "tycho_collator_finalize_build_in_msgs_time_high",
             "only Build InMsgDescr",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_out_msgs_time",
+            "tycho_collator_finalize_build_out_msgs_time_high",
             "only Build OutMsgDescr",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finish_build_mc_state_extra_time",
+            "tycho_collator_finish_build_mc_state_extra_time_high",
             "Build McStateExtra",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_state_update_time",
+            "tycho_collator_finalize_build_state_update_time_high",
             "Compute MerkleUpdate",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_create_merkle_update_time",
+            "tycho_collator_create_merkle_update_time_high",
             "inc. Create MerkleUpdate",
             labels=['workchain=~"$workchain"'],
         ),
@@ -1049,7 +1049,7 @@ def collator_finalize_block() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_block_time",
+            "tycho_collator_finalize_build_block_time_high",
             "Build Block",
             labels=['workchain=~"$workchain"'],
         ),
@@ -1486,22 +1486,22 @@ def collator_time_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_prepare_working_state_update_time",
+            "tycho_collator_prepare_working_state_update_time_high",
             "Prepare WorkingState update",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_resume_collation_time",
+            "tycho_collator_resume_collation_time_high",
             "Resume collation",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_build_new_state_time",
+            "tycho_collator_build_new_state_time_high",
             "Build Pure State for next collation",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_wait_for_working_state_time",
+            "tycho_collator_wait_for_working_state_time_high",
             "Wait for updated WorkingState",
             labels=['workchain=~"$workchain"'],
         ),
@@ -1514,7 +1514,7 @@ def collator_time_metrics() -> RowPanel:
             "Try collate next shard block",
         ),
         create_heatmap_panel(
-            "tycho_collator_import_next_anchor_time",
+            "tycho_collator_import_next_anchor_time_high",
             "Import next anchor time",
             labels=['workchain=~"$workchain"'],
         ),
@@ -1631,82 +1631,82 @@ def collator_wu_metrics() -> RowPanel:
 def collator_core_operations_metrics() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_do_collate_total_time",
+            "tycho_do_collate_total_time_high",
             "Total collation time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_prepare_time",
+            "tycho_do_collate_prepare_time_high",
             "Collation prepare time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_execute_time",
+            "tycho_do_collate_execute_time_high",
             "Execution time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_fill_msgs_total_time",
+            "tycho_do_collate_fill_msgs_total_time_high",
             "Execution time: incl Fill messages",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_init_iterator_time",
+            "tycho_do_collate_init_iterator_time_high",
             "Execution time: incl Fill messages: init iterator",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_read_int_msgs_time",
+            "tycho_do_collate_read_int_msgs_time_high",
             "Execution time: incl Fill messages: read existing",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_read_ext_msgs_time",
+            "tycho_do_collate_read_ext_msgs_time_high",
             "Execution time: incl Fill messages: read externals",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_read_new_msgs_time",
+            "tycho_do_collate_read_new_msgs_time_high",
             "Execution time: incl Fill messages: read new",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_add_to_msg_groups_time",
+            "tycho_do_collate_add_to_msg_groups_time_high",
             "Execution time: incl Fill messages: add to msg groups",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_exec_msgs_total_time",
+            "tycho_do_collate_exec_msgs_total_time_high",
             "Execution time: incl Execute messages",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_process_txs_total_time",
+            "tycho_do_collate_process_txs_total_time_high",
             "Execution time: incl Process transactions",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_create_queue_diff_time",
-            "async Create message queue diff",
+            "tycho_do_collate_create_queue_diff_time_high",
+            "Create message queue diff",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_apply_queue_diff_time",
+            "tycho_do_collate_apply_queue_diff_time_high",
             "async Apply message queue diff",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_build_statistics_time",
+            "tycho_do_collate_build_statistics_time_high",
             "async Apply message queue diff: inc. Build statistics",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_block_time",
+            "tycho_collator_finalize_block_time_high",
             "Finalize block",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_handle_block_candidate_time",
+            "tycho_do_collate_handle_block_candidate_time_high",
             "Handle block candidate",
             labels=['workchain=~"$workchain"'],
         ),
