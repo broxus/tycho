@@ -67,7 +67,7 @@ impl CollatorStdImpl {
     ) -> Result<()> {
         let labels: [(&str, String); 1] = [("workchain", self.shard_id.workchain().to_string())];
         let total_collation_histogram =
-            HistogramGuard::begin_with_labels("tycho_do_collate_total_time", &labels);
+            HistogramGuard::begin_with_labels("tycho_do_collate_total_time_high", &labels);
 
         let WorkingState {
             next_block_id_short,
@@ -286,7 +286,7 @@ impl CollatorStdImpl {
 
         // prepare execution
         let histogram_prepare =
-            HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", &labels);
+            HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time_high", &labels);
 
         let shards_processed_to_by_partitions = state
             .collation_data
@@ -317,7 +317,7 @@ impl CollatorStdImpl {
         // execute incoming messages
         let execute_elapsed = {
             let histogram =
-                HistogramGuard::begin_with_labels("tycho_do_collate_execute_time", &labels);
+                HistogramGuard::begin_with_labels("tycho_do_collate_execute_time_high", &labels);
 
             execute_phase.run()?;
 
@@ -920,7 +920,7 @@ impl CollatorStdImpl {
             };
             async move {
                 let _histogram = HistogramGuard::begin_with_labels(
-                    "tycho_collator_build_new_state_time",
+                    "tycho_collator_build_new_state_time_high",
                     &labels,
                 );
                 adapter
@@ -932,7 +932,7 @@ impl CollatorStdImpl {
         let handle_block_candidate_elapsed;
         {
             let histogram = HistogramGuard::begin_with_labels(
-                "tycho_do_collate_handle_block_candidate_time",
+                "tycho_do_collate_handle_block_candidate_time_high",
                 &labels,
             );
 

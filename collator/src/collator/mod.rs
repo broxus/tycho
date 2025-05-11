@@ -587,7 +587,7 @@ impl CollatorStdImpl {
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let histogram =
-            HistogramGuard::begin_with_labels("tycho_collator_resume_collation_time", &labels);
+            HistogramGuard::begin_with_labels("tycho_collator_resume_collation_time_high", &labels);
 
         // update collation session info to refer to a correct subset in collated block
         self.collation_session = collation_session;
@@ -826,7 +826,7 @@ impl CollatorStdImpl {
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let _histogram = HistogramGuard::begin_with_labels(
-            "tycho_collator_prepare_working_state_update_time",
+            "tycho_collator_prepare_working_state_update_time_high",
             &labels,
         );
 
@@ -1072,7 +1072,7 @@ impl CollatorStdImpl {
         let labels = [("workchain", shard_id.workchain().to_string())];
 
         let _histogram =
-            HistogramGuardWithLabels::begin("tycho_collator_import_next_anchor_time", &labels);
+            HistogramGuardWithLabels::begin("tycho_collator_import_next_anchor_time_high", &labels);
 
         let timer = std::time::Instant::now();
 
@@ -2045,8 +2045,10 @@ impl DelayedWorkingState {
 
     async fn wait(&mut self) -> Result<Box<WorkingState>> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
-        let _histogram =
-            HistogramGuardWithLabels::begin("tycho_collator_wait_for_working_state_time", &labels);
+        let _histogram = HistogramGuardWithLabels::begin(
+            "tycho_collator_wait_for_working_state_time_high",
+            &labels,
+        );
 
         if let Some(state) = self.unused.take() {
             return Ok(state);

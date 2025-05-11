@@ -150,7 +150,7 @@ impl Phase<FinalizeState> {
             anchors_cache,
         } = {
             let histogram_create_queue_diff = HistogramGuard::begin_with_labels(
-                "tycho_do_collate_create_queue_diff_time",
+                "tycho_do_collate_create_queue_diff_time_high",
                 &labels,
             );
             let finalize_message_reader_res = messages_reader.finalize(
@@ -199,7 +199,7 @@ impl Phase<FinalizeState> {
                 let _span = span.enter();
 
                 let histogram = HistogramGuard::begin_with_labels(
-                    "tycho_do_collate_build_statistics_time",
+                    "tycho_do_collate_build_statistics_time_high",
                     &labels,
                 );
 
@@ -214,7 +214,7 @@ impl Phase<FinalizeState> {
 
                 // apply queue diff
                 let histogram = HistogramGuard::begin_with_labels(
-                    "tycho_do_collate_apply_queue_diff_time",
+                    "tycho_do_collate_apply_queue_diff_time_high",
                     &labels,
                 );
 
@@ -280,7 +280,7 @@ impl Phase<FinalizeState> {
 
         let labels = &[("workchain", shard.workchain().to_string())];
         let histogram =
-            HistogramGuard::begin_with_labels("tycho_collator_finalize_block_time", labels);
+            HistogramGuard::begin_with_labels("tycho_collator_finalize_block_time_high", labels);
 
         let executor = self.extra.executor;
 
@@ -306,13 +306,13 @@ impl Phase<FinalizeState> {
         let mut out_msgs_res = Ok(Default::default());
         let mut build_out_msgs_elapsed = Duration::ZERO;
         let histogram_build_account_blocks_and_messages = HistogramGuard::begin_with_labels(
-            "tycho_collator_finalize_build_account_blocks_and_msgs_time",
+            "tycho_collator_finalize_build_account_blocks_and_msgs_time_high",
             labels,
         );
         rayon::scope(|s| {
             s.spawn(|_| {
                 let histogram = HistogramGuard::begin_with_labels(
-                    "tycho_collator_finalize_build_in_msgs_time",
+                    "tycho_collator_finalize_build_in_msgs_time_high",
                     labels,
                 );
                 in_msgs_res = Self::build_in_msgs(&collation_data.in_msgs);
@@ -320,7 +320,7 @@ impl Phase<FinalizeState> {
             });
             s.spawn(|_| {
                 let histogram = HistogramGuard::begin_with_labels(
-                    "tycho_collator_finalize_build_out_msgs_time",
+                    "tycho_collator_finalize_build_out_msgs_time_high",
                     labels,
                 );
                 out_msgs_res = Self::build_out_msgs(&collation_data.out_msgs);
@@ -328,7 +328,7 @@ impl Phase<FinalizeState> {
             });
 
             let histogram = HistogramGuard::begin_with_labels(
-                "tycho_collator_finalize_build_account_blocks_time",
+                "tycho_collator_finalize_build_account_blocks_time_high",
                 labels,
             );
 
@@ -377,7 +377,7 @@ impl Phase<FinalizeState> {
         let build_mc_state_extra_elapsed;
         let (mc_state_extra, master_ref) = if is_masterchain {
             let histogram = HistogramGuard::begin_with_labels(
-                "tycho_collator_finish_build_mc_state_extra_time",
+                "tycho_collator_finish_build_mc_state_extra_time_high",
                 labels,
             );
 
@@ -466,7 +466,7 @@ impl Phase<FinalizeState> {
         let finalize_wu_total;
         let (state_update, new_observable_state) = {
             let histogram = HistogramGuard::begin_with_labels(
-                "tycho_collator_finalize_build_state_update_time",
+                "tycho_collator_finalize_build_state_update_time_high",
                 labels,
             );
 
@@ -577,7 +577,7 @@ impl Phase<FinalizeState> {
         let build_block_elapsed;
         let (new_block, new_block_extra, new_mc_block_extra) = {
             let histogram = HistogramGuard::begin_with_labels(
-                "tycho_collator_finalize_build_block_time",
+                "tycho_collator_finalize_build_block_time_high",
                 labels,
             );
 
@@ -1488,7 +1488,7 @@ fn create_merkle_update(
 ) -> Result<MerkleUpdate> {
     let labels = [("workchain", shard_id.workchain().to_string())];
     let histogram =
-        HistogramGuard::begin_with_labels("tycho_collator_create_merkle_update_time", &labels);
+        HistogramGuard::begin_with_labels("tycho_collator_create_merkle_update_time_high", &labels);
 
     let merkle_update_builder =
         MerkleUpdate::create(old_state_root.as_ref(), new_state_root.as_ref(), usage_tree);

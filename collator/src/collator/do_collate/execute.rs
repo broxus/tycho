@@ -152,11 +152,11 @@ impl Phase<ExecuteState> {
             execute_msgs_total_elapsed.as_millis();
         metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
             .set(executed_groups_count as f64);
-        metrics::histogram!("tycho_do_collate_fill_msgs_total_time", &labels)
+        metrics::histogram!("tycho_do_collate_fill_msgs_total_time_high", &labels)
             .record(fill_msgs_total_elapsed);
-        metrics::histogram!("tycho_do_collate_exec_msgs_total_time", &labels)
+        metrics::histogram!("tycho_do_collate_exec_msgs_total_time_high", &labels)
             .record(execute_msgs_total_elapsed);
-        metrics::histogram!("tycho_do_collate_process_txs_total_time", &labels)
+        metrics::histogram!("tycho_do_collate_process_txs_total_time_high", &labels)
             .record(process_txs_total_elapsed);
 
         let process_txs_wu = calc_process_txs_wu(
@@ -284,15 +284,15 @@ impl Phase<ExecuteState> {
             ..
         }) = &self.extra.execute_result
         {
-            metrics::histogram!("tycho_do_collate_init_iterator_time", &labels)
+            metrics::histogram!("tycho_do_collate_init_iterator_time_high", &labels)
                 .record(metrics.init_iterator_timer.total_elapsed);
-            metrics::histogram!("tycho_do_collate_read_int_msgs_time", &labels)
+            metrics::histogram!("tycho_do_collate_read_int_msgs_time_high", &labels)
                 .record(metrics.read_existing_messages_timer.total_elapsed);
-            metrics::histogram!("tycho_do_collate_read_new_msgs_time", &labels)
+            metrics::histogram!("tycho_do_collate_read_new_msgs_time_high", &labels)
                 .record(metrics.read_new_messages_timer.total_elapsed);
-            metrics::histogram!("tycho_do_collate_read_ext_msgs_time", &labels)
+            metrics::histogram!("tycho_do_collate_read_ext_msgs_time_high", &labels)
                 .record(metrics.read_ext_messages_timer.total_elapsed);
-            metrics::histogram!("tycho_do_collate_add_to_msg_groups_time", &labels)
+            metrics::histogram!("tycho_do_collate_add_to_msg_groups_time_high", &labels)
                 .record(metrics.add_to_message_groups_timer.total_elapsed);
         }
     }
