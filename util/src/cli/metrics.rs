@@ -38,6 +38,12 @@ pub fn init_metrics(config: &MetricsConfig) -> anyhow::Result<()> {
         7.5, 10.0, 30.0, 60.0, 120.0, 180.0, 240.0, 300.0,
     ];
 
+    const EXPONENTIAL_SECONDS_HIGH: &[f64] = &[
+        0.00001, 0.0001, 0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.125, 0.15, 0.175, 0.2,
+        0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5, 2.0, 2.5,
+        3.0,
+    ];
+
     const EXPONENTIAL_LONG_SECONDS: &[f64] = &[
         0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 240.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0,
         14400.0, 28800.0, 43200.0, 86400.0,
@@ -47,6 +53,10 @@ pub fn init_metrics(config: &MetricsConfig) -> anyhow::Result<()> {
 
     metrics_exporter_prometheus::PrometheusBuilder::new()
         .set_buckets_for_metric(Matcher::Suffix("_time".to_string()), EXPONENTIAL_SECONDS)?
+        .set_buckets_for_metric(
+            Matcher::Suffix("_time_high".to_string()),
+            EXPONENTIAL_SECONDS_HIGH,
+        )?
         .set_buckets_for_metric(Matcher::Suffix("_threads".to_string()), EXPONENTIAL_THREADS)?
         .set_buckets_for_metric(
             Matcher::Suffix("_time_long".to_string()),
