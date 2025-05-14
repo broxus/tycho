@@ -136,9 +136,12 @@ impl ShardStateStorage {
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
 
             let ctx = cell_storage.create_store_ctx(estimated_update_size_bytes);
-            CellStorage::store_cell(root_cell.as_ref(), &ctx)?;
 
             rayon::scope(|s| {
+                s.spawn(|_| {
+                    CellStorage::store_cell(root_cell.as_ref(), &ctx).unwrap();
+                });
+
                 for (_, data_root_cell) in root_data_cells.iter() {
                     s.spawn(|_| {
                         CellStorage::store_cell(data_root_cell.as_ref(), &ctx).unwrap();
@@ -294,21 +297,12 @@ impl ShardStateStorage {
                 let key = key.to_vec();
 
                 let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
-                    let start = std::time::Instant::now();
                     let (stats, mut batch) = cell_storage.remove_cell(&alloc, &root_hash)?;
-
-                    let finished = start.elapsed().as_millis();
 
                     batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
                     db.raw()
                         .rocksdb()
                         .write_opt(batch, db.cells.write_config())?;
-
-                    tracing::info!(
-                        ms = finished,
-                        full_ms = start.elapsed().as_millis(),
-                        "remove_cell_time"
-                    );
 
                     Ok::<_, anyhow::Error>((stats, alloc))
                 })
@@ -417,8 +411,6 @@ impl ShardStateStorage {
                 let data_roots = data_roots.clone();
 
                 let total = tokio::task::spawn_blocking(move || {
-                    let start = std::time::Instant::now();
-
                     tracing::info!(len = data_roots.len(), block_id = ?cur_block_id, "data_roots");
 
                     let ctx = cell_storage.create_remove_ctx();
@@ -433,8 +425,6 @@ impl ShardStateStorage {
                     let mut batch = WriteBatch::with_capacity_bytes(ctx.len() * (32 + 8 + 8));
 
                     let total = ctx.finalize(&mut batch);
-
-                    let finished = start.elapsed().as_millis();
 
                     let mut from = [0u8; tables::ShardStateData::KEY_LEN];
                     from[..80].copy_from_slice(&cur_block_id.to_vec());
@@ -451,12 +441,6 @@ impl ShardStateStorage {
                     db.raw()
                         .rocksdb()
                         .write_opt(batch, db.cells.write_config())?;
-
-                    tracing::info!(
-                        ms = finished,
-                        full_ms = start.elapsed().as_millis(),
-                        "accounts remove_cell_time"
-                    );
 
                     Ok::<_, anyhow::Error>(total)
                 })

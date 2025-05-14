@@ -2,7 +2,6 @@ use anyhow::Result;
 use bytesize::ByteSize;
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, CellBuilder, CellSlice, HashBytes, Lazy};
-use everscale_types::dict::Dict;
 use everscale_types::models::{
     CurrencyCollection, IntMsgInfo, IntermediateAddr, Message, MsgEnvelope, MsgInfo, OutMsg,
     OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, ShardIdent,

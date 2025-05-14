@@ -583,18 +583,22 @@ impl Phase<FinalizeState> {
 
             total_validator_fees = new_observable_state.total_validator_fees.clone();
 
-            // calc merkle update
-            let merkle_update = create_merkle_update(
-                &shard,
-                self.state.prev_shard_data.pure_state_root(),
-                &new_state_root,
-                &usage_tree,
-            )?;
+            let mut merkle_update = MerkleUpdate::default();
 
             let state_data_merkle_update = Arc::new(Mutex::new(Dict::new()));
-
             let prev_roots = self.state.prev_shard_data.pure_state_data_roots();
             rayon::scope(|s| {
+                s.spawn(|_| {
+                    // calc merkle update
+                    merkle_update = create_merkle_update(
+                        &shard,
+                        self.state.prev_shard_data.pure_state_root(),
+                        &new_state_root,
+                        &usage_tree,
+                    )
+                    .unwrap();
+                });
+
                 for (id, new_state) in &new_observable_state_data {
                     let prev_root = prev_roots.get(id).unwrap();
                     let usage_tree = usage_trees.get(id).unwrap();
