@@ -359,8 +359,6 @@ impl ShardStateStorage {
         let mut state_data_read_options = self.cells_db.shard_state_data.new_read_config();
         state_data_read_options.set_snapshot(&snapshot);
 
-        let mut alloc = bumpalo::Bump::new();
-
         // Create iterator
         let mut iter =
             raw.raw_iterator_cf_opt(&shard_state_data_cf.bound(), state_data_read_options);
@@ -401,10 +399,14 @@ impl ShardStateStorage {
                 continue;
             }
 
-            cur_block_id = block_id;
-            data_roots.clear();
+            if cur_block_id.seqno == 0 {
+                data_roots.push(root_hash);
 
-            alloc.reset();
+                cur_block_id = block_id;
+
+                iter.next();
+                continue;
+            }
 
             {
                 let _guard = self.gc_lock.lock().await;
@@ -412,11 +414,12 @@ impl ShardStateStorage {
                 let db = self.cells_db.clone();
                 let cell_storage = self.cell_storage.clone();
 
-                let key = key.to_vec();
                 let data_roots = data_roots.clone();
 
-                let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
+                let total = tokio::task::spawn_blocking(move || {
                     let start = std::time::Instant::now();
+
+                    tracing::info!(len = data_roots.len(), block_id = ?cur_block_id, "data_roots");
 
                     let ctx = cell_storage.create_remove_ctx();
                     rayon::scope(|s| {
@@ -433,9 +436,16 @@ impl ShardStateStorage {
 
                     let finished = start.elapsed().as_millis();
 
-                    batch.delete_cf(
+                    let mut from = [0u8; tables::ShardStateData::KEY_LEN];
+                    from[..80].copy_from_slice(&cur_block_id.to_vec());
+
+                    let mut to = [0xff; tables::ShardStateData::KEY_LEN];
+                    to[..80].copy_from_slice(&cur_block_id.to_vec());
+
+                    batch.delete_range_cf(
                         &db.shard_state_data.get_unbounded_cf().bound(),
-                        key.as_slice(),
+                        from,
+                        to,
                     );
 
                     db.raw()
@@ -448,15 +458,18 @@ impl ShardStateStorage {
                         "accounts remove_cell_time"
                     );
 
-                    Ok::<_, anyhow::Error>((total, alloc))
+                    Ok::<_, anyhow::Error>(total)
                 })
                 .await??;
 
                 removed_cells += total;
-                alloc = inner_alloc; // Reuse allocation without passing alloc by ref
 
-                tracing::debug!(removed_cells = total, %block_id);
+                tracing::debug!(removed_cells = total, %cur_block_id);
             }
+
+            cur_block_id = block_id;
+            data_roots.clear();
+            data_roots.push(root_hash);
 
             removed_states += 1;
             iter.next();
