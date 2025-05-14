@@ -120,8 +120,8 @@ weedb = "0.4.1"
 zstd-safe = "7.2"
 zstd-sys = "2.0"
 
-tycho-executor = { git = "https://github.com/broxus/tycho-vm.git", rev = "e3f9cec978b43fb9da90f46059c2f3b9d4012b17" }
-tycho-vm = { git = "https://github.com/broxus/tycho-vm.git", rev = "e3f9cec978b43fb9da90f46059c2f3b9d4012b17" }
+tycho-executor = { git = "https://github.com/broxus/tycho-vm.git", rev = "c224351e576375430f4a2d66207406998d189946" }
+tycho-vm = { git = "https://github.com/broxus/tycho-vm.git", rev = "c224351e576375430f4a2d66207406998d189946" }
 
 # local deps
 tycho-block-util = { path = "./block-util", version = "0.2.8" }
@@ -135,7 +135,7 @@ tycho-storage = { path = "./storage", version = "0.2.8" }
 tycho-util = { path = "./util", version = "0.2.8" }
 
 [patch.crates-io]
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "b55da379aba126d4496c88bc7b8cc7af553ab37a" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "fee2eb43c3cbd0c5180a6d4c359e5bb415fb9d72" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
