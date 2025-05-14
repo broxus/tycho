@@ -253,7 +253,7 @@ async fn handle_run_get_method(id: String, state: RpcState, p: RunGetMethodParam
             .with_storage_fees(Tokens::ZERO)
             .require_ton_v6()
             .with_unpacked_config(config.unpacked.as_tuple())
-            .require_ton_v9();
+            .require_ton_v11();
 
         let libraries = (account_libs, state_libs);
         let mut vm = tycho_vm::VmState::builder()
