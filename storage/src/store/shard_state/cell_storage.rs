@@ -290,7 +290,6 @@ impl CellStorage {
             stack.pop();
         }
 
-        // Write transaction to the `WriteBatch`
         Ok(())
     }
 
@@ -465,49 +464,53 @@ impl StoreContext {
         let mut buffer = [0; 512];
 
         let key = cell.repr_hash();
+
+        if let Some(mut value) = self.transaction.get_mut(key) {
+            value.rc += 1;
+            return Ok(false);
+        }
+
+        let (old_rc, has_value) = 'value: {
+            const NEW_CELLS_DEPTH_THRESHOLD: usize = 4;
+
+            if depth >= NEW_CELLS_DEPTH_THRESHOLD {
+                // NOTE: `get` here is used to affect a "hotness" of the value, because
+                // there is a big chance that we will need it soon during state processing
+                if let Some(entry) = self.raw_cache.inner.get(key) {
+                    let rc = entry.header.header.load(Ordering::Acquire);
+                    break 'value (rc, rc > 0);
+                }
+            }
+
+            match self.db.cells.get(key).map_err(CellStorageError::Internal)? {
+                Some(value) => {
+                    let (rc, value) = refcount::decode_value_with_rc(value.as_ref());
+                    (rc, value.is_some())
+                }
+                None => (0, false),
+            }
+        };
+
+        assert!(
+            has_value && old_rc > 0 || !has_value && old_rc == 0,
+            "{has_value}, {old_rc}"
+        );
+
+        let data = if !has_value {
+            match StorageCell::serialize_to(cell, &mut buffer) {
+                Err(_) => return Err(CellStorageError::InvalidCell),
+                Ok(size) => Some(buffer[..size].to_vec()),
+            }
+        } else {
+            None
+        };
+
         Ok(match self.transaction.entry(*key) {
             Entry::Occupied(mut value) => {
                 value.get_mut().rc += 1;
                 false
             }
             Entry::Vacant(entry) => {
-                // A constant which tells since which depth we should start to use cache.
-                // This method is used mostly for inserting new states, so we can assume
-                // that first N levels will mostly be new.
-                //
-                // This value was chosen empirically.
-                const NEW_CELLS_DEPTH_THRESHOLD: usize = 4;
-
-                let (old_rc, has_value) = 'value: {
-                    if depth >= NEW_CELLS_DEPTH_THRESHOLD {
-                        // NOTE: `get` here is used to affect a "hotness" of the value, because
-                        // there is a big chance that we will need it soon during state processing
-                        if let Some(entry) = self.raw_cache.inner.get(key) {
-                            let rc = entry.header.header.load(Ordering::Acquire);
-                            break 'value (rc, rc > 0);
-                        }
-                    }
-
-                    match self.db.cells.get(key).map_err(CellStorageError::Internal)? {
-                        Some(value) => {
-                            let (rc, value) = refcount::decode_value_with_rc(value.as_ref());
-                            (rc, value.is_some())
-                        }
-                        None => (0, false),
-                    }
-                };
-
-                // TODO: lower to `debug_assert` when sure
-                assert!(has_value && old_rc > 0 || !has_value && old_rc == 0);
-
-                let data = if !has_value {
-                    match StorageCell::serialize_to(cell, &mut buffer) {
-                        Err(_) => return Err(CellStorageError::InvalidCell),
-                        Ok(size) => Some(buffer[..size].to_vec()),
-                    }
-                } else {
-                    None
-                };
                 entry.insert(CellWithRefs { rc: 1, data });
                 !has_value
             }
