@@ -110,9 +110,7 @@ impl<W: Write> ZstdCompressedFile<W> {
     fn flush_buf(&mut self) -> std::io::Result<()> {
         if !self.buffer.is_empty() {
             if self.compressor.finished {
-                return Err(std::io::Error::other(
-                    "compressor already terminated",
-                ));
+                return Err(std::io::Error::other("compressor already terminated"));
             }
 
             self.writer.write_all(&self.buffer)?;
