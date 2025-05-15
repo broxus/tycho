@@ -1,7 +1,7 @@
 use std::cell::UnsafeCell;
 use std::collections::hash_map;
 use std::mem::{ManuallyDrop, MaybeUninit};
-use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -437,7 +437,7 @@ impl CellStorage {
 }
 
 struct CellWithRefs {
-    rc: u32,
+    rc: AtomicU32,
     data: Option<Vec<u8>>,
 }
 
@@ -465,8 +465,8 @@ impl StoreContext {
 
         let key = cell.repr_hash();
 
-        if let Some(mut value) = self.transaction.get_mut(key) {
-            value.rc += 1;
+        if let Some(mut value) = self.transaction.get(key) {
+            value.rc.fetch_add(1, Ordering::Relaxed);
             return Ok(false);
         }
 
@@ -507,11 +507,14 @@ impl StoreContext {
 
         Ok(match self.transaction.entry(*key) {
             Entry::Occupied(mut value) => {
-                value.get_mut().rc += 1;
+                value.get().rc.fetch_add(1, Ordering::Relaxed);
                 false
             }
             Entry::Vacant(entry) => {
-                entry.insert(CellWithRefs { rc: 1, data });
+                entry.insert(CellWithRefs {
+                    rc: AtomicU32::new(1),
+                    data,
+                });
                 !has_value
             }
         })
@@ -530,7 +533,7 @@ impl StoreContext {
                 s.spawn(move || {
                     for (key, value) in shard {
                         let value = value.get();
-                        let rc = value.rc;
+                        let rc = value.rc.load(Ordering::Relaxed);
                         if let Some(data) = &value.data {
                             cache.insert(key, rc, data);
                         } else {
@@ -547,7 +550,7 @@ impl StoreContext {
                 for kv in self.transaction.iter() {
                     let key = kv.key();
                     let value = kv.value();
-                    let rc = value.rc;
+                    let rc = value.rc.load(Ordering::Relaxed);
                     let data = value.data.as_deref();
 
                     buffer.clear();
