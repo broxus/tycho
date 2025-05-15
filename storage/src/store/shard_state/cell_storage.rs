@@ -510,7 +510,7 @@ impl StoreContext {
         };
 
         Ok(match self.transaction.entry(*key) {
-            Entry::Occupied(mut value) => {
+            Entry::Occupied(value) => {
                 value.get().rc.fetch_add(1, Ordering::Relaxed);
                 false
             }

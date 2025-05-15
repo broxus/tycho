@@ -137,13 +137,13 @@ impl ShardStateStorage {
 
             let ctx = cell_storage.create_store_ctx(estimated_update_size_bytes);
 
-            rayon::scope(|s| {
-                s.spawn(|_| {
+            std::thread::scope(|s| {
+                s.spawn(|| {
                     CellStorage::store_cell(root_cell.as_ref(), &ctx).unwrap();
                 });
 
                 for (_, data_root_cell) in root_data_cells.iter() {
-                    s.spawn(|_| {
+                    s.spawn(|| {
                         CellStorage::store_cell(data_root_cell.as_ref(), &ctx).unwrap();
                     });
                 }
@@ -413,9 +413,9 @@ impl ShardStateStorage {
                     tracing::info!(len = data_roots.len(), block_id = ?cur_block_id, "data_roots");
 
                     let ctx = cell_storage.create_remove_ctx();
-                    rayon::scope(|s| {
+                    std::thread::scope(|s| {
                         for data_root in data_roots.iter() {
-                            s.spawn(|_| {
+                            s.spawn(|| {
                                 ctx.remove_cell(data_root).unwrap();
                             });
                         }
