@@ -159,6 +159,7 @@ pub(super) enum CandidateStatus {
     Synced,
 }
 
+#[expect(clippy::large_enum_variant)]
 pub(super) enum BlockCacheEntryData {
     Collated {
         /// Collated block candidate with signatures
@@ -410,6 +411,7 @@ impl McBlockSubgraph {
     }
 }
 
+#[expect(clippy::large_enum_variant)]
 pub(super) enum McBlockSubgraphExtract {
     Extracted(McBlockSubgraph),
     AlreadyExtracted,
