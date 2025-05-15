@@ -531,7 +531,7 @@ fn parser_error<E>(error: E) -> std::io::Error
 where
     E: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    std::io::Error::new(std::io::ErrorKind::Other, error)
+    std::io::Error::other(error)
 }
 
 #[derive(thiserror::Error, Debug)]

@@ -172,8 +172,7 @@ impl HelmRunner {
         if output.status.success() {
             io::stdout().write_all(&output.stdout)
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
+            Err(io::Error::other(
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ))
         }
