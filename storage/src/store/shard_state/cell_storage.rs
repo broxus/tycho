@@ -482,6 +482,10 @@ impl StoreContext {
                 }
             }
 
+            if !self.db.cells.key_may_exist(key) {
+                break 'value (0, false);
+            }
+
             match self.db.cells.get(key).map_err(CellStorageError::Internal)? {
                 Some(value) => {
                     let (rc, value) = refcount::decode_value_with_rc(value.as_ref());
