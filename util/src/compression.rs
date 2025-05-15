@@ -110,8 +110,7 @@ impl<W: Write> ZstdCompressedFile<W> {
     fn flush_buf(&mut self) -> std::io::Result<()> {
         if !self.buffer.is_empty() {
             if self.compressor.finished {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(std::io::Error::other(
                     "compressor already terminated",
                 ));
             }
@@ -356,7 +355,7 @@ pub enum ZstdError {
 
 impl From<ZstdError> for std::io::Error {
     fn from(value: ZstdError) -> Self {
-        std::io::Error::new(std::io::ErrorKind::Other, value)
+        std::io::Error::other(value)
     }
 }
 

@@ -315,7 +315,7 @@ impl PrioritySemaphore {
                 .as_ref()
                 .is_none_or(|waker| !waker.will_wake(cx.waker()))
             {
-                old_waker = std::mem::replace(waker, Some(cx.waker().clone()));
+                old_waker = waker.replace(cx.waker().clone());
             }
         }
 
