@@ -135,7 +135,7 @@ impl ShardStateStorage {
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
 
-            let ctx = cell_storage.create_store_ctx(estimated_update_size_bytes);
+            let ctx = cell_storage.create_store_ctx(estimated_merkle_update_size);
 
             std::thread::scope(|s| {
                 s.spawn(|| {
