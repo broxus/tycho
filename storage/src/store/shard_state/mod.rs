@@ -267,7 +267,6 @@ impl ShardStateStorage {
         let mut removed_states = 0usize;
         let mut removed_cells = 0usize;
         loop {
-            let _hist = HistogramGuard::begin("tycho_storage_state_gc_time");
             let (key, value) = match iter.item() {
                 Some(item) => item,
                 None => match iter.status() {

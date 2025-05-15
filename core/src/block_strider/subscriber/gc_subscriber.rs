@@ -423,6 +423,8 @@ impl GcSubscriber {
                 .compute_recent_blocks(target_seqno)
                 .await
             {
+                let _hist = HistogramGuard::begin("tycho_storage_state_gc_time");
+
                 if let Err(e) = storage
                     .shard_state_storage()
                     .remove_outdated_states(&top_blocks)
