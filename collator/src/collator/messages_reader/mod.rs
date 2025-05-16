@@ -138,6 +138,8 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
         // TODO: msgs-v3: should create partitions 1+ only when exist in current processed_upto
 
+        const ADDITIONAL_EXTERNALS_COUNT: usize = 0;
+
         // internals: normal partition 0: 80% of `group_limit`, but min 1
         let par_0_slots_fraction = slots_fractions.get(&0).cloned().unwrap() as usize;
         internals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
@@ -148,11 +150,11 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 .max(1),
             slot_vert_size: group_vert_size,
         });
-        // externals: normal partition 0: 100%, but min 2, vert size +1
+        // externals: normal partition 0: 100%, but min 2, vert size + ADDITIONAL_EXTERNALS_COUNT
         externals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
             max_count: msgs_buffer_max_count,
             slots_count: group_limit.saturating_mul(100).saturating_div(100).max(2),
-            slot_vert_size: group_vert_size + 1,
+            slot_vert_size: group_vert_size + ADDITIONAL_EXTERNALS_COUNT,
         });
 
         // internals: low-priority partition 1: 10%, but min 1
@@ -165,13 +167,13 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 .max(1),
             slot_vert_size: group_vert_size,
         });
-        // externals: low-priority partition 1: equal to internals, vert size +1
+        // externals: low-priority partition 1: equal to internals, vert size + ADDITIONAL_EXTERNALS_COUNT
         {
             let int_buffer_limits = internals_buffer_limits_by_partitions.get(&1).unwrap();
             externals_buffer_limits_by_partitions.insert(1, MessagesBufferLimits {
                 max_count: msgs_buffer_max_count,
                 slots_count: int_buffer_limits.slots_count,
-                slot_vert_size: int_buffer_limits.slot_vert_size + 1,
+                slot_vert_size: int_buffer_limits.slot_vert_size + ADDITIONAL_EXTERNALS_COUNT,
             });
         }
 
@@ -1107,6 +1109,9 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         par_0_metrics.add_to_message_groups_timer.stop();
 
         tracing::debug!(target: tracing_targets::COLLATOR,
+            expired_ext_msgs_count = ?DebugIter(
+                metrics_by_partitions.inner.iter().map(|(par_id, m)| (par_id, m.expired_ext_msgs_count))
+            ),
             has_not_fully_read_externals_ranges = self.has_not_fully_read_externals_ranges(),
             has_not_fully_read_internals_ranges = self.has_not_fully_read_internals_ranges(),
             has_pending_new_messages = self.has_pending_new_messages(),
@@ -1450,6 +1455,9 @@ pub(super) struct MessagesReaderMetrics {
     /// num of external messages read
     pub read_ext_msgs_count: u64,
 
+    /// num of expired external messages
+    pub expired_ext_msgs_count: u64,
+
     pub add_to_msgs_groups_ops_count: u64,
 }
 
@@ -1467,6 +1475,8 @@ impl MessagesReaderMetrics {
         self.read_existing_msgs_count += other.read_existing_msgs_count;
         self.read_new_msgs_count += other.read_new_msgs_count;
         self.read_ext_msgs_count += other.read_ext_msgs_count;
+
+        self.expired_ext_msgs_count += other.expired_ext_msgs_count;
 
         self.add_to_msgs_groups_ops_count = self
             .add_to_msgs_groups_ops_count

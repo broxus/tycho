@@ -153,6 +153,7 @@ impl ExecutorWrapper {
                 special_origin: Some(special_origin),
                 block_seqno: Some(collation_data.block_id_short.seqno),
                 from_same_shard: None,
+                ext_msg_chain_time: None,
             })
         };
 
@@ -314,6 +315,7 @@ fn new_transaction(
                     special_origin: None,
                     block_seqno: Some(collation_data.block_id_short.seqno),
                     from_same_shard: Some(true),
+                    ext_msg_chain_time: None,
                 }));
             }
             MsgInfo::ExtOut(_) => {

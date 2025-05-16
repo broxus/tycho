@@ -6,7 +6,7 @@ use rayon::iter::IntoParallelIterator;
 use tycho_block_util::queue::QueueKey;
 use tycho_util::{FastHashMap, FastHashSet};
 
-use super::types::ParsedMessage;
+use super::types::{ParsedMessage, ParsedMessageKind};
 use crate::types::{DebugIter, DisplayIter};
 
 #[cfg(test)]
@@ -113,15 +113,17 @@ impl MessagesBuffer {
     }
 
     /// Returns queue keys of collected internal queue messages.
-    pub fn fill_message_group<F>(
+    pub fn fill_message_group<FA, FM>(
         &mut self,
         msg_group: &mut MessageGroup,
         slots_count: usize,
         slot_vert_size: usize,
-        check_skip_account: F,
+        check_skip_account: FA,
+        mut check_skip_msg: CheckSkipMessage<FM>,
     ) -> FillMessageGroupResult
     where
-        F: Fn(&HashBytes) -> (bool, u64),
+        FA: Fn(&HashBytes) -> (bool, u64),
+        FM: FnMut(&ParsedMessage) -> bool,
     {
         // evaluate ops count for wu calculation
         let mut ops_count = 0;
@@ -168,6 +170,9 @@ impl MessagesBuffer {
                 // try to get messages of other accounts which are not included in any slot
                 while let Some(account_id) = buffer_accounts.pop_front() {
                     if msg_group.msgs.contains_key(&account_id) {
+                        // try skip messages from skipped account: maybe they expired
+                        self.try_skip_account_msgs(&account_id, &mut check_skip_msg);
+
                         continue;
                     }
 
@@ -175,6 +180,9 @@ impl MessagesBuffer {
                     let (skip_account, check_ops_count) = check_skip_account(&account_id);
                     ops_count.saturating_add_assign(check_ops_count);
                     if skip_account {
+                        // try skip messages from skipped account: maybe they expired
+                        self.try_skip_account_msgs(&account_id, &mut check_skip_msg);
+
                         continue;
                     }
 
@@ -184,6 +192,7 @@ impl MessagesBuffer {
                         &mut slot_cx,
                         &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
+                        &mut check_skip_msg,
                     );
                     ops_count.saturating_add_assign(move_ops_count);
 
@@ -248,10 +257,14 @@ impl MessagesBuffer {
 
                 // try to get messages of accounts which are already included in slot
                 for account_id in slot_cx.slot.accounts.clone() {
+                    // TODO: we may not check account that was already skipped before
                     // skip accounts that do not pass the provided check
                     let (skip_account, check_ops_count) = check_skip_account(&account_id);
                     ops_count.saturating_add_assign(check_ops_count);
                     if skip_account {
+                        // try skip messages from skipped account: maybe they expired
+                        self.try_skip_account_msgs(&account_id, &mut check_skip_msg);
+
                         continue;
                     }
 
@@ -261,6 +274,7 @@ impl MessagesBuffer {
                         &mut slot_cx,
                         &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
+                        &mut check_skip_msg,
                     );
                     ops_count.saturating_add_assign(move_ops_count);
 
@@ -278,6 +292,9 @@ impl MessagesBuffer {
 
                 while let Some(account_id) = buffer_accounts.pop_front() {
                     if msg_group.msgs.contains_key(&account_id) {
+                        // try skip messages from skipped account: maybe they expired
+                        self.try_skip_account_msgs(&account_id, &mut check_skip_msg);
+
                         continue;
                     }
 
@@ -285,6 +302,9 @@ impl MessagesBuffer {
                     let (skip_account, check_ops_count) = check_skip_account(&account_id);
                     ops_count.saturating_add_assign(check_ops_count);
                     if skip_account {
+                        // try skip messages from skipped account: maybe they expired
+                        self.try_skip_account_msgs(&account_id, &mut check_skip_msg);
+
                         continue;
                     }
 
@@ -294,6 +314,7 @@ impl MessagesBuffer {
                         &mut slot_cx,
                         &mut collected_queue_msgs_keys,
                         &mut slots_index_updates,
+                        &mut check_skip_msg,
                     );
                     ops_count.saturating_add_assign(move_ops_count);
 
@@ -301,6 +322,13 @@ impl MessagesBuffer {
                         break;
                     }
                 }
+            }
+        }
+
+        // check and skip messages in remaning accounts if required
+        if let CheckSkipMessage::Check(_) = check_skip_msg {
+            while let Some(account_id) = buffer_accounts.pop_front() {
+                self.try_skip_account_msgs(&account_id, &mut check_skip_msg);
             }
         }
 
@@ -346,20 +374,29 @@ impl MessagesBuffer {
         }
     }
 
-    fn move_account_messages_to_slot(
+    fn move_account_messages_to_slot<FM>(
         &mut self,
         account_id: HashBytes,
         msg_group: &mut MessageGroup,
         slot_cx: &mut SlotContext<'_>,
         collected_queue_msgs_keys: &mut Vec<QueueKey>,
         slots_index_updates: &mut BTreeMap<SlotId, SlotIndexUpdate>,
-    ) -> u64 {
+        check_skip_msg: &mut CheckSkipMessage<FM>,
+    ) -> u64
+    where
+        FM: FnMut(&ParsedMessage) -> bool,
+    {
         // evaluate ops count for wu calculation
         let mut ops_count = 0;
 
         let mut amount = 0;
-        let mut int_count = 0;
-        let mut ext_count = 0;
+
+        let mut int_collected_count = 0;
+        let mut ext_collected_count = 0;
+
+        let mut skipped_counter = SkippedMessages::default();
+
+        let mut should_add_account_to_slot_index = false;
 
         if let Some(account_msgs) = self.msgs.get_mut(&account_id) {
             ops_count.saturating_add_assign(1);
@@ -372,25 +409,39 @@ impl MessagesBuffer {
             let slot_account_msgs = msg_group.msgs.entry(account_id).or_default();
             ops_count.saturating_add_assign(1);
 
-            if slot_account_msgs.is_empty() {
-                slot_cx.slot.accounts.push(account_id);
-            }
+            should_add_account_to_slot_index = slot_account_msgs.is_empty();
 
             slot_account_msgs.reserve(amount);
-            for msg in account_msgs.drain(..amount) {
-                match (&msg.info, &msg.special_origin) {
-                    (MsgInfo::Int(int_msg_info), None) => {
-                        let queue_key = QueueKey {
-                            lt: int_msg_info.created_lt,
-                            hash: *msg.cell.repr_hash(),
-                        };
-                        collected_queue_msgs_keys.push(queue_key);
-                        int_count += 1;
+            while int_collected_count + ext_collected_count < amount {
+                let Some(msg) = account_msgs.pop_front() else {
+                    break;
+                };
+                ops_count.saturating_add_assign(1);
+
+                // check and skip message if required
+                if let CheckSkipMessage::Check(check) = check_skip_msg {
+                    if Self::check_and_skip_msg(&msg, &mut skipped_counter, check) {
+                        continue;
                     }
-                    (MsgInfo::ExtIn(_), None) => ext_count += 1,
+                }
+
+                // collect message if it was not skipped
+                match msg.kind() {
+                    ParsedMessageKind::Int { queue_key } => {
+                        collected_queue_msgs_keys.push(queue_key);
+                        int_collected_count += 1;
+                    }
+                    ParsedMessageKind::ExtIn { .. } => {
+                        ext_collected_count += 1;
+                    }
                     _ => unreachable!("must contain only Int and ExtIn messages"),
                 }
                 slot_account_msgs.push(msg);
+            }
+
+            if slot_account_msgs.is_empty() {
+                msg_group.msgs.remove(&account_id);
+                ops_count.saturating_add_assign(1);
             }
         }
 
@@ -398,16 +449,31 @@ impl MessagesBuffer {
             return ops_count;
         }
 
-        // update buffer msgs counter
-        self.int_count -= int_count;
-        self.ext_count -= ext_count;
+        // update buffer msgs counter by skipped messages
+        self.int_count -= skipped_counter.int_count;
+        self.ext_count -= skipped_counter.ext_count;
+
+        let collected_count = int_collected_count + ext_collected_count;
+        if collected_count == 0 {
+            return ops_count;
+        }
+
+        // update buffer msgs counter by collected messages
+        self.int_count -= int_collected_count;
+        self.ext_count -= ext_collected_count;
 
         // update slot msgs counter
-        slot_cx.slot.int_count += int_count;
-        slot_cx.slot.ext_count += ext_count;
+        slot_cx.slot.int_count += int_collected_count;
+        slot_cx.slot.ext_count += ext_collected_count;
 
         // calc remaining capacity
-        slot_cx.remaning_capacity -= amount;
+        let collected_count = int_collected_count + ext_collected_count;
+        slot_cx.remaning_capacity -= collected_count;
+
+        // add account to slot index if any message collected
+        if should_add_account_to_slot_index && collected_count > 0 {
+            slot_cx.slot.accounts.push(account_id);
+        }
 
         // collect slot index updates
         slots_index_updates
@@ -425,12 +491,76 @@ impl MessagesBuffer {
 
         ops_count
     }
+
+    fn try_skip_account_msgs<FM>(
+        &mut self,
+        account_id: &HashBytes,
+        check_skip_msg: &mut CheckSkipMessage<FM>,
+    ) -> SkippedMessages
+    where
+        FM: FnMut(&ParsedMessage) -> bool,
+    {
+        let mut res = SkippedMessages::default();
+
+        if let CheckSkipMessage::Check(check) = check_skip_msg {
+            if let Some(account_msgs) = self.msgs.get_mut(account_id) {
+                account_msgs.retain(|msg| !Self::check_and_skip_msg(msg, &mut res, check));
+
+                // update buffer msgs counter by skipped messages
+                self.int_count -= res.int_count;
+                self.ext_count -= res.ext_count;
+            }
+        }
+
+        res
+    }
+
+    fn check_and_skip_msg<FM>(
+        msg: &ParsedMessage,
+        skipped_counter: &mut SkippedMessages,
+        check: &mut FM,
+    ) -> bool
+    where
+        FM: FnMut(&ParsedMessage) -> bool,
+    {
+        if check(msg) {
+            match msg.kind() {
+                ParsedMessageKind::Int { .. } => {
+                    skipped_counter.int_count += 1;
+                }
+                ParsedMessageKind::ExtIn { .. } => {
+                    skipped_counter.ext_count += 1;
+                }
+                _ => unreachable!("must contain only Int and ExtIn messages"),
+            }
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct SkippedMessages {
+    int_count: usize,
+    ext_count: usize,
 }
 
 pub struct FillMessageGroupResult {
     pub collected_queue_msgs_keys: Vec<QueueKey>,
     pub ops_count: u64,
 }
+
+#[derive(Clone)]
+pub enum CheckSkipMessage<FM>
+where
+    FM: FnMut(&ParsedMessage) -> bool,
+{
+    DoNot(FM),
+    Check(FM),
+}
+
+impl<FM: Copy> Copy for CheckSkipMessage<FM> where FM: FnMut(&ParsedMessage) -> bool {}
 
 pub trait SaturatingAddAssign {
     fn saturating_add_assign(&mut self, rhs: Self);
