@@ -1179,12 +1179,12 @@ where
                     }
 
                     for ctx in batch {
-                        let skip_sync = matches!(
-                            last_mc_block_id_opt, Some(last_mc_block_id) if ctx.state.block_id() != &last_mc_block_id
+                        let is_last_mc_block_in_batch = matches!(
+                            last_mc_block_id_opt, Some(last_mc_block_id) if ctx.state.block_id() == &last_mc_block_id
                         );
 
                         // handle block from bc
-                        self.handle_block_from_bc(ctx, skip_sync).await.map_err(|err| {
+                        self.handle_block_from_bc(ctx, is_last_mc_block_in_batch).await.map_err(|err| {
                             tracing::error!(target: tracing_targets::COLLATION_MANAGER,
                                 "error handling block from bc: {err:?}",
                             );
@@ -1214,11 +1214,11 @@ where
     /// 3. Commit block if it was collated first
     /// 4. Notify mempool about new master block
     /// 5. Sync to received block if it is far ahead last collated and last synced_to
-    #[tracing::instrument(skip_all, fields(block_id = %ctx.state.block_id().as_short_id(), skip_sync = skip_sync))]
+    #[tracing::instrument(skip_all, fields(block_id = %ctx.state.block_id().as_short_id(), is_last_mc_block_in_batch))]
     async fn handle_block_from_bc(
         &self,
         ctx: HandledBlockFromBcCtx,
-        skip_sync: bool,
+        is_last_mc_block_in_batch: bool,
     ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "start processing block from bc",
@@ -1294,14 +1294,15 @@ where
         }
 
         // when received block is master
+        let is_key_block = state.state_extra()?.after_key_block;
 
         // stop any running validations up to this block
         self.validator.cancel_validation(&block_id.as_short_id())?;
 
         // check if should sync to last applied mc block right now
         let should_sync_to_last_applied_mc_block = 'check_should_sync: {
-            // do not sync if requested to skip
-            if skip_sync {
+            // sync only last master block from batch or key block
+            if !is_last_mc_block_in_batch && !is_key_block {
                 break 'check_should_sync false;
             }
 
@@ -1314,7 +1315,7 @@ where
                 ) {
                     tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                         last_received_mc_block_seqno,
-                        applied_range_end,
+                        received_is_key_block = is_key_block,
                         "check_should_sync: should not sync to last applied mc block \
                         because a newer one already received",
                     );
@@ -1331,16 +1332,26 @@ where
                     let should_sync = {
                         let applied_range_end_delta = applied_range_end
                             .saturating_sub(top_mc_block_id_for_next_collation.seqno);
-                        if applied_range_end_delta < self.config.min_mc_block_delta_from_bc_to_sync
+
+                        // we should sync to every key block if node is not in current vset
+                        let required_min_mc_block_delta = if is_key_block
+                            && !self.active_collators.contains_key(&ShardIdent::MASTERCHAIN)
                         {
+                            1
+                        } else {
+                            self.config.min_mc_block_delta_from_bc_to_sync
+                        };
+
+                        if applied_range_end_delta < required_min_mc_block_delta {
                             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                                 last_synced_to_mc_block_id = ?self.get_last_synced_to_mc_block_id().map(|id| id.as_short_id().to_string()),
                                 last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
                                 last_processed_mc_block_id = ?self.get_last_processed_mc_block_id().map(|id| id.as_short_id().to_string()),
+                                received_is_key_block = is_key_block,
                                 "check_should_sync: should wait for next collated own mc block: \
                                 last applied ({}) ahead of top for collation ({}) on {} < {}",
                                 applied_range_end, top_mc_block_id_for_next_collation.seqno,
-                                applied_range_end_delta, self.config.min_mc_block_delta_from_bc_to_sync,
+                                applied_range_end_delta, required_min_mc_block_delta,
                             );
                             false
                         } else {
@@ -1348,10 +1359,11 @@ where
                                 last_synced_to_mc_block_id = ?self.get_last_synced_to_mc_block_id().map(|id| id.as_short_id().to_string()),
                                 last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
                                 last_processed_mc_block_id = ?self.get_last_processed_mc_block_id().map(|id| id.as_short_id().to_string()),
+                                received_is_key_block = is_key_block,
                                 "check_should_sync: should sync to last applied mc block from bc: \
                                 last applied ({}) ahead of top for collation ({}) on {} >= {}",
                                 applied_range_end, top_mc_block_id_for_next_collation.seqno,
-                                applied_range_end_delta, self.config.min_mc_block_delta_from_bc_to_sync,
+                                applied_range_end_delta, required_min_mc_block_delta,
                             );
                             true
                         }
@@ -1374,6 +1386,7 @@ where
                                 last_synced_to_mc_block_id = ?self.get_last_synced_to_mc_block_id().map(|id| id.as_short_id().to_string()),
                                 last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
                                 last_processed_mc_block_id = ?self.get_last_processed_mc_block_id().map(|id| id.as_short_id().to_string()),
+                                received_is_key_block = is_key_block,
                                 "check_should_sync: cannot sync when there are active collations, \
                                 try to gracefully cancel them",
                             );
@@ -1383,6 +1396,7 @@ where
                                 last_synced_to_mc_block_id = ?self.get_last_synced_to_mc_block_id().map(|id| id.as_short_id().to_string()),
                                 last_collated_mc_block_id = ?store_res.last_collated_mc_block_id.map(|id| id.as_short_id().to_string()),
                                 last_processed_mc_block_id = ?self.get_last_processed_mc_block_id().map(|id| id.as_short_id().to_string()),
+                                received_is_key_block = is_key_block,
                                 "check_should_sync: can sync to last applied mc block \
                                 when all collators were cancelled, or waiting, or there are no collators (node not in set)",
                             );
@@ -1403,6 +1417,7 @@ where
                 }
             } else {
                 tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                    received_is_key_block = is_key_block,
                     "should sync to last applied mc block when no last collated or prev sync to",
                 );
                 true
