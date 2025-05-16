@@ -8,7 +8,9 @@ use futures_util::Future;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::validate_external_message;
 use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, ServiceRequest};
-use tycho_storage::{ArchiveId, BlockConnection, KeyBlocksDirection, PersistentStateKind, Storage};
+use tycho_storage::{
+    ArchiveMeta, BlockConnection, KeyBlocksDirection, PersistentStateKind, Storage,
+};
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 
@@ -512,21 +514,16 @@ impl<B> Inner<B> {
                 }
 
                 let block_storage = self.storage().block_storage();
+                let id = block_storage.get_archive_meta(mc_seqno);
 
-                let id = block_storage.get_archive_id(mc_seqno);
-                let size_res = match id {
-                    ArchiveId::Found(id) => block_storage.get_archive_size(id),
-                    ArchiveId::TooNew | ArchiveId::NotFound => Ok(None),
-                };
-
-                overlay::Response::Ok(match (id, size_res) {
-                    (ArchiveId::Found(id), Ok(Some(size))) if size > 0 => ArchiveInfo::Found {
-                        id: id as u64,
-                        size: NonZeroU64::new(size as _).unwrap(),
+                overlay::Response::Ok(match id {
+                    ArchiveMeta::Found { mc_block_id, len } => ArchiveInfo::Found {
+                        id: mc_block_id as _,
+                        size: NonZeroU64::new(len as _).expect("len can't be zero"),
                         chunk_size: block_storage.archive_chunk_size(),
                     },
-                    (ArchiveId::TooNew, Ok(None)) => ArchiveInfo::TooNew,
-                    _ => ArchiveInfo::NotFound,
+                    ArchiveMeta::TooNew => ArchiveInfo::TooNew,
+                    ArchiveMeta::NotFound => ArchiveInfo::NotFound,
                 })
             }
             None => {
@@ -619,20 +616,18 @@ impl<B> Inner<B> {
             return Ok(BlockFull::NotFound);
         };
 
-        let data_chunk_size = block_storage.block_data_chunk_size();
-        let data_size = if data.len() < data_chunk_size.get() as usize {
-            // NOTE: Skip one RocksDB read for relatively small blocks
-            //       Average block size is 4KB, while the chunk size is 1MB.
-            data.len() as u32
-        } else {
-            match block_storage.get_block_data_size(block_id)? {
-                Some(size) => size,
-                None => return Ok(BlockFull::NotFound),
-            }
+        let data_size = match block_storage.get_block_data_size(block_id)? {
+            Some(size) => size,
+            None => return Ok(BlockFull::NotFound),
         };
 
+        let data_chunk_size = block_storage.block_data_chunk_size();
+        let data_size = data_size
+            .try_into()
+            .with_context(|| format!("block {} len is > u32::MAX", block_id))?;
+
         let block = BlockData {
-            data: Bytes::from_owner(data),
+            data,
             size: NonZeroU32::new(data_size).expect("shouldn't happen"),
             chunk_size: data_chunk_size,
         };

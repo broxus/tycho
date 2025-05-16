@@ -6,7 +6,7 @@ use tycho_block_util::archive::ArchiveEntryType;
 
 use super::{StoredValue, StoredValueBuffer};
 
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, Ord, PartialOrd)]
 pub struct PartialBlockId {
     pub shard: ShardIdent,
     pub seqno: u32,
@@ -88,28 +88,37 @@ impl StoredValue for PartialBlockId {
 }
 
 /// Package entry id.
-#[derive(Debug, Hash, Eq, PartialEq)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Ord, PartialOrd)]
 pub struct PackageEntryKey {
     pub block_id: PartialBlockId,
     pub ty: ArchiveEntryType,
 }
 
 impl PackageEntryKey {
-    pub fn block(block_id: &BlockId) -> Self {
+    pub fn block<ID>(block_id: ID) -> Self
+    where
+        ID: Into<PartialBlockId>,
+    {
         Self {
             block_id: block_id.into(),
             ty: ArchiveEntryType::Block,
         }
     }
 
-    pub fn proof(block_id: &BlockId) -> Self {
+    pub fn proof<ID>(block_id: ID) -> Self
+    where
+        ID: Into<PartialBlockId>,
+    {
         Self {
             block_id: block_id.into(),
             ty: ArchiveEntryType::Proof,
         }
     }
 
-    pub fn queue_diff(block_id: &BlockId) -> Self {
+    pub fn queue_diff<ID>(block_id: ID) -> Self
+    where
+        ID: Into<PartialBlockId>,
+    {
         Self {
             block_id: block_id.into(),
             ty: ArchiveEntryType::QueueDiff,
