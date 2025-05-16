@@ -548,8 +548,14 @@ impl proto::ControlServer for ControlServer {
                 .load_state(block_handle.id())
                 .await?;
 
-            // Find the account state in it
-            match state.as_ref().load_accounts()?.get(req.address.address)? {
+            let shard_prefix = req.address.prefix() & (0b1111u64 << 60) | (0b1u64 << 59); // prefix + tag
+
+            match state
+                .load_accounts()
+                .get(&shard_prefix)
+                .unwrap()
+                .get(req.address.address)?
+            {
                 None => (block_handle, None),
                 Some((_, account)) => (
                     block_handle,
@@ -776,10 +782,15 @@ impl Inner {
             .context("block handle not found")?;
 
         // Get a weak reference to the accounts dictionary root.
-        let accounts_dict_root = {
-            let accounts = cx.state.as_ref().load_accounts()?;
-            let (dict_root, _) = accounts.into_parts();
-            dict_root.into_root().as_ref().map(Cell::downgrade)
+        let accounts_roots = {
+            cx.state
+                .load_accounts()
+                .into_iter()
+                .map(|(k, v)| {
+                    let (dict_root, _) = v.into_parts();
+                    (k, dict_root.into_root().as_ref().map(Cell::downgrade))
+                })
+                .collect()
         };
 
         // Store a tracker handle to delay the GC.
@@ -787,7 +798,7 @@ impl Inner {
 
         let cached = CachedAccounts {
             block_handle,
-            accounts_dict_root,
+            accounts_roots,
             tracker_handle,
         };
 
@@ -836,13 +847,20 @@ impl From<proto::TriggerGcRequest> for ManualGcTrigger {
 /// A bit more weak version of `CachedAccounts` from the `tycho-rpc`.
 struct CachedAccounts {
     block_handle: BlockHandle,
-    accounts_dict_root: Option<WeakCell>,
+    accounts_roots: FastHashMap<u64, Option<WeakCell>>,
     tracker_handle: RefMcStateHandle,
 }
 
 impl CachedAccounts {
     fn try_get(&self, addr: &HashBytes) -> Result<CacheItem> {
-        let Some(dict_root) = &self.accounts_dict_root else {
+        let shard_prefix =
+            u64::from_be_bytes(*addr.first_chunk()) & (0b1111u64 << 60) | (0b1u64 << 59);
+
+        let Some(dict_root) = self.accounts_roots.get(&shard_prefix) else {
+            return Ok(CacheItem::NotFound);
+        };
+
+        let Some(dict_root) = dict_root else {
             return Ok(CacheItem::NotFound);
         };
 

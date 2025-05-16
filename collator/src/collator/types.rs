@@ -17,7 +17,7 @@ use everscale_types::models::{
 use everscale_types::num::Tokens;
 use tl_proto::TlWrite;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, SerializedQueueDiff};
-use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
+use tycho_block_util::state::{RefMcStateHandle, ShardStateData, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::{AccountMeta, PublicLibraryChange};
 use tycho_network::PeerId;
@@ -44,6 +44,7 @@ pub(super) struct WorkingState {
     pub wu_used_from_last_anchor: u64,
     pub prev_shard_data: Option<PrevData>,
     pub usage_tree: Option<UsageTree>,
+    pub usage_trees: Option<BTreeMap<u64, UsageTree>>,
     pub has_unprocessed_messages: Option<bool>,
     pub reader_state: ReaderState,
 }
@@ -56,12 +57,13 @@ impl WorkingState {
 
 pub(super) struct PrevData {
     observable_states: Vec<ShardStateStuff>,
-    observable_accounts: ShardAccounts,
+    observable_accounts: BTreeMap<u64, ShardAccounts>,
 
     blocks_ids: Vec<BlockId>,
 
     pure_states: Vec<ShardStateStuff>,
     pure_state_root: Cell,
+    pure_state_data_roots: BTreeMap<u64, Cell>,
 
     gen_chain_time: u64,
     gen_lt: u64,
@@ -77,7 +79,7 @@ impl PrevData {
     pub fn build(
         prev_states: Vec<ShardStateStuff>,
         prev_queue_diff_hashes: Vec<HashBytes>,
-    ) -> Result<(Self, UsageTree)> {
+    ) -> Result<(Self, UsageTree, BTreeMap<u64, UsageTree>)> {
         // TODO: make real implementation
         // consider split/merge logic
         //  Collator::prepare_data()
@@ -85,19 +87,32 @@ impl PrevData {
 
         let prev_blocks_ids: Vec<_> = prev_states.iter().map(|s| *s.block_id()).collect();
         let pure_prev_state_root = prev_states[0].root_cell().clone();
+        let pure_prev_state_data_roots = prev_states[0].data_root_cells();
         let pure_prev_states = prev_states;
 
         let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
         let observable_root = usage_tree.track(&pure_prev_state_root);
+
+        let mut usage_trees = BTreeMap::new();
+        let mut observable_data_roots = pure_prev_states[0].data_root_cells();
+        for (id, root) in pure_prev_states[0].data_root_cells() {
+            let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
+            let observable_root = usage_tree.track(&root);
+
+            usage_trees.insert(id, usage_tree);
+            observable_data_roots.insert(id, observable_root);
+        }
+
         let observable_states = vec![ShardStateStuff::from_root(
             pure_prev_states[0].block_id(),
             observable_root,
+            observable_data_roots,
             pure_prev_states[0].ref_mc_state_handle().tracker(),
         )?];
 
         let gen_chain_time = observable_states[0].get_gen_chain_time();
         let gen_lt = observable_states[0].state().gen_lt;
-        let observable_accounts = observable_states[0].state().load_accounts()?;
+        let observable_accounts = observable_states[0].load_accounts();
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
         let wu_used_from_last_anchor = observable_states[0].state().overload_history;
 
@@ -111,6 +126,7 @@ impl PrevData {
 
             pure_states: pure_prev_states,
             pure_state_root: pure_prev_state_root,
+            pure_state_data_roots: pure_prev_state_data_roots,
 
             gen_chain_time,
             gen_lt,
@@ -122,14 +138,26 @@ impl PrevData {
             prev_queue_diff_hashes,
         };
 
-        Ok((prev_data, usage_tree))
+        Ok((prev_data, usage_tree, usage_trees))
     }
 
     pub fn observable_states(&self) -> &Vec<ShardStateStuff> {
         &self.observable_states
     }
 
-    pub fn observable_accounts(&self) -> &ShardAccounts {
+    pub fn observable_accounts_balance(&self) -> Result<CurrencyCollection> {
+        let balance = self
+            .observable_accounts
+            .values()
+            .map(|v| v.root_extra().balance.clone())
+            .try_fold(CurrencyCollection::ZERO, |left, right| {
+                left.checked_add(&right)
+            })?;
+
+        Ok(balance)
+    }
+
+    pub fn observable_accounts(&self) -> &BTreeMap<u64, ShardAccounts> {
         &self.observable_accounts
     }
 
@@ -173,6 +201,10 @@ impl PrevData {
 
     pub fn pure_state_root(&self) -> &Cell {
         &self.pure_state_root
+    }
+
+    pub fn pure_state_data_roots(&self) -> &BTreeMap<u64, Cell> {
+        &self.pure_state_data_roots
     }
 
     pub fn gen_chain_time(&self) -> u64 {
@@ -429,7 +461,7 @@ impl BlockCollationData {
     pub fn finalize_value_flow(
         &mut self,
         account_blocks: &AccountBlocks,
-        shard_accounts: &ShardAccounts,
+        shard_accounts: &BTreeMap<u64, ShardAccounts>,
         in_msgs: &InMsgDescr,
         out_msgs: &OutMsgDescr,
         config: &BlockchainConfig,
@@ -454,7 +486,12 @@ impl BlockCollationData {
         // Finalize value flow.
         Ok(ValueFlow {
             from_prev_block: self.value_flow.from_prev_block.clone(),
-            to_next_block: shard_accounts.root_extra().balance.clone(),
+            to_next_block: shard_accounts
+                .values()
+                .map(|v| v.root_extra().balance.clone())
+                .try_fold(CurrencyCollection::ZERO, |left, right| {
+                    left.checked_add(&right)
+                })?,
             imported: in_msgs.root_extra().value_imported.clone(),
             exported: out_msgs.root_extra().clone(),
             fees_collected: self.value_flow.fees_collected.clone(),
@@ -1149,6 +1186,7 @@ pub struct FinalizeBlockResult {
     pub old_mc_data: Arc<McData>,
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
+    pub new_observable_state_data: BTreeMap<u64, ShardStateData>,
     pub finalize_wu_total: u64,
     pub collation_config: Arc<CollationConfig>,
 }

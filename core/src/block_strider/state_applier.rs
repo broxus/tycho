@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::cell::Cell;
 use futures_util::future::BoxFuture;
+use futures_util::stream::FuturesUnordered;
+use futures_util::StreamExt;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_storage::{BlockHandle, Storage, StoreStateHint};
@@ -64,38 +67,33 @@ where
                 .construct_prev_id()
                 .context("failed to construct prev id")?;
 
-            let (prev_root_cell, handles) = {
+            let (prev_root_cell, prev_data_root_cells, handles) = {
                 let prev_state = state_storage
                     .load_state(&prev_id)
                     .await
                     .context("failed to load prev shard state")?;
 
                 match &prev_id_alt {
-                    Some(prev_id) => {
-                        let prev_state_alt = state_storage
-                            .load_state(prev_id)
-                            .await
-                            .context("failed to load alt prev shard state")?;
-
-                        let cell = ShardStateStuff::construct_split_root(
-                            prev_state.root_cell().clone(),
-                            prev_state_alt.root_cell().clone(),
-                        )?;
-                        let left_handle = prev_state.ref_mc_state_handle().clone();
-                        let right_handle = prev_state_alt.ref_mc_state_handle().clone();
-                        (cell, RefMcStateHandles::Split(left_handle, right_handle))
+                    Some(_prev_id) => {
+                        todo!()
                     }
                     None => {
                         let cell = prev_state.root_cell().clone();
+                        let data_cells = prev_state.data_root_cells();
                         let handle = prev_state.ref_mc_state_handle().clone();
-                        (cell, RefMcStateHandles::Single(handle))
+                        (cell, data_cells, RefMcStateHandles::Single(handle))
                     }
                 }
             };
 
             // Apply state
             let state = self
-                .compute_and_store_state_update(&cx.block, &handle, prev_root_cell)
+                .compute_and_store_state_update(
+                    &cx.block,
+                    &handle,
+                    prev_root_cell,
+                    prev_data_root_cells,
+                )
                 .await?;
 
             (state, handles)
@@ -160,23 +158,45 @@ where
         block: &BlockStuff,
         handle: &BlockHandle,
         prev_root: Cell,
+        prev_data_roots: BTreeMap<u64, Cell>,
     ) -> Result<ShardStateStuff> {
         let _histogram = HistogramGuard::begin("tycho_core_apply_block_time");
 
-        let update = block
+        let state_update = block
             .as_ref()
             .load_state_update()
             .context("Failed to load state update")?;
 
-        let new_state = rayon_run(move || update.apply(&prev_root))
+        let new_state = rayon_run(move || state_update.apply(&prev_root))
             .await
             .context("Failed to apply state update")?;
 
+        let mut futures = FuturesUnordered::new();
+        for item in block.as_ref().iter_state_data_updates() {
+            let (shard_prefix, state_data_update) = item?;
+
+            let prev_data_root = prev_data_roots.get(&shard_prefix).unwrap().clone();
+            let task = rayon_run(move || {
+                let update = state_data_update.apply(&prev_data_root);
+                (shard_prefix, update)
+            });
+            futures.push(task);
+        }
+
+        let mut new_state_data = BTreeMap::new();
+        while let Some((key, update)) = futures.next().await {
+            new_state_data.insert(key, update?);
+        }
+
         let state_storage = self.inner.storage.shard_state_storage();
 
-        let new_state =
-            ShardStateStuff::from_root(block.id(), new_state, state_storage.min_ref_mc_state())
-                .context("Failed to create new state")?;
+        let new_state = ShardStateStuff::from_root(
+            block.id(),
+            new_state,
+            new_state_data,
+            state_storage.min_ref_mc_state(),
+        )
+        .context("Failed to create new state")?;
 
         state_storage
             .store_state(handle, &new_state, StoreStateHint {
