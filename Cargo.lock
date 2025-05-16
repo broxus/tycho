@@ -3682,7 +3682,7 @@ dependencies = [
 [[package]]
 name = "tycho-executor"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git?rev=c224351e576375430f4a2d66207406998d189946#c224351e576375430f4a2d66207406998d189946"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=8077daff38aa8887b2d41615dcbb10c6115c39e8#8077daff38aa8887b2d41615dcbb10c6115c39e8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3890,7 +3890,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git?rev=c224351e576375430f4a2d66207406998d189946#c224351e576375430f4a2d66207406998d189946"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=8077daff38aa8887b2d41615dcbb10c6115c39e8#8077daff38aa8887b2d41615dcbb10c6115c39e8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3911,7 +3911,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm-proc"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git?rev=c224351e576375430f4a2d66207406998d189946#c224351e576375430f4a2d66207406998d189946"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=8077daff38aa8887b2d41615dcbb10c6115c39e8#8077daff38aa8887b2d41615dcbb10c6115c39e8"
 dependencies = [
  "darling",
  "proc-macro2",

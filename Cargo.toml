@@ -120,8 +120,8 @@ weedb = "0.4.1"
 zstd-safe = "7.2"
 zstd-sys = "2.0"
 
-tycho-executor = { git = "https://github.com/broxus/tycho-vm.git", rev = "c224351e576375430f4a2d66207406998d189946" }
-tycho-vm = { git = "https://github.com/broxus/tycho-vm.git", rev = "c224351e576375430f4a2d66207406998d189946" }
+tycho-executor = { git = "https://github.com/broxus/tycho-vm.git", rev = "8077daff38aa8887b2d41615dcbb10c6115c39e8" }
+tycho-vm = { git = "https://github.com/broxus/tycho-vm.git", rev = "8077daff38aa8887b2d41615dcbb10c6115c39e8" }
 
 # local deps
 tycho-block-util = { path = "./block-util", version = "0.2.8" }
