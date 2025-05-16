@@ -1,3 +1,5 @@
+#[cfg(feature = "governor")]
+pub mod ratelimit;
 // TODO: Extend with required methods.
 pub trait ByteOrderRead {
     fn read_be_uint(&mut self, bytes: usize) -> std::io::Result<u64>;
