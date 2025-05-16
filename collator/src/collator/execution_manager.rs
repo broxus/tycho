@@ -1,10 +1,9 @@
 use std::cmp;
 use std::collections::hash_map::Entry;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use humantime::format_duration;
 use rayon::prelude::*;
@@ -113,18 +112,16 @@ impl MessagesExecutor {
         let config = self.config.clone();
         let params = self.params.clone();
 
-        let accounts_cache = Arc::new(&self.accounts_cache);
+        let accounts_cache = Mutex::new(&mut self.accounts_cache);
         let result = msg_group
             .into_par_iter()
             .map(|(account_id, msgs)| {
-                Self::execute_subgroup(
-                    account_id,
-                    msgs,
-                    &accounts_cache,
-                    min_next_lt,
-                    &config,
-                    &params,
-                )
+                let account_state = accounts_cache
+                    .lock()
+                    .unwrap()
+                    .get_account_stuff(&account_id)?;
+
+                Self::execute_messages(account_state, msgs, min_next_lt, &config, &params)
             })
             .collect_vec_list();
 
@@ -191,19 +188,6 @@ impl MessagesExecutor {
             ext_msgs_skipped,
             total_exec_wu,
         })
-    }
-
-    #[allow(clippy::vec_box)]
-    fn execute_subgroup(
-        account_id: HashBytes,
-        msgs: Vec<Box<ParsedMessage>>,
-        accounts_cache: &AccountsCache,
-        min_next_lt: u64,
-        config: &ParsedConfig,
-        params: &ExecutorParams,
-    ) -> Result<ExecutedTransactions> {
-        let shard_account_stuff = accounts_cache.get_account_stuff(&account_id)?;
-        Self::execute_messages(shard_account_stuff, msgs, min_next_lt, config, params)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -391,9 +375,9 @@ impl AccountsCache {
         Ok(None)
     }
 
-    fn get_account_stuff(&self, account_id: &AccountId) -> Result<Box<ShardAccountStuff>> {
-        if let Some(account) = self.items.get(account_id) {
-            Ok(account.clone())
+    fn get_account_stuff(&mut self, account_id: &AccountId) -> Result<Box<ShardAccountStuff>> {
+        if let Some(account) = self.items.remove(account_id) {
+            Ok(account)
         } else if let Some((_depth, shard_account)) = self.shard_accounts.get(account_id)? {
             ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
         } else {
@@ -458,7 +442,11 @@ fn execute_ordinary_transaction_impl(
 
     let is_external = matches!(in_message.info, MsgInfo::ExtIn(_));
 
-    let mut inspector = ExecutorInspector::default();
+    let mut storage_cache = std::mem::take(&mut account_stuff.storage_cache);
+    let mut inspector = ExecutorInspector {
+        storage_cache: Some(&mut storage_cache),
+        ..Default::default()
+    };
     let uncommited = Executor::new(params, config)
         .with_min_lt(min_lt)
         .begin_ordinary_ext(
@@ -490,6 +478,7 @@ fn execute_ordinary_transaction_impl(
         output.new_state_meta,
         output.transaction.clone(),
         inspector.public_libs_diff,
+        storage_cache,
     );
 
     Ok(ExecutedOrdinaryTransaction {
@@ -520,7 +509,11 @@ fn execute_ticktock_transaction(
 
     let _histogram = HistogramGuard::begin("tycho_collator_execute_ticktock_time");
 
-    let mut inspector = ExecutorInspector::default();
+    let mut storage_cache = std::mem::take(&mut account_stuff.storage_cache);
+    let mut inspector = ExecutorInspector {
+        storage_cache: Some(&mut storage_cache),
+        ..Default::default()
+    };
     let uncommited = Executor::new(params, config)
         .with_min_lt(min_lt)
         .begin_tick_tock_ext(
@@ -545,6 +538,7 @@ fn execute_ticktock_transaction(
         output.new_state_meta,
         output.transaction.clone(),
         inspector.public_libs_diff,
+        storage_cache,
     );
 
     Ok(Some(ExecutedTransaction {

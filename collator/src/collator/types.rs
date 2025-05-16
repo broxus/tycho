@@ -639,7 +639,6 @@ impl AnchorInfo {
 
 pub(super) type AccountId = HashBytes;
 
-#[derive(Clone)]
 pub(super) struct ShardAccountStuff {
     pub workchain_id: i8,
     pub account_addr: AccountId,
@@ -650,6 +649,7 @@ pub(super) struct ShardAccountStuff {
     pub public_libs_diff: AccountPublicLibsDiff,
     pub exists: bool,
     pub transactions: BTreeMap<u64, (CurrencyCollection, Lazy<Transaction>)>,
+    pub storage_cache: tycho_executor::StorageCache,
 }
 
 pub type AccountPublicLibsDiff = FastHashMap<HashBytes, Option<Cell>>;
@@ -690,6 +690,7 @@ impl ShardAccountStuff {
             public_libs_diff: FastHashMap::new(),
             exists,
             transactions: Default::default(),
+            storage_cache: Default::default(),
         })
     }
 
@@ -716,6 +717,7 @@ impl ShardAccountStuff {
             public_libs_diff: FastHashMap::new(),
             exists: false,
             transactions: Default::default(),
+            storage_cache: Default::default(),
         }
     }
 
@@ -742,6 +744,7 @@ impl ShardAccountStuff {
         account_meta: AccountMeta,
         tx: Lazy<Transaction>,
         mut public_libs_diff: Vec<PublicLibraryChange>,
+        storage_cache: tycho_executor::StorageCache,
     ) {
         use std::collections::hash_map;
 
@@ -754,6 +757,7 @@ impl ShardAccountStuff {
         self.transactions.insert(lt, (total_fees.into(), tx));
         self.balance = account_meta.balance;
         self.exists = account_meta.exists;
+        self.storage_cache = storage_cache;
 
         if is_masterchain {
             // Sort diff in reverse order (sort must be stable here).
