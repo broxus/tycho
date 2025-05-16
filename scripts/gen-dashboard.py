@@ -821,10 +821,8 @@ def storage() -> RowPanel:
             ],
             unit=UNITS.PERCENT_FORMAT,
         ),
-        create_counter_panel(
-            "tycho_storage_raw_cells_cache_size",
-            "Raw cells cache size",
-            UNITS.BYTES_IEC,
+        create_gauge_panel(
+            "tycho_storage_raw_cells_cache_size", "Raw cells cache size", UNITS.BYTES_IEC
         ),
         create_heatmap_quantile_panel(
             "tycho_storage_store_block_data_size",
