@@ -1774,7 +1774,6 @@ dependencies = [
  "libc",
  "libz-sys",
  "lz4-sys",
- "tikv-jemalloc-sys",
  "zstd-sys",
 ]
 
@@ -2775,6 +2774,11 @@ dependencies = [
  "libc",
  "librocksdb-sys",
 ]
+
+[[package]]
+name = "rtcmalloc"
+version = "0.1.0"
+source = "git+https://github.com/0xdeafbeef/rtcmalloc.git#6577893bbb91104ab9ccb090bc2a3295b31f12b7"
 
 [[package]]
 name = "rustc-demangle"
@@ -3800,6 +3804,7 @@ dependencies = [
  "rand 0.8.5",
  "rayon",
  "reqwest",
+ "rtcmalloc",
  "rustc_version",
  "scopeguard",
  "serde",

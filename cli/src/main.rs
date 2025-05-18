@@ -24,6 +24,11 @@ mod util;
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+// #[allow(non_upper_case_globals)]
+// #[export_name = "malloc_conf"]
+// pub static malloc_conf: &[u8] =
+//     b"thp:always,metadata_thp:always,dirty_decay_ms:3600000,muzzy_decay_ms:3600000\0";
+
 fn main() -> ExitCode {
     if std::env::var("RUST_BACKTRACE").is_err() {
         // Enable backtraces on panics by default.
