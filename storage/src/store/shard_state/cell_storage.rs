@@ -620,59 +620,59 @@ impl RemoveContext {
         self.transaction.len()
     }
 
-    pub fn remove_cell(&self, hash: &HashBytes) -> Result<(), CellStorageError> {
-        let mut stack = SmallVec::<[CellRefs; 16]>::new();
-        stack.push(smallvec![*hash]);
-
-        let mut buffer = CellRefs::new();
-
-        // While some cells left
-        'outer: loop {
-            let Some(iter) = stack.last_mut() else {
-                break;
-            };
-
-            while let Some(cell_id) = iter.pop() {
-                // Process the current cell.
-                let refs = match self.transaction.entry(cell_id) {
-                    Entry::Occupied(mut v) => v.get_mut().remove()?.map(|v| {
-                        debug_assert!(v.len() <= 4, "Number of refs should not exceed 4");
-                        v.to_smallvec()
-                    }),
-                    Entry::Vacant(v) => {
-                        let old_rc =
-                            self.raw_cache
-                                .get_rc_for_delete_2(&self.db, &cell_id, &mut buffer)?;
-                        debug_assert!(old_rc > 0);
-
-                        debug_assert!(buffer.len() <= 4, "Number of refs should not exceed 4");
-
-                        v.insert(RemovedCell {
-                            old_rc,
-                            removes: 1,
-                            refs: buffer.clone(),
-                        })
-                        .next_refs()
-                        .map(|v| v.to_smallvec())
-                    }
-                };
-
-                if let Some(refs) = refs {
-                    // And proceed to its refs if any.
-                    stack.push(refs);
-                    continue 'outer;
-                }
-            }
-
-            // Drop the current cell when all of its children were processed.
-            stack.pop();
-        }
-
-        // Clear big chunks of data before finalization
-        drop(stack);
-
-        Ok(())
-    }
+    // pub fn remove_cell(&self, hash: &HashBytes) -> Result<(), CellStorageError> {
+    //     let mut stack = SmallVec::<[CellRefs; 16]>::new();
+    //     stack.push(smallvec![*hash]);
+    //
+    //     let mut buffer = CellRefs::new();
+    //
+    //     // While some cells left
+    //     'outer: loop {
+    //         let Some(iter) = stack.last_mut() else {
+    //             break;
+    //         };
+    //
+    //         while let Some(cell_id) = iter.pop() {
+    //             // Process the current cell.
+    //             let refs = match self.transaction.entry(cell_id) {
+    //                 Entry::Occupied(mut v) => v.get_mut().remove()?.map(|v| {
+    //                     debug_assert!(v.len() <= 4, "Number of refs should not exceed 4");
+    //                     v.to_smallvec()
+    //                 }),
+    //                 Entry::Vacant(v) => {
+    //                     let old_rc =
+    //                         self.raw_cache
+    //                             .get_rc_for_delete_2(&self.db, &cell_id, &mut buffer)?;
+    //                     debug_assert!(old_rc > 0);
+    //
+    //                     debug_assert!(buffer.len() <= 4, "Number of refs should not exceed 4");
+    //
+    //                     v.insert(RemovedCell {
+    //                         old_rc,
+    //                         removes: 1,
+    //                         refs: buffer.clone(),
+    //                     })
+    //                     .next_refs()
+    //                     .map(|v| v.to_smallvec())
+    //                 }
+    //             };
+    //
+    //             if let Some(refs) = refs {
+    //                 // And proceed to its refs if any.
+    //                 stack.push(refs);
+    //                 continue 'outer;
+    //             }
+    //         }
+    //
+    //         // Drop the current cell when all of its children were processed.
+    //         stack.pop();
+    //     }
+    //
+    //     // Clear big chunks of data before finalization
+    //     drop(stack);
+    //
+    //     Ok(())
+    // }
 
     pub fn finalize(self, batch: &mut WriteBatch) -> usize {
         std::thread::scope(|s| {
@@ -820,28 +820,28 @@ impl StorageCell {
         true
     }
 
-    pub fn deserialize_references_2(data: &[u8], target: &mut CellRefs) -> bool {
-        if data.len() < 4 {
-            return false;
-        }
-
-        let descriptor = CellDescriptor::new([data[0], data[1]]);
-        let hash_count = descriptor.hash_count();
-        let ref_count = descriptor.reference_count() as usize;
-
-        let mut offset = 4usize + descriptor.byte_len() as usize + (32 + 2) * hash_count as usize;
-        if data.len() < offset + 32 * ref_count {
-            return false;
-        }
-
-        target.reserve(ref_count);
-        for _ in 0..ref_count {
-            target.push(HashBytes::from_slice(&data[offset..offset + 32]));
-            offset += 32;
-        }
-
-        true
-    }
+    // pub fn deserialize_references_2(data: &[u8], target: &mut CellRefs) -> bool {
+    //     if data.len() < 4 {
+    //         return false;
+    //     }
+    //
+    //     let descriptor = CellDescriptor::new([data[0], data[1]]);
+    //     let hash_count = descriptor.hash_count();
+    //     let ref_count = descriptor.reference_count() as usize;
+    //
+    //     let mut offset = 4usize + descriptor.byte_len() as usize + (32 + 2) * hash_count as usize;
+    //     if data.len() < offset + 32 * ref_count {
+    //         return false;
+    //     }
+    //
+    //     target.reserve(ref_count);
+    //     for _ in 0..ref_count {
+    //         target.push(HashBytes::from_slice(&data[offset..offset + 32]));
+    //         offset += 32;
+    //     }
+    //
+    //     true
+    // }
 
     pub fn serialize_to(cell: &DynCell, target: &mut [u8]) -> Result<usize> {
         let descriptor = cell.descriptor();
@@ -1298,41 +1298,41 @@ impl RawCellsCache {
         }
     }
 
-    fn get_rc_for_delete_2(
-        &self,
-        db: &CellsDb,
-        key: &HashBytes,
-        refs_buffer: &mut CellRefs,
-    ) -> Result<i64, CellStorageError> {
-        refs_buffer.clear();
-
-        // NOTE: `peek` here is used to avoid affecting a "hotness" of the value
-        if let Some(value) = self.inner.peek(key) {
-            let rc = value.header.header.load(Ordering::Acquire);
-            if rc <= 0 {
-                return Err(CellStorageError::CellNotFound);
-            } else if rc != i64::MAX {
-                return StorageCell::deserialize_references_2(&value.slice, refs_buffer)
-                    .then_some(rc)
-                    .ok_or(CellStorageError::InvalidCell);
-            }
-        }
-
-        match db.cells.get(key.as_slice()) {
-            Ok(value) => {
-                if let Some(value) = value {
-                    if let (rc, Some(value)) = refcount::decode_value_with_rc(&value) {
-                        return StorageCell::deserialize_references_2(value, refs_buffer)
-                            .then_some(rc)
-                            .ok_or(CellStorageError::InvalidCell);
-                    }
-                }
-
-                Err(CellStorageError::CellNotFound)
-            }
-            Err(e) => Err(CellStorageError::Internal(e)),
-        }
-    }
+    // fn get_rc_for_delete_2(
+    //     &self,
+    //     db: &CellsDb,
+    //     key: &HashBytes,
+    //     refs_buffer: &mut CellRefs,
+    // ) -> Result<i64, CellStorageError> {
+    //     refs_buffer.clear();
+    //
+    //     // NOTE: `peek` here is used to avoid affecting a "hotness" of the value
+    //     if let Some(value) = self.inner.peek(key) {
+    //         let rc = value.header.header.load(Ordering::Acquire);
+    //         if rc <= 0 {
+    //             return Err(CellStorageError::CellNotFound);
+    //         } else if rc != i64::MAX {
+    //             return StorageCell::deserialize_references_2(&value.slice, refs_buffer)
+    //                 .then_some(rc)
+    //                 .ok_or(CellStorageError::InvalidCell);
+    //         }
+    //     }
+    //
+    //     match db.cells.get(key.as_slice()) {
+    //         Ok(value) => {
+    //             if let Some(value) = value {
+    //                 if let (rc, Some(value)) = refcount::decode_value_with_rc(&value) {
+    //                     return StorageCell::deserialize_references_2(value, refs_buffer)
+    //                         .then_some(rc)
+    //                         .ok_or(CellStorageError::InvalidCell);
+    //                 }
+    //             }
+    //
+    //             Err(CellStorageError::CellNotFound)
+    //         }
+    //         Err(e) => Err(CellStorageError::Internal(e)),
+    //     }
+    // }
 
     fn on_insert_cell(&self, key: &HashBytes, rc: i64, data: Option<&[u8]>) {
         match data {

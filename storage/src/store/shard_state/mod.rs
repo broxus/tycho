@@ -352,6 +352,8 @@ impl ShardStateStorage {
         let mut state_data_read_options = self.cells_db.shard_state_data.new_read_config();
         state_data_read_options.set_snapshot(&snapshot);
 
+        let mut alloc = bumpalo::Bump::new();
+
         // Create iterator
         let mut iter =
             raw.raw_iterator_cf_opt(&shard_state_data_cf.bound(), state_data_read_options);
@@ -386,20 +388,22 @@ impl ShardStateStorage {
             }
 
             if cur_block_id == block_id {
-                data_roots.push(root_hash);
+                data_roots.push((key.to_vec(), root_hash));
 
                 iter.next();
                 continue;
             }
 
             if cur_block_id.seqno == 0 {
-                data_roots.push(root_hash);
+                data_roots.push((key.to_vec(), root_hash));
 
                 cur_block_id = block_id;
 
                 iter.next();
                 continue;
             }
+
+            alloc.reset();
 
             {
                 let _guard = self.gc_lock.lock().await;
@@ -409,50 +413,35 @@ impl ShardStateStorage {
 
                 let data_roots = data_roots.clone();
 
-                let total = tokio::task::spawn_blocking(move || {
+                let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
                     tracing::info!(len = data_roots.len(), block_id = ?cur_block_id, "data_roots");
 
-                    let ctx = cell_storage.create_remove_ctx();
-                    std::thread::scope(|s| {
-                        for data_root in data_roots.iter() {
-                            s.spawn(|| {
-                                ctx.remove_cell(data_root).unwrap();
-                            });
-                        }
-                    });
+                    let mut total = 0usize;
+                    for (key, data_root) in data_roots {
+                        let (stats, mut batch) = cell_storage.remove_cell(&alloc, &data_root)?;
 
-                    let mut batch = WriteBatch::with_capacity_bytes(ctx.len() * (32 + 8 + 8));
+                        batch.delete_cf(&db.shard_state_data.get_unbounded_cf().bound(), key);
 
-                    let total = ctx.finalize(&mut batch);
+                        db.raw()
+                            .rocksdb()
+                            .write_opt(batch, db.cells.write_config())?;
 
-                    let mut from = [0u8; tables::ShardStateData::KEY_LEN];
-                    from[..80].copy_from_slice(&cur_block_id.to_vec());
+                        total += stats;
+                    }
 
-                    let mut to = [0xff; tables::ShardStateData::KEY_LEN];
-                    to[..80].copy_from_slice(&cur_block_id.to_vec());
-
-                    batch.delete_range_cf(
-                        &db.shard_state_data.get_unbounded_cf().bound(),
-                        from,
-                        to,
-                    );
-
-                    db.raw()
-                        .rocksdb()
-                        .write_opt(batch, db.cells.write_config())?;
-
-                    Ok::<_, anyhow::Error>(total)
+                    Ok::<_, anyhow::Error>((total, alloc))
                 })
                 .await??;
 
                 removed_cells += total;
+                alloc = inner_alloc; // Reuse allocation without passing alloc by ref
 
                 tracing::debug!(removed_cells = total, %cur_block_id);
             }
 
             cur_block_id = block_id;
             data_roots.clear();
-            data_roots.push(root_hash);
+            data_roots.push((key.to_vec(), root_hash));
 
             removed_states += 1;
             iter.next();
