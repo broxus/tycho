@@ -460,7 +460,7 @@ fn execute_ordinary_transaction_impl(
 
     let mut inspector = ExecutorInspector::default();
     let uncommited = Executor::new(params, config)
-        .with_min_lt(min_lt)
+        .with_min_lt(account_stuff.align_min_lt(min_lt))
         .begin_ordinary_ext(
             &account_stuff.make_std_addr(),
             is_external,
@@ -481,14 +481,11 @@ fn execute_ordinary_transaction_impl(
         Err(e) => return Err(e.into()),
     };
 
-    let tx_lt = output.new_state.last_trans_lt;
-
-    account_stuff.shard_account = output.new_state;
     account_stuff.apply_transaction(
-        tx_lt,
-        output.transaction_meta.total_fees,
+        output.new_state,
         output.new_state_meta,
         output.transaction.clone(),
+        &output.transaction_meta,
         inspector.public_libs_diff,
     );
 
@@ -522,7 +519,7 @@ fn execute_ticktock_transaction(
 
     let mut inspector = ExecutorInspector::default();
     let uncommited = Executor::new(params, config)
-        .with_min_lt(min_lt)
+        .with_min_lt(account_stuff.align_min_lt(min_lt))
         .begin_tick_tock_ext(
             &account_stuff.make_std_addr(),
             kind,
@@ -536,14 +533,11 @@ fn execute_ticktock_transaction(
         Err(TxError::Fatal(e)) => return Err(e),
     };
 
-    let tx_lt = output.new_state.last_trans_lt;
-
-    account_stuff.shard_account = output.new_state;
     account_stuff.apply_transaction(
-        tx_lt,
-        output.transaction_meta.total_fees,
+        output.new_state,
         output.new_state_meta,
         output.transaction.clone(),
+        &output.transaction_meta,
         inspector.public_libs_diff,
     );
 
