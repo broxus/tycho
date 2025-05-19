@@ -1,18 +1,26 @@
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use everscale_crypto::ed25519;
 use everscale_types::cell::HashBytes;
+use futures_util::StreamExt;
 use tokio::signal::unix;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{mpsc, oneshot};
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::StreamMap;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_collator::mempool::std_impl::anchor_handler::AnchorHandler;
+use tycho_collator::mempool::std_impl::cache::Cache;
 use tycho_consensus::prelude::{
-    EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolAdapterStore,
-    MempoolConfigBuilder, MempoolMergedConfig,
+    Commit, EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer,
+    MempoolAdapterStore, MempoolConfigBuilder, MempoolMergedConfig, MempoolOutput, RoundWatch,
+    TopKnownAnchor,
 };
 use tycho_consensus::test_utils::{test_logger, AnchorConsumer, LastAnchorFile};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
@@ -136,35 +144,80 @@ impl CmdRun {
         let mempool = Mempool::new(self, node_config).await?;
         let file_storage = Mempool::file_storage(&mempool.storage)?;
 
-        loop {
-            let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
+        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
 
-            let (session, anchor_consumer) =
-                mempool.boot(engine_stop_tx).await.context("init mempool")?;
+        let top_known_anchor = RoundWatch::<TopKnownAnchor>::default();
+        let commit_round = RoundWatch::<Commit>::default();
 
-            let mut last_anchor_file = LastAnchorFile::reopen_in(&file_storage)?;
-            (anchor_consumer.top_known_anchor).set_max_raw(last_anchor_file.read()?);
+        let mut last_anchor_file = LastAnchorFile::reopen_in(&file_storage)?;
+        top_known_anchor.set_max_raw(last_anchor_file.read()?);
 
-            let drain_anchors = JoinTask::new(anchor_consumer.drain(last_anchor_file));
+        let cache = Arc::new(Cache::default());
 
-            tracing::info!("started mempool");
+        let anchor_handler = AnchorHandler::new(mempool.merged_conf.consensus(), committed_rx);
 
-            tokio::select! {
-                result = &mut engine_stop_rx => bail!("engine exited as {result:?}"),
-                stop = stop_fut.recv() => match stop {
-                    Some(signal) => {
-                        drop(drain_anchors);
-                        session.stop().await;
-                        restarts_remain = restarts_remain.saturating_sub(1);
-                        tracing::warn!(?signal, ?restarts_remain, "received termination");
-                        if restarts_remain == 0 {
-                            return Ok(());
-                        }
-                    }
-                    None => bail!("cli signal listener channel dropped"),
+        let drain_anchors = tokio::spawn(anchor_handler.run(
+            cache.clone(),
+            MempoolAdapterStore::new(
+                mempool.storage.mempool_storage().clone(),
+                commit_round.clone(),
+            ),
+        ));
+
+        let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
+
+        let session = mempool
+            .boot(
+                engine_stop_tx,
+                committed_tx.clone(),
+                commit_round.clone(),
+                top_known_anchor.clone(),
+            )
+            .await
+            .context("init mempool")?;
+
+        tracing::info!("started mempool");
+
+        tokio::select! {
+            result = &mut engine_stop_rx => bail!("engine exited as {result:?}"),
+            stop = stop_fut.recv() => match stop {
+                Some(signal) => {
+                    drain_anchors.abort();
+                    drop(drain_anchors);
+                    restarts_remain = restarts_remain.saturating_sub(1);
+                    let network = mempool.net_args.network.clone();
+                    drop(mempool);
+                    drop(cache);
+                    network.shutdown().await;
+                    drop(network);
+                    session.stop().await;
+                    tracing::warn!(?signal, ?restarts_remain, "received termination");
+                    return Ok(());
                 }
+                None => bail!("cli signal listener channel dropped"),
             }
         }
+    }
+}
+
+pub async fn drain(mut stream: StreamMap<PeerId, UnboundedReceiverStream<MempoolOutput>>) {
+    loop {
+        let (_, commit_result) = stream
+            .next()
+            .await
+            .expect("committed anchor reader must be alive");
+        match commit_result {
+            MempoolOutput::Running | MempoolOutput::Paused => continue,
+            MempoolOutput::NewStartAfterGap(round) => {
+                tracing::warn!("gap in anchor chain, next to commit: {}", round.0);
+                round
+            }
+            MempoolOutput::NextAnchor(anchor_data) => {
+                let round = anchor_data.anchor.round();
+                tracing::info!("committed anchor {}", round.0);
+                round
+            }
+        };
     }
 }
 
@@ -182,8 +235,31 @@ impl Mempool {
         let global_config =
             GlobalConfig::from_file(&cmd.global_config).context("failed to load global config")?;
 
-        let init_peers =
-            InitPeers::new((global_config.bootstrap_peers.iter().map(|info| info.id)).collect());
+        let init_peers = InitPeers::new(
+            [
+                "f630e9314c9d21d28b8dc4dde7507bf1e0d13a7dae540f08f8b00ea100c4bd34", // 26 -> 1
+                "92aa9a2c641b700bc1a4c9e15e43c0467870aeb88aa04e4015503f8b23c89bf9", // ?? -> 2
+                "4122dfc139febe5a86e59c975062fe3206cbbf6dc814dba175ca5d41b026f7f0", // 25 -> 3
+                "dd3a881a8fe874b9f6f398a18da66363743675f453470a2639411c6ebd3e33c4", // 19 -> 4
+                "1bee52331b5e4987993a3fc9b86493dbcb024a9099b728a57907df0a19a6e386", // 20 -> 5
+                "ccbf488d1a8f98ce173733188ea47cb537ca3baa47cc25b960f6e6b1f0595768", // 17 -> 6
+                "85ee82cf5eec189141ff48b7aaa27f4a17c0a6d0c5459f99d255497c75898fe2", // 16 -> 7
+                "a73d64ecf807634d9fbbf094bf20734b6e0b39f2665ca9cc1de876f84dbdb17b", // 24 -> 8
+                "a8541e256904f36cbae7cf03d10c5a20c55a8c6473a09bf2c65ed9826c267485", // 15 -> 9
+                "1778eb66b9386bcc37031cad14d73e4554413b23d16b4b680726375a622f3a5b", // 18 -> 10
+                "23ecc8ae7a19b8bc7bd2a5eccfc87875a38ade6598bed613e149e9f0103d8548", // 14 -> 11
+                "8d2b5cc854ad54e33b9d7358fe8b0f254d2cecc07d6a6acd984600ad2501e827", // ?? -> 12
+                "e2b45a37e04c8d57076b07cd941a1228b29ad507f3a2035ce6257da86b5c20dd", // ?? -> 13
+                "46130918ae9128cd1386a1d3e0199883832e242776332680d023efd017e8f24e", // 22 -> 14
+                "b0d0d9f7897cae406ce89c8bf346cda4c131122724cbecd18aac2c0629a27495", // ?? -> 15
+                "732b8fe500000000000000000000000000000000000000000000000000000000", // 0o -> 16
+                "28fa39e1bddd9c35a108a4d50ec3e2abe72e52df4600133fa6b83ec88f4d1c16", // 23 -> 17
+                "91c88f5066a4fcccb4e3cdd0d9ca0980c01657ecf68feb429e60c0af63aa026a", // 21 -> 18
+            ]
+            .into_iter()
+            .map(PeerId::from_str)
+            .collect::<Result<Vec<PeerId>, _>>()?,
+        );
 
         let net_args = {
             let keys = NodeKeys::try_from(&cmd.key_variant)?;
@@ -296,20 +372,17 @@ impl Mempool {
     pub async fn boot(
         &self,
         engine_stop_tx: oneshot::Sender<()>,
-    ) -> Result<(EngineSession, AnchorConsumer)> {
-        let local_id = self.net_args.network.peer_id();
-
-        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        let mut anchor_consumer = AnchorConsumer::default();
-        anchor_consumer.add(*local_id, committed_rx);
-
+        committed_tx: UnboundedSender<MempoolOutput>,
+        commit_round: RoundWatch<Commit>,
+        top_known_anchor: RoundWatch<TopKnownAnchor>,
+    ) -> Result<EngineSession> {
         let bind = EngineBinding {
             mempool_adapter_store: MempoolAdapterStore::new(
                 self.storage.mempool_storage().clone(),
-                anchor_consumer.commit_round.clone(),
+                commit_round,
             ),
             input_buffer: self.input_buffer.clone(),
-            top_known_anchor: anchor_consumer.top_known_anchor.clone(),
+            top_known_anchor,
             output: committed_tx,
         };
 
@@ -323,7 +396,7 @@ impl Mempool {
 
         tracing::info!("mempool engine initialized");
 
-        Ok((session, anchor_consumer))
+        Ok(session)
     }
 }
 

@@ -47,6 +47,7 @@ tikv-jemallocator = { workspace = true, features = [
 ], optional = true }
 tikv-jemalloc-ctl = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
+tokio-stream = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 weedb = { workspace = true }
@@ -75,7 +76,7 @@ rustc_version = { workspace = true }
 default = ["jemalloc"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl", "dep:metrics"]
 deadlock-detection = ["parking_lot/deadlock_detection"]
-debug = ["tycho-consensus/test"]
+debug = ["tycho-consensus/test", "dep:tokio-stream"]
 lto = ["weedb/lto"]
 
 [lints]

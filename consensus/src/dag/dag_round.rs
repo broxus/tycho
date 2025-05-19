@@ -109,14 +109,9 @@ impl DagRound {
     where
         F: FnOnce(&mut DagLocation) -> R,
     {
-        match self.0.locations.get_mut(author) {
-            Some(mut loc) => edit(loc.value_mut()),
-            None => panic!(
-                "DAG must not contain location {} @ {}",
-                author.alt(),
-                self.round().0
-            ),
-        }
+        let entry = self.0.locations.entry(*author);
+        let mut loc = entry.or_insert(DagLocation::new(self.downgrade()));
+        edit(loc.value_mut())
     }
 
     pub fn view<F, R>(&self, author: &PeerId, view: F) -> Option<R>

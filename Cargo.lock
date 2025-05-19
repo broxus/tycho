@@ -3525,6 +3525,7 @@ dependencies = [
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "tokio",
+ "tokio-stream",
  "tracing",
  "tracing-subscriber",
  "tycho-block-util",

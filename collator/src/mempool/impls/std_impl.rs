@@ -1,9 +1,9 @@
-mod anchor_handler;
-mod cache;
-mod config;
-mod deduplicator;
-mod parser;
-mod state_update_queue;
+pub mod anchor_handler;
+pub mod cache;
+pub mod config;
+pub mod deduplicator;
+pub mod parser;
+pub mod state_update_queue;
 
 use std::sync::Arc;
 

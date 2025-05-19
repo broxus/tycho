@@ -53,12 +53,15 @@ impl CommitterTask {
         round_ctx: &RoundCtx,
     ) -> EngineResult<()> {
         let Some(committer) = self.inner.take_ready().await? else {
+            tracing::info!("committer not ready");
             return Ok(());
         };
         let is_dropping = committer.dag_len() > round_ctx.conf().consensus.min_front_rounds() as _;
         self.inner = if is_dropping {
+            tracing::info!("update committer dropping len {}", committer.dag_len());
             Inner::dropping(committer, full_history_bottom, committed_info_tx, round_ctx)
         } else {
+            tracing::info!("update committer fallible len {}", committer.dag_len());
             Inner::fallible(committer, full_history_bottom, committed_info_tx, round_ctx)
         };
         Ok(())

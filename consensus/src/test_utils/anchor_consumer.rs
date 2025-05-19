@@ -17,7 +17,7 @@ use crate::test_utils::last_anchor_file::LastAnchorFile;
 
 #[derive(Default)]
 pub struct AnchorConsumer {
-    streams: StreamMap<PeerId, UnboundedReceiverStream<MempoolOutput>>,
+    pub streams: StreamMap<PeerId, UnboundedReceiverStream<MempoolOutput>>,
     // all committers must share the same sequence of anchor points
     anchors: FastHashMap<Round, FastHashMap<PeerId, PointId>>,
     // all committers must share the same anchor history (linearized inclusion dag) for each anchor

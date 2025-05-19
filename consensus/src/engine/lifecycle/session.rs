@@ -88,8 +88,11 @@ impl EngineSession {
             guard.tracker.clone()
         };
         drop(self.run_attrs); // drops `PeerSchedule` clone inside
+        tracing::warn!("AAAAAAAA");
         engine_tracker.stop().await;
+        tracing::warn!("BBBBBBBBBBB");
         self.recover_loop.await.ok();
+        tracing::warn!("CCCCCCCCCCC");
 
         span.in_scope(|| tracing::warn!("stop completed"));
 

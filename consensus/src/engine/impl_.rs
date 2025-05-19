@@ -10,6 +10,7 @@ use itertools::{Either, Itertools};
 use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::FastHashSet;
 
 use crate::dag::{DagFront, DagRound, KeyGroup, Verifier};
 use crate::effects::{
@@ -86,7 +87,7 @@ impl Engine {
             let store = store.clone();
             let overlay_id = merged_conf.overlay_id;
             move || {
-                store.init_storage(&overlay_id);
+                // store.init_storage(&overlay_id);
                 store.insert_point(&genesis, PointStatusStoredRef::Exists);
                 fix_history // just pass further
             }
@@ -317,6 +318,13 @@ impl Engine {
                     let entry = map.entry((pre.round(), pre.restore_order_asc()));
                     entry.or_default().push(pre);
                 }
+                let mut authors = FastHashSet::default();
+                for round in map.values() {
+                    for r in round {
+                        authors.insert(r.author());
+                    }
+                }
+                tracing::info!("peers: {authors:?}");
                 map
             }
         });

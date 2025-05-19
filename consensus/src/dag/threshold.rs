@@ -65,13 +65,13 @@ impl Threshold {
         // count no matter if threshold is already reached;
         // increase counter before send to reduce it upon receive;
         ThresholdCount::add_one_in_channel(&self.count);
-        match self.sender.try_send(valid.info().clone()) {
-            Ok(()) => {}
-            Err(e) => {
-                // consider impossible
-                panic!("cannot add {:?} to threshold: {e}", valid.info().id().alt())
-            }
-        };
+        // match self.sender.try_send(valid.info().clone()) {
+        //     Ok(()) => {}
+        //     Err(e) => {
+        //         // consider impossible
+        //         panic!("cannot add {:?} to threshold: {e}", valid.info().id().alt())
+        //     }
+        // };
     }
 
     /// **WARNING** lock design is simple and is suited **only** for current use cases

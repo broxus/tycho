@@ -1,6 +1,8 @@
 use std::cmp;
+use std::fmt::format;
 use std::sync::Arc;
 
+use everscale_types::boc::Boc;
 use indexmap::IndexMap;
 use parking_lot::RwLock;
 use tokio::sync::Notify;
@@ -58,6 +60,16 @@ impl Cache {
     }
 
     pub fn push(&self, anchor: Arc<MempoolAnchor>) {
+        if anchor.id == 31316669 {
+            tracing::info!("looked for anchor time  {}", anchor.chain_time);
+            let mut str = String::new();
+            for e in &anchor.externals {
+                let msg = Boc::encode_base64(&e.cell);
+                str = format!("{str}\n{msg}");
+            }
+            tracing::info!("{str}");
+        }
+
         let mut data = self.data.write();
         let old = data.anchors.insert(anchor.id, anchor);
         if let Some(old) = old {
