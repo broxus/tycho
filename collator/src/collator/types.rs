@@ -19,7 +19,7 @@ use tl_proto::TlWrite;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
-use tycho_executor::{AccountMeta, PublicLibraryChange};
+use tycho_executor::{AccountMeta, PublicLibraryChange, TransactionMeta};
 use tycho_network::PeerId;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 
@@ -650,6 +650,7 @@ pub(super) struct ShardAccountStuff {
     pub public_libs_diff: AccountPublicLibsDiff,
     pub exists: bool,
     pub transactions: BTreeMap<u64, (CurrencyCollection, Lazy<Transaction>)>,
+    pub min_next_lt: u64,
 }
 
 pub type AccountPublicLibsDiff = FastHashMap<HashBytes, Option<Cell>>;
@@ -690,6 +691,10 @@ impl ShardAccountStuff {
             public_libs_diff: FastHashMap::new(),
             exists,
             transactions: Default::default(),
+            // NOTE: Since there were no transactions on this account yet we don't
+            //       need to additionaly align the execution LT.
+            //       (considering that the block LT is also aligned)
+            min_next_lt: 0,
         })
     }
 
@@ -716,11 +721,19 @@ impl ShardAccountStuff {
             public_libs_diff: FastHashMap::new(),
             exists: false,
             transactions: Default::default(),
+            // NOTE: No need to align logical time for non-existing accounts.
+            min_next_lt: 0,
         }
     }
 
     pub fn is_empty(&self) -> Result<bool> {
         Ok(self.shard_account.load_account()?.is_none())
+    }
+
+    /// Aligns the provided `lt` with the logical time of the last transaction on account.
+    /// Prevents reusing the same lt for uninit accounts in a single execution group.
+    pub fn align_min_lt(&self, lt: u64) -> u64 {
+        std::cmp::max(lt, self.min_next_lt)
     }
 
     pub fn make_std_addr(&self) -> StdAddr {
@@ -737,10 +750,10 @@ impl ShardAccountStuff {
 
     pub fn apply_transaction(
         &mut self,
-        lt: u64,
-        total_fees: Tokens,
+        new_state: ShardAccount,
         account_meta: AccountMeta,
         tx: Lazy<Transaction>,
+        tx_meta: &TransactionMeta,
         mut public_libs_diff: Vec<PublicLibraryChange>,
     ) {
         use std::collections::hash_map;
@@ -751,9 +764,16 @@ impl ShardAccountStuff {
             "non-empty public libs diff for a non-masterchain account"
         );
 
-        self.transactions.insert(lt, (total_fees.into(), tx));
+        debug_assert!(new_state.last_trans_lt >= self.min_next_lt);
+
+        let lt = new_state.last_trans_lt;
+
+        self.shard_account = new_state;
+        self.transactions
+            .insert(lt, (tx_meta.total_fees.into(), tx));
         self.balance = account_meta.balance;
         self.exists = account_meta.exists;
+        self.min_next_lt = tx_meta.next_lt;
 
         if is_masterchain {
             // Sort diff in reverse order (sort must be stable here).
