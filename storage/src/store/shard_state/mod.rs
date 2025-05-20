@@ -14,7 +14,6 @@ use tycho_block_util::state::*;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 use weedb::rocksdb;
-use weedb::rocksdb::WriteBatch;
 
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
@@ -135,18 +134,21 @@ impl ShardStateStorage {
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
 
-            let mut new_cell_count =
-                cell_storage.store_cell(&mut batch, root_cell.as_ref(), 100)?;
+            let ctx = cell_storage.create_store_ctx(estimated_merkle_update_size);
 
-            for (_, data_root_cell) in root_data_cells.iter() {
-                let cell_count = cell_storage.store_cell(
-                    &mut batch,
-                    data_root_cell.as_ref(),
-                    estimated_merkle_update_size / 16,
-                )?;
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    CellStorage::store_cell_mt(root_cell.as_ref(), &ctx).unwrap();
+                });
 
-                new_cell_count += cell_count;
-            }
+                for (_, data_root_cell) in root_data_cells.iter() {
+                    s.spawn(|| {
+                        CellStorage::store_cell_mt(data_root_cell.as_ref(), &ctx).unwrap();
+                    });
+                }
+            });
+
+            let new_cell_count = ctx.finalize(&mut batch);
 
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);

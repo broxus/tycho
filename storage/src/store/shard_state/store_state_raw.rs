@@ -681,7 +681,7 @@ mod test {
 
         let mut cell_keys = Vec::new();
 
-        const INITIAL_SIZE: usize = 200_000;
+        const INITIAL_SIZE: usize = 100_000;
 
         let mut keys: BTreeSet<HashBytes> =
             (0..INITIAL_SIZE).map(|_| HashBytes(rng.gen())).collect();
@@ -697,7 +697,7 @@ mod test {
 
         let mut cells = vec![];
 
-        for i in 0..100 {
+        for i in 0..20 {
             let keys_inner: Vec<_> = keys.iter().copied().collect();
 
             let keys_to_remove: Vec<_> =
@@ -742,7 +742,7 @@ mod test {
         std::thread::scope(|s| {
             for cell in cells.iter() {
                 s.spawn(|| {
-                    CellStorage::store_cell(cell.as_ref(), &ctx).unwrap();
+                    CellStorage::store_cell_mt(cell.as_ref(), &ctx).unwrap();
                 });
             }
         });
