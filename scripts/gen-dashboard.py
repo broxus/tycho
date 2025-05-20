@@ -822,7 +822,9 @@ def storage() -> RowPanel:
             unit=UNITS.PERCENT_FORMAT,
         ),
         create_gauge_panel(
-            "tycho_storage_raw_cells_cache_size", "Raw cells cache size", UNITS.BYTES_IEC
+            "tycho_storage_raw_cells_cache_size",
+            "Raw cells cache size",
+            UNITS.BYTES_IEC,
         ),
         create_heatmap_quantile_panel(
             "tycho_storage_store_block_data_size",
@@ -1034,6 +1036,16 @@ def collator_finalize_block() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_create_merkle_update_time",
             "inc. Create MerkleUpdate",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_collator_boc_cache_rev_indices_capacity",
+            "BOC Cache rev_indices capacity",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_collator_boc_cache_rev_cells_capacity",
+            "BOC Cache rev_cells capacity",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -1381,7 +1393,6 @@ def collator_queue_metrics() -> RowPanel:
             "Queue clean until",
             legend_format=legend_format,
         ),
-
         create_heatmap_panel(
             "tycho_internal_queue_gc_execute_task_time", "GC execute time"
         ),
@@ -1419,7 +1430,7 @@ def collator_queue_metrics() -> RowPanel:
             by_labels=["instance", "partition"],
         ),
         create_heatmap_panel(
-            "tycho_internal_queue_apply_diff_add_statistics_time", 
+            "tycho_internal_queue_apply_diff_add_statistics_time",
             "Apply diff: add statistics time",
         ),
         create_heatmap_panel(
