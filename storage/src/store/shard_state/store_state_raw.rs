@@ -681,7 +681,7 @@ mod test {
 
         let mut cell_keys = Vec::new();
 
-        const INITIAL_SIZE: usize = 100_000;
+        const INITIAL_SIZE: usize = 200_000;
 
         let mut keys: BTreeSet<HashBytes> =
             (0..INITIAL_SIZE).map(|_| HashBytes(rng.gen())).collect();
@@ -695,7 +695,9 @@ mod test {
 
         const MODIFY_COUNT: usize = INITIAL_SIZE / 50;
 
-        for i in 0..20 {
+        let mut cells = vec![];
+
+        for i in 0..100 {
             let keys_inner: Vec<_> = keys.iter().copied().collect();
 
             let keys_to_remove: Vec<_> =
@@ -730,21 +732,29 @@ mod test {
             let new_dict_cell = CellBuilder::build_from(dict.clone())?;
 
             let cell_hash = new_dict_cell.repr_hash();
-
-            let ctx = cell_storage.create_store_ctx(1);
-            CellStorage::store_cell(new_dict_cell.as_ref(), &ctx)?;
-
-            let mut batch = WriteBatch::new();
-            let traversed = ctx.finalize(&mut batch);
-
             cell_keys.push(*cell_hash);
 
-            cells_db
-                .rocksdb()
-                .write_opt(batch, cells_db.cells.write_config())?;
-
-            tracing::info!("Iteration {i} Finished. traversed: {traversed}",);
+            cells.push(new_dict_cell);
         }
+
+        let ctx = cell_storage.create_store_ctx(1_000_000);
+
+        std::thread::scope(|s| {
+            for cell in cells.iter() {
+                s.spawn(|| {
+                    CellStorage::store_cell(cell.as_ref(), &ctx).unwrap();
+                });
+            }
+        });
+
+        let mut batch = WriteBatch::new();
+        let traversed = ctx.finalize(&mut batch);
+
+        cells_db
+            .rocksdb()
+            .write_opt(batch, cells_db.cells.write_config())?;
+
+        tracing::info!("Finished. traversed: {traversed}");
 
         let mut bump = bumpalo::Bump::new();
 
@@ -755,12 +765,7 @@ mod test {
 
             traverse_cell((cell as Arc<DynCell>).as_ref());
 
-            let ctx = cell_storage.create_remove_ctx();
-            ctx.remove_cell(&key).unwrap();
-
-            let mut batch = WriteBatch::with_capacity_bytes(ctx.len() * (32 + 8 + 8));
-            let res = ctx.finalize(&mut batch);
-
+            let (res, batch) = cell_storage.remove_cell(&bump, &key)?;
             cells_db
                 .rocksdb()
                 .write_opt(batch, cells_db.cells.write_config())?;
