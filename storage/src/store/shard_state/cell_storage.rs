@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use bumpalo::Bump;
 use bytesize::ByteSize;
+use dashmap::mapref::entry::Entry;
+use dashmap::Map;
 use everscale_types::cell::*;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
@@ -253,6 +255,42 @@ impl CellStorage {
         Ok(())
     }
 
+    pub fn create_store_ctx(&self, capacity: usize) -> StoreContext<'_> {
+        StoreContext::new(&self.db, &self.raw_cells_cache, capacity)
+    }
+
+    pub fn store_cell_mt(root: &DynCell, ctx: &StoreContext<'_>) -> Result<(), CellStorageError> {
+        'visit: {
+            // Check root cell
+            if !ctx.insert_cell(root.as_ref(), 0)? {
+                break 'visit;
+            }
+            let mut stack = Vec::with_capacity(16);
+            stack.push(root.references());
+
+            // Check other cells
+            'outer: loop {
+                let depth = stack.len();
+                let Some(iter) = stack.last_mut() else {
+                    break;
+                };
+
+                for child in &mut *iter {
+                    if ctx.insert_cell(child, depth)? {
+                        stack.push(child.references());
+                        continue 'outer;
+                    }
+                }
+
+                stack.pop();
+            }
+        }
+
+        // Write transaction to the `WriteBatch`
+        Ok(())
+    }
+
+    #[allow(unused)]
     pub fn store_cell(
         &self,
         batch: &mut WriteBatch,
@@ -512,6 +550,106 @@ impl CellStorage {
         if self.cells_cache.remove(hash).is_some() {
             metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
         }
+    }
+}
+
+struct AddedCell {
+    old_rc: i64,
+    additions: u32,
+    data: Option<Vec<u8>>,
+}
+
+pub struct StoreContext<'a> {
+    db: &'a BaseDb,
+    raw_cache: &'a RawCellsCache,
+    transaction: FastDashMap<HashBytes, AddedCell>,
+}
+
+impl<'a> StoreContext<'a> {
+    fn new(db: &'a BaseDb, raw_cache: &'a RawCellsCache, capacity: usize) -> Self {
+        Self {
+            db,
+            raw_cache,
+            transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
+                capacity,
+                Default::default(),
+                512,
+            ),
+        }
+    }
+
+    fn insert_cell(&self, cell: &DynCell, depth: usize) -> Result<bool, CellStorageError> {
+        let mut buffer = Vec::with_capacity(512);
+
+        let key = cell.repr_hash();
+        Ok(match self.transaction.entry(*key) {
+            Entry::Occupied(mut value) => {
+                value.get_mut().additions += 1;
+                false
+            }
+            Entry::Vacant(entry) => {
+                let old_rc = self.raw_cache.get_rc_for_insert(self.db, key, depth)?;
+
+                let is_new = old_rc == 0;
+                let data = if is_new {
+                    if StorageCell::serialize_to(cell, &mut buffer).is_err() {
+                        return Err(CellStorageError::InvalidCell);
+                    }
+                    Some(buffer)
+                } else {
+                    None
+                };
+
+                entry.insert(AddedCell {
+                    old_rc,
+                    additions: 1,
+                    data,
+                });
+                is_new
+            }
+        })
+    }
+
+    pub fn finalize(self, batch: &mut WriteBatch) -> usize {
+        std::thread::scope(|s| {
+            let number_shards = self.transaction._shard_count();
+            // safety: we hold only read locks
+            let shards = unsafe { (0..number_shards).map(|i| self.transaction._get_read_shard(i)) };
+            let cache = &self.raw_cache;
+
+            // todo: clamp to number of cpus x2
+            for shard in shards {
+                // spawned threads will be joined at the end of the scope, so we don't need to store them
+                s.spawn(move || {
+                    for (key, value) in shard {
+                        let item = value.get();
+                        let new_rc = item.old_rc + item.additions as i64;
+                        cache.on_insert_cell(key, new_rc, item.data.as_deref());
+                    }
+                });
+            }
+
+            let batch_update = s.spawn(|| {
+                let mut buffer = Vec::with_capacity(512);
+                let total = self.transaction.len();
+                let cells_cf = &self.db.cells.cf();
+                for kv in self.transaction.iter() {
+                    let key = kv.key();
+                    let item = kv.value();
+
+                    buffer.clear();
+                    refcount::add_positive_refount(
+                        item.additions,
+                        item.data.as_deref(),
+                        &mut buffer,
+                    );
+                    batch.merge_cf(cells_cf, key.as_slice(), &buffer);
+                }
+                total
+            });
+
+            batch_update.join().expect("thread panicked")
+        })
     }
 }
 
