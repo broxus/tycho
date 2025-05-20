@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use ahash::HashMapExt;
 use anyhow::{anyhow, bail, Context, Result};
+use everscale_types::boc;
 use everscale_types::cell::{Cell, CellFamily, HashBytes, Lazy, UsageTree, UsageTreeMode};
 use everscale_types::dict::{self, Dict};
 use everscale_types::models::{
@@ -15,6 +16,7 @@ use everscale_types::models::{
     StateInit, StdAddr, Transaction, ValueFlow,
 };
 use everscale_types::num::Tokens;
+use parking_lot::Mutex;
 use tl_proto::TlWrite;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
@@ -1016,6 +1018,35 @@ impl ShardDescriptionExt for ShardDescription {
         }
     }
 }
+
+#[derive(Clone)]
+pub struct BlockSerializerCache {
+    inner: Arc<Mutex<BlockSerializerCacheInner>>,
+}
+
+impl BlockSerializerCache {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(BlockSerializerCacheInner {
+                boc_header: BocHeaderCache::with_capacity(capacity),
+            })),
+        }
+    }
+
+    pub fn take_boc_header_cache(&self) -> BocHeaderCache {
+        std::mem::take(&mut self.inner.lock().boc_header)
+    }
+
+    pub fn set_boc_header_cache(&self, boc_header: BocHeaderCache) {
+        self.inner.lock().boc_header = boc_header;
+    }
+}
+
+struct BlockSerializerCacheInner {
+    boc_header: BocHeaderCache,
+}
+
+type BocHeaderCache = boc::ser::BocHeaderCache<ahash::RandomState>;
 
 #[derive(Clone, Debug)]
 pub struct ExecutedTransaction {

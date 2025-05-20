@@ -22,7 +22,7 @@ use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
 use types::{AnchorInfo, AnchorsCache};
 
-use self::types::{CollatorStats, PrevData, WorkingState};
+use self::types::{BlockSerializerCache, CollatorStats, PrevData, WorkingState};
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -232,6 +232,7 @@ pub struct CollatorStdImpl {
     delayed_working_state: DelayedWorkingState,
     store_new_state_tasks: Vec<JoinTask<Result<bool>>>,
     anchors_cache: AnchorsCache,
+    block_serializer_cache: BlockSerializerCache,
     stats: CollatorStats,
     timer: std::time::Instant,
     anchor_timer: std::time::Instant,
@@ -259,6 +260,8 @@ impl CollatorStdImpl {
         mempool_config_override: Option<MempoolGlobalConfig>,
         cancel_collation: Arc<Notify>,
     ) -> Result<AsyncQueuedDispatcher<Self>> {
+        const BLOCK_CELL_COUNT_BASELINE: usize = 1_000_000;
+
         let next_block_info = calc_next_block_id_short(&prev_blocks_ids);
 
         tracing::info!(target: tracing_targets::COLLATOR,
@@ -284,6 +287,7 @@ impl CollatorStdImpl {
             }),
             store_new_state_tasks: Default::default(),
             anchors_cache: Default::default(),
+            block_serializer_cache: BlockSerializerCache::with_capacity(BLOCK_CELL_COUNT_BASELINE),
             stats: Default::default(),
             timer: std::time::Instant::now(),
             anchor_timer: std::time::Instant::now(),
