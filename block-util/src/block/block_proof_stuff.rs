@@ -33,6 +33,7 @@ impl BlockProofStuff {
             info: Lazy::new(&block_info).unwrap(),
             value_flow: Lazy::new(&ValueFlow::default()).unwrap(),
             state_update: Lazy::new(&MerkleUpdate::default()).unwrap(),
+            state_data_updates: Dict::new(),
             out_msg_queue_updates: OutMsgQueueUpdates {
                 diff_hash: Default::default(),
                 tail_len: 0,

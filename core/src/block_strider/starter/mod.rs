@@ -1,10 +1,14 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use everscale_types::boc::Boc;
-use everscale_types::models::{BlockId, ShardStateUnsplit};
+use everscale_types::boc::de::ProcessedCells;
+use everscale_types::boc::{de, Boc};
+use everscale_types::cell::Cell;
+use everscale_types::models::{BlockId, ShardAccounts, ShardStateUnsplit};
+use everscale_types::prelude::CellFamily;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::Storage;
@@ -109,13 +113,31 @@ impl ZerostateProvider for FileZerostateProvider {
 }
 
 fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<ShardStateStuff> {
+    tracing::info!("loading zerostate {}", path.display());
+
     let data = std::fs::read(path).context("failed to read file")?;
     let file_hash = Boc::file_hash_blake(&data);
 
-    let root = Boc::decode(data).context("failed to decode BOC")?;
-    let root_hash = *root.repr_hash();
+    let boc = de::BocHeader::decode(&data, &de::Options {
+        min_roots: None,
+        // NOTE: We must specify the max number of roots to avoid the default
+        //       limit (which is quite low since it is rarely used in practice).
+        max_roots: Some(33),
+    })?;
 
-    let state = root
+    let mut roots = boc.roots().to_vec();
+    roots.reverse();
+
+    let cells = boc.finalize(Cell::empty_context())?;
+
+    let mut parsed = ParsedBocHeader { roots, cells };
+
+    let root_state = parsed.next().unwrap();
+    let root_hash = *root_state.repr_hash();
+
+    tracing::info!("loading state");
+
+    let state = root_state
         .parse::<ShardStateUnsplit>()
         .context("failed to parse state")?;
 
@@ -128,5 +150,35 @@ fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<Shar
         file_hash,
     };
 
-    ShardStateStuff::from_root(&block_id, root, tracker)
+    tracing::info!("state loaded");
+
+    let mut shard_accounts = BTreeMap::new();
+    while let Some(root_prefix) = parsed.next() {
+        let shard_prefix = root_prefix
+            .parse::<u64>()
+            .context("failed to parse shard prefix")?;
+
+        let root_shard_accounts = parsed.next().unwrap();
+        let accounts = root_shard_accounts
+            .parse::<ShardAccounts>()
+            .context("failed to parse shard accounts")?;
+
+        shard_accounts.insert(shard_prefix, accounts);
+    }
+
+    ShardStateStuff::from_root_and_accounts(&block_id, root_state, shard_accounts, tracker)
+}
+
+struct ParsedBocHeader {
+    roots: Vec<u32>,
+    cells: ProcessedCells,
+}
+
+impl Iterator for ParsedBocHeader {
+    type Item = Cell;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let index = self.roots.pop()?;
+        self.cells.get(index)
+    }
 }

@@ -1,5 +1,6 @@
 use std::cmp;
 use std::collections::hash_map::Entry;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,7 +37,7 @@ impl MessagesExecutor {
         min_next_lt: u64,
         config: Arc<ParsedConfig>,
         params: Arc<ExecutorParams>,
-        shard_accounts: ShardAccounts,
+        shard_accounts: BTreeMap<u64, ShardAccounts>,
         wu_params_execute: WorkUnitsParamsExecute,
     ) -> Self {
         Self {
@@ -66,7 +67,7 @@ impl MessagesExecutor {
         self,
     ) -> (
         impl ExactSizeIterator<Item = Box<ShardAccountStuff>>,
-        ShardAccounts,
+        BTreeMap<u64, ShardAccounts>,
     ) {
         let AccountsCache {
             shard_accounts,
@@ -354,7 +355,7 @@ impl MessagesExecutor {
 
 struct AccountsCache {
     workchain_id: i8,
-    shard_accounts: ShardAccounts,
+    shard_accounts: BTreeMap<u64, ShardAccounts>,
     items: FastHashMap<AccountId, Box<ShardAccountStuff>>,
 }
 
@@ -374,16 +375,22 @@ impl AccountsCache {
                 }
             }
             Entry::Vacant(entry) => {
-                if let Some((_, state)) = self.shard_accounts.get(account_id)? {
-                    let account_stuff =
-                        ShardAccountStuff::new(self.workchain_id, account_id, state)
-                            .map(Box::new)?;
-                    if f(&account_stuff) {
-                        return Ok(Some(account_stuff));
-                    }
+                let shard_prefix = u64::from_be_bytes(*account_id.first_chunk())
+                    & (0b1111u64 << 60)
+                    | (0b1u64 << 59); // prefix + tag
 
-                    // NOTE: Reuse preloaded account state as it might be used later
-                    entry.insert(account_stuff);
+                if let Some(shard_accounts) = self.shard_accounts.get(&shard_prefix) {
+                    if let Some((_, state)) = shard_accounts.get(account_id)? {
+                        let account_stuff =
+                            ShardAccountStuff::new(self.workchain_id, account_id, state)
+                                .map(Box::new)?;
+                        if f(&account_stuff) {
+                            return Ok(Some(account_stuff));
+                        }
+
+                        // NOTE: Reuse preloaded account state as it might be used later
+                        entry.insert(account_stuff);
+                    }
                 }
             }
         }
@@ -394,13 +401,24 @@ impl AccountsCache {
     fn get_account_stuff(&self, account_id: &AccountId) -> Result<Box<ShardAccountStuff>> {
         if let Some(account) = self.items.get(account_id) {
             Ok(account.clone())
-        } else if let Some((_depth, shard_account)) = self.shard_accounts.get(account_id)? {
-            ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
         } else {
-            Ok(Box::new(ShardAccountStuff::new_empty(
-                self.workchain_id,
-                account_id,
-            )))
+            let shard_prefix =
+                u64::from_be_bytes(*account_id.first_chunk()) & (0b1111u64 << 60) | (0b1u64 << 59); // prefix + tag
+
+            if let Some((_depth, shard_account)) = self
+                .shard_accounts
+                .get(&shard_prefix)
+                .map(|sa| sa.get(account_id))
+                .transpose()?
+                .flatten()
+            {
+                ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
+            } else {
+                Ok(Box::new(ShardAccountStuff::new_empty(
+                    self.workchain_id,
+                    account_id,
+                )))
+            }
         }
     }
 

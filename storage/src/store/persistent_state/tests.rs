@@ -37,6 +37,7 @@ async fn persistent_shard_state() -> Result<()> {
     let zerostate = ShardStateStuff::from_root(
         &zerostate_id,
         zerostate_root,
+        BTreeMap::new(),
         shard_states.min_ref_mc_state(),
     )?;
 

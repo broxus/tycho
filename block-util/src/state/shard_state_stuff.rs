@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -5,6 +6,7 @@ use everscale_types::cell::Lazy;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 
+use crate::state::shard_state_data::ShardStateData;
 use crate::state::{MinRefMcStateTracker, RefMcStateHandle};
 
 /// Parsed shard state.
@@ -26,25 +28,40 @@ impl ShardStateStuff {
     pub fn from_root(
         block_id: &BlockId,
         root: Cell,
+        data_roots: BTreeMap<u64, Cell>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
         let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
-        Self::from_state_and_root(block_id, shard_state, root, tracker)
+
+        let shard_state_data = data_roots
+            .into_iter()
+            .map(|(k, cell)| ShardStateData::from_root(cell).map(|v| (k, v)))
+            .collect::<Result<BTreeMap<u64, ShardStateData>>>()?;
+
+        Self::from_state_and_root(block_id, root, shard_state, shard_state_data, tracker)
     }
 
-    pub fn from_state(
+    pub fn from_root_and_accounts(
         block_id: &BlockId,
-        shard_state: Box<ShardStateUnsplit>,
+        root: Cell,
+        state_data: BTreeMap<u64, ShardAccounts>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
-        let root = CellBuilder::build_from(&shard_state)?;
-        ShardStateStuff::from_state_and_root(block_id, shard_state, root, tracker)
+        let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
+
+        let shard_state_data = state_data
+            .into_iter()
+            .map(|(k, acc)| ShardStateData::from_accounts(acc).map(|v| (k, v)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+
+        Self::from_state_and_root(block_id, root, shard_state, shard_state_data, tracker)
     }
 
     pub fn from_state_and_root(
         block_id: &BlockId,
-        shard_state: Box<ShardStateUnsplit>,
         root: Cell,
+        shard_state: Box<ShardStateUnsplit>,
+        shard_state_data: BTreeMap<u64, ShardStateData>,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
         anyhow::ensure!(
@@ -68,36 +85,11 @@ impl ShardStateStuff {
                 block_id: *block_id,
                 shard_state_extra: shard_state.load_custom()?,
                 shard_state,
+                shard_state_data,
                 root,
                 handle,
             }),
         })
-    }
-
-    pub fn deserialize_zerostate(
-        zerostate_id: &BlockId,
-        bytes: &[u8],
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Self> {
-        anyhow::ensure!(zerostate_id.seqno == 0, "given id has a non-zero seqno");
-
-        let file_hash = Boc::file_hash_blake(bytes);
-        anyhow::ensure!(
-            zerostate_id.file_hash.as_slice() == file_hash.as_slice(),
-            "file_hash mismatch. Expected: {}, got: {}",
-            hex::encode(file_hash),
-            zerostate_id.file_hash,
-        );
-
-        let root = Boc::decode(bytes)?;
-        anyhow::ensure!(
-            &zerostate_id.root_hash == root.repr_hash(),
-            "root_hash mismatch for {zerostate_id}. Expected: {expected}, got: {got}",
-            expected = zerostate_id.root_hash,
-            got = root.repr_hash(),
-        );
-
-        Self::from_root(zerostate_id, root, tracker)
     }
 
     pub fn block_id(&self) -> &BlockId {
@@ -121,6 +113,22 @@ impl ShardStateStuff {
 
     pub fn root_cell(&self) -> &Cell {
         &self.inner.root
+    }
+
+    pub fn data_root_cells(&self) -> BTreeMap<u64, Cell> {
+        self.inner
+            .shard_state_data
+            .iter()
+            .map(|(k, v)| (*k, v.root_cell().clone()))
+            .collect()
+    }
+
+    pub fn load_accounts(&self) -> BTreeMap<u64, ShardAccounts> {
+        self.inner
+            .shard_state_data
+            .iter()
+            .map(|(k, v)| (*k, v.accounts().clone()))
+            .collect()
     }
 
     pub fn shards(&self) -> Result<&ShardHashes> {
@@ -178,6 +186,7 @@ unsafe impl arc_swap::RefCnt for ShardStateStuff {
 pub struct Inner {
     block_id: BlockId,
     shard_state: Box<ShardStateUnsplit>,
+    shard_state_data: BTreeMap<u64, ShardStateData>,
     shard_state_extra: Option<McStateExtra>,
     handle: RefMcStateHandle,
     root: Cell,
