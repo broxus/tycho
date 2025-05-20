@@ -651,7 +651,16 @@ impl Phase<FinalizeState> {
                     block_serializer_cache.take_boc_header_cache(),
                 );
                 header.encode_rayon(&mut data);
-                block_serializer_cache.set_boc_header_cache(header.into_cache());
+
+                let cache = header.into_cache();
+                let rev_indices_capacity = cache.rev_indices_capacity();
+                let rev_cells_capacity = cache.rev_cells_capacity();
+                block_serializer_cache.set_boc_header_cache(cache);
+
+                metrics::gauge!("tycho_collator_boc_cache_rev_indices_capacity", labels)
+                    .set(rev_indices_capacity as f64);
+                metrics::gauge!("tycho_collator_boc_cache_rev_cells_capacity", labels)
+                    .set(rev_cells_capacity as f64);
             };
 
             let block_id = BlockId {

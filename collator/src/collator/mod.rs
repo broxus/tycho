@@ -260,7 +260,7 @@ impl CollatorStdImpl {
         mempool_config_override: Option<MempoolGlobalConfig>,
         cancel_collation: Arc<Notify>,
     ) -> Result<AsyncQueuedDispatcher<Self>> {
-        const BLOCK_CELL_COUNT_BASELINE: usize = 1_000_000;
+        const BLOCK_CELL_COUNT_BASELINE: usize = 100_000;
 
         let next_block_info = calc_next_block_id_short(&prev_blocks_ids);
 
