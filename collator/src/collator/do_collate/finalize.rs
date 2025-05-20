@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use everscale_types::boc;
 use everscale_types::cell::Lazy;
 use everscale_types::merkle::*;
 use everscale_types::models::{ShardIdent, *};
@@ -26,8 +27,8 @@ use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::execution_manager::MessagesExecutor;
 use crate::collator::messages_reader::{FinalizedMessagesReader, MessagesReader};
 use crate::collator::types::{
-    BlockCollationData, ExecuteResult, FinalizeBlockResult, FinalizeMessagesReaderResult,
-    PreparedInMsg, PreparedOutMsg, PublicLibsDiff,
+    BlockCollationData, BlockSerializerCache, ExecuteResult, FinalizeBlockResult,
+    FinalizeMessagesReaderResult, PreparedInMsg, PreparedOutMsg, PublicLibsDiff,
 };
 use crate::internal_queue::types::{DiffStatistics, DiffZone, EnqueuedMessage};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -54,6 +55,7 @@ pub struct FinalizeBlockContext {
     pub collator_config: Arc<CollatorConfig>,
     pub processed_upto: ProcessedUptoInfoStuff,
     pub diff_tail_len: u32,
+    pub block_serializer_cache: BlockSerializerCache,
 }
 
 impl Phase<FinalizeState> {
@@ -262,6 +264,7 @@ impl Phase<FinalizeState> {
             collator_config,
             processed_upto,
             diff_tail_len,
+            block_serializer_cache,
         } = ctx;
 
         let wu_params_finalize = self
@@ -641,7 +644,16 @@ impl Phase<FinalizeState> {
             // TODO: Check (assert) whether the serialized block contains usage cells
             let root = CellBuilder::build_from(&block)?;
 
-            let data = everscale_types::boc::Boc::encode_rayon(&root);
+            let mut data = Vec::new();
+            {
+                let header = boc::ser::BocHeader::<ahash::RandomState>::with_root_and_cache(
+                    root.as_ref(),
+                    block_serializer_cache.take_boc_header_cache(),
+                );
+                header.encode_rayon(&mut data);
+                block_serializer_cache.set_boc_header_cache(header.into_cache());
+            };
+
             let block_id = BlockId {
                 shard: self.state.collation_data.block_id_short.shard,
                 seqno: self.state.collation_data.block_id_short.seqno,

@@ -21,8 +21,8 @@ use tycho_util::FastHashMap;
 
 use super::messages_reader::ReaderState;
 use super::types::{
-    AnchorInfo, AnchorsCache, BlockCollationData, BlockCollationDataBuilder, CollationResult,
-    ExecuteResult, FinalResult, FinalizeBlockResult, FinalizeCollationResult,
+    AnchorInfo, AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
+    CollationResult, ExecuteResult, FinalResult, FinalizeBlockResult, FinalizeCollationResult,
     FinalizeMessagesReaderResult, PrevData, ShardDescriptionExt, WorkingState,
 };
 use super::{CollatorStdImpl, ForceMasterCollation};
@@ -114,6 +114,7 @@ impl CollatorStdImpl {
         )?;
 
         let anchors_cache = std::mem::take(&mut self.anchors_cache);
+        let block_serializer_cache = self.block_serializer_cache.clone();
 
         let is_first_block_after_prev_master = is_first_block_after_prev_master(
             prev_shard_data.blocks_ids()[0], // TODO: consider split/merge
@@ -144,6 +145,7 @@ impl CollatorStdImpl {
                     mq_adapter,
                     reader_state,
                     anchors_cache,
+                    block_serializer_cache,
                     state,
                     collation_session,
                     wu_used_from_last_anchor,
@@ -270,6 +272,7 @@ impl CollatorStdImpl {
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         reader_state: ReaderState,
         anchors_cache: AnchorsCache,
+        block_serializer_cache: BlockSerializerCache,
         state: Box<ActualState>,
         collation_session: Arc<CollationSessionInfo>,
         wu_used_from_last_anchor: u64,
@@ -419,6 +422,7 @@ impl CollatorStdImpl {
                     collator_config,
                     processed_upto,
                     diff_tail_len,
+                    block_serializer_cache,
                 })
             },
             // wait update queue task before returning collation result
