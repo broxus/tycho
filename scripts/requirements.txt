@@ -1,3 +1,3 @@
 git+https://github.com/broxus/grafana-builder.git@376e405ac6620a76598dcdf81e7b6ff10aa702eb#egg=dashboard-builder
 grafanalib==0.7.1
-nekoton==0.1.22
+nekoton==0.1.23
