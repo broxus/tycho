@@ -22,7 +22,9 @@ use tycho_util::sync::rayon_run;
 
 use self::models::*;
 use crate::endpoint::{get_mime_type, APPLICATION_JSON};
-use crate::state::{LoadedAccountState, RpcState, RpcStateError, RunGetMethodPermit};
+use crate::state::{
+    BadRequestError, LoadedAccountState, RpcState, RpcStateError, RunGetMethodPermit,
+};
 use crate::util::error_codes::*;
 use crate::util::jrpc_extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
 
@@ -32,6 +34,7 @@ pub fn router() -> axum::Router<RpcState> {
     axum::Router::new()
         .route("/", post(post_jrpc))
         .route("/jsonRPC", post(post_jrpc))
+        .route("/detectAddress", get(get_detect_address))
         .route("/getAddressInformation", get(get_address_information))
         .route("/getTransactions", get(get_transactions))
         .route("/sendBoc", post(post_send_boc))
@@ -55,9 +58,11 @@ async fn post_jrpc(state: State<RpcState>, req: Request) -> Response {
 
 declare_jrpc_method! {
     pub enum MethodParams: Method {
+        DetectAddress(DetectAddressParams),
         GetAddressInformation(AccountParams),
         GetTransactions(TransactionsParams),
         SendBoc(SendBocParams),
+        SendBocReturnHash(SendBocParams),
         RunGetMethod(RunGetMethodParams),
     }
 }
@@ -66,13 +71,46 @@ async fn post_jrpc_impl(State(state): State<RpcState>, req: Jrpc<JrpcId, Method>
     let label = [("method", req.method)];
     let _hist = HistogramGuard::begin_with_labels("tycho_jrpc_request_time", &label);
     match req.params {
+        MethodParams::DetectAddress(p) => handle_detect_address(req.id, p).await,
         MethodParams::GetAddressInformation(p) => {
             handle_get_address_information(req.id, state, p).await
         }
         MethodParams::GetTransactions(p) => handle_get_transactions(req.id, state, p).await,
         MethodParams::SendBoc(p) => handle_send_boc(req.id, state, p).await,
+        MethodParams::SendBocReturnHash(p) => handle_send_boc_return_hash(req.id, state, p).await,
         MethodParams::RunGetMethod(p) => handle_run_get_method(req.id, state, p).await,
     }
+}
+
+// === GET /detectAddress ===
+
+fn get_detect_address(
+    query: Result<Query<DetectAddressParams>, QueryRejection>,
+) -> impl Future<Output = Response> {
+    match query {
+        Ok(Query(params)) => Either::Left(handle_detect_address(JrpcId::Skip, params)),
+        Err(e) => Either::Right(handle_rejection(e)),
+    }
+}
+
+async fn handle_detect_address(id: JrpcId, p: DetectAddressParams) -> Response {
+    let (test_only, given_type) = match p.base64_flags {
+        None => (false, AddressType::RawForm),
+        Some(flags) => (
+            flags.testnet,
+            if flags.bounceable {
+                AddressType::FriendlyBounceable
+            } else {
+                AddressType::FriendlyNonBounceable
+            },
+        ),
+    };
+
+    ok_to_response(id, AddressFormsResponse {
+        raw_form: p.address,
+        given_type,
+        test_only,
+    })
 }
 
 // === GET /getAddressInformation ===
@@ -85,10 +123,7 @@ fn get_address_information(
         Ok(Query(params)) => {
             Either::Left(handle_get_address_information(JrpcId::Skip, state, params))
         }
-        Err(e) => Either::Right(futures_util::future::ready(error_to_response(
-            JrpcId::Skip,
-            RpcStateError::BadRequest(e.into()),
-        ))),
+        Err(e) => Either::Right(handle_rejection(e)),
     }
 }
 
@@ -175,10 +210,7 @@ fn get_transactions(
 ) -> impl Future<Output = Response> {
     match query {
         Ok(Query(params)) => Either::Left(handle_get_transactions(JrpcId::Skip, state, params)),
-        Err(e) => Either::Right(futures_util::future::ready(error_to_response(
-            JrpcId::Skip,
-            RpcStateError::BadRequest(e.into()),
-        ))),
+        Err(e) => Either::Right(handle_rejection(e)),
     }
 }
 
@@ -210,10 +242,7 @@ fn post_send_boc(
 ) -> impl Future<Output = Response> {
     match body {
         Ok(Json(params)) => Either::Left(handle_send_boc(JrpcId::Skip, state, params)),
-        Err(e) => Either::Right(futures_util::future::ready(error_to_response(
-            JrpcId::Skip,
-            RpcStateError::BadRequest(e.into()),
-        ))),
+        Err(e) => Either::Right(handle_rejection(e)),
     }
 }
 
@@ -238,10 +267,7 @@ fn post_send_boc_return_hash(
 ) -> impl Future<Output = Response> {
     match body {
         Ok(Json(params)) => Either::Left(handle_send_boc_return_hash(JrpcId::Skip, state, params)),
-        Err(e) => Either::Right(futures_util::future::ready(error_to_response(
-            JrpcId::Skip,
-            RpcStateError::BadRequest(e.into()),
-        ))),
+        Err(e) => Either::Right(handle_rejection(e)),
     }
 }
 
@@ -277,10 +303,7 @@ fn post_run_get_method(
 ) -> impl Future<Output = Response> {
     match body {
         Ok(Json(params)) => Either::Left(handle_run_get_method(JrpcId::Skip, state, params)),
-        Err(e) => Either::Right(futures_util::future::ready(error_to_response(
-            JrpcId::Skip,
-            RpcStateError::BadRequest(e.into()),
-        ))),
+        Err(e) => Either::Right(handle_rejection(e)),
     }
 }
 
@@ -458,6 +481,13 @@ async fn handle_run_get_method(id: JrpcId, state: RpcState, p: RunGetMethodParam
 }
 
 // === Helpers ===
+
+fn handle_rejection<T: Into<BadRequestError>>(e: T) -> futures_util::future::Ready<Response> {
+    futures_util::future::ready(error_to_response(
+        JrpcId::Skip,
+        RpcStateError::BadRequest(e.into()),
+    ))
+}
 
 fn ok_to_response<T: Serialize>(id: JrpcId, result: T) -> Response {
     JrpcOkResponse::new(id, result).into_response()
