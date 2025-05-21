@@ -1605,3 +1605,40 @@ impl ConcurrentQueueStatistics {
         }
     }
 }
+
+#[derive(Default, Clone)]
+pub(super) struct MsgsExecutionParamsStuff {
+    pub current: MsgsExecutionParams,
+    pub new: Option<MsgsExecutionParams>,
+}
+
+impl MsgsExecutionParamsStuff {
+    pub fn new(
+        processed_upto_params: Option<MsgsExecutionParams>,
+        mc_data_params: MsgsExecutionParams,
+    ) -> Self {
+        match processed_upto_params {
+            Some(msgs_exec_params) => {
+                let new = (msgs_exec_params != mc_data_params).then_some(mc_data_params);
+                Self {
+                    current: msgs_exec_params,
+                    new,
+                }
+            }
+            _ => Self {
+                current: mc_data_params,
+                new: None,
+            },
+        }
+    }
+
+    pub fn new_exists(&self) -> bool {
+        self.new.is_some()
+    }
+
+    pub fn update(&mut self) {
+        if self.new.is_some() {
+            self.current = self.new.take().unwrap();
+        }
+    }
+}

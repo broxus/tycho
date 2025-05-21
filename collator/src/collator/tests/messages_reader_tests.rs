@@ -22,6 +22,7 @@ use super::{
 };
 use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::types::{AnchorsCache, ParsedMessage};
+use crate::collator::MsgsExecutionParamsStuff;
 use crate::internal_queue::types::{
     DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue,
 };
@@ -99,7 +100,7 @@ async fn test_refill_messages() -> Result<()> {
     let mut group_slots_fractions = Dict::<u16, u8>::new();
     group_slots_fractions.set(0, 80)?;
     group_slots_fractions.set(1, 10)?;
-    let msgs_exec_params = Arc::new(MsgsExecutionParams {
+    let msgs_exec_params = MsgsExecutionParams {
         buffer_limit: 30,
         group_limit: 5,
         group_vert_size: 2,
@@ -110,7 +111,12 @@ async fn test_refill_messages() -> Result<()> {
         par_0_int_msgs_count_limit: 50,
         group_slots_fractions,
         range_messages_limit: 20,
-    });
+    };
+
+    let buffer_limit = msgs_exec_params.buffer_limit;
+
+    let msgs_exec_params_stuff =
+        MsgsExecutionParamsStuff::new(Some(msgs_exec_params.clone()), msgs_exec_params);
 
     const DEFAULT_BLOCK_EXEC_COUNT_LIMIT: usize = 20;
 
@@ -132,7 +138,7 @@ async fn test_refill_messages() -> Result<()> {
 
     // test shard collator
     let sc_collator = TestCollator {
-        msgs_exec_params: msgs_exec_params.clone(),
+        msgs_exec_params: msgs_exec_params_stuff.clone(),
 
         shard_id: sc_shard_id,
         block_seqno: 0,
@@ -155,7 +161,7 @@ async fn test_refill_messages() -> Result<()> {
 
     // test master collator
     let mc_collator = TestCollator {
-        msgs_exec_params: msgs_exec_params.clone(),
+        msgs_exec_params: msgs_exec_params_stuff.clone(),
 
         shard_id: ShardIdent::MASTERCHAIN,
         block_seqno: 0,
@@ -335,7 +341,7 @@ async fn test_refill_messages() -> Result<()> {
 
     for _ in 0..20 {
         // we create such amout of externals per anchor so that they do not fit one buffer limit
-        let target_total_msgs_count = (msgs_exec_params.buffer_limit + 10) as usize;
+        let target_total_msgs_count = (buffer_limit + 10) as usize;
         let target_swap_msgs_count = target_total_msgs_count / 3;
         let target_transfer_msgs_count = target_total_msgs_count - target_swap_msgs_count;
         let mut messages = test_adapter
@@ -384,7 +390,7 @@ async fn test_refill_messages() -> Result<()> {
 
     for i in 0..10 {
         // we create such amount of externals per anchor so that they do not fit one buffer limit
-        let msgs_count = (msgs_exec_params.buffer_limit + 20) as usize;
+        let msgs_count = (buffer_limit + 20) as usize;
         let transfer_messages = test_adapter
             .msgs_factory
             .create_transfer_messages(&transfers_wallets, msgs_count)?;
@@ -542,7 +548,7 @@ struct TestCollateResult {
 }
 
 struct TestCollator<V: InternalMessageValue> {
-    msgs_exec_params: Arc<MsgsExecutionParams>,
+    msgs_exec_params: MsgsExecutionParamsStuff,
 
     shard_id: ShardIdent,
     block_seqno: BlockSeqno,
