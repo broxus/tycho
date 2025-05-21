@@ -38,11 +38,6 @@ pub struct RpcConfig {
     /// Configuration of getter requests.
     pub run_get_method: RunGetMethodConfig,
 
-    /// Enable `/toncenter/v2/*` endpoints.
-    ///
-    /// Default: `false`.
-    pub enable_toncenter_api: bool,
-
     pub storage: RpcStorage,
 }
 
@@ -144,7 +139,6 @@ impl Default for RpcConfig {
             allow_huge_requests: false,
             max_parallel_block_downloads: 10,
             run_get_method: RunGetMethodConfig::default(),
-            enable_toncenter_api: false,
             storage: RpcStorage::Full {
                 gc: Some(Default::default()),
                 force_reindex: false,

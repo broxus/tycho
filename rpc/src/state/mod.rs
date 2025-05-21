@@ -17,8 +17,12 @@ use tycho_core::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
+use tycho_core::global_config::ZerostateId;
 use tycho_storage::{
-    BlacklistedAccounts, CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder,
+    BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor,
+    BlockTransactionsIterBuilder, BlocksByMcSeqnoIter, BriefBlockInfo, BriefShardDescr,
+    CodeHashesIter, KeyBlocksDirection, RpcSnapshot, Storage, TransactionData, TransactionDataExt,
+    TransactionInfo, TransactionsIterBuilder,
 };
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
@@ -28,14 +32,14 @@ use crate::config::{BlackListConfig, RpcConfig, RpcStorage, TransactionsGcConfig
 use crate::endpoint::{JrpcEndpointCache, ProtoEndpointCache, RpcEndpoint};
 use crate::models::{GenTimings, StateTimings};
 
-pub struct RpcStateBuilder<MandatoryFields = (Storage, BlockchainRpcClient)> {
+pub struct RpcStateBuilder<MandatoryFields = (Storage, BlockchainRpcClient, ZerostateId)> {
     config: RpcConfig,
     mandatory_fields: MandatoryFields,
 }
 
 impl RpcStateBuilder {
     pub fn build(self) -> RpcState {
-        let (storage, blockchain_rpc_client) = self.mandatory_fields;
+        let (storage, blockchain_rpc_client, zerostate_id) = self.mandatory_fields;
 
         let gc_notify = Arc::new(Notify::new());
 
@@ -90,6 +94,7 @@ impl RpcStateBuilder {
                         gen_lt: 0,
                         gen_utime: 0,
                     },
+                    state_hash: HashBytes::ZERO,
                 }),
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
@@ -100,6 +105,7 @@ impl RpcStateBuilder {
                 blockchain_config: ArcSwap::new(parsed_config),
                 jrpc_cache: Default::default(),
                 proto_cache: Default::default(),
+                zerostate_id,
                 gc_notify,
                 gc_handle,
                 blacklisted_accounts,
@@ -109,33 +115,47 @@ impl RpcStateBuilder {
     }
 }
 
-impl<T2> RpcStateBuilder<((), T2)> {
-    pub fn with_storage(self, storage: Storage) -> RpcStateBuilder<(Storage, T2)> {
-        let (_, bc_rpc_client) = self.mandatory_fields;
+impl<T2, T3> RpcStateBuilder<((), T2, T3)> {
+    pub fn with_storage(self, storage: Storage) -> RpcStateBuilder<(Storage, T2, T3)> {
+        let (_, bc_rpc_client, zerostate_id) = self.mandatory_fields;
 
         RpcStateBuilder {
             config: self.config,
-            mandatory_fields: (storage, bc_rpc_client),
+            mandatory_fields: (storage, bc_rpc_client, zerostate_id),
         }
     }
 }
 
-impl<T1> RpcStateBuilder<(T1, ())> {
+impl<T1, T3> RpcStateBuilder<(T1, (), T3)> {
     pub fn with_blockchain_rpc_client(
         self,
         client: BlockchainRpcClient,
-    ) -> RpcStateBuilder<(T1, BlockchainRpcClient)> {
-        let (storage, _) = self.mandatory_fields;
+    ) -> RpcStateBuilder<(T1, BlockchainRpcClient, T3)> {
+        let (storage, _, zerostate_id) = self.mandatory_fields;
 
         RpcStateBuilder {
             config: self.config,
-            mandatory_fields: (storage, client),
+            mandatory_fields: (storage, client, zerostate_id),
         }
     }
 }
 
-impl<T1, T2> RpcStateBuilder<(T1, T2)> {
-    pub fn with_config(self, config: RpcConfig) -> RpcStateBuilder<(T1, T2)> {
+impl<T1, T2> RpcStateBuilder<(T1, T2, ())> {
+    pub fn with_zerostate_id(
+        self,
+        zerostate_id: ZerostateId,
+    ) -> RpcStateBuilder<(T1, T2, ZerostateId)> {
+        let (storage, client, _) = self.mandatory_fields;
+
+        RpcStateBuilder {
+            config: self.config,
+            mandatory_fields: (storage, client, zerostate_id),
+        }
+    }
+}
+
+impl<T1, T2, T3> RpcStateBuilder<(T1, T2, T3)> {
+    pub fn with_config(self, config: RpcConfig) -> RpcStateBuilder<(T1, T2, T3)> {
         RpcStateBuilder { config, ..self }
     }
 }
@@ -147,10 +167,10 @@ pub struct RpcState {
 }
 
 impl RpcState {
-    pub fn builder() -> RpcStateBuilder<((), ())> {
+    pub fn builder() -> RpcStateBuilder<((), (), ())> {
         RpcStateBuilder {
             config: RpcConfig::default(),
-            mandatory_fields: ((), ()),
+            mandatory_fields: ((), (), ()),
         }
     }
 
@@ -215,6 +235,19 @@ impl RpcState {
         &self.inner.proto_cache
     }
 
+    pub fn zerostate_id(&self) -> &ZerostateId {
+        &self.inner.zerostate_id
+    }
+
+    pub fn get_latest_mc_info(&self) -> LatestMcInfo {
+        self.inner.mc_info.read().clone()
+    }
+
+    pub fn rpc_storage_snapshot(&self) -> Option<RpcSnapshot> {
+        let rpc_storage = self.inner.storage.rpc_storage()?;
+        rpc_storage.load_snapshot()
+    }
+
     pub async fn broadcast_external_message(&self, message: &[u8]) {
         metrics::counter!("tycho_rpc_broadcast_external_message_tx_bytes_total")
             .increment(message.len() as u64);
@@ -226,6 +259,32 @@ impl RpcState {
 
     pub fn get_unpacked_blockchain_config(&self) -> Arc<LatestBlockchainConfig> {
         self.inner.blockchain_config.load_full()
+    }
+
+    pub fn get_brief_block_info(
+        &self,
+        block_id: &BlockIdShort,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<(BlockId, u32, BriefBlockInfo)>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_brief_block_info(block_id, snapshot)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_brief_shards_descr(
+        &self,
+        mc_seqno: u32,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<Vec<BriefShardDescr>>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_brief_shards_descr(mc_seqno, snapshot)
+            .map_err(RpcStateError::Internal)
     }
 
     pub fn get_libraries(&self) -> Dict<HashBytes, LibDescr> {
@@ -254,65 +313,154 @@ impl RpcState {
         &self,
         code_hash: &HashBytes,
         continuation: Option<&StdAddr>,
+        snapshot: Option<RpcSnapshot>,
     ) -> Result<CodeHashesIter<'_>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_accounts_by_code_hash(code_hash, continuation)
+            .get_accounts_by_code_hash(code_hash, continuation, snapshot)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_known_mc_blocks_range(
+        &self,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<(u32, u32)>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_known_mc_blocks_range(snapshot)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_blocks_by_mc_seqno(
+        &self,
+        mc_seqno: u32,
+        snapshot: Option<RpcSnapshot>,
+    ) -> Result<Option<BlocksByMcSeqnoIter>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_blocks_by_mc_seqno(mc_seqno, snapshot)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_block_transactions(
+        &self,
+        block_id: &BlockIdShort,
+        reverse: bool,
+        cursor: Option<&BlockTransactionsCursor>,
+        snapshot: Option<RpcSnapshot>,
+    ) -> Result<Option<BlockTransactionsIterBuilder>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_block_transactions(block_id, reverse, cursor, snapshot)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_block_transaction_ids(
+        &self,
+        block_id: &BlockIdShort,
+        reverse: bool,
+        cursor: Option<&BlockTransactionsCursor>,
+        snapshot: Option<RpcSnapshot>,
+    ) -> Result<Option<BlockTransactionIdsIter>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_block_transaction_ids(block_id, reverse, cursor, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
     pub fn get_transactions(
         &self,
         account: &StdAddr,
-        last_lt: Option<u64>,
-        to_lt: u64,
-    ) -> Result<TransactionsIterBuilder<'_>, RpcStateError> {
+        start_lt: Option<u64>,
+        end_lt: Option<u64>,
+        reverse: bool,
+        snapshot: Option<RpcSnapshot>,
+    ) -> Result<TransactionsIterBuilder, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_transactions(account, last_lt, to_lt)
+            .get_transactions(account, start_lt, end_lt, reverse, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
     pub fn get_transaction(
         &self,
         hash: &HashBytes,
-    ) -> Result<Option<impl AsRef<[u8]> + '_>, RpcStateError> {
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<TransactionData<'_>>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_transaction(hash)
+            .get_transaction(hash, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
-    pub fn get_transaction_block_id(
+    pub fn get_transaction_ext<'a>(
+        &'a self,
+        hash: &HashBytes,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<TransactionDataExt<'a>>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_transaction_ext(hash, snapshot)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_transaction_info(
         &self,
         hash: &HashBytes,
-    ) -> Result<Option<BlockId>, RpcStateError> {
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<TransactionInfo>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_transaction_block_id(hash)
+            .get_transaction_info(hash, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
-    pub fn get_dst_transaction(
-        &self,
+    pub fn get_src_transaction<'a>(
+        &'a self,
+        account: &StdAddr,
+        message_lt: u64,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<impl AsRef<[u8]> + 'a>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_src_transaction(account, message_lt, snapshot)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_dst_transaction<'a>(
+        &'a self,
         in_msg_hash: &HashBytes,
-    ) -> Result<Option<impl AsRef<[u8]> + '_>, RpcStateError> {
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<impl AsRef<[u8]> + 'a>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_dst_transaction(in_msg_hash)
+            .get_dst_transaction(in_msg_hash, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
+    // TODO: Add snapshot support.
     pub async fn get_key_block_proof(
         &self,
         key_block_seqno: u32,
@@ -375,8 +523,9 @@ impl BlockSubscriber for RpcBlockSubscriber {
     fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
         let handle = tokio::task::spawn({
             let inner = self.inner.clone();
+            let mc_block_id = cx.mc_block_id;
             let block = cx.block.clone();
-            async move { inner.update(&block).await }
+            async move { inner.update(&mc_block_id, &block).await }
         });
 
         futures_util::future::ready(Ok(handle))
@@ -423,6 +572,7 @@ struct Inner {
     blockchain_config: ArcSwap<LatestBlockchainConfig>,
     jrpc_cache: JrpcEndpointCache,
     proto_cache: ProtoEndpointCache,
+    zerostate_id: ZerostateId,
     // GC
     gc_notify: Arc<Notify>,
     gc_handle: Option<JoinHandle<()>>,
@@ -432,9 +582,10 @@ struct Inner {
 }
 
 #[derive(Clone)]
-struct LatestMcInfo {
-    block_id: Arc<BlockId>,
-    timings: GenTimings,
+pub struct LatestMcInfo {
+    pub block_id: Arc<BlockId>,
+    pub timings: GenTimings,
+    pub state_hash: HashBytes,
 }
 
 pub struct LatestBlockchainConfig {
@@ -608,7 +759,7 @@ impl Inner {
         }
     }
 
-    async fn update(&self, block: &BlockStuff) -> Result<()> {
+    async fn update(&self, mc_block_id: &BlockId, block: &BlockStuff) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_rpc_state_update_time");
 
         let is_masterchain = block.id().is_masterchain();
@@ -618,7 +769,11 @@ impl Inner {
 
         if let Some(rpc_storage) = self.storage.rpc_storage() {
             rpc_storage
-                .update(block.clone(), self.blacklisted_accounts.as_ref())
+                .update(
+                    mc_block_id,
+                    block.clone(),
+                    self.blacklisted_accounts.as_ref(),
+                )
                 .await?;
         }
         Ok(())
@@ -657,6 +812,8 @@ impl Inner {
 
     fn update_mc_info(&self, block: &BlockStuff) -> Result<()> {
         let info = block.load_info()?;
+        let state_update = block.block().state_update.load()?;
+
         let block_id = Arc::new(*block.id());
         *self.mc_info.write() = LatestMcInfo {
             block_id,
@@ -664,6 +821,7 @@ impl Inner {
                 gen_lt: info.end_lt,
                 gen_utime: info.gen_utime,
             },
+            state_hash: state_update.new_hash,
         };
         Ok(())
     }
@@ -865,7 +1023,7 @@ async fn transactions_gc(config: TransactionsGcConfig, storage: Storage, gc_noti
         gc_notify.notified().await;
 
         let target_utime = now_sec().saturating_sub(tx_ttl_sec);
-        let min_lt = match find_closest_key_block_lt(&storage, target_utime).await {
+        let gc_range = match find_closest_key_block_lt(&storage, target_utime).await {
             Ok(lt) => lt,
             Err(e) => {
                 tracing::error!(target_utime, "failed to find the closest key block lt: {e}");
@@ -874,12 +1032,13 @@ async fn transactions_gc(config: TransactionsGcConfig, storage: Storage, gc_noti
         };
 
         if let Err(e) = persistent_storage
-            .remove_old_transactions(min_lt, config.keep_tx_per_account)
+            .remove_old_transactions(gc_range.mc_seqno, gc_range.lt, config.keep_tx_per_account)
             .await
         {
             tracing::error!(
                 target_utime,
-                min_lt,
+                mc_seqno = gc_range.mc_seqno,
+                min_lt = gc_range.lt,
                 "failed to remove old transactions: {e:?}"
             );
         }
@@ -920,7 +1079,7 @@ pub async fn watch_blacklisted_accounts(config_path: PathBuf, accounts: Blacklis
     }
 }
 
-async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64> {
+async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<GcRange> {
     let block_handle_storage = storage.block_handle_storage();
 
     // Find the key block with max seqno which was preduced not later than `utime`
@@ -936,7 +1095,7 @@ async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64>
             }
         }
 
-        return Ok(0);
+        return Ok(GcRange::default());
     };
 
     // Load block proof
@@ -945,7 +1104,16 @@ async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64>
     // Read `start_lt` from virtual block info
     let (virt_block, _) = block_proof.virtualize_block()?;
     let info = virt_block.info.load()?;
-    Ok(info.start_lt)
+    Ok(GcRange {
+        mc_seqno: info.seqno,
+        lt: info.start_lt,
+    })
+}
+
+#[derive(Default)]
+struct GcRange {
+    mc_seqno: u32,
+    lt: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -956,6 +1124,43 @@ pub enum RpcStateError {
     NotSupported,
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
+    #[error(transparent)]
+    BadRequest(#[from] BadRequestError),
+}
+
+impl RpcStateError {
+    pub fn internal<E: Into<anyhow::Error>>(error: E) -> Self {
+        Self::Internal(error.into())
+    }
+
+    pub fn bad_request<E: Into<anyhow::Error>>(error: E) -> Self {
+        Self::BadRequest(BadRequestError(error.into()))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct BadRequestError(anyhow::Error);
+
+impl From<anyhow::Error> for BadRequestError {
+    #[inline]
+    fn from(value: anyhow::Error) -> Self {
+        Self(value)
+    }
+}
+
+impl From<axum::extract::rejection::QueryRejection> for BadRequestError {
+    #[inline]
+    fn from(value: axum::extract::rejection::QueryRejection) -> Self {
+        Self(anyhow::Error::msg(value.body_text()))
+    }
+}
+
+impl From<axum::extract::rejection::JsonRejection> for BadRequestError {
+    #[inline]
+    fn from(value: axum::extract::rejection::JsonRejection) -> Self {
+        Self(anyhow::Error::msg(value.body_text()))
+    }
 }
 
 #[cfg(test)]
@@ -969,6 +1174,7 @@ mod test {
     use tycho_block_util::block::{BlockStuff, BlockStuffAug};
     use tycho_core::block_strider::{BlockSubscriber, BlockSubscriberContext, DelayedTasks};
     use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService};
+    use tycho_core::global_config::ZerostateId;
     use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
     use tycho_network::{
         service_query_fn, BoxCloneService, Network, NetworkConfig, OverlayId, PublicOverlay,
@@ -1063,6 +1269,7 @@ mod test {
             .with_config(config)
             .with_storage(storage)
             .with_blockchain_rpc_client(blockchain_rpc_client)
+            .with_zerostate_id(ZerostateId::default())
             .build();
 
         let block = get_block();
@@ -1093,7 +1300,7 @@ mod test {
         )?;
 
         let account_by_code_hash = rpc_state
-            .get_accounts_by_code_hash(&new_code_hash, None)?
+            .get_accounts_by_code_hash(&new_code_hash, None, None)?
             .last()
             .unwrap();
 
@@ -1136,6 +1343,7 @@ mod test {
             .with_config(config)
             .with_storage(storage)
             .with_blockchain_rpc_client(blockchain_rpc_client)
+            .with_zerostate_id(ZerostateId::default())
             .build();
 
         let block = get_empty_block();
