@@ -435,6 +435,21 @@ impl<'a> TonlibAddress<'a> {
     }
 }
 
+// === Message hash response ===
+
+#[derive(Serialize)]
+pub struct ExtMsgInfoResponse {
+    pub ty: &'static str,
+    pub hash: HashBytes,
+    pub hash_norm: HashBytes,
+    #[serde(rename = "@extra")]
+    pub extra: TonlibExtra,
+}
+
+impl ExtMsgInfoResponse {
+    pub const TY: &str = "raw.extMessageInfo";
+}
+
 // === Vm Response ===
 
 #[derive(Serialize)]
