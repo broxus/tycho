@@ -14,6 +14,100 @@ use tycho_block_util::message::ExtMsgRepr;
 use tycho_storage::TransactionsIterBuilder;
 use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
+use crate::util::jrpc_extractor::{
+    JrpcError, JrpcErrorResponse, JrpcOkResponse, JSONRPC_FIELD, JSONRPC_VERSION,
+};
+
+// === ID ===
+
+#[derive(Debug, Clone)]
+pub enum JrpcId {
+    Skip,
+    Set(StringOrNumber),
+}
+
+impl<'de> Deserialize<'de> for JrpcId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        StringOrNumber::deserialize(deserializer).map(Self::Set)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StringOrNumber {
+    Number(i64),
+    String(String),
+}
+
+// Strange JRPC OK response.
+impl<T: Serialize> Serialize for JrpcOkResponse<JrpcId, T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let field_count = match &self.id {
+            JrpcId::Skip => 2,
+            JrpcId::Set(_) => 4,
+        };
+
+        let mut ser = serializer.serialize_struct("JrpcResponse", field_count)?;
+
+        if let JrpcId::Set(id) = &self.id {
+            ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
+            ser.serialize_field("id", id)?;
+        }
+
+        ser.serialize_field("result", &self.result)?;
+        ser.serialize_field("ok", &true)?;
+        ser.end()
+    }
+}
+
+impl Serialize for JrpcErrorResponse<JrpcId> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let id;
+        let field_count;
+        match &self.id {
+            None => {
+                id = Some(None);
+                field_count = 4;
+            }
+            Some(JrpcId::Skip) => {
+                id = None;
+                field_count = 2;
+            }
+            Some(JrpcId::Set(x)) => {
+                id = Some(Some(x));
+                field_count = 4;
+            }
+        };
+
+        let mut ser = serializer.serialize_struct("JrpcResponse", field_count)?;
+
+        if let Some(id) = id {
+            ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
+            ser.serialize_field("id", &id)?;
+        }
+
+        ser.serialize_field("error", &JrpcError {
+            code: self.code,
+            message: &self.message,
+        })?;
+        ser.serialize_field("ok", &false)?;
+        ser.end()
+    }
+}
+
 // === Requests ===
 
 #[derive(Debug, Deserialize)]
