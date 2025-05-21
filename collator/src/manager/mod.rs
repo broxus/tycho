@@ -25,7 +25,9 @@ use types::{
 
 use self::blocks_cache::BlocksCache;
 use self::types::{BlockCacheKey, CandidateStatus, CollationSyncState, McBlockSubgraphExtract};
-use self::utils::find_us_in_collators_set;
+use self::utils::{
+    find_us_in_collators_set, get_all_shards_processed_to_by_partitions_for_mc_block_with_cache,
+};
 use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
     ForceMasterCollation,
@@ -45,8 +47,8 @@ use crate::types::processed_upto::{
 };
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
-    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
-    ShardDescriptionExt, ShardDescriptionShort, ShardHashesExt,
+    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ShardDescriptionExt,
+    ShardDescriptionShort, ShardHashesExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -57,7 +59,7 @@ use crate::{method_to_async_closure, tracing_targets};
 
 mod blocks_cache;
 mod types;
-mod utils;
+pub mod utils;
 
 #[cfg(test)]
 #[path = "tests/manager_tests.rs"]
@@ -487,13 +489,10 @@ where
 
         let _histogram = HistogramGuard::begin("tycho_collator_commit_queue_diffs_time");
 
-        let mut top_blocks: Vec<_> = top_shard_blocks_info
-            .iter()
-            .map(|(id, updated)| (*id, *updated))
-            .collect();
-        top_blocks.push((*block_id, true));
+        let mut mc_top_blocks: Vec<_> = top_shard_blocks_info.to_vec();
+        mc_top_blocks.push((*block_id, true));
 
-        if let Err(err) = mq_adapter.commit_diff(top_blocks, partitions) {
+        if let Err(err) = mq_adapter.commit_diff(&mc_top_blocks, partitions) {
             bail!(
                 "Error committing message queue diff of block ({}): {:?}",
                 block_id,
@@ -1546,7 +1545,7 @@ where
         // get internals processed_to from master and all shards
         // for last applied master block
         let all_shards_processed_to_by_partitions =
-            Self::get_all_shards_processed_to_by_partitions_for_mc_block(
+            get_all_shards_processed_to_by_partitions_for_mc_block_with_cache(
                 &last_applied_mc_block_key,
                 &self.blocks_cache,
                 self.state_node_adapter.clone(),
@@ -1683,41 +1682,6 @@ where
         }
 
         Ok(true)
-    }
-
-    async fn get_all_shards_processed_to_by_partitions_for_mc_block(
-        mc_block_key: &BlockCacheKey,
-        blocks_cache: &BlocksCache,
-        state_node_adapter: Arc<dyn StateNodeAdapter>,
-    ) -> Result<FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>> {
-        let mut result = FastHashMap::default();
-
-        if mc_block_key.seqno == 0 {
-            return Ok(result);
-        }
-
-        let from_cache = blocks_cache.get_top_blocks_processed_to_by_partitions(mc_block_key)?;
-
-        for (top_block_id, (updated, processed_to_opt)) in from_cache {
-            let processed_to = match processed_to_opt {
-                Some(processed_to) => processed_to,
-                None => {
-                    if top_block_id.seqno == 0 {
-                        FastHashMap::default()
-                    } else {
-                        // get from state
-                        let state = state_node_adapter.load_state(&top_block_id).await?;
-                        let processed_upto = state.state().processed_upto.load()?;
-                        let processed_upto = ProcessedUptoInfoStuff::try_from(processed_upto)?;
-                        processed_upto.get_internals_processed_to_by_partitions()
-                    }
-                }
-            };
-
-            result.insert(top_block_id.shard, (updated, processed_to));
-        }
-
-        Ok(result)
     }
 
     // Returns top master block id upto which all queue diffs applied
@@ -3121,9 +3085,9 @@ where
                     },
                     state => state,
                 }?;
-                for item in state.shards()?.iter() {
-                    let (shard_id, shard_descr) = item?;
-                    result.insert(shard_id, shard_descr.get_block_id(shard_id).seqno);
+                for item in state.shards()?.latest_blocks() {
+                    let block_id = item?;
+                    result.insert(block_id.shard, block_id.seqno);
                 }
             }
             Some(top_shard_blocks) => {

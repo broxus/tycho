@@ -39,7 +39,7 @@ use crate::types::processed_upto::{
 };
 use crate::types::{BlockCandidate, McData, ProcessedToByPartitions, TopShardBlockInfo};
 
-pub(super) struct WorkingState {
+pub struct WorkingState {
     pub next_block_id_short: BlockIdShort,
     pub mc_data: Arc<McData>,
     pub collation_config: Arc<CollationConfig>,
@@ -56,7 +56,7 @@ impl WorkingState {
     }
 }
 
-pub(super) struct PrevData {
+pub struct PrevData {
     observable_states: Vec<ShardStateStuff>,
     observable_accounts: ShardAccounts,
 

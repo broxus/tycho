@@ -57,6 +57,7 @@ pub(crate) use messages_reader::tests::{TestInternalMessage, TestMessageFactory}
 
 // FACTORY
 
+#[derive(Clone)]
 pub struct CollatorContext {
     pub mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     pub mpool_adapter: Arc<dyn MempoolAdapter>,
@@ -67,6 +68,7 @@ pub struct CollatorContext {
     pub shard_id: ShardIdent,
     pub prev_blocks_ids: Vec<BlockId>,
     pub mc_data: Arc<McData>,
+
     /// Mempool config override for a new genesis
     pub mempool_config_override: Option<MempoolGlobalConfig>,
 
@@ -154,20 +156,7 @@ impl CollatorFactory for CollatorStdImplFactory {
     type Collator = AsyncQueuedDispatcher<CollatorStdImpl>;
 
     async fn start(&self, cx: CollatorContext) -> Result<Self::Collator> {
-        CollatorStdImpl::start(
-            cx.mq_adapter,
-            cx.mpool_adapter,
-            cx.state_node_adapter,
-            cx.config,
-            cx.collation_session,
-            cx.listener,
-            cx.shard_id,
-            cx.prev_blocks_ids,
-            cx.mc_data,
-            cx.mempool_config_override,
-            cx.cancel_collation,
-        )
-        .await
+        CollatorStdImpl::start(cx).await
     }
 }
 
@@ -219,7 +208,7 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
 }
 
 pub struct CollatorStdImpl {
-    next_block_info: BlockIdShort,
+    pub next_block_info: BlockIdShort,
 
     config: Arc<CollatorConfig>,
     collation_session: Arc<CollationSessionInfo>,
@@ -246,31 +235,67 @@ pub struct CollatorStdImpl {
 }
 
 impl CollatorStdImpl {
+    pub async fn start(cx: CollatorContext) -> Result<AsyncQueuedDispatcher<Self>> {
+        let (collator, working_state_tx) = Self::create(&cx);
+
+        let next_block_info = collator.next_block_info;
+
+        // create dispatcher for own async tasks queue
+        let dispatcher =
+            AsyncQueuedDispatcher::create(collator, STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE);
+        tracing::trace!(target: tracing_targets::COLLATOR,
+            "(next_block_id={}): collator tasks queue dispatcher started", next_block_info,
+        );
+
+        // equeue first initialization task
+        // sending to the receiver here cannot return Error because it is guaranteed not closed or dropped
+        dispatcher
+            .enqueue_task(method_to_queued_async_closure!(
+                init_collator_wrapper,
+                cx.prev_blocks_ids,
+                cx.mc_data,
+                working_state_tx
+            ))
+            .await
+            .context("task receiver had to be not closed or dropped here")?;
+        tracing::info!(target: tracing_targets::COLLATOR,
+            "(next_block_id={}): collator initialization task enqueued", next_block_info,
+        );
+
+        tracing::info!(target: tracing_targets::COLLATOR,
+            "(next_block_id={}): collator started", next_block_info,
+        );
+
+        Ok(dispatcher)
+    }
+
     #[allow(clippy::too_many_arguments)]
-    pub async fn start(
-        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-        mpool_adapter: Arc<dyn MempoolAdapter>,
-        state_node_adapter: Arc<dyn StateNodeAdapter>,
-        config: Arc<CollatorConfig>,
-        collation_session: Arc<CollationSessionInfo>,
-        listener: Arc<dyn CollatorEventListener>,
-        shard_id: ShardIdent,
-        prev_blocks_ids: Vec<BlockId>,
-        mc_data: Arc<McData>,
-        mempool_config_override: Option<MempoolGlobalConfig>,
-        cancel_collation: Arc<Notify>,
-    ) -> Result<AsyncQueuedDispatcher<Self>> {
+    pub fn create(cx: &CollatorContext) -> (Self, oneshot::Sender<Result<Box<WorkingState>>>) {
         const BLOCK_CELL_COUNT_BASELINE: usize = 100_000;
+
+        let CollatorContext {
+            mq_adapter,
+            mpool_adapter,
+            state_node_adapter,
+            config,
+            collation_session,
+            listener,
+            shard_id,
+            prev_blocks_ids,
+            mempool_config_override,
+            cancel_collation,
+            ..
+        } = cx.clone();
 
         let next_block_info = calc_next_block_id_short(&prev_blocks_ids);
 
         tracing::info!(target: tracing_targets::COLLATOR,
-            "(next_block_id={}): collator starting...", next_block_info,
+            "(next_block_id={}): creating collator...", next_block_info,
         );
 
         let (working_state_tx, working_state_rx) = oneshot::channel::<Result<Box<WorkingState>>>();
 
-        let processor = Self {
+        let collator = Self {
             next_block_info,
             config,
             collation_session,
@@ -296,33 +321,7 @@ impl CollatorStdImpl {
             cancel_collation,
         };
 
-        // create dispatcher for own async tasks queue
-        let dispatcher =
-            AsyncQueuedDispatcher::create(processor, STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE);
-        tracing::trace!(target: tracing_targets::COLLATOR,
-            "(next_block_id={}): collator tasks queue dispatcher started", next_block_info,
-        );
-
-        // equeue first initialization task
-        // sending to the receiver here cannot return Error because it is guaranteed not closed or dropped
-        dispatcher
-            .enqueue_task(method_to_queued_async_closure!(
-                init_collator_wrapper,
-                prev_blocks_ids,
-                mc_data,
-                working_state_tx
-            ))
-            .await
-            .context("task receiver had to be not closed or dropped here")?;
-        tracing::info!(target: tracing_targets::COLLATOR,
-            "(next_block_id={}): collator initialization task enqueued", next_block_info,
-        );
-
-        tracing::info!(target: tracing_targets::COLLATOR,
-            "(next_block_id={}): collator started", next_block_info,
-        );
-
-        Ok(dispatcher)
+        (collator, working_state_tx)
     }
 
     async fn stop_collator(&mut self, dispatcher_cancel_token: CancellationToken) -> Result<()> {
@@ -346,7 +345,7 @@ impl CollatorStdImpl {
 
     // Initialize collator working state then run collation
     #[tracing::instrument(skip_all, fields(next_block_id = %self.next_block_info))]
-    async fn init_collator(
+    pub async fn init_collator(
         &mut self,
         prev_blocks_ids: Vec<BlockId>,
         mc_data: Arc<McData>,
@@ -368,7 +367,7 @@ impl CollatorStdImpl {
         // get last processed and last imported anchor info (will be None on zerostate)
         let prev_shard_data = working_state.prev_shard_data_ref();
         let prev_block_id = prev_shard_data.blocks_ids()[0]; // TODO: consider split/merge
-        let anchors_processing_info_opt = Self::get_anchors_processing_info(
+        let anchors_processing_info_opt = get_anchors_processing_info(
             &working_state.next_block_id_short.shard,
             &working_state.mc_data,
             &prev_block_id,
@@ -658,7 +657,7 @@ impl CollatorStdImpl {
             let prev_shard_data = working_state.prev_shard_data_ref();
             let prev_block_id = prev_shard_data.blocks_ids()[0]; // TODO: consider split/merge
             let prev_shard_data_gen_chain_time = prev_shard_data.gen_chain_time();
-            let anchors_processing_info_opt = Self::get_anchors_processing_info(
+            let anchors_processing_info_opt = get_anchors_processing_info(
                 &working_state.next_block_id_short.shard,
                 &working_state.mc_data,
                 &prev_block_id,
@@ -984,81 +983,6 @@ impl CollatorStdImpl {
         }))
     }
 
-    fn get_anchors_processing_info(
-        shard_id: &ShardIdent,
-        mc_data: &McData,
-        prev_block_id: &BlockId,
-        prev_gen_chain_time: u64,
-        prev_externals_processed_to: (MempoolAnchorId, u64),
-    ) -> Option<AnchorsProcessingInfo> {
-        // try get from mc data
-        let mut from_mc_info_opt = None;
-        if !shard_id.is_masterchain() {
-            let (mc_processed_to_anchor_id, mc_processed_to_msgs_offset) = mc_data
-                .processed_upto
-                .get_min_externals_processed_to()
-                .unwrap_or_default();
-            if mc_processed_to_anchor_id > 0 {
-                // TODO: consider split/merge
-
-                // get from mc data if prev shard block is equal to the top shard
-                // and top shard was not updated in master
-                // it means that no shard blocks were collated between masters
-                // because there were no messages for processing
-                // and we can omit top processed anchor from shard
-                // if it is lower then top processed from master
-                for (top_shard_id, top_shard_descr) in mc_data.shards.iter() {
-                    if shard_id == top_shard_id {
-                        if prev_block_id.seqno == top_shard_descr.seqno
-                            && !top_shard_descr.top_sc_block_updated
-                        {
-                            from_mc_info_opt = Some(AnchorsProcessingInfo {
-                                processed_to_anchor_id: mc_processed_to_anchor_id,
-                                processed_to_msgs_offset: mc_processed_to_msgs_offset,
-                                last_imported_chain_time: mc_data.gen_chain_time,
-                                last_imported_in_block_id: mc_data.block_id,
-                                current_shard_last_imported_chain_time: prev_gen_chain_time,
-                            });
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        // try get from prev data
-        let from_prev_info_opt = match prev_externals_processed_to {
-            (processed_to_anchor_id, processed_to_msgs_offset) if processed_to_anchor_id > 0 => {
-                Some(AnchorsProcessingInfo {
-                    processed_to_anchor_id,
-                    processed_to_msgs_offset,
-                    last_imported_chain_time: prev_gen_chain_time,
-                    last_imported_in_block_id: *prev_block_id,
-                    current_shard_last_imported_chain_time: prev_gen_chain_time,
-                })
-            }
-            _ => None,
-        };
-
-        // choose the higher one
-        match (from_mc_info_opt, from_prev_info_opt) {
-            (Some(from_mc_info), Some(from_prev_info)) => {
-                if from_mc_info.processed_to_anchor_id > from_prev_info.processed_to_anchor_id
-                    || (from_mc_info.processed_to_anchor_id
-                        == from_prev_info.processed_to_anchor_id
-                        && from_mc_info.processed_to_msgs_offset
-                            > from_prev_info.processed_to_msgs_offset)
-                {
-                    Some(from_mc_info)
-                } else {
-                    Some(from_prev_info)
-                }
-            }
-            (from_mc_info_opt, None) => from_mc_info_opt,
-            (None, from_prev_info_opt) => from_prev_info_opt,
-        }
-    }
-
     /// 1. Get last imported anchor id from cache
     /// 2. Await next anchor via mempool adapter
     /// 3. Store anchor in cache and return it
@@ -1370,6 +1294,7 @@ impl CollatorStdImpl {
         } = messages_reader.finalize(
             0, // can pass 0 because new messages reader was not initialized in this case
             &Default::default(),
+            false,
         )?;
         std::mem::swap(&mut working_state.reader_state, &mut reader_state);
 
@@ -2069,7 +1994,7 @@ impl DelayedWorkingState {
     }
 }
 
-struct AnchorsProcessingInfo {
+pub struct AnchorsProcessingInfo {
     pub processed_to_anchor_id: MempoolAnchorId,
     pub processed_to_msgs_offset: u64,
     pub last_imported_chain_time: u64,
@@ -2101,6 +2026,80 @@ impl std::fmt::Display for AnchorsProcessingInfo {
                 &self.current_shard_last_imported_chain_time,
             )
             .finish()
+    }
+}
+
+pub fn get_anchors_processing_info(
+    shard_id: &ShardIdent,
+    mc_data: &McData,
+    prev_block_id: &BlockId,
+    prev_gen_chain_time: u64,
+    prev_externals_processed_to: (MempoolAnchorId, u64),
+) -> Option<AnchorsProcessingInfo> {
+    // try get from mc data
+    let mut from_mc_info_opt = None;
+    if !shard_id.is_masterchain() {
+        let (mc_processed_to_anchor_id, mc_processed_to_msgs_offset) = mc_data
+            .processed_upto
+            .get_min_externals_processed_to()
+            .unwrap_or_default();
+        if mc_processed_to_anchor_id > 0 {
+            // TODO: consider split/merge
+
+            // get from mc data if prev shard block is equal to the top shard
+            // and top shard was not updated in master
+            // it means that no shard blocks were collated between masters
+            // because there were no messages for processing
+            // and we can omit top processed anchor from shard
+            // if it is lower then top processed from master
+            for (top_shard_id, top_shard_descr) in mc_data.shards.iter() {
+                if shard_id == top_shard_id {
+                    if prev_block_id.seqno == top_shard_descr.seqno
+                        && !top_shard_descr.top_sc_block_updated
+                    {
+                        from_mc_info_opt = Some(AnchorsProcessingInfo {
+                            processed_to_anchor_id: mc_processed_to_anchor_id,
+                            processed_to_msgs_offset: mc_processed_to_msgs_offset,
+                            last_imported_chain_time: mc_data.gen_chain_time,
+                            last_imported_in_block_id: mc_data.block_id,
+                            current_shard_last_imported_chain_time: prev_gen_chain_time,
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // try get from prev data
+    let from_prev_info_opt = match prev_externals_processed_to {
+        (processed_to_anchor_id, processed_to_msgs_offset) if processed_to_anchor_id > 0 => {
+            Some(AnchorsProcessingInfo {
+                processed_to_anchor_id,
+                processed_to_msgs_offset,
+                last_imported_chain_time: prev_gen_chain_time,
+                last_imported_in_block_id: *prev_block_id,
+                current_shard_last_imported_chain_time: prev_gen_chain_time,
+            })
+        }
+        _ => None,
+    };
+
+    // choose the higher one
+    match (from_mc_info_opt, from_prev_info_opt) {
+        (Some(from_mc_info), Some(from_prev_info)) => {
+            if from_mc_info.processed_to_anchor_id > from_prev_info.processed_to_anchor_id
+                || (from_mc_info.processed_to_anchor_id == from_prev_info.processed_to_anchor_id
+                    && from_mc_info.processed_to_msgs_offset
+                        > from_prev_info.processed_to_msgs_offset)
+            {
+                Some(from_mc_info)
+            } else {
+                Some(from_prev_info)
+            }
+        }
+        (from_mc_info_opt, None) => from_mc_info_opt,
+        (None, from_prev_info_opt) => from_prev_info_opt,
     }
 }
 

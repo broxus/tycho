@@ -137,12 +137,26 @@ impl ShardStateStuff {
         state.gen_utime as u64 * 1000 + state.gen_utime_ms as u64
     }
 
-    pub fn get_top_shards(&self) -> Result<Vec<ShardIdent>> {
+    pub fn get_all_top_shards(&self) -> Result<Vec<ShardIdent>> {
         let mut res = vec![self.block_id().shard];
 
         for item in self.shards()?.latest_blocks() {
             let block_id = item?;
             res.push(block_id.shard);
+        }
+
+        Ok(res)
+    }
+
+    pub fn get_top_shard_blocks_info(&self) -> Result<Vec<(BlockId, bool)>> {
+        let mut res = vec![];
+
+        for item in self.shards()?.iter() {
+            let (shard_id, shard_descr) = item?;
+            res.push((
+                shard_descr.as_block_id(shard_id),
+                shard_descr.top_sc_block_updated,
+            ));
         }
 
         Ok(res)

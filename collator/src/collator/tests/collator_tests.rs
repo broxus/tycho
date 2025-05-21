@@ -9,7 +9,9 @@ use everscale_types::models::{
 use tycho_block_util::state::MinRefMcStateTracker;
 
 use crate::collator::types::AnchorsCache;
-use crate::collator::{CollatorStdImpl, ImportInitAnchorsResult, InitAnchorSource};
+use crate::collator::{
+    get_anchors_processing_info, CollatorStdImpl, ImportInitAnchorsResult, InitAnchorSource,
+};
 use crate::mempool::{MempoolAdapterStubImpl, MempoolAnchor, MempoolEventListener};
 use crate::test_utils::try_init_test_tracing;
 use crate::types::processed_upto::{
@@ -374,7 +376,7 @@ fn test_get_anchors_processing_info() {
 
     //------
     // on zerostate will return None
-    let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
+    let anchors_proc_info_opt = get_anchors_processing_info(
         &shard_id,
         &mc_data,
         &prev_block_id,
@@ -435,7 +437,7 @@ fn test_get_anchors_processing_info() {
 
     //------
     // will get anchors processing info from prev shard state
-    let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
+    let anchors_proc_info_opt = get_anchors_processing_info(
         &shard_id,
         &mc_data,
         &prev_block_id,
@@ -489,7 +491,7 @@ fn test_get_anchors_processing_info() {
     //------
     // will get anchors processing info from prev shard state
     // because it is still ahead of master
-    let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
+    let anchors_proc_info_opt = get_anchors_processing_info(
         &shard_id,
         &mc_data,
         &prev_block_id,
@@ -541,7 +543,7 @@ fn test_get_anchors_processing_info() {
 
     //------
     // will get anchors processing info from mc data
-    let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
+    let anchors_proc_info_opt = get_anchors_processing_info(
         &shard_id,
         &mc_data,
         &prev_block_id,

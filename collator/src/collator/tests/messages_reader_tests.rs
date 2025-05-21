@@ -488,7 +488,7 @@ where
             let partitions = [0, 1].into_iter().collect();
             self.mc_collator
                 .primary_mq_adapter
-                .commit_diff(mc_top_blocks, &partitions)?;
+                .commit_diff(&mc_top_blocks, &partitions)?;
         }
 
         Ok(TestCollateResult {
@@ -741,7 +741,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
             reader_state,
             anchors_cache,
             ..
-        } = primary_messages_reader.finalize(self.curr_lt, &other_shards_top_block_diffs)?;
+        } = primary_messages_reader.finalize(self.curr_lt, &other_shards_top_block_diffs, true)?;
 
         // create diff and compute hash
         let (min_message, max_message) = {

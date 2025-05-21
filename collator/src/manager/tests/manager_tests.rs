@@ -33,7 +33,9 @@ use crate::internal_queue::types::{
 };
 use crate::manager::blocks_cache::BlocksCache;
 use crate::manager::types::{CollationSyncState, NextCollationStep};
-use crate::manager::McBlockSubgraphExtract;
+use crate::manager::{
+    get_all_shards_processed_to_by_partitions_for_mc_block_with_cache, McBlockSubgraphExtract,
+};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{CollatorSyncContext, StateNodeAdapter};
 use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
@@ -709,12 +711,10 @@ async fn test_queue_restore_on_sync() {
     test_adapter
         .mq_adapter
         .commit_diff(
-            [
+            &[
                 (test_adapter.last_sc_block_id, false),
                 (test_adapter.last_mc_block_id, true),
-            ]
-            .into_iter()
-            .collect(),
+            ],
             &partitions,
         )
         .unwrap();
@@ -740,12 +740,10 @@ async fn test_queue_restore_on_sync() {
     test_adapter
         .mq_adapter
         .commit_diff(
-            [
+            &[
                 (test_adapter.last_sc_block_id, true),
                 (*test_adapter.last_mc_blocks.get(&1).unwrap().id(), true),
-            ]
-            .into_iter()
-            .collect(),
+            ],
             &partitions,
         )
         .unwrap();
@@ -933,7 +931,7 @@ async fn test_queue_restore_on_sync() {
         .as_short_id();
     tracing::trace!("last_applied_mc_block_key: {}", last_applied_mc_block_key);
     let all_shards_processed_to_by_partitions =
-        TestCollationManager::get_all_shards_processed_to_by_partitions_for_mc_block(
+        get_all_shards_processed_to_by_partitions_for_mc_block_with_cache(
             &last_applied_mc_block_key,
             &test_adapter.blocks_cache,
             test_adapter.state_adapter.clone(),
@@ -1286,7 +1284,7 @@ async fn test_queue_restore_on_sync() {
         .as_short_id();
     tracing::trace!("last_applied_mc_block_key: {}", last_applied_mc_block_key);
     let all_shards_processed_to_by_partitions =
-        TestCollationManager::get_all_shards_processed_to_by_partitions_for_mc_block(
+        get_all_shards_processed_to_by_partitions_for_mc_block_with_cache(
             &last_applied_mc_block_key,
             &test_adapter.blocks_cache,
             test_adapter.state_adapter.clone(),
@@ -1573,7 +1571,7 @@ async fn test_queue_restore_on_sync() {
         .as_short_id();
     tracing::trace!("last_applied_mc_block_key: {}", last_applied_mc_block_key);
     let all_shards_processed_to_by_partitions =
-        TestCollationManager::get_all_shards_processed_to_by_partitions_for_mc_block(
+        get_all_shards_processed_to_by_partitions_for_mc_block_with_cache(
             &last_applied_mc_block_key,
             &test_adapter.blocks_cache,
             test_adapter.state_adapter.clone(),
@@ -1884,7 +1882,7 @@ async fn test_queue_restore_on_sync() {
         .as_short_id();
     tracing::trace!("last_applied_mc_block_key: {}", last_applied_mc_block_key);
     let all_shards_processed_to_by_partitions =
-        TestCollationManager::get_all_shards_processed_to_by_partitions_for_mc_block(
+        get_all_shards_processed_to_by_partitions_for_mc_block_with_cache(
             &last_applied_mc_block_key,
             &test_adapter.blocks_cache,
             test_adapter.state_adapter.clone(),

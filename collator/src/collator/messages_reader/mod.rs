@@ -435,6 +435,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             ShardIdent,
             (PartitionRouter, DiffStatistics),
         >,
+        check_for_unprocessed_messages: bool,
     ) -> Result<FinalizedMessagesReader<V>> {
         let mut has_unprocessed_messages = self.has_messages_in_buffers()
             || self.has_pending_new_messages()
@@ -444,7 +445,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         let mut internals_reader_state = InternalsReaderState::default();
         for (_par_id, par_reader) in self.internals_partition_readers.iter_mut() {
             // check pending internals in iterators
-            if !has_unprocessed_messages {
+            if !has_unprocessed_messages && check_for_unprocessed_messages {
                 has_unprocessed_messages = par_reader.check_has_pending_internals_in_iterators()?;
             }
 
