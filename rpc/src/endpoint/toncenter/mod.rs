@@ -1,11 +1,17 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::future::Future;
 
-use axum::extract::State;
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{Query, Request, State};
+use axum::http::status::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, RequestExt};
 use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
+use futures_util::future::Either;
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::validate_external_message;
@@ -13,11 +19,36 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
 use self::models::*;
+use crate::endpoint::{get_mime_type, APPLICATION_JSON};
 use crate::state::{LoadedAccountState, RpcState, RpcStateError, RunGetMethodPermit};
 use crate::util::error_codes::*;
 use crate::util::jrpc_extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
 
 pub mod models;
+
+pub fn router() -> axum::Router<RpcState> {
+    axum::Router::new()
+        .route("/", post(post_jrpc))
+        .route("/jsonRPC", post(post_jrpc))
+        .route("/getAddressInformation", get(get_address_information))
+        .route("/getTransactions", get(get_transactions))
+        .route("/sendBoc", post(post_send_boc))
+        .route("/runGetMethod", post(post_run_get_method))
+}
+
+// === POST /jsonRPC ===
+
+async fn post_jrpc(state: State<RpcState>, req: Request) -> Response {
+    use axum::http::StatusCode;
+
+    match get_mime_type(&req) {
+        Some(mime) if mime.starts_with(APPLICATION_JSON) => match req.extract().await {
+            Ok(method) => post_jrpc_impl(state, method).await,
+            Err(e) => e.into_response(),
+        },
+        _ => StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
+    }
+}
 
 declare_jrpc_method! {
     pub enum MethodParams: Method {
@@ -28,7 +59,7 @@ declare_jrpc_method! {
     }
 }
 
-pub async fn route(State(state): State<RpcState>, req: Jrpc<String, Method>) -> Response {
+async fn post_jrpc_impl(State(state): State<RpcState>, req: Jrpc<JrpcId, Method>) -> Response {
     let label = [("method", req.method)];
     let _hist = HistogramGuard::begin_with_labels("tycho_jrpc_request_time", &label);
     match req.params {
@@ -41,7 +72,24 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<String, Method>) -> 
     }
 }
 
-async fn handle_get_address_information(id: String, state: RpcState, p: AccountParams) -> Response {
+// === GET /getAddressInformation ===
+
+fn get_address_information(
+    State(state): State<RpcState>,
+    query: Result<Query<AccountParams>, QueryRejection>,
+) -> impl Future<Output = Response> {
+    match query {
+        Ok(Query(params)) => {
+            Either::Left(handle_get_address_information(JrpcId::Skip, state, params))
+        }
+        Err(e) => Either::Right(futures_util::future::ready(error_to_response(
+            JrpcId::Skip,
+            RpcStateError::BadRequest(e.into()),
+        ))),
+    }
+}
+
+async fn handle_get_address_information(id: JrpcId, state: RpcState, p: AccountParams) -> Response {
     let item = match state.get_account_state(&p.address) {
         Ok(item) => item,
         Err(e) => return error_to_response(id, e),
@@ -116,7 +164,22 @@ async fn handle_get_address_information(id: String, state: RpcState, p: AccountP
     })
 }
 
-async fn handle_get_transactions(id: String, state: RpcState, p: TransactionsParams) -> Response {
+// === GET /getTransactions ===
+
+fn get_transactions(
+    State(state): State<RpcState>,
+    query: Result<Query<TransactionsParams>, QueryRejection>,
+) -> impl Future<Output = Response> {
+    match query {
+        Ok(Query(params)) => Either::Left(handle_get_transactions(JrpcId::Skip, state, params)),
+        Err(e) => Either::Right(futures_util::future::ready(error_to_response(
+            JrpcId::Skip,
+            RpcStateError::BadRequest(e.into()),
+        ))),
+    }
+}
+
+async fn handle_get_transactions(id: JrpcId, state: RpcState, p: TransactionsParams) -> Response {
     const MAX_LIMIT: u8 = 100;
 
     if p.limit == 0 || p.lt.unwrap_or(u64::MAX) < p.to_lt {
@@ -136,7 +199,22 @@ async fn handle_get_transactions(id: String, state: RpcState, p: TransactionsPar
     }
 }
 
-async fn handle_send_boc(id: String, state: RpcState, p: SendBocParams) -> Response {
+// === POST /sendBoc ===
+
+fn post_send_boc(
+    State(state): State<RpcState>,
+    body: Result<Json<SendBocParams>, JsonRejection>,
+) -> impl Future<Output = Response> {
+    match body {
+        Ok(Json(params)) => Either::Left(handle_send_boc(JrpcId::Skip, state, params)),
+        Err(e) => Either::Right(futures_util::future::ready(error_to_response(
+            JrpcId::Skip,
+            RpcStateError::BadRequest(e.into()),
+        ))),
+    }
+}
+
+async fn handle_send_boc(id: JrpcId, state: RpcState, p: SendBocParams) -> Response {
     if let Err(e) = validate_external_message(&p.boc).await {
         return JrpcErrorResponse {
             id: Some(id),
@@ -150,7 +228,22 @@ async fn handle_send_boc(id: String, state: RpcState, p: SendBocParams) -> Respo
     ok_to_response(id, TonlibOk)
 }
 
-async fn handle_run_get_method(id: String, state: RpcState, p: RunGetMethodParams) -> Response {
+// === POST /runGetMethod ===
+
+fn post_run_get_method(
+    State(state): State<RpcState>,
+    body: Result<Json<RunGetMethodParams>, JsonRejection>,
+) -> impl Future<Output = Response> {
+    match body {
+        Ok(Json(params)) => Either::Left(handle_run_get_method(JrpcId::Skip, state, params)),
+        Err(e) => Either::Right(futures_util::future::ready(error_to_response(
+            JrpcId::Skip,
+            RpcStateError::BadRequest(e.into()),
+        ))),
+    }
+}
+
+async fn handle_run_get_method(id: JrpcId, state: RpcState, p: RunGetMethodParams) -> Response {
     enum RunMethodError {
         RpcError(RpcStateError),
         InvalidParams(everscale_types::error::Error),
@@ -324,30 +417,56 @@ async fn handle_run_get_method(id: String, state: RpcState, p: RunGetMethodParam
     .await
 }
 
-fn ok_to_response<T: Serialize>(id: String, result: T) -> Response {
+// === Helpers ===
+
+fn ok_to_response<T: Serialize>(id: JrpcId, result: T) -> Response {
     JrpcOkResponse::new(id, result).into_response()
 }
 
-fn error_to_response(id: String, e: RpcStateError) -> Response {
-    let (code, message) = match e {
-        RpcStateError::NotReady => (NOT_READY_CODE, Cow::Borrowed("not ready")),
-        RpcStateError::NotSupported => (NOT_SUPPORTED_CODE, Cow::Borrowed("method not supported")),
-        RpcStateError::Internal(e) => (INTERNAL_ERROR_CODE, e.to_string().into()),
+fn error_to_response(id: JrpcId, e: RpcStateError) -> Response {
+    let (status_code, code, message) = match e {
+        RpcStateError::NotReady => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            NOT_READY_CODE,
+            Cow::Borrowed("not ready"),
+        ),
+        RpcStateError::NotSupported => (
+            StatusCode::NOT_IMPLEMENTED,
+            NOT_SUPPORTED_CODE,
+            Cow::Borrowed("method not supported"),
+        ),
+        RpcStateError::Internal(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            INTERNAL_ERROR_CODE,
+            e.to_string().into(),
+        ),
+        RpcStateError::BadRequest(e) => (
+            StatusCode::BAD_REQUEST,
+            INVALID_PARAMS_CODE,
+            e.to_string().into(),
+        ),
     };
 
-    JrpcErrorResponse {
+    into_err_response(status_code, JrpcErrorResponse {
         id: Some(id),
         code,
         message,
-    }
-    .into_response()
+    })
 }
 
-fn too_large_limit_response(id: String) -> Response {
-    JrpcErrorResponse {
+fn too_large_limit_response(id: JrpcId) -> Response {
+    into_err_response(StatusCode::BAD_REQUEST, JrpcErrorResponse {
         id: Some(id),
         code: TOO_LARGE_LIMIT_CODE,
         message: Cow::Borrowed("limit is too large"),
+    })
+}
+
+fn into_err_response(mut status_code: StatusCode, mut res: JrpcErrorResponse<JrpcId>) -> Response {
+    if matches!(&res.id, Some(JrpcId::Skip)) {
+        res.code = status_code.as_u16() as i32;
+    } else {
+        status_code = StatusCode::OK;
     }
-    .into_response()
+    (status_code, res).into_response()
 }

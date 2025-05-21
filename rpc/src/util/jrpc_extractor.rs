@@ -85,7 +85,7 @@ pub struct Jrpc<ID, T: ParseParams> {
 impl<S, T, ID> FromRequest<S> for Jrpc<ID, T>
 where
     JrpcErrorResponse<ID>: IntoResponse,
-    ID: Serialize + for<'de> Deserialize<'de>,
+    ID: for<'de> Deserialize<'de>,
     T: ParseParams + for<'de> Deserialize<'de>,
     S: Send + Sync,
 {
@@ -196,23 +196,6 @@ impl<T: Serialize> Serialize for JrpcOkResponse<i64, T> {
     }
 }
 
-// Strange JRPC OK response.
-impl<T: Serialize> Serialize for JrpcOkResponse<String, T> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-
-        let mut ser = serializer.serialize_struct("JrpcResponse", 4)?;
-        ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
-        ser.serialize_field("id", &self.id)?;
-        ser.serialize_field("result", &self.result)?;
-        ser.serialize_field("ok", &true)?;
-        ser.end()
-    }
-}
-
 impl<ID, T> IntoResponse for JrpcOkResponse<ID, T>
 where
     Self: Serialize,
@@ -254,29 +237,10 @@ impl Serialize for JrpcErrorResponse<i64> {
         let mut ser = serializer.serialize_struct("JrpcResponse", 3)?;
         ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
         ser.serialize_field("id", &self.id)?;
-        ser.serialize_field("error", &Error {
+        ser.serialize_field("error", &JrpcError {
             code: self.code,
             message: &self.message,
         })?;
-        ser.end()
-    }
-}
-
-impl Serialize for JrpcErrorResponse<String> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-
-        let mut ser = serializer.serialize_struct("JrpcResponse", 4)?;
-        ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
-        ser.serialize_field("id", &self.id)?;
-        ser.serialize_field("error", &Error {
-            code: self.code,
-            message: &self.message,
-        })?;
-        ser.serialize_field("ok", &false)?;
         ser.end()
     }
 }
@@ -293,10 +257,10 @@ where
 }
 
 #[derive(Serialize)]
-struct Error<'a> {
-    code: i32,
-    message: &'a str,
+pub struct JrpcError<'a> {
+    pub code: i32,
+    pub message: &'a str,
 }
 
-const JSONRPC_FIELD: &str = "jsonrpc";
-const JSONRPC_VERSION: &str = "2.0";
+pub const JSONRPC_FIELD: &str = "jsonrpc";
+pub const JSONRPC_VERSION: &str = "2.0";

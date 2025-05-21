@@ -460,6 +460,7 @@ fn error_to_response(id: i64, e: RpcStateError) -> Response {
         RpcStateError::NotReady => (NOT_READY_CODE, Cow::Borrowed("not ready")),
         RpcStateError::NotSupported => (NOT_SUPPORTED_CODE, Cow::Borrowed("method not supported")),
         RpcStateError::Internal(e) => (INTERNAL_ERROR_CODE, e.to_string().into()),
+        RpcStateError::BadRequest(e) => (INVALID_PARAMS_CODE, e.to_string().into()),
     };
 
     JrpcErrorResponse {

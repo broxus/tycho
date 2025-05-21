@@ -956,6 +956,33 @@ pub enum RpcStateError {
     NotSupported,
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
+    #[error(transparent)]
+    BadRequest(#[from] BadRequestError),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct BadRequestError(anyhow::Error);
+
+impl From<anyhow::Error> for BadRequestError {
+    #[inline]
+    fn from(value: anyhow::Error) -> Self {
+        Self(value)
+    }
+}
+
+impl From<axum::extract::rejection::QueryRejection> for BadRequestError {
+    #[inline]
+    fn from(value: axum::extract::rejection::QueryRejection) -> Self {
+        Self(anyhow::Error::msg(value.body_text()))
+    }
+}
+
+impl From<axum::extract::rejection::JsonRejection> for BadRequestError {
+    #[inline]
+    fn from(value: axum::extract::rejection::JsonRejection) -> Self {
+        Self(anyhow::Error::msg(value.body_text()))
+    }
 }
 
 #[cfg(test)]
