@@ -9,6 +9,8 @@ use everscale_types::merkle::*;
 use everscale_types::models::{ShardIdent, *};
 use everscale_types::prelude::*;
 use humantime::format_duration;
+use itertools::Itertools;
+use parking_lot::Mutex;
 use rayon::slice::ParallelSliceMut;
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockStuff;
@@ -27,9 +29,11 @@ use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::execution_manager::MessagesExecutor;
 use crate::collator::messages_reader::{FinalizedMessagesReader, MessagesReader};
 use crate::collator::types::{
-    BlockCollationData, BlockSerializerCache, ExecuteResult, FinalizeBlockResult,
+    AccountIdExt, BlockCollationData, BlockSerializerCache, ExecuteResult, FinalizeBlockResult,
     FinalizeMessagesReaderResult, PreparedInMsg, PreparedOutMsg, PublicLibsDiff,
+    ShardAccountsLayout,
 };
+use crate::collator::SHARD_ACCOUNTS_SPLIT_DEPTH;
 use crate::internal_queue::types::{DiffStatistics, DiffZone, EnqueuedMessage};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
@@ -351,10 +355,12 @@ impl Phase<FinalizeState> {
 
         // TODO: update new_config_opt from hard fork
 
+        let shard_accounts = processed_accounts.shard_accounts.merge()?;
+
         // Compute value flow.
         let value_flow = collation_data.finalize_value_flow(
             &processed_accounts.account_blocks,
-            &processed_accounts.shard_accounts,
+            &shard_accounts,
             &in_msgs,
             &out_msgs,
             &self.state.mc_data.config,
@@ -535,7 +541,7 @@ impl Phase<FinalizeState> {
                 min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
                 processed_upto: Lazy::new(&processed_upto.clone().try_into()?)?,
                 before_split: new_block_info.before_split,
-                accounts: Lazy::new(&processed_accounts.shard_accounts)?,
+                accounts: Lazy::new(&shard_accounts)?,
                 overload_history: new_wu_used_from_last_anchor,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
@@ -1132,7 +1138,6 @@ impl Phase<FinalizeState> {
         let mut account_blocks = BTreeMap::new();
         let mut new_config_params = None;
         let (updated_accounts, shard_accounts) = executor.into_accounts_cache_raw();
-        let mut shard_accounts = RelaxedAugDict::from_full(&shard_accounts);
 
         let mut public_libraries_diff = PublicLibsDiff::new(public_libraries.clone());
 
@@ -1193,9 +1198,62 @@ impl Phase<FinalizeState> {
         }
 
         account_updates.par_sort_by(|(a, ..), (b, ..)| a.cmp(b));
-        shard_accounts
-            .modify_with_sorted_iter(account_updates)
-            .context("failed to modify accounts dict")?;
+
+        let shard_accounts = match shard_accounts {
+            ShardAccountsLayout::Merged(shard_accounts) => {
+                let mut shard_accounts = RelaxedAugDict::from_full(&shard_accounts);
+
+                shard_accounts
+                    .modify_with_sorted_iter(account_updates)
+                    .context("failed to modify accounts dict")?;
+
+                ShardAccountsLayout::Merged(shard_accounts.build()?)
+            }
+            ShardAccountsLayout::Split(shard_accounts) => {
+                let shard_accounts = shard_accounts
+                    .into_iter()
+                    .map(|(k, v)| (k, RelaxedAugDict::from_full(&v)))
+                    .collect::<BTreeMap<_, _>>();
+
+                let account_updates_by_shards = Arc::new(Mutex::new(
+                    account_updates
+                        .into_iter()
+                        .group_by(|(account, _)| account.shard_id(SHARD_ACCOUNTS_SPLIT_DEPTH))
+                        .into_iter()
+                        .map(|(prefix, group)| (prefix, group.collect::<Vec<_>>()))
+                        .collect::<FastHashMap<_, _>>(),
+                ));
+
+                let updated_shard_accounts = Arc::new(Mutex::new(BTreeMap::new()));
+
+                rayon::scope(|s| {
+                    for (prefix, mut shard_accounts) in shard_accounts {
+                        let account_updates_by_shards = Arc::clone(&account_updates_by_shards);
+                        let updated_shard_accounts = Arc::clone(&updated_shard_accounts);
+                        s.spawn(move |_| {
+                            let account_updates = account_updates_by_shards.lock().remove(&prefix);
+                            if let Some(account_updates) = account_updates {
+                                shard_accounts
+                                    .modify_with_sorted_iter(account_updates)
+                                    .expect("failed to modify accounts dict");
+                            }
+
+                            let dict = shard_accounts
+                                .build()
+                                .expect("failed to build shard accounts");
+
+                            updated_shard_accounts.lock().insert(prefix, dict);
+                        });
+                    }
+                });
+
+                ShardAccountsLayout::Split(
+                    Arc::try_unwrap(updated_shard_accounts)
+                        .map_err(|_e| anyhow::anyhow!("failed to unwrap ShardAccounts"))?
+                        .into_inner(),
+                )
+            }
+        };
 
         let accounts_len = account_blocks.len();
 
@@ -1213,7 +1271,7 @@ impl Phase<FinalizeState> {
 
         Ok(ProcessedAccounts {
             account_blocks: account_blocks.build()?,
-            shard_accounts: shard_accounts.build()?,
+            shard_accounts,
             new_config_params,
             accounts_len,
         })
@@ -1393,9 +1451,10 @@ impl Phase<FinalizeState> {
         );
 
         // Previous total shard balance.
-        let from_prev_block = &prev_shard_data.observable_accounts().root_extra().balance;
+        let from_prev_block = prev_shard_data.observable_accounts().balance()?;
+
         anyhow::ensure!(
-            value_flow.from_prev_block == *from_prev_block,
+            value_flow.from_prev_block == from_prev_block,
             "ValueFlow for {} declares from_prev_block={}, \
             but the total balance present in the previous state is {}",
             collation_data.block_id_short,
@@ -1404,9 +1463,9 @@ impl Phase<FinalizeState> {
         );
 
         // Next total shard balance.
-        let to_next_block = &processed_accounts.shard_accounts.root_extra().balance;
+        let to_next_block = processed_accounts.shard_accounts.balance()?;
         anyhow::ensure!(
-            value_flow.to_next_block == *to_next_block,
+            value_flow.to_next_block == to_next_block,
             "ValueFlow for {} declares to_next_block={}, \
             but the total balance present in the new state is {}",
             collation_data.block_id_short,
@@ -1475,7 +1534,7 @@ impl Phase<FinalizeState> {
 #[derive(Default)]
 struct ProcessedAccounts {
     account_blocks: AccountBlocks,
-    shard_accounts: ShardAccounts,
+    shard_accounts: ShardAccountsLayout,
     new_config_params: Option<BlockchainConfigParams>,
     accounts_len: usize,
 }

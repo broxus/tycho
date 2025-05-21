@@ -13,7 +13,11 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
 use super::messages_buffer::MessageGroup;
-use super::types::{AccountId, ExecutedTransaction, ParsedMessage, ShardAccountStuff};
+use super::types::{
+    AccountId, AccountIdExt, ExecutedTransaction, ParsedMessage, ShardAccountStuff,
+    ShardAccountsLayout,
+};
+use crate::collator::SHARD_ACCOUNTS_SPLIT_DEPTH;
 use crate::tracing_targets;
 
 pub(super) struct MessagesExecutor {
@@ -36,7 +40,7 @@ impl MessagesExecutor {
         min_next_lt: u64,
         config: Arc<ParsedConfig>,
         params: Arc<ExecutorParams>,
-        shard_accounts: ShardAccounts,
+        shard_accounts: ShardAccountsLayout,
         wu_params_execute: WorkUnitsParamsExecute,
     ) -> Self {
         Self {
@@ -66,7 +70,7 @@ impl MessagesExecutor {
         self,
     ) -> (
         impl ExactSizeIterator<Item = Box<ShardAccountStuff>>,
-        ShardAccounts,
+        ShardAccountsLayout,
     ) {
         let AccountsCache {
             shard_accounts,
@@ -354,7 +358,7 @@ impl MessagesExecutor {
 
 struct AccountsCache {
     workchain_id: i8,
-    shard_accounts: ShardAccounts,
+    shard_accounts: ShardAccountsLayout,
     items: FastHashMap<AccountId, Box<ShardAccountStuff>>,
 }
 
@@ -374,10 +378,22 @@ impl AccountsCache {
                 }
             }
             Entry::Vacant(entry) => {
-                if let Some((_, state)) = self.shard_accounts.get(account_id)? {
+                let state = match &self.shard_accounts {
+                    ShardAccountsLayout::Merged(shard_accounts) => {
+                        shard_accounts.get(account_id)?.map(|(_, state)| state)
+                    }
+                    ShardAccountsLayout::Split(shard_accounts) => shard_accounts
+                        .get(&account_id.shard_id(SHARD_ACCOUNTS_SPLIT_DEPTH))
+                        .and_then(|accounts| accounts.get(account_id).transpose())
+                        .transpose()?
+                        .map(|(_, state)| state),
+                };
+
+                if let Some(state) = state {
                     let account_stuff =
                         ShardAccountStuff::new(self.workchain_id, account_id, state)
                             .map(Box::new)?;
+
                     if f(&account_stuff) {
                         return Ok(Some(account_stuff));
                     }
@@ -393,14 +409,29 @@ impl AccountsCache {
 
     fn get_account_stuff(&self, account_id: &AccountId) -> Result<Box<ShardAccountStuff>> {
         if let Some(account) = self.items.get(account_id) {
-            Ok(account.clone())
-        } else if let Some((_depth, shard_account)) = self.shard_accounts.get(account_id)? {
-            ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
-        } else {
-            Ok(Box::new(ShardAccountStuff::new_empty(
+            return Ok(account.clone());
+        }
+
+        let shard_account = match &self.shard_accounts {
+            ShardAccountsLayout::Merged(shard_accounts) => {
+                shard_accounts.get(account_id)?.map(|(_, state)| state)
+            }
+            ShardAccountsLayout::Split(shard_accounts) => shard_accounts
+                .get(&account_id.shard_id(SHARD_ACCOUNTS_SPLIT_DEPTH))
+                .map(|sa| sa.get(account_id))
+                .transpose()?
+                .flatten()
+                .map(|(_, state)| state),
+        };
+
+        match shard_account {
+            None => Ok(Box::new(ShardAccountStuff::new_empty(
                 self.workchain_id,
                 account_id,
-            )))
+            ))),
+            Some(state) => {
+                ShardAccountStuff::new(self.workchain_id, account_id, state).map(Box::new)
+            }
         }
     }
 

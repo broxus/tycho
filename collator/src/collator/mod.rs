@@ -55,6 +55,9 @@ pub(super) mod tests;
 #[cfg(test)]
 pub(crate) use messages_reader::tests::{TestInternalMessage, TestMessageFactory};
 
+// TODO: move to config?
+pub const SHARD_ACCOUNTS_SPLIT_DEPTH: u8 = 4; // 16 shards
+
 // FACTORY
 
 pub struct CollatorContext {
