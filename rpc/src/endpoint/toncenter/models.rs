@@ -3,7 +3,10 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 use base64::prelude::{Engine as _, BASE64_STANDARD};
-use everscale_types::models::{BlockId, IntAddr, Message, MsgInfo, StdAddr, Transaction, TxInfo};
+use everscale_types::models::{
+    Base64StdAddrFlags, BlockId, DisplayBase64StdAddr, IntAddr, Message, MsgInfo, StdAddr,
+    StdAddrFormat, Transaction, TxInfo,
+};
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use num_bigint::BigInt;
@@ -110,6 +113,58 @@ impl Serialize for JrpcErrorResponse<JrpcId> {
 
 // === Requests ===
 
+#[derive(Debug)]
+pub struct DetectAddressParams {
+    pub address: StdAddr,
+    pub base64_flags: Option<Base64StdAddrFlags>,
+}
+
+impl<'de> Deserialize<'de> for DetectAddressParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        #[derive(Deserialize)]
+        struct Helper {
+            address: String,
+        }
+
+        let Helper { mut address } = <_>::deserialize(deserializer)?;
+        if address.len() == 64 {
+            return Ok(Self {
+                address: StdAddr::new(-1, HashBytes::from_str(&address).map_err(Error::custom)?),
+                base64_flags: None,
+            });
+        }
+
+        let is_base64 = address.len() == 48;
+
+        // Try to normalize a URL-safe base64.
+        if is_base64 {
+            // SAFETY: Content of the slice will remain a valid utf8 slice.
+            let bytes = unsafe { address.as_bytes_mut() };
+            for byte in bytes {
+                match *byte {
+                    b'-' => *byte = b'+',
+                    b'_' => *byte = b'/',
+                    byte if !byte.is_ascii() => return Err(Error::custom("invalid character")),
+                    _ => {}
+                }
+            }
+        }
+
+        let (address, flags) =
+            StdAddr::from_str_ext(&address, StdAddrFormat::any()).map_err(Error::custom)?;
+
+        Ok(Self {
+            address,
+            base64_flags: is_base64.then_some(flags),
+        })
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AccountParams {
     #[serde(with = "serde_tonlib_address")]
@@ -151,6 +206,69 @@ pub struct RunGetMethodParams {
 }
 
 // === Responses ===
+
+pub struct AddressFormsResponse {
+    pub raw_form: StdAddr,
+    pub given_type: AddressType,
+    pub test_only: bool,
+}
+
+impl Serialize for AddressFormsResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Base64Form<'a> {
+            #[serde(with = "serde_helpers::string")]
+            b64: DisplayBase64StdAddr<'a>,
+            #[serde(with = "serde_helpers::string")]
+            b64url: DisplayBase64StdAddr<'a>,
+        }
+
+        impl<'a> Base64Form<'a> {
+            fn new(addr: &'a StdAddr, bounceable: bool, testnet: bool) -> Self {
+                let flags = Base64StdAddrFlags {
+                    testnet,
+                    base64_url: false,
+                    bounceable,
+                };
+                Self {
+                    b64: DisplayBase64StdAddr { addr, flags },
+                    b64url: DisplayBase64StdAddr {
+                        addr,
+                        flags: Base64StdAddrFlags {
+                            base64_url: true,
+                            ..flags
+                        },
+                    },
+                }
+            }
+        }
+
+        let mut s = serializer.serialize_struct("AddressFormsResponse", 5)?;
+        s.serialize_field("raw_form", &self.raw_form)?;
+        s.serialize_field(
+            "bounceable",
+            &Base64Form::new(&self.raw_form, true, self.test_only),
+        )?;
+        s.serialize_field(
+            "non_bounceable",
+            &Base64Form::new(&self.raw_form, false, self.test_only),
+        )?;
+        s.serialize_field("given_type", &self.given_type)?;
+        s.serialize_field("test_only", &self.test_only)?;
+        s.end()
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddressType {
+    RawForm,
+    FriendlyBounceable,
+    FriendlyNonBounceable,
+}
 
 #[derive(Serialize)]
 pub struct AddressInformationResponse {
