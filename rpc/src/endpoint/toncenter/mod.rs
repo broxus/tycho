@@ -14,7 +14,9 @@ use everscale_types::prelude::*;
 use futures_util::future::Either;
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
-use tycho_block_util::message::validate_external_message;
+use tycho_block_util::message::{
+    normalize_external_message, parse_external_message, validate_external_message,
+};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
@@ -33,6 +35,7 @@ pub fn router() -> axum::Router<RpcState> {
         .route("/getAddressInformation", get(get_address_information))
         .route("/getTransactions", get(get_transactions))
         .route("/sendBoc", post(post_send_boc))
+        .route("/sendBocReturnHash", post(post_send_boc_return_hash))
         .route("/runGetMethod", post(post_run_get_method))
 }
 
@@ -216,16 +219,54 @@ fn post_send_boc(
 
 async fn handle_send_boc(id: JrpcId, state: RpcState, p: SendBocParams) -> Response {
     if let Err(e) = validate_external_message(&p.boc).await {
-        return JrpcErrorResponse {
+        return into_err_response(StatusCode::BAD_REQUEST, JrpcErrorResponse {
             id: Some(id),
             code: INVALID_BOC_CODE,
             message: e.to_string().into(),
-        }
-        .into_response();
+        });
     }
 
     state.broadcast_external_message(&p.boc).await;
     ok_to_response(id, TonlibOk)
+}
+
+// === POST /sendBocReturnHash ===
+
+fn post_send_boc_return_hash(
+    State(state): State<RpcState>,
+    body: Result<Json<SendBocParams>, JsonRejection>,
+) -> impl Future<Output = Response> {
+    match body {
+        Ok(Json(params)) => Either::Left(handle_send_boc_return_hash(JrpcId::Skip, state, params)),
+        Err(e) => Either::Right(futures_util::future::ready(error_to_response(
+            JrpcId::Skip,
+            RpcStateError::BadRequest(e.into()),
+        ))),
+    }
+}
+
+async fn handle_send_boc_return_hash(id: JrpcId, state: RpcState, p: SendBocParams) -> Response {
+    let (hash, hash_norm) = match parse_external_message(&p.boc).await.and_then(|root| {
+        let normalized = normalize_external_message(root.as_ref())?;
+        Ok((*root.repr_hash(), *normalized.repr_hash()))
+    }) {
+        Ok(res) => res,
+        Err(e) => {
+            return into_err_response(StatusCode::BAD_REQUEST, JrpcErrorResponse {
+                id: Some(id),
+                code: INVALID_BOC_CODE,
+                message: e.to_string().into(),
+            })
+        }
+    };
+
+    state.broadcast_external_message(&p.boc).await;
+    ok_to_response(id, ExtMsgInfoResponse {
+        ty: ExtMsgInfoResponse::TY,
+        hash,
+        hash_norm,
+        extra: TonlibExtra,
+    })
 }
 
 // === POST /runGetMethod ===
@@ -255,20 +296,18 @@ async fn handle_run_get_method(id: JrpcId, state: RpcState, p: RunGetMethodParam
     let permit = match state.acquire_run_get_method_permit().await {
         RunGetMethodPermit::Acquired(permit) => permit,
         RunGetMethodPermit::Disabled => {
-            return JrpcErrorResponse {
+            return into_err_response(StatusCode::NOT_IMPLEMENTED, JrpcErrorResponse {
                 id: Some(id),
                 code: NOT_SUPPORTED_CODE,
                 message: "method disabled".into(),
-            }
-            .into_response()
+            });
         }
         RunGetMethodPermit::Timeout => {
-            return JrpcErrorResponse {
+            return into_err_response(StatusCode::REQUEST_TIMEOUT, JrpcErrorResponse {
                 id: Some(id),
                 code: TIMEOUT_CODE,
                 message: "timeout while waiting for VM slot".into(),
-            }
-            .into_response()
+            });
         }
     };
     let gas_limit = config.vm_getter_gas;
@@ -394,12 +433,13 @@ async fn handle_run_get_method(id: JrpcId, state: RpcState, p: RunGetMethodParam
                 ok_to_response(id, res)
             }
             Err(RunMethodError::RpcError(e)) => error_to_response(id, e),
-            Err(RunMethodError::InvalidParams(e)) => JrpcErrorResponse {
-                id: Some(id),
-                code: INVALID_PARAMS_CODE,
-                message: format!("invalid stack item: {e}").into(),
+            Err(RunMethodError::InvalidParams(e)) => {
+                into_err_response(StatusCode::BAD_REQUEST, JrpcErrorResponse {
+                    id: Some(id),
+                    code: INVALID_PARAMS_CODE,
+                    message: format!("invalid stack item: {e}").into(),
+                })
             }
-            .into_response(),
             Err(RunMethodError::Internal(e)) => {
                 error_to_response(id, RpcStateError::Internal(e.into()))
             }

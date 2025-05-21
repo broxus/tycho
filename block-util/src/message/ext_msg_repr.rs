@@ -2,17 +2,76 @@ use std::cell::RefCell;
 
 use everscale_types::cell::CellTreeStats;
 use everscale_types::error::Error;
-use everscale_types::models::{IntAddr, MsgInfo, StateInit};
+use everscale_types::models::{ExtInMsgInfo, IntAddr, MsgType, StateInit};
 use everscale_types::prelude::*;
 use tycho_util::FastHashMap;
 
 pub async fn validate_external_message(body: &bytes::Bytes) -> Result<(), InvalidExtMsg> {
     if body.len() > ExtMsgRepr::BOUNDARY_BOC_SIZE {
         let body = body.clone();
+        // NOTE: Drop `Cell` inside rayon to not block the executor thread.
+        tycho_util::sync::rayon_run_fifo(move || ExtMsgRepr::validate(&body).map(|_| ())).await
+    } else {
+        ExtMsgRepr::validate(body).map(|_| ())
+    }
+}
+
+pub async fn parse_external_message(body: &bytes::Bytes) -> Result<Cell, InvalidExtMsg> {
+    if body.len() > ExtMsgRepr::BOUNDARY_BOC_SIZE {
+        let body = body.clone();
         tycho_util::sync::rayon_run_fifo(move || ExtMsgRepr::validate(&body)).await
     } else {
         ExtMsgRepr::validate(body)
     }
+}
+
+/// Computes a normalized message.
+///
+/// A normalized message contains only `dst` address and a body as reference.
+pub fn normalize_external_message(cell: &'_ DynCell) -> Result<Cell, Error> {
+    let mut cs = cell.as_slice()?;
+    if MsgType::load_from(&mut cs)? != MsgType::ExtIn {
+        return Err(Error::InvalidData);
+    }
+
+    let info = ExtInMsgInfo::load_from(&mut cs)?;
+
+    // Skip message state init.
+    if cs.load_bit()? {
+        if cs.load_bit()? {
+            // State init as reference.
+            cs.load_reference()?;
+        } else {
+            // Inline state init.
+            StateInit::load_from(&mut cs)?;
+        }
+    }
+
+    // Load message body.
+    let body = if cs.load_bit()? {
+        cs.load_reference_cloned()?
+    } else if cs.is_empty() {
+        Cell::empty_cell()
+    } else {
+        CellBuilder::build_from(cs)?
+    };
+
+    // Rebuild normalized message.
+    let cx = Cell::empty_context();
+    let mut b = CellBuilder::new();
+
+    // message$_ -> info:CommonMsgInfo -> ext_in_msg_info$10
+    // message$_ -> info:CommonMsgInfo -> src:MsgAddressExt -> addr_none$00
+    b.store_small_uint(0b1000, 4)?;
+    // message$_ -> info:CommonMsgInfo -> dest:MsgAddressInt
+    info.dst.store_into(&mut b, cx)?;
+    // message$_ -> info:CommonMsgInfo -> import_fee:Grams -> 0
+    // message$_ -> init:(Maybe (Either StateInit ^StateInit)) -> nothing$0
+    // message$_ -> body:(Either X ^X) -> right$1
+    b.store_small_uint(0b000001, 6)?;
+    b.store_reference(body)?;
+
+    b.build_ext(cx)
 }
 
 pub struct ExtMsgRepr;
@@ -29,7 +88,7 @@ impl ExtMsgRepr {
 
     // === General methods ===
 
-    pub fn validate<T: AsRef<[u8]>>(bytes: T) -> Result<(), InvalidExtMsg> {
+    pub fn validate<T: AsRef<[u8]>>(bytes: T) -> Result<Cell, InvalidExtMsg> {
         // Apply limits to the encoded BOC.
         if bytes.as_ref().len() > Self::MAX_BOC_SIZE {
             return Err(InvalidExtMsg::BocSizeExceeded);
@@ -56,12 +115,10 @@ impl ExtMsgRepr {
         // Start parsing the message (we are sure now that it is an ordinary cell).
         let mut cs = msg_root.as_slice_allow_exotic();
 
-        // Parse info first.
-        let info = MsgInfo::load_from(&mut cs)?;
-
         'info: {
             // Only external inbound messages are allowed.
-            if let MsgInfo::ExtIn(info) = &info {
+            if MsgType::load_from(&mut cs)? == MsgType::ExtIn {
+                let info = ExtInMsgInfo::load_from(&mut cs)?;
                 if let IntAddr::Std(std_addr) = &info.dst {
                     // Only `addr_std` (without anycast) to existing workchains is allowed.
                     if Self::ALLOWED_WORKCHAINS.contains(&std_addr.workchain)
@@ -113,7 +170,7 @@ impl ExtMsgRepr {
             }
         }
 
-        Ok(())
+        Ok(msg_root)
     }
 
     fn boc_decode_with_limit(data: &[u8], max_cells: u64) -> Result<Cell, InvalidExtMsg> {
@@ -248,7 +305,9 @@ impl<'a> MsgStorageStat<'a> {
 mod test {
     use everscale_types::error::Error;
     use everscale_types::merkle::MerkleProof;
-    use everscale_types::models::{ExtOutMsgInfo, IntMsgInfo, MessageLayout, OwnedMessage};
+    use everscale_types::models::{
+        ExtOutMsgInfo, IntMsgInfo, MessageLayout, MsgInfo, OwnedMessage,
+    };
 
     use super::*;
     use crate::block::AlwaysInclude;
