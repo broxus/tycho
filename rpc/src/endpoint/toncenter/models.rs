@@ -303,6 +303,27 @@ pub enum TonlibAccountStatus {
     Active,
 }
 
+#[derive(Serialize)]
+pub struct ExtendedAddressInformationResponse<'a> {
+    #[serde(rename = "@type")]
+    pub ty: &'static str,
+    pub address: TonlibAddress<'a>,
+    #[serde(with = "serde_helpers::string")]
+    pub balance: Tokens,
+    pub extra_currencies: [(); 0],
+    pub last_transaction_id: TonlibTransactionId,
+    pub block_id: TonlibBlockId,
+    pub sync_utime: u32,
+    pub account_state: ParsedAccountState,
+    pub revision: i32,
+    #[serde(rename = "@extra")]
+    pub extra: TonlibExtra,
+}
+
+impl ExtendedAddressInformationResponse<'_> {
+    pub const TY: &'static str = "fullAccountState";
+}
+
 // === Transactions Response ===
 
 pub struct GetTransactionsResponse<'a> {
@@ -545,7 +566,7 @@ pub struct TonlibAddress<'a> {
 impl<'a> TonlibAddress<'a> {
     pub const TY: &'static str = "accountAddress";
 
-    fn new(address: &'a StdAddr) -> Self {
+    pub fn new(address: &'a StdAddr) -> Self {
         Self {
             ty: Self::TY,
             account_address: address,
@@ -1012,6 +1033,191 @@ impl Serialize for TonlibOk {
         s.serialize_field("@type", "ok")?;
         s.end()
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "@type")]
+pub enum ParsedAccountState {
+    #[serde(rename = "raw.accountState")]
+    Raw {
+        #[serde(with = "serde_boc_or_empty")]
+        code: Option<Cell>,
+        #[serde(with = "serde_boc_or_empty")]
+        data: Option<Cell>,
+        #[serde(serialize_with = "serde_tonlib_hash::serialize_or_empty")]
+        frozen_hash: Option<HashBytes>,
+    },
+    #[serde(rename = "wallet.v3.accountState")]
+    WalletV3 {
+        #[serde(with = "serde_helpers::string")]
+        wallet_id: i64,
+        seqno: i32,
+    },
+    #[serde(rename = "wallet.v4.accountState")]
+    WalletV4 {
+        #[serde(with = "serde_helpers::string")]
+        wallet_id: i64,
+        seqno: i32,
+    },
+    #[serde(rename = "wallet.highload.v1.accountState")]
+    HighloadWalletV1 {
+        #[serde(with = "serde_helpers::string")]
+        wallet_id: i64,
+        seqno: i32,
+    },
+    #[serde(rename = "wallet.highload.v2.accountState")]
+    HighloadWalletV2 {
+        #[serde(with = "serde_helpers::string")]
+        wallet_id: i64,
+    },
+    #[serde(rename = "uninited.accountState")]
+    Uninit {
+        #[serde(serialize_with = "serde_tonlib_hash::serialize_or_empty")]
+        frozen_hash: Option<HashBytes>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BasicContractType {
+    HighloadWalletV1,
+    HighloadWalletV2,
+    WalletV3,
+    WalletV4,
+}
+
+pub struct BasicContractInfo {
+    pub ty: BasicContractType,
+    pub revision: i32,
+}
+
+impl BasicContractInfo {
+    pub fn guess(code_hash: &HashBytes) -> Option<Self> {
+        Some(match *code_hash {
+            code_hash::WALLET_V3_R2 => Self {
+                ty: BasicContractType::WalletV3,
+                revision: 2,
+            },
+            code_hash::WALLET_V3_R1 => Self {
+                ty: BasicContractType::WalletV3,
+                revision: 1,
+            },
+            code_hash::WALLET_V4_R2 => Self {
+                ty: BasicContractType::WalletV4,
+                revision: 2,
+            },
+            code_hash::HIGHLOAD_WALLET_V2_R2 => Self {
+                ty: BasicContractType::HighloadWalletV2,
+                revision: 2,
+            },
+            code_hash::HIGHLOAD_WALLET_V2_R1 => Self {
+                ty: BasicContractType::HighloadWalletV2,
+                revision: 1,
+            },
+            code_hash::HIGHLOAD_WALLET_V2 => Self {
+                ty: BasicContractType::HighloadWalletV2,
+                revision: -1,
+            },
+            code_hash::HIGHLOAD_WALLET_V1_R2 => Self {
+                ty: BasicContractType::HighloadWalletV1,
+                revision: 2,
+            },
+            code_hash::HIGHLOAD_WALLET_V1_R1 => Self {
+                ty: BasicContractType::HighloadWalletV1,
+                revision: 1,
+            },
+            code_hash::HIGHLOAD_WALLET_V1 => Self {
+                ty: BasicContractType::HighloadWalletV1,
+                revision: -1,
+            },
+            _ => return None,
+        })
+    }
+
+    pub fn read_init_data(
+        &self,
+        data: &DynCell,
+    ) -> Result<ParsedAccountState, everscale_types::error::Error> {
+        let mut cs = data.as_slice()?;
+        Ok(match self.ty {
+            BasicContractType::HighloadWalletV1 => {
+                let seqno = cs.load_u32()? as i32;
+                let wallet_id = cs.load_u32()? as i64;
+                ParsedAccountState::HighloadWalletV1 { wallet_id, seqno }
+            }
+            BasicContractType::HighloadWalletV2 => {
+                let wallet_id = cs.load_u32()? as i64;
+                ParsedAccountState::HighloadWalletV2 { wallet_id }
+            }
+            BasicContractType::WalletV3 => {
+                let seqno = cs.load_u32()? as i32;
+                let wallet_id = cs.load_u32()? as i64;
+                ParsedAccountState::WalletV3 { wallet_id, seqno }
+            }
+            BasicContractType::WalletV4 => {
+                let seqno = cs.load_u32()? as i32;
+                let wallet_id = cs.load_u32()? as i64;
+                ParsedAccountState::WalletV4 { wallet_id, seqno }
+            }
+        })
+    }
+}
+
+mod code_hash {
+    use super::*;
+
+    pub const HIGHLOAD_WALLET_V1: HashBytes = HashBytes([
+        0x0a, 0xb1, 0xff, 0x93, 0xa9, 0xe7, 0x9c, 0x0d, 0xef, 0xf4, 0x40, 0x5d, 0x8d, 0xad, 0x6b,
+        0x5a, 0xc9, 0xf8, 0xc0, 0x1b, 0x2f, 0x1e, 0xbc, 0xb4, 0x25, 0x9f, 0xeb, 0x9e, 0x98, 0x38,
+        0x00, 0x99,
+    ]);
+
+    pub const HIGHLOAD_WALLET_V1_R1: HashBytes = HashBytes([
+        0xd8, 0xcd, 0xbb, 0xb7, 0x9f, 0x2c, 0x5c, 0xaa, 0x67, 0x7a, 0xc4, 0x50, 0x77, 0x0b, 0xe0,
+        0x35, 0x1b, 0xe2, 0x1e, 0x12, 0x50, 0x48, 0x6d, 0xe8, 0x5c, 0xc5, 0x2a, 0xa3, 0x3d, 0xd1,
+        0x64, 0x84,
+    ]);
+
+    pub const HIGHLOAD_WALLET_V1_R2: HashBytes = HashBytes([
+        0x36, 0x8c, 0x03, 0x97, 0x2e, 0x5f, 0x4c, 0x24, 0x41, 0x2b, 0x81, 0x86, 0x52, 0xde, 0x1d,
+        0xe2, 0xa2, 0x63, 0x0d, 0x1c, 0x01, 0x16, 0x09, 0x99, 0x9d, 0xff, 0x74, 0x5f, 0xb3, 0x68,
+        0x49, 0xad,
+    ]);
+
+    pub const HIGHLOAD_WALLET_V2: HashBytes = HashBytes([
+        0x94, 0x94, 0xd1, 0xcc, 0x8e, 0xdf, 0x12, 0xf0, 0x56, 0x71, 0xa1, 0xa9, 0xba, 0x09, 0x92,
+        0x10, 0x96, 0xeb, 0x50, 0x81, 0x1e, 0x19, 0x24, 0xec, 0x65, 0xc3, 0xc6, 0x29, 0xfb, 0xb8,
+        0x08, 0x12,
+    ]);
+
+    pub const HIGHLOAD_WALLET_V2_R1: HashBytes = HashBytes([
+        0x8c, 0xeb, 0x45, 0xb3, 0xcd, 0x4b, 0x5c, 0xc6, 0x0e, 0xaa, 0xe1, 0xc1, 0x3b, 0x9c, 0x09,
+        0x23, 0x92, 0x67, 0x7f, 0xe5, 0x36, 0xb2, 0xe9, 0xb2, 0xd8, 0x01, 0xb6, 0x2e, 0xff, 0x93,
+        0x1f, 0xe1,
+    ]);
+
+    pub const HIGHLOAD_WALLET_V2_R2: HashBytes = HashBytes([
+        0x0b, 0x3a, 0x88, 0x7a, 0xea, 0xcd, 0x2a, 0x7d, 0x40, 0xbb, 0x55, 0x50, 0xbc, 0x92, 0x53,
+        0x15, 0x6a, 0x02, 0x90, 0x65, 0xae, 0xfb, 0x6d, 0x6b, 0x58, 0x37, 0x35, 0xd5, 0x8d, 0xa9,
+        0xd5, 0xbe,
+    ]);
+
+    pub const WALLET_V3_R1: HashBytes = HashBytes([
+        0xb6, 0x10, 0x41, 0xa5, 0x8a, 0x79, 0x80, 0xb9, 0x46, 0xe8, 0xfb, 0x9e, 0x19, 0x8e, 0x3c,
+        0x90, 0x4d, 0x24, 0x79, 0x9f, 0xfa, 0x36, 0x57, 0x4e, 0xa4, 0x25, 0x1c, 0x41, 0xa5, 0x66,
+        0xf5, 0x81,
+    ]);
+
+    pub const WALLET_V3_R2: HashBytes = HashBytes([
+        0x84, 0xda, 0xfa, 0x44, 0x9f, 0x98, 0xa6, 0x98, 0x77, 0x89, 0xba, 0x23, 0x23, 0x58, 0x07,
+        0x2b, 0xc0, 0xf7, 0x6d, 0xc4, 0x52, 0x40, 0x02, 0xa5, 0xd0, 0x91, 0x8b, 0x9a, 0x75, 0xd2,
+        0xd5, 0x99,
+    ]);
+
+    pub const WALLET_V4_R2: HashBytes = HashBytes([
+        0xfe, 0xb5, 0xff, 0x68, 0x20, 0xe2, 0xff, 0x0d, 0x94, 0x83, 0xe7, 0xe0, 0xd6, 0x2c, 0x81,
+        0x7d, 0x84, 0x67, 0x89, 0xfb, 0x4a, 0xe5, 0x80, 0xc8, 0x78, 0x86, 0x6d, 0x95, 0x9d, 0xab,
+        0xd5, 0xc0,
+    ]);
 }
 
 mod serde_option_tonlib_address {
