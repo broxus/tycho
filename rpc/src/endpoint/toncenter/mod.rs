@@ -36,6 +36,10 @@ pub fn router() -> axum::Router<RpcState> {
         .route("/jsonRPC", post(post_jrpc))
         .route("/detectAddress", get(get_detect_address))
         .route("/getAddressInformation", get(get_address_information))
+        .route(
+            "/getExtendedAddressInformation",
+            get(get_extended_address_information),
+        )
         .route("/getTransactions", get(get_transactions))
         .route("/sendBoc", post(post_send_boc))
         .route("/sendBocReturnHash", post(post_send_boc_return_hash))
@@ -60,6 +64,7 @@ declare_jrpc_method! {
     pub enum MethodParams: Method {
         DetectAddress(DetectAddressParams),
         GetAddressInformation(AccountParams),
+        GetExtendedAddressInformation(AccountParams),
         GetTransactions(TransactionsParams),
         SendBoc(SendBocParams),
         SendBocReturnHash(SendBocParams),
@@ -74,6 +79,9 @@ async fn post_jrpc_impl(State(state): State<RpcState>, req: Jrpc<JrpcId, Method>
         MethodParams::DetectAddress(p) => handle_detect_address(req.id, p).await,
         MethodParams::GetAddressInformation(p) => {
             handle_get_address_information(req.id, state, p).await
+        }
+        MethodParams::GetExtendedAddressInformation(p) => {
+            handle_get_extended_address_information(req.id, state, p).await
         }
         MethodParams::GetTransactions(p) => handle_get_transactions(req.id, state, p).await,
         MethodParams::SendBoc(p) => handle_send_boc(req.id, state, p).await,
@@ -199,6 +207,114 @@ async fn handle_get_address_information(id: JrpcId, state: RpcState, p: AccountP
         sync_utime,
         extra: TonlibExtra,
         state: status,
+    })
+}
+
+// === GET /getExtendedAddressInformation ===
+
+fn get_extended_address_information(
+    State(state): State<RpcState>,
+    query: Result<Query<AccountParams>, QueryRejection>,
+) -> impl Future<Output = Response> {
+    match query {
+        Ok(Query(params)) => Either::Left(handle_get_extended_address_information(
+            JrpcId::Skip,
+            state,
+            params,
+        )),
+        Err(e) => Either::Right(handle_rejection(e)),
+    }
+}
+
+async fn handle_get_extended_address_information(
+    id: JrpcId,
+    state: RpcState,
+    p: AccountParams,
+) -> Response {
+    let item = match state.get_account_state(&p.address) {
+        Ok(item) => item,
+        Err(e) => return error_to_response(id, e),
+    };
+
+    let mut balance = Tokens::ZERO;
+    let mut parsed = ParsedAccountState::Uninit { frozen_hash: None };
+    let last_transaction_id;
+    let block_id;
+    let sync_utime;
+    let mut revision = 0;
+
+    let _mc_ref_handle;
+    match item {
+        LoadedAccountState::NotFound {
+            timings,
+            mc_block_id,
+        } => {
+            last_transaction_id = TonlibTransactionId::default();
+            block_id = TonlibBlockId::from(*mc_block_id);
+            sync_utime = timings.gen_utime;
+        }
+        LoadedAccountState::Found {
+            timings,
+            mc_block_id,
+            state,
+            mc_ref_handle,
+        } => {
+            last_transaction_id =
+                TonlibTransactionId::new(state.last_trans_lt, state.last_trans_hash);
+            block_id = TonlibBlockId::from(*mc_block_id);
+            sync_utime = timings.gen_utime;
+
+            match state.load_account() {
+                Ok(Some(loaded)) => {
+                    _mc_ref_handle = mc_ref_handle;
+
+                    balance = loaded.balance.tokens;
+                    match loaded.state {
+                        AccountState::Active(account) => {
+                            if let Some(res) =
+                                account.code.as_ref().zip(account.data.as_ref()).and_then(
+                                    |(code, data)| {
+                                        let info = BasicContractInfo::guess(code.repr_hash())?;
+                                        let parsed = info.read_init_data(data.as_ref()).ok()?;
+                                        Some((info.revision, parsed))
+                                    },
+                                )
+                            {
+                                revision = res.0;
+                                parsed = res.1;
+                            } else {
+                                parsed = ParsedAccountState::Raw {
+                                    code: account.code,
+                                    data: account.data,
+                                    frozen_hash: None,
+                                }
+                            }
+                        }
+                        AccountState::Frozen(hash) => {
+                            parsed = ParsedAccountState::Uninit {
+                                frozen_hash: Some(hash),
+                            }
+                        }
+                        AccountState::Uninit => {}
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => return error_to_response(id, RpcStateError::Internal(e.into())),
+            }
+        }
+    }
+
+    ok_to_response(id, ExtendedAddressInformationResponse {
+        ty: ExtendedAddressInformationResponse::TY,
+        address: TonlibAddress::new(&p.address),
+        balance,
+        extra_currencies: [],
+        last_transaction_id,
+        block_id,
+        sync_utime,
+        account_state: parsed,
+        revision,
+        extra: TonlibExtra,
     })
 }
 
@@ -539,4 +655,33 @@ fn into_err_response(mut status_code: StatusCode, mut res: JrpcErrorResponse<Jrp
         status_code = StatusCode::OK;
     }
     (status_code, res).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn print_wallet_v4() {
+        let wallet = Boc::decode_base64("te6ccgECFgEAAzoAAm6AGE3DuCEqSX0GkrvxdALj9iNdEFOQuNKSjSq5im7DoelEWQschn68LPAAAbC9fDcKGgD4sgMmAgEAUQAAAAEpqaMXHSwYXPOWkRNYxRHGUjggtZsD/elIXIA9ob2KZ9cZI6JAART/APSkE/S88sgLAwIBIAkEBPjygwjXGCDTH9Mf0x8C+CO78mTtRNDTH9Mf0//0BNFRQ7ryoVFRuvKiBfkBVBBk+RDyo/gAJKTIyx9SQMsfUjDL/1IQ9ADJ7VT4DwHTByHAAJ9sUZMg10qW0wfUAvsA6DDgIcAB4wAhwALjAAHAA5Ew4w0DpMjLHxLLH8v/CAcGBQAK9ADJ7VQAbIEBCNcY+gDTPzBSJIEBCPRZ8qeCEGRzdHJwdIAYyMsFywJQBc8WUAP6AhPLassfEss/yXP7AABwgQEI1xj6ANM/yFQgR4EBCPRR8qeCEG5vdGVwdIAYyMsFywJQBs8WUAT6AhTLahLLH8s/yXP7AAIAbtIH+gDU1CL5AAXIygcVy//J0Hd0gBjIywXLAiLPFlAF+gIUy2sSzMzJc/sAyEAUgQEI9FHypwICAUgTCgIBIAwLAFm9JCtvaiaECAoGuQ+gIYRw1AgIR6STfSmRDOaQPp/5g3gSgBt4EBSJhxWfMYQCASAODQARuMl+1E0NcLH4AgFYEg8CASAREAAZrx32omhAEGuQ64WPwAAZrc52omhAIGuQ64X/wAA9sp37UTQgQFA1yH0BDACyMoHy//J0AGBAQj0Cm+hMYALm0AHQ0wMhcbCSXwTgItdJwSCSXwTgAtMfIYIQcGx1Z70ighBkc3RyvbCSXwXgA/pAMCD6RAHIygfL/8nQ7UTQgQFA1yH0BDBcgQEI9ApvoTGzkl8H4AXTP8glghBwbHVnupI4MOMNA4IQZHN0crqSXwbjDRUUAIpQBIEBCPRZMO1E0IEBQNcgyAHPFvQAye1UAXKwjiOCEGRzdHKDHrFwgBhQBcsFUAPPFiP6AhPLassfyz/JgED7AJJfA+IAeAH6APQEMPgnbyIwUAqhIb7y4FCCEHBsdWeDHrFwgBhQBMsFJs8WWPoCGfQAy2kXyx9SYMs/IMmAQPsABg==").unwrap();
+        let account = wallet.parse::<Account>().unwrap();
+
+        if let AccountState::Active(state) = &account.state {
+            let info = BasicContractInfo::guess(state.code.as_ref().unwrap().repr_hash()).unwrap();
+            let ParsedAccountState::WalletV4 { wallet_id, seqno } = info
+                .read_init_data(state.data.as_ref().unwrap().as_ref())
+                .unwrap()
+            else {
+                panic!("invalid parsed state ");
+            };
+
+            assert_eq!(wallet_id, 698983191);
+            assert_eq!(seqno, 1);
+        }
+
+        println!(
+            "{}",
+            Boc::encode_base64(CellBuilder::build_from(OptionalAccount(Some(account))).unwrap())
+        );
+    }
 }
