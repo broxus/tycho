@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,7 +10,8 @@ use everscale_types::models::{ShardIdent, *};
 use everscale_types::prelude::*;
 use humantime::format_duration;
 use itertools::Itertools;
-use parking_lot::Mutex;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::prelude::ParallelSlice;
 use rayon::slice::ParallelSliceMut;
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockStuff;
@@ -31,7 +32,6 @@ use crate::collator::messages_reader::{FinalizedMessagesReader, MessagesReader};
 use crate::collator::types::{
     AccountIdExt, BlockCollationData, BlockSerializerCache, ExecuteResult, FinalizeBlockResult,
     FinalizeMessagesReaderResult, PreparedInMsg, PreparedOutMsg, PublicLibsDiff,
-    ShardAccountsLayout,
 };
 use crate::collator::SHARD_ACCOUNTS_SPLIT_DEPTH;
 use crate::internal_queue::types::{DiffStatistics, DiffZone, EnqueuedMessage};
@@ -355,12 +355,10 @@ impl Phase<FinalizeState> {
 
         // TODO: update new_config_opt from hard fork
 
-        let shard_accounts = processed_accounts.shard_accounts.merge()?;
-
         // Compute value flow.
         let value_flow = collation_data.finalize_value_flow(
             &processed_accounts.account_blocks,
-            &shard_accounts,
+            &processed_accounts.shard_accounts,
             &in_msgs,
             &out_msgs,
             &self.state.mc_data.config,
@@ -541,7 +539,7 @@ impl Phase<FinalizeState> {
                 min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
                 processed_upto: Lazy::new(&processed_upto.clone().try_into()?)?,
                 before_split: new_block_info.before_split,
-                accounts: Lazy::new(&shard_accounts)?,
+                accounts: Lazy::new(&processed_accounts.shard_accounts)?,
                 overload_history: new_wu_used_from_last_anchor,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
@@ -1141,118 +1139,131 @@ impl Phase<FinalizeState> {
 
         let mut public_libraries_diff = PublicLibsDiff::new(public_libraries.clone());
 
-        // TODO: `par_iter` might be added here but the filter closure is quite heavy.
-        let mut account_updates = Vec::with_capacity(updated_accounts.len());
-        for mut updated_account in updated_accounts {
-            if updated_account.transactions.is_empty() {
-                continue;
-            }
-
-            // Handle masterchain account libraries and config change.
-            if is_masterchain {
-                if &updated_account.account_addr == config_address {
-                    if let Some(Account {
-                        state:
-                            AccountState::Active(StateInit {
-                                data: Some(data), ..
-                            }),
-                        ..
-                    }) = updated_account.shard_account.load_account()?
-                    {
-                        new_config_params = Some(data.parse::<BlockchainConfigParams>()?);
+        let updated_accounts: Result<Vec<_>> = updated_accounts
+            .filter(|account| !account.transactions.is_empty())
+            .try_fold(Vec::new(), |mut acc, mut updated_account| {
+                if is_masterchain {
+                    if &updated_account.account_addr == config_address {
+                        if let Some(Account {
+                            state:
+                                AccountState::Active(StateInit {
+                                    data: Some(data), ..
+                                }),
+                            ..
+                        }) = updated_account
+                            .shard_account
+                            .load_account()
+                            .context("failed to load account")?
+                        {
+                            new_config_params = Some(
+                                data.parse::<BlockchainConfigParams>()
+                                    .context("failed to parse config params")?,
+                            );
+                        }
                     }
+
+                    public_libraries_diff
+                        .merge(
+                            &updated_account.account_addr,
+                            std::mem::take(&mut updated_account.public_libs_diff),
+                        )
+                        .context("failed to add public libraries diff")?;
                 }
 
-                public_libraries_diff
-                    .merge(
-                        &updated_account.account_addr,
-                        std::mem::take(&mut updated_account.public_libs_diff),
-                    )
-                    .context("failed to add public libraries diff")?;
-            }
+                acc.push(updated_account);
+                Ok(acc)
+            });
 
-            // Add account block.
-            let transactions = AugDict::try_from_btree(&updated_account.transactions)
-                .context("failed to build account block transactions")?;
-            let account_block = AccountBlock {
-                state_update: updated_account.build_hash_update(),
-                account: updated_account.account_addr,
-                transactions,
-            };
-            account_blocks.insert(updated_account.account_addr, account_block);
+        let updated_accounts: Result<Vec<_>> = updated_accounts?
+            .par_chunks(1 << SHARD_ACCOUNTS_SPLIT_DEPTH)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|updated_account| {
+                        // Add account block.
+                        let transactions = AugDict::try_from_btree(&updated_account.transactions)
+                            .context("failed to build account block transactions")?;
 
-            // Prepare modification.
-            let key = updated_account.account_addr;
-            let op = if updated_account.exists {
-                let extra = DepthBalanceInfo {
-                    // NOTE: will need to set when we implement accounts split/merge logic
-                    split_depth: 0,
-                    balance: updated_account.balance.clone(),
-                };
-                let value = updated_account.shard_account;
-                Some((extra, value))
-            } else {
-                None
-            };
-            account_updates.push((key, op));
-        }
+                        let account_block = AccountBlock {
+                            state_update: updated_account.build_hash_update(),
+                            account: updated_account.account_addr,
+                            transactions,
+                        };
+
+                        // Prepare modification.
+                        let key = updated_account.account_addr;
+                        let op = if updated_account.exists {
+                            let extra = DepthBalanceInfo {
+                                // NOTE: will need to set when we implement accounts split/merge logic
+                                split_depth: 0,
+                                balance: updated_account.balance.clone(),
+                            };
+                            let value = updated_account.shard_account.clone();
+                            Some((extra, value))
+                        } else {
+                            None
+                        };
+
+                        Ok((key, account_block, op))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .flatten()
+            .collect();
+
+        let mut account_updates = updated_accounts?
+            .into_iter()
+            .map(|(key, account_block, op)| {
+                account_blocks.insert(key, account_block);
+                (key, op)
+            })
+            .collect::<Vec<_>>();
 
         account_updates.par_sort_by(|(a, ..), (b, ..)| a.cmp(b));
 
-        let shard_accounts = match shard_accounts {
-            ShardAccountsLayout::Merged(shard_accounts) => {
-                let mut shard_accounts = RelaxedAugDict::from_full(&shard_accounts);
+        let shard_accounts = if is_masterchain {
+            let mut accounts = RelaxedAugDict::from_full(&shard_accounts);
 
-                shard_accounts
-                    .modify_with_sorted_iter(account_updates)
-                    .context("failed to modify accounts dict")?;
+            accounts
+                .modify_with_sorted_iter(account_updates)
+                .context("failed to modify accounts dict")?;
 
-                ShardAccountsLayout::Merged(shard_accounts.build()?)
-            }
-            ShardAccountsLayout::Split(shard_accounts) => {
-                let shard_accounts = shard_accounts
-                    .into_iter()
-                    .map(|(k, v)| (k, RelaxedAugDict::from_full(&v)))
-                    .collect::<BTreeMap<_, _>>();
+            accounts.build()?
+        } else {
+            // Group account updates by shards
+            let account_updates_by_shards = account_updates
+                .into_iter()
+                .group_by(|(account, _)| account.shard_id(SHARD_ACCOUNTS_SPLIT_DEPTH))
+                .into_iter()
+                .map(|(prefix, group)| (prefix, group.collect::<Vec<_>>()))
+                .collect::<FastHashMap<_, _>>();
 
-                let account_updates_by_shards = Arc::new(Mutex::new(
-                    account_updates
-                        .into_iter()
-                        .group_by(|(account, _)| account.shard_id(SHARD_ACCOUNTS_SPLIT_DEPTH))
-                        .into_iter()
-                        .map(|(prefix, group)| (prefix, group.collect::<Vec<_>>()))
-                        .collect::<FastHashMap<_, _>>(),
-                ));
+            let split_shard_accounts = split_shard_accounts(
+                &ShardIdent::BASECHAIN,
+                &shard_accounts,
+                SHARD_ACCOUNTS_SPLIT_DEPTH,
+            )?;
 
-                let updated_shard_accounts = Arc::new(Mutex::new(BTreeMap::new()));
+            let updated_shard_accounts = split_shard_accounts
+                .into_par_iter()
+                .map(|(prefix, shard_accounts)| {
+                    let mut shard_accounts = RelaxedAugDict::from_full(&shard_accounts);
 
-                rayon::scope(|s| {
-                    for (prefix, mut shard_accounts) in shard_accounts {
-                        let account_updates_by_shards = Arc::clone(&account_updates_by_shards);
-                        let updated_shard_accounts = Arc::clone(&updated_shard_accounts);
-                        s.spawn(move |_| {
-                            let account_updates = account_updates_by_shards.lock().remove(&prefix);
-                            if let Some(account_updates) = account_updates {
-                                shard_accounts
-                                    .modify_with_sorted_iter(account_updates)
-                                    .expect("failed to modify accounts dict");
-                            }
-
-                            let dict = shard_accounts
-                                .build()
-                                .expect("failed to build shard accounts");
-
-                            updated_shard_accounts.lock().insert(prefix, dict);
-                        });
+                    if let Some(updates) = account_updates_by_shards.get(&prefix) {
+                        shard_accounts
+                            .modify_with_sorted_iter(updates.clone())
+                            .expect("failed to modify accounts dict");
                     }
-                });
 
-                ShardAccountsLayout::Split(
-                    Arc::try_unwrap(updated_shard_accounts)
-                        .map_err(|_e| anyhow::anyhow!("failed to unwrap ShardAccounts"))?
-                        .into_inner(),
-                )
-            }
+                    let dict = shard_accounts
+                        .build()
+                        .expect("failed to build shard accounts");
+
+                    (prefix, dict)
+                })
+                .collect::<BTreeMap<_, _>>();
+
+            merge_shard_accounts(&updated_shard_accounts)?
         };
 
         let accounts_len = account_blocks.len();
@@ -1451,10 +1462,9 @@ impl Phase<FinalizeState> {
         );
 
         // Previous total shard balance.
-        let from_prev_block = prev_shard_data.observable_accounts().balance()?;
-
+        let from_prev_block = &prev_shard_data.observable_accounts().root_extra().balance;
         anyhow::ensure!(
-            value_flow.from_prev_block == from_prev_block,
+            value_flow.from_prev_block == *from_prev_block,
             "ValueFlow for {} declares from_prev_block={}, \
             but the total balance present in the previous state is {}",
             collation_data.block_id_short,
@@ -1463,9 +1473,9 @@ impl Phase<FinalizeState> {
         );
 
         // Next total shard balance.
-        let to_next_block = processed_accounts.shard_accounts.balance()?;
+        let to_next_block = &processed_accounts.shard_accounts.root_extra().balance;
         anyhow::ensure!(
-            value_flow.to_next_block == to_next_block,
+            value_flow.to_next_block == *to_next_block,
             "ValueFlow for {} declares to_next_block={}, \
             but the total balance present in the new state is {}",
             collation_data.block_id_short,
@@ -1534,7 +1544,7 @@ impl Phase<FinalizeState> {
 #[derive(Default)]
 struct ProcessedAccounts {
     account_blocks: AccountBlocks,
-    shard_accounts: ShardAccountsLayout,
+    shard_accounts: ShardAccounts,
     new_config_params: Option<BlockchainConfigParams>,
     accounts_len: usize,
 }
@@ -1562,4 +1572,88 @@ fn create_merkle_update(
     );
 
     Ok(state_update)
+}
+
+fn split_shard_accounts(
+    shard: &ShardIdent,
+    accounts: &ShardAccounts,
+    depth: u8,
+) -> Result<BTreeMap<u64, ShardAccounts>> {
+    fn split_shard_accounts_impl(
+        shard: &ShardIdent,
+        accounts: &ShardAccounts,
+        depth: u8,
+        shards: &mut BTreeMap<u64, ShardAccounts>,
+        builder: &mut CellBuilder,
+    ) -> Result<()> {
+        let (left_shard_ident, right_shard_ident) = 'split: {
+            if depth > 0 {
+                if let Some((left, right)) = shard.split() {
+                    break 'split (left, right);
+                }
+            }
+            shards.insert(shard.prefix(), accounts.clone());
+            return Ok(());
+        };
+
+        let (left_accounts, right_accounts) = {
+            builder.clear_bits();
+            let prefix_len = shard.prefix_len();
+            if prefix_len > 0 {
+                builder.store_uint(shard.prefix() >> (64 - prefix_len), prefix_len)?;
+            }
+            accounts.split_by_prefix(&builder.as_data_slice())?
+        };
+
+        split_shard_accounts_impl(
+            &left_shard_ident,
+            &left_accounts,
+            depth - 1,
+            shards,
+            builder,
+        )?;
+        split_shard_accounts_impl(
+            &right_shard_ident,
+            &right_accounts,
+            depth - 1,
+            shards,
+            builder,
+        )
+    }
+
+    let mut shards = BTreeMap::new();
+
+    split_shard_accounts_impl(shard, accounts, depth, &mut shards, &mut CellBuilder::new())?;
+
+    Ok(shards)
+}
+
+pub fn merge_shard_accounts(
+    shard_accounts: &BTreeMap<u64, ShardAccounts>,
+) -> Result<ShardAccounts> {
+    let shards = shard_accounts.len();
+    let max_depth = shards.trailing_zeros() as u8;
+
+    let mut buffer = shard_accounts
+        .values()
+        .map(|accounts| (max_depth, accounts.clone()))
+        .collect::<VecDeque<_>>();
+
+    while buffer.len() > 1 {
+        let (depth_right, accounts_right) = buffer.pop_back().expect("shouldn't happen");
+
+        match buffer.iter().last() {
+            Some(&(depth_left, _)) if depth_left == depth_right => {
+                let (depth, accounts_left) = buffer.pop_back().expect("shouldn't happen");
+                let merged = accounts_left.merge_with_right_sibling(&accounts_right)?;
+                buffer.push_front((depth - 1, merged));
+            }
+            _ => unreachable!("invalid number of shards"),
+        }
+    }
+
+    let (depth, merged_shard_accounts) = buffer.pop_back().expect("shouldn't happen");
+    assert_eq!(depth, 0);
+
+    Ok(merged_shard_accounts)
 }

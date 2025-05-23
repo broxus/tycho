@@ -5,9 +5,7 @@ use std::time::Duration;
 use ahash::HashMapExt;
 use anyhow::{anyhow, bail, Context, Result};
 use everscale_types::boc;
-use everscale_types::cell::{
-    Cell, CellBuilder, CellFamily, HashBytes, Lazy, UsageTree, UsageTreeMode,
-};
+use everscale_types::cell::{Cell, CellFamily, HashBytes, Lazy, UsageTree, UsageTreeMode};
 use everscale_types::dict::{self, Dict};
 use everscale_types::models::{
     AccountBlocks, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
@@ -29,7 +27,6 @@ use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::{MessagesReaderMetrics, ReaderState};
-use crate::collator::SHARD_ACCOUNTS_SPLIT_DEPTH;
 use crate::internal_queue::types::{
     AccountStatistics, DiffStatistics, InternalMessageValue, QueueShardRange, QueueStatistics,
     SeparatedStatisticsByPartitions,
@@ -61,7 +58,7 @@ impl WorkingState {
 
 pub(super) struct PrevData {
     observable_states: Vec<ShardStateStuff>,
-    observable_accounts: ShardAccountsLayout,
+    observable_accounts: ShardAccounts,
 
     blocks_ids: Vec<BlockId>,
 
@@ -102,20 +99,7 @@ impl PrevData {
 
         let gen_chain_time = observable_states[0].get_gen_chain_time();
         let gen_lt = observable_states[0].state().gen_lt;
-
-        let observable_accounts = {
-            let state = &observable_states[0];
-            if state.block_id().is_masterchain() {
-                ShardAccountsLayout::Merged(state.state().load_accounts()?)
-            } else {
-                ShardAccountsLayout::split(
-                    &state.block_id().shard,
-                    &state.state().load_accounts()?,
-                    SHARD_ACCOUNTS_SPLIT_DEPTH,
-                )?
-            }
-        };
-
+        let observable_accounts = observable_states[0].state().load_accounts()?;
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
         let wu_used_from_last_anchor = observable_states[0].state().overload_history;
 
@@ -147,7 +131,7 @@ impl PrevData {
         &self.observable_states
     }
 
-    pub fn observable_accounts(&self) -> &ShardAccountsLayout {
+    pub fn observable_accounts(&self) -> &ShardAccounts {
         &self.observable_accounts
     }
 
@@ -1637,124 +1621,5 @@ impl ConcurrentQueueStatistics {
                 .and_modify(|count| *count += msgs_count)
                 .or_insert(msgs_count);
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum ShardAccountsLayout {
-    Merged(ShardAccounts),
-    Split(BTreeMap<u64, ShardAccounts>),
-}
-
-impl Default for ShardAccountsLayout {
-    fn default() -> Self {
-        ShardAccountsLayout::Merged(ShardAccounts::default())
-    }
-}
-
-impl ShardAccountsLayout {
-    pub fn balance(&self) -> Result<CurrencyCollection> {
-        let balance = match &self {
-            ShardAccountsLayout::Merged(accounts) => accounts.root_extra().balance.clone(),
-            ShardAccountsLayout::Split(accounts) => {
-                let balance = accounts
-                    .values()
-                    .map(|v| v.root_extra().balance.clone())
-                    .try_fold(CurrencyCollection::ZERO, |left, right| {
-                        left.checked_add(&right)
-                    })?;
-
-                balance
-            }
-        };
-
-        Ok(balance)
-    }
-
-    pub fn merge(&self) -> Result<ShardAccounts> {
-        let shard_accounts = match self {
-            ShardAccountsLayout::Merged(shard_accounts) => shard_accounts.clone(),
-            ShardAccountsLayout::Split(shard_accounts) => {
-                let shards = shard_accounts.len();
-                let max_depth = shards.trailing_zeros() as u8;
-
-                let mut buffer = shard_accounts
-                    .values()
-                    .map(|accounts| (max_depth, accounts.clone()))
-                    .collect::<VecDeque<_>>();
-
-                while buffer.len() > 1 {
-                    let (depth_right, accounts_right) =
-                        buffer.pop_back().expect("shouldn't happen");
-
-                    match buffer.iter().last() {
-                        Some(&(depth_left, _)) if depth_left == depth_right => {
-                            let (depth, accounts_left) =
-                                buffer.pop_back().expect("shouldn't happen");
-                            let merged = accounts_left.merge_with_right_sibling(&accounts_right)?;
-                            buffer.push_front((depth - 1, merged));
-                        }
-                        _ => unreachable!("invalid number of shards"),
-                    }
-                }
-
-                let (depth, merged_shard_accounts) = buffer.pop_back().expect("shouldn't happen");
-                assert_eq!(depth, 0);
-
-                merged_shard_accounts
-            }
-        };
-
-        Ok(shard_accounts)
-    }
-
-    pub fn split(shard: &ShardIdent, accounts: &ShardAccounts, depth: u8) -> Result<Self> {
-        let mut shards = BTreeMap::new();
-
-        fn split_shard_accounts_impl(
-            shard: &ShardIdent,
-            accounts: &ShardAccounts,
-            depth: u8,
-            shards: &mut BTreeMap<u64, ShardAccounts>,
-            builder: &mut CellBuilder,
-        ) -> Result<()> {
-            let (left_shard_ident, right_shard_ident) = 'split: {
-                if depth > 0 {
-                    if let Some((left, right)) = shard.split() {
-                        break 'split (left, right);
-                    }
-                }
-                shards.insert(shard.prefix(), accounts.clone());
-                return Ok(());
-            };
-
-            let (left_accounts, right_accounts) = {
-                builder.clear_bits();
-                let prefix_len = shard.prefix_len();
-                if prefix_len > 0 {
-                    builder.store_uint(shard.prefix() >> (64 - prefix_len), prefix_len)?;
-                }
-                accounts.split_by_prefix(&builder.as_data_slice())?
-            };
-
-            split_shard_accounts_impl(
-                &left_shard_ident,
-                &left_accounts,
-                depth - 1,
-                shards,
-                builder,
-            )?;
-            split_shard_accounts_impl(
-                &right_shard_ident,
-                &right_accounts,
-                depth - 1,
-                shards,
-                builder,
-            )
-        }
-
-        split_shard_accounts_impl(shard, accounts, depth, &mut shards, &mut CellBuilder::new())?;
-
-        Ok(Self::Split(shards))
     }
 }
