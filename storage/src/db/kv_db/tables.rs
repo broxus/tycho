@@ -704,6 +704,73 @@ impl ColumnFamilyOptions<Caches> for TransactionsByInMsg {
     }
 }
 
+/// Processed blocks (to distinguish "no block" from "no block transactions")
+/// - Key: `workchain: i8, shard: u64 (BE), seqno: u32 (BE)`
+/// - Value: empty
+pub struct KnownBlocks;
+
+impl KnownBlocks {
+    pub const KEY_LEY: usize = 1 + 8 + 4;
+}
+
+impl ColumnFamily for KnownBlocks {
+    const NAME: &'static str = "known_blocks";
+}
+
+impl ColumnFamilyOptions<Caches> for KnownBlocks {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+    }
+}
+
+/// Transactions grouped by short block id.
+/// - Key: `workchain: i8, shard: u64 (BE), seqno: u32 (BE), account: [u8; 32], lt: u64 (BE)`.
+/// - Value: `tx_hash: [u8; 32]`.
+pub struct BlockTransactions;
+
+impl BlockTransactions {
+    pub const KEY_LEN: usize = 1 + 8 + 4 + 32 + 8;
+    pub const VALUE_LEN: usize = 32;
+}
+
+impl ColumnFamily for BlockTransactions {
+    const NAME: &'static str = "block_transactions";
+}
+
+impl ColumnFamilyOptions<Caches> for BlockTransactions {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+    }
+}
+
+/// Blocks by logical time.
+///
+/// - Key: `mc_seqno: u32 (BE), workchain: i8, shard: u64 (BE), seqno: u32 (BE)`
+/// - Value: `root_hash: [u8; 32], file_hash: [u8; 32], start_lt: u64 (LE), end_lt: (LE)`
+///
+/// # Additional value for masterchain
+/// - `shard_count: u32 (LE), shard_count * (workchain: i8, shard: u64 (LE), seqno: u32 (LE)),
+///   root_hash: [u8; 32], file_hash: [u8; 32], start_lt: u64 (LE), end_lt: (LE))`
+pub struct BlocksByMcSeqno;
+
+impl BlocksByMcSeqno {
+    pub const KEY_LEN: usize = 4 + 1 + 8 + 4;
+    pub const VALUE_LEN: usize = 32 + 32 + 8 + 8;
+
+    pub const DESCR_OFFSET: usize = Self::VALUE_LEN + 4;
+    pub const DESCR_LEN: usize = 1 + 8 + 4 + Self::VALUE_LEN;
+}
+
+impl ColumnFamily for BlocksByMcSeqno {
+    const NAME: &'static str = "blocks_by_mc_seqno";
+}
+
+impl ColumnFamilyOptions<Caches> for BlocksByMcSeqno {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+    }
+}
+
 /// Code hash with account address
 /// - Key: `code_hash: [u8; 32], workchain: i8, account: [u8; 32]`
 /// - Value: empty
