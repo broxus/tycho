@@ -5,7 +5,7 @@ pub use dht::{
     StorageError,
 };
 pub use network::{
-    Connection, ConnectionError, KnownPeerHandle, KnownPeers, KnownPeersError, Network,
+    BindError, Connection, ConnectionError, KnownPeerHandle, KnownPeers, KnownPeersError, Network,
     NetworkBuilder, NetworkConfig, Peer, PeerBannedError, QuicConfig, RecvStream, SendStream,
     ToSocket, WeakKnownPeerHandle, WeakNetwork,
 };

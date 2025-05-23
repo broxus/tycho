@@ -346,11 +346,11 @@ impl Drop for NetworkInner {
 }
 
 pub trait ToSocket {
-    fn to_socket(self) -> Result<std::net::UdpSocket>;
+    fn to_socket(self) -> Result<std::net::UdpSocket, BindError>;
 }
 
 impl ToSocket for std::net::UdpSocket {
-    fn to_socket(self) -> Result<std::net::UdpSocket> {
+    fn to_socket(self) -> Result<std::net::UdpSocket, BindError> {
         Ok(self)
     }
 }
@@ -358,7 +358,7 @@ impl ToSocket for std::net::UdpSocket {
 macro_rules! impl_to_socket_for_addr {
     ($($ty:ty),*$(,)?) => {$(
         impl ToSocket for $ty {
-            fn to_socket(self) -> Result<std::net::UdpSocket> {
+            fn to_socket(self) -> Result<std::net::UdpSocket, BindError> {
                 bind_socket_to_addr(self)
             }
         }
@@ -380,19 +380,65 @@ impl_to_socket_for_addr! {
     Address,
 }
 
-fn bind_socket_to_addr<T: ToSocketAddrs>(bind_address: T) -> Result<std::net::UdpSocket> {
+fn bind_socket_to_addr<T: ToSocketAddrs>(
+    bind_address: T,
+) -> Result<std::net::UdpSocket, BindError> {
     use socket2::{Domain, Protocol, Socket, Type};
 
-    let mut err = anyhow::anyhow!("no addresses to bind to");
-    for addr in bind_address.to_socket_addrs()? {
-        let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
-        if let Err(e) = s.bind(&socket2::SockAddr::from(addr)) {
-            err = e.into();
-        } else {
-            return Ok(s.into());
+    let socket_addrs = bind_address
+        .to_socket_addrs()
+        .map_err(BindError::AddressResolution)?;
+
+    let mut last_bind_error: Option<BindError> = None;
+
+    for addr in socket_addrs {
+        let socket = match Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))
+        {
+            Ok(s) => s,
+            Err(e) => {
+                if last_bind_error.is_none() {
+                    last_bind_error = Some(BindError::SocketCreation { addr, source: e });
+                }
+                continue;
+            }
+        };
+
+        // Attempt to bind the socket
+        match socket.bind(&socket2::SockAddr::from(addr)) {
+            Ok(()) => return Ok(socket.into()),
+            Err(e) => {
+                // Bind failed for this address, store the error and try the next
+                tracing::warn!(?e, %addr, "failed to bind, trying next address");
+                last_bind_error = Some(BindError::SocketBind { addr, source: e });
+            }
         }
     }
-    Err(err)
+
+    // If we've looped through all addresses and none succeeded
+    Err(last_bind_error.unwrap_or(BindError::NoAddressesToBind))
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum BindError {
+    #[error("failed to resolve socket addresses: {0}")]
+    AddressResolution(#[source] std::io::Error),
+
+    #[error("no suitable addresses found to bind to after attempting all resolved addresses")]
+    NoAddressesToBind,
+
+    #[error("failed to create new socket for address {addr:?}: {source}")]
+    SocketCreation {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to bind socket to address {addr}: {source}")]
+    SocketBind {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
