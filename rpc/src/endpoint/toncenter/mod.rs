@@ -40,6 +40,7 @@ pub fn router() -> axum::Router<RpcState> {
             "/getExtendedAddressInformation",
             get(get_extended_address_information),
         )
+        .route("/getWalletInformation", get(get_wallet_information))
         .route("/getTransactions", get(get_transactions))
         .route("/sendBoc", post(post_send_boc))
         .route("/sendBocReturnHash", post(post_send_boc_return_hash))
@@ -65,6 +66,7 @@ declare_jrpc_method! {
         DetectAddress(DetectAddressParams),
         GetAddressInformation(AccountParams),
         GetExtendedAddressInformation(AccountParams),
+        GetWalletInformation(AccountParams),
         GetTransactions(TransactionsParams),
         SendBoc(SendBocParams),
         SendBocReturnHash(SendBocParams),
@@ -82,6 +84,9 @@ async fn post_jrpc_impl(State(state): State<RpcState>, req: Jrpc<JrpcId, Method>
         }
         MethodParams::GetExtendedAddressInformation(p) => {
             handle_get_extended_address_information(req.id, state, p).await
+        }
+        MethodParams::GetWalletInformation(p) => {
+            handle_get_wallet_information(req.id, state, p).await
         }
         MethodParams::GetTransactions(p) => handle_get_transactions(req.id, state, p).await,
         MethodParams::SendBoc(p) => handle_send_boc(req.id, state, p).await,
@@ -315,6 +320,73 @@ async fn handle_get_extended_address_information(
         account_state: parsed,
         revision,
         extra: TonlibExtra,
+    })
+}
+
+// === GET /getWalletInformation ===
+
+fn get_wallet_information(
+    State(state): State<RpcState>,
+    query: Result<Query<AccountParams>, QueryRejection>,
+) -> impl Future<Output = Response> {
+    match query {
+        Ok(Query(params)) => {
+            Either::Left(handle_get_wallet_information(JrpcId::Skip, state, params))
+        }
+        Err(e) => Either::Right(handle_rejection(e)),
+    }
+}
+
+async fn handle_get_wallet_information(id: JrpcId, state: RpcState, p: AccountParams) -> Response {
+    let item = match state.get_account_state(&p.address) {
+        Ok(item) => item,
+        Err(e) => return error_to_response(id, e),
+    };
+
+    let mut last_transaction_id = TonlibTransactionId::default();
+    let mut balance = Tokens::ZERO;
+    let mut fields = None::<WalletFields>;
+    let mut account_state = TonlibAccountStatus::Uninitialized;
+
+    let _mc_ref_handle;
+    if let LoadedAccountState::Found {
+        state,
+        mc_ref_handle,
+        ..
+    } = item
+    {
+        last_transaction_id = TonlibTransactionId::new(state.last_trans_lt, state.last_trans_hash);
+
+        match state.load_account() {
+            Ok(Some(loaded)) => {
+                _mc_ref_handle = mc_ref_handle;
+
+                balance = loaded.balance.tokens;
+                match loaded.state {
+                    AccountState::Active(state) => {
+                        account_state = TonlibAccountStatus::Active;
+                        if let (Some(code), Some(data)) = (state.code, state.data) {
+                            fields = WalletFields::load_from(code.as_ref(), data.as_ref()).ok();
+                        }
+                    }
+                    AccountState::Frozen(..) => {
+                        account_state = TonlibAccountStatus::Frozen;
+                    }
+                    AccountState::Uninit => {}
+                }
+            }
+            Ok(None) => {}
+            Err(e) => return error_to_response(id, RpcStateError::Internal(e.into())),
+        }
+    }
+
+    ok_to_response(id, WalletInformationResponse {
+        wallet: fields.is_some(),
+        balance,
+        extra_currencies: [(); 0],
+        account_state,
+        fields,
+        last_transaction_id,
     })
 }
 
@@ -667,16 +739,24 @@ mod tests {
         let account = wallet.parse::<Account>().unwrap();
 
         if let AccountState::Active(state) = &account.state {
-            let info = BasicContractInfo::guess(state.code.as_ref().unwrap().repr_hash()).unwrap();
-            let ParsedAccountState::WalletV4 { wallet_id, seqno } = info
-                .read_init_data(state.data.as_ref().unwrap().as_ref())
-                .unwrap()
+            let code = state.code.as_ref().unwrap();
+            let data = state.data.as_ref().unwrap();
+
+            let info = BasicContractInfo::guess(code.repr_hash()).unwrap();
+            let ParsedAccountState::WalletV4 { wallet_id, seqno } =
+                info.read_init_data(data.as_ref()).unwrap()
             else {
                 panic!("invalid parsed state ");
             };
 
             assert_eq!(wallet_id, 698983191);
             assert_eq!(seqno, 1);
+
+            let fields = WalletFields::load_from(code.as_ref(), data.as_ref()).unwrap();
+            assert_eq!(fields.wallet_type, WalletType::WalletV4R2);
+            assert_eq!(fields.seqno, Some(1));
+            assert_eq!(fields.wallet_id, Some(698983191));
+            assert_eq!(fields.is_signature_allowed, None);
         }
 
         println!(

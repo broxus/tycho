@@ -3,6 +3,7 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 use base64::prelude::{Engine as _, BASE64_STANDARD};
+use everscale_types::error::Error;
 use everscale_types::models::{
     Base64StdAddrFlags, BlockId, DisplayBase64StdAddr, IntAddr, Message, MsgInfo, StdAddr,
     StdAddrFormat, Transaction, TxInfo,
@@ -324,6 +325,18 @@ impl ExtendedAddressInformationResponse<'_> {
     pub const TY: &'static str = "fullAccountState";
 }
 
+#[derive(Serialize)]
+pub struct WalletInformationResponse {
+    pub wallet: bool,
+    #[serde(with = "serde_helpers::string")]
+    pub balance: Tokens,
+    pub extra_currencies: [(); 0],
+    pub account_state: TonlibAccountStatus,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<WalletFields>,
+    pub last_transaction_id: TonlibTransactionId,
+}
+
 // === Transactions Response ===
 
 pub struct GetTransactionsResponse<'a> {
@@ -458,7 +471,7 @@ pub struct TonlibMessage {
 impl TonlibMessage {
     pub const TY: &str = "raw.message";
 
-    fn parse(cell: &Cell) -> Result<Self, everscale_types::error::Error> {
+    fn parse(cell: &Cell) -> Result<Self, Error> {
         fn to_std_addr(addr: IntAddr) -> Option<StdAddr> {
             match addr {
                 IntAddr::Std(addr) => Some(addr),
@@ -805,7 +818,7 @@ pub enum TonlibInputStackItem {
 }
 
 impl TryFrom<TonlibInputStackItem> for tycho_vm::RcStackValue {
-    type Error = everscale_types::error::Error;
+    type Error = Error;
 
     fn try_from(value: TonlibInputStackItem) -> Result<Self, Self::Error> {
         match value {
@@ -813,7 +826,7 @@ impl TryFrom<TonlibInputStackItem> for tycho_vm::RcStackValue {
             TonlibInputStackItem::Cell(cell) => Ok(tycho_vm::RcStackValue::new_dyn_value(cell)),
             TonlibInputStackItem::Slice(cell) => {
                 if cell.is_exotic() {
-                    return Err(everscale_types::error::Error::UnexpectedExoticCell);
+                    return Err(Error::UnexpectedExoticCell);
                 }
                 let slice = tycho_vm::OwnedCellSlice::new_allow_exotic(cell);
                 Ok(tycho_vm::RcStackValue::new_dyn_value(slice))
@@ -1105,6 +1118,10 @@ impl BasicContractInfo {
                 ty: BasicContractType::WalletV4,
                 revision: 2,
             },
+            code_hash::WALLET_V4_R1 => Self {
+                ty: BasicContractType::WalletV4,
+                revision: 1,
+            },
             code_hash::HIGHLOAD_WALLET_V2_R2 => Self {
                 ty: BasicContractType::HighloadWalletV2,
                 revision: 2,
@@ -1133,10 +1150,7 @@ impl BasicContractInfo {
         })
     }
 
-    pub fn read_init_data(
-        &self,
-        data: &DynCell,
-    ) -> Result<ParsedAccountState, everscale_types::error::Error> {
+    pub fn read_init_data(&self, data: &DynCell) -> Result<ParsedAccountState, Error> {
         let mut cs = data.as_slice()?;
         Ok(match self.ty {
             BasicContractType::HighloadWalletV1 => {
@@ -1159,6 +1173,111 @@ impl BasicContractInfo {
                 ParsedAccountState::WalletV4 { wallet_id, seqno }
             }
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum WalletType {
+    #[serde(rename = "wallet v3 r1")]
+    WalletV3R1,
+    #[serde(rename = "wallet v3 r2")]
+    WalletV3R2,
+    #[serde(rename = "wallet v4 r1")]
+    WalletV4R1,
+    #[serde(rename = "wallet v4 r2")]
+    WalletV4R2,
+    #[serde(rename = "wallet v5 r1")]
+    WalletV5R1,
+    #[serde(rename = "nominator pool v1")]
+    NominatorPoolV1,
+    #[serde(rename = "highload wallet v1")]
+    HighloadWalletV1,
+    #[serde(rename = "highload wallet v1 r1")]
+    HighloadWalletV1R1,
+    #[serde(rename = "highload wallet v1 r2")]
+    HighloadWalletV1R2,
+    #[serde(rename = "highload wallet v2")]
+    HighloadWalletV2,
+    #[serde(rename = "highload wallet v2 r1")]
+    HighloadWalletV2R1,
+    #[serde(rename = "highload wallet v2 r2")]
+    HighloadWalletV2R2,
+}
+
+#[derive(Serialize)]
+pub struct WalletFields {
+    pub wallet_type: WalletType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seqno: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallet_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_signature_allowed: Option<bool>,
+}
+
+impl WalletFields {
+    pub fn load_from(code: &DynCell, data: &DynCell) -> Result<Self, Error> {
+        fn no_fields(ty: WalletType) -> WalletFields {
+            WalletFields {
+                wallet_type: ty,
+                seqno: None,
+                wallet_id: None,
+                is_signature_allowed: None,
+            }
+        }
+
+        fn only_wallet_id(ty: WalletType, data: &DynCell) -> Result<WalletFields, Error> {
+            let mut fields = no_fields(ty);
+            fields.wallet_id = Some(data.as_slice()?.load_u32()? as i32);
+            Ok(fields)
+        }
+
+        fn seqno_and_wallet_id(ty: WalletType, data: &DynCell) -> Result<WalletFields, Error> {
+            let mut fields = no_fields(ty);
+            let mut data = data.as_slice()?;
+            fields.seqno = Some(data.load_u32()? as i32);
+            fields.wallet_id = Some(data.load_u32()? as i32);
+            Ok(fields)
+        }
+
+        fn all_fields(ty: WalletType, data: &DynCell) -> Result<WalletFields, Error> {
+            let mut fields = no_fields(ty);
+            let mut data = data.as_slice()?;
+            fields.is_signature_allowed = Some(data.load_bit()?);
+            fields.seqno = Some(data.load_u32()? as i32);
+            fields.wallet_id = Some(data.load_u32()? as i32);
+            Ok(fields)
+        }
+
+        match *code.repr_hash() {
+            code_hash::WALLET_V3_R1 => seqno_and_wallet_id(WalletType::WalletV3R1, data),
+            code_hash::WALLET_V3_R2 => seqno_and_wallet_id(WalletType::WalletV3R2, data),
+            code_hash::WALLET_V4_R1 => seqno_and_wallet_id(WalletType::WalletV4R1, data),
+            code_hash::WALLET_V4_R2 => seqno_and_wallet_id(WalletType::WalletV4R2, data),
+            code_hash::WALLET_V5_R1 => all_fields(WalletType::WalletV5R1, data),
+
+            code_hash::HIGHLOAD_WALLET_V2 => only_wallet_id(WalletType::HighloadWalletV2, data),
+            code_hash::HIGHLOAD_WALLET_V2_R1 => {
+                only_wallet_id(WalletType::HighloadWalletV2R1, data)
+            }
+            code_hash::HIGHLOAD_WALLET_V2_R2 => {
+                only_wallet_id(WalletType::HighloadWalletV2R2, data)
+            }
+
+            code_hash::HIGHLOAD_WALLET_V1 => {
+                seqno_and_wallet_id(WalletType::HighloadWalletV1, data)
+            }
+            code_hash::HIGHLOAD_WALLET_V1_R1 => {
+                seqno_and_wallet_id(WalletType::HighloadWalletV1R1, data)
+            }
+            code_hash::HIGHLOAD_WALLET_V1_R2 => {
+                seqno_and_wallet_id(WalletType::HighloadWalletV1R2, data)
+            }
+
+            code_hash::NOMINATOR_POOL_V1 => Ok(no_fields(WalletType::NominatorPoolV1)),
+
+            _ => Err(Error::InvalidTag),
+        }
     }
 }
 
@@ -1213,10 +1332,28 @@ mod code_hash {
         0xd5, 0x99,
     ]);
 
+    pub const WALLET_V4_R1: HashBytes = HashBytes([
+        0x64, 0xdd, 0x54, 0x80, 0x55, 0x22, 0xc5, 0xbe, 0x8a, 0x9d, 0xb5, 0x9c, 0xea, 0x01, 0x05,
+        0xcc, 0xf0, 0xd0, 0x87, 0x86, 0xca, 0x79, 0xbe, 0xb8, 0xcb, 0x79, 0xe8, 0x80, 0xa8, 0xd7,
+        0x32, 0x2d,
+    ]);
+
     pub const WALLET_V4_R2: HashBytes = HashBytes([
         0xfe, 0xb5, 0xff, 0x68, 0x20, 0xe2, 0xff, 0x0d, 0x94, 0x83, 0xe7, 0xe0, 0xd6, 0x2c, 0x81,
         0x7d, 0x84, 0x67, 0x89, 0xfb, 0x4a, 0xe5, 0x80, 0xc8, 0x78, 0x86, 0x6d, 0x95, 0x9d, 0xab,
         0xd5, 0xc0,
+    ]);
+
+    pub const WALLET_V5_R1: HashBytes = HashBytes([
+        0x20, 0x83, 0x4b, 0x7b, 0x72, 0xb1, 0x12, 0x14, 0x7e, 0x1b, 0x2f, 0xb4, 0x57, 0xb8, 0x4e,
+        0x74, 0xd1, 0xa3, 0x0f, 0x04, 0xf7, 0x37, 0xd4, 0xf6, 0x2a, 0x66, 0x8e, 0x95, 0x52, 0xd2,
+        0xb7, 0x2f,
+    ]);
+
+    pub const NOMINATOR_POOL_V1: HashBytes = HashBytes([
+        0x9a, 0x3e, 0xc1, 0x4b, 0xc0, 0x98, 0xf6, 0xb4, 0x40, 0x64, 0xc3, 0x05, 0x22, 0x2c, 0xae,
+        0xa2, 0x80, 0x0f, 0x17, 0xdd, 0xa8, 0x5e, 0xe6, 0xa8, 0x19, 0x8a, 0x70, 0x95, 0xed, 0xe1,
+        0x0d, 0xcf,
     ]);
 }
 
