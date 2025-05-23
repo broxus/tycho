@@ -375,8 +375,9 @@ impl BlockSubscriber for RpcBlockSubscriber {
     fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
         let handle = tokio::task::spawn({
             let inner = self.inner.clone();
+            let mc_block_id = cx.mc_block_id;
             let block = cx.block.clone();
-            async move { inner.update(&block).await }
+            async move { inner.update(&mc_block_id, &block).await }
         });
 
         futures_util::future::ready(Ok(handle))
@@ -608,7 +609,7 @@ impl Inner {
         }
     }
 
-    async fn update(&self, block: &BlockStuff) -> Result<()> {
+    async fn update(&self, mc_block_id: &BlockId, block: &BlockStuff) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_rpc_state_update_time");
 
         let is_masterchain = block.id().is_masterchain();
@@ -618,7 +619,11 @@ impl Inner {
 
         if let Some(rpc_storage) = self.storage.rpc_storage() {
             rpc_storage
-                .update(block.clone(), self.blacklisted_accounts.as_ref())
+                .update(
+                    mc_block_id,
+                    block.clone(),
+                    self.blacklisted_accounts.as_ref(),
+                )
                 .await?;
         }
         Ok(())
@@ -865,7 +870,7 @@ async fn transactions_gc(config: TransactionsGcConfig, storage: Storage, gc_noti
         gc_notify.notified().await;
 
         let target_utime = now_sec().saturating_sub(tx_ttl_sec);
-        let min_lt = match find_closest_key_block_lt(&storage, target_utime).await {
+        let gc_range = match find_closest_key_block_lt(&storage, target_utime).await {
             Ok(lt) => lt,
             Err(e) => {
                 tracing::error!(target_utime, "failed to find the closest key block lt: {e}");
@@ -874,12 +879,13 @@ async fn transactions_gc(config: TransactionsGcConfig, storage: Storage, gc_noti
         };
 
         if let Err(e) = persistent_storage
-            .remove_old_transactions(min_lt, config.keep_tx_per_account)
+            .remove_old_transactions(gc_range.mc_seqno, gc_range.lt, config.keep_tx_per_account)
             .await
         {
             tracing::error!(
                 target_utime,
-                min_lt,
+                mc_seqno = gc_range.mc_seqno,
+                min_lt = gc_range.lt,
                 "failed to remove old transactions: {e:?}"
             );
         }
@@ -920,7 +926,7 @@ pub async fn watch_blacklisted_accounts(config_path: PathBuf, accounts: Blacklis
     }
 }
 
-async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64> {
+async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<GcRange> {
     let block_handle_storage = storage.block_handle_storage();
 
     // Find the key block with max seqno which was preduced not later than `utime`
@@ -936,7 +942,7 @@ async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64>
             }
         }
 
-        return Ok(0);
+        return Ok(GcRange::default());
     };
 
     // Load block proof
@@ -945,7 +951,16 @@ async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64>
     // Read `start_lt` from virtual block info
     let (virt_block, _) = block_proof.virtualize_block()?;
     let info = virt_block.info.load()?;
-    Ok(info.start_lt)
+    Ok(GcRange {
+        mc_seqno: info.seqno,
+        lt: info.start_lt,
+    })
+}
+
+#[derive(Default)]
+struct GcRange {
+    mc_seqno: u32,
+    lt: u64,
 }
 
 #[derive(Debug, thiserror::Error)]

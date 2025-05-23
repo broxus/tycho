@@ -149,6 +149,47 @@ impl RpcStorage {
         })
     }
 
+    pub fn get_block_transactions(
+        &self,
+        block_id: &BlockIdShort,
+    ) -> Result<Option<BlockTransactionIdsIter<'_>>> {
+        let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
+            return Ok(None);
+        };
+
+        let Some(snapshot) = self.snapshot.load_full() else {
+            // TODO: Somehow always use snapshot.
+            anyhow::bail!("No snapshot available");
+        };
+
+        let mut range_from = [0x00; tables::BlockTransactions::KEY_LEN];
+        range_from[0] = workchain as u8;
+        range_from[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+        range_from[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+
+        if !self.db.known_blocks.contains_key(&range_from[0..13])? {
+            return Ok(None);
+        }
+
+        let mut range_to = [0xff; tables::BlockTransactions::KEY_LEN];
+        range_to[0..13].copy_from_slice(&range_from[0..13]);
+
+        let mut readopts = self.db.block_transactions.new_read_config();
+        readopts.set_iterate_lower_bound(range_from.as_slice());
+        readopts.set_iterate_upper_bound(range_to.as_slice());
+        readopts.set_snapshot(&snapshot);
+
+        let rocksdb = self.db.rocksdb();
+        let block_transactions_cf = self.db.block_transactions.cf();
+        let mut iter = rocksdb.raw_iterator_cf_opt(&block_transactions_cf, readopts);
+        iter.seek(range_from);
+
+        Ok(Some(BlockTransactionIdsIter {
+            inner: iter,
+            snapshot,
+        }))
+    }
+
     pub fn get_transactions(
         &self,
         account: &StdAddr,
@@ -393,6 +434,7 @@ impl RpcStorage {
     #[tracing::instrument(level = "info", name = "remove_old_transactions", skip(self))]
     pub async fn remove_old_transactions(
         &self,
+        mc_seqno: u32,
         min_lt: u64,
         keep_tx_per_account: usize,
     ) -> Result<()> {
@@ -538,6 +580,97 @@ impl RpcStorage {
 
             // Prepare snapshot and iterator
             let snapshot = raw.snapshot();
+
+            // Delete block transactions.
+            'block: {
+                let mc_seqno = match mc_seqno.checked_sub(1) {
+                    None | Some(0) => break 'block,
+                    Some(seqno) => seqno,
+                };
+
+                let known_blocks = &db.known_blocks;
+                let blocks_by_mc_seqno = &db.blocks_by_mc_seqno;
+                let block_transactions = &db.block_transactions;
+
+                // Get masterchain block entry.
+                let mut key = [0u8; tables::BlocksByMcSeqno::KEY_LEN];
+                key[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
+                key[4] = -1i8 as u8;
+                key[5..13].copy_from_slice(&ShardIdent::PREFIX_FULL.to_be_bytes());
+                key[13..17].copy_from_slice(&mc_seqno.to_be_bytes());
+
+                let Some(value) = snapshot.get_pinned_cf_opt(
+                    &blocks_by_mc_seqno.cf(),
+                    key,
+                    blocks_by_mc_seqno.new_read_config(),
+                )?
+                else {
+                    break 'block;
+                };
+                let value = value.as_ref();
+                debug_assert!(value.len() >= tables::BlocksByMcSeqno::VALUE_LEN + 4);
+
+                // Parse top shard block ids (short).
+                let shard_count = u32::from_le_bytes(
+                    value[tables::BlocksByMcSeqno::VALUE_LEN
+                        ..tables::BlocksByMcSeqno::VALUE_LEN + 4]
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+                let mut top_block_ids = Vec::with_capacity(1 + shard_count);
+                top_block_ids.push(BlockIdShort {
+                    shard: ShardIdent::MASTERCHAIN,
+                    seqno: mc_seqno,
+                });
+                for i in 0..shard_count {
+                    let offset = tables::BlocksByMcSeqno::DESCR_OFFSET
+                        + i * tables::BlocksByMcSeqno::DESCR_LEN;
+                    let descr = &value[offset..offset + tables::BlocksByMcSeqno::DESCR_LEN];
+                    top_block_ids.push(BlockIdShort {
+                        shard: ShardIdent::new(
+                            descr[0] as i8 as i32,
+                            u64::from_le_bytes(descr[1..9].try_into().unwrap()),
+                        )
+                        .context("invalid top shard ident")?,
+                        seqno: u32::from_le_bytes(descr[9..13].try_into().unwrap()),
+                    });
+                }
+
+                // Prepare batch.
+                let mut batch = rocksdb::WriteBatch::new();
+
+                // Delete `blocks_by_mc_seqno` range before the mc block.
+                let range_from = [0x00; tables::BlocksByMcSeqno::KEY_LEN];
+                let mut range_to = [0xff; tables::BlocksByMcSeqno::KEY_LEN];
+                range_to[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
+                batch.delete_range_cf(&blocks_by_mc_seqno.cf(), range_from, range_to);
+                batch.delete_cf(&blocks_by_mc_seqno.cf(), range_to);
+
+                // Delete `known_blocks` and `block_transactions` ranges for each shard
+                // (including masterchain).
+                let mut range_from = [0x00; tables::BlockTransactions::KEY_LEN];
+                let mut range_to = [0xff; tables::BlockTransactions::KEY_LEN];
+                for block_id in top_block_ids {
+                    range_from[0] = block_id.shard.workchain() as i8 as u8;
+                    range_from[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+                    range_from[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+                    range_to[0..13].copy_from_slice(&range_from[0..13]);
+                    batch.delete_range_cf(&block_transactions.cf(), range_from, range_to);
+                    batch.delete_cf(&block_transactions.cf(), range_to);
+
+                    let range_from = &range_from[0..tables::KnownBlocks::KEY_LEY];
+                    let range_to = &range_to[0..tables::KnownBlocks::KEY_LEY];
+                    batch.delete_range_cf(&known_blocks.cf(), range_from, range_to);
+                    batch.delete_cf(&known_blocks.cf(), range_to);
+                }
+
+                // Apply batch.
+                db.rocksdb()
+                    .write(batch)
+                    .context("failed to remove block transactions")?;
+            }
+
+            // Remove transactions
             let mut readopts = db.transactions.new_read_config();
             readopts.set_snapshot(&snapshot);
             let mut iter = raw.raw_iterator_cf_opt(&db.transactions.cf(), readopts);
@@ -648,6 +781,7 @@ impl RpcStorage {
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
     pub async fn update(
         &self,
+        mc_block_id: &BlockId,
         block: BlockStuff,
         rpc_blacklist: Option<&BlacklistedAccounts>,
     ) -> Result<()> {
@@ -655,7 +789,22 @@ impl RpcStorage {
             return Ok(());
         };
 
-        let min_lt = block.load_info()?.start_lt;
+        let is_masterchain = block.id().is_masterchain();
+        let mc_seqno = mc_block_id.seqno;
+        let start_lt;
+        let end_lt;
+        {
+            let info = block.load_info()?;
+            start_lt = info.start_lt;
+            end_lt = info.end_lt;
+        }
+
+        let shard_hashes = is_masterchain
+            .then(|| {
+                let custom = block.load_custom()?;
+                Ok::<_, anyhow::Error>(custom.shards.clone())
+            })
+            .transpose()?;
 
         let span = tracing::Span::current();
         let db = self.db.clone();
@@ -700,6 +849,7 @@ impl RpcStorage {
             let tx_cf = &db.transactions.cf();
             let tx_by_hash_cf = &db.transactions_by_hash.cf();
             let tx_by_in_msg_cf = &db.transactions_by_in_msg.cf();
+            let block_txs_cf = &db.block_transactions.cf();
 
             // Prepare buffer for full tx id
             let mut tx_info = [0u8; tables::TransactionsByHash::VALUE_FULL_LEN];
@@ -711,18 +861,81 @@ impl RpcStorage {
             tx_info[46..78].copy_from_slice(block_id.root_hash.as_slice());
             tx_info[78..110].copy_from_slice(block_id.file_hash.as_slice());
 
+            let mut block_tx = [0u8; tables::BlockTransactions::KEY_LEN];
+            block_tx[0] = workchain as u8;
+            block_tx[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+            block_tx[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+
+            // Add known block id.
+            write_batch.put_cf(
+                &db.known_blocks.cf(),
+                &block_tx[0..tables::KnownBlocks::KEY_LEY],
+                [],
+            );
+
+            // Write block info.
+            {
+                let mut key = [0u8; tables::BlocksByMcSeqno::KEY_LEN];
+                key[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
+                key[4] = workchain as u8;
+                key[5..13].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+                key[13..17].copy_from_slice(&block_id.seqno.to_be_bytes());
+
+                let mut value = Vec::with_capacity(tables::BlocksByMcSeqno::VALUE_LEN);
+                value.extend_from_slice(block_id.root_hash.as_slice()); // 0..32
+                value.extend_from_slice(block_id.file_hash.as_slice()); // 32..64
+                value.extend_from_slice(&start_lt.to_le_bytes()); // 64..72
+                value.extend_from_slice(&end_lt.to_le_bytes()); // 72..80
+                if let Some(shard_hashes) = shard_hashes {
+                    let shards = shard_hashes
+                        .iter()
+                        .filter_map(|item| {
+                            let (shard_ident, descr) = match item {
+                                Ok(item) => item,
+                                Err(e) => return Some(Err(e)),
+                            };
+                            if i8::try_from(shard_ident.workchain()).is_err() {
+                                return None;
+                            }
+
+                            Some(Ok(BriefShardDescr {
+                                shard_ident,
+                                seqno: descr.seqno,
+                                root_hash: descr.root_hash,
+                                file_hash: descr.file_hash,
+                                start_lt: descr.start_lt,
+                                end_lt: descr.end_lt,
+                            }))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+
+                    value.reserve(4 + tables::BlocksByMcSeqno::DESCR_LEN * shards.len());
+                    value.extend_from_slice(&(shards.len() as u32).to_le_bytes());
+                    for shard in shards {
+                        value.push(shard.shard_ident.workchain() as i8 as u8);
+                        value.extend_from_slice(&shard.shard_ident.prefix().to_le_bytes());
+                        value.extend_from_slice(&shard.seqno.to_le_bytes());
+                        value.extend_from_slice(shard.root_hash.as_slice());
+                        value.extend_from_slice(shard.file_hash.as_slice());
+                        value.extend_from_slice(&shard.start_lt.to_le_bytes());
+                        value.extend_from_slice(&shard.end_lt.to_le_bytes());
+                    }
+                }
+
+                write_batch.put_cf(&db.blocks_by_mc_seqno.cf(), key, value);
+            }
+
             let mut tx_buffer = Vec::with_capacity(1024);
 
             let rpc_blacklist = rpc_blacklist.as_deref();
 
-            // Iterate through all changed accounts in the block
-            let mut non_empty_batch = false;
+            // Iterate through all changed accounts in the block.
             for item in account_blocks.iter() {
                 let (account, _, account_block) = item?;
-                non_empty_batch |= true;
 
                 // Fill account address in the key buffer
                 tx_info[1..33].copy_from_slice(account.as_slice());
+                block_tx[13..45].copy_from_slice(account.as_slice());
 
                 // Flag to update code hash
                 let mut has_special_actions = false;
@@ -737,6 +950,7 @@ impl RpcStorage {
                     let tx = tx_cell.load()?;
 
                     tx_info[33..41].copy_from_slice(&tx.lt.to_be_bytes());
+                    block_tx[45..53].copy_from_slice(&tx.lt.to_be_bytes());
 
                     // Update flags
                     if first_tx {
@@ -795,6 +1009,7 @@ impl RpcStorage {
 
                     // Write tx data and indices
                     write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
+                    write_batch.put_cf(block_txs_cf, block_tx.as_slice(), tx_hash.as_slice());
 
                     if let Some(msg_hash) = msg_hash {
                         write_batch.put_cf(
@@ -844,10 +1059,8 @@ impl RpcStorage {
             let _execute_batch_histogram =
                 HistogramGuard::begin("tycho_storage_rpc_execute_batch_time");
 
-            if non_empty_batch {
-                db.rocksdb()
-                    .write_opt(write_batch, db.transactions.write_config())?;
-            }
+            db.rocksdb()
+                .write_opt(write_batch, db.transactions.write_config())?;
 
             Ok::<_, anyhow::Error>(())
         })
@@ -857,18 +1070,18 @@ impl RpcStorage {
         'min_lt: {
             // Update the runtime value first. Load is relaxed since we just need
             // to know that the value was updated.
-            if min_lt < self.min_tx_lt.fetch_min(min_lt, Ordering::Release) {
+            if start_lt < self.min_tx_lt.fetch_min(start_lt, Ordering::Release) {
                 // Acquire the operation guard to ensure that there is only one writer.
                 let _guard = self.min_tx_lt_guard.lock().await;
 
                 // Do nothing if the value was already updated while we were waiting.
                 // Load is Acquire since we need to see the most recent value.
-                if min_lt > self.min_tx_lt.load(Ordering::Acquire) {
+                if start_lt > self.min_tx_lt.load(Ordering::Acquire) {
                     break 'min_lt;
                 }
 
                 // Update the value in the database.
-                self.db.state.insert(TX_MIN_LT, min_lt.to_le_bytes())?;
+                self.db.state.insert(TX_MIN_LT, start_lt.to_le_bytes())?;
             }
         }
 
@@ -1057,6 +1270,15 @@ impl RpcStorage {
     }
 }
 
+struct BriefShardDescr {
+    shard_ident: ShardIdent,
+    seqno: u32,
+    root_hash: HashBytes,
+    file_hash: HashBytes,
+    start_lt: u64,
+    end_lt: u64,
+}
+
 pub struct CodeHashesIter<'a> {
     inner: rocksdb::DBRawIterator<'a>,
     snapshot: Option<Arc<OwnedSnapshot>>,
@@ -1104,6 +1326,40 @@ impl Iterator for RawCodeHashesIter<'_> {
         self.inner.next();
         result
     }
+}
+
+pub struct BlockTransactionIdsIter<'a> {
+    inner: rocksdb::DBRawIterator<'a>,
+    snapshot: Arc<OwnedSnapshot>,
+}
+
+impl BlockTransactionIdsIter<'_> {
+    #[inline]
+    pub fn snapshow(&self) -> &Arc<OwnedSnapshot> {
+        &self.snapshot
+    }
+}
+
+impl Iterator for BlockTransactionIdsIter<'_> {
+    type Item = FullTransactionId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (key, value) = self.inner.item()?;
+        let res = Some(FullTransactionId {
+            account: StdAddr::new(key[0] as i8, HashBytes::from_slice(&key[13..45])),
+            lt: u64::from_be_bytes(key[45..53].try_into().unwrap()),
+            hash: HashBytes::from_slice(&value[0..32]),
+        });
+        self.inner.next();
+        res
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FullTransactionId {
+    pub account: StdAddr,
+    pub lt: u64,
+    pub hash: HashBytes,
 }
 
 pub struct TransactionsIterBuilder<'a> {

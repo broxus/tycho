@@ -246,6 +246,9 @@ weedb::tables! {
         pub transactions: tables::Transactions,
         pub transactions_by_hash: tables::TransactionsByHash,
         pub transactions_by_in_msg: tables::TransactionsByInMsg,
+        pub known_blocks: tables::KnownBlocks,
+        pub block_transactions: tables::BlockTransactions,
+        pub blocks_by_mc_seqno: tables::BlocksByMcSeqno,
         pub code_hashes: tables::CodeHashes,
         pub code_hashes_by_address: tables::CodeHashesByAddress,
     }
