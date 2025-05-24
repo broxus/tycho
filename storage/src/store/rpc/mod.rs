@@ -393,6 +393,7 @@ impl RpcStorage {
     #[tracing::instrument(level = "info", name = "remove_old_transactions", skip(self))]
     pub async fn remove_old_transactions(
         &self,
+        mc_seqno: u32,
         min_lt: u64,
         keep_tx_per_account: usize,
     ) -> Result<()> {
@@ -538,6 +539,18 @@ impl RpcStorage {
 
             // Prepare snapshot and iterator
             let snapshot = raw.snapshot();
+
+            // Delete block transactions.
+            {
+                let mut readopts = db.blocks_by_mc_seqno.new_read_config();
+                readopts.set_snapshot(&snapshot);
+                let mut iter = raw.raw_iterator_cf_opt(&db.blocks_by_mc_seqno.cf(), readopts);
+
+                let mut key = [0u8; tables::BlocksByMcSeqno::KEY_LEN];
+                key[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
+            }
+
+            // Remove transactions
             let mut readopts = db.transactions.new_read_config();
             readopts.set_snapshot(&snapshot);
             let mut iter = raw.raw_iterator_cf_opt(&db.transactions.cf(), readopts);
@@ -648,6 +661,7 @@ impl RpcStorage {
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
     pub async fn update(
         &self,
+        mc_block_id: &BlockId,
         block: BlockStuff,
         rpc_blacklist: Option<&BlacklistedAccounts>,
     ) -> Result<()> {
@@ -655,7 +669,14 @@ impl RpcStorage {
             return Ok(());
         };
 
-        let min_lt = block.load_info()?.start_lt;
+        let mc_seqno = mc_block_id.seqno;
+        let start_lt;
+        let end_lt;
+        {
+            let info = block.load_info()?;
+            start_lt = info.start_lt;
+            end_lt = info.end_lt;
+        }
 
         let span = tracing::Span::current();
         let db = self.db.clone();
@@ -700,6 +721,7 @@ impl RpcStorage {
             let tx_cf = &db.transactions.cf();
             let tx_by_hash_cf = &db.transactions_by_hash.cf();
             let tx_by_in_msg_cf = &db.transactions_by_in_msg.cf();
+            let block_txs_cf = &db.block_transactions.cf();
 
             // Prepare buffer for full tx id
             let mut tx_info = [0u8; tables::TransactionsByHash::VALUE_FULL_LEN];
@@ -711,18 +733,39 @@ impl RpcStorage {
             tx_info[46..78].copy_from_slice(block_id.root_hash.as_slice());
             tx_info[78..110].copy_from_slice(block_id.file_hash.as_slice());
 
+            let mut block_tx = [0u8; tables::BlockTransactions::KEY_LEN];
+            block_tx[0] = workchain as u8;
+            block_tx[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+            block_tx[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+
+            // Write block info.
+            {
+                let mut key = [0u8; tables::BlocksByMcSeqno::KEY_LEN];
+                key[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
+                key[4] = workchain as u8;
+                key[5..13].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+                key[13..17].copy_from_slice(&block_id.seqno.to_be_bytes());
+
+                let mut value = [0u8; tables::BlocksByMcSeqno::VALUE_LEN];
+                value[0..32].copy_from_slice(block_id.root_hash.as_slice());
+                value[32..64].copy_from_slice(block_id.file_hash.as_slice());
+                value[64..72].copy_from_slice(&start_lt.to_le_bytes());
+                value[72..80].copy_from_slice(&end_lt.to_le_bytes());
+
+                write_batch.put_cf(&db.blocks_by_mc_seqno.cf(), key, value);
+            }
+
             let mut tx_buffer = Vec::with_capacity(1024);
 
             let rpc_blacklist = rpc_blacklist.as_deref();
 
-            // Iterate through all changed accounts in the block
-            let mut non_empty_batch = false;
+            // Iterate through all changed accounts in the block.
             for item in account_blocks.iter() {
                 let (account, _, account_block) = item?;
-                non_empty_batch |= true;
 
                 // Fill account address in the key buffer
                 tx_info[1..33].copy_from_slice(account.as_slice());
+                block_tx[13..45].copy_from_slice(account.as_slice());
 
                 // Flag to update code hash
                 let mut has_special_actions = false;
@@ -737,6 +780,7 @@ impl RpcStorage {
                     let tx = tx_cell.load()?;
 
                     tx_info[33..41].copy_from_slice(&tx.lt.to_be_bytes());
+                    block_tx[45..53].copy_from_slice(&tx.lt.to_be_bytes());
 
                     // Update flags
                     if first_tx {
@@ -795,6 +839,7 @@ impl RpcStorage {
 
                     // Write tx data and indices
                     write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
+                    write_batch.put_cf(block_txs_cf, block_tx.as_slice(), []);
 
                     if let Some(msg_hash) = msg_hash {
                         write_batch.put_cf(
@@ -844,10 +889,8 @@ impl RpcStorage {
             let _execute_batch_histogram =
                 HistogramGuard::begin("tycho_storage_rpc_execute_batch_time");
 
-            if non_empty_batch {
-                db.rocksdb()
-                    .write_opt(write_batch, db.transactions.write_config())?;
-            }
+            db.rocksdb()
+                .write_opt(write_batch, db.transactions.write_config())?;
 
             Ok::<_, anyhow::Error>(())
         })
@@ -857,18 +900,18 @@ impl RpcStorage {
         'min_lt: {
             // Update the runtime value first. Load is relaxed since we just need
             // to know that the value was updated.
-            if min_lt < self.min_tx_lt.fetch_min(min_lt, Ordering::Release) {
+            if start_lt < self.min_tx_lt.fetch_min(start_lt, Ordering::Release) {
                 // Acquire the operation guard to ensure that there is only one writer.
                 let _guard = self.min_tx_lt_guard.lock().await;
 
                 // Do nothing if the value was already updated while we were waiting.
                 // Load is Acquire since we need to see the most recent value.
-                if min_lt > self.min_tx_lt.load(Ordering::Acquire) {
+                if start_lt > self.min_tx_lt.load(Ordering::Acquire) {
                     break 'min_lt;
                 }
 
                 // Update the value in the database.
-                self.db.state.insert(TX_MIN_LT, min_lt.to_le_bytes())?;
+                self.db.state.insert(TX_MIN_LT, start_lt.to_le_bytes())?;
             }
         }
 

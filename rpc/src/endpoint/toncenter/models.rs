@@ -3,7 +3,11 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 use base64::prelude::{Engine as _, BASE64_STANDARD};
-use everscale_types::models::{BlockId, IntAddr, Message, MsgInfo, StdAddr, Transaction, TxInfo};
+use everscale_types::error::Error;
+use everscale_types::models::{
+    Base64StdAddrFlags, BlockId, DisplayBase64StdAddr, IntAddr, Message, MsgInfo, StdAddr,
+    StdAddrFormat, Transaction, TxInfo,
+};
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use num_bigint::BigInt;
@@ -14,7 +18,153 @@ use tycho_block_util::message::ExtMsgRepr;
 use tycho_storage::TransactionsIterBuilder;
 use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
+use crate::util::jrpc_extractor::{
+    JrpcError, JrpcErrorResponse, JrpcOkResponse, JSONRPC_FIELD, JSONRPC_VERSION,
+};
+
+// === ID ===
+
+#[derive(Debug, Clone)]
+pub enum JrpcId {
+    Skip,
+    Set(StringOrNumber),
+}
+
+impl<'de> Deserialize<'de> for JrpcId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        StringOrNumber::deserialize(deserializer).map(Self::Set)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StringOrNumber {
+    Number(i64),
+    String(String),
+}
+
+// Strange JRPC OK response.
+impl<T: Serialize> Serialize for JrpcOkResponse<JrpcId, T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let field_count = match &self.id {
+            JrpcId::Skip => 2,
+            JrpcId::Set(_) => 4,
+        };
+
+        let mut ser = serializer.serialize_struct("JrpcResponse", field_count)?;
+
+        if let JrpcId::Set(id) = &self.id {
+            ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
+            ser.serialize_field("id", id)?;
+        }
+
+        ser.serialize_field("result", &self.result)?;
+        ser.serialize_field("ok", &true)?;
+        ser.end()
+    }
+}
+
+impl Serialize for JrpcErrorResponse<JrpcId> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let id;
+        let field_count;
+        match &self.id {
+            None => {
+                id = Some(None);
+                field_count = 4;
+            }
+            Some(JrpcId::Skip) => {
+                id = None;
+                field_count = 2;
+            }
+            Some(JrpcId::Set(x)) => {
+                id = Some(Some(x));
+                field_count = 4;
+            }
+        };
+
+        let mut ser = serializer.serialize_struct("JrpcResponse", field_count)?;
+
+        if let Some(id) = id {
+            ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
+            ser.serialize_field("id", &id)?;
+        }
+
+        ser.serialize_field("error", &JrpcError {
+            code: self.code,
+            message: &self.message,
+        })?;
+        ser.serialize_field("ok", &false)?;
+        ser.end()
+    }
+}
+
 // === Requests ===
+
+#[derive(Debug)]
+pub struct DetectAddressParams {
+    pub address: StdAddr,
+    pub base64_flags: Option<Base64StdAddrFlags>,
+}
+
+impl<'de> Deserialize<'de> for DetectAddressParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        #[derive(Deserialize)]
+        struct Helper {
+            address: String,
+        }
+
+        let Helper { mut address } = <_>::deserialize(deserializer)?;
+        if address.len() == 64 {
+            return Ok(Self {
+                address: StdAddr::new(-1, HashBytes::from_str(&address).map_err(Error::custom)?),
+                base64_flags: None,
+            });
+        }
+
+        let is_base64 = address.len() == 48;
+
+        // Try to normalize a URL-safe base64.
+        if is_base64 {
+            // SAFETY: Content of the slice will remain a valid utf8 slice.
+            let bytes = unsafe { address.as_bytes_mut() };
+            for byte in bytes {
+                match *byte {
+                    b'-' => *byte = b'+',
+                    b'_' => *byte = b'/',
+                    byte if !byte.is_ascii() => return Err(Error::custom("invalid character")),
+                    _ => {}
+                }
+            }
+        }
+
+        let (address, flags) =
+            StdAddr::from_str_ext(&address, StdAddrFormat::any()).map_err(Error::custom)?;
+
+        Ok(Self {
+            address,
+            base64_flags: is_base64.then_some(flags),
+        })
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct AccountParams {
@@ -58,6 +208,69 @@ pub struct RunGetMethodParams {
 
 // === Responses ===
 
+pub struct AddressFormsResponse {
+    pub raw_form: StdAddr,
+    pub given_type: AddressType,
+    pub test_only: bool,
+}
+
+impl Serialize for AddressFormsResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Base64Form<'a> {
+            #[serde(with = "serde_helpers::string")]
+            b64: DisplayBase64StdAddr<'a>,
+            #[serde(with = "serde_helpers::string")]
+            b64url: DisplayBase64StdAddr<'a>,
+        }
+
+        impl<'a> Base64Form<'a> {
+            fn new(addr: &'a StdAddr, bounceable: bool, testnet: bool) -> Self {
+                let flags = Base64StdAddrFlags {
+                    testnet,
+                    base64_url: false,
+                    bounceable,
+                };
+                Self {
+                    b64: DisplayBase64StdAddr { addr, flags },
+                    b64url: DisplayBase64StdAddr {
+                        addr,
+                        flags: Base64StdAddrFlags {
+                            base64_url: true,
+                            ..flags
+                        },
+                    },
+                }
+            }
+        }
+
+        let mut s = serializer.serialize_struct("AddressFormsResponse", 5)?;
+        s.serialize_field("raw_form", &self.raw_form)?;
+        s.serialize_field(
+            "bounceable",
+            &Base64Form::new(&self.raw_form, true, self.test_only),
+        )?;
+        s.serialize_field(
+            "non_bounceable",
+            &Base64Form::new(&self.raw_form, false, self.test_only),
+        )?;
+        s.serialize_field("given_type", &self.given_type)?;
+        s.serialize_field("test_only", &self.test_only)?;
+        s.end()
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddressType {
+    RawForm,
+    FriendlyBounceable,
+    FriendlyNonBounceable,
+}
+
 #[derive(Serialize)]
 pub struct AddressInformationResponse {
     #[serde(rename = "@type")]
@@ -89,6 +302,39 @@ pub enum TonlibAccountStatus {
     Uninitialized,
     Frozen,
     Active,
+}
+
+#[derive(Serialize)]
+pub struct ExtendedAddressInformationResponse<'a> {
+    #[serde(rename = "@type")]
+    pub ty: &'static str,
+    pub address: TonlibAddress<'a>,
+    #[serde(with = "serde_helpers::string")]
+    pub balance: Tokens,
+    pub extra_currencies: [(); 0],
+    pub last_transaction_id: TonlibTransactionId,
+    pub block_id: TonlibBlockId,
+    pub sync_utime: u32,
+    pub account_state: ParsedAccountState,
+    pub revision: i32,
+    #[serde(rename = "@extra")]
+    pub extra: TonlibExtra,
+}
+
+impl ExtendedAddressInformationResponse<'_> {
+    pub const TY: &'static str = "fullAccountState";
+}
+
+#[derive(Serialize)]
+pub struct WalletInformationResponse {
+    pub wallet: bool,
+    #[serde(with = "serde_helpers::string")]
+    pub balance: Tokens,
+    pub extra_currencies: [(); 0],
+    pub account_state: TonlibAccountStatus,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<WalletFields>,
+    pub last_transaction_id: TonlibTransactionId,
 }
 
 // === Transactions Response ===
@@ -225,7 +471,7 @@ pub struct TonlibMessage {
 impl TonlibMessage {
     pub const TY: &str = "raw.message";
 
-    fn parse(cell: &Cell) -> Result<Self, everscale_types::error::Error> {
+    fn parse(cell: &Cell) -> Result<Self, Error> {
         fn to_std_addr(addr: IntAddr) -> Option<StdAddr> {
             match addr {
                 IntAddr::Std(addr) => Some(addr),
@@ -333,12 +579,27 @@ pub struct TonlibAddress<'a> {
 impl<'a> TonlibAddress<'a> {
     pub const TY: &'static str = "accountAddress";
 
-    fn new(address: &'a StdAddr) -> Self {
+    pub fn new(address: &'a StdAddr) -> Self {
         Self {
             ty: Self::TY,
             account_address: address,
         }
     }
+}
+
+// === Message hash response ===
+
+#[derive(Serialize)]
+pub struct ExtMsgInfoResponse {
+    pub ty: &'static str,
+    pub hash: HashBytes,
+    pub hash_norm: HashBytes,
+    #[serde(rename = "@extra")]
+    pub extra: TonlibExtra,
+}
+
+impl ExtMsgInfoResponse {
+    pub const TY: &str = "raw.extMessageInfo";
 }
 
 // === Vm Response ===
@@ -557,7 +818,7 @@ pub enum TonlibInputStackItem {
 }
 
 impl TryFrom<TonlibInputStackItem> for tycho_vm::RcStackValue {
-    type Error = everscale_types::error::Error;
+    type Error = Error;
 
     fn try_from(value: TonlibInputStackItem) -> Result<Self, Self::Error> {
         match value {
@@ -565,7 +826,7 @@ impl TryFrom<TonlibInputStackItem> for tycho_vm::RcStackValue {
             TonlibInputStackItem::Cell(cell) => Ok(tycho_vm::RcStackValue::new_dyn_value(cell)),
             TonlibInputStackItem::Slice(cell) => {
                 if cell.is_exotic() {
-                    return Err(everscale_types::error::Error::UnexpectedExoticCell);
+                    return Err(Error::UnexpectedExoticCell);
                 }
                 let slice = tycho_vm::OwnedCellSlice::new_allow_exotic(cell);
                 Ok(tycho_vm::RcStackValue::new_dyn_value(slice))
@@ -785,6 +1046,315 @@ impl Serialize for TonlibOk {
         s.serialize_field("@type", "ok")?;
         s.end()
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "@type")]
+pub enum ParsedAccountState {
+    #[serde(rename = "raw.accountState")]
+    Raw {
+        #[serde(with = "serde_boc_or_empty")]
+        code: Option<Cell>,
+        #[serde(with = "serde_boc_or_empty")]
+        data: Option<Cell>,
+        #[serde(serialize_with = "serde_tonlib_hash::serialize_or_empty")]
+        frozen_hash: Option<HashBytes>,
+    },
+    #[serde(rename = "wallet.v3.accountState")]
+    WalletV3 {
+        #[serde(with = "serde_helpers::string")]
+        wallet_id: i64,
+        seqno: i32,
+    },
+    #[serde(rename = "wallet.v4.accountState")]
+    WalletV4 {
+        #[serde(with = "serde_helpers::string")]
+        wallet_id: i64,
+        seqno: i32,
+    },
+    #[serde(rename = "wallet.highload.v1.accountState")]
+    HighloadWalletV1 {
+        #[serde(with = "serde_helpers::string")]
+        wallet_id: i64,
+        seqno: i32,
+    },
+    #[serde(rename = "wallet.highload.v2.accountState")]
+    HighloadWalletV2 {
+        #[serde(with = "serde_helpers::string")]
+        wallet_id: i64,
+    },
+    #[serde(rename = "uninited.accountState")]
+    Uninit {
+        #[serde(serialize_with = "serde_tonlib_hash::serialize_or_empty")]
+        frozen_hash: Option<HashBytes>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BasicContractType {
+    HighloadWalletV1,
+    HighloadWalletV2,
+    WalletV3,
+    WalletV4,
+}
+
+pub struct BasicContractInfo {
+    pub ty: BasicContractType,
+    pub revision: i32,
+}
+
+impl BasicContractInfo {
+    pub fn guess(code_hash: &HashBytes) -> Option<Self> {
+        Some(match *code_hash {
+            code_hash::WALLET_V3_R2 => Self {
+                ty: BasicContractType::WalletV3,
+                revision: 2,
+            },
+            code_hash::WALLET_V3_R1 => Self {
+                ty: BasicContractType::WalletV3,
+                revision: 1,
+            },
+            code_hash::WALLET_V4_R2 => Self {
+                ty: BasicContractType::WalletV4,
+                revision: 2,
+            },
+            code_hash::WALLET_V4_R1 => Self {
+                ty: BasicContractType::WalletV4,
+                revision: 1,
+            },
+            code_hash::HIGHLOAD_WALLET_V2_R2 => Self {
+                ty: BasicContractType::HighloadWalletV2,
+                revision: 2,
+            },
+            code_hash::HIGHLOAD_WALLET_V2_R1 => Self {
+                ty: BasicContractType::HighloadWalletV2,
+                revision: 1,
+            },
+            code_hash::HIGHLOAD_WALLET_V2 => Self {
+                ty: BasicContractType::HighloadWalletV2,
+                revision: -1,
+            },
+            code_hash::HIGHLOAD_WALLET_V1_R2 => Self {
+                ty: BasicContractType::HighloadWalletV1,
+                revision: 2,
+            },
+            code_hash::HIGHLOAD_WALLET_V1_R1 => Self {
+                ty: BasicContractType::HighloadWalletV1,
+                revision: 1,
+            },
+            code_hash::HIGHLOAD_WALLET_V1 => Self {
+                ty: BasicContractType::HighloadWalletV1,
+                revision: -1,
+            },
+            _ => return None,
+        })
+    }
+
+    pub fn read_init_data(&self, data: &DynCell) -> Result<ParsedAccountState, Error> {
+        let mut cs = data.as_slice()?;
+        Ok(match self.ty {
+            BasicContractType::HighloadWalletV1 => {
+                let seqno = cs.load_u32()? as i32;
+                let wallet_id = cs.load_u32()? as i64;
+                ParsedAccountState::HighloadWalletV1 { wallet_id, seqno }
+            }
+            BasicContractType::HighloadWalletV2 => {
+                let wallet_id = cs.load_u32()? as i64;
+                ParsedAccountState::HighloadWalletV2 { wallet_id }
+            }
+            BasicContractType::WalletV3 => {
+                let seqno = cs.load_u32()? as i32;
+                let wallet_id = cs.load_u32()? as i64;
+                ParsedAccountState::WalletV3 { wallet_id, seqno }
+            }
+            BasicContractType::WalletV4 => {
+                let seqno = cs.load_u32()? as i32;
+                let wallet_id = cs.load_u32()? as i64;
+                ParsedAccountState::WalletV4 { wallet_id, seqno }
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum WalletType {
+    #[serde(rename = "wallet v3 r1")]
+    WalletV3R1,
+    #[serde(rename = "wallet v3 r2")]
+    WalletV3R2,
+    #[serde(rename = "wallet v4 r1")]
+    WalletV4R1,
+    #[serde(rename = "wallet v4 r2")]
+    WalletV4R2,
+    #[serde(rename = "wallet v5 r1")]
+    WalletV5R1,
+    #[serde(rename = "nominator pool v1")]
+    NominatorPoolV1,
+    #[serde(rename = "highload wallet v1")]
+    HighloadWalletV1,
+    #[serde(rename = "highload wallet v1 r1")]
+    HighloadWalletV1R1,
+    #[serde(rename = "highload wallet v1 r2")]
+    HighloadWalletV1R2,
+    #[serde(rename = "highload wallet v2")]
+    HighloadWalletV2,
+    #[serde(rename = "highload wallet v2 r1")]
+    HighloadWalletV2R1,
+    #[serde(rename = "highload wallet v2 r2")]
+    HighloadWalletV2R2,
+}
+
+#[derive(Serialize)]
+pub struct WalletFields {
+    pub wallet_type: WalletType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seqno: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallet_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_signature_allowed: Option<bool>,
+}
+
+impl WalletFields {
+    pub fn load_from(code: &DynCell, data: &DynCell) -> Result<Self, Error> {
+        fn no_fields(ty: WalletType) -> WalletFields {
+            WalletFields {
+                wallet_type: ty,
+                seqno: None,
+                wallet_id: None,
+                is_signature_allowed: None,
+            }
+        }
+
+        fn only_wallet_id(ty: WalletType, data: &DynCell) -> Result<WalletFields, Error> {
+            let mut fields = no_fields(ty);
+            fields.wallet_id = Some(data.as_slice()?.load_u32()? as i32);
+            Ok(fields)
+        }
+
+        fn seqno_and_wallet_id(ty: WalletType, data: &DynCell) -> Result<WalletFields, Error> {
+            let mut fields = no_fields(ty);
+            let mut data = data.as_slice()?;
+            fields.seqno = Some(data.load_u32()? as i32);
+            fields.wallet_id = Some(data.load_u32()? as i32);
+            Ok(fields)
+        }
+
+        fn all_fields(ty: WalletType, data: &DynCell) -> Result<WalletFields, Error> {
+            let mut fields = no_fields(ty);
+            let mut data = data.as_slice()?;
+            fields.is_signature_allowed = Some(data.load_bit()?);
+            fields.seqno = Some(data.load_u32()? as i32);
+            fields.wallet_id = Some(data.load_u32()? as i32);
+            Ok(fields)
+        }
+
+        match *code.repr_hash() {
+            code_hash::WALLET_V3_R1 => seqno_and_wallet_id(WalletType::WalletV3R1, data),
+            code_hash::WALLET_V3_R2 => seqno_and_wallet_id(WalletType::WalletV3R2, data),
+            code_hash::WALLET_V4_R1 => seqno_and_wallet_id(WalletType::WalletV4R1, data),
+            code_hash::WALLET_V4_R2 => seqno_and_wallet_id(WalletType::WalletV4R2, data),
+            code_hash::WALLET_V5_R1 => all_fields(WalletType::WalletV5R1, data),
+
+            code_hash::HIGHLOAD_WALLET_V2 => only_wallet_id(WalletType::HighloadWalletV2, data),
+            code_hash::HIGHLOAD_WALLET_V2_R1 => {
+                only_wallet_id(WalletType::HighloadWalletV2R1, data)
+            }
+            code_hash::HIGHLOAD_WALLET_V2_R2 => {
+                only_wallet_id(WalletType::HighloadWalletV2R2, data)
+            }
+
+            code_hash::HIGHLOAD_WALLET_V1 => {
+                seqno_and_wallet_id(WalletType::HighloadWalletV1, data)
+            }
+            code_hash::HIGHLOAD_WALLET_V1_R1 => {
+                seqno_and_wallet_id(WalletType::HighloadWalletV1R1, data)
+            }
+            code_hash::HIGHLOAD_WALLET_V1_R2 => {
+                seqno_and_wallet_id(WalletType::HighloadWalletV1R2, data)
+            }
+
+            code_hash::NOMINATOR_POOL_V1 => Ok(no_fields(WalletType::NominatorPoolV1)),
+
+            _ => Err(Error::InvalidTag),
+        }
+    }
+}
+
+mod code_hash {
+    use super::*;
+
+    pub const HIGHLOAD_WALLET_V1: HashBytes = HashBytes([
+        0x0a, 0xb1, 0xff, 0x93, 0xa9, 0xe7, 0x9c, 0x0d, 0xef, 0xf4, 0x40, 0x5d, 0x8d, 0xad, 0x6b,
+        0x5a, 0xc9, 0xf8, 0xc0, 0x1b, 0x2f, 0x1e, 0xbc, 0xb4, 0x25, 0x9f, 0xeb, 0x9e, 0x98, 0x38,
+        0x00, 0x99,
+    ]);
+
+    pub const HIGHLOAD_WALLET_V1_R1: HashBytes = HashBytes([
+        0xd8, 0xcd, 0xbb, 0xb7, 0x9f, 0x2c, 0x5c, 0xaa, 0x67, 0x7a, 0xc4, 0x50, 0x77, 0x0b, 0xe0,
+        0x35, 0x1b, 0xe2, 0x1e, 0x12, 0x50, 0x48, 0x6d, 0xe8, 0x5c, 0xc5, 0x2a, 0xa3, 0x3d, 0xd1,
+        0x64, 0x84,
+    ]);
+
+    pub const HIGHLOAD_WALLET_V1_R2: HashBytes = HashBytes([
+        0x36, 0x8c, 0x03, 0x97, 0x2e, 0x5f, 0x4c, 0x24, 0x41, 0x2b, 0x81, 0x86, 0x52, 0xde, 0x1d,
+        0xe2, 0xa2, 0x63, 0x0d, 0x1c, 0x01, 0x16, 0x09, 0x99, 0x9d, 0xff, 0x74, 0x5f, 0xb3, 0x68,
+        0x49, 0xad,
+    ]);
+
+    pub const HIGHLOAD_WALLET_V2: HashBytes = HashBytes([
+        0x94, 0x94, 0xd1, 0xcc, 0x8e, 0xdf, 0x12, 0xf0, 0x56, 0x71, 0xa1, 0xa9, 0xba, 0x09, 0x92,
+        0x10, 0x96, 0xeb, 0x50, 0x81, 0x1e, 0x19, 0x24, 0xec, 0x65, 0xc3, 0xc6, 0x29, 0xfb, 0xb8,
+        0x08, 0x12,
+    ]);
+
+    pub const HIGHLOAD_WALLET_V2_R1: HashBytes = HashBytes([
+        0x8c, 0xeb, 0x45, 0xb3, 0xcd, 0x4b, 0x5c, 0xc6, 0x0e, 0xaa, 0xe1, 0xc1, 0x3b, 0x9c, 0x09,
+        0x23, 0x92, 0x67, 0x7f, 0xe5, 0x36, 0xb2, 0xe9, 0xb2, 0xd8, 0x01, 0xb6, 0x2e, 0xff, 0x93,
+        0x1f, 0xe1,
+    ]);
+
+    pub const HIGHLOAD_WALLET_V2_R2: HashBytes = HashBytes([
+        0x0b, 0x3a, 0x88, 0x7a, 0xea, 0xcd, 0x2a, 0x7d, 0x40, 0xbb, 0x55, 0x50, 0xbc, 0x92, 0x53,
+        0x15, 0x6a, 0x02, 0x90, 0x65, 0xae, 0xfb, 0x6d, 0x6b, 0x58, 0x37, 0x35, 0xd5, 0x8d, 0xa9,
+        0xd5, 0xbe,
+    ]);
+
+    pub const WALLET_V3_R1: HashBytes = HashBytes([
+        0xb6, 0x10, 0x41, 0xa5, 0x8a, 0x79, 0x80, 0xb9, 0x46, 0xe8, 0xfb, 0x9e, 0x19, 0x8e, 0x3c,
+        0x90, 0x4d, 0x24, 0x79, 0x9f, 0xfa, 0x36, 0x57, 0x4e, 0xa4, 0x25, 0x1c, 0x41, 0xa5, 0x66,
+        0xf5, 0x81,
+    ]);
+
+    pub const WALLET_V3_R2: HashBytes = HashBytes([
+        0x84, 0xda, 0xfa, 0x44, 0x9f, 0x98, 0xa6, 0x98, 0x77, 0x89, 0xba, 0x23, 0x23, 0x58, 0x07,
+        0x2b, 0xc0, 0xf7, 0x6d, 0xc4, 0x52, 0x40, 0x02, 0xa5, 0xd0, 0x91, 0x8b, 0x9a, 0x75, 0xd2,
+        0xd5, 0x99,
+    ]);
+
+    pub const WALLET_V4_R1: HashBytes = HashBytes([
+        0x64, 0xdd, 0x54, 0x80, 0x55, 0x22, 0xc5, 0xbe, 0x8a, 0x9d, 0xb5, 0x9c, 0xea, 0x01, 0x05,
+        0xcc, 0xf0, 0xd0, 0x87, 0x86, 0xca, 0x79, 0xbe, 0xb8, 0xcb, 0x79, 0xe8, 0x80, 0xa8, 0xd7,
+        0x32, 0x2d,
+    ]);
+
+    pub const WALLET_V4_R2: HashBytes = HashBytes([
+        0xfe, 0xb5, 0xff, 0x68, 0x20, 0xe2, 0xff, 0x0d, 0x94, 0x83, 0xe7, 0xe0, 0xd6, 0x2c, 0x81,
+        0x7d, 0x84, 0x67, 0x89, 0xfb, 0x4a, 0xe5, 0x80, 0xc8, 0x78, 0x86, 0x6d, 0x95, 0x9d, 0xab,
+        0xd5, 0xc0,
+    ]);
+
+    pub const WALLET_V5_R1: HashBytes = HashBytes([
+        0x20, 0x83, 0x4b, 0x7b, 0x72, 0xb1, 0x12, 0x14, 0x7e, 0x1b, 0x2f, 0xb4, 0x57, 0xb8, 0x4e,
+        0x74, 0xd1, 0xa3, 0x0f, 0x04, 0xf7, 0x37, 0xd4, 0xf6, 0x2a, 0x66, 0x8e, 0x95, 0x52, 0xd2,
+        0xb7, 0x2f,
+    ]);
+
+    pub const NOMINATOR_POOL_V1: HashBytes = HashBytes([
+        0x9a, 0x3e, 0xc1, 0x4b, 0xc0, 0x98, 0xf6, 0xb4, 0x40, 0x64, 0xc3, 0x05, 0x22, 0x2c, 0xae,
+        0xa2, 0x80, 0x0f, 0x17, 0xdd, 0xa8, 0x5e, 0xe6, 0xa8, 0x19, 0x8a, 0x70, 0x95, 0xed, 0xe1,
+        0x0d, 0xcf,
+    ]);
 }
 
 mod serde_option_tonlib_address {
