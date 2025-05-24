@@ -2,9 +2,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{anyhow, ensure, Context, Result};
-use everscale_types::models::{
-    BlockIdShort, IntAddr, MsgInfo, MsgsExecutionParams, ShardIdent, StdAddr,
-};
+use everscale_types::models::{BlockIdShort, IntAddr, MsgInfo, ShardIdent, StdAddr};
+use parking_lot::RwLock;
 use tycho_block_util::queue::{get_short_addr_string, QueueKey, QueuePartitionIdx};
 
 use super::{
@@ -17,7 +16,8 @@ use crate::collator::messages_buffer::{
     MessageGroup, MessagesBuffer, MessagesBufferLimits, SaturatingAddAssign,
 };
 use crate::collator::types::{
-    ConcurrentQueueStatistics, MsgsExecutionParamsExtension, ParsedMessage,
+    ConcurrentQueueStatistics, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff,
+    ParsedMessage,
 };
 use crate::internal_queue::iterator::QueueIterator;
 use crate::internal_queue::types::{DiffZone, InternalMessageValue, QueueShardRange};
@@ -38,7 +38,7 @@ pub(super) struct InternalsPartitionReader<V: InternalMessageValue> {
     pub(super) target_limits: MessagesBufferLimits,
     pub(super) max_limits: MessagesBufferLimits,
 
-    msgs_exec_params: Arc<MsgsExecutionParams>,
+    msgs_exec_params: Arc<RwLock<MsgsExecutionParamsStuff>>,
 
     /// mc state gen lt
     mc_state_gen_lt: Lt,
@@ -63,7 +63,7 @@ pub(super) struct InternalsPartitionReaderContext {
     pub block_seqno: BlockSeqno,
     pub target_limits: MessagesBufferLimits,
     pub max_limits: MessagesBufferLimits,
-    pub msgs_exec_params: Arc<MsgsExecutionParams>,
+    pub msgs_exec_params: Arc<RwLock<MsgsExecutionParamsStuff>>,
     pub mc_state_gen_lt: Lt,
     pub prev_state_gen_lt: Lt,
     pub mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
@@ -194,7 +194,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
     }
 
     pub fn open_ranges_limit_reached(&self) -> bool {
-        self.range_readers.len() >= self.msgs_exec_params.open_ranges_limit()
+        self.range_readers.len() >= self.msgs_exec_params.read().current.open_ranges_limit()
     }
 
     pub fn has_non_zero_processed_offset(&self) -> bool {
@@ -226,6 +226,11 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
     pub fn all_read_existing_messages_collected(&self) -> bool {
         self.all_ranges_fully_read && !self.has_messages_in_buffers()
+    }
+
+    pub fn check_all_read_existing_messages_collected(&self) -> bool {
+        (self.range_readers.is_empty() || self.range_readers.iter().all(|(_, r)| r.fully_read))
+            && !self.has_messages_in_buffers()
     }
 
     pub fn all_new_messages_collected(&self, has_pending_new_messages: bool) -> bool {
@@ -466,10 +471,10 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
     }
 
     fn create_append_next_range_reader(&mut self) -> Result<BlockSeqno, CollatorError> {
-        let range_max_messages = if self.msgs_exec_params.range_messages_limit == 0 {
+        let range_max_messages = if self.msgs_exec_params.read().current.range_messages_limit == 0 {
             10_000
         } else {
-            self.msgs_exec_params.range_messages_limit
+            self.msgs_exec_params.read().current.range_messages_limit
         };
 
         let reader = self.create_next_internals_range_reader(Some(range_max_messages))?;
@@ -832,7 +837,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             let mut should_create_next_range = if self.open_ranges_limit_reached() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     partition_id = self.partition_id,
-                    open_ranges_limit = self.msgs_exec_params.open_ranges_limit,
+                    open_ranges_limit = self.msgs_exec_params.read().current.open_ranges_limit,
                     "internals reader: open ranges limit reached in current partition",
                 );
                 false
@@ -844,7 +849,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 if limit_reached_in_other_parts {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         partition_id = self.partition_id,
-                        open_ranges_limit = self.msgs_exec_params.open_ranges_limit,
+                        open_ranges_limit = self.msgs_exec_params.read().current.open_ranges_limit,
                         "internals reader: open ranges limit reached in other partitions",
                     );
                     false
@@ -880,6 +885,10 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             );
 
             if should_create_next_range {
+                if self.msgs_exec_params.read().new_exists() {
+                    break;
+                }
+
                 let range_seqno = self.create_append_next_range_reader()?;
                 ranges_seqno.push_back(range_seqno);
             } else {

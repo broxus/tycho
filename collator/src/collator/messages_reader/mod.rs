@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{MsgsExecutionParams, ShardIdent};
+use everscale_types::models::ShardIdent;
+use parking_lot::RwLock;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -14,7 +15,9 @@ use self::new_messages::*;
 pub(super) use self::reader_state::*;
 use super::error::CollatorError;
 use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
-use super::types::{AnchorsCache, CumulativeStatistics, MsgsExecutionParamsExtension};
+use super::types::{
+    AnchorsCache, CumulativeStatistics, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff,
+};
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::internal_queue::types::{
     DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
@@ -58,7 +61,9 @@ enum MessagesReaderStage {
 pub(super) struct MessagesReader<V: InternalMessageValue> {
     for_shard_id: ShardIdent,
 
-    msgs_exec_params: Arc<MsgsExecutionParams>,
+    msgs_exec_params: Arc<RwLock<MsgsExecutionParamsStuff>>,
+
+    par_0_int_msgs_count_limit: u64,
 
     /// Collect separate metrics by partitions
     metrics_by_partitions: MessagesReaderMetricsByPartitions,
@@ -85,7 +90,7 @@ pub(super) struct MessagesReaderContext {
     pub for_shard_id: ShardIdent,
     pub block_seqno: BlockSeqno,
     pub next_chain_time: u64,
-    pub msgs_exec_params: Arc<MsgsExecutionParams>,
+    pub msgs_exec_params: MsgsExecutionParamsStuff,
     pub mc_state_gen_lt: Lt,
     pub prev_state_gen_lt: Lt,
     pub mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
@@ -100,15 +105,15 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         cx: MessagesReaderContext,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
     ) -> Result<Self> {
-        let slots_fractions = cx.msgs_exec_params.group_slots_fractions()?;
+        let slots_fractions = cx.msgs_exec_params.current.group_slots_fractions()?;
 
         // metrics: messages exec params
         metrics::gauge!("tycho_do_collate_msgs_exec_params_buffer_limit")
-            .set(cx.msgs_exec_params.buffer_limit as f64);
+            .set(cx.msgs_exec_params.current.buffer_limit as f64);
         metrics::gauge!("tycho_do_collate_msgs_exec_params_group_limit")
-            .set(cx.msgs_exec_params.group_limit as f64);
+            .set(cx.msgs_exec_params.current.group_limit as f64);
         metrics::gauge!("tycho_do_collate_msgs_exec_params_group_vert_size")
-            .set(cx.msgs_exec_params.group_vert_size as f64);
+            .set(cx.msgs_exec_params.current.group_vert_size as f64);
         for (par_id, par_fraction) in &slots_fractions {
             let labels = [("par_id", par_id.to_string())];
             metrics::gauge!(
@@ -118,18 +123,18 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             .set(*par_fraction as f64);
         }
         metrics::gauge!("tycho_do_collate_msgs_exec_params_externals_expire_timeout")
-            .set(cx.msgs_exec_params.externals_expire_timeout as f64);
+            .set(cx.msgs_exec_params.current.externals_expire_timeout as f64);
         metrics::gauge!("tycho_do_collate_msgs_exec_params_open_ranges_limit")
-            .set(cx.msgs_exec_params.open_ranges_limit as f64);
+            .set(cx.msgs_exec_params.current.open_ranges_limit as f64);
         metrics::gauge!("tycho_do_collate_msgs_exec_params_par_0_ext_msgs_count_limit")
-            .set(cx.msgs_exec_params.par_0_ext_msgs_count_limit as f64);
+            .set(cx.msgs_exec_params.current.par_0_ext_msgs_count_limit as f64);
         metrics::gauge!("tycho_do_collate_msgs_exec_params_par_0_int_msgs_count_limit")
-            .set(cx.msgs_exec_params.par_0_int_msgs_count_limit as f64);
+            .set(cx.msgs_exec_params.current.par_0_int_msgs_count_limit as f64);
 
         // group limits by msgs kinds
-        let msgs_buffer_max_count = cx.msgs_exec_params.buffer_limit as usize;
-        let group_vert_size = (cx.msgs_exec_params.group_vert_size as usize).max(1);
-        let group_limit = cx.msgs_exec_params.group_limit as usize;
+        let msgs_buffer_max_count = cx.msgs_exec_params.current.buffer_limit as usize;
+        let group_vert_size = (cx.msgs_exec_params.current.group_vert_size as usize).max(1);
+        let group_limit = cx.msgs_exec_params.current.group_limit as usize;
 
         let mut internals_buffer_limits_by_partitions =
             BTreeMap::<QueuePartitionIdx, MessagesBufferLimits>::new();
@@ -237,12 +242,14 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             cumulative_statistics = Some(inner_cumulative_statistics);
         }
 
+        let msgs_exec_params = Arc::new(RwLock::new(cx.msgs_exec_params.clone()));
+
         // create externals reader
         let externals_reader = ExternalsReader::new(
             cx.for_shard_id,
             cx.block_seqno,
             cx.next_chain_time,
-            cx.msgs_exec_params.clone(),
+            msgs_exec_params.clone(),
             externals_buffer_limits_by_partitions.clone(),
             cx.anchors_cache,
             cx.reader_state.externals,
@@ -251,9 +258,12 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         let mut res = Self {
             for_shard_id: cx.for_shard_id,
 
-            msgs_exec_params: cx.msgs_exec_params.clone(),
+            par_0_int_msgs_count_limit: cx.msgs_exec_params.current.par_0_int_msgs_count_limit
+                as u64,
 
             metrics_by_partitions: Default::default(),
+
+            msgs_exec_params: msgs_exec_params.clone(),
 
             new_messages,
 
@@ -301,7 +311,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 block_seqno: cx.block_seqno,
                 target_limits,
                 max_limits,
-                msgs_exec_params: cx.msgs_exec_params.clone(),
+                msgs_exec_params: msgs_exec_params.clone(),
                 mc_state_gen_lt: cx.mc_state_gen_lt,
                 prev_state_gen_lt: cx.prev_state_gen_lt,
                 mc_top_shards_end_lts: cx.mc_top_shards_end_lts.clone(),
@@ -344,7 +354,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 block_seqno: cx.block_seqno,
                 target_limits,
                 max_limits,
-                msgs_exec_params: cx.msgs_exec_params.clone(),
+                msgs_exec_params,
                 mc_state_gen_lt: cx.mc_state_gen_lt,
                 prev_state_gen_lt: cx.prev_state_gen_lt,
                 mc_top_shards_end_lts: cx.mc_top_shards_end_lts,
@@ -514,7 +524,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             // reset queue diff partition router
             // according to actual aggregated stats
             let moved_from_par_0_accounts = Self::reset_partition_router_by_stats(
-                &self.msgs_exec_params,
+                self.par_0_int_msgs_count_limit,
                 &mut queue_diff_with_msgs.partition_router,
                 aggregated_stats,
                 self.for_shard_id,
@@ -586,7 +596,9 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             );
         }
 
-        let processed_upto = reader_state.get_updated_processed_upto();
+        let mut processed_upto = reader_state.get_updated_processed_upto();
+
+        processed_upto.msgs_exec_params = Some(self.msgs_exec_params.read().current.clone());
 
         // add updated cumulative stats
         reader_state.internals.cumulative_statistics = self.internal_queue_statistics;
@@ -614,7 +626,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
     }
 
     pub fn reset_partition_router_by_stats(
-        msgs_exec_params: &MsgsExecutionParams,
+        par_0_msgs_count_limit: u64,
         partition_router: &mut PartitionRouter,
         aggregated_stats: QueueStatistics,
         for_shard_id: ShardIdent,
@@ -623,7 +635,6 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             (PartitionRouter, DiffStatistics),
         >,
     ) -> Result<FastHashSet<HashBytes>> {
-        let par_0_msgs_count_limit = msgs_exec_params.par_0_int_msgs_count_limit as u64;
         let mut moved_from_par_0_accounts = FastHashSet::default();
 
         for (dest_int_address, msgs_count) in aggregated_stats {
@@ -1129,6 +1140,16 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             self.metrics_by_partitions
                 .get_mut(*par_id)
                 .append(par_metrics);
+        }
+
+        // update msg exec params
+        if self.externals_reader.check_all_ranges_read_and_collected()
+            && self
+                .internals_partition_readers
+                .iter()
+                .all(|(_, par)| par.check_all_read_existing_messages_collected())
+        {
+            self.msgs_exec_params.write().update();
         }
 
         // retun None when messages group is empty
