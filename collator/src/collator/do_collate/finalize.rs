@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1231,7 +1231,7 @@ impl Phase<FinalizeState> {
             accounts.build()?
         } else {
             // Group account updates by shards
-            let account_updates_by_shards = account_updates
+            let mut account_updates_by_shards = account_updates
                 .into_iter()
                 .group_by(|(account, _)| account.shard_id(SHARD_ACCOUNTS_SPLIT_DEPTH))
                 .into_iter()
@@ -1244,14 +1244,22 @@ impl Phase<FinalizeState> {
                 SHARD_ACCOUNTS_SPLIT_DEPTH,
             )?;
 
-            let updated_shard_accounts = split_shard_accounts
+            let split_shard_accounts_with_updates = split_shard_accounts
+                .into_iter()
+                .map(|(key, shard_accounts)| {
+                    let account_updates = account_updates_by_shards.remove(&key);
+                    (key, (shard_accounts, account_updates))
+                })
+                .collect::<BTreeMap<_, _>>();
+
+            let updated_shard_accounts = split_shard_accounts_with_updates
                 .into_par_iter()
-                .map(|(prefix, shard_accounts)| {
+                .map(|(prefix, (shard_accounts, account_updates))| {
                     let mut shard_accounts = RelaxedAugDict::from_full(&shard_accounts);
 
-                    if let Some(updates) = account_updates_by_shards.get(&prefix) {
+                    if let Some(updates) = account_updates {
                         shard_accounts
-                            .modify_with_sorted_iter(updates.clone())
+                            .modify_with_sorted_iter(updates)
                             .expect("failed to modify accounts dict");
                     }
 
@@ -1263,7 +1271,7 @@ impl Phase<FinalizeState> {
                 })
                 .collect::<BTreeMap<_, _>>();
 
-            merge_shard_accounts(&updated_shard_accounts)?
+            merge_shard_accounts(updated_shard_accounts)?
         };
 
         let accounts_len = account_blocks.len();
@@ -1628,31 +1636,51 @@ fn split_shard_accounts(
     Ok(shards)
 }
 
-pub fn merge_shard_accounts(
-    shard_accounts: &BTreeMap<u64, ShardAccounts>,
-) -> Result<ShardAccounts> {
-    let shards = shard_accounts.len();
-    let max_depth = shards.trailing_zeros() as u8;
+/// Merges multiple shard accounts into a single one using a binary tree approach.
+/// The number of input shards must be equal to `2^SHARD_ACCOUNTS_SPLIT_DEPTH`.
+pub fn merge_shard_accounts(shard_accounts: BTreeMap<u64, ShardAccounts>) -> Result<ShardAccounts> {
+    // Verify input size matches expected number of shards
+    assert_eq!(shard_accounts.len(), 1 << SHARD_ACCOUNTS_SPLIT_DEPTH);
 
-    let mut buffer = shard_accounts
-        .values()
-        .map(|accounts| (max_depth, accounts.clone()))
-        .collect::<VecDeque<_>>();
+    // Create iterator from BTreeMap
+    let mut iter = shard_accounts
+        .into_values()
+        .map(|accounts| (SHARD_ACCOUNTS_SPLIT_DEPTH, accounts));
 
-    while buffer.len() > 1 {
-        let (depth_right, accounts_right) = buffer.pop_back().expect("shouldn't happen");
+    // Initialize array directly from iterator using from_fn
+    let mut buffer: [(u8, ShardAccounts); 1 << SHARD_ACCOUNTS_SPLIT_DEPTH] =
+        std::array::from_fn(|_| iter.next().expect("Length already verified with assert"));
 
-        match buffer.iter().last() {
-            Some(&(depth_left, _)) if depth_left == depth_right => {
-                let (depth, accounts_left) = buffer.pop_back().expect("shouldn't happen");
-                let merged = accounts_left.merge_with_right_sibling(&accounts_right)?;
-                buffer.push_front((depth - 1, merged));
-            }
-            _ => unreachable!("invalid number of shards"),
+    // Track actual length since we can't truncate arrays
+    let mut buffer_len = 1 << SHARD_ACCOUNTS_SPLIT_DEPTH;
+
+    // Start from maximum depth and work down to root
+    let mut cur_depth = SHARD_ACCOUNTS_SPLIT_DEPTH;
+    while cur_depth > 0 {
+        let mut i = 0;
+        while i < buffer_len {
+            let (left_depth, left_accounts) = &buffer[i];
+            let (right_depth, right_accounts) = &buffer[i + 1];
+
+            assert_eq!(*left_depth, cur_depth);
+            assert_eq!(*right_depth, cur_depth);
+
+            let merged = left_accounts.merge_with_right_sibling(right_accounts)?;
+
+            buffer[i / 2] = (cur_depth - 1, merged);
+            i += 2;
         }
+
+        cur_depth -= 1;
+
+        // Update logical buffer length
+        buffer_len /= 2;
     }
 
-    let (depth, merged_shard_accounts) = buffer.pop_back().expect("shouldn't happen");
+    // At this point we should have exactly one merged account
+    assert_eq!(buffer_len, 1);
+
+    let [(depth, merged_shard_accounts), ..] = buffer;
     assert_eq!(depth, 0);
 
     Ok(merged_shard_accounts)
