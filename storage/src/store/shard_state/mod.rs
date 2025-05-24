@@ -123,11 +123,9 @@ impl ShardStateStorage {
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
 
-            let new_cell_count = cell_storage.store_cell(
-                &mut batch,
-                root_cell.as_ref(),
-                estimated_merkle_update_size,
-            )?;
+            let ctx = cell_storage.create_store_ctx(estimated_merkle_update_size);
+            CellStorage::store_cell_mt(root_cell.as_ref(), &ctx)?;
+            let new_cell_count = ctx.finalize(&mut batch);
 
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
