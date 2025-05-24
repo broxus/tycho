@@ -641,6 +641,23 @@ impl AnchorInfo {
 
 pub(super) type AccountId = HashBytes;
 
+pub(super) trait AccountIdExt {
+    fn shard_id(&self, depth: u8) -> u64;
+}
+
+impl AccountIdExt for AccountId {
+    fn shard_id(&self, depth: u8) -> u64 {
+        if depth > 8 {
+            panic!("depth too deep: {depth}");
+        }
+
+        let mask = (!0b0u64) << (u64::BITS - depth as u32);
+        let tag = 0b1u64 << (u64::BITS - (depth + 1) as u32);
+
+        u64::from_be_bytes(*self.first_chunk()) & mask | tag
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ShardAccountStuff {
     pub workchain_id: i8,
