@@ -435,6 +435,7 @@ impl ProofChecker {
     pub async fn check_proof(&self, ctx: CheckProof<'_>) -> Result<NewBlockMeta> {
         // TODO: Add labels with shard?
         let _histogram = HistogramGuard::begin("tycho_core_check_block_proof_time");
+        let start = std::time::Instant::now();
 
         let CheckProof {
             mc_block_id,
@@ -529,16 +530,33 @@ impl ProofChecker {
             }
         }
 
+        let mut store_block_proof_duration = Duration::ZERO;
+        let mut store_queue_diff_duration = Duration::ZERO;
+
         if store_on_success {
-            // Store proof
+            let store_proof_start = std::time::Instant::now();
             let res = block_storage
                 .store_block_proof(proof, MaybeExistingHandle::New(meta))
                 .await?;
+            store_block_proof_duration = store_proof_start.elapsed();
 
-            // Store queue diff
+            let store_queue_diff_start = std::time::Instant::now();
             block_storage
                 .store_queue_diff(queue_diff, res.handle.into())
                 .await?;
+            store_queue_diff_duration = store_queue_diff_start.elapsed();
+        }
+
+        let total_duration = start.elapsed();
+
+        if total_duration > Duration::from_millis(100) {
+            tracing::warn!(
+                store_block_proof = ?store_block_proof_duration,
+                store_queue_diff = ?store_queue_diff_duration,
+                total = ?total_duration,
+                id = ?block.id(),
+                "slow check_proof"
+            );
         }
 
         Ok(meta)

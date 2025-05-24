@@ -223,18 +223,12 @@ pub struct BlocksCacheConfig {
     /// Default: `5 min`.
     #[serde(with = "serde_helpers::humantime")]
     pub ttl: Duration,
-
-    /// Cache capacity in bytes.
-    ///
-    /// Default: `500 MB`.
-    pub size: ByteSize,
 }
 
 impl Default for BlocksCacheConfig {
     fn default() -> Self {
         Self {
             ttl: Duration::from_secs(300),
-            size: ByteSize::mb(500),
         }
     }
 }
