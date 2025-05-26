@@ -42,8 +42,8 @@ use crate::types::processed_upto::{
     ProcessedUptoPartitionStuff,
 };
 use crate::types::{
-    BlockCandidate, BlockStuffForSync, ProcessedTo, ShardDescriptionExt as _,
-    ShardDescriptionShort, ShardHashesExt, ShardIdentExt,
+    BlockCandidate, BlockStuffForSync, ProcessedTo, ShardDescriptionShort,
+    ShardDescriptionShortExt as _, ShardHashesExt, ShardIdentExt,
 };
 use crate::validator::{ValidationComplete, ValidationStatus, ValidatorStdImpl};
 

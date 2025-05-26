@@ -19,7 +19,8 @@ use super::types::{
 };
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
+    DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
+    QueueShardBoundedRange, QueueStatistics,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
@@ -95,6 +96,7 @@ pub(super) struct MessagesReaderContext {
     pub anchors_cache: AnchorsCache,
     pub is_first_block_after_prev_master: bool,
     pub cumulative_stats_calc_params: Option<CumulativeStatsCalcParams>,
+    pub part_stat_ranges: Option<Vec<QueueShardBoundedRange>>,
 }
 
 impl<V: InternalMessageValue> MessagesReader<V> {
@@ -118,31 +120,61 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         let mut cumulative_stats_just_loaded = false;
 
         if let Some(params) = cx.cumulative_stats_calc_params {
+            let previous_cumulative_statistics = cx.reader_state.internals.cumulative_statistics;
+
             // get cumulative internals stats
             let mut inner_cumulative_statistics = if cx.is_first_block_after_prev_master {
+                // if cumulative statistics are already present, then we should
+                // enrich it using a diff from the previous master block and diffs
+                // from another shard between the previous master block and previous master block - 1
                 let partitions = params
                     .all_shards_processed_to_by_partitions
                     .values()
                     .flat_map(|(_, map)| map.keys())
                     .copied()
                     .collect();
-                let mut inner_cumulative_statistics =
-                    CumulativeStatistics::new(params.all_shards_processed_to_by_partitions);
-                inner_cumulative_statistics.load(
-                    mq_adapter.clone(),
-                    &cx.for_shard_id,
-                    &partitions,
-                    cx.prev_state_gen_lt,
-                    cx.mc_state_gen_lt,
-                    &cx.mc_top_shards_end_lts.iter().copied().collect(),
-                )?;
+
                 cumulative_stats_just_loaded = true;
-                inner_cumulative_statistics
+                match (previous_cumulative_statistics, cx.part_stat_ranges) {
+                    (Some(mut previous_cumulative_statistics), Some(part_stat_ranges)) => {
+                        // update all_shards_processed_to_by_partitions and truncate processed data
+                        previous_cumulative_statistics.update_processed_to_by_partitions(
+                            params.all_shards_processed_to_by_partitions.clone(),
+                        );
+
+                        // truncate data before range
+                        previous_cumulative_statistics.truncate_before(
+                            &cx.for_shard_id,
+                            cx.prev_state_gen_lt,
+                            cx.mc_state_gen_lt,
+                            &cx.mc_top_shards_end_lts.iter().copied().collect(),
+                        );
+
+                        // partial load statistics and enrich current value
+                        previous_cumulative_statistics.load_partial(
+                            mq_adapter.clone(),
+                            &partitions,
+                            part_stat_ranges,
+                        )?;
+
+                        previous_cumulative_statistics
+                    }
+                    _ => {
+                        let mut inner_cumulative_statistics =
+                            CumulativeStatistics::new(params.all_shards_processed_to_by_partitions);
+                        inner_cumulative_statistics.load(
+                            mq_adapter.clone(),
+                            &cx.for_shard_id,
+                            &partitions,
+                            cx.prev_state_gen_lt,
+                            cx.mc_state_gen_lt,
+                            &cx.mc_top_shards_end_lts.iter().copied().collect(),
+                        )?;
+                        inner_cumulative_statistics
+                    }
+                }
             } else {
-                cx.reader_state
-                    .internals
-                    .cumulative_statistics
-                    .expect("cumulative statistics should exist")
+                previous_cumulative_statistics.expect("cumulative statistics should exist")
             };
 
             if let Some(partition_stats) = inner_cumulative_statistics.result().get(&1) {

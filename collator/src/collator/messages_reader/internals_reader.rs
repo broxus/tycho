@@ -19,7 +19,7 @@ use crate::collator::types::{
     ParsedMessage,
 };
 use crate::internal_queue::iterator::QueueIterator;
-use crate::internal_queue::types::{DiffZone, InternalMessageValue, QueueShardRange};
+use crate::internal_queue::types::{Bound, DiffZone, InternalMessageValue, QueueShardBoundedRange};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, Lt};
@@ -370,11 +370,11 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 fully_read = false;
             }
 
-            ranges.push(QueueShardRange {
+            ranges.push(QueueShardBoundedRange {
                 shard_ident: *shard_id,
                 // TODO: may be we should pass `from` here because we should load stats for the full range
-                from: shard_reader_state.current_position,
-                to: shard_range_to,
+                from: Bound::Excluded(shard_reader_state.current_position),
+                to: Bound::Included(shard_range_to),
             });
         }
 
@@ -460,7 +460,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         &self,
         range_reader_state: &mut InternalsRangeReaderState,
         fully_read: bool,
-        ranges: &[QueueShardRange],
+        ranges: &[QueueShardBoundedRange],
     ) -> Result<()> {
         let msgs_stats = self
             .mq_adapter
@@ -599,10 +599,10 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 current_position: shard_range_from,
             });
 
-            ranges.push(QueueShardRange {
+            ranges.push(QueueShardBoundedRange {
                 shard_ident: shard_id,
-                from: shard_range_from,
-                to: shard_range_to,
+                from: Bound::Excluded(shard_range_from),
+                to: Bound::Included(shard_range_to),
             });
         }
 
@@ -1107,10 +1107,10 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
 
             for (shard_id, shard_reader_state) in &self.reader_state.shards {
                 let shard_range_to = QueueKey::max_for_lt(shard_reader_state.to);
-                ranges.push(QueueShardRange {
+                ranges.push(QueueShardBoundedRange {
                     shard_ident: *shard_id,
-                    from: shard_reader_state.current_position,
-                    to: shard_range_to,
+                    from: Bound::Excluded(shard_reader_state.current_position),
+                    to: Bound::Included(shard_range_to),
                 });
             }
 
