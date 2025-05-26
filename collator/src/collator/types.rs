@@ -29,8 +29,8 @@ use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::{MessagesReaderMetrics, ReaderState};
 use crate::internal_queue::types::{
-    AccountStatistics, DiffStatistics, InternalMessageValue, QueueShardRange, QueueStatistics,
-    SeparatedStatisticsByPartitions,
+    AccountStatistics, Bound, DiffStatistics, InternalMessageValue, QueueShardBoundedRange,
+    QueueStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -1326,7 +1326,39 @@ impl CumulativeStatistics {
             mc_state_gen_lt,
             mc_top_shards_end_lts,
         );
-        tracing::trace!(target: tracing_targets::COLLATOR, "cumulative_stats_ranges: {:?}", ranges);
+
+        tracing::trace!(
+            target: tracing_targets::COLLATOR,
+            "cumulative_stats_ranges: {:?}",
+            ranges
+        );
+
+        self.load_internal(mq_adapter, partitions, ranges)
+    }
+
+    /// Partially loads diff statistics for the given ranges.
+    /// Automatically applies `processed_to` filtering and updates internal state.
+    pub fn load_partial<V: InternalMessageValue>(
+        &mut self,
+        mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        ranges: Vec<QueueShardBoundedRange>,
+    ) -> Result<()> {
+        tracing::trace!(
+            target: tracing_targets::COLLATOR,
+            "cumulative_stats_partial_ranges: {:?}",
+            ranges
+        );
+        self.load_internal(mq_adapter, partitions, ranges)
+    }
+
+    /// Internal helper to load and apply diff statistics.
+    fn load_internal<V: InternalMessageValue>(
+        &mut self,
+        mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
+        partitions: &FastHashSet<QueuePartitionIdx>,
+        ranges: Vec<QueueShardBoundedRange>,
+    ) -> Result<()> {
         for range in ranges {
             let stats_by_partitions = mq_adapter
                 .load_separated_diff_statistics(partitions, &range)
@@ -1346,6 +1378,16 @@ impl CumulativeStatistics {
         Ok(())
     }
 
+    pub fn update_processed_to_by_partitions(
+        &mut self,
+        all_shards_processed_to_by_partitions: FastHashMap<
+            ShardIdent,
+            (bool, ProcessedToByPartitions),
+        >,
+    ) {
+        self.all_shards_processed_to_by_partitions = all_shards_processed_to_by_partitions;
+    }
+
     fn compute_cumulative_stats_ranges(
         current_shard: &ShardIdent,
         all_shards_processed_to_by_partitions: &FastHashMap<
@@ -1355,7 +1397,7 @@ impl CumulativeStatistics {
         prev_state_gen_lt: Lt,
         mc_state_gen_lt: Lt,
         mc_top_shards_end_lts: &FastHashMap<ShardIdent, Lt>,
-    ) -> Vec<QueueShardRange> {
+    ) -> Vec<QueueShardBoundedRange> {
         let mut ranges = vec![];
 
         let from_ranges = find_min_processed_to_by_shards(all_shards_processed_to_by_partitions);
@@ -1369,11 +1411,11 @@ impl CumulativeStatistics {
                 *mc_top_shards_end_lts.get(&shard_ident).unwrap()
             };
 
-            let to = QueueKey::max_for_lt(to_lt);
+            let to = Bound::Included(QueueKey::max_for_lt(to_lt));
 
-            ranges.push(QueueShardRange {
+            ranges.push(QueueShardBoundedRange {
                 shard_ident,
-                from,
+                from: Bound::Excluded(from),
                 to,
             });
         }

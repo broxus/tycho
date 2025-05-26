@@ -148,6 +148,7 @@ impl Phase<PrepareState> {
                 reader_state: self.extra.reader_state,
                 anchors_cache: self.extra.anchors_cache,
                 is_first_block_after_prev_master: self.state.is_first_block_after_prev_master,
+                part_stat_ranges: self.state.part_stat_ranges.clone(),
             },
             self.extra.mq_adapter.clone(),
         )?;
