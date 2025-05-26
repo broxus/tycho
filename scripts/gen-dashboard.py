@@ -845,7 +845,7 @@ def storage() -> RowPanel:
             "Time to store single root with rocksdb write etc",
         ),
         create_heatmap_panel(
-            "tycho_storage_cell_in_mem_store_time", "Time to store cell without write"
+            "tycho_storage_cell_in_mem_store_time_high", "Time to store cell without write"
         ),
         create_heatmap_panel(
             "tycho_storage_batch_write_time", "Time to write merge in write batch"

@@ -10,6 +10,7 @@ use humantime::format_duration;
 use phase::{ActualState, Phase};
 use prepare::PrepareState;
 use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
+use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::{NewBlockMeta, StoreStateHint};
@@ -909,13 +910,22 @@ impl CollatorStdImpl {
             let hint = StoreStateHint {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
             };
+
+            // TODO: Move into config
+            const SHARD_SPLIT_DEPTH: u8 = 4; // 16 shards
+
+            let split_accounts = split_aug_dict_raw(
+                finalized.new_observable_state.accounts.load()?,
+                SHARD_SPLIT_DEPTH,
+            )?;
+
             async move {
                 let _histogram = HistogramGuard::begin_with_labels(
                     "tycho_collator_build_new_state_time_high",
                     &labels,
                 );
                 adapter
-                    .store_state_root(&block_id, meta, new_state_root, hint)
+                    .store_state_root(&block_id, meta, new_state_root, split_accounts, hint)
                     .await
             }
         });
