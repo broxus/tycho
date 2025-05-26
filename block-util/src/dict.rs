@@ -1,11 +1,13 @@
 use everscale_types::cell::Lazy;
 use everscale_types::dict::{
     aug_dict_insert, aug_dict_merge_siblings, aug_dict_modify_from_sorted_iter,
-    aug_dict_remove_owned, build_aug_dict_from_sorted_iter, AugDictExtra, DictKey, SetMode,
+    aug_dict_remove_owned, build_aug_dict_from_sorted_iter, dict_split_raw, AugDictExtra, DictKey,
+    PartialSplitDict, SetMode,
 };
 use everscale_types::error::Error;
 use everscale_types::models::ShardIdent;
 use everscale_types::prelude::*;
+use tycho_util::FastHashMap;
 
 pub struct RelaxedAugDict<K, A, V> {
     dict_root: Option<Cell>,
@@ -199,6 +201,55 @@ where
     )?;
 
     Ok(shards)
+}
+
+#[allow(clippy::type_complexity)]
+pub fn split_aug_dict_raw<K, A, V>(
+    dict: AugDict<K, A, V>,
+    depth: u8,
+) -> anyhow::Result<FastHashMap<HashBytes, Cell>>
+where
+    K: StoreDictKey,
+    V: Store,
+    for<'a> A: AugDictExtra + Store + Load<'a>,
+{
+    fn split_dict_impl(
+        dict: Option<Cell>,
+        key_bit_len: u16,
+        depth: u8,
+        split: &mut FastHashMap<HashBytes, Cell>,
+    ) -> anyhow::Result<()> {
+        'split: {
+            if depth > 0 {
+                break 'split;
+            }
+
+            if let Some(cell) = dict {
+                split.insert(*cell.repr_hash(), cell);
+            }
+
+            return Ok(());
+        };
+
+        let PartialSplitDict {
+            remaining_bit_len,
+            left_branch,
+            right_branch,
+        } = { dict_split_raw(dict.as_ref(), key_bit_len, Cell::empty_context())? };
+
+        split_dict_impl(left_branch, remaining_bit_len, depth - 1, split)?;
+        split_dict_impl(right_branch, remaining_bit_len, depth - 1, split)?;
+
+        Ok(())
+    }
+
+    let mut split =
+        FastHashMap::with_capacity_and_hasher(2usize.pow(depth as _), Default::default());
+
+    let (dict_root, _) = dict.into_parts();
+    split_dict_impl(dict_root.into_root(), K::BITS, depth, &mut split)?;
+
+    Ok(split)
 }
 
 /// Merges multiple `RelaxedAugDict` into a single one using a binary tree approach.
