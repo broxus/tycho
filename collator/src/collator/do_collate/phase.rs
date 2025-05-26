@@ -4,6 +4,7 @@ use everscale_types::models::{CollationConfig, ShardIdent};
 use tycho_util::sync::CancellationFlag;
 
 use super::{BlockCollationData, PrevData};
+use crate::internal_queue::types::QueueShardBoundedRange;
 use crate::types::McData;
 
 pub struct Phase<S: PhaseState> {
@@ -24,4 +25,5 @@ pub struct ActualState {
     /// Indicates if current collating block is first
     /// after previous master block
     pub is_first_block_after_prev_master: bool,
+    pub part_stat_ranges: Option<Vec<QueueShardBoundedRange>>,
 }
