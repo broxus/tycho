@@ -852,6 +852,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 anchors_cache,
                 is_first_block_after_prev_master,
                 cumulative_stats_calc_params: cumulative_stats_calc_params.clone(),
+                part_stat_ranges: None,
             },
             self.primary_mq_adapter.clone(),
         )?;
@@ -873,6 +874,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 anchors_cache: secondary_anchors_cache,
                 cumulative_stats_calc_params,
                 is_first_block_after_prev_master: true,
+                part_stat_ranges: None,
             },
             self.secondary_mq_adapter.clone(),
         )?;

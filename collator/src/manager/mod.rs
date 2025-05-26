@@ -46,7 +46,7 @@ use crate::types::processed_upto::{
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
     DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
-    ShardDescriptionExt, ShardDescriptionShort, ShardHashesExt,
+    ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;

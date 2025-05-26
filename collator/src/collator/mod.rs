@@ -1354,6 +1354,7 @@ impl CollatorStdImpl {
                     working_state.prev_shard_data_ref().blocks_ids()[0], /* TODO: consider split/merge */
                     &working_state.mc_data.shards,
                 ),
+                part_stat_ranges: None,
             },
             self.mq_adapter.clone(),
         )?;
