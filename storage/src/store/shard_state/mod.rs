@@ -8,8 +8,10 @@ use bytesize::ByteSize;
 use everscale_types::models::*;
 use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
+use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::FastHashMap;
 use weedb::rocksdb;
 
 use self::cell_storage::*;
@@ -85,7 +87,12 @@ impl ShardStateStorage {
             return Err(ShardStateStorageError::BlockHandleIdMismatch.into());
         }
 
-        self.store_state_root(handle, state.root_cell().clone(), hint)
+        // TODO: Move into config
+        const SHARD_SPLIT_DEPTH: u8 = 4; // 16 shards
+
+        let split_accounts = split_aug_dict_raw(state.state().accounts.load()?, SHARD_SPLIT_DEPTH)?;
+
+        self.store_state_root(handle, state.root_cell().clone(), split_accounts, hint)
             .await
     }
 
@@ -93,6 +100,7 @@ impl ShardStateStorage {
         &self,
         handle: &BlockHandle,
         root_cell: Cell,
+        split_accounts: FastHashMap<HashBytes, Cell>,
         hint: StoreStateHint,
     ) -> Result<bool> {
         if handle.has_state() {
@@ -121,11 +129,14 @@ impl ShardStateStorage {
             let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
             let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
 
-            let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
+            let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time_high");
 
-            let ctx = cell_storage.create_store_ctx(estimated_merkle_update_size);
-            CellStorage::store_cell_mt(root_cell.as_ref(), &ctx)?;
-            let new_cell_count = ctx.finalize(&mut batch);
+            let new_cell_count = cell_storage.store_cell_mt(
+                root_cell.as_ref(),
+                &mut batch,
+                split_accounts,
+                estimated_merkle_update_size,
+            )?;
 
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);

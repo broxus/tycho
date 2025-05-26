@@ -715,10 +715,12 @@ mod test {
             let cell_hash = new_dict_cell.repr_hash();
             let mut batch = WriteBatch::new();
 
-            let ctx = cell_storage.create_store_ctx(MODIFY_COUNT * 3);
-            CellStorage::store_cell_mt(new_dict_cell.as_ref(), &ctx)?;
-
-            let traversed = ctx.finalize(&mut batch);
+            let traversed = cell_storage.store_cell_mt(
+                new_dict_cell.as_ref(),
+                &mut batch,
+                Default::default(),
+                MODIFY_COUNT * 3,
+            )?;
 
             cell_keys.push(*cell_hash);
 
