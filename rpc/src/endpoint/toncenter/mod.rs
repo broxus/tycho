@@ -34,6 +34,7 @@ pub fn router() -> axum::Router<RpcState> {
     axum::Router::new()
         .route("/", post(post_jrpc))
         .route("/jsonRPC", post(post_jrpc))
+        .route("/shards", get(get_shards))
         .route("/detectAddress", get(get_detect_address))
         .route("/getAddressInformation", get(get_address_information))
         .route(
@@ -63,6 +64,7 @@ async fn post_jrpc(state: State<RpcState>, req: Request) -> Response {
 
 declare_jrpc_method! {
     pub enum MethodParams: Method {
+        Shards(GetShardsParams),
         DetectAddress(DetectAddressParams),
         GetAddressInformation(AccountParams),
         GetExtendedAddressInformation(AccountParams),
@@ -78,6 +80,7 @@ async fn post_jrpc_impl(State(state): State<RpcState>, req: Jrpc<JrpcId, Method>
     let label = [("method", req.method)];
     let _hist = HistogramGuard::begin_with_labels("tycho_jrpc_request_time", &label);
     match req.params {
+        MethodParams::Shards(p) => handle_get_shards(req.id, state, p).await,
         MethodParams::DetectAddress(p) => handle_detect_address(req.id, p).await,
         MethodParams::GetAddressInformation(p) => {
             handle_get_address_information(req.id, state, p).await
@@ -93,6 +96,36 @@ async fn post_jrpc_impl(State(state): State<RpcState>, req: Jrpc<JrpcId, Method>
         MethodParams::SendBocReturnHash(p) => handle_send_boc_return_hash(req.id, state, p).await,
         MethodParams::RunGetMethod(p) => handle_run_get_method(req.id, state, p).await,
     }
+}
+
+// === GET /shards ===
+
+fn get_shards(
+    State(state): State<RpcState>,
+    query: Result<Query<GetShardsParams>, QueryRejection>,
+) -> impl Future<Output = Response> {
+    match query {
+        Ok(Query(params)) => Either::Left(handle_get_shards(JrpcId::Skip, state, params)),
+        Err(e) => Either::Right(handle_rejection(e)),
+    }
+}
+
+async fn handle_get_shards(id: JrpcId, state: RpcState, p: GetShardsParams) -> Response {
+    let shards = match state.get_brief_shards_descr(p.seqno) {
+        Ok(Some(shards)) => shards,
+        Ok(None) => {
+            let e =
+                RpcStateError::Internal(anyhow::anyhow!("masterchain block {} not found", p.seqno));
+            return error_to_response(id, e);
+        }
+        Err(e) => return error_to_response(id, e),
+    };
+
+    ok_to_response(id, ShardsResponse {
+        ty: ShardsResponse::TY,
+        shards: &shards,
+        extra: TonlibExtra,
+    })
 }
 
 // === GET /detectAddress ===

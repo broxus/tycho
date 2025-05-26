@@ -15,7 +15,7 @@ use rand::Rng;
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::ExtMsgRepr;
-use tycho_storage::TransactionsIterBuilder;
+use tycho_storage::{BriefShardDescr, TransactionsIterBuilder};
 use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
 use crate::util::jrpc_extractor::{
@@ -114,6 +114,11 @@ impl Serialize for JrpcErrorResponse<JrpcId> {
 
 // === Requests ===
 
+#[derive(Debug, Deserialize)]
+pub struct GetShardsParams {
+    pub seqno: u32,
+}
+
 #[derive(Debug)]
 pub struct DetectAddressParams {
     pub address: StdAddr,
@@ -207,6 +212,38 @@ pub struct RunGetMethodParams {
 }
 
 // === Responses ===
+
+#[derive(Serialize)]
+pub struct ShardsResponse<'a> {
+    #[serde(rename = "@type")]
+    pub ty: &'static str,
+    #[serde(serialize_with = "ShardsResponse::serialize_shards")]
+    pub shards: &'a [BriefShardDescr],
+    #[serde(rename = "@extra")]
+    pub extra: TonlibExtra,
+}
+
+impl<'a> ShardsResponse<'a> {
+    pub const TY: &'static str = "blocks.shards";
+
+    fn serialize_shards<S: serde::Serializer>(
+        shards: &'a [BriefShardDescr],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut s = serializer.serialize_seq(Some(shards.len()))?;
+        for descr in shards {
+            s.serialize_element(&TonlibBlockId {
+                ty: TonlibBlockId::TY,
+                workchain: descr.shard_ident.workchain(),
+                shard: descr.shard_ident.prefix() as i64,
+                seqno: descr.seqno,
+                root_hash: descr.root_hash,
+                file_hash: descr.file_hash,
+            })?;
+        }
+        s.end()
+    }
+}
 
 pub struct AddressFormsResponse {
     pub raw_form: StdAddr,
