@@ -108,6 +108,47 @@ impl RpcStorage {
         InstanceId::from_slice(id.as_ref())
     }
 
+    pub fn get_brief_shards_descr(&self, mc_seqno: u32) -> Result<Option<Vec<BriefShardDescr>>> {
+        let mut key = [0x00; tables::BlocksByMcSeqno::KEY_LEN];
+        key[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
+        key[4] = -1i8 as u8;
+        key[5..13].copy_from_slice(&ShardIdent::PREFIX_FULL.to_be_bytes());
+        key[13..17].copy_from_slice(&mc_seqno.to_be_bytes());
+
+        let Some(value) = self.db.blocks_by_mc_seqno.get(key)? else {
+            return Ok(None);
+        };
+        let value = value.as_ref();
+
+        let shard_count = u32::from_le_bytes(
+            value[tables::BlocksByMcSeqno::VALUE_LEN..tables::BlocksByMcSeqno::VALUE_LEN + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+
+        let mut result = Vec::with_capacity(shard_count);
+        for i in 0..shard_count {
+            let offset =
+                tables::BlocksByMcSeqno::DESCR_OFFSET + i * tables::BlocksByMcSeqno::DESCR_LEN;
+            let descr = &value[offset..offset + tables::BlocksByMcSeqno::DESCR_LEN];
+
+            result.push(BriefShardDescr {
+                shard_ident: ShardIdent::new(
+                    descr[0] as i8 as i32,
+                    u64::from_le_bytes(descr[1..9].try_into().unwrap()),
+                )
+                .context("invalid top shard ident")?,
+                seqno: u32::from_le_bytes(descr[9..13].try_into().unwrap()),
+                root_hash: HashBytes::from_slice(&descr[13..45]),
+                file_hash: HashBytes::from_slice(&descr[45..77]),
+                start_lt: u64::from_le_bytes(descr[77..85].try_into().unwrap()),
+                end_lt: u64::from_le_bytes(descr[85..93].try_into().unwrap()),
+            });
+        }
+
+        Ok(Some(result))
+    }
+
     pub fn get_accounts_by_code_hash(
         &self,
         code_hash: &HashBytes,
@@ -1270,13 +1311,13 @@ impl RpcStorage {
     }
 }
 
-struct BriefShardDescr {
-    shard_ident: ShardIdent,
-    seqno: u32,
-    root_hash: HashBytes,
-    file_hash: HashBytes,
-    start_lt: u64,
-    end_lt: u64,
+pub struct BriefShardDescr {
+    pub shard_ident: ShardIdent,
+    pub seqno: u32,
+    pub root_hash: HashBytes,
+    pub file_hash: HashBytes,
+    pub start_lt: u64,
+    pub end_lt: u64,
 }
 
 pub struct CodeHashesIter<'a> {

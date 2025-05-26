@@ -18,7 +18,8 @@ use tycho_core::block_strider::{
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_storage::{
-    BlacklistedAccounts, CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder,
+    BlacklistedAccounts, BriefShardDescr, CodeHashesIter, KeyBlocksDirection, Storage,
+    TransactionsIterBuilder,
 };
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
@@ -226,6 +227,18 @@ impl RpcState {
 
     pub fn get_unpacked_blockchain_config(&self) -> Arc<LatestBlockchainConfig> {
         self.inner.blockchain_config.load_full()
+    }
+
+    pub fn get_brief_shards_descr(
+        &self,
+        mc_seqno: u32,
+    ) -> Result<Option<Vec<BriefShardDescr>>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_brief_shards_descr(mc_seqno)
+            .map_err(RpcStateError::Internal)
     }
 
     pub fn get_libraries(&self) -> Dict<HashBytes, LibDescr> {
