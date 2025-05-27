@@ -121,7 +121,7 @@ impl ShardStateStorage {
             let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
             let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
 
-            let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
+            let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time_high");
 
             let new_cell_count = cell_storage.store_cell(
                 &mut batch,
