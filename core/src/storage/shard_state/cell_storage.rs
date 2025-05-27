@@ -4,7 +4,9 @@ use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread::Scope;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "cells-metrics")]
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bumpalo::Bump;
@@ -657,6 +659,7 @@ impl CellStorage {
         hash: &HashBytes,
         epoch: u32,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
+        #[cfg(feature = "cells-metrics")]
         let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
         if let Some(cell) = self.cells_cache.get(hash)
@@ -701,16 +704,17 @@ impl CellStorage {
         };
 
         if has_new {
+            #[cfg(feature = "cells-metrics")]
             metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
         }
 
         Ok(cell)
     }
 
-    pub fn remove_cell_mt(
+    pub fn remove_cells_mt(
         &self,
         herd: &Herd,
-        root: &HashBytes,
+        roots: &[HashBytes],
         split_at: FastHashSet<HashBytes>,
     ) -> Result<(usize, WriteBatch), CellStorageError> {
         type RemoveResult = Result<(), CellStorageError>;
@@ -943,7 +947,24 @@ impl CellStorage {
 
         let ctx = RemoveContext::new(&self.cells_db, herd, &self.raw_cells_cache, split_at);
 
-        std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
+        std::thread::scope(|scope| {
+            let mut results = Vec::with_capacity(roots.len());
+
+            for root in roots {
+                let res = scope.spawn(|| -> RemoveResult { ctx.traverse_cell(root, scope) });
+                results.push(res);
+            }
+
+            results
+                .into_iter()
+                .map(|handle| match handle.join() {
+                    Ok(result) => result,
+                    Err(_panic) => Err(CellStorageError::Traverse),
+                })
+                .collect::<Result<Vec<_>, CellStorageError>>()?;
+
+            Ok::<(), CellStorageError>(())
+        })?;
 
         // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
         //       and a bit more just in case.
@@ -953,6 +974,7 @@ impl CellStorage {
         Ok((ctx.finalize(&mut batch), batch))
     }
 
+    #[allow(unused)]
     pub fn remove_cell(
         &self,
         alloc: &Bump,
@@ -1037,6 +1059,7 @@ impl CellStorage {
             .remove_if(hash, |_, cell| cell.weak.strong_count() == 0)
             .is_some()
         {
+            #[cfg(feature = "cells-metrics")]
             metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
         }
     }
@@ -1078,6 +1101,8 @@ pub enum CellStorageError {
     InvalidCell,
     #[error("Cell counter mismatch: expected refcount {expected}, got {actual} removes")]
     CounterMismatch { expected: i64, actual: u32 },
+    #[error("Cell traverse error")]
+    Traverse,
     #[error("Internal rocksdb error")]
     Internal(#[from] rocksdb::Error),
 }
@@ -1373,6 +1398,7 @@ pub union StorageCellReferenceData {
 
 struct RawCellsCache {
     inner: Cache<HashBytes, RawCellsCacheItem, CellSizeEstimator, FastHasherState>,
+    #[cfg(feature = "cells-metrics")]
     rocksdb_access_histogram: metrics::Histogram,
 }
 
@@ -1441,6 +1467,7 @@ impl RawCellsCache {
 
         Self {
             inner,
+            #[cfg(feature = "cells-metrics")]
             rocksdb_access_histogram: metrics::histogram!(
                 "tycho_storage_get_cell_from_rocksdb_time"
             ),
@@ -1458,10 +1485,10 @@ impl RawCellsCache {
             GuardResult::Value(value) => Ok(Some(value)),
             GuardResult::Guard(g) => {
                 let value = {
-                    let started_at = Instant::now();
-                    scopeguard::defer! {
+                    #[cfg(feature = "cells-metrics")]
+                    let _timer = scopeguard::guard(Instant::now(), |started_at| {
                         self.rocksdb_access_histogram.record(started_at.elapsed());
-                    }
+                    });
 
                     db.cells.get(key.as_slice())?
                 };
@@ -1582,7 +1609,7 @@ impl RawCellsCache {
                 Some((_, v)) => v,
             }
         } else {
-            // NOTE: `peek` here is used to avoid affecting a "hotness" of the value
+            // NOTE: `peek` here is used to avoid affecting "hotness" of the value
             match self.inner.peek(key) {
                 None => return,
                 Some(v) => v,
