@@ -798,6 +798,8 @@ impl Phase<FinalizeState> {
                 collation_data: self.state.collation_data,
                 block_candidate,
                 mc_data: new_mc_data,
+                state_update,
+                prev_pure_state_root: self.state.prev_shard_data.pure_state_root().clone(),
                 new_state_root,
                 new_observable_state,
                 finalize_wu_total,
