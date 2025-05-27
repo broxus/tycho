@@ -36,10 +36,14 @@ pub fn merge_operator(
 
 pub fn compaction_filter(_level: u32, _key: &[u8], value: &[u8]) -> Decision {
     if value.is_empty() {
+        #[cfg(feature = "cells-metrics")]
         metrics::counter!("tycho_compaction_removes").increment(1);
+
         Decision::Remove
     } else {
+        #[cfg(feature = "cells-metrics")]
         metrics::counter!("tycho_compaction_keeps").increment(1);
+
         Decision::Keep
     }
 }

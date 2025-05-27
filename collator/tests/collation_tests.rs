@@ -91,6 +91,7 @@ async fn test_collation_process_on_stubs() {
         fast_sync: false,
         accounts_split_depth: 4,
         merkle_split_depth: 5,
+        merkle_chain_limit: 5,
     };
 
     tracing::info!("Trying to start CollationManager");

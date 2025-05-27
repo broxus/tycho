@@ -4,7 +4,9 @@ use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread::Scope;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "cells-metrics")]
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bumpalo::Bump;
@@ -657,6 +659,7 @@ impl CellStorage {
         hash: &HashBytes,
         epoch: u32,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
+        #[cfg(feature = "cells-metrics")]
         let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
         if let Some(cell) = self.cells_cache.get(hash)
@@ -701,6 +704,7 @@ impl CellStorage {
         };
 
         if has_new {
+            #[cfg(feature = "cells-metrics")]
             metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
         }
 
@@ -953,6 +957,7 @@ impl CellStorage {
         Ok((ctx.finalize(&mut batch), batch))
     }
 
+    #[allow(unused)]
     pub fn remove_cell(
         &self,
         alloc: &Bump,
@@ -1037,6 +1042,7 @@ impl CellStorage {
             .remove_if(hash, |_, cell| cell.weak.strong_count() == 0)
             .is_some()
         {
+            #[cfg(feature = "cells-metrics")]
             metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
         }
     }
@@ -1373,6 +1379,7 @@ pub union StorageCellReferenceData {
 
 struct RawCellsCache {
     inner: Cache<HashBytes, RawCellsCacheItem, CellSizeEstimator, FastHasherState>,
+    #[cfg(feature = "cells-metrics")]
     rocksdb_access_histogram: metrics::Histogram,
 }
 
@@ -1441,6 +1448,7 @@ impl RawCellsCache {
 
         Self {
             inner,
+            #[cfg(feature = "cells-metrics")]
             rocksdb_access_histogram: metrics::histogram!(
                 "tycho_storage_get_cell_from_rocksdb_time"
             ),
@@ -1458,10 +1466,10 @@ impl RawCellsCache {
             GuardResult::Value(value) => Ok(Some(value)),
             GuardResult::Guard(g) => {
                 let value = {
-                    let started_at = Instant::now();
-                    scopeguard::defer! {
+                    #[cfg(feature = "cells-metrics")]
+                    let _timer = scopeguard::guard(Instant::now(), |started_at| {
                         self.rocksdb_access_histogram.record(started_at.elapsed());
-                    }
+                    });
 
                     db.cells.get(key.as_slice())?
                 };
@@ -1582,7 +1590,7 @@ impl RawCellsCache {
                 Some((_, v)) => v,
             }
         } else {
-            // NOTE: `peek` here is used to avoid affecting a "hotness" of the value
+            // NOTE: `peek` here is used to avoid affecting "hotness" of the value
             match self.inner.peek(key) {
                 None => return,
                 Some(v) => v,
