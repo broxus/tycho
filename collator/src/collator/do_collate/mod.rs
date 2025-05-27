@@ -904,16 +904,11 @@ impl CollatorStdImpl {
                 ref_by_mc_seqno: finalized.block_candidate.ref_by_mc_seqno,
             };
             let adapter = self.state_node_adapter.clone();
-            let labels = labels.clone();
             let new_state_root = finalized.new_state_root.clone();
             let hint = StoreStateHint {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
             };
             async move {
-                let _histogram = HistogramGuard::begin_with_labels(
-                    "tycho_collator_build_new_state_time_high",
-                    &labels,
-                );
                 adapter
                     .store_state_root(&block_id, meta, new_state_root, hint)
                     .await
@@ -953,6 +948,7 @@ impl CollatorStdImpl {
                 block_id,
                 finalized.new_observable_state,
                 finalized.new_state_root,
+                finalized.state_update,
                 store_new_state_task,
                 new_queue_diff_hash,
                 new_mc_data,
