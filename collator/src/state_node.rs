@@ -60,6 +60,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Return master or shard state on specified block from node local state
     async fn load_state(&self, ref_by_mc_seqno: u32, block_id: &BlockId)
     -> Result<ShardStateStuff>;
+    async fn load_state_root(&self, ref_by_mc_seqno: u32, block_id: &BlockId) -> Result<Cell>;
     /// Store shard state root in the storage.
     /// Returns `true` when state was updated in storage.
     async fn store_state_root(
@@ -196,7 +197,24 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             .shard_state_storage()
             .load_state(ref_by_mc_seqno, block_id)
             .await?;
+
         Ok(state)
+    }
+
+    async fn load_state_root(&self, ref_by_mc_seqno: u32, block_id: &BlockId) -> Result<Cell> {
+        let _histogram = HistogramGuard::begin("tycho_collator_state_load_state_root_time");
+
+        let hash = self
+            .storage
+            .shard_state_storage()
+            .load_state_root(block_id)?;
+
+        let cell = self
+            .storage
+            .shard_state_storage()
+            .load_cell(&hash, ref_by_mc_seqno)?;
+
+        Ok(cell)
     }
 
     async fn store_state_root(
@@ -206,7 +224,11 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         state_root: Cell,
         hint: StoreStateHint,
     ) -> Result<bool> {
-        let _histogram = HistogramGuard::begin("tycho_collator_state_store_state_root_time");
+        let labels = [("workchain", block_id.shard.workchain().to_string())];
+        let _histogram = HistogramGuard::begin_with_labels(
+            "tycho_collator_state_store_state_root_time_high",
+            &labels,
+        );
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
 
@@ -457,7 +479,7 @@ impl StateNodeAdapterStdImpl {
         .await;
 
         let _histogram =
-            HistogramGuard::begin("tycho_collator_state_adapter_save_block_proof_time");
+            HistogramGuard::begin("tycho_collator_state_adapter_save_block_proof_time_high");
 
         let block_storage = self.storage.block_storage();
         let result = block_storage

@@ -674,7 +674,7 @@ impl Phase<FinalizeState> {
                 &shard,
                 self.state.prev_shard_data.pure_state_root(),
                 &new_state_root,
-                &usage_tree,
+                usage_tree,
                 old_split_at,
                 new_split_at,
             )?;
@@ -896,6 +896,7 @@ impl Phase<FinalizeState> {
                 collation_data: self.state.collation_data,
                 block_candidate,
                 mc_data: new_mc_data,
+                state_update,
                 new_state_root,
                 new_observable_state,
                 finalize_wu: self.extra.finalize_wu,
@@ -1636,7 +1637,7 @@ fn create_merkle_update(
     shard_id: &ShardIdent,
     old_state_root: &Cell,
     new_state_root: &Cell,
-    usage_tree: &UsageTree,
+    usage_tree: UsageTree,
     old_split_at: ahash::HashSet<HashBytes>,
     new_split_at: ahash::HashSet<HashBytes>,
 ) -> Result<MerkleUpdate> {
