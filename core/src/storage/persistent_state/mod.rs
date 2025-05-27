@@ -333,7 +333,7 @@ impl PersistentStateStorage {
             // NOTE: Ensure that the tracker handle will outlive the state writer.
             let _tracker_handle = tracker_handle;
 
-            let root_hash = this.shard_states.load_state_root(handle.id())?;
+            let root_hash = this.shard_states.load_state_root_hash(handle.id())?;
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
