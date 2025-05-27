@@ -1575,18 +1575,18 @@ def collator_time_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_prepare_working_state_update_time_high",
-            "Prepare WorkingState update",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_heatmap_panel(
             "tycho_collator_resume_collation_time_high",
             "Resume collation",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_collator_resume_collation_apply_merkles_time_high",
+            "inc. apply Merkle Updates",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_collator_build_new_state_time_high",
-            "Build Pure State for next collation",
+            "Build State for next collation",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -2282,6 +2282,7 @@ def collator_state_adapter_metrics() -> RowPanel:
             "tycho_collator_state_store_state_root_time", "Store state root"
         ),
         create_heatmap_panel("tycho_collator_state_load_state_time", "Load state"),
+        create_heatmap_panel("tycho_collator_state_load_state_root_time", "Load state root"),
         create_heatmap_panel("tycho_collator_state_load_block_time", "Load block"),
         create_heatmap_panel(
             "tycho_collator_state_load_queue_diff_time", "Load queue diff"

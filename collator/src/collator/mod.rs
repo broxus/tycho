@@ -18,6 +18,7 @@ use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
 use tycho_types::cell::{Cell, HashBytes};
+use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
@@ -235,8 +236,11 @@ pub struct CollatorStdImpl {
     mpool_adapter: Arc<dyn MempoolAdapter>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     shard_id: ShardIdent,
+
     delayed_working_state: DelayedWorkingState,
-    store_new_state_tasks: Vec<JoinTask<Result<bool>>>,
+    store_new_state_tasks: Vec<StateUpdateContext>,
+    background_store_new_state_tx: std::sync::mpsc::Sender<StateUpdateContext>,
+
     anchors_cache: AnchorsCache,
     block_serializer_cache: BlockSerializerCache,
     stats: CollatorStats,
@@ -280,6 +284,9 @@ impl CollatorStdImpl {
 
         let (working_state_tx, working_state_rx) = oneshot::channel::<Result<Box<WorkingState>>>();
 
+        let (background_store_new_state_tx, background_store_new_state_rx) =
+            std::sync::mpsc::channel::<StateUpdateContext>();
+
         let processor = Self {
             next_block_info,
             config,
@@ -296,6 +303,7 @@ impl CollatorStdImpl {
                 }
             }),
             store_new_state_tasks: Default::default(),
+            background_store_new_state_tx,
             anchors_cache: Default::default(),
             block_serializer_cache: BlockSerializerCache::with_capacity(BLOCK_CELL_COUNT_BASELINE),
             stats: Default::default(),
@@ -306,6 +314,17 @@ impl CollatorStdImpl {
             cancel_collation,
             wu_tuner_event_sender,
         };
+
+        // finalize new state store tasks in background
+        tokio::spawn(async move {
+            while let Ok(cx) = background_store_new_state_rx.recv() {
+                if let Err(err) = cx.store_new_state_task.await {
+                    tracing::error!(target: tracing_targets::COLLATOR,
+                        "Error when store new state: {:?}", err,
+                    );
+                }
+            }
+        });
 
         // create dispatcher for own async tasks queue
         let dispatcher =
@@ -602,18 +621,7 @@ impl CollatorStdImpl {
 
         // update collation session info to refer to a correct subset in collated block
         self.collation_session = collation_session;
-
-        // previously wait when all state store tasks finished
-        if !self.store_new_state_tasks.is_empty() {
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "awaiting when all state store tasks finished...",
-            );
-            for task in self.store_new_state_tasks.drain(..) {
-                task.await?;
-            }
-        }
-
-        let mut working_state = if !reset {
+        let working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
 
             // update mc_data if newer
@@ -626,10 +634,51 @@ impl CollatorStdImpl {
                 }
 
                 // and only for shard collator
-                // reload prev states from storage to drop usage tree
-                if !self.shard_id.is_masterchain() && working_state.next_block_id_short.seqno != 0 {
-                    Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
-                        .await?;
+                // update prev states to drop usage tree
+                if !self.shard_id.is_masterchain()
+                    && self.store_new_state_tasks.len()
+                        > self.config.untrack_prev_state_after as usize
+                {
+                    // get last store task
+                    let last_task = self.store_new_state_tasks.pop().unwrap();
+
+                    // if it is finished then we can just reload prev state
+                    if last_task.store_new_state_task.is_finished() {
+                        last_task.store_new_state_task.await?;
+
+                        // and reload pure prev state in working state
+                        Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
+                            .await?;
+                    } else {
+                        // if it is not finished then wait for the previous one and apply merkle update
+                        let prev_task = self.store_new_state_tasks.pop().unwrap();
+                        prev_task.store_new_state_task.await?;
+
+                        // load stored state
+                        let mut pure_state_root = self
+                            .state_node_adapter
+                            .load_state_root(&prev_task.block_id)
+                            .await?;
+
+                        // apply state update from last task
+                        let histogram_apply_merkles = HistogramGuard::begin_with_labels(
+                            "tycho_collator_resume_collation_apply_merkles_time_high",
+                            &labels,
+                        );
+                        pure_state_root = last_task.state_update.apply(&pure_state_root)?;
+                        drop(histogram_apply_merkles);
+
+                        // finalize last store task in background
+                        self.background_store_new_state_tx.send(last_task)?;
+
+                        // and update pure prev state in working state
+                        Self::update_prev_data(&mut working_state, pure_state_root).await?;
+                    }
+
+                    // finalize all remaining state store tasks in background
+                    for cx in self.store_new_state_tasks.drain(..) {
+                        self.background_store_new_state_tx.send(cx)?;
+                    }
                 }
             }
 
@@ -640,6 +689,11 @@ impl CollatorStdImpl {
 
             working_state
         } else {
+            // finalize all remaining state store tasks in background
+            for cx in self.store_new_state_tasks.drain(..) {
+                self.background_store_new_state_tx.send(cx)?;
+            }
+
             // reset any delayed working state because we will init a new one
             self.delayed_working_state.reset();
 
@@ -788,6 +842,39 @@ impl CollatorStdImpl {
         Self::build_and_validate_init_working_state(mc_data, prev_states, prev_queue_diff_hashes)
     }
 
+    async fn update_prev_data(
+        working_state: &mut WorkingState,
+        pure_state_root: Cell,
+    ) -> Result<()> {
+        // drop prev shard data and usage tree
+        let prev_queue_diff_hashes;
+        let prev_blocks_ids;
+        let tracker;
+        {
+            working_state.usage_tree.take();
+
+            let prev_shard_data = working_state.prev_shard_data.take().unwrap();
+            prev_queue_diff_hashes = prev_shard_data.prev_queue_diff_hashes().clone();
+            prev_blocks_ids = prev_shard_data.blocks_ids().clone();
+            tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
+        }
+
+        let prev_state =
+            ShardStateStuff::from_root(&prev_blocks_ids[0], pure_state_root, &tracker)?;
+        let prev_states = vec![prev_state];
+
+        // update working state
+        tracing::debug!(target: tracing_targets::COLLATOR, "updating prev data in working state from built pure state root...");
+
+        let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
+
+        // set new prev shard data and usage tree
+        working_state.prev_shard_data = Some(prev_shard_data);
+        working_state.usage_tree = Some(usage_tree);
+
+        Ok(())
+    }
+
     async fn reload_prev_data(
         working_state: &mut WorkingState,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
@@ -811,7 +898,7 @@ impl CollatorStdImpl {
             Self::load_prev_states(state_node_adapter.as_ref(), &prev_blocks_ids).await?;
 
         // update working state
-        tracing::debug!(target: tracing_targets::COLLATOR, "updating working state...");
+        tracing::debug!(target: tracing_targets::COLLATOR, "updating prev data in working state from reloaded state root...");
 
         let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
@@ -828,7 +915,8 @@ impl CollatorStdImpl {
         &mut self,
         block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
-        new_state_root: Cell,
+        new_observable_state_root: Cell,
+        state_update: MerkleUpdate,
         store_new_state_task: JoinTask<Result<bool>>,
         new_queue_diff_hash: HashBytes,
         new_mc_data: Arc<McData>,
@@ -838,18 +926,12 @@ impl CollatorStdImpl {
         tracker: MinRefMcStateTracker,
         resume_collation_elapsed: Duration,
     ) -> Result<()> {
-        let labels = [("workchain", self.shard_id.workchain().to_string())];
-        let _histogram = HistogramGuard::begin_with_labels(
-            "tycho_collator_prepare_working_state_update_time_high",
-            &labels,
-        );
-
         enum GetNewShardStateStuff {
             ReloadFromStorage(JoinTask<Result<bool>>),
             BuildFromNewObservable {
                 block_id: BlockId,
-                shard_state: Box<ShardStateUnsplit>,
-                root: Cell,
+                new_observable_state: Box<ShardStateUnsplit>,
+                new_observable_state_root: Cell,
                 tracker: MinRefMcStateTracker,
             },
         }
@@ -859,13 +941,17 @@ impl CollatorStdImpl {
                 GetNewShardStateStuff::ReloadFromStorage(store_new_state_task)
             } else {
                 // append new store task
-                self.store_new_state_tasks.push(store_new_state_task);
+                self.store_new_state_tasks.push(StateUpdateContext {
+                    block_id,
+                    store_new_state_task,
+                    state_update,
+                });
 
                 // build state stuff from new observable state after collation
                 GetNewShardStateStuff::BuildFromNewObservable {
                     block_id,
-                    shard_state: new_observable_state,
-                    root: new_state_root,
+                    new_observable_state,
+                    new_observable_state_root,
                     tracker,
                 }
             }
@@ -873,14 +959,25 @@ impl CollatorStdImpl {
 
         let state_node_adapter = self.state_node_adapter.clone();
 
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
         self.delayed_working_state.future = Some(Box::pin(async move {
+            let _histogram = HistogramGuard::begin_with_labels(
+                "tycho_collator_build_new_state_time_high",
+                &labels,
+            );
+
             let new_state_stuff = match get_new_state_stuff {
                 GetNewShardStateStuff::BuildFromNewObservable {
                     block_id,
-                    shard_state,
-                    root,
+                    new_observable_state,
+                    new_observable_state_root,
                     tracker,
-                } => ShardStateStuff::from_state_and_root(&block_id, shard_state, root, &tracker)?,
+                } => ShardStateStuff::from_state_and_root(
+                    &block_id,
+                    new_observable_state,
+                    new_observable_state_root,
+                    &tracker,
+                )?,
                 GetNewShardStateStuff::ReloadFromStorage(store_new_state_task) => {
                     store_new_state_task.await?;
                     let load_task = JoinTask::new({
@@ -2143,6 +2240,12 @@ impl DelayedWorkingState {
         self.unused = None;
         self.future = None;
     }
+}
+
+struct StateUpdateContext {
+    block_id: BlockId,
+    store_new_state_task: JoinTask<Result<bool>>,
+    state_update: MerkleUpdate,
 }
 
 struct AnchorsProcessingInfo {

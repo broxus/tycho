@@ -895,6 +895,7 @@ impl Phase<FinalizeState> {
                 collation_data: self.state.collation_data,
                 block_candidate,
                 mc_data: new_mc_data,
+                state_update,
                 new_state_root,
                 new_observable_state,
                 finalize_wu: self.extra.finalize_wu,
