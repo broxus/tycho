@@ -701,10 +701,10 @@ impl CellStorage {
         Ok(cell)
     }
 
-    pub fn remove_cell_mt(
+    pub fn remove_cells_mt(
         &self,
         herd: &Herd,
-        root: &HashBytes,
+        roots: &[HashBytes],
         split_at: FastHashSet<HashBytes>,
     ) -> Result<(usize, WriteBatch), CellStorageError> {
         type RemoveResult = Result<(), CellStorageError>;
@@ -937,7 +937,24 @@ impl CellStorage {
 
         let ctx = RemoveContext::new(&self.db, herd, &self.raw_cells_cache, split_at);
 
-        std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
+        std::thread::scope(|scope| {
+            let mut results = Vec::with_capacity(roots.len());
+
+            for root in roots {
+                let res = scope.spawn(|| -> RemoveResult { ctx.traverse_cell(root, scope) });
+                results.push(res);
+            }
+
+            results
+                .into_iter()
+                .map(|handle| match handle.join() {
+                    Ok(result) => result,
+                    Err(_panic) => Err(CellStorageError::Traverse),
+                })
+                .collect::<Result<Vec<_>, CellStorageError>>()?;
+
+            Ok::<(), CellStorageError>(())
+        })?;
 
         // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
         //       and a bit more just in case.
@@ -947,6 +964,7 @@ impl CellStorage {
         Ok((ctx.finalize(&mut batch), batch))
     }
 
+    #[allow(unused)]
     pub fn remove_cell(
         &self,
         alloc: &Bump,
@@ -1072,6 +1090,8 @@ pub enum CellStorageError {
     InvalidCell,
     #[error("Cell counter mismatch: expected refcount {expected}, got {actual} removes")]
     CounterMismatch { expected: i64, actual: u32 },
+    #[error("Cell traverse error")]
+    Traverse,
     #[error("Internal rocksdb error")]
     Internal(#[from] rocksdb::Error),
 }
