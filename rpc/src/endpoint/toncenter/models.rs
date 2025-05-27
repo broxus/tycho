@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::num::NonZeroU8;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
@@ -15,7 +16,7 @@ use rand::Rng;
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::ExtMsgRepr;
-use tycho_storage::{BriefShardDescr, TransactionsIterBuilder};
+use tycho_storage::{BlockTransactionIdsIter, BriefShardDescr, TransactionsIterBuilder};
 use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
 use crate::util::jrpc_extractor::{
@@ -194,6 +195,27 @@ pub struct TransactionsParams {
 
 const fn default_tx_limit() -> u8 {
     10
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BlockTransactionsParams {
+    pub workchain: i8,
+    pub shard: i64,
+    pub seqno: u32,
+    #[serde(default, with = "serde_option_tonlib_hash")]
+    pub root_hash: Option<HashBytes>,
+    #[serde(default, with = "serde_option_tonlib_hash")]
+    pub file_hash: Option<HashBytes>,
+    #[serde(default, deserialize_with = "serde_string_or_u64::deserialize_option")]
+    pub after_lt: Option<u64>,
+    #[serde(default, with = "serde_option_tonlib_hash")]
+    pub after_hash: Option<HashBytes>,
+    #[serde(default = "default_block_tx_limit")]
+    pub count: NonZeroU8,
+}
+
+const fn default_block_tx_limit() -> NonZeroU8 {
+    NonZeroU8::new(10).unwrap()
 }
 
 #[derive(Debug, Deserialize)]
@@ -458,6 +480,88 @@ impl Serialize for GetTransactionsResponse<'_> {
 
         seq.end()
     }
+}
+
+pub struct GetBlockTransactionsResponse<'a> {
+    pub req_count: u8,
+    pub transactions: RefCell<Option<BlockTransactionIdsIter<'a>>>,
+}
+
+impl GetBlockTransactionsResponse<'_> {
+    const TY: &'static str = "blocks.transactions";
+}
+
+impl Serialize for GetBlockTransactionsResponse<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        struct TransactionsList<'a> {
+            req_count: usize,
+            incomplete: std::cell::Cell<bool>,
+            transactions: RefCell<BlockTransactionIdsIter<'a>>,
+        }
+
+        impl Serialize for TransactionsList<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut s = serializer.serialize_seq(None)?;
+
+                let mut iter = self.transactions.borrow_mut();
+                let mut n = 0usize;
+                for item in iter.by_ref().take(self.req_count) {
+                    n += 1;
+                    s.serialize_element(&TonlibBlockTransactionId {
+                        ty: TonlibBlockTransactionId::TY,
+                        mode: 135,
+                        account: &item.account,
+                        lt: item.lt,
+                        hash: &item.hash,
+                    })?;
+                }
+
+                if n >= self.req_count {
+                    self.incomplete.set(iter.next().is_some());
+                }
+
+                s.end()
+            }
+        }
+
+        let transactions = self
+            .transactions
+            .borrow_mut()
+            .take()
+            .expect("transactions response must not be serialized twise");
+
+        let mut s = serializer.serialize_struct("GetBlockTransactionsResponse", 6)?;
+        s.serialize_field("@type", Self::TY)?;
+        s.serialize_field("id", &TonlibBlockId::from(*transactions.block_id()))?;
+        s.serialize_field("req_count", &self.req_count)?;
+
+        let transactions = TransactionsList {
+            req_count: self.req_count as usize,
+            incomplete: std::cell::Cell::new(false),
+            transactions: RefCell::new(transactions),
+        };
+        s.serialize_field("transactions", &transactions)?;
+        s.serialize_field("incomplete", &transactions.incomplete.get())?;
+        s.serialize_field("@extra", &TonlibExtra)?;
+        s.end()
+    }
+}
+
+#[derive(Serialize)]
+pub struct TonlibBlockTransactionId<'a> {
+    #[serde(rename = "@type")]
+    pub ty: &'static str,
+    pub mode: u8,
+    #[serde(with = "serde_helpers::string")]
+    pub account: &'a StdAddr,
+    #[serde(with = "serde_helpers::string")]
+    pub lt: u64,
+    #[serde(with = "serde_tonlib_hash")]
+    pub hash: &'a HashBytes,
+}
+
+impl TonlibBlockTransactionId<'_> {
+    pub const TY: &'static str = "blocks.shortTxId";
 }
 
 #[derive(Serialize)]

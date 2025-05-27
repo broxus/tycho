@@ -190,9 +190,10 @@ impl RpcStorage {
         })
     }
 
-    pub fn get_block_transactions(
+    pub fn get_block_transaction_ids(
         &self,
         block_id: &BlockIdShort,
+        cursor: Option<&BlockTransactionsCursor>,
     ) -> Result<Option<BlockTransactionIdsIter<'_>>> {
         let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
             return Ok(None);
@@ -208,9 +209,23 @@ impl RpcStorage {
         range_from[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
         range_from[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
 
-        if !self.db.known_blocks.contains_key(&range_from[0..13])? {
-            return Ok(None);
+        if let Some(cursor) = cursor {
+            range_from[13..45].copy_from_slice(cursor.hash.as_slice());
+            range_from[45..53].copy_from_slice(&cursor.lt.to_be_bytes());
         }
+
+        let block_id = match self.db.known_blocks.get(&range_from[0..13])? {
+            Some(value) => {
+                let value = value.as_ref();
+                BlockId {
+                    shard: block_id.shard,
+                    seqno: block_id.seqno,
+                    root_hash: HashBytes::from_slice(&value[0..32]),
+                    file_hash: HashBytes::from_slice(&value[32..64]),
+                }
+            }
+            None => return Ok(None),
+        };
 
         let mut range_to = [0xff; tables::BlockTransactions::KEY_LEN];
         range_to[0..13].copy_from_slice(&range_from[0..13]);
@@ -225,7 +240,16 @@ impl RpcStorage {
         let mut iter = rocksdb.raw_iterator_cf_opt(&block_transactions_cf, readopts);
         iter.seek(range_from);
 
+        if cursor.is_some() {
+            if let Some(key) = iter.key() {
+                if key == range_from.as_slice() {
+                    iter.next();
+                }
+            }
+        }
+
         Ok(Some(BlockTransactionIdsIter {
+            block_id,
             inner: iter,
             snapshot,
         }))
@@ -911,7 +935,7 @@ impl RpcStorage {
             write_batch.put_cf(
                 &db.known_blocks.cf(),
                 &block_tx[0..tables::KnownBlocks::KEY_LEY],
-                [],
+                &tx_info[46..110],
             );
 
             // Write block info.
@@ -1369,14 +1393,24 @@ impl Iterator for RawCodeHashesIter<'_> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BlockTransactionsCursor {
+    pub hash: HashBytes,
+    pub lt: u64,
+}
+
 pub struct BlockTransactionIdsIter<'a> {
+    block_id: BlockId,
     inner: rocksdb::DBRawIterator<'a>,
     snapshot: Arc<OwnedSnapshot>,
 }
 
 impl BlockTransactionIdsIter<'_> {
-    #[inline]
-    pub fn snapshow(&self) -> &Arc<OwnedSnapshot> {
+    pub fn block_id(&self) -> &BlockId {
+        &self.block_id
+    }
+
+    pub fn snapshot(&self) -> &Arc<OwnedSnapshot> {
         &self.snapshot
     }
 }
