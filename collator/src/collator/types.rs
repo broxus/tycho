@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use everscale_types::boc;
 use everscale_types::cell::{Cell, CellFamily, HashBytes, Lazy, UsageTree, UsageTreeMode};
 use everscale_types::dict::{self, Dict};
+use everscale_types::merkle::MerkleUpdate;
 use everscale_types::models::{
     AccountBlocks, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
     BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg,
@@ -1200,6 +1201,7 @@ pub struct FinalizeBlockResult {
     pub block_candidate: Box<BlockCandidate>,
     pub mc_data: Option<Arc<McData>>,
     pub old_mc_data: Arc<McData>,
+    pub state_update: MerkleUpdate,
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
     pub finalize_wu_total: u64,

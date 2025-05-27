@@ -89,6 +89,7 @@ async fn test_collation_process_on_stubs() {
         check_value_flow: false,
         validate_config: true,
         fast_sync: false,
+        untrack_prev_state_after: 5,
     };
 
     tracing::info!("Trying to start CollationManager");
