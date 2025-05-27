@@ -18,8 +18,9 @@ use tycho_core::block_strider::{
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_storage::{
-    BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor, BriefShardDescr,
-    CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder,
+    BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor,
+    BlockTransactionsIterBuilder, BriefShardDescr, CodeHashesIter, KeyBlocksDirection, Storage,
+    TransactionsIterBuilder,
 };
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
@@ -276,11 +277,24 @@ impl RpcState {
             .map_err(RpcStateError::Internal)
     }
 
+    pub fn get_block_transactions(
+        &self,
+        block_id: &BlockIdShort,
+        cursor: Option<&BlockTransactionsCursor>,
+    ) -> Result<Option<BlockTransactionsIterBuilder>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_block_transactions(block_id, cursor)
+            .map_err(RpcStateError::Internal)
+    }
+
     pub fn get_block_transaction_ids(
         &self,
         block_id: &BlockIdShort,
         cursor: Option<&BlockTransactionsCursor>,
-    ) -> Result<Option<BlockTransactionIdsIter<'_>>, RpcStateError> {
+    ) -> Result<Option<BlockTransactionIdsIter>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
@@ -294,7 +308,7 @@ impl RpcState {
         account: &StdAddr,
         last_lt: Option<u64>,
         to_lt: u64,
-    ) -> Result<TransactionsIterBuilder<'_>, RpcStateError> {
+    ) -> Result<TransactionsIterBuilder, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };

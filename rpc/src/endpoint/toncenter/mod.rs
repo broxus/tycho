@@ -46,6 +46,7 @@ pub fn router() -> axum::Router<RpcState> {
         .route("/getWalletInformation", get(get_wallet_information))
         .route("/getTransactions", get(get_transactions))
         .route("/getBlockTransactions", get(get_block_transactions))
+        .route("/getBlockTransactionsExt", get(get_block_transactions_ext))
         .route("/sendBoc", post(post_send_boc))
         .route("/sendBocReturnHash", post(post_send_boc_return_hash))
         .route("/runGetMethod", post(post_run_get_method))
@@ -74,6 +75,7 @@ declare_jrpc_method! {
         GetWalletInformation(AccountParams),
         GetTransactions(TransactionsParams),
         GetBlockTransactions(BlockTransactionsParams),
+        GetBlockTransactionsExt(BlockTransactionsParams),
         SendBoc(SendBocParams),
         SendBocReturnHash(SendBocParams),
         RunGetMethod(RunGetMethodParams),
@@ -98,6 +100,9 @@ async fn post_jrpc_impl(State(state): State<RpcState>, req: Jrpc<JrpcId, Method>
         MethodParams::GetTransactions(p) => handle_get_transactions(req.id, state, p).await,
         MethodParams::GetBlockTransactions(p) => {
             handle_get_block_transactions(req.id, state, p).await
+        }
+        MethodParams::GetBlockTransactionsExt(p) => {
+            handle_get_block_transactions_ext(req.id, state, p).await
         }
         MethodParams::SendBoc(p) => handle_send_boc(req.id, state, p).await,
         MethodParams::SendBocReturnHash(p) => handle_send_boc_return_hash(req.id, state, p).await,
@@ -528,10 +533,87 @@ async fn handle_get_block_transactions(
         );
     }
 
-    ok_to_response(id, GetBlockTransactionsResponse {
+    ok_to_large_response(id, GetBlockTransactionsResponse {
         req_count: std::cmp::min(p.count.get(), MAX_LIMIT),
         transactions: RefCell::new(Some(iter)),
     })
+    .await
+}
+
+// === GET /get_block_transactions_ext ===
+
+fn get_block_transactions_ext(
+    State(state): State<RpcState>,
+    query: Result<Query<BlockTransactionsParams>, QueryRejection>,
+) -> impl Future<Output = Response> {
+    match query {
+        Ok(Query(params)) => Either::Left(handle_get_block_transactions_ext(
+            JrpcId::Skip,
+            state,
+            params,
+        )),
+        Err(e) => Either::Right(handle_rejection(e)),
+    }
+}
+
+async fn handle_get_block_transactions_ext(
+    id: JrpcId,
+    state: RpcState,
+    p: BlockTransactionsParams,
+) -> Response {
+    const MAX_LIMIT: u8 = 100;
+
+    let Some(shard) = ShardIdent::new(p.workchain as i32, p.shard as u64) else {
+        return error_to_response(
+            id,
+            RpcStateError::bad_request(anyhow!("invalid shard prefix")),
+        );
+    };
+    let block_id = BlockIdShort {
+        shard,
+        seqno: p.seqno,
+    };
+    let cursor = if p.after_hash.is_some() || p.after_lt.is_some() {
+        Some(BlockTransactionsCursor {
+            hash: p.after_hash.unwrap_or_default(),
+            lt: p.after_lt.unwrap_or_default(),
+        })
+    } else {
+        None
+    };
+
+    let iter = match state.get_block_transactions(&block_id, cursor.as_ref()) {
+        Ok(Some(iter)) => iter,
+        Ok(None) => {
+            let e = RpcStateError::Internal(anyhow!("block {block_id} not found"));
+            return error_to_response(id, e);
+        }
+        Err(e) => return error_to_response(id, e),
+    };
+
+    let mut is_block_id_ok = true;
+    if let Some(root_hash) = &p.root_hash {
+        is_block_id_ok &= iter.block_id().root_hash == *root_hash;
+    }
+    if let Some(file_hash) = &p.file_hash {
+        is_block_id_ok &= iter.block_id().file_hash == *file_hash;
+    }
+
+    if !is_block_id_ok {
+        return error_to_response(
+            id,
+            RpcStateError::bad_request(anyhow!(
+                "block root or file hash mismatch, \
+                better don't specify them anyway"
+            )),
+        );
+    }
+
+    ok_to_large_response(id, GetBlockTransactionsExtResponse {
+        req_count: std::cmp::min(p.count.get(), MAX_LIMIT),
+        transactions: RefCell::new(Some(iter)),
+    })
+    .await
 }
 
 // === POST /sendBoc ===
@@ -791,6 +873,19 @@ fn handle_rejection<T: Into<BadRequestError>>(e: T) -> futures_util::future::Rea
 
 fn ok_to_response<T: Serialize>(id: JrpcId, result: T) -> Response {
     JrpcOkResponse::new(id, result).into_response()
+}
+
+async fn ok_to_large_response<T: Serialize + Send + 'static>(id: JrpcId, result: T) -> Response {
+    // TODO: Use a separate pool of blocking tasks?
+    let handle = tokio::task::spawn_blocking({
+        let id = id.clone();
+        move || ok_to_response(id, result)
+    });
+
+    match handle.await {
+        Ok(res) => res,
+        Err(_) => error_to_response(id, RpcStateError::Internal(anyhow!("request cancelled"))),
+    }
 }
 
 fn error_to_response(id: JrpcId, e: RpcStateError) -> Response {

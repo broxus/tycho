@@ -16,7 +16,9 @@ use rand::Rng;
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::ExtMsgRepr;
-use tycho_storage::{BlockTransactionIdsIter, BriefShardDescr, TransactionsIterBuilder};
+use tycho_storage::{
+    BlockTransactionIdsIter, BlockTransactionsIterBuilder, BriefShardDescr, TransactionsIterBuilder,
+};
 use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
 use crate::util::jrpc_extractor::{
@@ -400,7 +402,7 @@ pub struct WalletInformationResponse {
 
 pub struct GetTransactionsResponse<'a> {
     pub address: &'a StdAddr,
-    pub list: RefCell<Option<TransactionsIterBuilder<'a>>>,
+    pub list: RefCell<Option<TransactionsIterBuilder>>,
     pub limit: u8,
     pub to_lt: u64,
 }
@@ -410,7 +412,7 @@ impl Serialize for GetTransactionsResponse<'_> {
     where
         S: serde::Serializer,
     {
-        use serde::ser::{Error, SerializeSeq};
+        use serde::ser::SerializeSeq;
 
         let list = self.list.borrow_mut().take().unwrap();
 
@@ -421,59 +423,13 @@ impl Serialize for GetTransactionsResponse<'_> {
         // NOTE: We use a `.map` from a separate impl thus we cannot use `.try_for_each`.
         #[allow(clippy::map_collect_result_unit)]
         list.map(|item| {
-            let cell = match Boc::decode(item) {
-                Ok(cell) => cell,
-                Err(e) => return Some(Err(S::Error::custom(e))),
-            };
-            let tx = match cell.parse::<Transaction>() {
-                Ok(tx) => tx,
-                Err(e) => return Some(Err(S::Error::custom(e))),
-            };
-            if tx.lt <= self.to_lt {
-                return None;
-            }
-
-            let hash = *cell.repr_hash();
-            drop(cell);
-
-            Some((|| {
-                let mut fee = tx.total_fees.tokens;
-
-                let mut out_msgs = Vec::with_capacity(tx.out_msg_count.into_inner() as _);
-                for item in tx.out_msgs.values() {
-                    let msg = item
-                        .and_then(|cell| TonlibMessage::parse(&cell))
-                        .map_err(Error::custom)?;
-
-                    fee = fee.saturating_add(msg.fwd_fee);
-                    fee = fee.saturating_add(msg.ihr_fee);
-                    out_msgs.push(msg);
-                }
-
-                let storage_fee = match tx.load_info().map_err(Error::custom)? {
-                    TxInfo::Ordinary(info) => match info.storage_phase {
-                        Some(phase) => phase.storage_fees_collected,
-                        None => Tokens::ZERO,
-                    },
-                    TxInfo::TickTock(info) => info.storage_phase.storage_fees_collected,
-                };
-
-                BASE64_STANDARD.encode_string(item, &mut buffer);
-                let res = seq.serialize_element(&TonlibTransaction {
-                    ty: TonlibTransaction::TY,
-                    address: TonlibAddress::new(self.address),
-                    utime: tx.now,
-                    data: &buffer,
-                    transaction_id: TonlibTransactionId::new(tx.lt, hash),
-                    fee,
-                    storage_fee,
-                    other_fee: fee.saturating_sub(storage_fee),
-                    in_msg: tx.in_msg,
-                    out_msgs,
-                });
-                buffer.clear();
-                res
-            })())
+            TonlibTransaction::handle_serde::<S, _, _, _, _>(
+                item,
+                &mut buffer,
+                |tx| tx.lt > self.to_lt,
+                |_| self.address.clone(),
+                |tx| seq.serialize_element(tx),
+            )
         })
         .take(self.limit as _)
         .collect::<Result<(), _>>()?;
@@ -482,32 +438,32 @@ impl Serialize for GetTransactionsResponse<'_> {
     }
 }
 
-pub struct GetBlockTransactionsResponse<'a> {
+pub struct GetBlockTransactionsResponse {
     pub req_count: u8,
-    pub transactions: RefCell<Option<BlockTransactionIdsIter<'a>>>,
+    pub transactions: RefCell<Option<BlockTransactionIdsIter>>,
 }
 
-impl GetBlockTransactionsResponse<'_> {
+impl GetBlockTransactionsResponse {
     const TY: &'static str = "blocks.transactions";
 }
 
-impl Serialize for GetBlockTransactionsResponse<'_> {
+impl Serialize for GetBlockTransactionsResponse {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        struct TransactionsList<'a> {
+        struct TransactionsList {
             req_count: usize,
             incomplete: std::cell::Cell<bool>,
-            transactions: RefCell<BlockTransactionIdsIter<'a>>,
+            transactions: RefCell<BlockTransactionIdsIter>,
         }
 
-        impl Serialize for TransactionsList<'_> {
+        impl Serialize for TransactionsList {
             fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                let mut s = serializer.serialize_seq(None)?;
+                let mut seq = serializer.serialize_seq(None)?;
 
                 let mut iter = self.transactions.borrow_mut();
                 let mut n = 0usize;
                 for item in iter.by_ref().take(self.req_count) {
                     n += 1;
-                    s.serialize_element(&TonlibBlockTransactionId {
+                    seq.serialize_element(&TonlibBlockTransactionId {
                         ty: TonlibBlockTransactionId::TY,
                         mode: 135,
                         account: &item.account,
@@ -520,7 +476,7 @@ impl Serialize for GetBlockTransactionsResponse<'_> {
                     self.incomplete.set(iter.next().is_some());
                 }
 
-                s.end()
+                seq.end()
             }
         }
 
@@ -547,6 +503,90 @@ impl Serialize for GetBlockTransactionsResponse<'_> {
     }
 }
 
+pub struct GetBlockTransactionsExtResponse {
+    pub req_count: u8,
+    pub transactions: RefCell<Option<BlockTransactionsIterBuilder>>,
+}
+
+impl GetBlockTransactionsExtResponse {
+    const TY: &'static str = "blocks.transactionsExt";
+}
+
+impl Serialize for GetBlockTransactionsExtResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        struct TransactionsList<'a> {
+            req_count: usize,
+            incomplete: std::cell::Cell<bool>,
+            transactions: &'a RefCell<Option<BlockTransactionsIterBuilder>>,
+        }
+
+        impl Serialize for TransactionsList<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let iter = self
+                    .transactions
+                    .borrow_mut()
+                    .take()
+                    .expect("transactions response must not be serialized twise");
+
+                let workchain = iter.block_id().shard.workchain() as i8;
+
+                let mut seq = serializer.serialize_seq(None)?;
+
+                let mut buffer = String::new();
+                let mut n = 0usize;
+
+                // NOTE: We use a `.map` from a separate impl thus we cannot use `.try_for_each`.
+                #[allow(clippy::map_collect_result_unit)]
+                let mut iter = iter.map(|item| {
+                    TonlibTransaction::handle_serde::<S, _, _, _, _>(
+                        item,
+                        &mut buffer,
+                        |_| true,
+                        |tx| StdAddr::new(workchain, tx.account),
+                        |tx| {
+                            n += 1;
+                            seq.serialize_element(&TonlibBlockTransaction {
+                                tx,
+                                account: tx.address.account_address,
+                            })
+                        },
+                    )
+                });
+
+                iter.by_ref()
+                    .take(self.req_count as _)
+                    .collect::<Result<(), _>>()?;
+
+                let mut iter = iter.into_ids();
+
+                if n >= self.req_count {
+                    self.incomplete.set(iter.next().is_some());
+                }
+
+                seq.end()
+            }
+        }
+
+        let mut s = serializer.serialize_struct("GetBlockTransactionsExtResponse", 6)?;
+        s.serialize_field("@type", Self::TY)?;
+        s.serialize_field(
+            "id",
+            &TonlibBlockId::from(*self.transactions.borrow().as_ref().unwrap().block_id()),
+        )?;
+        s.serialize_field("req_count", &self.req_count)?;
+
+        let transactions = TransactionsList {
+            req_count: self.req_count as usize,
+            incomplete: std::cell::Cell::new(false),
+            transactions: &self.transactions,
+        };
+        s.serialize_field("transactions", &transactions)?;
+        s.serialize_field("incomplete", &transactions.incomplete.get())?;
+        s.serialize_field("@extra", &TonlibExtra)?;
+        s.end()
+    }
+}
+
 #[derive(Serialize)]
 pub struct TonlibBlockTransactionId<'a> {
     #[serde(rename = "@type")]
@@ -562,6 +602,13 @@ pub struct TonlibBlockTransactionId<'a> {
 
 impl TonlibBlockTransactionId<'_> {
     pub const TY: &'static str = "blocks.shortTxId";
+}
+
+#[derive(Serialize)]
+pub struct TonlibBlockTransaction<'t, 'a> {
+    #[serde(flatten)]
+    pub tx: &'t TonlibTransaction<'a>,
+    pub account: &'a StdAddr,
 }
 
 #[derive(Serialize)]
@@ -585,6 +632,81 @@ pub struct TonlibTransaction<'a> {
 
 impl TonlibTransaction<'_> {
     pub const TY: &'static str = "raw.transaction";
+
+    fn handle_serde<S, T, F, A, P>(
+        item: T,
+        buffer: &mut String,
+        mut filter: F,
+        mut address: A,
+        mut serialize: P,
+    ) -> Option<Result<(), S::Error>>
+    where
+        S: serde::Serializer,
+        T: AsRef<[u8]>,
+        for<'a> A: FnMut(&'a Transaction) -> StdAddr,
+        for<'a> F: FnMut(&'a Transaction) -> bool,
+        for<'t, 'a> P: FnMut(&'t TonlibTransaction<'a>) -> Result<(), S::Error>,
+    {
+        use serde::ser::Error;
+
+        let item = item.as_ref();
+        let cell = match Boc::decode(item) {
+            Ok(cell) => cell,
+            Err(e) => return Some(Err(S::Error::custom(e))),
+        };
+        let tx = match cell.parse::<Transaction>() {
+            Ok(tx) => tx,
+            Err(e) => return Some(Err(S::Error::custom(e))),
+        };
+        if !filter(&tx) {
+            return None;
+        }
+
+        let hash = *cell.repr_hash();
+        drop(cell);
+
+        Some((|| {
+            let mut fee = tx.total_fees.tokens;
+
+            let mut out_msgs = Vec::with_capacity(tx.out_msg_count.into_inner() as _);
+            for item in tx.out_msgs.values() {
+                let msg = item
+                    .and_then(|cell| TonlibMessage::parse(&cell))
+                    .map_err(Error::custom)?;
+
+                fee = fee.saturating_add(msg.fwd_fee);
+                fee = fee.saturating_add(msg.ihr_fee);
+                out_msgs.push(msg);
+            }
+
+            let storage_fee = match tx.load_info().map_err(Error::custom)? {
+                TxInfo::Ordinary(info) => match info.storage_phase {
+                    Some(phase) => phase.storage_fees_collected,
+                    None => Tokens::ZERO,
+                },
+                TxInfo::TickTock(info) => info.storage_phase.storage_fees_collected,
+            };
+
+            BASE64_STANDARD.encode_string(item, buffer);
+
+            let address = address(&tx);
+            let item = TonlibTransaction {
+                ty: TonlibTransaction::TY,
+                address: TonlibAddress::new(&address),
+                utime: tx.now,
+                data: &*buffer,
+                transaction_id: TonlibTransactionId::new(tx.lt, hash),
+                fee,
+                storage_fee,
+                other_fee: fee.saturating_sub(storage_fee),
+                in_msg: tx.in_msg,
+                out_msgs,
+            };
+            let res = serialize(&item);
+            buffer.clear();
+            res
+        })())
+    }
 }
 
 #[derive(Serialize)]
