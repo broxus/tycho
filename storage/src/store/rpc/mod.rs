@@ -190,11 +190,26 @@ impl RpcStorage {
         })
     }
 
+    pub fn get_block_transactions(
+        &self,
+        block_id: &BlockIdShort,
+        cursor: Option<&BlockTransactionsCursor>,
+    ) -> Result<Option<BlockTransactionsIterBuilder>> {
+        let Some(ids) = self.get_block_transaction_ids(block_id, cursor)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(BlockTransactionsIterBuilder {
+            ids,
+            transactions_cf: self.db.transactions.get_unbounded_cf(),
+        }))
+    }
+
     pub fn get_block_transaction_ids(
         &self,
         block_id: &BlockIdShort,
         cursor: Option<&BlockTransactionsCursor>,
-    ) -> Result<Option<BlockTransactionIdsIter<'_>>> {
+    ) -> Result<Option<BlockTransactionIdsIter>> {
         let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
             return Ok(None);
         };
@@ -250,7 +265,8 @@ impl RpcStorage {
 
         Ok(Some(BlockTransactionIdsIter {
             block_id,
-            inner: iter,
+            // SAFETY: Iterator was created from the same DB instance.
+            inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), iter) },
             snapshot,
         }))
     }
@@ -260,7 +276,7 @@ impl RpcStorage {
         account: &StdAddr,
         mut last_lt: Option<u64>,
         mut to_lt: u64,
-    ) -> Result<TransactionsIterBuilder<'_>> {
+    ) -> Result<TransactionsIterBuilder> {
         if matches!(last_lt, Some(last_lt) if last_lt < to_lt) {
             // Make empty iterator if `last_lt < to_lt`.
             last_lt = Some(u64::MAX);
@@ -290,7 +306,8 @@ impl RpcStorage {
         iter.seek_for_prev(key);
 
         Ok(TransactionsIterBuilder {
-            inner: iter,
+            // SAFETY: Iterator was created from the same DB instance.
+            inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), iter) },
             snapshot,
         })
     }
@@ -1399,13 +1416,13 @@ pub struct BlockTransactionsCursor {
     pub lt: u64,
 }
 
-pub struct BlockTransactionIdsIter<'a> {
+pub struct BlockTransactionIdsIter {
     block_id: BlockId,
-    inner: rocksdb::DBRawIterator<'a>,
+    inner: weedb::OwnedRawIterator,
     snapshot: Arc<OwnedSnapshot>,
 }
 
-impl BlockTransactionIdsIter<'_> {
+impl BlockTransactionIdsIter {
     pub fn block_id(&self) -> &BlockId {
         &self.block_id
     }
@@ -1415,7 +1432,7 @@ impl BlockTransactionIdsIter<'_> {
     }
 }
 
-impl Iterator for BlockTransactionIdsIter<'_> {
+impl Iterator for BlockTransactionIdsIter {
     type Item = FullTransactionId;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1430,6 +1447,88 @@ impl Iterator for BlockTransactionIdsIter<'_> {
     }
 }
 
+pub struct BlockTransactionsIterBuilder {
+    ids: BlockTransactionIdsIter,
+    transactions_cf: weedb::UnboundedCfHandle,
+}
+
+impl BlockTransactionsIterBuilder {
+    #[inline]
+    pub fn into_ids(self) -> BlockTransactionIdsIter {
+        self.ids
+    }
+
+    pub fn map<F, R>(self, map: F) -> BlockTransactionsIter<F>
+    where
+        for<'a> F: FnMut(&'a [u8]) -> R,
+    {
+        BlockTransactionsIter {
+            ids: self.ids,
+            transactions_cf: self.transactions_cf,
+            map,
+        }
+    }
+}
+
+impl std::ops::Deref for BlockTransactionsIterBuilder {
+    type Target = BlockTransactionIdsIter;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.ids
+    }
+}
+
+pub struct BlockTransactionsIter<F> {
+    ids: BlockTransactionIdsIter,
+    transactions_cf: weedb::UnboundedCfHandle,
+    map: F,
+}
+
+impl<F> BlockTransactionsIter<F> {
+    #[inline]
+    pub fn into_ids(self) -> BlockTransactionIdsIter {
+        self.ids
+    }
+}
+
+impl<F> std::ops::Deref for BlockTransactionsIter<F> {
+    type Target = BlockTransactionIdsIter;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.ids
+    }
+}
+
+impl<F, R> Iterator for BlockTransactionsIter<F>
+where
+    for<'a> F: FnMut(&'a [u8]) -> Option<R>,
+{
+    type Item = R;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let id = self.ids.next()?;
+
+            let mut key = [0; tables::Transactions::KEY_LEN];
+            key[0] = id.account.workchain as u8;
+            key[1..33].copy_from_slice(id.account.address.as_slice());
+            key[33..41].copy_from_slice(&id.lt.to_be_bytes());
+
+            let cf = self.transactions_cf.bound();
+            let value = match self.ids.snapshot.get_pinned_cf(&cf, key) {
+                Ok(Some(value)) => value,
+                // TODO: Maybe return error here?
+                Ok(None) => continue,
+                // TODO: Maybe return error here?
+                Err(_) => return None,
+            };
+            break (self.map)(TransactionData::read_transaction(&value));
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FullTransactionId {
     pub account: StdAddr,
@@ -1437,16 +1536,16 @@ pub struct FullTransactionId {
     pub hash: HashBytes,
 }
 
-pub struct TransactionsIterBuilder<'a> {
-    inner: rocksdb::DBRawIterator<'a>,
+pub struct TransactionsIterBuilder {
+    inner: weedb::OwnedRawIterator,
     // NOTE: We must store the snapshot for as long as iterator is alive.
     snapshot: Option<Arc<OwnedSnapshot>>,
 }
 
-impl<'a> TransactionsIterBuilder<'a> {
-    pub fn map<F, R>(self, map: F) -> TransactionsIter<'a, F>
+impl TransactionsIterBuilder {
+    pub fn map<F, R>(self, map: F) -> TransactionsIter<F>
     where
-        for<'s> F: FnMut(&'s [u8]) -> R,
+        for<'a> F: FnMut(&'a [u8]) -> R,
     {
         TransactionsIter {
             inner: self.inner,
@@ -1456,13 +1555,13 @@ impl<'a> TransactionsIterBuilder<'a> {
     }
 }
 
-pub struct TransactionsIter<'a, F> {
-    inner: rocksdb::DBRawIterator<'a>,
+pub struct TransactionsIter<F> {
+    inner: weedb::OwnedRawIterator,
     map: F,
     _snapshot: Option<Arc<OwnedSnapshot>>,
 }
 
-impl<F, R> Iterator for TransactionsIter<'_, F>
+impl<F, R> Iterator for TransactionsIter<F>
 where
     for<'a> F: FnMut(&'a [u8]) -> Option<R>,
 {
