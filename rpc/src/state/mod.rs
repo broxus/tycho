@@ -18,8 +18,8 @@ use tycho_core::block_strider::{
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_storage::{
-    BlacklistedAccounts, BriefShardDescr, CodeHashesIter, KeyBlocksDirection, Storage,
-    TransactionsIterBuilder,
+    BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor, BriefShardDescr,
+    CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder,
 };
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
@@ -273,6 +273,19 @@ impl RpcState {
         };
         storage
             .get_accounts_by_code_hash(code_hash, continuation)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_block_transaction_ids(
+        &self,
+        block_id: &BlockIdShort,
+        cursor: Option<&BlockTransactionsCursor>,
+    ) -> Result<Option<BlockTransactionIdsIter<'_>>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_block_transaction_ids(block_id, cursor)
             .map_err(RpcStateError::Internal)
     }
 
@@ -986,6 +999,12 @@ pub enum RpcStateError {
     Internal(#[from] anyhow::Error),
     #[error(transparent)]
     BadRequest(#[from] BadRequestError),
+}
+
+impl RpcStateError {
+    pub fn bad_request<E: Into<anyhow::Error>>(error: E) -> Self {
+        Self::BadRequest(BadRequestError(error.into()))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

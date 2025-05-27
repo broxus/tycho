@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::future::Future;
 
+use anyhow::anyhow;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Query, Request, State};
 use axum::http::status::StatusCode;
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use tycho_block_util::message::{
     normalize_external_message, parse_external_message, validate_external_message,
 };
+use tycho_storage::BlockTransactionsCursor;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
@@ -43,6 +45,7 @@ pub fn router() -> axum::Router<RpcState> {
         )
         .route("/getWalletInformation", get(get_wallet_information))
         .route("/getTransactions", get(get_transactions))
+        .route("/getBlockTransactions", get(get_block_transactions))
         .route("/sendBoc", post(post_send_boc))
         .route("/sendBocReturnHash", post(post_send_boc_return_hash))
         .route("/runGetMethod", post(post_run_get_method))
@@ -70,6 +73,7 @@ declare_jrpc_method! {
         GetExtendedAddressInformation(AccountParams),
         GetWalletInformation(AccountParams),
         GetTransactions(TransactionsParams),
+        GetBlockTransactions(BlockTransactionsParams),
         SendBoc(SendBocParams),
         SendBocReturnHash(SendBocParams),
         RunGetMethod(RunGetMethodParams),
@@ -92,6 +96,9 @@ async fn post_jrpc_impl(State(state): State<RpcState>, req: Jrpc<JrpcId, Method>
             handle_get_wallet_information(req.id, state, p).await
         }
         MethodParams::GetTransactions(p) => handle_get_transactions(req.id, state, p).await,
+        MethodParams::GetBlockTransactions(p) => {
+            handle_get_block_transactions(req.id, state, p).await
+        }
         MethodParams::SendBoc(p) => handle_send_boc(req.id, state, p).await,
         MethodParams::SendBocReturnHash(p) => handle_send_boc_return_hash(req.id, state, p).await,
         MethodParams::RunGetMethod(p) => handle_run_get_method(req.id, state, p).await,
@@ -114,8 +121,7 @@ async fn handle_get_shards(id: JrpcId, state: RpcState, p: GetShardsParams) -> R
     let shards = match state.get_brief_shards_descr(p.seqno) {
         Ok(Some(shards)) => shards,
         Ok(None) => {
-            let e =
-                RpcStateError::Internal(anyhow::anyhow!("masterchain block {} not found", p.seqno));
+            let e = RpcStateError::Internal(anyhow!("masterchain block {} not found", p.seqno));
             return error_to_response(id, e);
         }
         Err(e) => return error_to_response(id, e),
@@ -455,6 +461,79 @@ async fn handle_get_transactions(id: JrpcId, state: RpcState, p: TransactionsPar
     }
 }
 
+// === GET /getBlockTransactions ===
+
+fn get_block_transactions(
+    State(state): State<RpcState>,
+    query: Result<Query<BlockTransactionsParams>, QueryRejection>,
+) -> impl Future<Output = Response> {
+    match query {
+        Ok(Query(params)) => {
+            Either::Left(handle_get_block_transactions(JrpcId::Skip, state, params))
+        }
+        Err(e) => Either::Right(handle_rejection(e)),
+    }
+}
+
+async fn handle_get_block_transactions(
+    id: JrpcId,
+    state: RpcState,
+    p: BlockTransactionsParams,
+) -> Response {
+    const MAX_LIMIT: u8 = 100;
+
+    let Some(shard) = ShardIdent::new(p.workchain as i32, p.shard as u64) else {
+        return error_to_response(
+            id,
+            RpcStateError::bad_request(anyhow!("invalid shard prefix")),
+        );
+    };
+    let block_id = BlockIdShort {
+        shard,
+        seqno: p.seqno,
+    };
+    let cursor = if p.after_hash.is_some() || p.after_lt.is_some() {
+        Some(BlockTransactionsCursor {
+            hash: p.after_hash.unwrap_or_default(),
+            lt: p.after_lt.unwrap_or_default(),
+        })
+    } else {
+        None
+    };
+
+    let iter = match state.get_block_transaction_ids(&block_id, cursor.as_ref()) {
+        Ok(Some(iter)) => iter,
+        Ok(None) => {
+            let e = RpcStateError::Internal(anyhow!("block {block_id} not found"));
+            return error_to_response(id, e);
+        }
+        Err(e) => return error_to_response(id, e),
+    };
+
+    let mut is_block_id_ok = true;
+    if let Some(root_hash) = &p.root_hash {
+        is_block_id_ok &= iter.block_id().root_hash == *root_hash;
+    }
+    if let Some(file_hash) = &p.file_hash {
+        is_block_id_ok &= iter.block_id().file_hash == *file_hash;
+    }
+
+    if !is_block_id_ok {
+        return error_to_response(
+            id,
+            RpcStateError::bad_request(anyhow!(
+                "block root or file hash mismatch, \
+                better don't specify them anyway"
+            )),
+        );
+    }
+
+    ok_to_response(id, GetBlockTransactionsResponse {
+        req_count: std::cmp::min(p.count.get(), MAX_LIMIT),
+        transactions: RefCell::new(Some(iter)),
+    })
+}
+
 // === POST /sendBoc ===
 
 fn post_send_boc(
@@ -689,7 +768,7 @@ async fn handle_run_get_method(id: JrpcId, state: RpcState, p: RunGetMethodParam
             }
             Err(RunMethodError::TooBigStack(n)) => error_to_response(
                 id,
-                RpcStateError::Internal(anyhow::anyhow!("response stack is too big to send: {n}")),
+                RpcStateError::Internal(anyhow!("response stack is too big to send: {n}")),
             ),
         };
 
