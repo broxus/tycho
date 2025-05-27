@@ -12,6 +12,7 @@ use tycho_storage::fs::TempFileStorage;
 use tycho_storage::kv::StoredValue;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
+use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
@@ -169,7 +170,7 @@ impl ShardStateStorage {
 
             raw_db.write(batch)?;
 
-            drop(root_cell);
+            Reclaimer::instance().drop(root_cell);
 
             hist.finish();
 
@@ -238,6 +239,11 @@ impl ShardStateStorage {
         metrics::gauge!("tycho_storage_state_max_epoch").set(max_known_epoch);
 
         ShardStateStuff::from_root(block_id, Cell::from(cell as Arc<_>), &self.min_ref_mc_state)
+    }
+
+    pub fn load_cell(&self, cell_id: &HashBytes, epoch: u32) -> Result<Cell> {
+        let cell = self.cell_storage.load_cell(cell_id, epoch)?;
+        Ok(Cell::from(cell as Arc<_>))
     }
 
     #[tracing::instrument(skip(self))]
