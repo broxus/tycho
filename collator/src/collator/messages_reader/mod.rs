@@ -217,16 +217,29 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                     .copied()
                     .collect();
 
+                cumulative_stats_just_loaded = true;
                 match (previous_cumulative_statistics, cx.part_stat_ranges) {
                     (Some(mut previous_cumulative_statistics), Some(part_stat_ranges)) => {
+                        // update all_shards_processed_to_by_partitions and truncate processed data
                         previous_cumulative_statistics.update_processed_to_by_partitions(
-                            params.all_shards_processed_to_by_partitions,
+                            params.all_shards_processed_to_by_partitions.clone(),
                         );
+
+                        // truncate data before range
+                        previous_cumulative_statistics.truncate_before(
+                            &cx.for_shard_id,
+                            cx.prev_state_gen_lt,
+                            cx.mc_state_gen_lt,
+                            &cx.mc_top_shards_end_lts.iter().copied().collect(),
+                        );
+
+                        // partial load statistics and enrich current value
                         previous_cumulative_statistics.load_partial(
                             mq_adapter.clone(),
                             &partitions,
                             part_stat_ranges,
                         )?;
+
                         previous_cumulative_statistics
                     }
                     _ => {
@@ -240,7 +253,6 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                             cx.mc_state_gen_lt,
                             &cx.mc_top_shards_end_lts.iter().copied().collect(),
                         )?;
-                        cumulative_stats_just_loaded = true;
                         inner_cumulative_statistics
                     }
                 }

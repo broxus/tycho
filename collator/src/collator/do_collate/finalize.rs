@@ -744,7 +744,6 @@ impl Phase<FinalizeState> {
                         .collation_data
                         .mc_shards_processed_to_by_partitions
                         .clone(),
-
                     prev_mc_block_id: Some(self.state.mc_data.block_id),
                 }))
             }
