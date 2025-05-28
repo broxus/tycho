@@ -1,9 +1,10 @@
 use everscale_types::cell::Lazy;
 use everscale_types::dict::{
-    aug_dict_insert, aug_dict_modify_from_sorted_iter, aug_dict_remove_owned,
-    build_aug_dict_from_sorted_iter, AugDictExtra, DictKey, SetMode,
+    aug_dict_insert, aug_dict_merge_siblings, aug_dict_modify_from_sorted_iter,
+    aug_dict_remove_owned, build_aug_dict_from_sorted_iter, AugDictExtra, DictKey, SetMode,
 };
 use everscale_types::error::Error;
+use everscale_types::models::ShardIdent;
 use everscale_types::prelude::*;
 
 pub struct RelaxedAugDict<K, A, V> {
@@ -138,5 +139,157 @@ where
         let mut res = AugDict::<K, A, V>::from_parts(Dict::from_raw(self.dict_root), A::default());
         res.update_root_extra()?;
         Ok(res)
+    }
+}
+
+#[allow(clippy::type_complexity)]
+pub fn split_aug_dict<K, A, V>(
+    workchain: i32,
+    dict: AugDict<K, A, V>,
+    depth: u8,
+) -> Result<Vec<(ShardIdent, AugDict<K, A, V>)>, Error>
+where
+    K: StoreDictKey,
+    V: Store,
+    for<'a> A: AugDictExtra + Store + Load<'a>,
+{
+    fn split_dict_impl<K, A, V>(
+        shard: &ShardIdent,
+        dict: AugDict<K, A, V>,
+        depth: u8,
+        shards: &mut Vec<(ShardIdent, AugDict<K, A, V>)>,
+        builder: &mut CellDataBuilder,
+    ) -> Result<(), Error>
+    where
+        K: StoreDictKey,
+        V: Store,
+        for<'a> A: AugDictExtra + Store + Load<'a>,
+    {
+        let (left_shard_ident, right_shard_ident) = 'split: {
+            if depth > 0 {
+                if let Some((left, right)) = shard.split() {
+                    break 'split (left, right);
+                }
+            }
+            shards.push((*shard, dict));
+            return Ok(());
+        };
+
+        let (left_dict, right_dict) = {
+            builder.clear_bits();
+            let prefix_len = shard.prefix_len();
+            if prefix_len > 0 {
+                builder.store_uint(shard.prefix() >> (64 - prefix_len), prefix_len)?;
+            }
+            dict.split_by_prefix(&builder.as_data_slice())?
+        };
+
+        split_dict_impl(&left_shard_ident, left_dict, depth - 1, shards, builder)?;
+        split_dict_impl(&right_shard_ident, right_dict, depth - 1, shards, builder)
+    }
+
+    let mut shards = Vec::with_capacity(2usize.pow(depth as _));
+
+    split_dict_impl(
+        &ShardIdent::new_full(workchain),
+        dict,
+        depth,
+        &mut shards,
+        &mut CellDataBuilder::new(),
+    )?;
+
+    Ok(shards)
+}
+
+/// Merges multiple `RelaxedAugDict` into a single one using a binary tree approach.
+pub fn merge_relaxed_aug_dicts<I, K, A, V>(shards: I) -> Result<AugDict<K, A, V>, Error>
+where
+    I: IntoIterator<Item = (ShardIdent, RelaxedAugDict<K, A, V>)>,
+    K: StoreDictKey,
+    V: Store,
+    for<'a> A: AugDictExtra + Store + Load<'a>,
+{
+    let mut stack = Vec::<(ShardIdent, Option<Cell>)>::new();
+
+    for (shard, dict) in shards {
+        stack.push((shard, dict.dict_root));
+
+        while let [.., (left_shard, left_root), (right_shard, right_root)] = stack.as_slice() {
+            let Some(opposite) = left_shard.opposite() else {
+                // There cannot be two items in the stack when one of them is a "full" shard.
+                return Err(Error::InvalidData);
+            };
+
+            if *right_shard == opposite {
+                let merged_shard = left_shard.merge().unwrap();
+                let merged_root = aug_dict_merge_siblings(
+                    left_root,
+                    right_root,
+                    K::BITS,
+                    A::comp_add,
+                    Cell::empty_context(),
+                )?;
+
+                stack.pop();
+                stack.pop();
+                stack.push((merged_shard, merged_root));
+            } else {
+                break;
+            }
+        }
+    }
+
+    let mut stack = stack.into_iter();
+    let Some((merged_shard, merged_root)) = stack.next() else {
+        return Err(Error::InvalidData);
+    };
+    if !merged_shard.is_full() || stack.next().is_some() {
+        return Err(Error::InvalidData);
+    }
+
+    let mut res = AugDict::from_parts(Dict::from_raw(merged_root), A::default());
+    res.update_root_extra()?;
+
+    Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::marker::PhantomData;
+
+    use everscale_types::models::DepthBalanceInfo;
+
+    use super::*;
+
+    #[test]
+    fn split_merge_works() -> anyhow::Result<()> {
+        type MyAugDict = AugDict<u32, DepthBalanceInfo, ()>;
+
+        fn test_split_merge(dict: MyAugDict, depth: u8) {
+            let shards = split_aug_dict(0, dict.clone(), depth).unwrap();
+            println!("SHARD LEN: {}", shards.len());
+
+            let merged = merge_relaxed_aug_dicts(shards.into_iter().map(|(shard, dict)| {
+                let (dict, _) = dict.into_parts();
+                (shard, RelaxedAugDict {
+                    dict_root: dict.into_root(),
+                    _marker: PhantomData::<(u32, DepthBalanceInfo, ())>,
+                })
+            }))
+            .unwrap();
+
+            assert_eq!(dict, merged);
+        }
+
+        let mut dict = MyAugDict::new();
+        for i in 0..100 {
+            dict.set(i, DepthBalanceInfo::default(), ())?;
+        }
+
+        for depth in 0..7 {
+            test_split_merge(dict.clone(), depth);
+        }
+
+        Ok(())
     }
 }

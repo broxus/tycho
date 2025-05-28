@@ -54,6 +54,10 @@ impl MessagesExecutor {
         }
     }
 
+    pub fn shard_id(&self) -> ShardIdent {
+        self.shard_id
+    }
+
     pub fn min_next_lt(&self) -> u64 {
         self.min_next_lt
     }
