@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -1310,6 +1311,7 @@ impl CumulativeStatistics {
         }
     }
 
+    /// Create range and full load statistics and store it
     pub fn load<V: InternalMessageValue>(
         &mut self,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
@@ -1344,6 +1346,7 @@ impl CumulativeStatistics {
         partitions: &FastHashSet<QueuePartitionIdx>,
         ranges: Vec<QueueShardBoundedRange>,
     ) -> Result<()> {
+        self.dirty = true;
         tracing::trace!(
             target: tracing_targets::COLLATOR,
             "cumulative_stats_partial_ranges: {:?}",
@@ -1378,14 +1381,68 @@ impl CumulativeStatistics {
         Ok(())
     }
 
+    /// Create range and remove data before this range
+    pub fn truncate_before(
+        &mut self,
+        current_shard: &ShardIdent,
+        prev_state_gen_lt: Lt,
+        mc_state_gen_lt: Lt,
+        mc_top_shards_end_lts: &FastHashMap<ShardIdent, Lt>,
+    ) {
+        let ranges = Self::compute_cumulative_stats_ranges(
+            current_shard,
+            &self.all_shards_processed_to_by_partitions,
+            prev_state_gen_lt,
+            mc_state_gen_lt,
+            mc_top_shards_end_lts,
+        );
+
+        for r in &ranges {
+            self.truncate_range(r);
+        }
+
+        self.dirty = true;
+    }
+
+    /// Remove data before range
+    fn truncate_range(&mut self, range: &QueueShardBoundedRange) {
+        let cut_key = match &range.from {
+            Bound::Included(k) | Bound::Excluded(k) => *k,
+        };
+
+        if let Some(by_partitions) = self.shards_stats_by_partitions.get_mut(&range.shard_ident) {
+            by_partitions.retain(|_part, diffs| {
+                diffs.retain(|k, _| k > &cut_key);
+                !diffs.is_empty()
+            });
+
+            if by_partitions.is_empty() {
+                self.shards_stats_by_partitions.remove(&range.shard_ident);
+            }
+        }
+    }
+
+    /// Update `all_shards_processed_to_by_partitions` and remove
+    /// processed data
     pub fn update_processed_to_by_partitions(
         &mut self,
-        all_shards_processed_to_by_partitions: FastHashMap<
-            ShardIdent,
-            (bool, ProcessedToByPartitions),
-        >,
+        new_pt: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
     ) {
-        self.all_shards_processed_to_by_partitions = all_shards_processed_to_by_partitions;
+        for (&dst_shard, (_, ref processed_to)) in &new_pt {
+            let changed = match self.all_shards_processed_to_by_partitions.get(&dst_shard) {
+                Some((_, old_pt)) => old_pt != processed_to,
+                None => true,
+            };
+
+            if changed {
+                self.handle_processed_to_update(dst_shard, processed_to.clone());
+            }
+        }
+
+        // TODO should remove full stat by shard if it doesn't exist in new_pt?
+
+        self.all_shards_processed_to_by_partitions = new_pt;
+        self.dirty = true;
     }
 
     fn compute_cumulative_stats_ranges(
@@ -1445,6 +1502,9 @@ impl CumulativeStatistics {
                     }
                 }
             }
+        }
+        if diff_partition_stats.is_empty() {
+            return;
         }
 
         // finally add weeded stats
@@ -1605,6 +1665,35 @@ impl CumulativeStatistics {
         }
 
         self.dirty = false;
+    }
+}
+
+impl fmt::Debug for CumulativeStatistics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let shards_summary: Vec<String> = self
+            .shards_stats_by_partitions
+            .iter()
+            .map(|(shard_id, by_partitions)| {
+                let parts: Vec<String> = by_partitions
+                    .iter()
+                    .map(|(part, diffs)| format!("p{}:{}", part, diffs.len()))
+                    .collect();
+                format!("{} -> {}", shard_id, parts.join(", "))
+            })
+            .collect();
+
+        f.debug_struct("CumulativeStatistics")
+            .field(
+                "processed_to",
+                &format!(
+                    "{} shards",
+                    self.all_shards_processed_to_by_partitions.len()
+                ),
+            )
+            .field("shards_stats_by_partitions", &shards_summary)
+            .field("result", &format!("{} partitions", self.result.len()))
+            .field("dirty", &self.dirty)
+            .finish()
     }
 }
 
