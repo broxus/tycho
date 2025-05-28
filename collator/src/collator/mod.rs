@@ -605,15 +605,21 @@ impl CollatorStdImpl {
         // update collation session info to refer to a correct subset in collated block
         self.collation_session = collation_session;
 
-        // previously wait when all state store tasks finished
-        // HACK: do not wait for previous state store tasks
-        if !self.store_new_state_tasks.is_empty() && false {
+        // previously wait when the last state store task finished
+        if !self.store_new_state_tasks.is_empty() {
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "awaiting when all state store tasks finished...",
+                "awaiting when state store task finished...",
             );
-            for task in self.store_new_state_tasks.drain(..) {
-                task.await?;
+            // wait all previous tasks in a separate thread
+            for task in self
+                .store_new_state_tasks
+                .drain(..self.store_new_state_tasks.len().saturating_sub(1))
+            {
+                self.store_new_state_tasks_tx.send(task)?;
             }
+            // wait the last task here
+            let last_task = self.store_new_state_tasks.pop().unwrap();
+            last_task.await?;
         }
 
         let working_state = if !reset {
@@ -630,9 +636,7 @@ impl CollatorStdImpl {
 
                 // and only for shard collator
                 // reload prev states from storage to drop usage tree
-                assert_ne!(working_state.next_block_id_short.seqno, 0);
-                // HACK: do not reload shard state to drop usage tree
-                if !self.shard_id.is_masterchain() && false {
+                if !self.shard_id.is_masterchain() {
                     Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
                         .await?;
                 }
@@ -865,36 +869,38 @@ impl CollatorStdImpl {
         }
 
         let get_new_state_stuff = {
-            // HACK: always use updated observable state
-            if block_id.is_masterchain() && false {
+            if block_id.is_masterchain() {
                 GetNewShardStateStuff::ReloadFromStorage(store_new_state_task)
             } else {
                 // append new store task
-                // HACK: do not collect state store tasks because we will not wait them
-                // self.store_new_state_tasks.push(store_new_state_task);
-
-                self.store_new_state_tasks_tx.send(store_new_state_task)?;
+                self.store_new_state_tasks.push(store_new_state_task);
 
                 // build state stuff from new observable state after collation
-                // HACK: build new state from prev pure root and state update
-                // GetNewShardStateStuff::BuildFromNewObservable {
-                //     block_id,
-                //     shard_state: new_observable_state,
-                //     root: new_state_root,
-                //     tracker,
-                // }
-                GetNewShardStateStuff::BuildFromPureRootAndStateUpdate {
+                GetNewShardStateStuff::BuildFromNewObservable {
                     block_id,
-                    prev_pure_state_root,
-                    state_update,
+                    shard_state: new_observable_state,
+                    root: new_observable_state_root,
                     tracker,
                 }
+                // HACK: build new state from prev pure root and state update
+                // GetNewShardStateStuff::BuildFromPureRootAndStateUpdate {
+                //     block_id,
+                //     prev_pure_state_root,
+                //     state_update,
+                //     tracker,
+                // }
             }
         };
 
         let state_node_adapter = self.state_node_adapter.clone();
 
+        let labels = labels.clone();
         self.delayed_working_state.future = Some(Box::pin(async move {
+            let _histogram = HistogramGuard::begin_with_labels(
+                "tycho_collator_build_new_state_time_high",
+                &labels,
+            );
+
             let new_state_stuff = match get_new_state_stuff {
                 GetNewShardStateStuff::BuildFromNewObservable {
                     block_id,
