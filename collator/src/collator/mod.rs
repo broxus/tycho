@@ -859,7 +859,13 @@ impl CollatorStdImpl {
 
         let state_node_adapter = self.state_node_adapter.clone();
 
+        let labels = labels.clone();
         self.delayed_working_state.future = Some(Box::pin(async move {
+            let _histogram = HistogramGuard::begin_with_labels(
+                "tycho_collator_build_new_state_time_high",
+                &labels,
+            );
+
             let new_state_stuff = match get_new_state_stuff {
                 GetNewShardStateStuff::BuildFromNewObservable {
                     block_id,
