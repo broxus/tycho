@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -230,9 +231,11 @@ pub struct CollatorStdImpl {
     mpool_adapter: Arc<dyn MempoolAdapter>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     shard_id: ShardIdent,
+
     delayed_working_state: DelayedWorkingState,
-    store_new_state_tasks: Vec<JoinTask<Result<bool>>>,
-    store_new_state_tasks_tx: std::sync::mpsc::Sender<JoinTask<Result<bool>>>,
+    store_new_state_tasks: Vec<StateUpdateContext>,
+    background_store_new_state_tx: std::sync::mpsc::Sender<StateUpdateContext>,
+
     anchors_cache: AnchorsCache,
     block_serializer_cache: BlockSerializerCache,
     stats: CollatorStats,
@@ -272,8 +275,8 @@ impl CollatorStdImpl {
 
         let (working_state_tx, working_state_rx) = oneshot::channel::<Result<Box<WorkingState>>>();
 
-        let (store_new_state_tasks_tx, mut store_new_state_tasks_rx) =
-            std::sync::mpsc::channel::<JoinTask<Result<bool>>>();
+        let (background_store_new_state_tx, background_store_new_state_rx) =
+            std::sync::mpsc::channel::<StateUpdateContext>();
 
         let processor = Self {
             next_block_info,
@@ -291,7 +294,7 @@ impl CollatorStdImpl {
                 }
             }),
             store_new_state_tasks: Default::default(),
-            store_new_state_tasks_tx,
+            background_store_new_state_tx,
             anchors_cache: Default::default(),
             block_serializer_cache: BlockSerializerCache::with_capacity(BLOCK_CELL_COUNT_BASELINE),
             stats: Default::default(),
@@ -302,10 +305,14 @@ impl CollatorStdImpl {
             cancel_collation,
         };
 
-        // process state store tasks
+        // finalize new state store tasks in background
         tokio::spawn(async move {
-            while let Ok(task) = store_new_state_tasks_rx.recv() {
-                let _ = task.await;
+            while let Ok(cx) = background_store_new_state_rx.recv() {
+                if let Err(err) = cx.store_new_state_task.await {
+                    tracing::error!(target: tracing_targets::COLLATOR,
+                        "Error when store new state: {:?}", err,
+                    );
+                }
             }
         });
 
@@ -605,23 +612,6 @@ impl CollatorStdImpl {
         // update collation session info to refer to a correct subset in collated block
         self.collation_session = collation_session;
 
-        // previously wait when the last state store task finished
-        if !self.store_new_state_tasks.is_empty() {
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "awaiting when state store task finished...",
-            );
-            // wait all previous tasks in a separate thread
-            for task in self
-                .store_new_state_tasks
-                .drain(..self.store_new_state_tasks.len().saturating_sub(1))
-            {
-                self.store_new_state_tasks_tx.send(task)?;
-            }
-            // wait the last task here
-            let last_task = self.store_new_state_tasks.pop().unwrap();
-            last_task.await?;
-        }
-
         let working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
 
@@ -635,10 +625,59 @@ impl CollatorStdImpl {
                 }
 
                 // and only for shard collator
-                // reload prev states from storage to drop usage tree
-                if !self.shard_id.is_masterchain() {
-                    Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
-                        .await?;
+                // update prev states to drop usage tree
+                if !self.shard_id.is_masterchain() && self.store_new_state_tasks.len() > 100 {
+                    // try to find last finished store task
+                    let mut last_finished_task = None;
+                    let mut last_not_finished_tasks = VecDeque::new();
+                    while let Some(cx) = self.store_new_state_tasks.pop() {
+                        if cx.store_new_state_task.is_finished() {
+                            last_finished_task = Some(cx);
+                            break;
+                        } else {
+                            // store not finished tasks
+                            last_not_finished_tasks.push_back(cx);
+                        }
+                    }
+
+                    // if found then build pure state from it
+                    if let Some(last_finished) = last_finished_task {
+                        // load last stored state
+                        let pure_state_stuff = self
+                            .state_node_adapter
+                            .load_state(&last_finished.block_id)
+                            .await?;
+                        let mut pure_state_root = pure_state_stuff.root_cell().clone();
+
+                        // apply next state updates
+                        while let Some(not_finished) = last_not_finished_tasks.pop_back() {
+                            pure_state_root = not_finished.state_update.apply(&pure_state_root)?;
+
+                            // and finalize store task in background
+                            self.background_store_new_state_tx.send(not_finished)?;
+                        }
+
+                        // and update pure prev state in working state
+                        Self::update_prev_data(&mut working_state, pure_state_root).await?;
+                    } else {
+                        // otherwise wait until the last store task finished
+                        let last = last_not_finished_tasks.pop_front().unwrap();
+                        last.store_new_state_task.await?;
+
+                        // and reload pure prev state in working state
+                        Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
+                            .await?;
+
+                        // finalize other not finished tasks in background
+                        for cx in last_not_finished_tasks {
+                            self.background_store_new_state_tx.send(cx)?;
+                        }
+                    }
+
+                    // finalize all remaining state store tasks in background
+                    for cx in self.store_new_state_tasks.drain(..) {
+                        self.background_store_new_state_tx.send(cx)?;
+                    }
                 }
             }
 
@@ -649,6 +688,11 @@ impl CollatorStdImpl {
 
             working_state
         } else {
+            // finalize all remaining state store tasks in background
+            for cx in self.store_new_state_tasks.drain(..) {
+                self.background_store_new_state_tx.send(cx)?;
+            }
+
             // reset any delayed working state because we will init a new one
             self.delayed_working_state.reset();
 
@@ -795,6 +839,39 @@ impl CollatorStdImpl {
         Self::build_and_validate_init_working_state(mc_data, prev_states, prev_queue_diff_hashes)
     }
 
+    async fn update_prev_data(
+        working_state: &mut WorkingState,
+        pure_state_root: Cell,
+    ) -> Result<()> {
+        // drop prev shard data and usage tree
+        let prev_queue_diff_hashes;
+        let prev_blocks_ids;
+        let tracker;
+        {
+            working_state.usage_tree.take();
+
+            let prev_shard_data = working_state.prev_shard_data.take().unwrap();
+            prev_queue_diff_hashes = prev_shard_data.prev_queue_diff_hashes().clone();
+            prev_blocks_ids = prev_shard_data.blocks_ids().clone();
+            tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
+        }
+
+        let prev_state =
+            ShardStateStuff::from_root(&prev_blocks_ids[0], pure_state_root, &tracker)?;
+        let prev_states = vec![prev_state];
+
+        // update working state
+        tracing::debug!(target: tracing_targets::COLLATOR, "updating prev data in working state from built pure state root...");
+
+        let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
+
+        // set new prev shard data and usage tree
+        working_state.prev_shard_data = Some(prev_shard_data);
+        working_state.usage_tree = Some(usage_tree);
+
+        Ok(())
+    }
+
     async fn reload_prev_data(
         working_state: &mut WorkingState,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
@@ -818,7 +895,7 @@ impl CollatorStdImpl {
             Self::load_prev_states(state_node_adapter.as_ref(), &prev_blocks_ids).await?;
 
         // update working state
-        tracing::debug!(target: tracing_targets::COLLATOR, "updating working state...");
+        tracing::debug!(target: tracing_targets::COLLATOR, "updating prev data in working state from reloaded state root...");
 
         let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
@@ -836,7 +913,7 @@ impl CollatorStdImpl {
         block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
         new_observable_state_root: Cell,
-        prev_pure_state_root: Cell,
+        prev_state_root: Cell,
         state_update: MerkleUpdate,
         store_new_state_task: JoinTask<Result<bool>>,
         new_queue_diff_hash: HashBytes,
@@ -856,14 +933,8 @@ impl CollatorStdImpl {
             ReloadFromStorage(JoinTask<Result<bool>>),
             BuildFromNewObservable {
                 block_id: BlockId,
-                shard_state: Box<ShardStateUnsplit>,
-                root: Cell,
-                tracker: MinRefMcStateTracker,
-            },
-            BuildFromPureRootAndStateUpdate {
-                block_id: BlockId,
-                prev_pure_state_root: Cell,
-                state_update: MerkleUpdate,
+                new_observable_state: Box<ShardStateUnsplit>,
+                new_observable_state_root: Cell,
                 tracker: MinRefMcStateTracker,
             },
         }
@@ -873,22 +944,20 @@ impl CollatorStdImpl {
                 GetNewShardStateStuff::ReloadFromStorage(store_new_state_task)
             } else {
                 // append new store task
-                self.store_new_state_tasks.push(store_new_state_task);
+                self.store_new_state_tasks.push(StateUpdateContext {
+                    block_id,
+                    store_new_state_task,
+                    prev_state_root,
+                    state_update,
+                });
 
                 // build state stuff from new observable state after collation
                 GetNewShardStateStuff::BuildFromNewObservable {
                     block_id,
-                    shard_state: new_observable_state,
-                    root: new_observable_state_root,
+                    new_observable_state,
+                    new_observable_state_root,
                     tracker,
                 }
-                // HACK: build new state from prev pure root and state update
-                // GetNewShardStateStuff::BuildFromPureRootAndStateUpdate {
-                //     block_id,
-                //     prev_pure_state_root,
-                //     state_update,
-                //     tracker,
-                // }
             }
         };
 
@@ -904,19 +973,15 @@ impl CollatorStdImpl {
             let new_state_stuff = match get_new_state_stuff {
                 GetNewShardStateStuff::BuildFromNewObservable {
                     block_id,
-                    shard_state,
-                    root,
+                    new_observable_state,
+                    new_observable_state_root,
                     tracker,
-                } => ShardStateStuff::from_state_and_root(&block_id, shard_state, root, &tracker)?,
-                GetNewShardStateStuff::BuildFromPureRootAndStateUpdate {
-                    block_id,
-                    prev_pure_state_root,
-                    state_update,
-                    tracker,
-                } => {
-                    let new_pure_state_root = state_update.apply(&prev_pure_state_root)?;
-                    ShardStateStuff::from_root(&block_id, new_pure_state_root, &tracker)?
-                }
+                } => ShardStateStuff::from_state_and_root(
+                    &block_id,
+                    new_observable_state,
+                    new_observable_state_root,
+                    &tracker,
+                )?,
                 GetNewShardStateStuff::ReloadFromStorage(store_new_state_task) => {
                     store_new_state_task.await?;
                     let load_task = JoinTask::new({
@@ -2119,6 +2184,13 @@ impl DelayedWorkingState {
         self.unused = None;
         self.future = None;
     }
+}
+
+struct StateUpdateContext {
+    block_id: BlockId,
+    store_new_state_task: JoinTask<Result<bool>>,
+    prev_state_root: Cell,
+    state_update: MerkleUpdate,
 }
 
 struct AnchorsProcessingInfo {
