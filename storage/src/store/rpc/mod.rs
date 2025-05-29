@@ -1352,6 +1352,7 @@ impl RpcStorage {
     }
 }
 
+#[derive(Debug)]
 pub struct BriefShardDescr {
     pub shard_ident: ShardIdent,
     pub seqno: u32,

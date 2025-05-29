@@ -118,6 +118,9 @@ impl Serialize for JrpcErrorResponse<JrpcId> {
 // === Requests ===
 
 #[derive(Debug, Deserialize)]
+pub struct EmptyParams;
+
+#[derive(Debug, Deserialize)]
 pub struct GetShardsParams {
     pub seqno: u32,
 }
@@ -236,6 +239,22 @@ pub struct RunGetMethodParams {
 }
 
 // === Responses ===
+
+#[derive(Serialize)]
+pub struct MasterchainInfoResponse {
+    #[serde(rename = "@type")]
+    pub ty: &'static str,
+    pub last: TonlibBlockId,
+    #[serde(with = "serde_tonlib_hash")]
+    pub state_root_hash: HashBytes,
+    pub init: TonlibBlockId,
+    #[serde(rename = "@extra")]
+    pub extra: TonlibExtra,
+}
+
+impl MasterchainInfoResponse {
+    pub const TY: &str = "blocks.masterchainInfo";
+}
 
 #[derive(Serialize)]
 pub struct ShardsResponse<'a> {
