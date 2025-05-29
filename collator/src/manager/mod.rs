@@ -45,8 +45,8 @@ use crate::types::processed_upto::{
 };
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
-    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
-    ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt,
+    DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, McDataStuff,
+    ProcessedToByPartitions, ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -141,7 +141,7 @@ where
     mempool_config_override: Option<MempoolGlobalConfig>,
 
     /// `McData` which processing was delayed until block is validated.
-    delayed_mc_state_update: Arc<Mutex<Option<Arc<McData>>>>,
+    delayed_mc_state_update: Arc<Mutex<Option<McDataStuff>>>,
 }
 
 #[async_trait]
@@ -798,7 +798,7 @@ where
 
         debug_assert_eq!(
             block_id.is_masterchain(),
-            collation_result.mc_data.is_some(),
+            collation_result.mc_data_stuff.is_some(),
         );
 
         // sync cache and collator state access
@@ -865,10 +865,11 @@ where
             store_res
         } else {
             let top_shard_blocks_info = collation_result
-                .mc_data
+                .mc_data_stuff
                 .as_ref()
                 .map(|mc_data| {
                     mc_data
+                        .current
                         .shards
                         .iter()
                         .map(|(shard_id, shard_descr)| {
@@ -881,9 +882,9 @@ where
                 })
                 .unwrap_or_default();
             let top_processed_to_anchor = collation_result
-                .mc_data
+                .mc_data_stuff
                 .as_ref()
-                .map(|mc_data| mc_data.top_processed_to_anchor);
+                .map(|mc_data| mc_data.current.top_processed_to_anchor);
             let store_res = self.blocks_cache.store_collated(
                 collation_result.candidate,
                 top_shard_blocks_info,
@@ -1042,11 +1043,13 @@ where
             // if consensus config was changed we should wait until master block is validated
             if consensus_config_changed == Some(true) {
                 let mut delayed_mc_state_update = self.delayed_mc_state_update.lock();
-                *delayed_mc_state_update = collation_result.mc_data.clone();
+                *delayed_mc_state_update = collation_result.mc_data_stuff.clone();
             } else {
                 // otherwise we can notify state update to mempool right now
-                self.notify_mc_state_update_to_mempool(collation_result.mc_data.clone().unwrap())
-                    .await?;
+                self.notify_mc_state_update_to_mempool(
+                    collation_result.mc_data_stuff.clone().unwrap().current,
+                )
+                .await?;
             }
 
             // process validation
@@ -1085,7 +1088,7 @@ where
             // if consensus config was not changed execute master state update processing routines right now
             if consensus_config_changed != Some(true) {
                 self.process_mc_state_update(
-                    collation_result.mc_data.unwrap(),
+                    collation_result.mc_data_stuff.unwrap(),
                     ProcessMcStateUpdateMode::StartCollation {
                         reset_collators: false,
                     },
@@ -1645,11 +1648,16 @@ where
         let mc_data =
             McData::load_from_state(&last_mc_state, all_shards_processed_to_by_partitions)?;
 
+        let mc_data_stuff = McDataStuff {
+            current: mc_data.clone(),
+            previous: None,
+        };
+
         self.blocks_cache
             .remove_next_collated_blocks_from_cache(&queue_restore_res.synced_to_blocks_keys);
 
         // notify state update to mempool
-        self.notify_mc_state_update_to_mempool(mc_data.clone())
+        self.notify_mc_state_update_to_mempool(mc_data_stuff.current.clone())
             .await?;
 
         // when sync cancelled we do not exist sync but skip collation
@@ -1660,7 +1668,7 @@ where
             },
         };
 
-        self.process_mc_state_update(mc_data.clone(), process_state_update_mode)
+        self.process_mc_state_update(mc_data_stuff, process_state_update_mode)
             .await?;
 
         // handle top processed to anchor in mempool
@@ -2064,7 +2072,7 @@ where
 
     async fn process_mc_state_update(
         &self,
-        mc_data: Arc<McData>,
+        mc_data_stuff: McDataStuff,
         mode: ProcessMcStateUpdateMode,
     ) -> Result<()> {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER,
@@ -2073,7 +2081,7 @@ where
         );
 
         if let ProcessMcStateUpdateMode::StartCollation { reset_collators } = mode {
-            self.refresh_collation_sessions(mc_data, reset_collators)
+            self.refresh_collation_sessions(mc_data_stuff, reset_collators)
                 .await?;
         }
 
@@ -2085,14 +2093,14 @@ where
         &self,
         block_id: &BlockId,
     ) -> Result<Option<MempoolAnchorId>> {
-        let mut delayed_mc_data = None;
+        let mut delayed_mc_data_stuff = None;
         {
             let mut guard = self.delayed_mc_state_update.lock();
-            if let Some(mc_data) = guard.clone() {
-                if mc_data.block_id <= *block_id {
+            if let Some(mc_data_stuff) = guard.clone() {
+                if mc_data_stuff.current.block_id <= *block_id {
                     // process delayed mc state only if committed block is equal
-                    if mc_data.block_id == *block_id {
-                        delayed_mc_data = Some(mc_data);
+                    if mc_data_stuff.current.block_id == *block_id {
+                        delayed_mc_data_stuff = Some(mc_data_stuff);
                     }
 
                     // remove delayed mc state even if committed block is ahead
@@ -2100,18 +2108,18 @@ where
                 }
             }
         }
-        if let Some(mc_data) = delayed_mc_data {
-            self.notify_mc_state_update_to_mempool(mc_data.clone())
+        if let Some(mc_data_stuff) = delayed_mc_data_stuff {
+            self.notify_mc_state_update_to_mempool(mc_data_stuff.current.clone())
                 .await?;
             self.process_mc_state_update(
-                mc_data.clone(),
+                mc_data_stuff.clone(),
                 ProcessMcStateUpdateMode::StartCollation {
                     reset_collators: false,
                 },
             )
             .await?;
 
-            Ok(Some(mc_data.top_processed_to_anchor))
+            Ok(Some(mc_data_stuff.current.top_processed_to_anchor))
         } else {
             Ok(None)
         }
@@ -2154,29 +2162,33 @@ where
     #[tracing::instrument(skip_all)]
     async fn refresh_collation_sessions(
         &self,
-        mc_data: Arc<McData>,
+        mc_data_stuff: McDataStuff,
         reset_collators: bool,
     ) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Start refresh collation sessions by mc state ({})...",
-            mc_data.block_id.as_short_id(),
+            mc_data_stuff.current.block_id.as_short_id(),
         );
 
         let _histogram = HistogramGuard::begin("tycho_collator_refresh_collation_sessions_time");
 
         // do not re-process this master block if it is lower then last processed or equal to it
         // but process a new version of block with the same seqno
-        if !self.check_should_process_and_update_last_processed_mc_block(&mc_data.block_id) {
+        if !self.check_should_process_and_update_last_processed_mc_block(
+            &mc_data_stuff.current.block_id,
+        ) {
             return Ok(());
         }
 
-        tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "mc_data: {:?}", mc_data);
+        tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "mc_data: {:?}", mc_data_stuff.current);
 
         // get new shards info from updated master state
         let mut new_shards_info = FastHashMap::default();
-        new_shards_info.insert(ShardIdent::MASTERCHAIN, vec![mc_data.block_id]);
-        for (shard_id, descr) in mc_data.shards.iter() {
+        new_shards_info.insert(ShardIdent::MASTERCHAIN, vec![
+            mc_data_stuff.current.block_id,
+        ]);
+        for (shard_id, descr) in mc_data_stuff.current.shards.iter() {
             let top_block_id = descr.get_block_id(*shard_id);
             // TODO: consider split and merge
             new_shards_info.insert(*shard_id, vec![top_block_id]);
@@ -2208,17 +2220,17 @@ where
         }
 
         // find out the actual collation session start round from master state
-        let current_session_seqno = mc_data.validator_info.catchain_seqno;
+        let current_session_seqno = mc_data_stuff.current.validator_info.catchain_seqno;
 
         // we need full validators set to define the subset for each session and to check if current node should collate
-        let full_validators_set = mc_data.config.get_current_validator_set()?;
+        let full_validators_set = mc_data_stuff.current.config.get_current_validator_set()?;
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER,
             "full_validators_set: since={}, until={}, main={}, total_weight={}, list={:?}",
             full_validators_set.utime_since, full_validators_set.utime_until,
             full_validators_set.main, full_validators_set.total_weight,
             DebugIter(full_validators_set.list.iter().map(|i| i.public_key)),
         );
-        let collation_config = mc_data.config.get_collation_config()?;
+        let collation_config = mc_data_stuff.current.config.get_collation_config()?;
         let mut subset_cache = FastHashMap::new();
         let mut get_validator_subset = |shard_id| match subset_cache.entry(shard_id) {
             hash_map::Entry::Occupied(entry) => {
@@ -2374,7 +2386,7 @@ where
                             listener: self.dispatcher.clone(),
                             shard_id,
                             prev_blocks_ids,
-                            mc_data: mc_data.clone(),
+                            mc_data_stuff: mc_data_stuff.clone(),
                             mempool_config_override: self.mempool_config_override.clone(),
                             cancel_collation: cancel_collation_notify.clone(),
                         })
@@ -2439,7 +2451,7 @@ where
             );
             collator
                 .enqueue_resume_collation(
-                    mc_data.clone(),
+                    mc_data_stuff.clone(),
                     reset_collators,
                     new_session_info,
                     prev_blocks_ids,

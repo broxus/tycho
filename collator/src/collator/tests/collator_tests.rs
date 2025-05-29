@@ -16,7 +16,7 @@ use crate::types::processed_upto::{
     ExternalsProcessedUptoStuff, ExternalsRangeInfo, ProcessedUptoInfoExtension,
     ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
 };
-use crate::types::{McData, ShardDescriptionShort};
+use crate::types::{McData, McDataStuff, ShardDescriptionShort};
 
 struct MempoolEventStubListener;
 #[async_trait]
@@ -373,11 +373,16 @@ fn test_get_anchors_processing_info() {
         prev_mc_block_id: None,
     };
 
+    let mc_data_stuff = McDataStuff {
+        current: Arc::new(mc_data.clone()),
+        previous: None,
+    };
+
     //------
     // on zerostate will return None
     let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
         &shard_id,
-        &mc_data,
+        &mc_data_stuff,
         &prev_block_id,
         prev_gen_chain_time,
         prev_processed_upto_externals.processed_to,
@@ -419,7 +424,7 @@ fn test_get_anchors_processing_info() {
                 ranges: [(967, ExternalsRangeInfo {
                     skip_offset: 0,
                     processed_offset: 0,
-                    chain_time: mc_data.gen_chain_time,
+                    chain_time: mc_data_stuff.current.gen_chain_time,
                     from: (0, 0),
                     to: (1752, 12000),
                 })]
@@ -438,7 +443,7 @@ fn test_get_anchors_processing_info() {
     // will get anchors processing info from prev shard state
     let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
         &shard_id,
-        &mc_data,
+        &mc_data_stuff,
         &prev_block_id,
         prev_gen_chain_time,
         prev_processed_upto_externals.processed_to,
@@ -473,7 +478,7 @@ fn test_get_anchors_processing_info() {
                 ranges: [(968, ExternalsRangeInfo {
                     skip_offset: 0,
                     processed_offset: 0,
-                    chain_time: mc_data.gen_chain_time,
+                    chain_time: mc_data_stuff.current.gen_chain_time,
                     from: (1752, 12000),
                     to: (1756, 7000),
                 })]
@@ -490,9 +495,14 @@ fn test_get_anchors_processing_info() {
     //------
     // will get anchors processing info from prev shard state
     // because it is still ahead of master
+
+    let mc_data_stuff = McDataStuff {
+        current: Arc::new(mc_data.clone()),
+        previous: None,
+    };
     let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
         &shard_id,
-        &mc_data,
+        &mc_data_stuff,
         &prev_block_id,
         prev_gen_chain_time,
         prev_processed_upto_externals.processed_to,
@@ -527,7 +537,7 @@ fn test_get_anchors_processing_info() {
                 ranges: [(1005, ExternalsRangeInfo {
                     skip_offset: 0,
                     processed_offset: 0,
-                    chain_time: mc_data.gen_chain_time,
+                    chain_time: mc_data_stuff.current.gen_chain_time,
                     from: (1756, 7000),
                     to: (1816, 23429),
                 })]
@@ -542,16 +552,21 @@ fn test_get_anchors_processing_info() {
 
     //------
     // will get anchors processing info from mc data
+    let mc_data_stuff = McDataStuff {
+        current: Arc::new(mc_data.clone()),
+        previous: None,
+    };
     let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
         &shard_id,
-        &mc_data,
+        &mc_data_stuff,
         &prev_block_id,
         prev_gen_chain_time,
         prev_processed_upto_externals.processed_to,
     );
     assert!(anchors_proc_info_opt.is_some());
     let anchors_proc_info = anchors_proc_info_opt.unwrap();
-    let min_externals_processed_to = mc_data
+    let min_externals_processed_to = mc_data_stuff
+        .current
         .processed_upto
         .get_min_externals_processed_to()
         .unwrap_or_default();
@@ -559,7 +574,7 @@ fn test_get_anchors_processing_info() {
         anchors_proc_info.processed_to_anchor_id,
         min_externals_processed_to.0,
         "prev_block_id: {:?}, prev_gen_chain_time: {}, prev_processed_upto_externals: {:?}, mc_data: {:?}",
-        prev_block_id, prev_gen_chain_time, prev_processed_upto_externals, mc_data,
+        prev_block_id, prev_gen_chain_time, prev_processed_upto_externals, mc_data_stuff.current,
     );
     assert_eq!(
         anchors_proc_info.processed_to_msgs_offset,
@@ -567,10 +582,10 @@ fn test_get_anchors_processing_info() {
     );
     assert_eq!(
         anchors_proc_info.last_imported_chain_time,
-        mc_data.gen_chain_time,
+        mc_data_stuff.current.gen_chain_time,
     );
     assert_eq!(
         anchors_proc_info.last_imported_in_block_id,
-        mc_data.block_id,
+        mc_data_stuff.current.block_id,
     );
 }
