@@ -184,6 +184,17 @@ pub struct AccountParams {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct BlockHeaderParams {
+    pub workchain: i8,
+    pub shard: i64,
+    pub seqno: u32,
+    #[serde(default, with = "serde_option_tonlib_hash")]
+    pub root_hash: Option<HashBytes>,
+    #[serde(default, with = "serde_option_tonlib_hash")]
+    pub file_hash: Option<HashBytes>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct TransactionsParams {
     #[serde(with = "serde_tonlib_address")]
     pub address: StdAddr,
@@ -415,6 +426,39 @@ pub struct WalletInformationResponse {
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub fields: Option<WalletFields>,
     pub last_transaction_id: TonlibTransactionId,
+}
+
+#[derive(Serialize)]
+pub struct BlockHeaderResponse {
+    #[serde(rename = "@type")]
+    pub ty: &'static str,
+    pub id: TonlibBlockId,
+    pub global_id: i32,
+    pub version: u32,
+    pub flags: u8,
+    pub after_merge: bool,
+    pub after_split: bool,
+    pub before_split: bool,
+    pub want_merge: bool,
+    pub want_split: bool,
+    pub validator_list_hash_short: u32,
+    pub catchain_seqno: u32,
+    pub min_ref_mc_seqno: u32,
+    pub is_key_block: bool,
+    pub prev_key_block_seqno: u32,
+    #[serde(with = "serde_helpers::string")]
+    pub start_lt: u64,
+    #[serde(with = "serde_helpers::string")]
+    pub end_lt: u64,
+    pub gen_utime: u32,
+    pub vert_seqno: u32,
+    pub prev_blocks: Vec<TonlibBlockId>,
+    #[serde(rename = "@extra")]
+    pub extra: TonlibExtra,
+}
+
+impl BlockHeaderResponse {
+    pub const TY: &'static str = "blocks.header";
 }
 
 // === Transactions Response ===

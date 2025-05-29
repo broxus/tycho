@@ -20,8 +20,8 @@ use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::global_config::ZerostateId;
 use tycho_storage::{
     BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor,
-    BlockTransactionsIterBuilder, BriefShardDescr, CodeHashesIter, KeyBlocksDirection, Storage,
-    TransactionsIterBuilder,
+    BlockTransactionsIterBuilder, BriefBlockInfo, BriefShardDescr, CodeHashesIter,
+    KeyBlocksDirection, Storage, TransactionsIterBuilder,
 };
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
@@ -253,6 +253,18 @@ impl RpcState {
 
     pub fn get_unpacked_blockchain_config(&self) -> Arc<LatestBlockchainConfig> {
         self.inner.blockchain_config.load_full()
+    }
+
+    pub fn get_brief_block_info(
+        &self,
+        block_id: &BlockIdShort,
+    ) -> Result<Option<(BlockId, BriefBlockInfo)>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_brief_block_info(block_id)
+            .map_err(RpcStateError::Internal)
     }
 
     pub fn get_brief_shards_descr(
