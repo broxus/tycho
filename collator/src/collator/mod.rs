@@ -626,7 +626,9 @@ impl CollatorStdImpl {
 
                 // and only for shard collator
                 // update prev states to drop usage tree
-                if !self.shard_id.is_masterchain() && self.store_new_state_tasks.len() > 100 {
+                if !self.shard_id.is_masterchain() && self.store_new_state_tasks.len() > 10 {
+                    let store_new_state_tasks_count = self.store_new_state_tasks.len();
+
                     // try to find last finished store task
                     let mut last_finished_task = None;
                     let mut last_not_finished_tasks = VecDeque::new();
@@ -639,16 +641,27 @@ impl CollatorStdImpl {
                             last_not_finished_tasks.push_back(cx);
                         }
                     }
+                    let last_not_finished_tasks_count = last_not_finished_tasks.len();
 
                     // if found then build pure state from it
+                    let mut last_finished_task_block_id = None;
+                    let mut load_last_stored_state_elapsed = 0;
+                    let mut apply_merkls_elapsed = 0;
+                    let mut update_prev_data_elapsed = 0;
+                    let mut wait_store_prev_state_elapsed = 0;
+                    let mut reload_prev_data_elapsed = 0;
                     if let Some(last_finished) = last_finished_task {
+                        last_finished_task_block_id = Some(last_finished.block_id);
+                        let timer = std::time::Instant::now();
                         // load last stored state
                         let pure_state_stuff = self
                             .state_node_adapter
                             .load_state(&last_finished.block_id)
                             .await?;
                         let mut pure_state_root = pure_state_stuff.root_cell().clone();
+                        load_last_stored_state_elapsed = timer.elapsed().as_millis();
 
+                        let timer = std::time::Instant::now();
                         // apply next state updates
                         while let Some(not_finished) = last_not_finished_tasks.pop_back() {
                             pure_state_root = not_finished.state_update.apply(&pure_state_root)?;
@@ -656,23 +669,42 @@ impl CollatorStdImpl {
                             // and finalize store task in background
                             self.background_store_new_state_tx.send(not_finished)?;
                         }
+                        apply_merkls_elapsed = timer.elapsed().as_millis();
 
+                        let timer = std::time::Instant::now();
                         // and update pure prev state in working state
                         Self::update_prev_data(&mut working_state, pure_state_root).await?;
+                        update_prev_data_elapsed = timer.elapsed().as_millis();
                     } else {
+                        let timer = std::time::Instant::now();
                         // otherwise wait until the last store task finished
                         let last = last_not_finished_tasks.pop_front().unwrap();
                         last.store_new_state_task.await?;
+                        wait_store_prev_state_elapsed = timer.elapsed().as_millis();
 
+                        let timer = std::time::Instant::now();
                         // and reload pure prev state in working state
                         Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
                             .await?;
+                        reload_prev_data_elapsed = timer.elapsed().as_millis();
 
                         // finalize other not finished tasks in background
                         for cx in last_not_finished_tasks {
                             self.background_store_new_state_tx.send(cx)?;
                         }
                     }
+
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        store_new_state_tasks_count,
+                        last_not_finished_tasks_count,
+                        last_finished_task = ?last_finished_task_block_id.map(|id| id.as_short_id().to_string()),
+                        load_last_stored_state_elapsed,
+                        apply_merkls_elapsed,
+                        update_prev_data_elapsed,
+                        wait_store_prev_state_elapsed,
+                        reload_prev_data_elapsed,
+                        "try update pure prev state in working state",
+                    );
 
                     // finalize all remaining state store tasks in background
                     for cx in self.store_new_state_tasks.drain(..) {
