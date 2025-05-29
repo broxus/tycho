@@ -37,6 +37,7 @@ pub fn router() -> axum::Router<RpcState> {
         .route("/", post(post_jrpc))
         .route("/jsonRPC", post(post_jrpc))
         .route("/getMasterchainInfo", get(get_masterchain_info))
+        .route("/getBlockHeader", get(get_block_header))
         .route("/shards", get(get_shards))
         .route("/detectAddress", get(get_detect_address))
         .route("/getAddressInformation", get(get_address_information))
@@ -70,6 +71,7 @@ async fn post_jrpc(state: State<RpcState>, req: Request) -> Response {
 declare_jrpc_method! {
     pub enum MethodParams: Method {
         GetMasterchainInfo(EmptyParams),
+        GetBlockHeader(BlockHeaderParams),
         Shards(GetShardsParams),
         DetectAddress(DetectAddressParams),
         GetAddressInformation(AccountParams),
@@ -89,6 +91,7 @@ async fn post_jrpc_impl(State(state): State<RpcState>, req: Jrpc<JrpcId, Method>
     let _hist = HistogramGuard::begin_with_labels("tycho_jrpc_request_time", &label);
     match req.params {
         MethodParams::GetMasterchainInfo(_) => handle_get_masterchain_info(req.id, state).await,
+        MethodParams::GetBlockHeader(p) => handle_get_block_header(req.id, state, p).await,
         MethodParams::Shards(p) => handle_get_shards(req.id, state, p).await,
         MethodParams::DetectAddress(p) => handle_detect_address(req.id, p).await,
         MethodParams::GetAddressInformation(p) => {
@@ -134,6 +137,85 @@ async fn handle_get_masterchain_info(id: JrpcId, state: RpcState) -> Response {
             root_hash: zerostate_id.root_hash,
             file_hash: zerostate_id.file_hash,
         },
+        extra: TonlibExtra,
+    })
+}
+
+// === GET /getBlockHeader ===
+
+fn get_block_header(
+    State(state): State<RpcState>,
+    query: Result<Query<BlockHeaderParams>, QueryRejection>,
+) -> impl Future<Output = Response> {
+    match query {
+        Ok(Query(params)) => Either::Left(handle_get_block_header(JrpcId::Skip, state, params)),
+        Err(e) => Either::Right(handle_rejection(e)),
+    }
+}
+
+async fn handle_get_block_header(id: JrpcId, state: RpcState, p: BlockHeaderParams) -> Response {
+    let Some(shard) = ShardIdent::new(p.workchain as i32, p.shard as u64) else {
+        return error_to_response(
+            id,
+            RpcStateError::bad_request(anyhow!("invalid shard prefix")),
+        );
+    };
+
+    let (block_id, info) = match state.get_brief_block_info(&BlockIdShort {
+        shard,
+        seqno: p.seqno,
+    }) {
+        Ok(Some(info)) => info,
+        Ok(None) => {
+            let e = RpcStateError::Internal(anyhow!("block {} not found", p.seqno));
+            return error_to_response(id, e);
+        }
+        Err(e) => return error_to_response(id, e),
+    };
+
+    let mut is_block_id_ok = true;
+    if let Some(root_hash) = &p.root_hash {
+        is_block_id_ok &= block_id.root_hash == *root_hash;
+    }
+    if let Some(file_hash) = &p.file_hash {
+        is_block_id_ok &= block_id.file_hash == *file_hash;
+    }
+
+    if !is_block_id_ok {
+        return error_to_response(
+            id,
+            RpcStateError::bad_request(anyhow!(
+                "block root or file hash mismatch, \
+                better don't specify them anyway"
+            )),
+        );
+    }
+
+    ok_to_response(id, BlockHeaderResponse {
+        ty: BlockHeaderResponse::TY,
+        id: TonlibBlockId::from(block_id),
+        global_id: info.global_id,
+        version: info.version,
+        flags: info.flags,
+        after_merge: info.after_merge,
+        after_split: info.after_split,
+        before_split: info.before_split,
+        want_merge: info.want_merge,
+        want_split: info.want_split,
+        validator_list_hash_short: info.validator_list_hash_short,
+        catchain_seqno: info.catchain_seqno,
+        min_ref_mc_seqno: info.min_ref_mc_seqno,
+        is_key_block: info.is_key_block,
+        prev_key_block_seqno: info.prev_key_block_seqno,
+        start_lt: info.start_lt,
+        end_lt: info.end_lt,
+        gen_utime: info.gen_utime,
+        vert_seqno: info.vert_seqno,
+        prev_blocks: info
+            .prev_blocks
+            .into_iter()
+            .map(TonlibBlockId::from)
+            .collect(),
         extra: TonlibExtra,
     })
 }

@@ -108,6 +108,36 @@ impl RpcStorage {
         InstanceId::from_slice(id.as_ref())
     }
 
+    pub fn get_brief_block_info(
+        &self,
+        block_id: &BlockIdShort,
+    ) -> Result<Option<(BlockId, BriefBlockInfo)>> {
+        let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
+            return Ok(None);
+        };
+        let mut key = [0; tables::KnownBlocks::KEY_LEN];
+        key[0] = workchain as u8;
+        key[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+        key[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+        let value = match self.db.known_blocks.get(key)? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        let value = value.as_ref();
+
+        let brief_info = BriefBlockInfo::load_from_bytes(workchain as i32, &value[64..])
+            .context("invalid brief info")?;
+
+        let block_id = BlockId {
+            shard: block_id.shard,
+            seqno: block_id.seqno,
+            root_hash: HashBytes::from_slice(&value[0..32]),
+            file_hash: HashBytes::from_slice(&value[32..64]),
+        };
+
+        Ok(Some((block_id, brief_info)))
+    }
+
     pub fn get_brief_shards_descr(&self, mc_seqno: u32) -> Result<Option<Vec<BriefShardDescr>>> {
         let mut key = [0x00; tables::BlocksByMcSeqno::KEY_LEN];
         key[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
@@ -740,8 +770,8 @@ impl RpcStorage {
                     batch.delete_range_cf(&block_transactions.cf(), range_from, range_to);
                     batch.delete_cf(&block_transactions.cf(), range_to);
 
-                    let range_from = &range_from[0..tables::KnownBlocks::KEY_LEY];
-                    let range_to = &range_to[0..tables::KnownBlocks::KEY_LEY];
+                    let range_from = &range_from[0..tables::KnownBlocks::KEY_LEN];
+                    let range_to = &range_to[0..tables::KnownBlocks::KEY_LEN];
                     batch.delete_range_cf(&known_blocks.cf(), range_from, range_to);
                     batch.delete_cf(&known_blocks.cf(), range_to);
                 }
@@ -873,13 +903,9 @@ impl RpcStorage {
 
         let is_masterchain = block.id().is_masterchain();
         let mc_seqno = mc_block_id.seqno;
-        let start_lt;
-        let end_lt;
-        {
-            let info = block.load_info()?;
-            start_lt = info.start_lt;
-            end_lt = info.end_lt;
-        }
+        let brief_block_info = BriefBlockInfo::new(block.as_ref(), block.load_info()?)?;
+        let start_lt = brief_block_info.start_lt;
+        let end_lt = brief_block_info.end_lt;
 
         let shard_hashes = is_masterchain
             .then(|| {
@@ -949,10 +975,14 @@ impl RpcStorage {
             block_tx[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
 
             // Add known block id.
+            let mut buffer = Vec::with_capacity(64 + BriefBlockInfo::MIN_BYTE_LEN);
+            buffer.extend_from_slice(&tx_info[46..110]); // root_hash + file_hash
+            brief_block_info.write_to_bytes(&mut buffer); // everything else
+
             write_batch.put_cf(
                 &db.known_blocks.cf(),
-                &block_tx[0..tables::KnownBlocks::KEY_LEY],
-                &tx_info[46..110],
+                &block_tx[0..tables::KnownBlocks::KEY_LEN],
+                buffer.as_slice(),
             );
 
             // Write block info.
@@ -963,11 +993,11 @@ impl RpcStorage {
                 key[5..13].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
                 key[13..17].copy_from_slice(&block_id.seqno.to_be_bytes());
 
-                let mut value = Vec::with_capacity(tables::BlocksByMcSeqno::VALUE_LEN);
-                value.extend_from_slice(block_id.root_hash.as_slice()); // 0..32
-                value.extend_from_slice(block_id.file_hash.as_slice()); // 32..64
-                value.extend_from_slice(&start_lt.to_le_bytes()); // 64..72
-                value.extend_from_slice(&end_lt.to_le_bytes()); // 72..80
+                buffer.clear();
+                buffer.extend_from_slice(block_id.root_hash.as_slice()); // 0..32
+                buffer.extend_from_slice(block_id.file_hash.as_slice()); // 32..64
+                buffer.extend_from_slice(&start_lt.to_le_bytes()); // 64..72
+                buffer.extend_from_slice(&end_lt.to_le_bytes()); // 72..80
                 if let Some(shard_hashes) = shard_hashes {
                     let shards = shard_hashes
                         .iter()
@@ -991,23 +1021,21 @@ impl RpcStorage {
                         })
                         .collect::<Result<Vec<_>, _>>()?;
 
-                    value.reserve(4 + tables::BlocksByMcSeqno::DESCR_LEN * shards.len());
-                    value.extend_from_slice(&(shards.len() as u32).to_le_bytes());
+                    buffer.reserve(4 + tables::BlocksByMcSeqno::DESCR_LEN * shards.len());
+                    buffer.extend_from_slice(&(shards.len() as u32).to_le_bytes());
                     for shard in shards {
-                        value.push(shard.shard_ident.workchain() as i8 as u8);
-                        value.extend_from_slice(&shard.shard_ident.prefix().to_le_bytes());
-                        value.extend_from_slice(&shard.seqno.to_le_bytes());
-                        value.extend_from_slice(shard.root_hash.as_slice());
-                        value.extend_from_slice(shard.file_hash.as_slice());
-                        value.extend_from_slice(&shard.start_lt.to_le_bytes());
-                        value.extend_from_slice(&shard.end_lt.to_le_bytes());
+                        buffer.push(shard.shard_ident.workchain() as i8 as u8);
+                        buffer.extend_from_slice(&shard.shard_ident.prefix().to_le_bytes());
+                        buffer.extend_from_slice(&shard.seqno.to_le_bytes());
+                        buffer.extend_from_slice(shard.root_hash.as_slice());
+                        buffer.extend_from_slice(shard.file_hash.as_slice());
+                        buffer.extend_from_slice(&shard.start_lt.to_le_bytes());
+                        buffer.extend_from_slice(&shard.end_lt.to_le_bytes());
                     }
                 }
 
-                write_batch.put_cf(&db.blocks_by_mc_seqno.cf(), key, value);
+                write_batch.put_cf(&db.blocks_by_mc_seqno.cf(), key, buffer.as_slice());
             }
-
-            let mut tx_buffer = Vec::with_capacity(1024);
 
             let rpc_blacklist = rpc_blacklist.as_deref();
 
@@ -1078,16 +1106,16 @@ impl RpcStorage {
                     };
 
                     // Collect transaction data to `tx_buffer`
-                    tx_buffer.clear();
-                    tx_buffer.push(tx_mask.bits());
-                    tx_buffer.extend_from_slice(tx_hash.as_slice());
+                    buffer.clear();
+                    buffer.push(tx_mask.bits());
+                    buffer.extend_from_slice(tx_hash.as_slice());
                     if let Some(msg_hash) = msg_hash {
-                        tx_buffer.extend_from_slice(msg_hash.as_slice());
+                        buffer.extend_from_slice(msg_hash.as_slice());
                     }
                     everscale_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(
                         tx_cell.inner().as_ref(),
                     )
-                    .encode(&mut tx_buffer);
+                    .encode(&mut buffer);
 
                     // Write tx data and indices
                     write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
@@ -1101,11 +1129,7 @@ impl RpcStorage {
                         );
                     }
 
-                    write_batch.put_cf(
-                        tx_cf,
-                        &tx_info[..tables::Transactions::KEY_LEN],
-                        &tx_buffer,
-                    );
+                    write_batch.put_cf(tx_cf, &tx_info[..tables::Transactions::KEY_LEN], &buffer);
                 }
 
                 // Update code hash
@@ -1360,6 +1384,156 @@ pub struct BriefShardDescr {
     pub file_hash: HashBytes,
     pub start_lt: u64,
     pub end_lt: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BriefBlockInfo {
+    pub global_id: i32,
+    pub version: u32,
+    pub flags: u8,
+    pub after_merge: bool,
+    pub after_split: bool,
+    pub before_split: bool,
+    pub want_merge: bool,
+    pub want_split: bool,
+    pub validator_list_hash_short: u32,
+    pub catchain_seqno: u32,
+    pub min_ref_mc_seqno: u32,
+    pub is_key_block: bool,
+    pub prev_key_block_seqno: u32,
+    pub start_lt: u64,
+    pub end_lt: u64,
+    pub gen_utime: u32,
+    pub vert_seqno: u32,
+    pub prev_blocks: Vec<BlockId>,
+}
+
+impl BriefBlockInfo {
+    const VERSION: u8 = 0;
+    const MIN_BYTE_LEN: usize = 128;
+
+    pub fn new(
+        block: &Block,
+        block_info: &BlockInfo,
+    ) -> Result<Self, everscale_types::error::Error> {
+        let shard_ident = block_info.shard;
+        let prev_blocks = match block_info.load_prev_ref()? {
+            PrevBlockRef::Single(block_ref) => vec![block_ref.as_block_id(shard_ident)],
+            PrevBlockRef::AfterMerge { left, right } => vec![
+                left.as_block_id(shard_ident),
+                right.as_block_id(shard_ident),
+            ],
+        };
+
+        Ok(Self {
+            global_id: block.global_id,
+            version: block_info.version,
+            flags: block_info.flags,
+            after_merge: block_info.after_merge,
+            after_split: block_info.after_split,
+            before_split: block_info.before_split,
+            want_merge: block_info.want_merge,
+            want_split: block_info.want_split,
+            validator_list_hash_short: block_info.gen_validator_list_hash_short,
+            catchain_seqno: block_info.gen_catchain_seqno,
+            min_ref_mc_seqno: block_info.min_ref_mc_seqno,
+            is_key_block: block_info.key_block,
+            prev_key_block_seqno: block_info.prev_key_block_seqno,
+            start_lt: block_info.start_lt,
+            end_lt: block_info.end_lt,
+            gen_utime: block_info.gen_utime,
+            vert_seqno: block_info.vert_seqno,
+            prev_blocks,
+        })
+    }
+
+    fn write_to_bytes(&self, target: &mut Vec<u8>) {
+        // NOTE: Bit 7 and 0 are reserved for future.
+        let packed_flags = ((self.after_merge as u8) << 6)
+            | ((self.before_split as u8) << 5)
+            | ((self.after_split as u8) << 4)
+            | ((self.want_split as u8) << 3)
+            | ((self.want_merge as u8) << 2)
+            | ((self.is_key_block as u8) << 1);
+
+        target.reserve(Self::MIN_BYTE_LEN);
+        target.push(Self::VERSION);
+        target.extend_from_slice(&self.global_id.to_le_bytes());
+        target.extend_from_slice(&self.version.to_le_bytes());
+        target.push(self.flags);
+        target.push(packed_flags);
+        target.extend_from_slice(&self.validator_list_hash_short.to_le_bytes());
+        target.extend_from_slice(&self.catchain_seqno.to_le_bytes());
+        target.extend_from_slice(&self.min_ref_mc_seqno.to_le_bytes());
+        target.extend_from_slice(&self.prev_key_block_seqno.to_le_bytes());
+        target.extend_from_slice(&self.start_lt.to_le_bytes());
+        target.extend_from_slice(&self.end_lt.to_le_bytes());
+        target.extend_from_slice(&self.gen_utime.to_le_bytes());
+        target.extend_from_slice(&self.vert_seqno.to_le_bytes());
+        target.push(self.prev_blocks.len() as u8);
+        for block_id in &self.prev_blocks {
+            target.extend_from_slice(&block_id.shard.prefix().to_le_bytes());
+            target.extend_from_slice(&block_id.seqno.to_le_bytes());
+            target.extend_from_slice(block_id.root_hash.as_slice());
+            target.extend_from_slice(block_id.file_hash.as_slice());
+        }
+    }
+
+    fn load_from_bytes(workchain: i32, mut bytes: &[u8]) -> Option<Self> {
+        use bytes::Buf;
+
+        if bytes.get_u8() != Self::VERSION {
+            return None;
+        }
+
+        let global_id = bytes.get_i32_le();
+        let version = bytes.get_u32_le();
+        let [flags, packed_flags] = bytes.get_u16().to_be_bytes();
+        let validator_list_hash_short = bytes.get_u32_le();
+        let catchain_seqno = bytes.get_u32_le();
+        let min_ref_mc_seqno = bytes.get_u32_le();
+        let prev_key_block_seqno = bytes.get_u32_le();
+        let start_lt = bytes.get_u64_le();
+        let end_lt = bytes.get_u64_le();
+        let gen_utime = bytes.get_u32_le();
+        let vert_seqno = bytes.get_u32_le();
+        let prev_block_count = bytes.get_u8();
+        let mut prev_blocks = Vec::with_capacity(prev_block_count as _);
+        for _ in 0..prev_block_count {
+            prev_blocks.push(BlockId {
+                shard: ShardIdent::new(
+                    workchain,
+                    u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                )
+                .unwrap(),
+                seqno: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                root_hash: HashBytes::from_slice(&bytes[12..44]),
+                file_hash: HashBytes::from_slice(&bytes[44..76]),
+            });
+            bytes = &bytes[76..];
+        }
+
+        Some(Self {
+            global_id,
+            version,
+            flags,
+            after_merge: packed_flags & 0b01000000 != 0,
+            after_split: packed_flags & 0b00010000 != 0,
+            before_split: packed_flags & 0b00100000 != 0,
+            want_merge: packed_flags & 0b00000100 != 0,
+            want_split: packed_flags & 0b00001000 != 0,
+            validator_list_hash_short,
+            catchain_seqno,
+            min_ref_mc_seqno,
+            is_key_block: packed_flags & 0b00000010 != 0,
+            prev_key_block_seqno,
+            start_lt,
+            end_lt,
+            gen_utime,
+            vert_seqno,
+            prev_blocks,
+        })
+    }
 }
 
 pub struct CodeHashesIter<'a> {
