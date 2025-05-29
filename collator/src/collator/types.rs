@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -612,7 +613,6 @@ pub(super) struct CollatorStats {
     pub total_execute_count_int: u64,
     pub total_execute_count_new_int: u64,
     pub int_queue_length: u64,
-
     pub tps_block: u32,
     pub tps_timer: Option<std::time::Instant>,
     pub tps_execute_count: u64,
@@ -1281,6 +1281,12 @@ pub struct QueueStatisticsWithRemaning {
     pub remaning_stats: ConcurrentQueueStatistics,
 }
 
+impl QueueStatisticsWithRemaning {
+    pub fn total_messages(&self) -> u64 {
+        self.remaning_stats.total_messages()
+    }
+}
+
 pub struct CumulativeStatistics {
     /// Cumulative statistics created for this shard. When reader reads messages, it decrements `remaining messages`
     /// Another shard stats can be decremented only by calling `update_processed_to_by_partitions`
@@ -1602,6 +1608,13 @@ impl CumulativeStatistics {
         }
         res.unwrap_or_default()
     }
+
+    pub fn total_messages(&self) -> u64 {
+        self.result
+            .values()
+            .map(|stats| stats.total_messages())
+            .sum()
+    }
 }
 
 impl fmt::Debug for CumulativeStatistics {
@@ -1636,6 +1649,7 @@ impl fmt::Debug for CumulativeStatistics {
 #[derive(Debug, Default, Clone)]
 pub struct ConcurrentQueueStatistics {
     statistics: Arc<FastDashMap<IntAddr, u64>>,
+    total: Arc<AtomicU64>,
 }
 
 impl ConcurrentQueueStatistics {
@@ -1654,18 +1668,26 @@ impl ConcurrentQueueStatistics {
             if *value == 0 {
                 occupied.remove();
             }
+            self.total.fetch_sub(count, Ordering::Relaxed);
         } else {
             panic!("attempt to decrement non-existing account");
         }
     }
 
     pub fn append(&self, other: &AccountStatistics) {
+        let mut delta = 0;
         for (account_addr, &msgs_count) in other {
             self.statistics
                 .entry(account_addr.clone())
                 .and_modify(|count| *count += msgs_count)
                 .or_insert(msgs_count);
+            delta += msgs_count;
         }
+        self.total.fetch_add(delta, Ordering::Relaxed);
+    }
+
+    pub fn total_messages(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
     }
 }
 
