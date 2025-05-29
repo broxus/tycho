@@ -17,6 +17,7 @@ use tycho_core::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
+use tycho_core::global_config::ZerostateId;
 use tycho_storage::{
     BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor,
     BlockTransactionsIterBuilder, BriefShardDescr, CodeHashesIter, KeyBlocksDirection, Storage,
@@ -30,14 +31,14 @@ use crate::config::{BlackListConfig, RpcConfig, RpcStorage, TransactionsGcConfig
 use crate::endpoint::{JrpcEndpointCache, ProtoEndpointCache, RpcEndpoint};
 use crate::models::{GenTimings, StateTimings};
 
-pub struct RpcStateBuilder<MandatoryFields = (Storage, BlockchainRpcClient)> {
+pub struct RpcStateBuilder<MandatoryFields = (Storage, BlockchainRpcClient, ZerostateId)> {
     config: RpcConfig,
     mandatory_fields: MandatoryFields,
 }
 
 impl RpcStateBuilder {
     pub fn build(self) -> RpcState {
-        let (storage, blockchain_rpc_client) = self.mandatory_fields;
+        let (storage, blockchain_rpc_client, zerostate_id) = self.mandatory_fields;
 
         let gc_notify = Arc::new(Notify::new());
 
@@ -92,6 +93,7 @@ impl RpcStateBuilder {
                         gen_lt: 0,
                         gen_utime: 0,
                     },
+                    state_hash: HashBytes::ZERO,
                 }),
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
@@ -102,6 +104,7 @@ impl RpcStateBuilder {
                 blockchain_config: ArcSwap::new(parsed_config),
                 jrpc_cache: Default::default(),
                 proto_cache: Default::default(),
+                zerostate_id,
                 gc_notify,
                 gc_handle,
                 blacklisted_accounts,
@@ -111,33 +114,47 @@ impl RpcStateBuilder {
     }
 }
 
-impl<T2> RpcStateBuilder<((), T2)> {
-    pub fn with_storage(self, storage: Storage) -> RpcStateBuilder<(Storage, T2)> {
-        let (_, bc_rpc_client) = self.mandatory_fields;
+impl<T2, T3> RpcStateBuilder<((), T2, T3)> {
+    pub fn with_storage(self, storage: Storage) -> RpcStateBuilder<(Storage, T2, T3)> {
+        let (_, bc_rpc_client, zerostate_id) = self.mandatory_fields;
 
         RpcStateBuilder {
             config: self.config,
-            mandatory_fields: (storage, bc_rpc_client),
+            mandatory_fields: (storage, bc_rpc_client, zerostate_id),
         }
     }
 }
 
-impl<T1> RpcStateBuilder<(T1, ())> {
+impl<T1, T3> RpcStateBuilder<(T1, (), T3)> {
     pub fn with_blockchain_rpc_client(
         self,
         client: BlockchainRpcClient,
-    ) -> RpcStateBuilder<(T1, BlockchainRpcClient)> {
-        let (storage, _) = self.mandatory_fields;
+    ) -> RpcStateBuilder<(T1, BlockchainRpcClient, T3)> {
+        let (storage, _, zerostate_id) = self.mandatory_fields;
 
         RpcStateBuilder {
             config: self.config,
-            mandatory_fields: (storage, client),
+            mandatory_fields: (storage, client, zerostate_id),
         }
     }
 }
 
-impl<T1, T2> RpcStateBuilder<(T1, T2)> {
-    pub fn with_config(self, config: RpcConfig) -> RpcStateBuilder<(T1, T2)> {
+impl<T1, T2> RpcStateBuilder<(T1, T2, ())> {
+    pub fn with_zerostate_id(
+        self,
+        zerostate_id: ZerostateId,
+    ) -> RpcStateBuilder<(T1, T2, ZerostateId)> {
+        let (storage, client, _) = self.mandatory_fields;
+
+        RpcStateBuilder {
+            config: self.config,
+            mandatory_fields: (storage, client, zerostate_id),
+        }
+    }
+}
+
+impl<T1, T2, T3> RpcStateBuilder<(T1, T2, T3)> {
+    pub fn with_config(self, config: RpcConfig) -> RpcStateBuilder<(T1, T2, T3)> {
         RpcStateBuilder { config, ..self }
     }
 }
@@ -149,10 +166,10 @@ pub struct RpcState {
 }
 
 impl RpcState {
-    pub fn builder() -> RpcStateBuilder<((), ())> {
+    pub fn builder() -> RpcStateBuilder<((), (), ())> {
         RpcStateBuilder {
             config: RpcConfig::default(),
-            mandatory_fields: ((), ()),
+            mandatory_fields: ((), (), ()),
         }
     }
 
@@ -215,6 +232,14 @@ impl RpcState {
 
     pub fn proto_cache(&self) -> &ProtoEndpointCache {
         &self.inner.proto_cache
+    }
+
+    pub fn zerostate_id(&self) -> &ZerostateId {
+        &self.inner.zerostate_id
+    }
+
+    pub fn get_latest_mc_info(&self) -> LatestMcInfo {
+        self.inner.mc_info.read().clone()
     }
 
     pub async fn broadcast_external_message(&self, message: &[u8]) {
@@ -464,6 +489,7 @@ struct Inner {
     blockchain_config: ArcSwap<LatestBlockchainConfig>,
     jrpc_cache: JrpcEndpointCache,
     proto_cache: ProtoEndpointCache,
+    zerostate_id: ZerostateId,
     // GC
     gc_notify: Arc<Notify>,
     gc_handle: Option<JoinHandle<()>>,
@@ -473,9 +499,10 @@ struct Inner {
 }
 
 #[derive(Clone)]
-struct LatestMcInfo {
-    block_id: Arc<BlockId>,
-    timings: GenTimings,
+pub struct LatestMcInfo {
+    pub block_id: Arc<BlockId>,
+    pub timings: GenTimings,
+    pub state_hash: HashBytes,
 }
 
 pub struct LatestBlockchainConfig {
@@ -702,6 +729,8 @@ impl Inner {
 
     fn update_mc_info(&self, block: &BlockStuff) -> Result<()> {
         let info = block.load_info()?;
+        let state_update = block.block().state_update.load()?;
+
         let block_id = Arc::new(*block.id());
         *self.mc_info.write() = LatestMcInfo {
             block_id,
@@ -709,6 +738,7 @@ impl Inner {
                 gen_lt: info.end_lt,
                 gen_utime: info.gen_utime,
             },
+            state_hash: state_update.new_hash,
         };
         Ok(())
     }
@@ -1057,6 +1087,7 @@ mod test {
     use tycho_block_util::block::{BlockStuff, BlockStuffAug};
     use tycho_core::block_strider::{BlockSubscriber, BlockSubscriberContext, DelayedTasks};
     use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService};
+    use tycho_core::global_config::ZerostateId;
     use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
     use tycho_network::{
         service_query_fn, BoxCloneService, Network, NetworkConfig, OverlayId, PublicOverlay,
@@ -1151,6 +1182,7 @@ mod test {
             .with_config(config)
             .with_storage(storage)
             .with_blockchain_rpc_client(blockchain_rpc_client)
+            .with_zerostate_id(ZerostateId::default())
             .build();
 
         let block = get_block();
@@ -1224,6 +1256,7 @@ mod test {
             .with_config(config)
             .with_storage(storage)
             .with_blockchain_rpc_client(blockchain_rpc_client)
+            .with_zerostate_id(ZerostateId::default())
             .build();
 
         let block = get_empty_block();

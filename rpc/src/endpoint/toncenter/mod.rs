@@ -36,6 +36,7 @@ pub fn router() -> axum::Router<RpcState> {
     axum::Router::new()
         .route("/", post(post_jrpc))
         .route("/jsonRPC", post(post_jrpc))
+        .route("/getMasterchainInfo", get(get_masterchain_info))
         .route("/shards", get(get_shards))
         .route("/detectAddress", get(get_detect_address))
         .route("/getAddressInformation", get(get_address_information))
@@ -68,6 +69,7 @@ async fn post_jrpc(state: State<RpcState>, req: Request) -> Response {
 
 declare_jrpc_method! {
     pub enum MethodParams: Method {
+        GetMasterchainInfo(EmptyParams),
         Shards(GetShardsParams),
         DetectAddress(DetectAddressParams),
         GetAddressInformation(AccountParams),
@@ -86,6 +88,7 @@ async fn post_jrpc_impl(State(state): State<RpcState>, req: Jrpc<JrpcId, Method>
     let label = [("method", req.method)];
     let _hist = HistogramGuard::begin_with_labels("tycho_jrpc_request_time", &label);
     match req.params {
+        MethodParams::GetMasterchainInfo(_) => handle_get_masterchain_info(req.id, state).await,
         MethodParams::Shards(p) => handle_get_shards(req.id, state, p).await,
         MethodParams::DetectAddress(p) => handle_detect_address(req.id, p).await,
         MethodParams::GetAddressInformation(p) => {
@@ -108,6 +111,31 @@ async fn post_jrpc_impl(State(state): State<RpcState>, req: Jrpc<JrpcId, Method>
         MethodParams::SendBocReturnHash(p) => handle_send_boc_return_hash(req.id, state, p).await,
         MethodParams::RunGetMethod(p) => handle_run_get_method(req.id, state, p).await,
     }
+}
+
+// === GET /getMasterchainInfo ===
+
+fn get_masterchain_info(State(state): State<RpcState>) -> impl Future<Output = Response> {
+    handle_get_masterchain_info(JrpcId::Skip, state)
+}
+
+async fn handle_get_masterchain_info(id: JrpcId, state: RpcState) -> Response {
+    let info = state.get_latest_mc_info();
+    let zerostate_id = state.zerostate_id();
+    ok_to_response(id, MasterchainInfoResponse {
+        ty: MasterchainInfoResponse::TY,
+        last: TonlibBlockId::from(*info.block_id),
+        state_root_hash: info.state_hash,
+        init: TonlibBlockId {
+            ty: TonlibBlockId::TY,
+            workchain: -1,
+            shard: ShardIdent::PREFIX_FULL as i64,
+            seqno: 0,
+            root_hash: zerostate_id.root_hash,
+            file_hash: zerostate_id.file_hash,
+        },
+        extra: TonlibExtra,
+    })
 }
 
 // === GET /shards ===
