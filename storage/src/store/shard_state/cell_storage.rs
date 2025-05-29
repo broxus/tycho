@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bumpalo::Bump;
+use bumpalo_herd::{Herd, Member};
 use bytesize::ByteSize;
 use dashmap::mapref::entry::Entry;
 use dashmap::Map;
@@ -262,22 +263,29 @@ impl CellStorage {
         split_accounts: FastHashMap<HashBytes, Cell>,
         capacity: usize,
     ) -> Result<usize, CellStorageError> {
-        struct AddedCell {
+        struct AddedCell<'a> {
             old_rc: i64,
             additions: u32,
-            data: Option<Vec<u8>>,
+            data: Option<&'a [u8]>,
+        }
+
+        struct Alloc<'a> {
+            bump: Member<'a>,
+            buffer: Vec<u8>,
         }
 
         struct StoreContext<'a> {
             db: &'a BaseDb,
+            herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
             split_accounts: FastHashMap<HashBytes, Cell>,
-            transaction: FastDashMap<HashBytes, AddedCell>,
+            transaction: FastDashMap<HashBytes, AddedCell<'a>>,
         }
 
         impl<'a> StoreContext<'a> {
             fn new(
                 db: &'a BaseDb,
+                herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
                 split_accounts: FastHashMap<HashBytes, Cell>,
                 capacity: usize,
@@ -285,6 +293,7 @@ impl CellStorage {
                 Self {
                     db,
                     raw_cache,
+                    herd,
                     split_accounts,
                     transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
                         capacity,
@@ -294,9 +303,12 @@ impl CellStorage {
                 }
             }
 
-            fn insert_cell(&self, cell: &DynCell, depth: usize) -> Result<bool, CellStorageError> {
-                let mut buffer = Vec::with_capacity(512);
-
+            fn insert_cell(
+                &self,
+                cell: &DynCell,
+                alloc: &mut Alloc<'a>,
+                depth: usize,
+            ) -> Result<bool, CellStorageError> {
                 let key = cell.repr_hash();
                 Ok(match self.transaction.entry(*key) {
                     Entry::Occupied(mut value) => {
@@ -308,10 +320,13 @@ impl CellStorage {
 
                         let is_new = old_rc == 0;
                         let data = if is_new {
-                            if StorageCell::serialize_to(cell, &mut buffer).is_err() {
+                            let buffer = &mut alloc.buffer;
+                            buffer.clear();
+
+                            if StorageCell::serialize_to(cell, buffer).is_err() {
                                 return Err(CellStorageError::InvalidCell);
                             }
-                            Some(buffer)
+                            Some(alloc.bump.alloc_slice_copy(buffer.as_slice()) as &[u8])
                         } else {
                             None
                         };
@@ -354,7 +369,7 @@ impl CellStorage {
                                 for (key, value) in shard {
                                     let item = value.get();
                                     let new_rc = item.old_rc + item.additions as i64;
-                                    cache.on_insert_cell(key, new_rc, item.data.as_deref());
+                                    cache.on_insert_cell(key, new_rc, item.data);
                                 }
                             }
                         });
@@ -369,11 +384,7 @@ impl CellStorage {
                             let item = kv.value();
 
                             buffer.clear();
-                            refcount::add_positive_refount(
-                                item.additions,
-                                item.data.as_deref(),
-                                &mut buffer,
-                            );
+                            refcount::add_positive_refount(item.additions, item.data, &mut buffer);
                             batch.merge_cf(cells_cf, key.as_slice(), &buffer);
                         }
                         total
@@ -384,9 +395,13 @@ impl CellStorage {
             }
         }
 
-        fn store_cell_impl(root: &DynCell, ctx: &StoreContext<'_>) -> Result<(), CellStorageError> {
+        fn store_cell_impl<'a>(
+            root: &DynCell,
+            ctx: &StoreContext<'a>,
+            alloc: &mut Alloc<'a>,
+        ) -> Result<(), CellStorageError> {
             'visit: {
-                if !ctx.insert_cell(root.as_ref(), 0)? {
+                if !ctx.insert_cell(root.as_ref(), alloc, 0)? {
                     break 'visit;
                 }
 
@@ -405,7 +420,7 @@ impl CellStorage {
                             continue 'outer;
                         }
 
-                        if ctx.insert_cell(child, depth)? {
+                        if ctx.insert_cell(child, alloc, depth)? {
                             stack.push(child.references());
                             continue 'outer;
                         }
@@ -418,16 +433,35 @@ impl CellStorage {
             Ok(())
         }
 
-        let ctx = StoreContext::new(&self.db, &self.raw_cells_cache, split_accounts, capacity);
+        let herd = Herd::new();
+
+        let ctx = StoreContext::new(
+            &self.db,
+            &herd,
+            &self.raw_cells_cache,
+            split_accounts,
+            capacity,
+        );
 
         std::thread::scope(|s| {
             s.spawn(|| {
-                store_cell_impl(root, &ctx).expect("multi-threaded store cell");
+                let mut alloc = Alloc {
+                    bump: ctx.herd.get(),
+                    buffer: Vec::with_capacity(512),
+                };
+
+                store_cell_impl(root, &ctx, &mut alloc).expect("multi-threaded store cell");
             });
 
             for cell in ctx.split_accounts.values() {
                 s.spawn(|| {
-                    store_cell_impl(cell.as_ref(), &ctx).expect("multi-threaded store cell");
+                    let mut alloc = Alloc {
+                        bump: ctx.herd.get(),
+                        buffer: Vec::with_capacity(512),
+                    };
+
+                    store_cell_impl(cell.as_ref(), &ctx, &mut alloc)
+                        .expect("multi-threaded store cell");
                 });
             }
         });

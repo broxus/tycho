@@ -15,6 +15,7 @@ anyhow = { workspace = true }
 arc-swap = { workspace = true }
 bitflags = { workspace = true }
 bumpalo = { workspace = true }
+bumpalo-herd = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 crc32c = { workspace = true }
