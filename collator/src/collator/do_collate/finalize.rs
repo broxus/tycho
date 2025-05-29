@@ -40,9 +40,6 @@ use crate::types::{
 };
 use crate::utils::block::detect_top_processed_to_anchor;
 
-// TODO: Move into config (might be done in #752)
-pub const SHARD_SPLIT_DEPTH: u8 = 4; // 16 shards.
-
 pub struct FinalizeState {
     pub execute_result: ExecuteResult,
     pub executor: MessagesExecutor,
@@ -335,8 +332,13 @@ impl Phase<FinalizeState> {
                 labels,
             );
 
-            processed_accounts_res =
-                Self::build_accounts(executor, config_address, &mut public_libraries);
+            processed_accounts_res = Self::build_accounts(
+                executor,
+                config_address,
+                collator_config.accounts_split_depth,
+                &mut public_libraries,
+            );
+
             build_account_blocks_elapsed = histogram.finish();
         });
 
@@ -1125,6 +1127,7 @@ impl Phase<FinalizeState> {
     fn build_accounts(
         executor: MessagesExecutor,
         config_address: &HashBytes,
+        split_depth: u8,
         public_libraries: &mut Dict<HashBytes, LibDescr>,
     ) -> Result<ProcessedAccounts> {
         let shard_ident = executor.shard_id();
@@ -1134,7 +1137,7 @@ impl Phase<FinalizeState> {
         let mut new_config_params = None;
         let (updated_accounts, shard_accounts) = executor.into_accounts_cache_raw();
 
-        let split_depth = if is_masterchain { 0 } else { SHARD_SPLIT_DEPTH };
+        let split_depth = if is_masterchain { 0 } else { split_depth };
         let shard_count = 2usize.pow(split_depth as _);
 
         // Collect account updates while merging masterchain info.
