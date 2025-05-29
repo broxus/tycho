@@ -911,12 +911,9 @@ impl CollatorStdImpl {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
             };
 
-            // TODO: Move into config
-            const SHARD_SPLIT_DEPTH: u8 = 4; // 16 shards
-
             let split_accounts = split_aug_dict_raw(
                 finalized.new_observable_state.accounts.load()?,
-                SHARD_SPLIT_DEPTH,
+                self.config.accounts_split_depth,
             )?;
 
             async move {

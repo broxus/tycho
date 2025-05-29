@@ -30,6 +30,7 @@ pub struct CollatorConfig {
     pub check_value_flow: bool,
     pub validate_config: bool,
     pub fast_sync: bool,
+    pub accounts_split_depth: u8,
 }
 
 impl Default for CollatorConfig {
@@ -41,6 +42,7 @@ impl Default for CollatorConfig {
             check_value_flow: false,
             validate_config: true,
             fast_sync: true,
+            accounts_split_depth: 4,
         }
     }
 }

@@ -36,6 +36,8 @@ pub struct ShardStateStorage {
     min_ref_mc_state: MinRefMcStateTracker,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
+
+    accounts_split_depth: u8,
 }
 
 impl ShardStateStorage {
@@ -58,6 +60,7 @@ impl ShardStateStorage {
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
+            accounts_split_depth: 4,
         }))
     }
 
@@ -87,10 +90,8 @@ impl ShardStateStorage {
             return Err(ShardStateStorageError::BlockHandleIdMismatch.into());
         }
 
-        // TODO: Move into config
-        const SHARD_SPLIT_DEPTH: u8 = 4; // 16 shards
-
-        let split_accounts = split_aug_dict_raw(state.state().accounts.load()?, SHARD_SPLIT_DEPTH)?;
+        let split_accounts =
+            split_aug_dict_raw(state.state().accounts.load()?, self.accounts_split_depth)?;
 
         self.store_state_root(handle, state.root_cell().clone(), split_accounts, hint)
             .await
