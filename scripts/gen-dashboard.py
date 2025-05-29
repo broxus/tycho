@@ -1380,7 +1380,9 @@ def collator_queue_metrics() -> RowPanel:
     legend_format_partition = "{{instance}} par_id: {{partition}}"
     metrics = [
         create_gauge_panel(
-            "tycho_do_collate_int_msgs_queue_calc", "Calculated Internal queue len"
+            "tycho_do_collate_int_msgs_queue_by_stat",
+            "Internal queue len by statistics",
+            labels=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_int_enqueue_count", "Enqueued int msgs count"

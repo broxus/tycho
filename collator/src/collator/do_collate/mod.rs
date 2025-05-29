@@ -205,6 +205,12 @@ impl CollatorStdImpl {
             res => res?,
         };
 
+        let int_queue_len = reader_state
+            .internals
+            .cumulative_statistics
+            .as_ref()
+            .map(|cumulative_stats| cumulative_stats.remaining_total_for_own_shard());
+
         let last_read_to_anchor_chain_time = reader_state.externals.last_read_to_anchor_chain_time;
 
         self.anchors_cache = anchors_cache;
@@ -239,6 +245,11 @@ impl CollatorStdImpl {
 
         // metrics
         metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
+
+        if let Some(int_queue_len) = int_queue_len {
+            metrics::gauge!("tycho_do_collate_int_msgs_queue_by_stat", &labels)
+                .set(int_queue_len as f64);
+        }
 
         self.report_wu_metrics(
             &execute_result,
