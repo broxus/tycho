@@ -103,12 +103,18 @@ pub struct BlockCollationResult {
     pub collation_session_id: CollationSessionId,
     pub candidate: Box<BlockCandidate>,
     pub prev_mc_block_id: BlockId,
-    pub mc_data: Option<Arc<McData>>,
+    pub mc_data_stuff: Option<McDataStuff>,
     pub collation_config: Arc<CollationConfig>,
     pub force_next_mc_block: ForceMasterCollation,
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
+pub struct McDataStuff {
+    pub current: Arc<McData>,
+    pub previous: Option<Arc<McData>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct McData {
     pub global_id: i32,
     pub block_id: BlockId,
