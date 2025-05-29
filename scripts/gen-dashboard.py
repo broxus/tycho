@@ -1382,6 +1382,9 @@ def collator_queue_metrics() -> RowPanel:
         create_gauge_panel(
             "tycho_do_collate_int_msgs_queue_calc", "Calculated Internal queue len"
         ),
+        create_gauge_panel(
+            "tycho_do_collate_int_msgs_queue_by_stat", "Internal queue len by statistics"
+        ),
         create_counter_panel(
             "tycho_do_collate_int_enqueue_count", "Enqueued int msgs count"
         ),

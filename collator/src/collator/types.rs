@@ -610,7 +610,6 @@ pub(super) struct CollatorStats {
     pub total_execute_count_int: u64,
     pub total_execute_count_new_int: u64,
     pub int_queue_length: u64,
-
     pub tps_block: u32,
     pub tps_timer: Option<std::time::Instant>,
     pub tps_execute_count: u64,
@@ -1279,6 +1278,12 @@ pub struct QueueStatisticsWithRemaning {
     pub remaning_stats: ConcurrentQueueStatistics,
 }
 
+impl QueueStatisticsWithRemaning {
+    pub fn total_messages(&self) -> u64 {
+        self.remaning_stats.total_messages()
+    }
+}
+
 pub struct CumulativeStatistics {
     /// Actual processed to info for master and all shards
     all_shards_processed_to_by_partitions: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
@@ -1563,6 +1568,14 @@ impl CumulativeStatistics {
 
         self.dirty = false;
     }
+
+    pub fn total_messages(&mut self) -> u64 {
+        self.ensure_finalized();
+        self.result
+            .values()
+            .map(|stats| stats.total_messages())
+            .sum()
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1604,5 +1617,9 @@ impl ConcurrentQueueStatistics {
                 .and_modify(|count| *count += msgs_count)
                 .or_insert(msgs_count);
         }
+    }
+
+    pub fn total_messages(&self) -> u64 {
+        self.statistics.iter().map(|e| *e.value()).sum()
     }
 }

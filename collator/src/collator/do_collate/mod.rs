@@ -174,7 +174,7 @@ impl CollatorStdImpl {
 
         let CollationResult {
             finalized,
-            reader_state,
+            mut reader_state,
             anchors_cache,
             execute_result,
             final_result,
@@ -188,6 +188,13 @@ impl CollatorStdImpl {
             }
             res => res?,
         };
+
+        let int_queue_len =
+            if let Some(ref mut cumulative_stats) = reader_state.internals.cumulative_statistics {
+                Some(cumulative_stats.total_messages())
+            } else {
+                None
+            };
 
         let last_read_to_anchor_chain_time = reader_state.externals.last_read_to_anchor_chain_time;
 
@@ -239,6 +246,14 @@ impl CollatorStdImpl {
             .record(elapsed_from_prev_block);
         metrics::histogram!("tycho_do_collate_overhead_time", &labels)
             .record(collation_mngmnt_overhead);
+
+        metrics::histogram!("tycho_do_collate_overhead_time", &labels)
+            .record(collation_mngmnt_overhead);
+
+        if let Some(int_queue_len) = int_queue_len {
+            metrics::gauge!("tycho_do_collate_int_msgs_queue_by_stat")
+                .increment(int_queue_len as f64);
+        }
 
         // block time diff from now
         let block_time_diff = {
