@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -138,7 +138,7 @@ pub struct McData {
 
     pub shards_processed_to_by_partitions: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
 
-    pub prev_mc_block_id: Option<BlockId>,
+    pub prev_mc_data: Option<PrevMcData>,
 }
 
 impl McData {
@@ -174,21 +174,6 @@ impl McData {
             .filter(|(shard_id, _)| !shard_id.is_masterchain())
             .collect();
 
-        let prev_mc_block_id = if block_id.seqno > 0 {
-            let prev_block = state_stuff
-                .state_extra()?
-                .prev_blocks
-                .get(block_id.seqno - 1)
-                .context("failed to get prev block")?
-                .unwrap()
-                .1
-                .block_ref
-                .as_block_id(block_id.shard);
-            Some(prev_block)
-        } else {
-            None
-        };
-
         Ok(Arc::new(Self {
             global_id: state.global_id,
             block_id,
@@ -210,7 +195,7 @@ impl McData {
 
             ref_mc_state_handle: state_stuff.ref_mc_state_handle().clone(),
             shards_processed_to_by_partitions,
-            prev_mc_block_id,
+            prev_mc_data: None,
         }))
     }
 
@@ -226,6 +211,11 @@ impl McData {
     pub fn lt_align(&self) -> u64 {
         1000000
     }
+}
+
+#[derive(Debug)]
+pub struct PrevMcData {
+    pub shards: Vec<(ShardIdent, ShardDescriptionShort)>,
 }
 
 #[derive(Clone)]

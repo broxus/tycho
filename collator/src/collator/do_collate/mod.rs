@@ -35,8 +35,7 @@ use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
     DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedToByPartitions,
-    ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt, TopBlockDescription,
-    TopShardBlockInfo,
+    ShardDescriptionShort, ShardDescriptionShortExt, TopBlockDescription, TopShardBlockInfo,
 };
 
 #[cfg(test)]
@@ -111,12 +110,8 @@ impl CollatorStdImpl {
         );
         let part_stat_ranges = if is_first_block_after_prev_master && mc_data.block_id.seqno > 0 {
             if next_block_id_short.is_masterchain() {
-                self.mc_compute_part_stat_ranges(
-                    &mc_data,
-                    &next_block_id_short,
-                    top_shard_blocks_info.clone().unwrap(),
-                )
-                .await?
+                self.mc_compute_part_stat_ranges(&mc_data, top_shard_blocks_info.clone().unwrap())
+                    .await?
             } else {
                 self.compute_part_stat_ranges(&mc_data, &next_block_id_short)
                     .await?
@@ -650,7 +645,7 @@ impl CollatorStdImpl {
     }
 
     fn import_new_shard_top_blocks_for_masterchain(
-        mc_data: &Arc<McData>,
+        mc_data: &McData,
         collation_data_builder: &mut BlockCollationDataBuilder,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<()> {
@@ -822,7 +817,7 @@ impl CollatorStdImpl {
         next_block_id_short: BlockIdShort,
         next_chain_time: u64,
         created_by: HashBytes,
-        mc_data: &Arc<McData>,
+        mc_data: &McData,
         prev_shard_data: &PrevData,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<Box<BlockCollationData>> {
@@ -1208,32 +1203,12 @@ impl CollatorStdImpl {
     ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
         let mc_block_id = mc_data.block_id;
 
-        let prev_mc_block_id = mc_data
-            .prev_mc_block_id
-            .context("Prev MC block must be present")?;
-
-        if prev_mc_block_id.seqno + 1 != mc_block_id.seqno {
-            tracing::error!(
-                target: tracing_targets::COLLATOR,
-                "Prev MC block ID has an incorrect sequence. Prev: {prev_mc_block_id:?}. \
-             Current: {mc_block_id:?}"
-            );
+        let Some(ref prev_mc_data) = mc_data.prev_mc_data else {
             return Ok(None);
-        }
+        };
 
-        let prev_mc_state = self
-            .state_node_adapter
-            .load_state(&prev_mc_block_id)
-            .await?;
-
-        let prev_mc_block_shards: FastHashMap<ShardIdent, ShardDescriptionShort> = prev_mc_state
-            .state_extra()
-            .cloned()?
-            .shards
-            .as_vec()?
-            .iter()
-            .cloned()
-            .collect();
+        let prev_mc_block_shards: FastHashMap<ShardIdent, ShardDescriptionShort> =
+            prev_mc_data.shards.iter().cloned().collect();
 
         let mut ranges = Vec::<QueueShardBoundedRange>::new();
 
@@ -1298,34 +1273,12 @@ impl CollatorStdImpl {
     async fn mc_compute_part_stat_ranges(
         &self,
         mc_data: &McData,
-        block_id_short: &BlockIdShort,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
         let prev_mc_block_id = mc_data.block_id;
 
-        if prev_mc_block_id.seqno + 1 != block_id_short.seqno {
-            tracing::error!(
-                target: tracing_targets::COLLATOR,
-                "Prev MC block ID has an incorrect sequence. Prev: {prev_mc_block_id:?}.
-             Current: {:?}",
-                block_id_short.seqno
-            );
-            return Ok(None);
-        }
-
-        let prev_mc_state = self
-            .state_node_adapter
-            .load_state(&prev_mc_block_id)
-            .await?;
-
-        let prev_mc_block_shards: FastHashMap<ShardIdent, ShardDescriptionShort> = prev_mc_state
-            .state_extra()
-            .cloned()?
-            .shards
-            .as_vec()?
-            .iter()
-            .cloned()
-            .collect();
+        let prev_mc_block_shards: FastHashMap<ShardIdent, ShardDescriptionShort> =
+            mc_data.shards.iter().cloned().collect();
 
         let mut ranges = Vec::<QueueShardBoundedRange>::new();
 

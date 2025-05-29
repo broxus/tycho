@@ -35,8 +35,8 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use crate::types::{
-    BlockCandidate, CollationSessionInfo, CollatorConfig, McData, ShardDescriptionShortExt,
-    ShardHashesExt,
+    BlockCandidate, CollationSessionInfo, CollatorConfig, McData, PrevMcData,
+    ShardDescriptionShortExt, ShardHashesExt,
 };
 use crate::utils::block::detect_top_processed_to_anchor;
 
@@ -745,7 +745,9 @@ impl Phase<FinalizeState> {
                         .collation_data
                         .mc_shards_processed_to_by_partitions
                         .clone(),
-                    prev_mc_block_id: Some(self.state.mc_data.block_id),
+                    prev_mc_data: Some(PrevMcData {
+                        shards: self.state.mc_data.shards.clone(),
+                    }),
                 }))
             }
         };
