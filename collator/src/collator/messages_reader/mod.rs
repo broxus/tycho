@@ -15,7 +15,8 @@ pub(super) use self::reader_state::*;
 use super::error::CollatorError;
 use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
 use super::types::{
-    AnchorsCache, CumulativeStatistics, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff,
+    AnchorsCache, ConcurrentQueueStatistics, CumulativeStatistics, MsgsExecutionParamsExtension,
+    MsgsExecutionParamsStuff,
 };
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::internal_queue::types::{
@@ -221,7 +222,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                     .result()
                     .get(&0)
                     .map(|par| par.remaning_stats.clone())
-                    .unwrap_or_default(),
+                    .unwrap_or(ConcurrentQueueStatistics::new(cx.for_shard_id)),
                 stats_just_loaded: cumulative_stats_just_loaded,
             });
         }
@@ -257,7 +258,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                     .result()
                     .get(&1)
                     .map(|par| par.remaning_stats.clone())
-                    .unwrap_or_default(),
+                    .unwrap_or(ConcurrentQueueStatistics::new(cx.for_shard_id)),
                 stats_just_loaded: cumulative_stats_just_loaded,
             });
         }

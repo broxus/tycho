@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -612,7 +613,6 @@ pub(super) struct CollatorStats {
     pub total_execute_count_int: u64,
     pub total_execute_count_new_int: u64,
     pub int_queue_length: u64,
-
     pub tps_block: u32,
     pub tps_timer: Option<std::time::Instant>,
     pub tps_execute_count: u64,
@@ -1272,7 +1272,7 @@ impl MsgsExecutionParamsExtension for MsgsExecutionParams {
 
 type DiffMaxMessage = QueueKey;
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct QueueStatisticsWithRemaning {
     /// Statistics shows all messages count
     pub initial_stats: QueueStatistics,
@@ -1475,7 +1475,7 @@ impl CumulativeStatistics {
             .entry(partition)
             .or_insert_with(|| QueueStatisticsWithRemaning {
                 initial_stats: QueueStatistics::default(),
-                remaning_stats: ConcurrentQueueStatistics::default(),
+                remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
             });
         entry.initial_stats.append(&diff_partition_stats);
         entry.remaning_stats.append(&diff_partition_stats);
@@ -1515,7 +1515,13 @@ impl CumulativeStatistics {
     ) {
         for (&partition, diff_partition_stats) in diff_stats.iter() {
             // append to cumulative stats
-            let partition_stats = self.result.entry(partition).or_default();
+            let partition_stats =
+                self.result
+                    .entry(partition)
+                    .or_insert_with(|| QueueStatisticsWithRemaning {
+                        initial_stats: QueueStatistics::default(),
+                        remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
+                    });
             partition_stats.initial_stats.append(diff_partition_stats);
             partition_stats.remaning_stats.append(diff_partition_stats);
 
@@ -1539,7 +1545,12 @@ impl CumulativeStatistics {
                 if let Some(partition_processed_to) =
                     shard_processed_to_by_partitions.get(partition)
                 {
-                    let cumulative_stats = self.result.entry(*partition).or_default();
+                    let cumulative_stats = self.result.entry(*partition).or_insert_with(|| {
+                        QueueStatisticsWithRemaning {
+                            initial_stats: QueueStatistics::default(),
+                            remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
+                        }
+                    });
                     if let Some(to_key) = partition_processed_to.get(src_shard) {
                         let mut to_remove_diffs = vec![];
                         // find diffs that below processed_to border and remove destination accounts from stats
@@ -1602,6 +1613,13 @@ impl CumulativeStatistics {
         }
         res.unwrap_or_default()
     }
+
+    pub fn remaining_total_for_own_shard(&self) -> u64 {
+        self.result
+            .values()
+            .map(|stats| stats.remaning_stats.tracked_total())
+            .sum()
+    }
 }
 
 impl fmt::Debug for CumulativeStatistics {
@@ -1633,12 +1651,26 @@ impl fmt::Debug for CumulativeStatistics {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ConcurrentQueueStatistics {
     statistics: Arc<FastDashMap<IntAddr, u64>>,
+    track_shard: ShardIdent,
+    tracked_total: Arc<AtomicU64>,
 }
 
 impl ConcurrentQueueStatistics {
+    pub fn new(track_shard: ShardIdent) -> Self {
+        Self {
+            statistics: Arc::new(Default::default()),
+            track_shard,
+            tracked_total: Arc::new(Default::default()),
+        }
+    }
+
+    pub fn tracked_total(&self) -> u64 {
+        self.tracked_total.load(Ordering::Relaxed)
+    }
+
     pub fn statistics(&self) -> &FastDashMap<IntAddr, u64> {
         &self.statistics
     }
@@ -1648,11 +1680,14 @@ impl ConcurrentQueueStatistics {
     }
 
     pub fn decrement_for_account(&self, account_addr: IntAddr, count: u64) {
-        if let DashMapEntry::Occupied(mut occupied) = self.statistics.entry(account_addr) {
+        if let DashMapEntry::Occupied(mut occupied) = self.statistics.entry(account_addr.clone()) {
             let value = occupied.get_mut();
             *value -= count;
             if *value == 0 {
                 occupied.remove();
+            }
+            if self.track_shard.contains_address(&account_addr) {
+                self.tracked_total.fetch_sub(count, Ordering::Relaxed);
             }
         } else {
             panic!("attempt to decrement non-existing account");
@@ -1660,11 +1695,22 @@ impl ConcurrentQueueStatistics {
     }
 
     pub fn append(&self, other: &AccountStatistics) {
+        let mut delta_tracked = 0;
+
         for (account_addr, &msgs_count) in other {
             self.statistics
                 .entry(account_addr.clone())
                 .and_modify(|count| *count += msgs_count)
                 .or_insert(msgs_count);
+
+            if self.track_shard.contains_address(account_addr) {
+                delta_tracked += msgs_count;
+            }
+        }
+
+        if delta_tracked != 0 {
+            self.tracked_total
+                .fetch_add(delta_tracked, Ordering::Relaxed);
         }
     }
 }
