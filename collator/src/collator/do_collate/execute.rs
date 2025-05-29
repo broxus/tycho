@@ -218,10 +218,6 @@ impl Phase<ExecuteState> {
             .increment(self.state.collation_data.int_enqueue_count);
         metrics::counter!("tycho_do_collate_int_dequeue_count")
             .increment(self.state.collation_data.int_dequeue_count);
-        metrics::gauge!("tycho_do_collate_int_msgs_queue_calc").increment(
-            (self.state.collation_data.int_enqueue_count as i64
-                - self.state.collation_data.int_dequeue_count as i64) as f64,
-        );
         metrics::counter!("tycho_do_collate_msgs_exec_count_all", &labels)
             .increment(self.state.collation_data.execute_count_all);
 
