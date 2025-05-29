@@ -39,11 +39,11 @@ use crate::tracing_targets;
 use crate::types::processed_upto::{
     find_min_processed_to_by_shards, BlockSeqno, Lt, ProcessedUptoInfoStuff,
 };
-use crate::types::{BlockCandidate, McData, ProcessedToByPartitions, TopShardBlockInfo};
+use crate::types::{BlockCandidate, McDataStuff, ProcessedToByPartitions, TopShardBlockInfo};
 
 pub(super) struct WorkingState {
     pub next_block_id_short: BlockIdShort,
-    pub mc_data: Arc<McData>,
+    pub mc_data_stuff: McDataStuff,
     pub collation_config: Arc<CollationConfig>,
     pub wu_used_from_last_anchor: u64,
     pub prev_shard_data: Option<PrevData>,
@@ -1199,8 +1199,8 @@ pub struct ExecuteResult {
 pub struct FinalizeBlockResult {
     pub collation_data: Box<BlockCollationData>,
     pub block_candidate: Box<BlockCandidate>,
-    pub mc_data: Option<Arc<McData>>,
-    pub old_mc_data: Arc<McData>,
+    pub mc_data_stuff: Option<McDataStuff>,
+    pub old_mc_data_stuff: McDataStuff,
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
     pub finalize_wu_total: u64,

@@ -34,9 +34,8 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
-    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedToByPartitions,
-    ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt, TopBlockDescription,
-    TopShardBlockInfo,
+    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, McDataStuff, ProcessedToByPartitions,
+    ShardDescriptionShort, ShardDescriptionShortExt, TopBlockDescription, TopShardBlockInfo,
 };
 
 #[cfg(test)]
@@ -72,7 +71,7 @@ impl CollatorStdImpl {
 
         let WorkingState {
             next_block_id_short,
-            mc_data,
+            mc_data_stuff,
             collation_config,
             wu_used_from_last_anchor,
             prev_shard_data,
@@ -81,14 +80,14 @@ impl CollatorStdImpl {
             ..
         } = *working_state;
 
-        let mc_block_id = mc_data.block_id;
+        let mc_block_id = mc_data_stuff.current.block_id;
         let prev_shard_data = prev_shard_data.unwrap();
         let usage_tree = usage_tree.unwrap();
         let tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "Start collating block: mc_data_block_id={}, prev_block_ids={}, top_shard_blocks_ids: {:?}",
-            mc_data.block_id.as_short_id(),
+            mc_data_stuff.current.block_id.as_short_id(),
             DisplayBlockIdsIntoIter(prev_shard_data.blocks_ids()),
             top_shard_blocks_info.as_ref().map(|v| DisplayBlockIdsIter(
                 v.iter().map(|i| &i.block_id)
@@ -107,29 +106,29 @@ impl CollatorStdImpl {
 
         let is_first_block_after_prev_master = is_first_block_after_prev_master(
             prev_shard_data.blocks_ids()[0], // TODO: consider split/merge
-            &mc_data.shards,
+            &mc_data_stuff.current.shards,
         );
-        let part_stat_ranges = if is_first_block_after_prev_master && mc_data.block_id.seqno > 0 {
-            if next_block_id_short.is_masterchain() {
-                self.mc_compute_part_stat_ranges(
-                    &mc_data,
-                    &next_block_id_short,
-                    top_shard_blocks_info.clone().unwrap(),
-                )
-                .await?
-            } else {
-                self.compute_part_stat_ranges(&mc_data, &next_block_id_short)
+        let part_stat_ranges =
+            if is_first_block_after_prev_master && mc_data_stuff.current.block_id.seqno > 0 {
+                if next_block_id_short.is_masterchain() {
+                    self.mc_compute_part_stat_ranges(
+                        &mc_data_stuff,
+                        top_shard_blocks_info.clone().unwrap(),
+                    )
                     .await?
-            }
-        } else {
-            None
-        };
+                } else {
+                    self.compute_part_stat_ranges(&mc_data_stuff, &next_block_id_short)
+                        .await?
+                }
+            } else {
+                None
+            };
 
         let collation_data = self.create_collation_data(
             next_block_id_short,
             next_chain_time,
             created_by,
-            &mc_data,
+            &mc_data_stuff,
             &prev_shard_data,
             top_shard_blocks_info,
         )?;
@@ -140,7 +139,7 @@ impl CollatorStdImpl {
         let state = Box::new(ActualState {
             collation_config,
             collation_data,
-            mc_data,
+            mc_data_stuff,
             prev_shard_data,
             shard_id: self.shard_id,
             collation_is_cancelled: CancellationFlag::new(),
@@ -297,7 +296,7 @@ impl CollatorStdImpl {
     ) -> Result<CollationResult, CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
-        let mc_data = state.mc_data.clone();
+        let mc_data_stuff = state.mc_data_stuff.clone();
 
         let collation_is_cancelled = state.collation_is_cancelled.clone();
 
@@ -393,7 +392,8 @@ impl CollatorStdImpl {
             .get_min_internals_processed_to_by_shards()
             .get(&shard_id)
             .cloned();
-        let min_processed_to_from_mc_data = mc_data
+        let min_processed_to_from_mc_data = mc_data_stuff
+            .current
             .processed_upto
             .get_min_internals_processed_to_by_shards()
             .get(&shard_id)
@@ -822,7 +822,7 @@ impl CollatorStdImpl {
         next_block_id_short: BlockIdShort,
         next_chain_time: u64,
         created_by: HashBytes,
-        mc_data: &Arc<McData>,
+        mc_data_stuff: &McDataStuff,
         prev_shard_data: &PrevData,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<Box<BlockCollationData>> {
@@ -843,7 +843,10 @@ impl CollatorStdImpl {
         }
 
         // prepare block collation data
-        let block_limits = mc_data.config.get_block_limits(is_masterchain)?;
+        let block_limits = mc_data_stuff
+            .current
+            .config
+            .get_block_limits(is_masterchain)?;
         tracing::debug!(target: tracing_targets::COLLATOR,
             "Block limits: {:?}",
             block_limits
@@ -852,7 +855,7 @@ impl CollatorStdImpl {
         let mut collation_data_builder = BlockCollationDataBuilder::new(
             next_block_id_short,
             rand_seed,
-            mc_data.block_id.seqno,
+            mc_data_stuff.current.block_id.seqno,
             next_chain_time,
             created_by,
             self.mempool_config_override.clone(),
@@ -869,19 +872,21 @@ impl CollatorStdImpl {
 
             if let Some(top_shard_blocks_info) = top_shard_blocks_info {
                 Self::import_new_shard_top_blocks_for_masterchain(
-                    mc_data,
+                    &mc_data_stuff.current,
                     &mut collation_data_builder,
                     top_shard_blocks_info,
                 )?;
             }
         } else {
-            collation_data_builder.mc_shards_processed_to_by_partitions =
-                mc_data.shards_processed_to_by_partitions.clone();
+            collation_data_builder.mc_shards_processed_to_by_partitions = mc_data_stuff
+                .current
+                .shards_processed_to_by_partitions
+                .clone();
         }
 
         let start_lt = Self::calc_start_lt(
-            mc_data.gen_lt,
-            mc_data.lt_align(),
+            mc_data_stuff.current.gen_lt,
+            mc_data_stuff.current.lt_align(),
             prev_shard_data.gen_lt(),
             is_masterchain,
             collation_data_builder.shards_max_end_lt,
@@ -892,10 +897,10 @@ impl CollatorStdImpl {
         // compute created / minted / recovered / from_prev_block
         let prev_total_balance = &prev_shard_data.observable_accounts().root_extra().balance;
         Self::init_value_flow(
-            &mc_data.config,
-            &mc_data.global_balance,
+            &mc_data_stuff.current.config,
+            &mc_data_stuff.current.global_balance,
             prev_total_balance,
-            &mc_data.total_validator_fees,
+            &mc_data_stuff.current.total_validator_fees,
             &mut collation_data,
         )?;
 
@@ -946,8 +951,8 @@ impl CollatorStdImpl {
 
             let new_queue_diff_hash = *finalized.block_candidate.queue_diff_aug.diff_hash();
 
-            let collation_config = match &finalized.mc_data {
-                Some(mcd) => Arc::new(mcd.config.get_collation_config()?),
+            let collation_config = match &finalized.mc_data_stuff {
+                Some(mcd) => Arc::new(mcd.current.config.get_collation_config()?),
                 None => finalized.collation_config,
             };
 
@@ -956,14 +961,16 @@ impl CollatorStdImpl {
                 .on_block_candidate(BlockCollationResult {
                     collation_session_id: self.collation_session.id(),
                     candidate: finalized.block_candidate,
-                    prev_mc_block_id: finalized.old_mc_data.block_id,
-                    mc_data: finalized.mc_data.clone(),
+                    prev_mc_block_id: finalized.old_mc_data_stuff.current.block_id,
+                    mc_data_stuff: finalized.mc_data_stuff.clone(),
                     collation_config: collation_config.clone(),
                     force_next_mc_block,
                 })
                 .await?;
 
-            let new_mc_data = finalized.mc_data.unwrap_or(finalized.old_mc_data);
+            let new_mc_data_stuff = finalized
+                .mc_data_stuff
+                .unwrap_or(finalized.old_mc_data_stuff);
 
             // spawn update PrevData and working state
             self.prepare_working_state_update(
@@ -972,7 +979,7 @@ impl CollatorStdImpl {
                 finalized.new_state_root,
                 store_new_state_task,
                 new_queue_diff_hash,
-                new_mc_data,
+                new_mc_data_stuff,
                 collation_config,
                 has_unprocessed_messages,
                 reader_state,
@@ -1203,37 +1210,19 @@ impl CollatorStdImpl {
     /// and other shards diffs between previous masterchain block - 1 and previous masterchain block
     async fn compute_part_stat_ranges(
         &self,
-        mc_data: &McData,
+        mc_data_stuff: &McDataStuff,
         block_id_short: &BlockIdShort,
     ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
-        let mc_block_id = mc_data.block_id;
+        let mc_block_id = mc_data_stuff.current.block_id;
 
-        let prev_mc_block_id = mc_data
-            .prev_mc_block_id
-            .context("Prev MC block must be present")?;
-
-        if prev_mc_block_id.seqno + 1 != mc_block_id.seqno {
-            tracing::error!(
-                target: tracing_targets::COLLATOR,
-                "Prev MC block ID has an incorrect sequence. Prev: {prev_mc_block_id:?}. \
-             Current: {mc_block_id:?}"
-            );
+        let prov_mc_state = if let Some(ref prev_mc_state) = mc_data_stuff.previous {
+            prev_mc_state
+        } else {
             return Ok(None);
-        }
+        };
 
-        let prev_mc_state = self
-            .state_node_adapter
-            .load_state(&prev_mc_block_id)
-            .await?;
-
-        let prev_mc_block_shards: FastHashMap<ShardIdent, ShardDescriptionShort> = prev_mc_state
-            .state_extra()
-            .cloned()?
-            .shards
-            .as_vec()?
-            .iter()
-            .cloned()
-            .collect();
+        let prev_mc_block_shards: FastHashMap<ShardIdent, ShardDescriptionShort> =
+            prov_mc_state.shards.iter().cloned().collect();
 
         let mut ranges = Vec::<QueueShardBoundedRange>::new();
 
@@ -1253,7 +1242,8 @@ impl CollatorStdImpl {
         });
 
         // Iterate over all updated shard blocks and add their diff ranges
-        for (shard, current_descr) in mc_data
+        for (shard, current_descr) in mc_data_stuff
+            .current
             .shards
             .iter()
             .filter(|(shard, d)| d.top_sc_block_updated && shard != &block_id_short.shard)
@@ -1297,35 +1287,13 @@ impl CollatorStdImpl {
     /// and diffs between previous masterchain top blocks and current top blocks
     async fn mc_compute_part_stat_ranges(
         &self,
-        mc_data: &McData,
-        block_id_short: &BlockIdShort,
+        mc_data_stuff: &McDataStuff,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
-        let prev_mc_block_id = mc_data.block_id;
+        let prev_mc_block_id = mc_data_stuff.current.block_id;
 
-        if prev_mc_block_id.seqno + 1 != block_id_short.seqno {
-            tracing::error!(
-                target: tracing_targets::COLLATOR,
-                "Prev MC block ID has an incorrect sequence. Prev: {prev_mc_block_id:?}.
-             Current: {:?}",
-                block_id_short.seqno
-            );
-            return Ok(None);
-        }
-
-        let prev_mc_state = self
-            .state_node_adapter
-            .load_state(&prev_mc_block_id)
-            .await?;
-
-        let prev_mc_block_shards: FastHashMap<ShardIdent, ShardDescriptionShort> = prev_mc_state
-            .state_extra()
-            .cloned()?
-            .shards
-            .as_vec()?
-            .iter()
-            .cloned()
-            .collect();
+        let prev_mc_block_shards: FastHashMap<ShardIdent, ShardDescriptionShort> =
+            mc_data_stuff.current.shards.iter().cloned().collect();
 
         let mut ranges = Vec::<QueueShardBoundedRange>::new();
 
