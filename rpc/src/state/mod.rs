@@ -21,7 +21,7 @@ use tycho_core::global_config::ZerostateId;
 use tycho_storage::{
     BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor,
     BlockTransactionsIterBuilder, BriefBlockInfo, BriefShardDescr, CodeHashesIter,
-    KeyBlocksDirection, Storage, TransactionsIterBuilder,
+    KeyBlocksDirection, Storage, TransactionData, TransactionDataExt, TransactionsIterBuilder,
 };
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
@@ -357,12 +357,24 @@ impl RpcState {
     pub fn get_transaction(
         &self,
         hash: &HashBytes,
-    ) -> Result<Option<impl AsRef<[u8]> + '_>, RpcStateError> {
+    ) -> Result<Option<TransactionData<'_>>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
             .get_transaction(hash)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_transaction_ext(
+        &self,
+        hash: &HashBytes,
+    ) -> Result<Option<TransactionDataExt<'_>>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_transaction_ext(hash)
             .map_err(RpcStateError::Internal)
     }
 
@@ -1058,6 +1070,10 @@ pub enum RpcStateError {
 }
 
 impl RpcStateError {
+    pub fn internal<E: Into<anyhow::Error>>(error: E) -> Self {
+        Self::Internal(error.into())
+    }
+
     pub fn bad_request<E: Into<anyhow::Error>>(error: E) -> Self {
         Self::BadRequest(BadRequestError(error.into()))
     }

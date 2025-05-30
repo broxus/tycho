@@ -352,6 +352,52 @@ impl RpcStorage {
         Ok(tx.map(TransactionData::new))
     }
 
+    pub fn get_transaction_ext(&self, hash: &HashBytes) -> Result<Option<TransactionDataExt<'_>>> {
+        let Some(tx_info) = self.db.transactions_by_hash.get(hash)? else {
+            return Ok(None);
+        };
+        let tx_info = tx_info.as_ref();
+        if tx_info.len() < tables::TransactionsByHash::VALUE_FULL_LEN {
+            return Ok(None);
+        }
+
+        let account = StdAddr::new(tx_info[0] as i8, HashBytes::from_slice(&tx_info[1..33]));
+        let lt = u64::from_be_bytes(tx_info[33..41].try_into().unwrap());
+        let prefix_len = tx_info[41];
+        debug_assert!(prefix_len < 64);
+
+        let tail_mask = 1u64 << (63 - prefix_len);
+
+        // TODO: Move into types?
+        let Some(shard) = ShardIdent::new(
+            tx_info[0] as i8 as i32,
+            (account.prefix() | tail_mask) & !(tail_mask - 1),
+        ) else {
+            // TODO: unwrap?
+            return Ok(None);
+        };
+        let block_id = BlockId {
+            shard,
+            seqno: u32::from_le_bytes(tx_info[42..46].try_into().unwrap()),
+            root_hash: HashBytes::from_slice(&tx_info[46..78]),
+            file_hash: HashBytes::from_slice(&tx_info[78..110]),
+        };
+        let mc_seqno = u32::from_le_bytes(tx_info[110..114].try_into().unwrap());
+
+        let tx = self
+            .db
+            .transactions
+            .get(&tx_info[..Transactions::KEY_LEN])?;
+
+        Ok(tx.map(|data| TransactionDataExt {
+            account,
+            lt,
+            block_id,
+            mc_seqno,
+            data: TransactionData::new(data),
+        }))
+    }
+
     pub fn get_transaction_block_id(&self, hash: &HashBytes) -> Result<Option<BlockId>> {
         let Some(tx_info) = self.db.transactions_by_hash.get(hash)? else {
             return Ok(None);
@@ -1750,6 +1796,14 @@ where
     }
 }
 
+pub struct TransactionDataExt<'a> {
+    pub account: StdAddr,
+    pub lt: u64,
+    pub block_id: BlockId,
+    pub mc_seqno: u32,
+    pub data: TransactionData<'a>,
+}
+
 pub struct TransactionData<'a> {
     data: rocksdb::DBPinnableSlice<'a>,
 }
@@ -1757,6 +1811,21 @@ pub struct TransactionData<'a> {
 impl<'a> TransactionData<'a> {
     pub fn new(data: rocksdb::DBPinnableSlice<'a>) -> Self {
         Self { data }
+    }
+
+    pub fn tx_hash(&self) -> HashBytes {
+        let value = self.data.as_ref();
+        assert!(!value.is_empty());
+        HashBytes::from_slice(&value[1..33])
+    }
+
+    pub fn in_msg_hash(&self) -> Option<HashBytes> {
+        let value = self.data.as_ref();
+        assert!(!value.is_empty());
+
+        let mask = TransactionMask::from_bits_retain(value[0]);
+        mask.has_msg_hash()
+            .then(|| HashBytes::from_slice(&value[33..65]))
     }
 
     fn read_transaction<T: AsRef<[u8]> + ?Sized>(value: &T) -> &[u8] {
