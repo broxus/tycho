@@ -22,6 +22,7 @@ use super::{
 };
 use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::types::{AnchorsCache, ParsedMessage};
+use crate::collator::MsgsExecutionParamsStuff;
 use crate::internal_queue::types::{
     DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue,
 };
@@ -99,7 +100,7 @@ async fn test_refill_messages() -> Result<()> {
     let mut group_slots_fractions = Dict::<u16, u8>::new();
     group_slots_fractions.set(0, 80)?;
     group_slots_fractions.set(1, 10)?;
-    let msgs_exec_params = Arc::new(MsgsExecutionParams {
+    let msgs_exec_params = MsgsExecutionParams {
         buffer_limit: 30,
         group_limit: 5,
         group_vert_size: 2,
@@ -110,7 +111,12 @@ async fn test_refill_messages() -> Result<()> {
         par_0_int_msgs_count_limit: 50,
         group_slots_fractions,
         range_messages_limit: 20,
-    });
+    };
+
+    let buffer_limit = msgs_exec_params.buffer_limit;
+
+    let msgs_exec_params_stuff =
+        MsgsExecutionParamsStuff::create(Some(msgs_exec_params.clone()), msgs_exec_params);
 
     const DEFAULT_BLOCK_EXEC_COUNT_LIMIT: usize = 20;
 
@@ -123,8 +129,10 @@ async fn test_refill_messages() -> Result<()> {
     // INIT TEST ADAPTER
     //--------------
     // test messages factory and executor
-    let msgs_factory =
-        TestMessageFactory::new(dex_pairs, |info, cell| EnqueuedMessage { info, cell });
+    let msgs_factory = TestMessageFactory::new(dex_pairs.clone(), |info, cell| EnqueuedMessage {
+        info,
+        cell,
+    });
 
     // queue adapter
     let (primary_mq_adapter, _primary_tmp_dir) = create_test_queue_adapter().await?;
@@ -132,7 +140,7 @@ async fn test_refill_messages() -> Result<()> {
 
     // test shard collator
     let sc_collator = TestCollator {
-        msgs_exec_params: msgs_exec_params.clone(),
+        msgs_exec_params: msgs_exec_params_stuff.clone(),
 
         shard_id: sc_shard_id,
         block_seqno: 0,
@@ -156,7 +164,7 @@ async fn test_refill_messages() -> Result<()> {
 
     // test master collator
     let mc_collator = TestCollator {
-        msgs_exec_params: msgs_exec_params.clone(),
+        msgs_exec_params: msgs_exec_params_stuff.clone(),
 
         shard_id: ShardIdent::MASTERCHAIN,
         block_seqno: 0,
@@ -174,8 +182,8 @@ async fn test_refill_messages() -> Result<()> {
             has_unprocessed_messages: None,
         }),
 
-        primary_mq_adapter,
-        secondary_mq_adapter,
+        primary_mq_adapter: primary_mq_adapter.clone(),
+        secondary_mq_adapter: secondary_mq_adapter.clone(),
     };
 
     // test adapter
@@ -359,7 +367,7 @@ async fn test_refill_messages() -> Result<()> {
         tracing::trace!("TEST CASE 006: STEP {}", i + 1);
 
         // we create such amout of externals per anchor so that they do not fit one buffer limit
-        let target_total_msgs_count = (msgs_exec_params.buffer_limit + 10) as usize;
+        let target_total_msgs_count = (buffer_limit + 10) as usize;
         let target_swap_msgs_count = target_total_msgs_count / 3;
         let target_transfer_msgs_count = target_total_msgs_count - target_swap_msgs_count;
         let mut messages = test_adapter
@@ -427,7 +435,7 @@ async fn test_refill_messages() -> Result<()> {
 
     for i in 0..10 {
         // we create such amount of externals per anchor so that they do not fit one buffer limit
-        let msgs_count = (msgs_exec_params.buffer_limit + 20) as usize;
+        let msgs_count = (buffer_limit + 20) as usize;
         let transfer_messages = test_adapter
             .msgs_factory
             .create_transfer_messages(&transfers_wallets, msgs_count)?;
@@ -504,6 +512,89 @@ async fn test_refill_messages() -> Result<()> {
     loop {
         i += 1;
         tracing::trace!("TEST CASE 008: REMAINING STEP {}", i);
+        if let TestCollateResult {
+            has_unprocessed_messages: false,
+        } = test_adapter.test_collate_shards(
+            DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+            &TestAssertsParams {
+                expired_ext_msgs_count: Some(0),
+            },
+        )? {
+            break;
+        }
+    }
+
+    //--------------
+    // TEST CASE 009: UPDATE MSG EXEC PARAMETERS
+    //--------------
+    tracing::trace!("TEST CASE 009: UPDATE MSG EXEC PARAMETERS");
+
+    for i in 0..20 {
+        tracing::trace!("TEST CASE 009: STEP {}", i + 1);
+
+        // we create such amout of externals per anchor so that they do not fit one buffer limit
+        let target_total_msgs_count = (buffer_limit + 10) as usize;
+        let target_swap_msgs_count = target_total_msgs_count / 3;
+        let target_transfer_msgs_count = target_total_msgs_count - target_swap_msgs_count;
+        let mut messages = test_adapter
+            .msgs_factory
+            .create_swap_messages(&dex_wallets, target_swap_msgs_count)?;
+        let mut transfer_messages = test_adapter
+            .msgs_factory
+            .create_transfer_messages(&transfers_wallets, target_transfer_msgs_count)?;
+        messages.append(&mut transfer_messages);
+        test_adapter.import_anchor_with_messages(messages);
+        test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT, &TestAssertsParams {
+            expired_ext_msgs_count: None,
+        })?;
+    }
+
+    let mut group_slots_fractions = Dict::<u16, u8>::new();
+    group_slots_fractions.set(0, 80)?;
+    group_slots_fractions.set(1, 10)?;
+    let msgs_exec_params = MsgsExecutionParams {
+        buffer_limit: 30,
+        group_limit: 5,
+        group_vert_size: 2,
+        externals_expire_timeout: 10,
+        open_ranges_limit: 3,
+        par_0_ext_msgs_count_limit: 10,
+        par_0_int_msgs_count_limit: 50,
+        group_slots_fractions: group_slots_fractions.clone(),
+        range_messages_limit: 20,
+    };
+
+    let msgs_exec_params_new = MsgsExecutionParams {
+        buffer_limit: 50, // change buffer limit
+        group_limit: 5,
+        group_vert_size: 2,
+        externals_expire_timeout: 10,
+        open_ranges_limit: 3,
+        par_0_ext_msgs_count_limit: 10,
+        par_0_int_msgs_count_limit: 50,
+        group_slots_fractions,
+        range_messages_limit: 20,
+    };
+
+    let msgs_exec_params_stuff = MsgsExecutionParamsStuff::create(
+        Some(msgs_exec_params.clone()),
+        msgs_exec_params_new.clone(),
+    );
+
+    test_adapter.update_msgs_exec_params_mc(msgs_exec_params_stuff);
+
+    //  NEED TO CREATE SEPARATE MsgsExecutionParamsStuff FOR ms and sc, DO NOT CLONE!
+
+    let msgs_exec_params_stuff =
+        MsgsExecutionParamsStuff::create(Some(msgs_exec_params), msgs_exec_params_new);
+
+    test_adapter.update_msgs_exec_params_sc(msgs_exec_params_stuff);
+
+    // process all remaining messages in queue
+    let mut i = 0;
+    loop {
+        i += 1;
+        tracing::trace!("TEST CASE 009: REMAINING STEP {}", i);
         if let TestCollateResult {
             has_unprocessed_messages: false,
         } = test_adapter.test_collate_shards(
@@ -657,6 +748,14 @@ where
         self.sc_collator.import_anchor(anchor.clone());
         self.mc_collator.import_anchor(anchor);
     }
+
+    fn update_msgs_exec_params_mc(&mut self, msgs_exec_params: MsgsExecutionParamsStuff) {
+        self.mc_collator.update_msgs_exec_params(msgs_exec_params);
+    }
+
+    fn update_msgs_exec_params_sc(&mut self, msgs_exec_params: MsgsExecutionParamsStuff) {
+        self.sc_collator.update_msgs_exec_params(msgs_exec_params);
+    }
 }
 
 #[derive(Default)]
@@ -669,7 +768,7 @@ struct TestCollateResult {
 }
 
 struct TestCollator<V: InternalMessageValue> {
-    msgs_exec_params: Arc<MsgsExecutionParams>,
+    msgs_exec_params: MsgsExecutionParamsStuff,
 
     shard_id: ShardIdent,
     block_seqno: BlockSeqno,
@@ -792,12 +891,13 @@ impl<V: InternalMessageValue> TestCollator<V> {
             groups_count += 1;
 
             // read message group in primary
-            let msg_group_opt = Self::collect_primary(&mut primary_messages_reader, self.curr_lt)?;
+            let msg_group_opt =
+                Self::collect_message_group(&mut primary_messages_reader, self.curr_lt)?;
 
             if groups_count == 1 {
                 // read message group in secondary after refill
                 let secondary_msg_group_opt =
-                    Self::collect_secondary(&mut secondary_messages_reader, self.curr_lt)?;
+                    Self::collect_message_group(&mut secondary_messages_reader, self.curr_lt)?;
 
                 // compare messages groups
                 self.assert_message_group_opt_eq(
@@ -990,17 +1090,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
     }
 
     #[tracing::instrument(skip_all)]
-    fn collect_primary(
-        messages_reader: &mut MessagesReader<V>,
-        curr_lt: Lt,
-    ) -> Result<Option<MessageGroup>> {
-        let msg_group_opt =
-            messages_reader.get_next_message_group(GetNextMessageGroupMode::Continue, curr_lt)?;
-        Ok(msg_group_opt)
-    }
-
-    #[tracing::instrument(skip_all)]
-    fn collect_secondary(
+    fn collect_message_group(
         messages_reader: &mut MessagesReader<V>,
         curr_lt: Lt,
     ) -> Result<Option<MessageGroup>> {
@@ -1118,6 +1208,10 @@ impl<V: InternalMessageValue> TestCollator<V> {
         working_state
             .anchors_cache
             .insert(anchor.clone(), our_exts_count);
+    }
+
+    fn update_msgs_exec_params(&mut self, msgs_exec_params: MsgsExecutionParamsStuff) {
+        self.msgs_exec_params = msgs_exec_params;
     }
 }
 

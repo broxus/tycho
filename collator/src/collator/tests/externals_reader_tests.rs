@@ -11,6 +11,7 @@ use crate::collator::messages_reader::{
     InternalsPartitionReaderState, ReaderState,
 };
 use crate::collator::types::AnchorsCache;
+use crate::collator::MsgsExecutionParamsStuff;
 use crate::internal_queue::types::{EnqueuedMessage, PartitionRouter};
 use crate::mempool::make_stub_anchor;
 use crate::test_utils::try_init_test_tracing;
@@ -74,10 +75,13 @@ fn test_read_externals() {
     let mut partition_router = PartitionRouter::new();
     partition_router.insert_dst(&dst_addrs[3], 1).unwrap();
 
-    let msgs_exec_params = Arc::new(MsgsExecutionParams {
+    let msgs_exec_params = MsgsExecutionParams {
         externals_expire_timeout: 100,
         ..Default::default()
-    });
+    };
+
+    let msgs_exec_params_stuff =
+        MsgsExecutionParamsStuff::create(Some(msgs_exec_params.clone()), msgs_exec_params);
 
     let mut buffer_limits_by_partitions = BTreeMap::new();
     buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
@@ -111,7 +115,7 @@ fn test_read_externals() {
         next_block_id_short.shard,
         next_block_id_short.seqno,
         next_chain_time,
-        msgs_exec_params.clone(),
+        msgs_exec_params_stuff.clone(),
         buffer_limits_by_partitions.clone(),
         anchors_cache.clone(),
         externals_reader_state,
@@ -272,7 +276,7 @@ fn test_read_externals() {
         next_block_id_short.shard,
         next_block_id_short.seqno,
         next_chain_time,
-        msgs_exec_params.clone(),
+        msgs_exec_params_stuff.clone(),
         buffer_limits_by_partitions.clone(),
         anchors_cache.clone(),
         externals_reader_state,
@@ -612,7 +616,7 @@ fn test_read_externals() {
         next_block_id_short.shard,
         next_block_id_short.seqno,
         next_chain_time,
-        msgs_exec_params.clone(),
+        msgs_exec_params_stuff.clone(),
         buffer_limits_by_partitions.clone(),
         anchors_cache.clone(),
         externals_reader_state,
@@ -836,7 +840,7 @@ fn test_read_externals() {
         next_block_id_short.shard,
         next_block_id_short.seqno,
         next_chain_time,
-        msgs_exec_params.clone(),
+        msgs_exec_params_stuff.clone(),
         buffer_limits_by_partitions.clone(),
         anchors_cache.clone(),
         externals_reader_state,
