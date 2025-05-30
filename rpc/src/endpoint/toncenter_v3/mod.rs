@@ -1,0 +1,217 @@
+use std::borrow::Cow;
+
+use anyhow::{anyhow, Context};
+use axum::extract::rejection::QueryRejection;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use everscale_types::models::{IntAddr, IntMsgInfo, MsgType};
+use everscale_types::prelude::*;
+use serde::Serialize;
+use tycho_storage::RpcSnapshot;
+
+use self::models::{Transaction, *};
+use crate::state::{RpcState, RpcStateError};
+
+mod models;
+
+pub fn router() -> axum::Router<RpcState> {
+    axum::Router::new().route("/adjacentTransactions", get(get_adjacent_transactions))
+}
+
+// === GET /adjacentTransactions
+
+async fn get_adjacent_transactions(
+    State(state): State<RpcState>,
+    query: Result<Query<AdjacentTransactionsRequest>, QueryRejection>,
+) -> Result<Response, ErrorResponse> {
+    const NOT_FOUND: &str = "adjacent transactions not found";
+
+    let Query(query) = query?;
+
+    let Some(snapshot) = state.rpc_storage_snapshot() else {
+        return Err(RpcStateError::NotReady.into());
+    };
+
+    let Some(tx) = state.get_transaction(&query.hash, Some(&snapshot))? else {
+        return Err(ErrorResponse::text_not_found(NOT_FOUND));
+    };
+    let tx: everscale_types::models::Transaction =
+        BocRepr::decode(tx).map_err(RpcStateError::internal)?;
+
+    let mut tx_count = 0usize;
+
+    let mut in_msg_source = None;
+    let mut out_msg_hashes = Vec::new();
+
+    (|| {
+        if query.direction.is_none() || matches!(query.direction, Some(MessageDirection::In)) {
+            if let Some(in_msg) = tx.in_msg {
+                let mut cs = in_msg.as_slice()?;
+                if MsgType::load_from(&mut cs)? == MsgType::Int {
+                    let info = IntMsgInfo::load_from(&mut cs)?;
+                    if let IntAddr::Std(addr) = info.src {
+                        in_msg_source = Some((addr, info.created_lt));
+                        tx_count += 1;
+                    }
+                }
+            }
+        }
+
+        if query.direction.is_none() || matches!(query.direction, Some(MessageDirection::Out)) {
+            for root in tx.out_msgs.values() {
+                let msg = root?;
+                let mut cs = msg.as_slice()?;
+                if MsgType::load_from(&mut cs)? != MsgType::Int {
+                    continue;
+                }
+                let info = IntMsgInfo::load_from(&mut cs)?;
+                if !matches!(info.dst, IntAddr::Std(_)) {
+                    continue;
+                }
+                out_msg_hashes.push(*msg.repr_hash());
+                tx_count += 1;
+            }
+        }
+
+        Ok::<_, anyhow::Error>(())
+    })()
+    .map_err(RpcStateError::internal)?;
+
+    if in_msg_source.is_none() && out_msg_hashes.is_empty() {
+        return Ok(axum::Json(TransactionsResponse::default()).into_response());
+    }
+
+    handle_blocking(move || {
+        let mut transactions = Vec::with_capacity(tx_count);
+
+        fn handle_transaction(
+            tx: impl AsRef<[u8]>,
+            state: &RpcState,
+            snapshot: &RpcSnapshot,
+            transactions: &mut Vec<Transaction>,
+        ) -> Result<(), RpcStateError> {
+            let tx = Boc::decode(tx).map_err(RpcStateError::internal)?;
+            let Some(info) = state.get_transaction_info(tx.repr_hash(), Some(snapshot))? else {
+                return Err(RpcStateError::Internal(anyhow!(
+                    "transaction info not found"
+                )));
+            };
+
+            transactions.push(
+                Transaction::load_raw(&info, tx.as_ref())
+                    .context("failed to convert transaction")
+                    .map_err(RpcStateError::Internal)?,
+            );
+
+            Ok(())
+        }
+
+        (|| {
+            if let Some((src, message_lt)) = in_msg_source {
+                let Some(tx) = state.get_src_transaction(&src, message_lt, Some(&snapshot))? else {
+                    return Err(RpcStateError::Internal(anyhow!(
+                        "src transaction not found"
+                    )));
+                };
+                handle_transaction(tx, &state, &snapshot, &mut transactions)?;
+            }
+
+            for msg_hash in out_msg_hashes {
+                let Some(tx) = state.get_dst_transaction(&msg_hash, Some(&snapshot))? else {
+                    return Err(RpcStateError::Internal(anyhow!(
+                        "dst transaction not found"
+                    )));
+                };
+                handle_transaction(tx, &state, &snapshot, &mut transactions)?;
+            }
+
+            Ok::<_, RpcStateError>(())
+        })()?;
+
+        let mut address_book = AddressBook::default();
+        address_book.fill_from_transactions(&transactions);
+
+        Ok(ok_to_response(TransactionsResponse {
+            transactions,
+            address_book,
+        }))
+    })
+    .await
+}
+
+// === Helpers ===
+
+fn ok_to_response<T: Serialize>(result: T) -> Response {
+    axum::Json(result).into_response()
+}
+
+async fn handle_blocking<F>(f: F) -> Result<Response, ErrorResponse>
+where
+    F: FnOnce() -> Result<Response, ErrorResponse> + Send + 'static,
+{
+    // TODO: Use a separate pool of blocking tasks?
+    let handle = tokio::task::spawn_blocking(f);
+
+    match handle.await {
+        Ok(res) => res,
+        Err(_) => Err(ErrorResponse {
+            status_code: StatusCode::INTERNAL_SERVER_ERROR,
+            error: "request cancelled".into(),
+        }),
+    }
+}
+
+#[derive(Debug)]
+struct ErrorResponse {
+    status_code: StatusCode,
+    error: Cow<'static, str>,
+}
+
+impl ErrorResponse {
+    fn text_not_found(msg: &'static str) -> Self {
+        Self {
+            status_code: StatusCode::NOT_FOUND,
+            error: Cow::Borrowed(msg),
+        }
+    }
+}
+
+impl IntoResponse for ErrorResponse {
+    fn into_response(self) -> Response {
+        #[derive(Serialize)]
+        struct Response<'a> {
+            error: &'a str,
+        }
+
+        IntoResponse::into_response((
+            self.status_code,
+            axum::Json(Response { error: &self.error }),
+        ))
+    }
+}
+
+impl From<RpcStateError> for ErrorResponse {
+    fn from(value: RpcStateError) -> Self {
+        let (status_code, error) = match value {
+            RpcStateError::NotReady => {
+                (StatusCode::SERVICE_UNAVAILABLE, Cow::Borrowed("not ready"))
+            }
+            RpcStateError::NotSupported => (
+                StatusCode::NOT_IMPLEMENTED,
+                Cow::Borrowed("method not supported"),
+            ),
+            RpcStateError::Internal(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string().into()),
+            RpcStateError::BadRequest(e) => (StatusCode::BAD_REQUEST, e.to_string().into()),
+        };
+
+        Self { status_code, error }
+    }
+}
+
+impl From<QueryRejection> for ErrorResponse {
+    fn from(value: QueryRejection) -> Self {
+        Self::from(RpcStateError::BadRequest(value.into()))
+    }
+}

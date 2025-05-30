@@ -21,7 +21,8 @@ use tycho_core::global_config::ZerostateId;
 use tycho_storage::{
     BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor,
     BlockTransactionsIterBuilder, BriefBlockInfo, BriefShardDescr, CodeHashesIter,
-    KeyBlocksDirection, Storage, TransactionsIterBuilder,
+    KeyBlocksDirection, RpcSnapshot, Storage, TransactionData, TransactionDataExt, TransactionInfo,
+    TransactionsIterBuilder,
 };
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
@@ -242,6 +243,11 @@ impl RpcState {
         self.inner.mc_info.read().clone()
     }
 
+    pub fn rpc_storage_snapshot(&self) -> Option<RpcSnapshot> {
+        let rpc_storage = self.inner.storage.rpc_storage()?;
+        rpc_storage.load_snapshot()
+    }
+
     pub async fn broadcast_external_message(&self, message: &[u8]) {
         metrics::counter!("tycho_rpc_broadcast_external_message_tx_bytes_total")
             .increment(message.len() as u64);
@@ -258,24 +264,26 @@ impl RpcState {
     pub fn get_brief_block_info(
         &self,
         block_id: &BlockIdShort,
+        snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<(BlockId, BriefBlockInfo)>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_brief_block_info(block_id)
+            .get_brief_block_info(block_id, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
     pub fn get_brief_shards_descr(
         &self,
         mc_seqno: u32,
+        snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<Vec<BriefShardDescr>>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_brief_shards_descr(mc_seqno)
+            .get_brief_shards_descr(mc_seqno, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
@@ -305,12 +313,13 @@ impl RpcState {
         &self,
         code_hash: &HashBytes,
         continuation: Option<&StdAddr>,
+        snapshot: Option<RpcSnapshot>,
     ) -> Result<CodeHashesIter<'_>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_accounts_by_code_hash(code_hash, continuation)
+            .get_accounts_by_code_hash(code_hash, continuation, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
@@ -318,12 +327,13 @@ impl RpcState {
         &self,
         block_id: &BlockIdShort,
         cursor: Option<&BlockTransactionsCursor>,
+        snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionsIterBuilder>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_block_transactions(block_id, cursor)
+            .get_block_transactions(block_id, cursor, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
@@ -331,12 +341,13 @@ impl RpcState {
         &self,
         block_id: &BlockIdShort,
         cursor: Option<&BlockTransactionsCursor>,
+        snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionIdsIter>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_block_transaction_ids(block_id, cursor)
+            .get_block_transaction_ids(block_id, cursor, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
@@ -345,51 +356,83 @@ impl RpcState {
         account: &StdAddr,
         last_lt: Option<u64>,
         to_lt: u64,
+        snapshot: Option<RpcSnapshot>,
     ) -> Result<TransactionsIterBuilder, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_transactions(account, last_lt, to_lt)
+            .get_transactions(account, last_lt, to_lt, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
     pub fn get_transaction(
         &self,
         hash: &HashBytes,
-    ) -> Result<Option<impl AsRef<[u8]> + '_>, RpcStateError> {
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<TransactionData<'_>>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_transaction(hash)
+            .get_transaction(hash, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
-    pub fn get_transaction_block_id(
+    pub fn get_transaction_ext<'a>(
+        &'a self,
+        hash: &HashBytes,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<TransactionDataExt<'a>>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_transaction_ext(hash, snapshot)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_transaction_info(
         &self,
         hash: &HashBytes,
-    ) -> Result<Option<BlockId>, RpcStateError> {
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<TransactionInfo>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_transaction_block_id(hash)
+            .get_transaction_info(hash, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
-    pub fn get_dst_transaction(
-        &self,
+    pub fn get_src_transaction<'a>(
+        &'a self,
+        account: &StdAddr,
+        message_lt: u64,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<impl AsRef<[u8]> + 'a>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_src_transaction(account, message_lt, snapshot)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_dst_transaction<'a>(
+        &'a self,
         in_msg_hash: &HashBytes,
-    ) -> Result<Option<impl AsRef<[u8]> + '_>, RpcStateError> {
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<impl AsRef<[u8]> + 'a>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_dst_transaction(in_msg_hash)
+            .get_dst_transaction(in_msg_hash, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
+    // TODO: Add snapshot support.
     pub async fn get_key_block_proof(
         &self,
         key_block_seqno: u32,
@@ -1058,6 +1101,10 @@ pub enum RpcStateError {
 }
 
 impl RpcStateError {
+    pub fn internal<E: Into<anyhow::Error>>(error: E) -> Self {
+        Self::Internal(error.into())
+    }
+
     pub fn bad_request<E: Into<anyhow::Error>>(error: E) -> Self {
         Self::BadRequest(BadRequestError(error.into()))
     }
@@ -1225,7 +1272,7 @@ mod test {
         )?;
 
         let account_by_code_hash = rpc_state
-            .get_accounts_by_code_hash(&new_code_hash, None)?
+            .get_accounts_by_code_hash(&new_code_hash, None, None)?
             .last()
             .unwrap();
 

@@ -12,7 +12,7 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::{FastHashMap, FastHashSet};
-use weedb::{rocksdb, OwnedSnapshot};
+use weedb::rocksdb;
 
 use crate::db::*;
 use crate::tables::Transactions;
@@ -52,7 +52,7 @@ pub struct RpcStorage {
     db: RpcDb,
     min_tx_lt: AtomicU64,
     min_tx_lt_guard: tokio::sync::Mutex<()>,
-    snapshot: ArcSwapOption<OwnedSnapshot>,
+    snapshot: ArcSwapOption<weedb::OwnedSnapshot>,
 }
 
 impl RpcStorage {
@@ -98,6 +98,10 @@ impl RpcStorage {
         self.snapshot.store(Some(snapshot));
     }
 
+    pub fn load_snapshot(&self) -> Option<RpcSnapshot> {
+        self.snapshot.load_full().map(RpcSnapshot)
+    }
+
     pub fn store_instance_id(&self, id: InstanceId) {
         let rpc_states = &self.db.state;
         rpc_states.insert(INSTANCE_ID, id).unwrap();
@@ -111,6 +115,7 @@ impl RpcStorage {
     pub fn get_brief_block_info(
         &self,
         block_id: &BlockIdShort,
+        snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<(BlockId, BriefBlockInfo)>> {
         let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
             return Ok(None);
@@ -119,9 +124,10 @@ impl RpcStorage {
         key[0] = workchain as u8;
         key[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
         key[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
-        let value = match self.db.known_blocks.get(key)? {
-            Some(value) => value,
-            None => return Ok(None),
+
+        let table = &self.db.known_blocks;
+        let Some(value) = table.get_ext(key, snapshot)? else {
+            return Ok(None);
         };
         let value = value.as_ref();
 
@@ -138,14 +144,19 @@ impl RpcStorage {
         Ok(Some((block_id, brief_info)))
     }
 
-    pub fn get_brief_shards_descr(&self, mc_seqno: u32) -> Result<Option<Vec<BriefShardDescr>>> {
+    pub fn get_brief_shards_descr(
+        &self,
+        mc_seqno: u32,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<Vec<BriefShardDescr>>> {
         let mut key = [0x00; tables::BlocksByMcSeqno::KEY_LEN];
         key[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
         key[4] = -1i8 as u8;
         key[5..13].copy_from_slice(&ShardIdent::PREFIX_FULL.to_be_bytes());
         key[13..17].copy_from_slice(&mc_seqno.to_be_bytes());
 
-        let Some(value) = self.db.blocks_by_mc_seqno.get(key)? else {
+        let table = &self.db.blocks_by_mc_seqno;
+        let Some(value) = table.get_ext(key, snapshot)? else {
             return Ok(None);
         };
         let value = value.as_ref();
@@ -183,6 +194,7 @@ impl RpcStorage {
         &self,
         code_hash: &HashBytes,
         continuation: Option<&StdAddr>,
+        mut snapshot: Option<RpcSnapshot>,
     ) -> Result<CodeHashesIter<'_>> {
         let mut key = [0u8; tables::CodeHashes::KEY_LEN];
         key[0..32].copy_from_slice(code_hash.as_ref());
@@ -200,10 +212,11 @@ impl RpcStorage {
         // upper_bound is not included in the range
         readopts.set_iterate_upper_bound(upper_bound);
 
-        let snapshot = self.snapshot.load_full();
-        if let Some(snapshot) = &snapshot {
-            readopts.set_snapshot(snapshot);
+        if snapshot.is_none() {
+            snapshot = self.snapshot.load_full().map(RpcSnapshot);
         }
+        let snapshot = snapshot.unwrap_or_else(|| RpcSnapshot(Arc::new(self.db.owned_snapshot())));
+        readopts.set_snapshot(&snapshot);
 
         let rocksdb = self.db.rocksdb();
         let code_hashes_cf = self.db.code_hashes.cf();
@@ -224,8 +237,9 @@ impl RpcStorage {
         &self,
         block_id: &BlockIdShort,
         cursor: Option<&BlockTransactionsCursor>,
+        snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionsIterBuilder>> {
-        let Some(ids) = self.get_block_transaction_ids(block_id, cursor)? else {
+        let Some(ids) = self.get_block_transaction_ids(block_id, cursor, snapshot)? else {
             return Ok(None);
         };
 
@@ -239,12 +253,16 @@ impl RpcStorage {
         &self,
         block_id: &BlockIdShort,
         cursor: Option<&BlockTransactionsCursor>,
+        mut snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionIdsIter>> {
         let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
             return Ok(None);
         };
 
-        let Some(snapshot) = self.snapshot.load_full() else {
+        if snapshot.is_none() {
+            snapshot = self.snapshot.load_full().map(RpcSnapshot);
+        }
+        let Some(snapshot) = snapshot else {
             // TODO: Somehow always use snapshot.
             anyhow::bail!("No snapshot available");
         };
@@ -259,7 +277,8 @@ impl RpcStorage {
             range_from[45..53].copy_from_slice(&cursor.lt.to_be_bytes());
         }
 
-        let block_id = match self.db.known_blocks.get(&range_from[0..13])? {
+        let table = &self.db.known_blocks;
+        let block_id = match table.get_ext(&range_from[0..13], Some(&snapshot))? {
             Some(value) => {
                 let value = value.as_ref();
                 BlockId {
@@ -306,6 +325,7 @@ impl RpcStorage {
         account: &StdAddr,
         mut last_lt: Option<u64>,
         mut to_lt: u64,
+        mut snapshot: Option<RpcSnapshot>,
     ) -> Result<TransactionsIterBuilder> {
         if matches!(last_lt, Some(last_lt) if last_lt < to_lt) {
             // Make empty iterator if `last_lt < to_lt`.
@@ -325,10 +345,11 @@ impl RpcStorage {
         let mut readopts = self.db.transactions.new_read_config();
         readopts.set_iterate_lower_bound(lower_bound);
 
-        let snapshot = self.snapshot.load_full();
-        if let Some(snapshot) = &snapshot {
-            readopts.set_snapshot(snapshot);
+        if snapshot.is_none() {
+            snapshot = self.snapshot.load_full().map(RpcSnapshot);
         }
+        let snapshot = snapshot.unwrap_or_else(|| RpcSnapshot(Arc::new(self.db.owned_snapshot())));
+        readopts.set_snapshot(&snapshot);
 
         let rocksdb = self.db.rocksdb();
         let transactions_cf = self.db.transactions.cf();
@@ -342,57 +363,116 @@ impl RpcStorage {
         })
     }
 
-    pub fn get_transaction(&self, hash: &HashBytes) -> Result<Option<TransactionData<'_>>> {
-        let Some(tx_info) = self.db.transactions_by_hash.get(hash)? else {
+    pub fn get_transaction(
+        &self,
+        hash: &HashBytes,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<TransactionData<'_>>> {
+        let table = &self.db.transactions_by_hash;
+        let Some(tx_info) = table.get_ext(hash, snapshot)? else {
             return Ok(None);
         };
-        let tx_info = &tx_info.as_ref()[..Transactions::KEY_LEN];
+        let key = &tx_info.as_ref()[..Transactions::KEY_LEN];
 
-        let tx = self.db.transactions.get(tx_info)?;
+        let table = &self.db.transactions;
+        let tx = table.get_ext(key, snapshot)?;
         Ok(tx.map(TransactionData::new))
     }
 
-    pub fn get_transaction_block_id(&self, hash: &HashBytes) -> Result<Option<BlockId>> {
-        let Some(tx_info) = self.db.transactions_by_hash.get(hash)? else {
+    pub fn get_transaction_ext<'db>(
+        &'db self,
+        hash: &HashBytes,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<TransactionDataExt<'db>>> {
+        let table = &self.db.transactions_by_hash;
+        let Some(tx_info) = table.get_ext(hash, snapshot)? else {
             return Ok(None);
         };
         let tx_info = tx_info.as_ref();
-        if tx_info.len() < tables::TransactionsByHash::VALUE_FULL_LEN {
-            return Ok(None);
-        }
-
-        let prefix_len = tx_info[41];
-        debug_assert!(prefix_len < 64);
-
-        let account_prefix = u64::from_be_bytes(tx_info[1..9].try_into().unwrap());
-        let tail_mask = 1u64 << (63 - prefix_len);
-
-        // TODO: Move into types?
-        let Some(shard) = ShardIdent::new(
-            tx_info[0] as i8 as i32,
-            (account_prefix | tail_mask) & !(tail_mask - 1),
-        ) else {
-            // TODO: unwrap?
+        let Some(info) = TransactionInfo::from_bytes(tx_info) else {
             return Ok(None);
         };
 
-        Ok(Some(BlockId {
-            shard,
-            seqno: u32::from_le_bytes(tx_info[42..46].try_into().unwrap()),
-            root_hash: HashBytes::from_slice(&tx_info[46..78]),
-            file_hash: HashBytes::from_slice(&tx_info[78..110]),
+        let table = &self.db.transactions;
+        let tx = table.get_ext(&tx_info[..Transactions::KEY_LEN], snapshot)?;
+
+        Ok(tx.map(move |data| TransactionDataExt {
+            info,
+            data: TransactionData::new(data),
         }))
     }
 
-    pub fn get_dst_transaction(
+    pub fn get_transaction_info(
         &self,
+        hash: &HashBytes,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<TransactionInfo>> {
+        let table = &self.db.transactions_by_hash;
+        let Some(tx_info) = table.get_ext(hash, snapshot)? else {
+            return Ok(None);
+        };
+        Ok(TransactionInfo::from_bytes(&tx_info))
+    }
+
+    pub fn get_src_transaction<'db>(
+        &'db self,
+        account: &StdAddr,
+        message_lt: u64,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<TransactionData<'db>>> {
+        let table = &self.db.transactions;
+
+        let owned_snapshot;
+        let snapshot = match snapshot {
+            Some(snapshot) => snapshot,
+            None => {
+                owned_snapshot = self
+                    .load_snapshot()
+                    .unwrap_or_else(|| RpcSnapshot(Arc::new(self.db.owned_snapshot())));
+                &owned_snapshot
+            }
+        };
+
+        let mut key = [0u8; tables::Transactions::KEY_LEN];
+        key[0] = account.workchain as u8;
+        key[1..33].copy_from_slice(account.address.as_slice());
+
+        let lower_bound = key;
+        key[33..41].copy_from_slice(&message_lt.to_be_bytes());
+
+        let mut readopts = table.new_read_config();
+        readopts.set_iterate_lower_bound(lower_bound);
+        readopts.set_iterate_upper_bound(key);
+        readopts.set_snapshot(snapshot);
+        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&table.cf(), readopts);
+        iter.seek_for_prev(key.as_slice());
+
+        // TODO: Allow TransactionData to store iterator/data itself.
+        let Some(tx_key) = iter.key() else {
+            iter.status()?;
+            return Ok(None);
+        };
+        if tx_key[0..33] != key[0..33] {
+            return Ok(None);
+        }
+
+        let tx = table.get_ext(tx_key, Some(snapshot))?;
+
+        Ok(tx.map(TransactionData::new))
+    }
+
+    pub fn get_dst_transaction<'db>(
+        &'db self,
         in_msg_hash: &HashBytes,
-    ) -> Result<Option<TransactionData<'_>>> {
-        let Some(key) = self.db.transactions_by_in_msg.get(in_msg_hash)? else {
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<TransactionData<'db>>> {
+        let table = &self.db.transactions_by_in_msg;
+        let Some(key) = table.get_ext(in_msg_hash, snapshot)? else {
             return Ok(None);
         };
 
-        let tx = self.db.transactions.get(key)?;
+        let table = &self.db.transactions;
+        let tx = table.get_ext(key, snapshot)?;
         Ok(tx.map(TransactionData::new))
     }
 
@@ -968,6 +1048,7 @@ impl RpcStorage {
             tx_info[42..46].copy_from_slice(&block_id.seqno.to_le_bytes());
             tx_info[46..78].copy_from_slice(block_id.root_hash.as_slice());
             tx_info[78..110].copy_from_slice(block_id.file_hash.as_slice());
+            tx_info[110..114].copy_from_slice(&mc_seqno.to_le_bytes());
 
             let mut block_tx = [0u8; tables::BlockTransactions::KEY_LEN];
             block_tx[0] = workchain as u8;
@@ -1376,6 +1457,37 @@ impl RpcStorage {
     }
 }
 
+trait TableExt {
+    fn get_ext<'db, K: AsRef<[u8]>>(
+        &'db self,
+        key: K,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<rocksdb::DBPinnableSlice<'db>>>;
+}
+
+impl<T: weedb::ColumnFamily> TableExt for weedb::Table<T> {
+    fn get_ext<'db, K: AsRef<[u8]>>(
+        &'db self,
+        key: K,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<rocksdb::DBPinnableSlice<'db>>> {
+        match snapshot {
+            None => self.get(key),
+            Some(snapshot) => {
+                anyhow::ensure!(
+                    Arc::ptr_eq(snapshot.db(), self.db()),
+                    "snapshot must be made for the same DB instance"
+                );
+
+                let mut readopts = self.new_read_config();
+                readopts.set_snapshot(snapshot);
+                self.db().get_pinned_cf_opt(&self.cf(), key, &readopts)
+            }
+        }
+        .map_err(Into::into)
+    }
+}
+
 #[derive(Debug)]
 pub struct BriefShardDescr {
     pub shard_ident: ShardIdent,
@@ -1536,16 +1648,33 @@ impl BriefBlockInfo {
     }
 }
 
+#[derive(Clone)]
+#[repr(transparent)]
+pub struct RpcSnapshot(Arc<weedb::OwnedSnapshot>);
+
+impl std::ops::Deref for RpcSnapshot {
+    type Target = weedb::OwnedSnapshot;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
 pub struct CodeHashesIter<'a> {
     inner: rocksdb::DBRawIterator<'a>,
-    snapshot: Option<Arc<OwnedSnapshot>>,
+    snapshot: RpcSnapshot,
 }
 
 impl<'a> CodeHashesIter<'a> {
+    pub fn snapshot(&self) -> &RpcSnapshot {
+        &self.snapshot
+    }
+
     pub fn into_raw(self) -> RawCodeHashesIter<'a> {
         RawCodeHashesIter {
             inner: self.inner,
-            _snapshot: self.snapshot,
+            snapshot: self.snapshot,
         }
     }
 }
@@ -1569,7 +1698,13 @@ impl Iterator for CodeHashesIter<'_> {
 
 pub struct RawCodeHashesIter<'a> {
     inner: rocksdb::DBRawIterator<'a>,
-    _snapshot: Option<Arc<OwnedSnapshot>>,
+    snapshot: RpcSnapshot,
+}
+
+impl RawCodeHashesIter<'_> {
+    pub fn snapshot(&self) -> &RpcSnapshot {
+        &self.snapshot
+    }
 }
 
 impl Iterator for RawCodeHashesIter<'_> {
@@ -1594,7 +1729,7 @@ pub struct BlockTransactionsCursor {
 pub struct BlockTransactionIdsIter {
     block_id: BlockId,
     inner: weedb::OwnedRawIterator,
-    snapshot: Arc<OwnedSnapshot>,
+    snapshot: RpcSnapshot,
 }
 
 impl BlockTransactionIdsIter {
@@ -1602,7 +1737,7 @@ impl BlockTransactionIdsIter {
         &self.block_id
     }
 
-    pub fn snapshot(&self) -> &Arc<OwnedSnapshot> {
+    pub fn snapshot(&self) -> &RpcSnapshot {
         &self.snapshot
     }
 }
@@ -1662,6 +1797,11 @@ pub struct BlockTransactionsIter<F> {
 
 impl<F> BlockTransactionsIter<F> {
     #[inline]
+    pub fn snapshot(&self) -> &RpcSnapshot {
+        self.ids.snapshot()
+    }
+
+    #[inline]
     pub fn into_ids(self) -> BlockTransactionIdsIter {
         self.ids
     }
@@ -1714,10 +1854,14 @@ pub struct FullTransactionId {
 pub struct TransactionsIterBuilder {
     inner: weedb::OwnedRawIterator,
     // NOTE: We must store the snapshot for as long as iterator is alive.
-    snapshot: Option<Arc<OwnedSnapshot>>,
+    snapshot: RpcSnapshot,
 }
 
 impl TransactionsIterBuilder {
+    pub fn snapshot(&self) -> &RpcSnapshot {
+        &self.snapshot
+    }
+
     pub fn map<F, R>(self, map: F) -> TransactionsIter<F>
     where
         for<'a> F: FnMut(&'a [u8]) -> R,
@@ -1725,7 +1869,7 @@ impl TransactionsIterBuilder {
         TransactionsIter {
             inner: self.inner,
             map,
-            _snapshot: self.snapshot,
+            snapshot: self.snapshot,
         }
     }
 }
@@ -1733,7 +1877,13 @@ impl TransactionsIterBuilder {
 pub struct TransactionsIter<F> {
     inner: weedb::OwnedRawIterator,
     map: F,
-    _snapshot: Option<Arc<OwnedSnapshot>>,
+    snapshot: RpcSnapshot,
+}
+
+impl<F> TransactionsIter<F> {
+    pub fn snapshot(&self) -> &RpcSnapshot {
+        &self.snapshot
+    }
 }
 
 impl<F, R> Iterator for TransactionsIter<F>
@@ -1750,6 +1900,58 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TransactionInfo {
+    pub account: StdAddr,
+    pub lt: u64,
+    pub block_id: BlockId,
+    pub mc_seqno: u32,
+}
+
+impl TransactionInfo {
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < tables::TransactionsByHash::VALUE_FULL_LEN {
+            return None;
+        }
+
+        let account = StdAddr::new(bytes[0] as i8, HashBytes::from_slice(&bytes[1..33]));
+        let lt = u64::from_be_bytes(bytes[33..41].try_into().unwrap());
+        let prefix_len = bytes[41];
+        debug_assert!(prefix_len < 64);
+
+        let tail_mask = 1u64 << (63 - prefix_len);
+
+        // TODO: Move into types?
+        let Some(shard) = ShardIdent::new(
+            bytes[0] as i8 as i32,
+            (account.prefix() | tail_mask) & !(tail_mask - 1),
+        ) else {
+            // TODO: unwrap?
+            return None;
+        };
+
+        let block_id = BlockId {
+            shard,
+            seqno: u32::from_le_bytes(bytes[42..46].try_into().unwrap()),
+            root_hash: HashBytes::from_slice(&bytes[46..78]),
+            file_hash: HashBytes::from_slice(&bytes[78..110]),
+        };
+        let mc_seqno = u32::from_le_bytes(bytes[110..114].try_into().unwrap());
+
+        Some(Self {
+            account,
+            lt,
+            block_id,
+            mc_seqno,
+        })
+    }
+}
+
+pub struct TransactionDataExt<'a> {
+    pub info: TransactionInfo,
+    pub data: TransactionData<'a>,
+}
+
 pub struct TransactionData<'a> {
     data: rocksdb::DBPinnableSlice<'a>,
 }
@@ -1757,6 +1959,21 @@ pub struct TransactionData<'a> {
 impl<'a> TransactionData<'a> {
     pub fn new(data: rocksdb::DBPinnableSlice<'a>) -> Self {
         Self { data }
+    }
+
+    pub fn tx_hash(&self) -> HashBytes {
+        let value = self.data.as_ref();
+        assert!(!value.is_empty());
+        HashBytes::from_slice(&value[1..33])
+    }
+
+    pub fn in_msg_hash(&self) -> Option<HashBytes> {
+        let value = self.data.as_ref();
+        assert!(!value.is_empty());
+
+        let mask = TransactionMask::from_bits_retain(value[0]);
+        mask.has_msg_hash()
+            .then(|| HashBytes::from_slice(&value[33..65]))
     }
 
     fn read_transaction<T: AsRef<[u8]> + ?Sized>(value: &T) -> &[u8] {

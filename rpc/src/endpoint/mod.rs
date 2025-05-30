@@ -13,7 +13,8 @@ use crate::state::RpcState;
 
 mod jrpc;
 mod proto;
-mod toncenter;
+mod toncenter_v2;
+mod toncenter_v3;
 
 pub struct RpcEndpoint {
     listener: TcpListener,
@@ -47,8 +48,11 @@ impl RpcEndpoint {
             .route("/rpc", post(common_route))
             .route("/proto", post(common_route));
 
-        if self.state.config().enable_toncenter_api {
-            router = router.nest("/toncenter/v2", toncenter::router());
+        if self.state.config().enable_toncenter_v2_api {
+            router = router.nest("/toncenter/v2", toncenter_v2::router());
+        }
+        if self.state.config().enable_toncenter_v3_api {
+            router = router.nest("/toncenter/v3", toncenter_v3::router());
         }
 
         let router = router.layer(service).with_state(self.state);
