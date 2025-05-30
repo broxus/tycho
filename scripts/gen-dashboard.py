@@ -1710,6 +1710,10 @@ def collator_core_operations_metrics() -> RowPanel:
             "Handle block candidate",
             labels=['workchain=~"$workchain"'],
         ),
+        create_heatmap_panel(
+            "tycho_do_collate_recalculate_statistics_time",
+            "Recalculate cumulative statistics"
+        ),
     ]
     return create_row("collator: Core Operations Metrics", metrics)
 

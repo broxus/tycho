@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -118,12 +118,18 @@ pub struct BlockCollationResult {
     pub collation_session_id: CollationSessionId,
     pub candidate: Box<BlockCandidate>,
     pub prev_mc_block_id: BlockId,
-    pub mc_data: Option<Arc<McData>>,
+    pub mc_data_stuff: Option<McDataStuff>,
     pub collation_config: Arc<CollationConfig>,
     pub force_next_mc_block: ForceMasterCollation,
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
+pub struct McDataStuff {
+    pub current: Arc<McData>,
+    pub previous: Option<Arc<McData>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct McData {
     pub global_id: i32,
     pub block_id: BlockId,
@@ -152,6 +158,8 @@ pub struct McData {
     pub ref_mc_state_handle: RefMcStateHandle,
 
     pub shards_processed_to_by_partitions: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
+
+    pub prev_mc_block_id: Option<BlockId>,
 }
 
 impl McData {
@@ -187,6 +195,21 @@ impl McData {
             .filter(|(shard_id, _)| !shard_id.is_masterchain())
             .collect();
 
+        let prev_mc_block_id = if block_id.seqno > 0 {
+            let prev_block = state_stuff
+                .state_extra()?
+                .prev_blocks
+                .get(block_id.seqno - 1)
+                .context("failed to get prev block")?
+                .unwrap()
+                .1
+                .block_ref
+                .as_block_id(block_id.shard);
+            Some(prev_block)
+        } else {
+            None
+        };
+
         Ok(Arc::new(Self {
             global_id: state.global_id,
             block_id,
@@ -208,6 +231,7 @@ impl McData {
 
             ref_mc_state_handle: state_stuff.ref_mc_state_handle().clone(),
             shards_processed_to_by_partitions,
+            prev_mc_block_id,
         }))
     }
 
@@ -439,10 +463,10 @@ impl BlockIdExt for BlockIdShort {
     }
 }
 
-pub trait ShardDescriptionExt {
+pub trait ShardDescriptionShortExt {
     fn get_block_id(&self, shard_id: ShardIdent) -> BlockId;
 }
-impl ShardDescriptionExt for ShardDescription {
+impl ShardDescriptionShortExt for ShardDescription {
     fn get_block_id(&self, shard_id: ShardIdent) -> BlockId {
         BlockId {
             shard: shard_id,
@@ -593,7 +617,7 @@ impl<BorrowShardDescription: Borrow<ShardDescription>> From<BorrowShardDescripti
     }
 }
 
-impl ShardDescriptionExt for ShardDescriptionShort {
+impl ShardDescriptionShortExt for ShardDescriptionShort {
     fn get_block_id(&self, shard_id: ShardIdent) -> BlockId {
         BlockId {
             shard: shard_id,
