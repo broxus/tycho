@@ -1,8 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use everscale_types::models::{IntAddr, MsgInfo, MsgsExecutionParams, ShardIdent};
+use everscale_types::models::{IntAddr, MsgInfo, ShardIdent};
 use tycho_block_util::queue::QueuePartitionIdx;
 
 use super::{
@@ -15,7 +14,9 @@ use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
     MessagesBufferLimits, SaturatingAddAssign, SkipExpiredExternals,
 };
-use crate::collator::types::{AnchorsCache, MsgsExecutionParamsExtension, ParsedMessage};
+use crate::collator::types::{
+    AnchorsCache, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff, ParsedMessage,
+};
 use crate::internal_queue::types::{InternalMessageValue, PartitionRouter};
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
@@ -37,7 +38,7 @@ pub(super) struct ExternalsReader {
     for_shard_id: ShardIdent,
     block_seqno: BlockSeqno,
     next_chain_time: u64,
-    msgs_exec_params: Arc<MsgsExecutionParams>,
+    msgs_exec_params: MsgsExecutionParamsStuff,
     /// Target limits for filling message group from the buffer
     buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
     anchors_cache: AnchorsCache,
@@ -52,7 +53,7 @@ impl ExternalsReader {
         for_shard_id: ShardIdent,
         block_seqno: BlockSeqno,
         next_chain_time: u64,
-        msgs_exec_params: Arc<MsgsExecutionParams>,
+        msgs_exec_params: MsgsExecutionParamsStuff,
         buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
         anchors_cache: AnchorsCache,
         mut reader_state: ExternalsReaderState,
@@ -122,7 +123,7 @@ impl ExternalsReader {
     }
 
     pub fn open_ranges_limit_reached(&self) -> bool {
-        self.range_readers.len() >= self.msgs_exec_params.open_ranges_limit()
+        self.range_readers.len() >= self.msgs_exec_params.current().open_ranges_limit()
     }
 
     pub fn reader_state(&self) -> &ExternalsReaderState {
@@ -148,6 +149,13 @@ impl ExternalsReader {
                 "externals reader does not contain buffer limits for partition {} (for_shard_id: {}, block_seqno: {})",
                 par_id, self.for_shard_id, self.block_seqno,
             ))
+    }
+
+    pub fn set_buffer_limits_by_partition(
+        &mut self,
+        buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
+    ) {
+        self.buffer_limits_by_partitions = buffer_limits_by_partitions;
     }
 
     pub fn has_non_zero_processed_offset(&self) -> bool {
@@ -234,6 +242,10 @@ impl ExternalsReader {
 
     pub fn all_ranges_read_and_collected(&self) -> bool {
         self.all_ranges_fully_read && !self.has_messages_in_buffers()
+    }
+
+    pub fn check_all_ranges_read_and_collected(&self) -> bool {
+        self.range_readers.values().all(|v| v.fully_read) && !self.has_messages_in_buffers()
     }
 
     pub fn all_read_externals_collected(&self) -> bool {
@@ -383,7 +395,6 @@ impl ExternalsReader {
         let reader = ExternalsRangeReader {
             for_shard_id: self.for_shard_id,
             seqno,
-            msgs_exec_params: self.msgs_exec_params.clone(),
             buffer_limits_by_partitions: self.buffer_limits_by_partitions.clone(),
             fully_read: range_reader_state.range.current_position == range_reader_state.range.to,
             reader_state: range_reader_state,
@@ -436,7 +447,6 @@ impl ExternalsReader {
         let reader = ExternalsRangeReader {
             for_shard_id: self.for_shard_id,
             seqno: self.block_seqno,
-            msgs_exec_params: self.msgs_exec_params.clone(),
             fully_read: false,
             buffer_limits_by_partitions: self.buffer_limits_by_partitions.clone(),
             reader_state: ExternalsRangeReaderState {
@@ -486,6 +496,9 @@ impl ExternalsReader {
         let mut last_seqno = 0;
 
         let mut last_ext_read_res_opt = None;
+
+        let externals_expire_timeout =
+            self.msgs_exec_params.current().externals_expire_timeout as u64;
 
         'main_loop: loop {
             let mut all_ranges_fully_read = true;
@@ -546,11 +559,13 @@ impl ExternalsReader {
                     } else {
                         ReadNextExternalsMode::ToPreviuosReadTo
                     };
+
                 let mut read_res = range_reader.read_externals_into_buffers(
                     &mut self.anchors_cache,
                     read_mode,
                     partition_router,
                     &processed_to_by_partitions,
+                    externals_expire_timeout,
                 )?;
 
                 metrics_by_partitions.append(std::mem::take(&mut read_res.metrics_by_partitions));
@@ -599,6 +614,15 @@ impl ExternalsReader {
                 if last_seqno < self.block_seqno {
                     if !self.open_ranges_limit_reached() {
                         if read_mode == GetNextMessageGroupMode::Continue {
+                            if self.msgs_exec_params.new_is_some() {
+                                tracing::debug!(target: tracing_targets::COLLATOR,
+                                    last_seqno,
+                                    "externals reader: do not create next range reader on Continue because new message exec params exists",
+                                );
+                                self.all_ranges_fully_read = true;
+                                break;
+                            }
+
                             self.create_append_next_range_reader();
                             ranges_seqno.push_back(self.block_seqno);
                         } else {
@@ -616,7 +640,7 @@ impl ExternalsReader {
                         // and then create next range
                         tracing::debug!(target: tracing_targets::COLLATOR,
                             last_seqno,
-                            open_ranges_limit = self.msgs_exec_params.open_ranges_limit,
+                            open_ranges_limit = self.msgs_exec_params.current().open_ranges_limit,
                             "externals reader: open ranges limit reached",
                         );
                         self.all_ranges_fully_read = true;
@@ -681,7 +705,7 @@ impl ExternalsReader {
         anyhow::ensure!(next_chain_time > 0);
 
         let externals_expire_timeout_ms =
-            self.msgs_exec_params.externals_expire_timeout as u64 * 1000;
+            self.msgs_exec_params.current().externals_expire_timeout as u64 * 1000;
         let mut expired_msgs_count = 0;
 
         // extract range readers from state to use previous readers buffers and stats
@@ -812,7 +836,6 @@ pub(super) struct CollectExternalsResult {
 pub(super) struct ExternalsRangeReader {
     for_shard_id: ShardIdent,
     seqno: BlockSeqno,
-    msgs_exec_params: Arc<MsgsExecutionParams>,
     /// Target limits for filling message group from the buffer
     buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
     reader_state: ExternalsRangeReaderState,
@@ -874,6 +897,7 @@ impl ExternalsRangeReader {
         read_mode: ReadNextExternalsMode,
         partition_router: &PartitionRouter,
         processed_to_by_partitions: &BTreeMap<QueuePartitionIdx, ExternalKey>,
+        externals_expire_timeout: u64,
     ) -> Result<ReadExternalsRangeResult> {
         let labels = [("workchain", self.for_shard_id.workchain().to_string())];
 
@@ -974,8 +998,7 @@ impl ExternalsRangeReader {
                     && msgs_read_offset_in_last_anchor == prev_to.msgs_offset);
 
             // skip expired anchor
-            let externals_expire_timeout_ms =
-                self.msgs_exec_params.externals_expire_timeout as u64 * 1000;
+            let externals_expire_timeout_ms = externals_expire_timeout * 1000;
 
             if next_chain_time.saturating_sub(anchor.chain_time) > externals_expire_timeout_ms {
                 let iter = anchor.iter_externals(msgs_read_offset_in_last_anchor as usize);

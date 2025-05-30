@@ -344,7 +344,7 @@ impl CollatorStdImpl {
                 queue_diff_messages_count,
                 has_unprocessed_messages,
                 reader_state,
-                mut processed_upto,
+                processed_upto,
                 anchors_cache,
                 create_queue_diff_elapsed,
             },
@@ -352,15 +352,6 @@ impl CollatorStdImpl {
         ) = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
 
         let finalize_block_timer = std::time::Instant::now();
-
-        // store actual messages execution params
-        processed_upto.msgs_exec_params = Some(
-            finalize_phase
-                .state
-                .collation_config
-                .msgs_exec_params
-                .clone(),
-        );
 
         // log updated processed upto
         tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto = {:?}", processed_upto);
