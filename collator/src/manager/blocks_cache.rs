@@ -164,36 +164,31 @@ impl BlocksCache {
         )
     }
 
-    pub fn get_top_blocks_processed_to_by_partitions(
+    pub fn preload_top_blocks_processed_to_by_partitions(
         &self,
         mc_block_key: &BlockCacheKey,
     ) -> Result<FastHashMap<BlockId, (bool, Option<ProcessedToByPartitions>)>> {
         let mut result = FastHashMap::default();
 
         if mc_block_key.seqno == 0 {
-            return Ok(result);
+            bail!("master block with seqno=0 will not exist in cache")
         }
 
-        let top_shard_blocks_info;
+        let mut top_shard_blocks_info = vec![];
         {
             let master_cache = self.inner.masters.lock();
-            let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) else {
-                bail!(
-                    "get_all_processed_to_by_mc_block_from_cache: Master block not found in cache! ({})",
-                    mc_block_key,
-                )
-            };
+            if let Some(mc_block_entry) = master_cache.blocks.get(&mc_block_key.seqno) {
+                let processed_to_by_partitions = mc_block_entry
+                    .data
+                    .processed_upto()
+                    .get_internals_processed_to_by_partitions();
+                result.insert(
+                    mc_block_entry.block_id,
+                    (true, Some(processed_to_by_partitions)),
+                );
 
-            let processed_to_by_partitions = mc_block_entry
-                .data
-                .processed_upto()
-                .get_internals_processed_to_by_partitions();
-            result.insert(
-                mc_block_entry.block_id,
-                (true, Some(processed_to_by_partitions)),
-            );
-
-            top_shard_blocks_info = mc_block_entry.top_shard_blocks_info.clone();
+                top_shard_blocks_info = mc_block_entry.top_shard_blocks_info.clone();
+            }
         }
 
         for (top_sc_block_id, updated) in top_shard_blocks_info {

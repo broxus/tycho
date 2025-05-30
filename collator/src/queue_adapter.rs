@@ -57,7 +57,7 @@ where
     /// Return `None` if specified diff does not exist.
     fn commit_diff(
         &self,
-        mc_top_blocks: Vec<(BlockId, bool)>,
+        mc_top_blocks: &[(BlockId, bool)],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
 
@@ -200,13 +200,13 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     #[instrument(skip_all, fields(?partitions))]
     fn commit_diff(
         &self,
-        mc_top_blocks: Vec<(BlockId, bool)>,
+        mc_top_blocks: &[(BlockId, bool)],
         // TODO: get partitions from queue state
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
 
-        self.queue.commit_diff(&mc_top_blocks, partitions)?;
+        self.queue.commit_diff(mc_top_blocks, partitions)?;
 
         let elapsed = start_time.elapsed();
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
