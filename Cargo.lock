@@ -365,6 +365,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "79296716171880943b8470b5f8d03aa55eb2e645a4874bdbb28adb49162e012c"
 
 [[package]]
+name = "bumpalo-herd"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c51ab7ee02d3459317cc16fec045966c9120733a10229541acaf3cc81b137c95"
+dependencies = [
+ "bumpalo",
+]
+
+[[package]]
 name = "bytecount"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -956,7 +965,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=cd1c9b1d9f8290a679eabea896a5a31a47715833#cd1c9b1d9f8290a679eabea896a5a31a47715833"
+source = "git+https://github.com/broxus/everscale-types.git?rev=2539f576d1558535279a9e3928a62f119d46a215#2539f576d1558535279a9e3928a62f119d46a215"
 dependencies = [
  "ahash",
  "anyhow",
@@ -986,7 +995,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-abi-proc"
 version = "0.1.0"
-source = "git+https://github.com/broxus/everscale-types.git?rev=cd1c9b1d9f8290a679eabea896a5a31a47715833#cd1c9b1d9f8290a679eabea896a5a31a47715833"
+source = "git+https://github.com/broxus/everscale-types.git?rev=2539f576d1558535279a9e3928a62f119d46a215#2539f576d1558535279a9e3928a62f119d46a215"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -997,7 +1006,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=cd1c9b1d9f8290a679eabea896a5a31a47715833#cd1c9b1d9f8290a679eabea896a5a31a47715833"
+source = "git+https://github.com/broxus/everscale-types.git?rev=2539f576d1558535279a9e3928a62f119d46a215#2539f576d1558535279a9e3928a62f119d46a215"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3820,6 +3829,7 @@ dependencies = [
  "arc-swap",
  "bitflags",
  "bumpalo",
+ "bumpalo-herd",
  "bytes",
  "bytesize",
  "crc32c",

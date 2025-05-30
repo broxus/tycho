@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bumpalo::Bump;
+use bumpalo_herd::{Herd, Member};
 use bytesize::ByteSize;
+use dashmap::mapref::entry::Entry;
+use dashmap::Map;
 use everscale_types::cell::*;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
@@ -253,6 +256,220 @@ impl CellStorage {
         Ok(())
     }
 
+    pub fn store_cell_mt(
+        &self,
+        root: &DynCell,
+        batch: &mut WriteBatch,
+        split_accounts: FastHashMap<HashBytes, Cell>,
+        capacity: usize,
+    ) -> Result<usize, CellStorageError> {
+        struct AddedCell<'a> {
+            old_rc: i64,
+            additions: u32,
+            data: Option<&'a [u8]>,
+        }
+
+        struct Alloc<'a> {
+            bump: Member<'a>,
+            buffer: Vec<u8>,
+        }
+
+        struct StoreContext<'a> {
+            db: &'a BaseDb,
+            herd: &'a Herd,
+            raw_cache: &'a RawCellsCache,
+            split_accounts: FastHashMap<HashBytes, Cell>,
+            transaction: FastDashMap<HashBytes, AddedCell<'a>>,
+        }
+
+        impl<'a> StoreContext<'a> {
+            fn new(
+                db: &'a BaseDb,
+                herd: &'a Herd,
+                raw_cache: &'a RawCellsCache,
+                split_accounts: FastHashMap<HashBytes, Cell>,
+                capacity: usize,
+            ) -> Self {
+                Self {
+                    db,
+                    raw_cache,
+                    herd,
+                    split_accounts,
+                    transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
+                        capacity,
+                        Default::default(),
+                        512,
+                    ),
+                }
+            }
+
+            fn insert_cell(
+                &self,
+                cell: &DynCell,
+                alloc: &mut Alloc<'a>,
+                depth: usize,
+            ) -> Result<bool, CellStorageError> {
+                let key = cell.repr_hash();
+                Ok(match self.transaction.entry(*key) {
+                    Entry::Occupied(mut value) => {
+                        value.get_mut().additions += 1;
+                        false
+                    }
+                    Entry::Vacant(entry) => {
+                        let old_rc = self.raw_cache.get_rc_for_insert(self.db, key, depth)?;
+
+                        let is_new = old_rc == 0;
+                        let data = if is_new {
+                            let buffer = &mut alloc.buffer;
+                            buffer.clear();
+
+                            if StorageCell::serialize_to(cell, buffer).is_err() {
+                                return Err(CellStorageError::InvalidCell);
+                            }
+                            Some(alloc.bump.alloc_slice_copy(buffer.as_slice()) as &[u8])
+                        } else {
+                            None
+                        };
+
+                        entry.insert(AddedCell {
+                            old_rc,
+                            additions: 1,
+                            data,
+                        });
+                        is_new
+                    }
+                })
+            }
+
+            fn finalize(self, batch: &mut WriteBatch) -> usize {
+                std::thread::scope(|s| {
+                    let num_shards = self.transaction._shard_count();
+                    let num_threads = std::thread::available_parallelism().map_or(1, usize::from);
+
+                    let chunk_size = num_shards / num_threads;
+
+                    (0..num_threads).for_each(|i| {
+                        let start = i * chunk_size;
+
+                        let end = {
+                            if i == num_threads - 1 {
+                                num_shards
+                            } else {
+                                start + chunk_size
+                            }
+                        };
+
+                        let shards =
+                            unsafe { (start..end).map(|i| self.transaction._get_read_shard(i)) };
+
+                        let cache = self.raw_cache;
+
+                        s.spawn(move || {
+                            for shard in shards {
+                                for (key, value) in shard {
+                                    let item = value.get();
+                                    let new_rc = item.old_rc + item.additions as i64;
+                                    cache.on_insert_cell(key, new_rc, item.data);
+                                }
+                            }
+                        });
+                    });
+
+                    let batch_update = s.spawn(|| {
+                        let mut buffer = Vec::with_capacity(512);
+                        let total = self.transaction.len();
+                        let cells_cf = &self.db.cells.cf();
+                        for kv in self.transaction.iter() {
+                            let key = kv.key();
+                            let item = kv.value();
+
+                            buffer.clear();
+                            refcount::add_positive_refount(item.additions, item.data, &mut buffer);
+                            batch.merge_cf(cells_cf, key.as_slice(), &buffer);
+                        }
+                        total
+                    });
+
+                    batch_update.join().expect("thread panicked")
+                })
+            }
+        }
+
+        fn store_cell_impl<'a>(
+            root: &DynCell,
+            ctx: &StoreContext<'a>,
+            alloc: &mut Alloc<'a>,
+        ) -> Result<(), CellStorageError> {
+            'visit: {
+                if !ctx.insert_cell(root.as_ref(), alloc, 0)? {
+                    break 'visit;
+                }
+
+                let mut stack = Vec::with_capacity(16);
+                stack.push(root.references());
+
+                'outer: loop {
+                    let depth = stack.len();
+                    let Some(iter) = stack.last_mut() else {
+                        break;
+                    };
+
+                    for child in &mut *iter {
+                        // Skip cell to store it later in parallel
+                        if ctx.split_accounts.contains_key(child.repr_hash()) {
+                            continue 'outer;
+                        }
+
+                        if ctx.insert_cell(child, alloc, depth)? {
+                            stack.push(child.references());
+                            continue 'outer;
+                        }
+                    }
+
+                    stack.pop();
+                }
+            }
+
+            Ok(())
+        }
+
+        let herd = Herd::new();
+
+        let ctx = StoreContext::new(
+            &self.db,
+            &herd,
+            &self.raw_cells_cache,
+            split_accounts,
+            capacity,
+        );
+
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let mut alloc = Alloc {
+                    bump: ctx.herd.get(),
+                    buffer: Vec::with_capacity(512),
+                };
+
+                store_cell_impl(root, &ctx, &mut alloc).expect("multi-threaded store cell");
+            });
+
+            for cell in ctx.split_accounts.values() {
+                s.spawn(|| {
+                    let mut alloc = Alloc {
+                        bump: ctx.herd.get(),
+                        buffer: Vec::with_capacity(512),
+                    };
+
+                    store_cell_impl(cell.as_ref(), &ctx, &mut alloc)
+                        .expect("multi-threaded store cell");
+                });
+            }
+        });
+
+        Ok(ctx.finalize(batch))
+    }
+
+    #[allow(unused)]
     pub fn store_cell(
         &self,
         batch: &mut WriteBatch,
