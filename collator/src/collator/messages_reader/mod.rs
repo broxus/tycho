@@ -142,14 +142,6 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                             params.all_shards_processed_to_by_partitions.clone(),
                         );
 
-                        // truncate data before range
-                        previous_cumulative_statistics.truncate_before(
-                            &cx.for_shard_id,
-                            cx.prev_state_gen_lt,
-                            cx.mc_state_gen_lt,
-                            &cx.mc_top_shards_end_lts.iter().copied().collect(),
-                        );
-
                         // partial load statistics and enrich current value
                         previous_cumulative_statistics.load_partial(
                             mq_adapter.clone(),

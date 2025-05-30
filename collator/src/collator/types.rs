@@ -25,6 +25,7 @@ use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::{AccountMeta, PublicLibraryChange, TransactionMeta};
 use tycho_network::PeerId;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
@@ -1381,53 +1382,15 @@ impl CumulativeStatistics {
         Ok(())
     }
 
-    /// Create range and remove data before this range
-    pub fn truncate_before(
-        &mut self,
-        current_shard: &ShardIdent,
-        prev_state_gen_lt: Lt,
-        mc_state_gen_lt: Lt,
-        mc_top_shards_end_lts: &FastHashMap<ShardIdent, Lt>,
-    ) {
-        let ranges = Self::compute_cumulative_stats_ranges(
-            current_shard,
-            &self.all_shards_processed_to_by_partitions,
-            prev_state_gen_lt,
-            mc_state_gen_lt,
-            mc_top_shards_end_lts,
-        );
-
-        for r in &ranges {
-            self.truncate_range(r);
-        }
-
-        self.dirty = true;
-    }
-
-    /// Remove data before range
-    fn truncate_range(&mut self, range: &QueueShardBoundedRange) {
-        let cut_key = match &range.from {
-            Bound::Included(k) | Bound::Excluded(k) => *k,
-        };
-
-        if let Some(by_partitions) = self.shards_stats_by_partitions.get_mut(&range.shard_ident) {
-            by_partitions.retain(|_part, diffs| {
-                diffs.retain(|k, _| k > &cut_key);
-                !diffs.is_empty()
-            });
-
-            if by_partitions.is_empty() {
-                self.shards_stats_by_partitions.remove(&range.shard_ident);
-            }
-        }
-    }
-
     /// Update `all_shards_processed_to_by_partitions` and remove
     /// processed data
     pub fn update_processed_to_by_partitions(
         &mut self,
         new_pt: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
     ) {
+        if self.all_shards_processed_to_by_partitions == new_pt {
+            return;
+        }
         for (&dst_shard, (_, ref processed_to)) in &new_pt {
             let changed = match self.all_shards_processed_to_by_partitions.get(&dst_shard) {
                 Some((_, old_pt)) => old_pt != processed_to,
@@ -1439,7 +1402,11 @@ impl CumulativeStatistics {
             }
         }
 
-        // TODO should remove full stat by shard if it doesn't exist in new_pt?
+        self.shards_stats_by_partitions
+            .retain(|_src_shard, by_partitions| {
+                by_partitions.retain(|_part, diffs| !diffs.is_empty());
+                !by_partitions.is_empty()
+            });
 
         self.all_shards_processed_to_by_partitions = new_pt;
         self.dirty = true;
@@ -1502,9 +1469,6 @@ impl CumulativeStatistics {
                     }
                 }
             }
-        }
-        if diff_partition_stats.is_empty() {
-            return;
         }
 
         // finally add weeded stats
@@ -1638,6 +1602,7 @@ impl CumulativeStatistics {
 
     /// Clears the existing result and aggregates all data from `shards_statistics`.
     fn recalculate(&mut self) {
+        let _histogram = HistogramGuard::begin("tycho_do_collate_recalculate_statistics_time");
         self.result.clear();
 
         for shard_stats_by_partitions in self.shards_stats_by_partitions.values() {
@@ -1645,10 +1610,7 @@ impl CumulativeStatistics {
                 let mut partition_stats = AccountStatistics::new();
                 for diff_stats in diffs.values() {
                     for (account, &count) in diff_stats {
-                        partition_stats
-                            .entry(account.clone())
-                            .and_modify(|c| *c += count)
-                            .or_insert(count);
+                        *partition_stats.entry(account.clone()).or_default() += count;
                     }
                 }
                 self.result
