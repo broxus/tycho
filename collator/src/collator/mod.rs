@@ -626,7 +626,10 @@ impl CollatorStdImpl {
 
                 // and only for shard collator
                 // update prev states to drop usage tree
-                if !self.shard_id.is_masterchain() && self.store_new_state_tasks.len() > 10 {
+                if !self.shard_id.is_masterchain()
+                    && self.store_new_state_tasks.len()
+                        > self.config.untrack_prev_state_after as usize
+                {
                     let store_new_state_tasks_count = self.store_new_state_tasks.len();
 
                     // try to find last finished store task
