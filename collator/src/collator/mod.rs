@@ -30,7 +30,7 @@ use crate::state_node::StateNodeAdapter;
 use crate::types::processed_upto::ProcessedUptoInfoExtension;
 use crate::types::{
     BlockCollationResult, CollationSessionId, CollationSessionInfo, CollatorConfig, DebugDisplay,
-    DisplayBlockIdsIntoIter, McDataStuff, TopBlockDescription,
+    DisplayBlockIdsIntoIter, McData, McDataStuff, TopBlockDescription,
 };
 use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE,
@@ -370,7 +370,7 @@ impl CollatorStdImpl {
         let prev_block_id = prev_shard_data.blocks_ids()[0]; // TODO: consider split/merge
         let anchors_processing_info_opt = Self::get_anchors_processing_info(
             &working_state.next_block_id_short.shard,
-            &working_state.mc_data_stuff,
+            &working_state.mc_data_stuff.current,
             &prev_block_id,
             prev_shard_data.gen_chain_time(),
             prev_shard_data
@@ -665,7 +665,7 @@ impl CollatorStdImpl {
             let prev_shard_data_gen_chain_time = prev_shard_data.gen_chain_time();
             let anchors_processing_info_opt = Self::get_anchors_processing_info(
                 &working_state.next_block_id_short.shard,
-                &working_state.mc_data_stuff,
+                &working_state.mc_data_stuff.current,
                 &prev_block_id,
                 prev_shard_data_gen_chain_time,
                 prev_shard_data
@@ -995,7 +995,7 @@ impl CollatorStdImpl {
 
     fn get_anchors_processing_info(
         shard_id: &ShardIdent,
-        mc_data_stuff: &McDataStuff,
+        mc_data: &McData,
         prev_block_id: &BlockId,
         prev_gen_chain_time: u64,
         prev_externals_processed_to: (MempoolAnchorId, u64),
@@ -1003,8 +1003,7 @@ impl CollatorStdImpl {
         // try get from mc data
         let mut from_mc_info_opt = None;
         if !shard_id.is_masterchain() {
-            let (mc_processed_to_anchor_id, mc_processed_to_msgs_offset) = mc_data_stuff
-                .current
+            let (mc_processed_to_anchor_id, mc_processed_to_msgs_offset) = mc_data
                 .processed_upto
                 .get_min_externals_processed_to()
                 .unwrap_or_default();
@@ -1017,7 +1016,7 @@ impl CollatorStdImpl {
                 // because there were no messages for processing
                 // and we can omit top processed anchor from shard
                 // if it is lower then top processed from master
-                for (top_shard_id, top_shard_descr) in mc_data_stuff.current.shards.iter() {
+                for (top_shard_id, top_shard_descr) in mc_data.shards.iter() {
                     if shard_id == top_shard_id {
                         if prev_block_id.seqno == top_shard_descr.seqno
                             && !top_shard_descr.top_sc_block_updated
@@ -1025,8 +1024,8 @@ impl CollatorStdImpl {
                             from_mc_info_opt = Some(AnchorsProcessingInfo {
                                 processed_to_anchor_id: mc_processed_to_anchor_id,
                                 processed_to_msgs_offset: mc_processed_to_msgs_offset,
-                                last_imported_chain_time: mc_data_stuff.current.gen_chain_time,
-                                last_imported_in_block_id: mc_data_stuff.current.block_id,
+                                last_imported_chain_time: mc_data.gen_chain_time,
+                                last_imported_in_block_id: mc_data.block_id,
                                 current_shard_last_imported_chain_time: prev_gen_chain_time,
                             });
                         }
