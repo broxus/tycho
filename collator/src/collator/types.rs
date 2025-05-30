@@ -1282,6 +1282,9 @@ pub struct QueueStatisticsWithRemaning {
 }
 
 pub struct CumulativeStatistics {
+    /// Cumulative statistics created for this shard. When reader reads messages, it decrements `remaining messages`
+    /// Another shard stats can be decremented only by calling `update_processed_to_by_partitions`
+    for_shard: ShardIdent,
     /// Actual processed to info for master and all shards
     all_shards_processed_to_by_partitions: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
 
@@ -1291,23 +1294,21 @@ pub struct CumulativeStatistics {
 
     /// The final aggregated statistics (across all shards) by partitions.
     result: FastHashMap<QueuePartitionIdx, QueueStatisticsWithRemaning>,
-
-    /// A flag indicating that data has changed, and we need to recalculate before returning `result`.
-    dirty: bool,
 }
 
 impl CumulativeStatistics {
     pub fn new(
+        for_shard: ShardIdent,
         all_shards_processed_to_by_partitions: FastHashMap<
             ShardIdent,
             (bool, ProcessedToByPartitions),
         >,
     ) -> Self {
         Self {
+            for_shard,
             all_shards_processed_to_by_partitions,
             shards_stats_by_partitions: Default::default(),
             result: Default::default(),
-            dirty: false,
         }
     }
 
@@ -1315,14 +1316,13 @@ impl CumulativeStatistics {
     pub fn load<V: InternalMessageValue>(
         &mut self,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-        current_shard: &ShardIdent,
         partitions: &FastHashSet<QueuePartitionIdx>,
         prev_state_gen_lt: Lt,
         mc_state_gen_lt: Lt,
         mc_top_shards_end_lts: &FastHashMap<ShardIdent, Lt>,
     ) -> Result<()> {
         let ranges = Self::compute_cumulative_stats_ranges(
-            current_shard,
+            &self.for_shard,
             &self.all_shards_processed_to_by_partitions,
             prev_state_gen_lt,
             mc_state_gen_lt,
@@ -1346,7 +1346,6 @@ impl CumulativeStatistics {
         partitions: &FastHashSet<QueuePartitionIdx>,
         ranges: Vec<QueueShardBoundedRange>,
     ) -> Result<()> {
-        self.dirty = true;
         tracing::trace!(
             target: tracing_targets::COLLATOR,
             "cumulative_stats_partial_ranges: {:?}",
@@ -1381,53 +1380,15 @@ impl CumulativeStatistics {
         Ok(())
     }
 
-    /// Create range and remove data before this range
-    pub fn truncate_before(
-        &mut self,
-        current_shard: &ShardIdent,
-        prev_state_gen_lt: Lt,
-        mc_state_gen_lt: Lt,
-        mc_top_shards_end_lts: &FastHashMap<ShardIdent, Lt>,
-    ) {
-        let ranges = Self::compute_cumulative_stats_ranges(
-            current_shard,
-            &self.all_shards_processed_to_by_partitions,
-            prev_state_gen_lt,
-            mc_state_gen_lt,
-            mc_top_shards_end_lts,
-        );
-
-        for r in &ranges {
-            self.truncate_range(r);
-        }
-
-        self.dirty = true;
-    }
-
-    /// Remove data before range
-    fn truncate_range(&mut self, range: &QueueShardBoundedRange) {
-        let cut_key = match &range.from {
-            Bound::Included(k) | Bound::Excluded(k) => *k,
-        };
-
-        if let Some(by_partitions) = self.shards_stats_by_partitions.get_mut(&range.shard_ident) {
-            by_partitions.retain(|_part, diffs| {
-                diffs.retain(|k, _| k > &cut_key);
-                !diffs.is_empty()
-            });
-
-            if by_partitions.is_empty() {
-                self.shards_stats_by_partitions.remove(&range.shard_ident);
-            }
-        }
-    }
-
     /// Update `all_shards_processed_to_by_partitions` and remove
     /// processed data
     pub fn update_processed_to_by_partitions(
         &mut self,
         new_pt: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
     ) {
+        if self.all_shards_processed_to_by_partitions == new_pt {
+            return;
+        }
         for (&dst_shard, (_, ref processed_to)) in &new_pt {
             let changed = match self.all_shards_processed_to_by_partitions.get(&dst_shard) {
                 Some((_, old_pt)) => old_pt != processed_to,
@@ -1439,10 +1400,13 @@ impl CumulativeStatistics {
             }
         }
 
-        // TODO should remove full stat by shard if it doesn't exist in new_pt?
+        self.shards_stats_by_partitions
+            .retain(|_src_shard, by_partitions| {
+                by_partitions.retain(|_part, diffs| !diffs.is_empty());
+                !by_partitions.is_empty()
+            });
 
         self.all_shards_processed_to_by_partitions = new_pt;
-        self.dirty = true;
     }
 
     fn compute_cumulative_stats_ranges(
@@ -1503,9 +1467,16 @@ impl CumulativeStatistics {
                 }
             }
         }
-        if diff_partition_stats.is_empty() {
-            return;
-        }
+
+        let entry = self
+            .result
+            .entry(partition)
+            .or_insert_with(|| QueueStatisticsWithRemaning {
+                initial_stats: QueueStatistics::default(),
+                remaning_stats: ConcurrentQueueStatistics::default(),
+            });
+        entry.initial_stats.append(&diff_partition_stats);
+        entry.remaning_stats.append(&diff_partition_stats);
 
         // finally add weeded stats
         self.add_diff_partition_stats(
@@ -1514,8 +1485,6 @@ impl CumulativeStatistics {
             diff_max_message,
             diff_partition_stats,
         );
-
-        self.dirty = true;
     }
 
     fn add_diff_partition_stats(
@@ -1579,6 +1548,12 @@ impl CumulativeStatistics {
                                         cumulative_stats
                                             .initial_stats
                                             .decrement_for_account(dst_acc.clone(), *count);
+
+                                        if self.for_shard != dst_shard {
+                                            cumulative_stats
+                                                .remaning_stats
+                                                .decrement_for_account(dst_acc.clone(), *count);
+                                        }
                                         false
                                     } else {
                                         true
@@ -1609,15 +1584,12 @@ impl CumulativeStatistics {
     /// Returns  a reference to the aggregated stats by partitions.
     /// If the data is marked as dirty, it triggers a lazy recalculation first.
     pub fn result(&mut self) -> &FastHashMap<QueuePartitionIdx, QueueStatisticsWithRemaning> {
-        self.ensure_finalized();
         &self.result
     }
 
     /// Calc aggregated stats among all partitions.
     /// If the data is marked as dirty, it triggers a lazy recalculation first.
     pub fn get_aggregated_result(&mut self) -> QueueStatistics {
-        self.ensure_finalized();
-
         let mut res: Option<QueueStatistics> = None;
         for stats in self.result.values() {
             if let Some(aggregated) = res.as_mut() {
@@ -1627,44 +1599,6 @@ impl CumulativeStatistics {
             }
         }
         res.unwrap_or_default()
-    }
-
-    /// A helper function to trigger a recalculation if `dirty` is set.
-    fn ensure_finalized(&mut self) {
-        if self.dirty {
-            self.recalculate();
-        }
-    }
-
-    /// Clears the existing result and aggregates all data from `shards_statistics`.
-    fn recalculate(&mut self) {
-        self.result.clear();
-
-        for shard_stats_by_partitions in self.shards_stats_by_partitions.values() {
-            for (&partition, diffs) in shard_stats_by_partitions {
-                let mut partition_stats = AccountStatistics::new();
-                for diff_stats in diffs.values() {
-                    for (account, &count) in diff_stats {
-                        partition_stats
-                            .entry(account.clone())
-                            .and_modify(|c| *c += count)
-                            .or_insert(count);
-                    }
-                }
-                self.result
-                    .entry(partition)
-                    .and_modify(|stats| {
-                        stats.initial_stats.append(&partition_stats);
-                        stats.remaning_stats.append(&partition_stats);
-                    })
-                    .or_insert(QueueStatisticsWithRemaning {
-                        initial_stats: QueueStatistics::with_statistics(partition_stats.clone()),
-                        remaning_stats: ConcurrentQueueStatistics::with_statistics(partition_stats),
-                    });
-            }
-        }
-
-        self.dirty = false;
     }
 }
 
@@ -1692,7 +1626,7 @@ impl fmt::Debug for CumulativeStatistics {
             )
             .field("shards_stats_by_partitions", &shards_summary)
             .field("result", &format!("{} partitions", self.result.len()))
-            .field("dirty", &self.dirty)
+            .field("for_shard", &self.for_shard)
             .finish()
     }
 }
@@ -1703,12 +1637,6 @@ pub struct ConcurrentQueueStatistics {
 }
 
 impl ConcurrentQueueStatistics {
-    pub fn with_statistics(statistics: AccountStatistics) -> Self {
-        Self {
-            statistics: Arc::new(statistics.into_iter().collect()),
-        }
-    }
-
     pub fn statistics(&self) -> &FastDashMap<IntAddr, u64> {
         &self.statistics
     }

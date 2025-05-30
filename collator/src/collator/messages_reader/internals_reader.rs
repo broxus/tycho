@@ -372,7 +372,6 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
             ranges.push(QueueShardBoundedRange {
                 shard_ident: *shard_id,
-                // TODO: may be we should pass `from` here because we should load stats for the full range
                 from: Bound::Excluded(shard_reader_state.current_position),
                 to: Bound::Included(shard_range_to),
             });

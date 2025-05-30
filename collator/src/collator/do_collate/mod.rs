@@ -128,7 +128,7 @@ impl CollatorStdImpl {
             next_block_id_short,
             next_chain_time,
             created_by,
-            &mc_data_stuff,
+            &mc_data_stuff.current,
             &prev_shard_data,
             top_shard_blocks_info,
         )?;
@@ -650,7 +650,7 @@ impl CollatorStdImpl {
     }
 
     fn import_new_shard_top_blocks_for_masterchain(
-        mc_data: &Arc<McData>,
+        mc_data: &McData,
         collation_data_builder: &mut BlockCollationDataBuilder,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<()> {
@@ -822,7 +822,7 @@ impl CollatorStdImpl {
         next_block_id_short: BlockIdShort,
         next_chain_time: u64,
         created_by: HashBytes,
-        mc_data_stuff: &McDataStuff,
+        mc_data: &McData,
         prev_shard_data: &PrevData,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<Box<BlockCollationData>> {
@@ -843,10 +843,7 @@ impl CollatorStdImpl {
         }
 
         // prepare block collation data
-        let block_limits = mc_data_stuff
-            .current
-            .config
-            .get_block_limits(is_masterchain)?;
+        let block_limits = mc_data.config.get_block_limits(is_masterchain)?;
         tracing::debug!(target: tracing_targets::COLLATOR,
             "Block limits: {:?}",
             block_limits
@@ -855,7 +852,7 @@ impl CollatorStdImpl {
         let mut collation_data_builder = BlockCollationDataBuilder::new(
             next_block_id_short,
             rand_seed,
-            mc_data_stuff.current.block_id.seqno,
+            mc_data.block_id.seqno,
             next_chain_time,
             created_by,
             self.mempool_config_override.clone(),
@@ -872,21 +869,19 @@ impl CollatorStdImpl {
 
             if let Some(top_shard_blocks_info) = top_shard_blocks_info {
                 Self::import_new_shard_top_blocks_for_masterchain(
-                    &mc_data_stuff.current,
+                    mc_data,
                     &mut collation_data_builder,
                     top_shard_blocks_info,
                 )?;
             }
         } else {
-            collation_data_builder.mc_shards_processed_to_by_partitions = mc_data_stuff
-                .current
-                .shards_processed_to_by_partitions
-                .clone();
+            collation_data_builder.mc_shards_processed_to_by_partitions =
+                mc_data.shards_processed_to_by_partitions.clone();
         }
 
         let start_lt = Self::calc_start_lt(
-            mc_data_stuff.current.gen_lt,
-            mc_data_stuff.current.lt_align(),
+            mc_data.gen_lt,
+            mc_data.lt_align(),
             prev_shard_data.gen_lt(),
             is_masterchain,
             collation_data_builder.shards_max_end_lt,
@@ -897,10 +892,10 @@ impl CollatorStdImpl {
         // compute created / minted / recovered / from_prev_block
         let prev_total_balance = &prev_shard_data.observable_accounts().root_extra().balance;
         Self::init_value_flow(
-            &mc_data_stuff.current.config,
-            &mc_data_stuff.current.global_balance,
+            &mc_data.config,
+            &mc_data.global_balance,
             prev_total_balance,
-            &mc_data_stuff.current.total_validator_fees,
+            &mc_data.total_validator_fees,
             &mut collation_data,
         )?;
 
@@ -1213,73 +1208,27 @@ impl CollatorStdImpl {
         mc_data_stuff: &McDataStuff,
         block_id_short: &BlockIdShort,
     ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
-        let mc_block_id = mc_data_stuff.current.block_id;
-
-        let prov_mc_state = if let Some(ref prev_mc_state) = mc_data_stuff.previous {
-            prev_mc_state
-        } else {
+        let Some(prev_state) = &mc_data_stuff.previous else {
             return Ok(None);
         };
 
-        let prev_mc_block_shards: FastHashMap<ShardIdent, ShardDescriptionShort> =
-            prov_mc_state.shards.iter().cloned().collect();
+        let prev_shards: FastHashMap<_, _> = prev_state.shards.iter().cloned().collect();
 
-        let mut ranges = Vec::<QueueShardBoundedRange>::new();
-
-        // Load max_message from masterchain block diff
-        let Some(master_max_msg) = self
-            .get_max_message(&mc_block_id)
-            .await
-            .context("loading diff for mc block")?
-        else {
-            return Ok(None);
-        };
-
-        ranges.push(QueueShardBoundedRange {
-            shard_ident: mc_block_id.shard,
-            from: Bound::Included(master_max_msg),
-            to: Bound::Included(master_max_msg),
-        });
-
-        // Iterate over all updated shard blocks and add their diff ranges
-        for (shard, current_descr) in mc_data_stuff
-            .current
-            .shards
-            .iter()
-            .filter(|(shard, d)| d.top_sc_block_updated && shard != &block_id_short.shard)
-        {
-            let Some(prev_descr) = prev_mc_block_shards.get(shard) else {
-                tracing::warn!(target: tracing_targets::COLLATOR, "prev_mc_block_shards not found: {shard:?}");
-                return Ok(None);
-            };
-
-            if prev_descr.seqno == 0 {
-                return Ok(None);
+        let mut shard_pairs = Vec::new();
+        for (shard, curr) in mc_data_stuff.current.shards.iter() {
+            if curr.top_sc_block_updated && *shard != block_id_short.shard {
+                if let Some(prev) = prev_shards.get(shard) {
+                    shard_pairs.push((
+                        *shard,
+                        prev.get_block_id(*shard),
+                        curr.get_block_id(*shard),
+                    ));
+                }
             }
-
-            let Some(first_diff_msg) = self
-                .get_max_message(&prev_descr.get_block_id(*shard))
-                .await
-                .context("loading first diff msg")?
-            else {
-                return Ok(None);
-            };
-            let Some(last_diff_msg) = self
-                .get_max_message(&current_descr.get_block_id(*shard))
-                .await
-                .context("loading last diff msg")?
-            else {
-                return Ok(None);
-            };
-
-            ranges.push(QueueShardBoundedRange {
-                shard_ident: *shard,
-                from: Bound::Excluded(first_diff_msg),
-                to: Bound::Included(last_diff_msg),
-            });
         }
 
-        Ok(Some(ranges))
+        self.build_ranges(&mc_data_stuff.current.block_id, shard_pairs)
+            .await
     }
 
     /// Collect ranges for loading cumulative statistics if collation block is master
@@ -1290,67 +1239,69 @@ impl CollatorStdImpl {
         mc_data_stuff: &McDataStuff,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
-        let prev_mc_block_id = mc_data_stuff.current.block_id;
+        let prev_shards: FastHashMap<_, _> = mc_data_stuff.current.shards.iter().cloned().collect();
 
-        let prev_mc_block_shards: FastHashMap<ShardIdent, ShardDescriptionShort> =
-            mc_data_stuff.current.shards.iter().cloned().collect();
+        let mut shard_pairs = Vec::new();
+        for top in top_shard_blocks_info {
+            if let Some(prev) = prev_shards.get(&top.block_id.shard) {
+                shard_pairs.push((
+                    top.block_id.shard,
+                    prev.get_block_id(top.block_id.shard),
+                    top.block_id,
+                ));
+            }
+        }
 
-        let mut ranges = Vec::<QueueShardBoundedRange>::new();
+        self.build_ranges(&mc_data_stuff.current.block_id, shard_pairs)
+            .await
+    }
 
-        // Load max_message from masterchain block diff
+    async fn build_ranges(
+        &self,
+        master_block_id: &BlockId,
+        shard_pairs: Vec<(ShardIdent, BlockId, BlockId)>,
+    ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
         let Some(master_max_msg) = self
-            .get_max_message(&prev_mc_block_id)
+            .get_diff_max_message(master_block_id)
             .await
             .context("loading diff for mc block")?
         else {
             return Ok(None);
         };
 
-        ranges.push(QueueShardBoundedRange {
-            shard_ident: prev_mc_block_id.shard,
+        // add mc block diff range
+        let mut ranges = vec![QueueShardBoundedRange {
+            shard_ident: master_block_id.shard,
             from: Bound::Included(master_max_msg),
             to: Bound::Included(master_max_msg),
-        });
+        }];
 
-        // Iterate over all updated shard blocks and add their diff ranges
-        for top_block_description in top_shard_blocks_info {
-            let Some(prev_descr) = prev_mc_block_shards.get(&top_block_description.block_id.shard)
-            else {
-                tracing::warn!(target: tracing_targets::COLLATOR, "prev_mc_block_shards not found: {:?}", top_block_description.block_id.shard);
-                return Ok(None);
-            };
-
-            if prev_descr.seqno == 0 {
+        for (shard, prev_id, curr_id) in shard_pairs {
+            if prev_id.seqno == 0 {
                 return Ok(None);
             }
 
-            let Some(first_diff_msg) = self
-                .get_max_message(&prev_descr.get_block_id(top_block_description.block_id.shard))
-                .await
-                .context("loading first diff msg")?
-            else {
-                return Ok(None);
-            };
-            let Some(last_diff_msg) = self
-                .get_max_message(&top_block_description.block_id)
-                .await
-                .context("loading last diff msg")?
-            else {
-                return Ok(None);
-            };
+            let (first_msg, last_msg) = tokio::try_join!(
+                self.get_diff_max_message(&prev_id),
+                self.get_diff_max_message(&curr_id)
+            )
+            .context("loading shard diffs")?;
 
-            ranges.push(QueueShardBoundedRange {
-                shard_ident: top_block_description.block_id.shard,
-                from: Bound::Excluded(first_diff_msg),
-                to: Bound::Included(last_diff_msg),
-            });
+            match (first_msg, last_msg) {
+                (Some(first), Some(last)) => ranges.push(QueueShardBoundedRange {
+                    shard_ident: shard,
+                    from: Bound::Excluded(first),
+                    to: Bound::Included(last),
+                }),
+                _ => return Ok(None),
+            }
         }
 
         Ok(Some(ranges))
     }
 
     /// Helper function that retrieves `max_message` from either MQ or state diff
-    async fn get_max_message(&self, block_id: &BlockId) -> Result<Option<QueueKey>> {
+    async fn get_diff_max_message(&self, block_id: &BlockId) -> Result<Option<QueueKey>> {
         if let Some(diff) =
             self.mq_adapter
                 .get_diff_info(&block_id.shard, block_id.seqno, DiffZone::Both)?
