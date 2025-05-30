@@ -14,7 +14,9 @@ use self::new_messages::*;
 pub(super) use self::reader_state::*;
 use super::error::CollatorError;
 use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
-use super::types::{AnchorsCache, CumulativeStatistics, MsgsExecutionParamsExtension};
+use super::types::{
+    AnchorsCache, CumulativeStatistics, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff,
+};
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::internal_queue::types::{
     DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages, QueueStatistics,
@@ -58,7 +60,7 @@ enum MessagesReaderStage {
 pub(super) struct MessagesReader<V: InternalMessageValue> {
     for_shard_id: ShardIdent,
 
-    msgs_exec_params: Arc<MsgsExecutionParams>,
+    msgs_exec_params: MsgsExecutionParamsStuff,
 
     /// Collect separate metrics by partitions
     metrics_by_partitions: MessagesReaderMetricsByPartitions,
@@ -85,7 +87,7 @@ pub(super) struct MessagesReaderContext {
     pub for_shard_id: ShardIdent,
     pub block_seqno: BlockSeqno,
     pub next_chain_time: u64,
-    pub msgs_exec_params: Arc<MsgsExecutionParams>,
+    pub msgs_exec_params: MsgsExecutionParamsStuff,
     pub mc_state_gen_lt: Lt,
     pub prev_state_gen_lt: Lt,
     pub mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
@@ -100,102 +102,15 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         cx: MessagesReaderContext,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
     ) -> Result<Self> {
-        let slots_fractions = cx.msgs_exec_params.group_slots_fractions()?;
+        let current_msgs_exec_params = cx.msgs_exec_params.current();
+        let CurrentMessagesBufferLimits {
+            externals,
+            internals,
+        } = Self::get_buffer_limits(&current_msgs_exec_params)?;
 
-        // metrics: messages exec params
-        metrics::gauge!("tycho_do_collate_msgs_exec_params_buffer_limit")
-            .set(cx.msgs_exec_params.buffer_limit as f64);
-        metrics::gauge!("tycho_do_collate_msgs_exec_params_group_limit")
-            .set(cx.msgs_exec_params.group_limit as f64);
-        metrics::gauge!("tycho_do_collate_msgs_exec_params_group_vert_size")
-            .set(cx.msgs_exec_params.group_vert_size as f64);
-        for (par_id, par_fraction) in &slots_fractions {
-            let labels = [("par_id", par_id.to_string())];
-            metrics::gauge!(
-                "tycho_do_collate_msgs_exec_params_group_slots_fractions",
-                &labels
-            )
-            .set(*par_fraction as f64);
-        }
-        metrics::gauge!("tycho_do_collate_msgs_exec_params_externals_expire_timeout")
-            .set(cx.msgs_exec_params.externals_expire_timeout as f64);
-        metrics::gauge!("tycho_do_collate_msgs_exec_params_open_ranges_limit")
-            .set(cx.msgs_exec_params.open_ranges_limit as f64);
-        metrics::gauge!("tycho_do_collate_msgs_exec_params_par_0_ext_msgs_count_limit")
-            .set(cx.msgs_exec_params.par_0_ext_msgs_count_limit as f64);
-        metrics::gauge!("tycho_do_collate_msgs_exec_params_par_0_int_msgs_count_limit")
-            .set(cx.msgs_exec_params.par_0_int_msgs_count_limit as f64);
+        Self::msgs_exec_params_metrics(&current_msgs_exec_params)?;
 
-        // group limits by msgs kinds
-        let msgs_buffer_max_count = cx.msgs_exec_params.buffer_limit as usize;
-        let group_vert_size = (cx.msgs_exec_params.group_vert_size as usize).max(1);
-        let group_limit = cx.msgs_exec_params.group_limit as usize;
-
-        let mut internals_buffer_limits_by_partitions =
-            BTreeMap::<QueuePartitionIdx, MessagesBufferLimits>::new();
-        let mut externals_buffer_limits_by_partitions =
-            BTreeMap::<QueuePartitionIdx, MessagesBufferLimits>::new();
-
-        // TODO: msgs-v3: should create partitions 1+ only when exist in current processed_upto
-
-        const ADDITIONAL_EXTERNALS_COUNT: usize = 0;
-
-        // internals: normal partition 0: 80% of `group_limit`, but min 1
-        let par_0_slots_fraction = slots_fractions.get(&0).cloned().unwrap() as usize;
-        internals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
-            max_count: msgs_buffer_max_count,
-            slots_count: group_limit
-                .saturating_mul(par_0_slots_fraction)
-                .saturating_div(100)
-                .max(1),
-            slot_vert_size: group_vert_size,
-        });
-        // externals: normal partition 0: 100%, but min 2, vert size + ADDITIONAL_EXTERNALS_COUNT
-        externals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
-            max_count: msgs_buffer_max_count,
-            slots_count: group_limit.saturating_mul(100).saturating_div(100).max(2),
-            slot_vert_size: group_vert_size + ADDITIONAL_EXTERNALS_COUNT,
-        });
-
-        // internals: low-priority partition 1: 10%, but min 1
-        let par_1_slots_fraction = slots_fractions.get(&1).cloned().unwrap() as usize;
-        internals_buffer_limits_by_partitions.insert(1, MessagesBufferLimits {
-            max_count: msgs_buffer_max_count,
-            slots_count: group_limit
-                .saturating_mul(par_1_slots_fraction)
-                .saturating_div(100)
-                .max(1),
-            slot_vert_size: group_vert_size,
-        });
-        // externals: low-priority partition 1: equal to internals, vert size + ADDITIONAL_EXTERNALS_COUNT
-        {
-            let int_buffer_limits = internals_buffer_limits_by_partitions.get(&1).unwrap();
-            externals_buffer_limits_by_partitions.insert(1, MessagesBufferLimits {
-                max_count: msgs_buffer_max_count,
-                slots_count: int_buffer_limits.slots_count,
-                slot_vert_size: int_buffer_limits.slot_vert_size + ADDITIONAL_EXTERNALS_COUNT,
-            });
-        }
-
-        // metrics: buffer limits
-        for (par_id, buffer_limits) in &internals_buffer_limits_by_partitions {
-            let labels = [("par_id", par_id.to_string())];
-            metrics::gauge!("tycho_do_collate_int_buffer_limits_max_count", &labels)
-                .set(buffer_limits.max_count as f64);
-            metrics::gauge!("tycho_do_collate_int_buffer_limits_slots_count", &labels)
-                .set(buffer_limits.slots_count as f64);
-            metrics::gauge!("tycho_do_collate_int_buffer_limits_slot_vert_size", &labels)
-                .set(buffer_limits.slot_vert_size as f64);
-        }
-        for (par_id, buffer_limits) in &externals_buffer_limits_by_partitions {
-            let labels = [("par_id", par_id.to_string())];
-            metrics::gauge!("tycho_do_collate_ext_buffer_limits_max_count", &labels)
-                .set(buffer_limits.max_count as f64);
-            metrics::gauge!("tycho_do_collate_ext_buffer_limits_slots_count", &labels)
-                .set(buffer_limits.slots_count as f64);
-            metrics::gauge!("tycho_do_collate_ext_buffer_limits_slot_vert_size", &labels)
-                .set(buffer_limits.slot_vert_size as f64);
-        }
+        drop(current_msgs_exec_params);
 
         let mut new_messages = NewMessagesState::new(cx.for_shard_id);
 
@@ -237,13 +152,15 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             cumulative_statistics = Some(inner_cumulative_statistics);
         }
 
+        let msgs_exec_params = cx.msgs_exec_params.clone();
+
         // create externals reader
         let externals_reader = ExternalsReader::new(
             cx.for_shard_id,
             cx.block_seqno,
             cx.next_chain_time,
-            cx.msgs_exec_params.clone(),
-            externals_buffer_limits_by_partitions.clone(),
+            msgs_exec_params.clone(),
+            externals,
             cx.anchors_cache,
             cx.reader_state.externals,
         );
@@ -251,9 +168,9 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         let mut res = Self {
             for_shard_id: cx.for_shard_id,
 
-            msgs_exec_params: cx.msgs_exec_params.clone(),
-
             metrics_by_partitions: Default::default(),
+
+            msgs_exec_params: msgs_exec_params.clone(),
 
             new_messages,
 
@@ -270,16 +187,6 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         // create internals readers by partitions
         let mut partition_reader_states = cx.reader_state.internals.partitions;
 
-        // normal partition 0
-        let target_limits = internals_buffer_limits_by_partitions.remove(&0).unwrap();
-        let max_limits = {
-            let ext_limits = externals_buffer_limits_by_partitions.remove(&0).unwrap();
-            MessagesBufferLimits {
-                max_count: msgs_buffer_max_count,
-                slots_count: ext_limits.slots_count,
-                slot_vert_size: target_limits.slot_vert_size,
-            }
-        };
         let par_reader_state = partition_reader_states.remove(&0).unwrap_or_default();
 
         let mut remaning_msg_stats = None;
@@ -294,14 +201,16 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             });
         }
 
+        let BufferLimits { target, max } = internals.get(&0).unwrap();
+
         let par_reader = InternalsPartitionReader::new(
             InternalsPartitionReaderContext {
                 partition_id: 0,
                 for_shard_id: cx.for_shard_id,
                 block_seqno: cx.block_seqno,
-                target_limits,
-                max_limits,
-                msgs_exec_params: cx.msgs_exec_params.clone(),
+                target_limits: *target,
+                max_limits: *max,
+                msgs_exec_params: msgs_exec_params.clone(),
                 mc_state_gen_lt: cx.mc_state_gen_lt,
                 prev_state_gen_lt: cx.prev_state_gen_lt,
                 mc_top_shards_end_lts: cx.mc_top_shards_end_lts.clone(),
@@ -314,15 +223,6 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         res.readers_stages.insert(0, initial_reader_stage);
 
         // low-priority partition 1
-        let target_limits = internals_buffer_limits_by_partitions.remove(&1).unwrap();
-        let max_limits = {
-            let ext_limits = externals_buffer_limits_by_partitions.remove(&1).unwrap();
-            MessagesBufferLimits {
-                max_count: msgs_buffer_max_count,
-                slots_count: ext_limits.slots_count,
-                slot_vert_size: target_limits.slot_vert_size,
-            }
-        };
         let par_reader_state = partition_reader_states.remove(&1).unwrap_or_default();
 
         let mut remaining_msg_stats = None;
@@ -337,14 +237,16 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             });
         }
 
+        let BufferLimits { target, max } = internals.get(&1).unwrap();
+
         let par_reader = InternalsPartitionReader::new(
             InternalsPartitionReaderContext {
                 partition_id: 1,
                 for_shard_id: cx.for_shard_id,
                 block_seqno: cx.block_seqno,
-                target_limits,
-                max_limits,
-                msgs_exec_params: cx.msgs_exec_params.clone(),
+                target_limits: *target,
+                max_limits: *max,
+                msgs_exec_params,
                 mc_state_gen_lt: cx.mc_state_gen_lt,
                 prev_state_gen_lt: cx.prev_state_gen_lt,
                 mc_top_shards_end_lts: cx.mc_top_shards_end_lts,
@@ -514,7 +416,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             // reset queue diff partition router
             // according to actual aggregated stats
             let moved_from_par_0_accounts = Self::reset_partition_router_by_stats(
-                &self.msgs_exec_params,
+                self.msgs_exec_params.current().par_0_int_msgs_count_limit as u64,
                 &mut queue_diff_with_msgs.partition_router,
                 aggregated_stats,
                 self.for_shard_id,
@@ -586,7 +488,13 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             );
         }
 
-        let processed_upto = reader_state.get_updated_processed_upto();
+        let mut processed_upto = reader_state.get_updated_processed_upto();
+
+        let current_msgs_exec_params = self.msgs_exec_params.current().clone();
+
+        Self::msgs_exec_params_metrics(&current_msgs_exec_params)?;
+
+        processed_upto.msgs_exec_params = Some(current_msgs_exec_params);
 
         // add updated cumulative stats
         reader_state.internals.cumulative_statistics = self.internal_queue_statistics;
@@ -614,7 +522,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
     }
 
     pub fn reset_partition_router_by_stats(
-        msgs_exec_params: &MsgsExecutionParams,
+        par_0_msgs_count_limit: u64,
         partition_router: &mut PartitionRouter,
         aggregated_stats: QueueStatistics,
         for_shard_id: ShardIdent,
@@ -623,7 +531,6 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             (PartitionRouter, DiffStatistics),
         >,
     ) -> Result<FastHashSet<HashBytes>> {
-        let par_0_msgs_count_limit = msgs_exec_params.par_0_int_msgs_count_limit as u64;
         let mut moved_from_par_0_accounts = FastHashSet::default();
 
         for (dest_int_address, msgs_count) in aggregated_stats {
@@ -1131,6 +1038,33 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 .append(par_metrics);
         }
 
+        if self.msgs_exec_params.new_is_some()
+            && self.externals_reader.check_all_ranges_read_and_collected()
+            && self
+                .internals_partition_readers
+                .iter()
+                .all(|(_, par)| par.all_read_existing_messages_collected())
+        {
+            {
+                if let Some(ref new) = *self.msgs_exec_params.new() {
+                    let CurrentMessagesBufferLimits {
+                        externals,
+                        internals,
+                    } = Self::get_buffer_limits(new)?;
+                    self.externals_reader
+                        .set_buffer_limits_by_partition(externals);
+                    self.internals_partition_readers
+                        .iter_mut()
+                        .for_each(|(par_id, par)| {
+                            let limits = internals.get(par_id).unwrap();
+                            par.set_buffer_limits_by_partition(limits.target, limits.max);
+                        });
+                }
+            }
+
+            self.msgs_exec_params.update();
+        }
+
         // retun None when messages group is empty
         if msg_group.len() == 0
             // and we reached previous processed offset on refill
@@ -1144,6 +1078,155 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         } else {
             Ok(Some(msg_group))
         }
+    }
+
+    fn msgs_exec_params_metrics(current: &MsgsExecutionParams) -> Result<()> {
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_buffer_limit")
+            .set(current.buffer_limit as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_group_limit")
+            .set(current.group_limit as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_group_vert_size")
+            .set(current.group_vert_size as f64);
+
+        for (par_id, par_fraction) in &current.group_slots_fractions()? {
+            let labels = [("par_id", par_id.to_string())];
+            metrics::gauge!(
+                "tycho_do_collate_msgs_exec_params_group_slots_fractions",
+                &labels
+            )
+            .set(*par_fraction as f64);
+        }
+
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_externals_expire_timeout")
+            .set(current.externals_expire_timeout as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_open_ranges_limit")
+            .set(current.open_ranges_limit as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_par_0_int_msgs_count_limit")
+            .set(current.par_0_int_msgs_count_limit as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_par_0_ext_msgs_count_limit")
+            .set(current.par_0_ext_msgs_count_limit as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_externals_expire_timeout")
+            .set(current.externals_expire_timeout as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_open_ranges_limit")
+            .set(current.open_ranges_limit as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_par_0_ext_msgs_count_limit")
+            .set(current.par_0_ext_msgs_count_limit as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_par_0_int_msgs_count_limit")
+            .set(current.par_0_int_msgs_count_limit as f64);
+
+        Ok(())
+    }
+
+    fn get_buffer_limits(current: &MsgsExecutionParams) -> Result<CurrentMessagesBufferLimits> {
+        let slots_fractions = current.group_slots_fractions()?;
+
+        // group limits by msgs kinds
+        let msgs_buffer_max_count = current.buffer_limit as usize;
+        let group_vert_size = (current.group_vert_size as usize).max(1);
+        let group_limit = current.group_limit as usize;
+
+        let mut internals_buffer_limits_by_partitions =
+            BTreeMap::<QueuePartitionIdx, MessagesBufferLimits>::new();
+        let mut externals_buffer_limits_by_partitions =
+            BTreeMap::<QueuePartitionIdx, MessagesBufferLimits>::new();
+
+        // TODO: msgs-v3: should create partitions 1+ only when exist in current processed_upto
+
+        const ADDITIONAL_EXTERNALS_COUNT: usize = 0;
+
+        // internals: normal partition 0: 80% of `group_limit`, but min 1
+        let par_0_slots_fraction = slots_fractions.get(&0).cloned().unwrap() as usize;
+        internals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
+            max_count: msgs_buffer_max_count,
+            slots_count: group_limit
+                .saturating_mul(par_0_slots_fraction)
+                .saturating_div(100)
+                .max(1),
+            slot_vert_size: group_vert_size,
+        });
+        // externals: normal partition 0: 100%, but min 2, vert size + ADDITIONAL_EXTERNALS_COUNT
+        externals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
+            max_count: msgs_buffer_max_count,
+            slots_count: group_limit.saturating_mul(100).saturating_div(100).max(2),
+            slot_vert_size: group_vert_size + ADDITIONAL_EXTERNALS_COUNT,
+        });
+
+        // internals: low-priority partition 1: 10%, but min 1
+        let par_1_slots_fraction = slots_fractions.get(&1).cloned().unwrap() as usize;
+        internals_buffer_limits_by_partitions.insert(1, MessagesBufferLimits {
+            max_count: msgs_buffer_max_count,
+            slots_count: group_limit
+                .saturating_mul(par_1_slots_fraction)
+                .saturating_div(100)
+                .max(1),
+            slot_vert_size: group_vert_size,
+        });
+        // externals: low-priority partition 1: equal to internals, vert size + ADDITIONAL_EXTERNALS_COUNT
+        {
+            let int_buffer_limits = internals_buffer_limits_by_partitions.get(&1).unwrap();
+            externals_buffer_limits_by_partitions.insert(1, MessagesBufferLimits {
+                max_count: msgs_buffer_max_count,
+                slots_count: int_buffer_limits.slots_count,
+                slot_vert_size: int_buffer_limits.slot_vert_size + ADDITIONAL_EXTERNALS_COUNT,
+            });
+        }
+
+        // metrics: buffer limits
+        for (par_id, buffer_limits) in &internals_buffer_limits_by_partitions {
+            let labels = [("par_id", par_id.to_string())];
+            metrics::gauge!("tycho_do_collate_int_buffer_limits_max_count", &labels)
+                .set(buffer_limits.max_count as f64);
+            metrics::gauge!("tycho_do_collate_int_buffer_limits_slots_count", &labels)
+                .set(buffer_limits.slots_count as f64);
+            metrics::gauge!("tycho_do_collate_int_buffer_limits_slot_vert_size", &labels)
+                .set(buffer_limits.slot_vert_size as f64);
+        }
+        for (par_id, buffer_limits) in &externals_buffer_limits_by_partitions {
+            let labels = [("par_id", par_id.to_string())];
+            metrics::gauge!("tycho_do_collate_ext_buffer_limits_max_count", &labels)
+                .set(buffer_limits.max_count as f64);
+            metrics::gauge!("tycho_do_collate_ext_buffer_limits_slots_count", &labels)
+                .set(buffer_limits.slots_count as f64);
+            metrics::gauge!("tycho_do_collate_ext_buffer_limits_slot_vert_size", &labels)
+                .set(buffer_limits.slot_vert_size as f64);
+        }
+
+        let mut internals = BTreeMap::new();
+
+        // normal partition 0
+        let target_limits = internals_buffer_limits_by_partitions.remove(&0).unwrap();
+        let max_limits = {
+            let ext_limits = externals_buffer_limits_by_partitions.get(&0).unwrap();
+            MessagesBufferLimits {
+                max_count: msgs_buffer_max_count,
+                slots_count: ext_limits.slots_count,
+                slot_vert_size: target_limits.slot_vert_size,
+            }
+        };
+        internals.insert(0, BufferLimits {
+            target: target_limits,
+            max: max_limits,
+        });
+
+        // low-priority partition 1
+        let target_limits = internals_buffer_limits_by_partitions.remove(&1).unwrap();
+        let max_limits = {
+            let ext_limits = externals_buffer_limits_by_partitions.get(&1).unwrap();
+            MessagesBufferLimits {
+                max_count: msgs_buffer_max_count,
+                slots_count: ext_limits.slots_count,
+                slot_vert_size: target_limits.slot_vert_size,
+            }
+        };
+        internals.insert(1, BufferLimits {
+            target: target_limits,
+            max: max_limits,
+        });
+
+        Ok(CurrentMessagesBufferLimits {
+            externals: externals_buffer_limits_by_partitions,
+            internals,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1398,6 +1481,16 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
         Ok(res)
     }
+}
+
+struct CurrentMessagesBufferLimits {
+    pub externals: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
+    pub internals: BTreeMap<QueuePartitionIdx, BufferLimits>,
+}
+
+struct BufferLimits {
+    pub target: MessagesBufferLimits,
+    pub max: MessagesBufferLimits,
 }
 
 #[derive(Default)]

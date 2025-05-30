@@ -20,7 +20,7 @@ use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
-use types::{AnchorInfo, AnchorsCache};
+use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
 
 use self::types::{BlockSerializerCache, CollatorStats, PrevData, WorkingState};
 use crate::internal_queue::types::EnqueuedMessage;
@@ -1320,13 +1320,22 @@ impl CollatorStdImpl {
 
         // finally check if has pending messages in iterators
 
+        let msgs_exec_params = MsgsExecutionParamsStuff::create(
+            working_state
+                .prev_shard_data_ref()
+                .processed_upto()
+                .msgs_exec_params
+                .clone(),
+            working_state.collation_config.msgs_exec_params.clone(),
+        );
+
         // create reader
         let mut messages_reader = MessagesReader::new(
             MessagesReaderContext {
                 for_shard_id: working_state.next_block_id_short.shard,
                 block_seqno: working_state.next_block_id_short.seqno,
                 next_chain_time: 0,
-                msgs_exec_params: Arc::new(working_state.collation_config.msgs_exec_params.clone()),
+                msgs_exec_params,
                 mc_state_gen_lt: working_state.mc_data.gen_lt,
                 prev_state_gen_lt: working_state.prev_shard_data_ref().gen_lt(),
                 mc_top_shards_end_lts: working_state
