@@ -57,6 +57,10 @@ pub fn normalize_external_message(cell: &'_ DynCell) -> Result<Cell, Error> {
     };
 
     // Rebuild normalized message.
+    build_normalized_external_message(&info.dst, body)
+}
+
+pub fn build_normalized_external_message(dst: &IntAddr, body: Cell) -> Result<Cell, Error> {
     let cx = Cell::empty_context();
     let mut b = CellBuilder::new();
 
@@ -64,7 +68,7 @@ pub fn normalize_external_message(cell: &'_ DynCell) -> Result<Cell, Error> {
     // message$_ -> info:CommonMsgInfo -> src:MsgAddressExt -> addr_none$00
     b.store_small_uint(0b1000, 4)?;
     // message$_ -> info:CommonMsgInfo -> dest:MsgAddressInt
-    info.dst.store_into(&mut b, cx)?;
+    dst.store_into(&mut b, cx)?;
     // message$_ -> info:CommonMsgInfo -> import_fee:Grams -> 0
     // message$_ -> init:(Maybe (Either StateInit ^StateInit)) -> nothing$0
     // message$_ -> body:(Either X ^X) -> right$1

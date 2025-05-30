@@ -161,10 +161,13 @@ async fn handle_get_block_header(id: JrpcId, state: RpcState, p: BlockHeaderPara
         );
     };
 
-    let (block_id, info) = match state.get_brief_block_info(&BlockIdShort {
-        shard,
-        seqno: p.seqno,
-    }) {
+    let (block_id, info) = match state.get_brief_block_info(
+        &BlockIdShort {
+            shard,
+            seqno: p.seqno,
+        },
+        None,
+    ) {
         Ok(Some(info)) => info,
         Ok(None) => {
             let e = RpcStateError::Internal(anyhow!("block {} not found", p.seqno));
@@ -233,7 +236,7 @@ fn get_shards(
 }
 
 async fn handle_get_shards(id: JrpcId, state: RpcState, p: GetShardsParams) -> Response {
-    let shards = match state.get_brief_shards_descr(p.seqno) {
+    let shards = match state.get_brief_shards_descr(p.seqno, None) {
         Ok(Some(shards)) => shards,
         Ok(None) => {
             let e = RpcStateError::Internal(anyhow!("masterchain block {} not found", p.seqno));
@@ -565,7 +568,7 @@ async fn handle_get_transactions(id: JrpcId, state: RpcState, p: TransactionsPar
         return too_large_limit_response(id);
     }
 
-    match state.get_transactions(&p.address, p.lt, p.to_lt) {
+    match state.get_transactions(&p.address, p.lt, p.to_lt, None) {
         Ok(list) => ok_to_response(id, GetTransactionsResponse {
             address: &p.address,
             list: RefCell::new(Some(list)),
@@ -616,7 +619,7 @@ async fn handle_get_block_transactions(
         None
     };
 
-    let iter = match state.get_block_transaction_ids(&block_id, cursor.as_ref()) {
+    let iter = match state.get_block_transaction_ids(&block_id, cursor.as_ref(), None) {
         Ok(Some(iter)) => iter,
         Ok(None) => {
             let e = RpcStateError::Internal(anyhow!("block {block_id} not found"));
@@ -692,7 +695,7 @@ async fn handle_get_block_transactions_ext(
         None
     };
 
-    let iter = match state.get_block_transactions(&block_id, cursor.as_ref()) {
+    let iter = match state.get_block_transactions(&block_id, cursor.as_ref(), None) {
         Ok(Some(iter)) => iter,
         Ok(None) => {
             let e = RpcStateError::Internal(anyhow!("block {block_id} not found"));

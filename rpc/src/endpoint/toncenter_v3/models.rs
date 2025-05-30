@@ -1,0 +1,671 @@
+use everscale_types::models::{
+    BlockIdShort, IntAddr, MsgInfo, OwnedMessage, StdAddr, StdAddrBase64Repr,
+};
+use everscale_types::num::{Tokens, VarUint24, VarUint56};
+use everscale_types::prelude::*;
+use serde::ser::{SerializeMap, SerializeStruct};
+use serde::{Deserialize, Serialize};
+use tycho_block_util::message::build_normalized_external_message;
+use tycho_storage::TransactionInfo;
+use tycho_util::FastHashSet;
+
+use crate::util::serde_helpers;
+
+// === Requests ===
+
+#[derive(Debug, Deserialize)]
+pub struct AdjacentTransactionsRequest {
+    pub hash: HashBytes,
+    #[serde(default)]
+    pub direction: Option<MessageDirection>,
+}
+
+// === Responses ===
+
+#[derive(Default, Serialize)]
+pub struct TransactionsResponse {
+    pub transactions: Vec<Transaction>,
+    pub address_book: AddressBook,
+}
+
+// === Stuff ===
+
+#[derive(Serialize)]
+pub struct Transaction {
+    pub account: StdAddr,
+    #[serde(with = "serde_helpers::tonlib_hash")]
+    pub hash: HashBytes,
+    #[serde(with = "serde_helpers::string")]
+    pub lt: u64,
+    pub now: u32,
+    pub mc_block_seqno: u32,
+    // TODO: Set some hash other than zero here?
+    pub trace_id: HashBytes,
+    #[serde(with = "serde_helpers::tonlib_hash")]
+    pub prev_trans_hash: HashBytes,
+    #[serde(with = "serde_helpers::string")]
+    pub prev_trans_lt: u64,
+    pub orig_status: AccountStatus,
+    pub end_status: AccountStatus,
+    pub total_fees: Tokens,
+    pub total_fees_extra_currencies: ExtraCurrenciesStub,
+    pub description: TxDescription,
+    pub block_ref: BlockRef,
+    pub in_msg: Option<Message>,
+    pub out_msgs: Vec<Message>,
+    pub account_state_before: BriefAccountState,
+    pub account_state_after: BriefAccountState,
+}
+
+impl Transaction {
+    pub fn load_raw(
+        info: &TransactionInfo,
+        cell: &DynCell,
+    ) -> Result<Self, everscale_types::error::Error> {
+        let tx = cell.parse::<everscale_types::models::Transaction>()?;
+
+        let state_update = tx.state_update.load()?;
+
+        Ok(Self {
+            account: info.account.clone(),
+            hash: *cell.repr_hash(),
+            lt: tx.lt,
+            now: tx.now,
+            mc_block_seqno: info.mc_seqno,
+            trace_id: HashBytes::ZERO,
+            prev_trans_hash: tx.prev_trans_hash,
+            prev_trans_lt: tx.prev_trans_lt,
+            orig_status: tx.orig_status.into(),
+            end_status: tx.end_status.into(),
+            total_fees: tx.total_fees.tokens,
+            total_fees_extra_currencies: ExtraCurrenciesStub {},
+            description: tx.load_info()?.into(),
+            block_ref: BlockRef(info.block_id.as_short_id()),
+            in_msg: tx.in_msg.as_deref().map(Message::load_raw).transpose()?,
+            out_msgs: {
+                let mut res = Vec::with_capacity(tx.out_msg_count.into_inner() as usize);
+                for item in tx.out_msgs.values() {
+                    let cell = item?;
+                    res.push(Message::load_raw(cell.as_ref())?);
+                }
+                res
+            },
+            // TODO: Fill state update.
+            account_state_before: BriefAccountState {
+                hash: state_update.old,
+                balance: None,
+                extra_currencies: None,
+                account_status: AccountStatus::new_only_existing(tx.orig_status),
+                frozen_hash: None,
+                data_hash: None,
+                code_hash: None,
+            },
+            // TODO: Fill state update.
+            account_state_after: BriefAccountState {
+                hash: state_update.new,
+                balance: None,
+                extra_currencies: None,
+                account_status: AccountStatus::new_only_existing(tx.end_status),
+                frozen_hash: None,
+                data_hash: None,
+                code_hash: None,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BriefAccountState {
+    #[serde(with = "serde_helpers::tonlib_hash")]
+    pub hash: HashBytes,
+    pub balance: Option<Tokens>,
+    pub extra_currencies: Option<ExtraCurrenciesStub>,
+    pub account_status: Option<AccountStatus>,
+    #[serde(with = "serde_helpers::option_tonlib_hash")]
+    pub frozen_hash: Option<HashBytes>,
+    #[serde(with = "serde_helpers::option_tonlib_hash")]
+    pub data_hash: Option<HashBytes>,
+    #[serde(with = "serde_helpers::option_tonlib_hash")]
+    pub code_hash: Option<HashBytes>,
+}
+
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub struct BlockRef(BlockIdShort);
+
+impl Serialize for BlockRef {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut s = serializer.serialize_struct("BlockRef", 3)?;
+        s.serialize_field("workchain", &self.0.shard.workchain())?;
+        s.serialize_field("shard", &format!("{:016x}", self.0.shard.prefix()))?;
+        s.serialize_field("seqno", &self.0.seqno)?;
+        s.end()
+    }
+}
+
+impl From<BlockIdShort> for BlockRef {
+    #[inline]
+    fn from(value: BlockIdShort) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum TxDescription {
+    #[serde(rename = "ord")]
+    Ordinary(TxDescriptionOrdinary),
+    #[serde(rename = "tick_tock")]
+    TickTock(TxDescriptionTickTock),
+}
+
+impl From<everscale_types::models::TxInfo> for TxDescription {
+    fn from(value: everscale_types::models::TxInfo) -> Self {
+        use everscale_types::models::TxInfo;
+
+        match value {
+            TxInfo::Ordinary(info) => Self::Ordinary(info.into()),
+            TxInfo::TickTock(info) => Self::TickTock(info.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TxDescriptionTickTock {
+    pub aborted: bool,
+    pub destroyed: bool,
+    pub is_tock: bool,
+    pub storage_ph: TxDescriptionStoragePhase,
+    pub compute_ph: TxDescriptionComputePhase,
+    pub action: Option<TxDescriptionActionPhase>,
+}
+
+impl From<everscale_types::models::TickTockTxInfo> for TxDescriptionTickTock {
+    fn from(value: everscale_types::models::TickTockTxInfo) -> Self {
+        use everscale_types::models::TickTock;
+
+        Self {
+            aborted: value.aborted,
+            destroyed: value.destroyed,
+            is_tock: matches!(value.kind, TickTock::Tock),
+            storage_ph: value.storage_phase.into(),
+            compute_ph: value.compute_phase.into(),
+            action: value.action_phase.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TxDescriptionOrdinary {
+    pub aborted: bool,
+    pub destroyed: bool,
+    pub credit_first: bool,
+    pub storage_ph: Option<TxDescriptionStoragePhase>,
+    pub credit_ph: Option<TxDescriptionCreditPhase>,
+    pub compute_ph: TxDescriptionComputePhase,
+    pub action: Option<TxDescriptionActionPhase>,
+    pub bounce: Option<TxDescriptionBouncePhase>,
+}
+
+impl From<everscale_types::models::OrdinaryTxInfo> for TxDescriptionOrdinary {
+    fn from(value: everscale_types::models::OrdinaryTxInfo) -> Self {
+        Self {
+            aborted: value.aborted,
+            destroyed: value.destroyed,
+            credit_first: value.credit_first,
+            storage_ph: value.storage_phase.map(Into::into),
+            credit_ph: value.credit_phase.map(Into::into),
+            compute_ph: value.compute_phase.into(),
+            action: value.action_phase.map(Into::into),
+            bounce: value.bounce_phase.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TxDescriptionStoragePhase {
+    pub storage_fees_collected: Tokens,
+    pub status_change: AccountStatusChange,
+}
+
+impl From<everscale_types::models::StoragePhase> for TxDescriptionStoragePhase {
+    #[inline]
+    fn from(value: everscale_types::models::StoragePhase) -> Self {
+        Self {
+            storage_fees_collected: value.storage_fees_collected,
+            status_change: value.status_change.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(transparent)]
+pub struct AccountStatus(everscale_types::models::AccountStatus);
+
+impl AccountStatus {
+    fn new_only_existing(status: everscale_types::models::AccountStatus) -> Option<Self> {
+        if status == everscale_types::models::AccountStatus::NotExists {
+            None
+        } else {
+            Some(Self(status))
+        }
+    }
+}
+
+impl Serialize for AccountStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self.0 {
+            everscale_types::models::AccountStatus::Uninit => "uninit",
+            everscale_types::models::AccountStatus::Frozen => "frozen",
+            everscale_types::models::AccountStatus::Active => "active",
+            everscale_types::models::AccountStatus::NotExists => "nonexist",
+        })
+    }
+}
+
+impl From<everscale_types::models::AccountStatus> for AccountStatus {
+    #[inline]
+    fn from(value: everscale_types::models::AccountStatus) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(transparent)]
+pub struct AccountStatusChange(everscale_types::models::AccountStatusChange);
+
+impl Serialize for AccountStatusChange {
+    #[inline]
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self.0 {
+            everscale_types::models::AccountStatusChange::Unchanged => "unchanged",
+            everscale_types::models::AccountStatusChange::Frozen => "frozen",
+            everscale_types::models::AccountStatusChange::Deleted => "deleted",
+        })
+    }
+}
+
+impl From<everscale_types::models::AccountStatusChange> for AccountStatusChange {
+    #[inline]
+    fn from(value: everscale_types::models::AccountStatusChange) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TxDescriptionCreditPhase {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_fees_collected: Option<Tokens>,
+    pub credit: Tokens,
+}
+
+impl From<everscale_types::models::CreditPhase> for TxDescriptionCreditPhase {
+    fn from(value: everscale_types::models::CreditPhase) -> Self {
+        Self {
+            due_fees_collected: value.due_fees_collected,
+            credit: value.credit.tokens,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum TxDescriptionComputePhase {
+    Skipped(TxDescriptionComputePhaseSkipped),
+    Executed(TxDescriptionComputePhaseExecuted),
+}
+
+impl From<everscale_types::models::ComputePhase> for TxDescriptionComputePhase {
+    fn from(value: everscale_types::models::ComputePhase) -> Self {
+        use everscale_types::models::ComputePhase;
+
+        match value {
+            ComputePhase::Skipped(phase) => Self::Skipped(phase.into()),
+            ComputePhase::Executed(phase) => Self::Executed(phase.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TxDescriptionComputePhaseSkipped {
+    pub skipped: bool,
+    pub reason: &'static str,
+}
+
+impl From<everscale_types::models::SkippedComputePhase> for TxDescriptionComputePhaseSkipped {
+    fn from(value: everscale_types::models::SkippedComputePhase) -> Self {
+        use everscale_types::models::ComputePhaseSkipReason;
+
+        Self {
+            skipped: true,
+            reason: match value.reason {
+                ComputePhaseSkipReason::NoState => "no_state",
+                ComputePhaseSkipReason::BadState => "bad_state",
+                ComputePhaseSkipReason::NoGas => "no_gas",
+                ComputePhaseSkipReason::Suspended => "suspended",
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TxDescriptionComputePhaseExecuted {
+    pub skipped: bool,
+    pub success: bool,
+    pub msg_state_used: bool,
+    pub account_activated: bool,
+    pub gas_fees: Tokens,
+    #[serde(with = "serde_helpers::string")]
+    pub gas_used: VarUint56,
+    #[serde(with = "serde_helpers::string")]
+    pub gas_limit: VarUint56,
+    #[serde(
+        with = "serde_helpers::option_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub gas_credit: Option<VarUint24>,
+    pub mode: i8,
+    pub exit_code: i32,
+    pub vm_steps: u32,
+    #[serde(with = "serde_helpers::tonlib_hash")]
+    pub vm_init_state_hash: HashBytes,
+    #[serde(with = "serde_helpers::tonlib_hash")]
+    pub vm_final_state_hash: HashBytes,
+}
+
+impl From<everscale_types::models::ExecutedComputePhase> for TxDescriptionComputePhaseExecuted {
+    fn from(value: everscale_types::models::ExecutedComputePhase) -> Self {
+        Self {
+            skipped: false,
+            success: value.success,
+            msg_state_used: value.msg_state_used,
+            account_activated: value.account_activated,
+            gas_fees: value.gas_fees,
+            gas_used: value.gas_used,
+            gas_limit: value.gas_limit,
+            gas_credit: value.gas_credit,
+            mode: value.mode,
+            exit_code: value.exit_code,
+            vm_steps: value.vm_steps,
+            vm_init_state_hash: value.vm_init_state_hash,
+            vm_final_state_hash: value.vm_final_state_hash,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TxDescriptionActionPhase {
+    pub success: bool,
+    pub valid: bool,
+    pub no_funds: bool,
+    pub status_change: AccountStatusChange,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_fwd_fees: Option<Tokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_action_fees: Option<Tokens>,
+    pub result_code: i32,
+    pub tot_actions: u16,
+    pub spec_actions: u16,
+    pub skipped_actions: u16,
+    pub msgs_created: u16,
+    #[serde(with = "serde_helpers::tonlib_hash")]
+    pub action_list_hash: HashBytes,
+    pub tot_msg_size: MessageSize,
+}
+
+impl From<everscale_types::models::ActionPhase> for TxDescriptionActionPhase {
+    fn from(value: everscale_types::models::ActionPhase) -> Self {
+        Self {
+            success: value.success,
+            valid: value.valid,
+            no_funds: value.no_funds,
+            status_change: value.status_change.into(),
+            total_fwd_fees: value.total_fwd_fees,
+            total_action_fees: value.total_action_fees,
+            result_code: value.result_code,
+            tot_actions: value.total_actions,
+            spec_actions: value.special_actions,
+            skipped_actions: value.skipped_actions,
+            msgs_created: value.messages_created,
+            action_list_hash: value.action_list_hash,
+            tot_msg_size: MessageSize {
+                cells: value.total_message_size.cells,
+                bits: value.total_message_size.bits,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TxDescriptionBouncePhase {
+    #[serde(rename = "type")]
+    pub ty: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg_size: Option<MessageSize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub req_fwd_fees: Option<Tokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg_fees: Option<Tokens>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fwd_fees: Option<Tokens>,
+}
+
+impl From<everscale_types::models::BouncePhase> for TxDescriptionBouncePhase {
+    fn from(value: everscale_types::models::BouncePhase) -> Self {
+        use everscale_types::models::BouncePhase;
+
+        let mut res = Self {
+            ty: "",
+            msg_size: None,
+            req_fwd_fees: None,
+            msg_fees: None,
+            fwd_fees: None,
+        };
+
+        match value {
+            BouncePhase::NegativeFunds => res.ty = "negfunds",
+            BouncePhase::NoFunds(phase) => {
+                res.ty = "nofunds";
+                res.msg_size = Some(MessageSize {
+                    cells: phase.msg_size.cells,
+                    bits: phase.msg_size.bits,
+                });
+                res.req_fwd_fees = Some(phase.req_fwd_fees);
+            }
+            BouncePhase::Executed(phase) => {
+                res.ty = "ok";
+                res.msg_size = Some(MessageSize {
+                    cells: phase.msg_size.cells,
+                    bits: phase.msg_size.bits,
+                });
+                res.msg_fees = Some(phase.msg_fees);
+                res.fwd_fees = Some(phase.fwd_fees);
+            }
+        }
+
+        res
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageSize {
+    #[serde(with = "serde_helpers::string")]
+    pub cells: VarUint56,
+    #[serde(with = "serde_helpers::string")]
+    pub bits: VarUint56,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Message {
+    #[serde(with = "serde_helpers::tonlib_hash")]
+    pub hash: HashBytes,
+    pub source: Option<StdAddr>,
+    pub destination: Option<StdAddr>,
+    pub value: Option<Tokens>,
+    pub value_extra_currencies: Option<ExtraCurrenciesStub>,
+    pub fwd_fee: Option<Tokens>,
+    pub ihr_fee: Option<Tokens>,
+    #[serde(with = "serde_helpers::option_string")]
+    pub created_lt: Option<u64>,
+    #[serde(with = "serde_helpers::option_string")]
+    pub created_at: Option<u32>,
+    pub ihr_disabled: Option<bool>,
+    pub bounce: Option<bool>,
+    pub bounced: Option<bool>,
+    pub import_fee: Option<Tokens>,
+    pub message_content: MessageContent,
+    // TODO: Replace with state init model.
+    pub init_state: Option<()>,
+    #[serde(with = "serde_helpers::option_tonlib_hash")]
+    pub hash_norm: Option<HashBytes>,
+}
+
+impl Message {
+    pub fn load_raw(cell: &DynCell) -> Result<Self, everscale_types::error::Error> {
+        let hash = cell.repr_hash();
+        let msg = cell.parse::<OwnedMessage>()?;
+
+        let message_content = if msg.body.0.is_full(&msg.body.1) {
+            MessageContent {
+                hash: *msg.body.1.repr_hash(),
+                body: msg.body.1.clone(),
+                // TODO: Parse content.
+                decoded: None,
+            }
+        } else {
+            let body = CellBuilder::build_from(CellSlice::apply_allow_exotic(&msg.body))?;
+            MessageContent {
+                hash: *body.repr_hash(),
+                body,
+                // TODO: Parse content.
+                decoded: None,
+            }
+        };
+
+        let mut res = Self {
+            hash: *hash,
+            source: None,
+            destination: None,
+            value: None,
+            value_extra_currencies: None,
+            fwd_fee: None,
+            ihr_fee: None,
+            created_lt: None,
+            created_at: None,
+            ihr_disabled: None,
+            bounce: None,
+            bounced: None,
+            import_fee: None,
+            message_content,
+            init_state: None,
+            hash_norm: None,
+        };
+        match &msg.info {
+            MsgInfo::Int(info) => {
+                res.ihr_disabled = Some(info.ihr_disabled);
+                res.bounce = Some(info.bounce);
+                res.bounced = Some(info.bounced);
+                res.source = to_std_addr(&info.src);
+                res.destination = to_std_addr(&info.dst);
+                res.value = Some(info.value.tokens);
+                res.value_extra_currencies = Some(ExtraCurrenciesStub {});
+                res.ihr_fee = Some(info.ihr_fee);
+                res.fwd_fee = Some(info.fwd_fee);
+                res.created_lt = Some(info.created_lt);
+                res.created_at = Some(info.created_at);
+            }
+            MsgInfo::ExtIn(info) => {
+                res.destination = to_std_addr(&info.dst);
+                res.import_fee = Some(info.import_fee);
+                res.hash_norm = Some(
+                    *build_normalized_external_message(
+                        &info.dst,
+                        res.message_content.body.clone(),
+                    )?
+                    .repr_hash(),
+                );
+            }
+            MsgInfo::ExtOut(info) => {
+                res.source = to_std_addr(&info.src);
+                res.created_lt = Some(info.created_lt);
+                res.created_at = Some(info.created_at);
+            }
+        }
+
+        Ok(res)
+    }
+}
+
+fn to_std_addr(addr: &IntAddr) -> Option<StdAddr> {
+    match addr {
+        IntAddr::Std(addr) => Some(addr.clone()),
+        IntAddr::Var(_) => None,
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageContent {
+    #[serde(with = "serde_helpers::tonlib_hash")]
+    pub hash: HashBytes,
+    #[serde(with = "Boc")]
+    pub body: Cell,
+    pub decoded: Option<()>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageDirection {
+    In,
+    Out,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ExtraCurrenciesStub {}
+
+#[derive(Default)]
+pub struct AddressBook {
+    pub items: FastHashSet<StdAddr>,
+}
+
+impl AddressBook {
+    pub fn fill_from_transactions(&mut self, transactions: &[Transaction]) {
+        for tx in transactions {
+            self.items.insert(tx.account.clone());
+
+            if let Some(msg) = &tx.in_msg {
+                if let Some(src) = msg.source.clone() {
+                    self.items.insert(src);
+                }
+            }
+
+            for msg in &tx.out_msgs {
+                if let Some(dst) = msg.destination.clone() {
+                    self.items.insert(dst);
+                }
+            }
+        }
+    }
+}
+
+impl serde::Serialize for AddressBook {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Item<'a> {
+            #[serde(with = "StdAddrBase64Repr::<true>")]
+            user_friendly: &'a StdAddr,
+            domain: (),
+        }
+
+        let mut s = serializer.serialize_map(Some(self.items.len()))?;
+        for addr in &self.items {
+            s.serialize_entry(addr, &Item {
+                user_friendly: addr,
+                domain: (),
+            })?;
+        }
+        s.end()
+    }
+}

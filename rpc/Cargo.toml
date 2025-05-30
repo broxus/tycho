@@ -23,7 +23,7 @@ num-bigint = { workspace = true }
 parking_lot = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
-scopeguard = { workspace = true}
+scopeguard = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

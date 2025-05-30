@@ -241,7 +241,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 None => None,
             };
 
-            match state.get_accounts_by_code_hash(&code_hash, continuation.as_ref()) {
+            match state.get_accounts_by_code_hash(&code_hash, continuation.as_ref(), None) {
                 Ok(list) => {
                     let result = response::Result::GetAccounts(response::GetAccountsByCodeHash {
                         account: list
@@ -269,7 +269,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 return invalid_params_response("invalid address");
             };
 
-            match state.get_transactions(&account, p.last_transaction_lt, 0) {
+            match state.get_transactions(&account, p.last_transaction_lt, 0, None) {
                 Ok(list) => {
                     let transactions = list
                         .map(|data| {
@@ -290,7 +290,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 return invalid_params_response("invalid tx id");
             };
 
-            match state.get_transaction(&hash) {
+            match state.get_transaction(&hash, None) {
                 Ok(tx) => ok_to_response(response::Result::GetRawTransaction(
                     response::GetRawTransaction {
                         transaction: tx.map(|slice| Bytes::copy_from_slice(slice.as_ref())),
@@ -304,7 +304,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 return invalid_params_response("invalid msg id");
             };
 
-            match state.get_dst_transaction(&hash) {
+            match state.get_dst_transaction(&hash, None) {
                 Ok(tx) => ok_to_response(response::Result::GetRawTransaction(
                     response::GetRawTransaction {
                         transaction: tx.map(|slice| Bytes::copy_from_slice(slice.as_ref())),
@@ -318,10 +318,10 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 return invalid_params_response("invalid tx id");
             };
 
-            match state.get_transaction_block_id(&hash) {
-                Ok(block_id) => ok_to_response(response::Result::GetTransactionBlockId(
+            match state.get_transaction_info(&hash, None) {
+                Ok(info) => ok_to_response(response::Result::GetTransactionBlockId(
                     response::GetTransactionBlockId {
-                        block_id: block_id.map(make_response_block_id),
+                        block_id: info.map(|info| make_response_block_id(info.block_id)),
                     },
                 )),
                 Err(e) => error_to_response(e),

@@ -671,12 +671,12 @@ impl ColumnFamilyOptions<Caches> for Transactions {
 
 /// Transaction hash to full key
 /// - Key: `tx_hash: [u8; 32]`
-/// - Value: `workchain: i8, account: [u8; 32], lt: u64, shard_depth: u8, seqno: u32, root_hash: [u8; 32], file_hash: [u8; 32]`
+/// - Value: `workchain: i8, account: [u8; 32], lt: u64 (BE), shard_depth: u8, seqno: u32 (LE), root_hash: [u8; 32], file_hash: [u8; 32], mc_seqno: u32 (LE)`
 pub struct TransactionsByHash;
 
 impl TransactionsByHash {
     pub const VALUE_SHORT_LEN: usize = Transactions::KEY_LEN;
-    pub const VALUE_FULL_LEN: usize = Transactions::KEY_LEN + 1 + 4 + 32 + 32;
+    pub const VALUE_FULL_LEN: usize = Transactions::KEY_LEN + 1 + 4 + 32 + 32 + 4;
 }
 
 impl ColumnFamily for TransactionsByHash {

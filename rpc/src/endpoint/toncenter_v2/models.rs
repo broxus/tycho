@@ -19,11 +19,11 @@ use tycho_block_util::message::ExtMsgRepr;
 use tycho_storage::{
     BlockTransactionIdsIter, BlockTransactionsIterBuilder, BriefShardDescr, TransactionsIterBuilder,
 };
-use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
 use crate::util::jrpc_extractor::{
     JrpcError, JrpcErrorResponse, JrpcOkResponse, JSONRPC_FIELD, JSONRPC_VERSION,
 };
+use crate::util::serde_helpers::{self, Base64BytesWithLimit};
 
 // === ID ===
 
@@ -179,7 +179,7 @@ impl<'de> Deserialize<'de> for DetectAddressParams {
 
 #[derive(Debug, Deserialize)]
 pub struct AccountParams {
-    #[serde(with = "serde_tonlib_address")]
+    #[serde(with = "serde_helpers::tonlib_address")]
     pub address: StdAddr,
 }
 
@@ -188,24 +188,27 @@ pub struct BlockHeaderParams {
     pub workchain: i8,
     pub shard: i64,
     pub seqno: u32,
-    #[serde(default, with = "serde_option_tonlib_hash")]
+    #[serde(default, with = "serde_helpers::option_tonlib_hash")]
     pub root_hash: Option<HashBytes>,
-    #[serde(default, with = "serde_option_tonlib_hash")]
+    #[serde(default, with = "serde_helpers::option_tonlib_hash")]
     pub file_hash: Option<HashBytes>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct TransactionsParams {
-    #[serde(with = "serde_tonlib_address")]
+    #[serde(with = "serde_helpers::tonlib_address")]
     pub address: StdAddr,
     #[serde(default = "default_tx_limit")]
     pub limit: u8,
-    #[serde(default, deserialize_with = "serde_string_or_u64::deserialize_option")]
+    #[serde(
+        default,
+        deserialize_with = "serde_helpers::string_or_u64::deserialize_option"
+    )]
     pub lt: Option<u64>,
     #[expect(unused)]
-    #[serde(default, with = "serde_option_tonlib_hash")]
+    #[serde(default, with = "serde_helpers::option_tonlib_hash")]
     pub hash: Option<HashBytes>,
-    #[serde(default, with = "serde_string_or_u64")]
+    #[serde(default, with = "serde_helpers::string_or_u64")]
     pub to_lt: u64,
 }
 
@@ -218,13 +221,16 @@ pub struct BlockTransactionsParams {
     pub workchain: i8,
     pub shard: i64,
     pub seqno: u32,
-    #[serde(default, with = "serde_option_tonlib_hash")]
+    #[serde(default, with = "serde_helpers::option_tonlib_hash")]
     pub root_hash: Option<HashBytes>,
-    #[serde(default, with = "serde_option_tonlib_hash")]
+    #[serde(default, with = "serde_helpers::option_tonlib_hash")]
     pub file_hash: Option<HashBytes>,
-    #[serde(default, deserialize_with = "serde_string_or_u64::deserialize_option")]
+    #[serde(
+        default,
+        deserialize_with = "serde_helpers::string_or_u64::deserialize_option"
+    )]
     pub after_lt: Option<u64>,
-    #[serde(default, with = "serde_option_tonlib_hash")]
+    #[serde(default, with = "serde_helpers::option_tonlib_hash")]
     pub after_hash: Option<HashBytes>,
     #[serde(default = "default_block_tx_limit")]
     pub count: NonZeroU8,
@@ -242,9 +248,9 @@ pub struct SendBocParams {
 
 #[derive(Debug, Deserialize)]
 pub struct RunGetMethodParams {
-    #[serde(with = "serde_tonlib_address")]
+    #[serde(with = "serde_helpers::tonlib_address")]
     pub address: StdAddr,
-    #[serde(with = "serde_method_id")]
+    #[serde(with = "serde_helpers::method_id")]
     pub method: i64,
     pub stack: Vec<TonlibInputStackItem>,
 }
@@ -256,7 +262,7 @@ pub struct MasterchainInfoResponse {
     #[serde(rename = "@type")]
     pub ty: &'static str,
     pub last: TonlibBlockId,
-    #[serde(with = "serde_tonlib_hash")]
+    #[serde(with = "serde_helpers::tonlib_hash")]
     pub state_root_hash: HashBytes,
     pub init: TonlibBlockId,
     #[serde(rename = "@extra")]
@@ -369,13 +375,13 @@ pub struct AddressInformationResponse {
     #[serde(with = "serde_helpers::string")]
     pub balance: Tokens,
     pub extra_currencies: [(); 0],
-    #[serde(with = "serde_boc_or_empty")]
+    #[serde(with = "serde_helpers::boc_or_empty")]
     pub code: Option<Cell>,
-    #[serde(with = "serde_boc_or_empty")]
+    #[serde(with = "serde_helpers::boc_or_empty")]
     pub data: Option<Cell>,
     pub last_transaction_id: TonlibTransactionId,
     pub block_id: TonlibBlockId,
-    #[serde(serialize_with = "serde_tonlib_hash::serialize_or_empty")]
+    #[serde(serialize_with = "serde_helpers::tonlib_hash::serialize_or_empty")]
     pub frozen_hash: Option<HashBytes>,
     pub sync_utime: u32,
     #[serde(rename = "@extra")]
@@ -659,7 +665,7 @@ pub struct TonlibBlockTransactionId<'a> {
     pub account: &'a StdAddr,
     #[serde(with = "serde_helpers::string")]
     pub lt: u64,
-    #[serde(with = "serde_tonlib_hash")]
+    #[serde(with = "serde_helpers::tonlib_hash")]
     pub hash: &'a HashBytes,
 }
 
@@ -776,11 +782,11 @@ impl TonlibTransaction<'_> {
 pub struct TonlibMessage {
     #[serde(rename = "@type")]
     pub ty: &'static str,
-    #[serde(with = "serde_tonlib_hash")]
+    #[serde(with = "serde_helpers::tonlib_hash")]
     pub hash: HashBytes,
-    #[serde(with = "serde_option_tonlib_address")]
+    #[serde(with = "serde_helpers::option_tonlib_address")]
     pub source: Option<StdAddr>,
-    #[serde(with = "serde_option_tonlib_address")]
+    #[serde(with = "serde_helpers::option_tonlib_address")]
     pub destination: Option<StdAddr>,
     #[serde(with = "serde_helpers::string")]
     pub value: Tokens,
@@ -789,7 +795,7 @@ pub struct TonlibMessage {
     pub ihr_fee: Tokens,
     #[serde(with = "serde_helpers::string")]
     pub created_lt: u64,
-    #[serde(with = "serde_tonlib_hash")]
+    #[serde(with = "serde_helpers::tonlib_hash")]
     pub body_hash: HashBytes,
     pub msg_data: TonlibMessageData,
 }
@@ -886,7 +892,7 @@ pub struct TonlibMessageData {
     pub ty: &'static str,
     #[serde(with = "Boc")]
     pub body: Cell,
-    #[serde(with = "serde_boc_or_empty")]
+    #[serde(with = "serde_helpers::boc_or_empty")]
     pub init_state: Option<Cell>,
 }
 
@@ -898,7 +904,7 @@ impl TonlibMessageData {
 pub struct TonlibAddress<'a> {
     #[serde(rename = "@type")]
     pub ty: &'static str,
-    #[serde(with = "serde_tonlib_address")]
+    #[serde(with = "serde_helpers::tonlib_address")]
     pub account_address: &'a StdAddr,
 }
 
@@ -1281,7 +1287,7 @@ pub struct TonlibTransactionId {
     pub ty: &'static str,
     #[serde(with = "serde_helpers::string")]
     pub lt: u64,
-    #[serde(with = "serde_tonlib_hash")]
+    #[serde(with = "serde_helpers::tonlib_hash")]
     pub hash: HashBytes,
 }
 
@@ -1311,9 +1317,9 @@ pub struct TonlibBlockId {
     #[serde(with = "serde_helpers::string")]
     pub shard: i64,
     pub seqno: u32,
-    #[serde(with = "serde_tonlib_hash")]
+    #[serde(with = "serde_helpers::tonlib_hash")]
     pub root_hash: HashBytes,
-    #[serde(with = "serde_tonlib_hash")]
+    #[serde(with = "serde_helpers::tonlib_hash")]
     pub file_hash: HashBytes,
 }
 
@@ -1379,11 +1385,11 @@ impl Serialize for TonlibOk {
 pub enum ParsedAccountState {
     #[serde(rename = "raw.accountState")]
     Raw {
-        #[serde(with = "serde_boc_or_empty")]
+        #[serde(with = "serde_helpers::boc_or_empty")]
         code: Option<Cell>,
-        #[serde(with = "serde_boc_or_empty")]
+        #[serde(with = "serde_helpers::boc_or_empty")]
         data: Option<Cell>,
-        #[serde(serialize_with = "serde_tonlib_hash::serialize_or_empty")]
+        #[serde(serialize_with = "serde_helpers::tonlib_hash::serialize_or_empty")]
         frozen_hash: Option<HashBytes>,
     },
     #[serde(rename = "wallet.v3.accountState")]
@@ -1411,7 +1417,7 @@ pub enum ParsedAccountState {
     },
     #[serde(rename = "uninited.accountState")]
     Uninit {
-        #[serde(serialize_with = "serde_tonlib_hash::serialize_or_empty")]
+        #[serde(serialize_with = "serde_helpers::tonlib_hash::serialize_or_empty")]
         frozen_hash: Option<HashBytes>,
     },
 }
@@ -1681,234 +1687,4 @@ mod code_hash {
         0xa2, 0x80, 0x0f, 0x17, 0xdd, 0xa8, 0x5e, 0xe6, 0xa8, 0x19, 0x8a, 0x70, 0x95, 0xed, 0xe1,
         0x0d, 0xcf,
     ]);
-}
-
-mod serde_option_tonlib_address {
-    use super::*;
-
-    pub fn serialize<S>(value: &Option<StdAddr>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        #[derive(Serialize)]
-        #[serde(transparent)]
-        #[repr(transparent)]
-        struct Wrapper<'a>(#[serde(with = "serde_tonlib_address")] &'a StdAddr);
-
-        value.as_ref().map(Wrapper).serialize(serializer)
-    }
-}
-
-mod serde_tonlib_address {
-    use everscale_types::models::{StdAddr, StdAddrBase64Repr};
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<StdAddr, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        StdAddrBase64Repr::<true>::deserialize(deserializer)
-    }
-
-    pub fn serialize<S>(value: &StdAddr, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        StdAddrBase64Repr::<true>::serialize(value, serializer)
-    }
-}
-
-mod serde_option_tonlib_hash {
-    use super::*;
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<HashBytes>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(transparent)]
-        #[repr(transparent)]
-        struct Wrapper(#[serde(with = "serde_tonlib_hash")] HashBytes);
-
-        Option::<Wrapper>::deserialize(deserializer).map(|x| x.map(|Wrapper(x)| x))
-    }
-}
-
-mod serde_tonlib_hash {
-    use std::str::FromStr;
-
-    use serde::de::Error;
-
-    use super::*;
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashBytes, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let serde_helpers::BorrowedStr(s) = <_>::deserialize(deserializer)?;
-        HashBytes::from_str(s.as_ref()).map_err(Error::custom)
-    }
-
-    pub fn serialize<S>(value: &HashBytes, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut res = [0u8; 44];
-        BASE64_STANDARD
-            .encode_slice(value.as_array(), &mut res)
-            .unwrap();
-        // SAFETY: `res` is guaranteed to contain a valid ASCII base64.
-        let res = unsafe { std::str::from_utf8_unchecked(&res) };
-
-        serializer.serialize_str(res)
-    }
-
-    pub fn serialize_or_empty<S>(
-        value: &Option<HashBytes>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match value {
-            Some(value) => serialize(value, serializer),
-            None => serializer.serialize_str(""),
-        }
-    }
-}
-
-mod serde_boc_or_empty {
-    use super::*;
-
-    pub fn serialize<S>(value: &Option<Cell>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match value {
-            Some(value) => Boc::serialize(value, serializer),
-            None => serializer.serialize_str(""),
-        }
-    }
-}
-
-mod serde_method_id {
-    use std::borrow::Cow;
-
-    use super::*;
-
-    const MAX_METHOD_NAME_LEN: usize = 128;
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<i64, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error;
-
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum MethodId<'a> {
-            Int(i64),
-            String(#[serde(borrow)] Cow<'a, str>),
-        }
-
-        Ok(match <_>::deserialize(deserializer)? {
-            MethodId::Int(int) => int,
-            MethodId::String(str) => {
-                let bytes = str.as_bytes();
-                if bytes.len() > MAX_METHOD_NAME_LEN {
-                    return Err(Error::custom("method name is too long"));
-                }
-                everscale_types::crc::crc_16(bytes) as i64 | 0x10000
-            }
-        })
-    }
-}
-
-mod serde_string_or_u64 {
-    use super::*;
-
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Value {
-        Int(u64),
-        String(#[serde(with = "serde_helpers::string")] u64),
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        Ok(match <_>::deserialize(deserializer)? {
-            Value::Int(x) | Value::String(x) => x,
-        })
-    }
-
-    pub fn deserialize_option<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let Some(value) = <_>::deserialize(deserializer)? else {
-            return Ok(None);
-        };
-
-        Ok(Some(match value {
-            Value::Int(x) | Value::String(x) => x,
-        }))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn string_or_u64() {
-        #[derive(Debug, Eq, PartialEq, Deserialize)]
-        struct Struct {
-            #[serde(with = "serde_string_or_u64")]
-            value: u64,
-        }
-
-        for (serialied, expected) in [
-            (r#"{"value":0}"#, Struct { value: 0 }),
-            (r#"{"value":123}"#, Struct { value: 123 }),
-            (r#"{"value":"123"}"#, Struct { value: 123 }),
-            (r#"{"value":18446744073709551615}"#, Struct {
-                value: u64::MAX,
-            }),
-            (r#"{"value":"18446744073709551615"}"#, Struct {
-                value: u64::MAX,
-            }),
-        ] {
-            let parsed: Struct = serde_json::from_str(serialied).unwrap();
-            assert_eq!(parsed, expected);
-        }
-    }
-
-    #[test]
-    fn string_or_u64_option() {
-        #[derive(Debug, Eq, PartialEq, Deserialize)]
-        struct Struct {
-            #[serde(deserialize_with = "serde_string_or_u64::deserialize_option")]
-            value: Option<u64>,
-        }
-
-        for (serialied, expected) in [
-            (r#"{"value":null}"#, Struct { value: None }),
-            (r#"{"value":0}"#, Struct { value: Some(0) }),
-            (r#"{"value":"0"}"#, Struct { value: Some(0) }),
-            (r#"{"value":123}"#, Struct { value: Some(123) }),
-            (r#"{"value":"123","value_opt":null}"#, Struct {
-                value: Some(123),
-            }),
-            (r#"{"value":18446744073709551615}"#, Struct {
-                value: Some(u64::MAX),
-            }),
-            (r#"{"value":"18446744073709551615"}"#, Struct {
-                value: Some(u64::MAX),
-            }),
-        ] {
-            let parsed: Struct = serde_json::from_str(serialied).unwrap();
-            assert_eq!(parsed, expected);
-        }
-    }
 }
