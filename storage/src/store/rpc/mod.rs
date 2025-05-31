@@ -108,6 +108,77 @@ impl RpcStorage {
         InstanceId::from_slice(id.as_ref())
     }
 
+    pub fn get_brief_block_info(
+        &self,
+        block_id: &BlockIdShort,
+    ) -> Result<Option<(BlockId, BriefBlockInfo)>> {
+        let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
+            return Ok(None);
+        };
+        let mut key = [0; tables::KnownBlocks::KEY_LEN];
+        key[0] = workchain as u8;
+        key[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+        key[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+        let value = match self.db.known_blocks.get(key)? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        let value = value.as_ref();
+
+        let brief_info = BriefBlockInfo::load_from_bytes(workchain as i32, &value[64..])
+            .context("invalid brief info")?;
+
+        let block_id = BlockId {
+            shard: block_id.shard,
+            seqno: block_id.seqno,
+            root_hash: HashBytes::from_slice(&value[0..32]),
+            file_hash: HashBytes::from_slice(&value[32..64]),
+        };
+
+        Ok(Some((block_id, brief_info)))
+    }
+
+    pub fn get_brief_shards_descr(&self, mc_seqno: u32) -> Result<Option<Vec<BriefShardDescr>>> {
+        let mut key = [0x00; tables::BlocksByMcSeqno::KEY_LEN];
+        key[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
+        key[4] = -1i8 as u8;
+        key[5..13].copy_from_slice(&ShardIdent::PREFIX_FULL.to_be_bytes());
+        key[13..17].copy_from_slice(&mc_seqno.to_be_bytes());
+
+        let Some(value) = self.db.blocks_by_mc_seqno.get(key)? else {
+            return Ok(None);
+        };
+        let value = value.as_ref();
+
+        let shard_count = u32::from_le_bytes(
+            value[tables::BlocksByMcSeqno::VALUE_LEN..tables::BlocksByMcSeqno::VALUE_LEN + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+
+        let mut result = Vec::with_capacity(shard_count);
+        for i in 0..shard_count {
+            let offset =
+                tables::BlocksByMcSeqno::DESCR_OFFSET + i * tables::BlocksByMcSeqno::DESCR_LEN;
+            let descr = &value[offset..offset + tables::BlocksByMcSeqno::DESCR_LEN];
+
+            result.push(BriefShardDescr {
+                shard_ident: ShardIdent::new(
+                    descr[0] as i8 as i32,
+                    u64::from_le_bytes(descr[1..9].try_into().unwrap()),
+                )
+                .context("invalid top shard ident")?,
+                seqno: u32::from_le_bytes(descr[9..13].try_into().unwrap()),
+                root_hash: HashBytes::from_slice(&descr[13..45]),
+                file_hash: HashBytes::from_slice(&descr[45..77]),
+                start_lt: u64::from_le_bytes(descr[77..85].try_into().unwrap()),
+                end_lt: u64::from_le_bytes(descr[85..93].try_into().unwrap()),
+            });
+        }
+
+        Ok(Some(result))
+    }
+
     pub fn get_accounts_by_code_hash(
         &self,
         code_hash: &HashBytes,
@@ -149,12 +220,93 @@ impl RpcStorage {
         })
     }
 
+    pub fn get_block_transactions(
+        &self,
+        block_id: &BlockIdShort,
+        cursor: Option<&BlockTransactionsCursor>,
+    ) -> Result<Option<BlockTransactionsIterBuilder>> {
+        let Some(ids) = self.get_block_transaction_ids(block_id, cursor)? else {
+            return Ok(None);
+        };
+
+        Ok(Some(BlockTransactionsIterBuilder {
+            ids,
+            transactions_cf: self.db.transactions.get_unbounded_cf(),
+        }))
+    }
+
+    pub fn get_block_transaction_ids(
+        &self,
+        block_id: &BlockIdShort,
+        cursor: Option<&BlockTransactionsCursor>,
+    ) -> Result<Option<BlockTransactionIdsIter>> {
+        let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
+            return Ok(None);
+        };
+
+        let Some(snapshot) = self.snapshot.load_full() else {
+            // TODO: Somehow always use snapshot.
+            anyhow::bail!("No snapshot available");
+        };
+
+        let mut range_from = [0x00; tables::BlockTransactions::KEY_LEN];
+        range_from[0] = workchain as u8;
+        range_from[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+        range_from[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+
+        if let Some(cursor) = cursor {
+            range_from[13..45].copy_from_slice(cursor.hash.as_slice());
+            range_from[45..53].copy_from_slice(&cursor.lt.to_be_bytes());
+        }
+
+        let block_id = match self.db.known_blocks.get(&range_from[0..13])? {
+            Some(value) => {
+                let value = value.as_ref();
+                BlockId {
+                    shard: block_id.shard,
+                    seqno: block_id.seqno,
+                    root_hash: HashBytes::from_slice(&value[0..32]),
+                    file_hash: HashBytes::from_slice(&value[32..64]),
+                }
+            }
+            None => return Ok(None),
+        };
+
+        let mut range_to = [0xff; tables::BlockTransactions::KEY_LEN];
+        range_to[0..13].copy_from_slice(&range_from[0..13]);
+
+        let mut readopts = self.db.block_transactions.new_read_config();
+        readopts.set_iterate_lower_bound(range_from.as_slice());
+        readopts.set_iterate_upper_bound(range_to.as_slice());
+        readopts.set_snapshot(&snapshot);
+
+        let rocksdb = self.db.rocksdb();
+        let block_transactions_cf = self.db.block_transactions.cf();
+        let mut iter = rocksdb.raw_iterator_cf_opt(&block_transactions_cf, readopts);
+        iter.seek(range_from);
+
+        if cursor.is_some() {
+            if let Some(key) = iter.key() {
+                if key == range_from.as_slice() {
+                    iter.next();
+                }
+            }
+        }
+
+        Ok(Some(BlockTransactionIdsIter {
+            block_id,
+            // SAFETY: Iterator was created from the same DB instance.
+            inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), iter) },
+            snapshot,
+        }))
+    }
+
     pub fn get_transactions(
         &self,
         account: &StdAddr,
         mut last_lt: Option<u64>,
         mut to_lt: u64,
-    ) -> Result<TransactionsIterBuilder<'_>> {
+    ) -> Result<TransactionsIterBuilder> {
         if matches!(last_lt, Some(last_lt) if last_lt < to_lt) {
             // Make empty iterator if `last_lt < to_lt`.
             last_lt = Some(u64::MAX);
@@ -184,7 +336,8 @@ impl RpcStorage {
         iter.seek_for_prev(key);
 
         Ok(TransactionsIterBuilder {
-            inner: iter,
+            // SAFETY: Iterator was created from the same DB instance.
+            inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), iter) },
             snapshot,
         })
     }
@@ -197,6 +350,52 @@ impl RpcStorage {
 
         let tx = self.db.transactions.get(tx_info)?;
         Ok(tx.map(TransactionData::new))
+    }
+
+    pub fn get_transaction_ext(&self, hash: &HashBytes) -> Result<Option<TransactionDataExt<'_>>> {
+        let Some(tx_info) = self.db.transactions_by_hash.get(hash)? else {
+            return Ok(None);
+        };
+        let tx_info = tx_info.as_ref();
+        if tx_info.len() < tables::TransactionsByHash::VALUE_FULL_LEN {
+            return Ok(None);
+        }
+
+        let account = StdAddr::new(tx_info[0] as i8, HashBytes::from_slice(&tx_info[1..33]));
+        let lt = u64::from_be_bytes(tx_info[33..41].try_into().unwrap());
+        let prefix_len = tx_info[41];
+        debug_assert!(prefix_len < 64);
+
+        let tail_mask = 1u64 << (63 - prefix_len);
+
+        // TODO: Move into types?
+        let Some(shard) = ShardIdent::new(
+            tx_info[0] as i8 as i32,
+            (account.prefix() | tail_mask) & !(tail_mask - 1),
+        ) else {
+            // TODO: unwrap?
+            return Ok(None);
+        };
+        let block_id = BlockId {
+            shard,
+            seqno: u32::from_le_bytes(tx_info[42..46].try_into().unwrap()),
+            root_hash: HashBytes::from_slice(&tx_info[46..78]),
+            file_hash: HashBytes::from_slice(&tx_info[78..110]),
+        };
+        let mc_seqno = u32::from_le_bytes(tx_info[110..114].try_into().unwrap());
+
+        let tx = self
+            .db
+            .transactions
+            .get(&tx_info[..Transactions::KEY_LEN])?;
+
+        Ok(tx.map(|data| TransactionDataExt {
+            account,
+            lt,
+            block_id,
+            mc_seqno,
+            data: TransactionData::new(data),
+        }))
     }
 
     pub fn get_transaction_block_id(&self, hash: &HashBytes) -> Result<Option<BlockId>> {
@@ -393,6 +592,7 @@ impl RpcStorage {
     #[tracing::instrument(level = "info", name = "remove_old_transactions", skip(self))]
     pub async fn remove_old_transactions(
         &self,
+        mc_seqno: u32,
         min_lt: u64,
         keep_tx_per_account: usize,
     ) -> Result<()> {
@@ -538,6 +738,97 @@ impl RpcStorage {
 
             // Prepare snapshot and iterator
             let snapshot = raw.snapshot();
+
+            // Delete block transactions.
+            'block: {
+                let mc_seqno = match mc_seqno.checked_sub(1) {
+                    None | Some(0) => break 'block,
+                    Some(seqno) => seqno,
+                };
+
+                let known_blocks = &db.known_blocks;
+                let blocks_by_mc_seqno = &db.blocks_by_mc_seqno;
+                let block_transactions = &db.block_transactions;
+
+                // Get masterchain block entry.
+                let mut key = [0u8; tables::BlocksByMcSeqno::KEY_LEN];
+                key[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
+                key[4] = -1i8 as u8;
+                key[5..13].copy_from_slice(&ShardIdent::PREFIX_FULL.to_be_bytes());
+                key[13..17].copy_from_slice(&mc_seqno.to_be_bytes());
+
+                let Some(value) = snapshot.get_pinned_cf_opt(
+                    &blocks_by_mc_seqno.cf(),
+                    key,
+                    blocks_by_mc_seqno.new_read_config(),
+                )?
+                else {
+                    break 'block;
+                };
+                let value = value.as_ref();
+                debug_assert!(value.len() >= tables::BlocksByMcSeqno::VALUE_LEN + 4);
+
+                // Parse top shard block ids (short).
+                let shard_count = u32::from_le_bytes(
+                    value[tables::BlocksByMcSeqno::VALUE_LEN
+                        ..tables::BlocksByMcSeqno::VALUE_LEN + 4]
+                        .try_into()
+                        .unwrap(),
+                ) as usize;
+                let mut top_block_ids = Vec::with_capacity(1 + shard_count);
+                top_block_ids.push(BlockIdShort {
+                    shard: ShardIdent::MASTERCHAIN,
+                    seqno: mc_seqno,
+                });
+                for i in 0..shard_count {
+                    let offset = tables::BlocksByMcSeqno::DESCR_OFFSET
+                        + i * tables::BlocksByMcSeqno::DESCR_LEN;
+                    let descr = &value[offset..offset + tables::BlocksByMcSeqno::DESCR_LEN];
+                    top_block_ids.push(BlockIdShort {
+                        shard: ShardIdent::new(
+                            descr[0] as i8 as i32,
+                            u64::from_le_bytes(descr[1..9].try_into().unwrap()),
+                        )
+                        .context("invalid top shard ident")?,
+                        seqno: u32::from_le_bytes(descr[9..13].try_into().unwrap()),
+                    });
+                }
+
+                // Prepare batch.
+                let mut batch = rocksdb::WriteBatch::new();
+
+                // Delete `blocks_by_mc_seqno` range before the mc block.
+                let range_from = [0x00; tables::BlocksByMcSeqno::KEY_LEN];
+                let mut range_to = [0xff; tables::BlocksByMcSeqno::KEY_LEN];
+                range_to[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
+                batch.delete_range_cf(&blocks_by_mc_seqno.cf(), range_from, range_to);
+                batch.delete_cf(&blocks_by_mc_seqno.cf(), range_to);
+
+                // Delete `known_blocks` and `block_transactions` ranges for each shard
+                // (including masterchain).
+                let mut range_from = [0x00; tables::BlockTransactions::KEY_LEN];
+                let mut range_to = [0xff; tables::BlockTransactions::KEY_LEN];
+                for block_id in top_block_ids {
+                    range_from[0] = block_id.shard.workchain() as i8 as u8;
+                    range_from[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+                    range_from[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+                    range_to[0..13].copy_from_slice(&range_from[0..13]);
+                    batch.delete_range_cf(&block_transactions.cf(), range_from, range_to);
+                    batch.delete_cf(&block_transactions.cf(), range_to);
+
+                    let range_from = &range_from[0..tables::KnownBlocks::KEY_LEN];
+                    let range_to = &range_to[0..tables::KnownBlocks::KEY_LEN];
+                    batch.delete_range_cf(&known_blocks.cf(), range_from, range_to);
+                    batch.delete_cf(&known_blocks.cf(), range_to);
+                }
+
+                // Apply batch.
+                db.rocksdb()
+                    .write(batch)
+                    .context("failed to remove block transactions")?;
+            }
+
+            // Remove transactions
             let mut readopts = db.transactions.new_read_config();
             readopts.set_snapshot(&snapshot);
             let mut iter = raw.raw_iterator_cf_opt(&db.transactions.cf(), readopts);
@@ -648,6 +939,7 @@ impl RpcStorage {
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
     pub async fn update(
         &self,
+        mc_block_id: &BlockId,
         block: BlockStuff,
         rpc_blacklist: Option<&BlacklistedAccounts>,
     ) -> Result<()> {
@@ -655,7 +947,18 @@ impl RpcStorage {
             return Ok(());
         };
 
-        let min_lt = block.load_info()?.start_lt;
+        let is_masterchain = block.id().is_masterchain();
+        let mc_seqno = mc_block_id.seqno;
+        let brief_block_info = BriefBlockInfo::new(block.as_ref(), block.load_info()?)?;
+        let start_lt = brief_block_info.start_lt;
+        let end_lt = brief_block_info.end_lt;
+
+        let shard_hashes = is_masterchain
+            .then(|| {
+                let custom = block.load_custom()?;
+                Ok::<_, anyhow::Error>(custom.shards.clone())
+            })
+            .transpose()?;
 
         let span = tracing::Span::current();
         let db = self.db.clone();
@@ -700,6 +1003,7 @@ impl RpcStorage {
             let tx_cf = &db.transactions.cf();
             let tx_by_hash_cf = &db.transactions_by_hash.cf();
             let tx_by_in_msg_cf = &db.transactions_by_in_msg.cf();
+            let block_txs_cf = &db.block_transactions.cf();
 
             // Prepare buffer for full tx id
             let mut tx_info = [0u8; tables::TransactionsByHash::VALUE_FULL_LEN];
@@ -711,18 +1015,83 @@ impl RpcStorage {
             tx_info[46..78].copy_from_slice(block_id.root_hash.as_slice());
             tx_info[78..110].copy_from_slice(block_id.file_hash.as_slice());
 
-            let mut tx_buffer = Vec::with_capacity(1024);
+            let mut block_tx = [0u8; tables::BlockTransactions::KEY_LEN];
+            block_tx[0] = workchain as u8;
+            block_tx[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+            block_tx[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
+
+            // Add known block id.
+            let mut buffer = Vec::with_capacity(64 + BriefBlockInfo::MIN_BYTE_LEN);
+            buffer.extend_from_slice(&tx_info[46..110]); // root_hash + file_hash
+            brief_block_info.write_to_bytes(&mut buffer); // everything else
+
+            write_batch.put_cf(
+                &db.known_blocks.cf(),
+                &block_tx[0..tables::KnownBlocks::KEY_LEN],
+                buffer.as_slice(),
+            );
+
+            // Write block info.
+            {
+                let mut key = [0u8; tables::BlocksByMcSeqno::KEY_LEN];
+                key[0..4].copy_from_slice(&mc_seqno.to_be_bytes());
+                key[4] = workchain as u8;
+                key[5..13].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+                key[13..17].copy_from_slice(&block_id.seqno.to_be_bytes());
+
+                buffer.clear();
+                buffer.extend_from_slice(block_id.root_hash.as_slice()); // 0..32
+                buffer.extend_from_slice(block_id.file_hash.as_slice()); // 32..64
+                buffer.extend_from_slice(&start_lt.to_le_bytes()); // 64..72
+                buffer.extend_from_slice(&end_lt.to_le_bytes()); // 72..80
+                if let Some(shard_hashes) = shard_hashes {
+                    let shards = shard_hashes
+                        .iter()
+                        .filter_map(|item| {
+                            let (shard_ident, descr) = match item {
+                                Ok(item) => item,
+                                Err(e) => return Some(Err(e)),
+                            };
+                            if i8::try_from(shard_ident.workchain()).is_err() {
+                                return None;
+                            }
+
+                            Some(Ok(BriefShardDescr {
+                                shard_ident,
+                                seqno: descr.seqno,
+                                root_hash: descr.root_hash,
+                                file_hash: descr.file_hash,
+                                start_lt: descr.start_lt,
+                                end_lt: descr.end_lt,
+                            }))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+
+                    buffer.reserve(4 + tables::BlocksByMcSeqno::DESCR_LEN * shards.len());
+                    buffer.extend_from_slice(&(shards.len() as u32).to_le_bytes());
+                    for shard in shards {
+                        buffer.push(shard.shard_ident.workchain() as i8 as u8);
+                        buffer.extend_from_slice(&shard.shard_ident.prefix().to_le_bytes());
+                        buffer.extend_from_slice(&shard.seqno.to_le_bytes());
+                        buffer.extend_from_slice(shard.root_hash.as_slice());
+                        buffer.extend_from_slice(shard.file_hash.as_slice());
+                        buffer.extend_from_slice(&shard.start_lt.to_le_bytes());
+                        buffer.extend_from_slice(&shard.end_lt.to_le_bytes());
+                    }
+                }
+
+                write_batch.put_cf(&db.blocks_by_mc_seqno.cf(), key, buffer.as_slice());
+            }
 
             let rpc_blacklist = rpc_blacklist.as_deref();
 
-            // Iterate through all changed accounts in the block
-            let mut non_empty_batch = false;
+            // Iterate through all changed accounts in the block.
             for item in account_blocks.iter() {
                 let (account, _, account_block) = item?;
-                non_empty_batch |= true;
 
                 // Fill account address in the key buffer
                 tx_info[1..33].copy_from_slice(account.as_slice());
+                block_tx[13..45].copy_from_slice(account.as_slice());
 
                 // Flag to update code hash
                 let mut has_special_actions = false;
@@ -737,6 +1106,7 @@ impl RpcStorage {
                     let tx = tx_cell.load()?;
 
                     tx_info[33..41].copy_from_slice(&tx.lt.to_be_bytes());
+                    block_tx[45..53].copy_from_slice(&tx.lt.to_be_bytes());
 
                     // Update flags
                     if first_tx {
@@ -782,19 +1152,20 @@ impl RpcStorage {
                     };
 
                     // Collect transaction data to `tx_buffer`
-                    tx_buffer.clear();
-                    tx_buffer.push(tx_mask.bits());
-                    tx_buffer.extend_from_slice(tx_hash.as_slice());
+                    buffer.clear();
+                    buffer.push(tx_mask.bits());
+                    buffer.extend_from_slice(tx_hash.as_slice());
                     if let Some(msg_hash) = msg_hash {
-                        tx_buffer.extend_from_slice(msg_hash.as_slice());
+                        buffer.extend_from_slice(msg_hash.as_slice());
                     }
                     everscale_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(
                         tx_cell.inner().as_ref(),
                     )
-                    .encode(&mut tx_buffer);
+                    .encode(&mut buffer);
 
                     // Write tx data and indices
                     write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_info.as_slice());
+                    write_batch.put_cf(block_txs_cf, block_tx.as_slice(), tx_hash.as_slice());
 
                     if let Some(msg_hash) = msg_hash {
                         write_batch.put_cf(
@@ -804,11 +1175,7 @@ impl RpcStorage {
                         );
                     }
 
-                    write_batch.put_cf(
-                        tx_cf,
-                        &tx_info[..tables::Transactions::KEY_LEN],
-                        &tx_buffer,
-                    );
+                    write_batch.put_cf(tx_cf, &tx_info[..tables::Transactions::KEY_LEN], &buffer);
                 }
 
                 // Update code hash
@@ -844,10 +1211,8 @@ impl RpcStorage {
             let _execute_batch_histogram =
                 HistogramGuard::begin("tycho_storage_rpc_execute_batch_time");
 
-            if non_empty_batch {
-                db.rocksdb()
-                    .write_opt(write_batch, db.transactions.write_config())?;
-            }
+            db.rocksdb()
+                .write_opt(write_batch, db.transactions.write_config())?;
 
             Ok::<_, anyhow::Error>(())
         })
@@ -857,18 +1222,18 @@ impl RpcStorage {
         'min_lt: {
             // Update the runtime value first. Load is relaxed since we just need
             // to know that the value was updated.
-            if min_lt < self.min_tx_lt.fetch_min(min_lt, Ordering::Release) {
+            if start_lt < self.min_tx_lt.fetch_min(start_lt, Ordering::Release) {
                 // Acquire the operation guard to ensure that there is only one writer.
                 let _guard = self.min_tx_lt_guard.lock().await;
 
                 // Do nothing if the value was already updated while we were waiting.
                 // Load is Acquire since we need to see the most recent value.
-                if min_lt > self.min_tx_lt.load(Ordering::Acquire) {
+                if start_lt > self.min_tx_lt.load(Ordering::Acquire) {
                     break 'min_lt;
                 }
 
                 // Update the value in the database.
-                self.db.state.insert(TX_MIN_LT, min_lt.to_le_bytes())?;
+                self.db.state.insert(TX_MIN_LT, start_lt.to_le_bytes())?;
             }
         }
 
@@ -1057,6 +1422,166 @@ impl RpcStorage {
     }
 }
 
+#[derive(Debug)]
+pub struct BriefShardDescr {
+    pub shard_ident: ShardIdent,
+    pub seqno: u32,
+    pub root_hash: HashBytes,
+    pub file_hash: HashBytes,
+    pub start_lt: u64,
+    pub end_lt: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BriefBlockInfo {
+    pub global_id: i32,
+    pub version: u32,
+    pub flags: u8,
+    pub after_merge: bool,
+    pub after_split: bool,
+    pub before_split: bool,
+    pub want_merge: bool,
+    pub want_split: bool,
+    pub validator_list_hash_short: u32,
+    pub catchain_seqno: u32,
+    pub min_ref_mc_seqno: u32,
+    pub is_key_block: bool,
+    pub prev_key_block_seqno: u32,
+    pub start_lt: u64,
+    pub end_lt: u64,
+    pub gen_utime: u32,
+    pub vert_seqno: u32,
+    pub prev_blocks: Vec<BlockId>,
+}
+
+impl BriefBlockInfo {
+    const VERSION: u8 = 0;
+    const MIN_BYTE_LEN: usize = 128;
+
+    pub fn new(
+        block: &Block,
+        block_info: &BlockInfo,
+    ) -> Result<Self, everscale_types::error::Error> {
+        let shard_ident = block_info.shard;
+        let prev_blocks = match block_info.load_prev_ref()? {
+            PrevBlockRef::Single(block_ref) => vec![block_ref.as_block_id(shard_ident)],
+            PrevBlockRef::AfterMerge { left, right } => vec![
+                left.as_block_id(shard_ident),
+                right.as_block_id(shard_ident),
+            ],
+        };
+
+        Ok(Self {
+            global_id: block.global_id,
+            version: block_info.version,
+            flags: block_info.flags,
+            after_merge: block_info.after_merge,
+            after_split: block_info.after_split,
+            before_split: block_info.before_split,
+            want_merge: block_info.want_merge,
+            want_split: block_info.want_split,
+            validator_list_hash_short: block_info.gen_validator_list_hash_short,
+            catchain_seqno: block_info.gen_catchain_seqno,
+            min_ref_mc_seqno: block_info.min_ref_mc_seqno,
+            is_key_block: block_info.key_block,
+            prev_key_block_seqno: block_info.prev_key_block_seqno,
+            start_lt: block_info.start_lt,
+            end_lt: block_info.end_lt,
+            gen_utime: block_info.gen_utime,
+            vert_seqno: block_info.vert_seqno,
+            prev_blocks,
+        })
+    }
+
+    fn write_to_bytes(&self, target: &mut Vec<u8>) {
+        // NOTE: Bit 7 and 0 are reserved for future.
+        let packed_flags = ((self.after_merge as u8) << 6)
+            | ((self.before_split as u8) << 5)
+            | ((self.after_split as u8) << 4)
+            | ((self.want_split as u8) << 3)
+            | ((self.want_merge as u8) << 2)
+            | ((self.is_key_block as u8) << 1);
+
+        target.reserve(Self::MIN_BYTE_LEN);
+        target.push(Self::VERSION);
+        target.extend_from_slice(&self.global_id.to_le_bytes());
+        target.extend_from_slice(&self.version.to_le_bytes());
+        target.push(self.flags);
+        target.push(packed_flags);
+        target.extend_from_slice(&self.validator_list_hash_short.to_le_bytes());
+        target.extend_from_slice(&self.catchain_seqno.to_le_bytes());
+        target.extend_from_slice(&self.min_ref_mc_seqno.to_le_bytes());
+        target.extend_from_slice(&self.prev_key_block_seqno.to_le_bytes());
+        target.extend_from_slice(&self.start_lt.to_le_bytes());
+        target.extend_from_slice(&self.end_lt.to_le_bytes());
+        target.extend_from_slice(&self.gen_utime.to_le_bytes());
+        target.extend_from_slice(&self.vert_seqno.to_le_bytes());
+        target.push(self.prev_blocks.len() as u8);
+        for block_id in &self.prev_blocks {
+            target.extend_from_slice(&block_id.shard.prefix().to_le_bytes());
+            target.extend_from_slice(&block_id.seqno.to_le_bytes());
+            target.extend_from_slice(block_id.root_hash.as_slice());
+            target.extend_from_slice(block_id.file_hash.as_slice());
+        }
+    }
+
+    fn load_from_bytes(workchain: i32, mut bytes: &[u8]) -> Option<Self> {
+        use bytes::Buf;
+
+        if bytes.get_u8() != Self::VERSION {
+            return None;
+        }
+
+        let global_id = bytes.get_i32_le();
+        let version = bytes.get_u32_le();
+        let [flags, packed_flags] = bytes.get_u16().to_be_bytes();
+        let validator_list_hash_short = bytes.get_u32_le();
+        let catchain_seqno = bytes.get_u32_le();
+        let min_ref_mc_seqno = bytes.get_u32_le();
+        let prev_key_block_seqno = bytes.get_u32_le();
+        let start_lt = bytes.get_u64_le();
+        let end_lt = bytes.get_u64_le();
+        let gen_utime = bytes.get_u32_le();
+        let vert_seqno = bytes.get_u32_le();
+        let prev_block_count = bytes.get_u8();
+        let mut prev_blocks = Vec::with_capacity(prev_block_count as _);
+        for _ in 0..prev_block_count {
+            prev_blocks.push(BlockId {
+                shard: ShardIdent::new(
+                    workchain,
+                    u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                )
+                .unwrap(),
+                seqno: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                root_hash: HashBytes::from_slice(&bytes[12..44]),
+                file_hash: HashBytes::from_slice(&bytes[44..76]),
+            });
+            bytes = &bytes[76..];
+        }
+
+        Some(Self {
+            global_id,
+            version,
+            flags,
+            after_merge: packed_flags & 0b01000000 != 0,
+            after_split: packed_flags & 0b00010000 != 0,
+            before_split: packed_flags & 0b00100000 != 0,
+            want_merge: packed_flags & 0b00000100 != 0,
+            want_split: packed_flags & 0b00001000 != 0,
+            validator_list_hash_short,
+            catchain_seqno,
+            min_ref_mc_seqno,
+            is_key_block: packed_flags & 0b00000010 != 0,
+            prev_key_block_seqno,
+            start_lt,
+            end_lt,
+            gen_utime,
+            vert_seqno,
+            prev_blocks,
+        })
+    }
+}
+
 pub struct CodeHashesIter<'a> {
     inner: rocksdb::DBRawIterator<'a>,
     snapshot: Option<Arc<OwnedSnapshot>>,
@@ -1106,16 +1631,142 @@ impl Iterator for RawCodeHashesIter<'_> {
     }
 }
 
-pub struct TransactionsIterBuilder<'a> {
-    inner: rocksdb::DBRawIterator<'a>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BlockTransactionsCursor {
+    pub hash: HashBytes,
+    pub lt: u64,
+}
+
+pub struct BlockTransactionIdsIter {
+    block_id: BlockId,
+    inner: weedb::OwnedRawIterator,
+    snapshot: Arc<OwnedSnapshot>,
+}
+
+impl BlockTransactionIdsIter {
+    pub fn block_id(&self) -> &BlockId {
+        &self.block_id
+    }
+
+    pub fn snapshot(&self) -> &Arc<OwnedSnapshot> {
+        &self.snapshot
+    }
+}
+
+impl Iterator for BlockTransactionIdsIter {
+    type Item = FullTransactionId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (key, value) = self.inner.item()?;
+        let res = Some(FullTransactionId {
+            account: StdAddr::new(key[0] as i8, HashBytes::from_slice(&key[13..45])),
+            lt: u64::from_be_bytes(key[45..53].try_into().unwrap()),
+            hash: HashBytes::from_slice(&value[0..32]),
+        });
+        self.inner.next();
+        res
+    }
+}
+
+pub struct BlockTransactionsIterBuilder {
+    ids: BlockTransactionIdsIter,
+    transactions_cf: weedb::UnboundedCfHandle,
+}
+
+impl BlockTransactionsIterBuilder {
+    #[inline]
+    pub fn into_ids(self) -> BlockTransactionIdsIter {
+        self.ids
+    }
+
+    pub fn map<F, R>(self, map: F) -> BlockTransactionsIter<F>
+    where
+        for<'a> F: FnMut(&'a [u8]) -> R,
+    {
+        BlockTransactionsIter {
+            ids: self.ids,
+            transactions_cf: self.transactions_cf,
+            map,
+        }
+    }
+}
+
+impl std::ops::Deref for BlockTransactionsIterBuilder {
+    type Target = BlockTransactionIdsIter;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.ids
+    }
+}
+
+pub struct BlockTransactionsIter<F> {
+    ids: BlockTransactionIdsIter,
+    transactions_cf: weedb::UnboundedCfHandle,
+    map: F,
+}
+
+impl<F> BlockTransactionsIter<F> {
+    #[inline]
+    pub fn into_ids(self) -> BlockTransactionIdsIter {
+        self.ids
+    }
+}
+
+impl<F> std::ops::Deref for BlockTransactionsIter<F> {
+    type Target = BlockTransactionIdsIter;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.ids
+    }
+}
+
+impl<F, R> Iterator for BlockTransactionsIter<F>
+where
+    for<'a> F: FnMut(&'a [u8]) -> Option<R>,
+{
+    type Item = R;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let id = self.ids.next()?;
+
+            let mut key = [0; tables::Transactions::KEY_LEN];
+            key[0] = id.account.workchain as u8;
+            key[1..33].copy_from_slice(id.account.address.as_slice());
+            key[33..41].copy_from_slice(&id.lt.to_be_bytes());
+
+            let cf = self.transactions_cf.bound();
+            let value = match self.ids.snapshot.get_pinned_cf(&cf, key) {
+                Ok(Some(value)) => value,
+                // TODO: Maybe return error here?
+                Ok(None) => continue,
+                // TODO: Maybe return error here?
+                Err(_) => return None,
+            };
+            break (self.map)(TransactionData::read_transaction(&value));
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FullTransactionId {
+    pub account: StdAddr,
+    pub lt: u64,
+    pub hash: HashBytes,
+}
+
+pub struct TransactionsIterBuilder {
+    inner: weedb::OwnedRawIterator,
     // NOTE: We must store the snapshot for as long as iterator is alive.
     snapshot: Option<Arc<OwnedSnapshot>>,
 }
 
-impl<'a> TransactionsIterBuilder<'a> {
-    pub fn map<F, R>(self, map: F) -> TransactionsIter<'a, F>
+impl TransactionsIterBuilder {
+    pub fn map<F, R>(self, map: F) -> TransactionsIter<F>
     where
-        for<'s> F: FnMut(&'s [u8]) -> R,
+        for<'a> F: FnMut(&'a [u8]) -> R,
     {
         TransactionsIter {
             inner: self.inner,
@@ -1125,13 +1776,13 @@ impl<'a> TransactionsIterBuilder<'a> {
     }
 }
 
-pub struct TransactionsIter<'a, F> {
-    inner: rocksdb::DBRawIterator<'a>,
+pub struct TransactionsIter<F> {
+    inner: weedb::OwnedRawIterator,
     map: F,
     _snapshot: Option<Arc<OwnedSnapshot>>,
 }
 
-impl<F, R> Iterator for TransactionsIter<'_, F>
+impl<F, R> Iterator for TransactionsIter<F>
 where
     for<'a> F: FnMut(&'a [u8]) -> Option<R>,
 {
@@ -1145,6 +1796,14 @@ where
     }
 }
 
+pub struct TransactionDataExt<'a> {
+    pub account: StdAddr,
+    pub lt: u64,
+    pub block_id: BlockId,
+    pub mc_seqno: u32,
+    pub data: TransactionData<'a>,
+}
+
 pub struct TransactionData<'a> {
     data: rocksdb::DBPinnableSlice<'a>,
 }
@@ -1152,6 +1811,21 @@ pub struct TransactionData<'a> {
 impl<'a> TransactionData<'a> {
     pub fn new(data: rocksdb::DBPinnableSlice<'a>) -> Self {
         Self { data }
+    }
+
+    pub fn tx_hash(&self) -> HashBytes {
+        let value = self.data.as_ref();
+        assert!(!value.is_empty());
+        HashBytes::from_slice(&value[1..33])
+    }
+
+    pub fn in_msg_hash(&self) -> Option<HashBytes> {
+        let value = self.data.as_ref();
+        assert!(!value.is_empty());
+
+        let mask = TransactionMask::from_bits_retain(value[0]);
+        mask.has_msg_hash()
+            .then(|| HashBytes::from_slice(&value[33..65]))
     }
 
     fn read_transaction<T: AsRef<[u8]> + ?Sized>(value: &T) -> &[u8] {

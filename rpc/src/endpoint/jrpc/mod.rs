@@ -156,6 +156,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<i64, Method>) -> Res
                 return too_large_limit_response(req.id);
             }
             match state.get_transactions(&p.account, p.last_transaction_lt, 0) {
+                // TODO: Move serialization to a separate blocking task pool.
                 Ok(list) => ok_to_response(req.id, GetTransactionsListResponse {
                     list: RefCell::new(Some(list)),
                     limit: p.limit,
@@ -393,16 +394,16 @@ impl Serialize for GetAccountsByCodeHashResponse<'_> {
     }
 }
 
-struct GetTransactionsListResponse<'a> {
-    list: RefCell<Option<TransactionsIterBuilder<'a>>>,
+struct GetTransactionsListResponse {
+    list: RefCell<Option<TransactionsIterBuilder>>,
     limit: u8,
 }
 
-impl GetTransactionsListResponse<'_> {
+impl GetTransactionsListResponse {
     const MAX_LIMIT: u8 = 100;
 }
 
-impl Serialize for GetTransactionsListResponse<'_> {
+impl Serialize for GetTransactionsListResponse {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -460,6 +461,7 @@ fn error_to_response(id: i64, e: RpcStateError) -> Response {
         RpcStateError::NotReady => (NOT_READY_CODE, Cow::Borrowed("not ready")),
         RpcStateError::NotSupported => (NOT_SUPPORTED_CODE, Cow::Borrowed("method not supported")),
         RpcStateError::Internal(e) => (INTERNAL_ERROR_CODE, e.to_string().into()),
+        RpcStateError::BadRequest(e) => (INVALID_PARAMS_CODE, e.to_string().into()),
     };
 
     JrpcErrorResponse {

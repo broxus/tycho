@@ -6,7 +6,8 @@
 .idea/
 .vscode/
 .fleet/
-.venv
+.venv/
+.zed/
 
 perf.data*
 .scratch
