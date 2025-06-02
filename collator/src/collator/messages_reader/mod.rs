@@ -134,7 +134,6 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                     .copied()
                     .collect();
 
-                cumulative_stats_just_loaded = true;
                 match (previous_cumulative_statistics, cx.part_stat_ranges) {
                     (Some(mut previous_cumulative_statistics), Some(part_stat_ranges)) => {
                         // update all_shards_processed_to_by_partitions and truncate processed data
@@ -152,11 +151,13 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                         previous_cumulative_statistics
                     }
                     _ => {
-                        let mut inner_cumulative_statistics =
-                            CumulativeStatistics::new(params.all_shards_processed_to_by_partitions);
+                        cumulative_stats_just_loaded = true;
+                        let mut inner_cumulative_statistics = CumulativeStatistics::new(
+                            cx.for_shard_id,
+                            params.all_shards_processed_to_by_partitions,
+                        );
                         inner_cumulative_statistics.load(
                             mq_adapter.clone(),
-                            &cx.for_shard_id,
                             &partitions,
                             cx.prev_state_gen_lt,
                             cx.mc_state_gen_lt,
