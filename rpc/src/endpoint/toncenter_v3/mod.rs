@@ -17,7 +17,9 @@ use crate::state::{RpcState, RpcStateError};
 mod models;
 
 pub fn router() -> axum::Router<RpcState> {
-    axum::Router::new().route("/adjacentTransactions", get(get_adjacent_transactions))
+    axum::Router::new()
+        .route("/adjacentTransactions", get(get_adjacent_transactions))
+        .route("/transactionsByMessage", get(get_transactions_by_message))
 }
 
 // === GET /adjacentTransactions
@@ -26,8 +28,6 @@ async fn get_adjacent_transactions(
     State(state): State<RpcState>,
     query: Result<Query<AdjacentTransactionsRequest>, QueryRejection>,
 ) -> Result<Response, ErrorResponse> {
-    const NOT_FOUND: &str = "adjacent transactions not found";
-
     let Query(query) = query?;
 
     let Some(snapshot) = state.rpc_storage_snapshot() else {
@@ -35,7 +35,9 @@ async fn get_adjacent_transactions(
     };
 
     let Some(tx) = state.get_transaction(&query.hash, Some(&snapshot))? else {
-        return Err(ErrorResponse::text_not_found(NOT_FOUND));
+        return Err(ErrorResponse::text_not_found(
+            "adjacent transactions not found",
+        ));
     };
     let tx: everscale_types::models::Transaction =
         BocRepr::decode(tx).map_err(RpcStateError::internal)?;
@@ -141,6 +143,147 @@ async fn get_adjacent_transactions(
     .await
 }
 
+// === GET /transactionsByMessage ===
+
+async fn get_transactions_by_message(
+    State(state): State<RpcState>,
+    query: Result<Query<TransactionsByMessageRequest>, QueryRejection>,
+) -> Result<Response, ErrorResponse> {
+    // Validate query.
+    let Query(query) = query?;
+
+    if query.body_hash.is_some() {
+        return Err(ErrorResponse::internal(anyhow!(
+            "search by `body_hash` is not supported yet"
+        )));
+    } else if query.opcode.is_some() {
+        return Err(ErrorResponse::internal(anyhow!(
+            "search by `opcode` is not supported yet"
+        )));
+    }
+
+    if query.offset >= 2 {
+        return Ok(axum::Json(TransactionsResponse::default()).into_response());
+    }
+
+    // Get snapshot.
+    let Some(snapshot) = state.rpc_storage_snapshot() else {
+        return Err(RpcStateError::NotReady.into());
+    };
+
+    // Find destination transaction by message.
+    let Some(dst_tx_root) = state.get_dst_transaction(&query.msg_hash, Some(&snapshot))? else {
+        return Err(ErrorResponse::text_not_found(
+            "adjacent transactions not found",
+        ));
+    };
+    let dst_tx_root = Boc::decode(dst_tx_root).map_err(RpcStateError::internal)?;
+
+    handle_blocking(move || {
+        let mut transactions = Vec::with_capacity(2);
+
+        let mut in_msg_source = None;
+
+        // Try to handle destination transaction first.
+        let both_directions = query.direction.is_none();
+        if both_directions || matches!(query.direction, Some(MessageDirection::Out)) {
+            // Fully parse destination transaction.
+            let Some(info) =
+                state.get_transaction_info(dst_tx_root.repr_hash(), Some(&snapshot))?
+            else {
+                return Err(ErrorResponse::internal(anyhow!(
+                    "transaction info not found"
+                )));
+            };
+
+            let out_tx = Transaction::load_raw(&info, dst_tx_root.as_ref())
+                .context("failed to convert transaction")
+                .map_err(RpcStateError::Internal)?;
+
+            if both_directions {
+                // Get message info to find its source transaction.
+                if let Some(Message {
+                    source: Some(source),
+                    created_lt: Some(created_lt),
+                    ..
+                }) = &out_tx.in_msg
+                {
+                    in_msg_source = Some((source.clone(), *created_lt));
+                }
+            }
+
+            // Add to the response.
+            transactions.push(out_tx);
+        } else {
+            (|| {
+                // Partially parse destination transaction.
+                let tx = dst_tx_root.parse::<everscale_types::models::Transaction>()?;
+                // Parse message info to find its source transaction.
+                if let Some(in_msg) = tx.in_msg {
+                    let mut cs = in_msg.as_slice()?;
+                    if MsgType::load_from(&mut cs)? == MsgType::Int {
+                        let info = IntMsgInfo::load_from(&mut cs)?;
+                        if let IntAddr::Std(addr) = info.src {
+                            in_msg_source = Some((addr, info.created_lt));
+                        }
+                    }
+                }
+
+                Ok::<_, everscale_types::error::Error>(())
+            })()
+            .map_err(ErrorResponse::internal)?;
+        }
+
+        // Try to find source transaction next.
+        if let Some((src, message_lt)) = in_msg_source {
+            // Find transaction by message LT.
+            let Some(tx) = state.get_src_transaction(&src, message_lt, Some(&snapshot))? else {
+                return Err(ErrorResponse::internal(anyhow!(
+                    "src transaction not found"
+                )));
+            };
+
+            // Decode and find transaction info.
+            let tx = Boc::decode(tx).map_err(ErrorResponse::internal)?;
+            let Some(info) = state.get_transaction_info(tx.repr_hash(), Some(&snapshot))? else {
+                return Err(ErrorResponse::internal(anyhow!(
+                    "transaction info not found"
+                )));
+            };
+
+            // Add to the response.
+            transactions.push(
+                Transaction::load_raw(&info, tx.as_ref())
+                    .context("failed to convert transaction")
+                    .map_err(ErrorResponse::internal)?,
+            );
+        }
+
+        // Apply transaction sort.
+        if query.sort == SortDirection::Asc {
+            transactions.reverse();
+        }
+
+        // Apply limit/offset
+        if query.offset >= transactions.len() {
+            transactions.clear();
+        } else {
+            transactions.drain(..query.offset);
+        }
+        transactions.truncate(query.limit.get());
+
+        // Build response.
+        let mut address_book = AddressBook::default();
+        address_book.fill_from_transactions(&transactions);
+
+        Ok(ok_to_response(TransactionsResponse {
+            transactions,
+            address_book,
+        }))
+    })
+    .await
+}
+
 // === Helpers ===
 
 fn ok_to_response<T: Serialize>(result: T) -> Response {
@@ -170,6 +313,10 @@ struct ErrorResponse {
 }
 
 impl ErrorResponse {
+    fn internal<E: Into<anyhow::Error>>(error: E) -> Self {
+        RpcStateError::Internal(error.into()).into()
+    }
+
     fn text_not_found(msg: &'static str) -> Self {
         Self {
             status_code: StatusCode::NOT_FOUND,

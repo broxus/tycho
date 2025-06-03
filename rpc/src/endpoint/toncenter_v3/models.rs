@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use everscale_types::models::{
     BlockIdShort, IntAddr, MsgInfo, OwnedMessage, StdAddr, StdAddrBase64Repr,
 };
@@ -15,9 +17,36 @@ use crate::util::serde_helpers;
 
 #[derive(Debug, Deserialize)]
 pub struct AdjacentTransactionsRequest {
+    #[serde(with = "serde_helpers::tonlib_hash")]
     pub hash: HashBytes,
     #[serde(default)]
     pub direction: Option<MessageDirection>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TransactionsByMessageRequest {
+    #[serde(with = "serde_helpers::tonlib_hash")]
+    pub msg_hash: HashBytes,
+    #[serde(default, with = "serde_helpers::option_tonlib_hash")]
+    pub body_hash: Option<HashBytes>,
+    #[serde(default)]
+    pub opcode: Option<i32>,
+    #[serde(default)]
+    pub direction: Option<MessageDirection>,
+    #[serde(default = "default_tx_limit")]
+    pub limit: NonZeroUsize,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_sort_direction")]
+    pub sort: SortDirection,
+}
+
+const fn default_tx_limit() -> NonZeroUsize {
+    NonZeroUsize::new(10).unwrap()
+}
+
+const fn default_sort_direction() -> SortDirection {
+    SortDirection::Desc
 }
 
 // === Responses ===
@@ -617,6 +646,13 @@ pub struct MessageContent {
 pub enum MessageDirection {
     In,
     Out,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortDirection {
+    Asc,
+    Desc,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
