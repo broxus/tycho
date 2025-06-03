@@ -345,7 +345,7 @@ impl CollatorStdImpl {
                 queue_diff_messages_count,
                 has_unprocessed_messages,
                 reader_state,
-                mut processed_upto,
+                processed_upto,
                 anchors_cache,
                 create_queue_diff_elapsed,
             },
@@ -353,15 +353,6 @@ impl CollatorStdImpl {
         ) = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
 
         let finalize_block_timer = std::time::Instant::now();
-
-        // store actual messages execution params
-        processed_upto.msgs_exec_params = Some(
-            finalize_phase
-                .state
-                .collation_config
-                .msgs_exec_params
-                .clone(),
-        );
 
         // log updated processed upto
         tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto = {:?}", processed_upto);
@@ -914,7 +905,6 @@ impl CollatorStdImpl {
                 ref_by_mc_seqno: finalized.block_candidate.ref_by_mc_seqno,
             };
             let adapter = self.state_node_adapter.clone();
-            let labels = labels.clone();
             let new_state_root = finalized.new_state_root.clone();
             let hint = StoreStateHint {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
@@ -926,10 +916,6 @@ impl CollatorStdImpl {
             )?;
 
             async move {
-                let _histogram = HistogramGuard::begin_with_labels(
-                    "tycho_collator_build_new_state_time_high",
-                    &labels,
-                );
                 adapter
                     .store_state_root(&block_id, meta, new_state_root, split_accounts, hint)
                     .await
@@ -969,6 +955,7 @@ impl CollatorStdImpl {
                 block_id,
                 finalized.new_observable_state,
                 finalized.new_state_root,
+                finalized.state_update,
                 store_new_state_task,
                 new_queue_diff_hash,
                 new_mc_data,

@@ -31,6 +31,7 @@ pub struct CollatorConfig {
     pub validate_config: bool,
     pub fast_sync: bool,
     pub accounts_split_depth: u8,
+    pub untrack_prev_state_after: u16,
 }
 
 impl Default for CollatorConfig {
@@ -43,12 +44,17 @@ impl Default for CollatorConfig {
             validate_config: true,
             fast_sync: true,
             accounts_split_depth: 4,
+            untrack_prev_state_after: default_5(),
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_5() -> u16 {
+    5
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,6 +64,8 @@ struct PartialCollatorConfig {
     validate_config: bool,
     #[serde(default = "default_true")]
     fast_sync: bool,
+    #[serde(default = "default_5")]
+    untrack_prev_state_after: u16,
 }
 
 impl<'de> serde::Deserialize<'de> for CollatorConfig {
@@ -72,6 +80,7 @@ impl<'de> serde::Deserialize<'de> for CollatorConfig {
             check_value_flow: partial.check_value_flow,
             validate_config: partial.validate_config,
             fast_sync: partial.fast_sync,
+            untrack_prev_state_after: partial.untrack_prev_state_after,
             ..Default::default()
         })
     }
@@ -87,6 +96,7 @@ impl serde::Serialize for CollatorConfig {
             check_value_flow: self.check_value_flow,
             validate_config: self.validate_config,
             fast_sync: self.fast_sync,
+            untrack_prev_state_after: self.untrack_prev_state_after,
         }
         .serialize(serializer)
     }

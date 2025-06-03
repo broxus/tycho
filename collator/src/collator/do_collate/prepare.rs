@@ -12,7 +12,7 @@ use crate::collator::execution_manager::MessagesExecutor;
 use crate::collator::messages_reader::{
     CumulativeStatsCalcParams, MessagesReader, MessagesReaderContext, ReaderState,
 };
-use crate::collator::types::AnchorsCache;
+use crate::collator::types::{AnchorsCache, MsgsExecutionParamsStuff};
 use crate::collator::CollationCancelReason;
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
@@ -122,13 +122,22 @@ impl Phase<PrepareState> {
             &self.state.mc_data.shards,
         );
 
+        let msgs_exec_params = MsgsExecutionParamsStuff::create(
+            self.state
+                .prev_shard_data
+                .processed_upto()
+                .msgs_exec_params
+                .clone(),
+            self.state.collation_config.msgs_exec_params.clone(),
+        );
+
         // create messages reader
         let mut messages_reader = MessagesReader::new(
             MessagesReaderContext {
                 for_shard_id: self.state.shard_id,
                 block_seqno: self.state.collation_data.block_id_short.seqno,
                 next_chain_time: self.state.collation_data.get_gen_chain_time(),
-                msgs_exec_params: Arc::new(self.state.collation_config.msgs_exec_params.clone()),
+                msgs_exec_params,
                 mc_state_gen_lt: self.state.mc_data.gen_lt,
                 prev_state_gen_lt: self.state.prev_shard_data.gen_lt(),
                 mc_top_shards_end_lts,

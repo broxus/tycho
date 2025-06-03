@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use everscale_types::boc;
 use everscale_types::cell::{Cell, CellFamily, HashBytes, Lazy, UsageTree, UsageTreeMode};
 use everscale_types::dict::{self, Dict};
+use everscale_types::merkle::MerkleUpdate;
 use everscale_types::models::{
     AccountBlocks, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
     BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg,
@@ -16,7 +17,8 @@ use everscale_types::models::{
     StateInit, StdAddr, Transaction, ValueFlow,
 };
 use everscale_types::num::Tokens;
-use parking_lot::Mutex;
+use parking_lot::lock_api::RwLockReadGuard;
+use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock};
 use tl_proto::TlWrite;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
@@ -1199,6 +1201,7 @@ pub struct FinalizeBlockResult {
     pub block_candidate: Box<BlockCandidate>,
     pub mc_data: Option<Arc<McData>>,
     pub old_mc_data: Arc<McData>,
+    pub state_update: MerkleUpdate,
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
     pub finalize_wu_total: u64,
@@ -1604,5 +1607,64 @@ impl ConcurrentQueueStatistics {
                 .and_modify(|count| *count += msgs_count)
                 .or_insert(msgs_count);
         }
+    }
+}
+
+#[derive(Default, Clone)]
+struct MsgsExecutionParamsStuffInner {
+    current: MsgsExecutionParams,
+    new: Option<MsgsExecutionParams>,
+}
+
+#[derive(Default, Clone)]
+pub(super) struct MsgsExecutionParamsStuff {
+    inner: Arc<RwLock<MsgsExecutionParamsStuffInner>>,
+}
+
+impl MsgsExecutionParamsStuff {
+    pub fn create(
+        prev_params: Option<MsgsExecutionParams>,
+        mc_data_params: MsgsExecutionParams,
+    ) -> Self {
+        match prev_params {
+            Some(prev_params) => {
+                let new = (prev_params != mc_data_params).then_some(mc_data_params);
+                Self {
+                    inner: Arc::new(RwLock::new(MsgsExecutionParamsStuffInner {
+                        current: prev_params,
+                        new,
+                    })),
+                }
+            }
+            _ => Self {
+                inner: Arc::new(RwLock::new(MsgsExecutionParamsStuffInner {
+                    current: mc_data_params,
+                    new: None,
+                })),
+            },
+        }
+    }
+
+    pub fn new_is_some(&self) -> bool {
+        self.inner.read().new.is_some()
+    }
+
+    pub fn update(&self) {
+        let mut guard = self.inner.write();
+
+        let new = guard.new.take();
+
+        if let Some(new) = new {
+            guard.current = new;
+        }
+    }
+
+    #[allow(clippy::wrong_self_convention, clippy::new_ret_no_self)]
+    pub fn new(&self) -> MappedRwLockReadGuard<'_, Option<MsgsExecutionParams>> {
+        RwLockReadGuard::map(self.inner.read(), |x| &x.new)
+    }
+
+    pub fn current(&self) -> MappedRwLockReadGuard<'_, MsgsExecutionParams> {
+        RwLockReadGuard::map(self.inner.read(), |x| &x.current)
     }
 }

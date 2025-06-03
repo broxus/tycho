@@ -160,7 +160,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                     for_shard_id: last_range_reader.for_shard_id,
                     seqno: last_range_reader.seqno,
                     kind: InternalsRangeReaderKind::NewMessages,
-                    buffer_limits: self.target_limits,
+                    buffer_limits: self.target_limits(),
                     reader_state: InternalsRangeReaderState {
                         buffer: Default::default(),
 
@@ -296,7 +296,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         // get range reader for new messages, create if not exists
         let partition_id = self.partition_id;
         let for_shard_id = self.for_shard_id;
-        let max_limits = self.max_limits;
+        let max_limits = self.max_limits();
 
         let range_reader = self.get_new_messages_range_reader(current_next_lt)?;
         let shard_reader_state = range_reader
