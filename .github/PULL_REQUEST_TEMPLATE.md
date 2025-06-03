@@ -48,7 +48,7 @@ Affected features:
 For each affected feature specify:
   - Compatibility status: [fully compatible] / [special logic applied] / [incompatible]
   - If not compatible, provide migration instructions
-  - If compatibility ensured, describe how. Describe how compatability was tested.
+  - If compatibility ensured, describe how. Describe how compatibility was tested.
 -->
 
 ### SPECIAL DEPLOYMENT ACTIONS
@@ -83,13 +83,13 @@ If impact expected:
 
 #### Unit Tests
 
-[Covered by:] / [No covarage]
+[Covered by:] / [No coverage]
 
 <!--List unit tests that cover changes (if exits). Link tasks to create additional tests (if needed).-->
 
 #### Network Tests
 
-[Covered by:] / [No covarage]
+[Covered by:] / [No coverage]
 
 <!--List unit tests that cover changes (if exits). Link tasks to create additional tests (if needed).-->
 
