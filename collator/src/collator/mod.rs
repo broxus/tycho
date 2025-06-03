@@ -646,43 +646,54 @@ impl CollatorStdImpl {
                     }
                     let last_not_finished_tasks_count = last_not_finished_tasks.len();
 
-                    // if found then build pure state from it
                     let mut last_finished_task_block_id = None;
-                    if let Some(last_finished) = last_finished_task {
-                        last_finished_task_block_id = Some(last_finished.block_id);
-                        // load last stored state
-                        let mut pure_state_root = self
-                            .state_node_adapter
-                            .load_state_root(&last_finished.block_id)
-                            .await?;
+                    match &last_finished_task {
+                        Some(last_finished) if last_not_finished_tasks_count > 0 => {
+                            // if found and it is not last then build pure state from it
+                            last_finished_task_block_id = Some(last_finished.block_id);
 
-                        // apply next state updates
-                        let histogram_apply_merkles = HistogramGuard::begin_with_labels(
-                            "tycho_collator_resume_collation_apply_merkles_time_high",
-                            &labels,
-                        );
-                        while let Some(not_finished) = last_not_finished_tasks.pop_back() {
-                            pure_state_root = not_finished.state_update.apply(&pure_state_root)?;
+                            // load last stored state
+                            let mut pure_state_root = self
+                                .state_node_adapter
+                                .load_state_root(&last_finished.block_id)
+                                .await?;
 
-                            // and finalize store task in background
-                            self.background_store_new_state_tx.send(not_finished)?;
+                            // apply next state updates
+                            let histogram_apply_merkles = HistogramGuard::begin_with_labels(
+                                "tycho_collator_resume_collation_apply_merkles_time_high",
+                                &labels,
+                            );
+                            while let Some(not_finished) = last_not_finished_tasks.pop_back() {
+                                pure_state_root =
+                                    not_finished.state_update.apply(&pure_state_root)?;
+
+                                // and finalize store task in background
+                                self.background_store_new_state_tx.send(not_finished)?;
+                            }
+                            drop(histogram_apply_merkles);
+
+                            // and update pure prev state in working state
+                            Self::update_prev_data(&mut working_state, pure_state_root).await?;
                         }
-                        drop(histogram_apply_merkles);
+                        _ => {
+                            // otherwise wait until the last store task finished
+                            if let Some(last) = last_not_finished_tasks.pop_front() {
+                                last.store_new_state_task.await?;
+                            } else if let Some(last) = last_finished_task {
+                                last.store_new_state_task.await?;
+                            }
 
-                        // and update pure prev state in working state
-                        Self::update_prev_data(&mut working_state, pure_state_root).await?;
-                    } else {
-                        // otherwise wait until the last store task finished
-                        let last = last_not_finished_tasks.pop_front().unwrap();
-                        last.store_new_state_task.await?;
-
-                        // and reload pure prev state in working state
-                        Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
+                            // and reload pure prev state in working state
+                            Self::reload_prev_data(
+                                &mut working_state,
+                                self.state_node_adapter.clone(),
+                            )
                             .await?;
 
-                        // finalize other not finished tasks in background
-                        for cx in last_not_finished_tasks {
-                            self.background_store_new_state_tx.send(cx)?;
+                            // finalize other not finished tasks in background
+                            for cx in last_not_finished_tasks {
+                                self.background_store_new_state_tx.send(cx)?;
+                            }
                         }
                     }
 
