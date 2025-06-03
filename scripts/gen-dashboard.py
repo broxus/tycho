@@ -1575,6 +1575,11 @@ def collator_time_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_collator_build_new_state_time_high",
+            "Build State for next collation",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_collator_resume_collation_time_high",
             "Resume collation",
             labels=['workchain=~"$workchain"'],
@@ -1585,13 +1590,13 @@ def collator_time_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_build_new_state_time_high",
-            "Build State for next collation",
+            "tycho_collator_wait_for_working_state_time_high",
+            "Wait for updated WorkingState",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_wait_for_working_state_time_high",
-            "Wait for updated WorkingState",
+            "tycho_collator_import_next_anchor_time_high",
+            "Import next anchor time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -2276,14 +2281,16 @@ def collator_state_adapter_metrics() -> RowPanel:
             "Prepare block proof",
         ),
         create_heatmap_panel(
-            "tycho_collator_state_adapter_save_block_proof_time", "Save block proof"
+            "tycho_collator_state_adapter_save_block_proof_time_high", "Save block proof"
         ),
         create_heatmap_panel(
-            "tycho_collator_state_store_state_root_time", "Store state root"
+            "tycho_collator_state_store_state_root_time_high",
+            "Store state root",
+            labels=['workchain=~"$workchain"'],
         ),
+        create_heatmap_panel("tycho_collator_state_load_block_time", "Load block"),
         create_heatmap_panel("tycho_collator_state_load_state_time", "Load state"),
         create_heatmap_panel("tycho_collator_state_load_state_root_time", "Load state root"),
-        create_heatmap_panel("tycho_collator_state_load_block_time", "Load block"),
         create_heatmap_panel(
             "tycho_collator_state_load_queue_diff_time", "Load queue diff"
         ),
