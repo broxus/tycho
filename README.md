@@ -5,7 +5,7 @@ Reference implementation of Tycho protocol.
 ## About
 
 Tycho is a high-performance protocol designed for building L1/L2 TVM blockchain
-networks. By utilizing DAG (Directed Acyclic Graph) for consensus and TVM for
+networks. By utilizing DAG (Directed Acyclic Graph) for consensus and TVM (TON Virtual Machine) for
 parallel execution, Tycho works with high throughput and low latency.
 
 - **[Testnet Validators Guide](./docs/validator.md)**
@@ -103,6 +103,10 @@ export ROCKSDB_LIB_DIR=/path/to/rocksdb/build
 
 We welcome contributions to the project! If you notice any issues or errors,
 feel free to open an issue or submit a pull request.
+
+## AI Documentation
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/broxus/tycho)
+
 
 ## License
 
