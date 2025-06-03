@@ -4,6 +4,30 @@ use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 pub use tycho_util::serde_helpers::*;
 
+pub fn should_normalize_base64(text: &str) -> bool {
+    for byte in text.as_bytes() {
+        match *byte {
+            b'-' | b'_' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+pub fn normalize_base64(text: &mut str) -> bool {
+    // SAFETY: Content of the slice will remain a valid utf8 slice.
+    let bytes = unsafe { text.as_bytes_mut() };
+    for byte in bytes {
+        match *byte {
+            b'-' => *byte = b'+',
+            b'_' => *byte = b'/',
+            byte if !byte.is_ascii() => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
 pub mod boc_or_empty {
     use super::*;
 
@@ -160,8 +184,12 @@ pub mod tonlib_hash {
     where
         D: serde::Deserializer<'de>,
     {
-        let BorrowedStr(s) = <_>::deserialize(deserializer)?;
-        HashBytes::from_str(s.as_ref()).map_err(Error::custom)
+        let BorrowedStr(mut s) = <_>::deserialize(deserializer)?;
+        if s.len() == 44 && should_normalize_base64(&s) && !normalize_base64(s.to_mut()) {
+            return Err(Error::custom("invalid character"));
+        }
+
+        HashBytes::from_str(&s).map_err(Error::custom)
     }
 
     pub fn serialize<S>(value: &HashBytes, serializer: S) -> Result<S::Ok, S::Error>
