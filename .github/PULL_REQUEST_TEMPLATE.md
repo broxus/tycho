@@ -83,13 +83,13 @@ If impact expected:
 
 #### Unit Tests
 
-[Covered by:] / [No covarage]
+[Covered by:] / [No coverage]
 
 <!--List unit tests that cover changes (if exits). Link tasks to create additional tests (if needed).-->
 
 #### Network Tests
 
-[Covered by:] / [No covarage]
+[Covered by:] / [No coverage]
 
 <!--List unit tests that cover changes (if exits). Link tasks to create additional tests (if needed).-->
 
