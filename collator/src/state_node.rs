@@ -214,7 +214,11 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         state_root: Cell,
         hint: StoreStateHint,
     ) -> Result<bool> {
-        let _histogram = HistogramGuard::begin("tycho_collator_state_store_state_root_time");
+        let labels = [("workchain", block_id.shard.workchain().to_string())];
+        let _histogram = HistogramGuard::begin_with_labels(
+            "tycho_collator_state_store_state_root_time_high",
+            &labels,
+        );
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
 
@@ -460,7 +464,7 @@ impl StateNodeAdapterStdImpl {
         .await;
 
         let _histogram =
-            HistogramGuard::begin("tycho_collator_state_adapter_save_block_proof_time");
+            HistogramGuard::begin("tycho_collator_state_adapter_save_block_proof_time_high");
 
         let block_storage = self.storage.block_storage();
         let result = block_storage
