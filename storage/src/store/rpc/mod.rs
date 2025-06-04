@@ -112,6 +112,52 @@ impl RpcStorage {
         InstanceId::from_slice(id.as_ref())
     }
 
+    pub fn get_blocks_by_mc_seqno(
+        &self,
+        mc_seqno: u32,
+        mut snapshot: Option<RpcSnapshot>,
+    ) -> Result<Option<BlocksByMcSeqnoIter>> {
+        let mut key = [0; tables::KnownBlocks::KEY_LEN];
+        key[0] = -1i8 as u8;
+        key[1..9].copy_from_slice(&ShardIdent::PREFIX_FULL.to_be_bytes());
+        key[9..13].copy_from_slice(&mc_seqno.to_be_bytes());
+
+        if snapshot.is_none() {
+            snapshot = self.snapshot.load_full().map(RpcSnapshot);
+        }
+        let Some(snapshot) = snapshot else {
+            // TODO: Somehow always use snapshot.
+            anyhow::bail!("No snapshot available");
+        };
+
+        let table = &self.db.known_blocks;
+        if table.get_ext(key, Some(&snapshot))?.is_none() {
+            return Ok(None);
+        };
+
+        let mut range_from = [0x00; tables::KnownBlocks::KEY_LEN];
+        range_from[0..4].clone_from_slice(&mc_seqno.to_be_bytes());
+        let mut range_to = [0xff; tables::KnownBlocks::KEY_LEN];
+        range_to[0..4].clone_from_slice(&mc_seqno.to_be_bytes());
+
+        let table = &self.db.blocks_by_mc_seqno;
+        let mut readopts = table.new_read_config();
+        readopts.set_snapshot(&snapshot);
+        readopts.set_iterate_lower_bound(range_from.as_slice());
+        readopts.set_iterate_upper_bound(range_to.as_slice());
+
+        let rocksdb = self.db.rocksdb();
+        let mut iter = rocksdb.raw_iterator_cf_opt(&table.cf(), readopts);
+        iter.seek(range_from.as_slice());
+
+        Ok(Some(BlocksByMcSeqnoIter {
+            mc_seqno,
+            // SAFETY: Iterator was created from the same DB instance.
+            inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), iter) },
+            snapshot,
+        }))
+    }
+
     pub fn get_brief_block_info(
         &self,
         block_id: &BlockIdShort,
@@ -236,10 +282,11 @@ impl RpcStorage {
     pub fn get_block_transactions(
         &self,
         block_id: &BlockIdShort,
+        reverse: bool,
         cursor: Option<&BlockTransactionsCursor>,
         snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionsIterBuilder>> {
-        let Some(ids) = self.get_block_transaction_ids(block_id, cursor, snapshot)? else {
+        let Some(ids) = self.get_block_transaction_ids(block_id, reverse, cursor, snapshot)? else {
             return Ok(None);
         };
 
@@ -252,6 +299,7 @@ impl RpcStorage {
     pub fn get_block_transaction_ids(
         &self,
         block_id: &BlockIdShort,
+        reverse: bool,
         cursor: Option<&BlockTransactionsCursor>,
         mut snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionIdsIter>> {
@@ -302,18 +350,28 @@ impl RpcStorage {
         let rocksdb = self.db.rocksdb();
         let block_transactions_cf = self.db.block_transactions.cf();
         let mut iter = rocksdb.raw_iterator_cf_opt(&block_transactions_cf, readopts);
-        iter.seek(range_from);
+
+        if reverse {
+            iter.seek_for_prev(range_to);
+        } else {
+            iter.seek(range_from);
+        }
 
         if cursor.is_some() {
             if let Some(key) = iter.key() {
                 if key == range_from.as_slice() {
-                    iter.next();
+                    if reverse {
+                        iter.prev();
+                    } else {
+                        iter.next();
+                    }
                 }
             }
         }
 
         Ok(Some(BlockTransactionIdsIter {
             block_id,
+            is_reversed: reverse,
             // SAFETY: Iterator was created from the same DB instance.
             inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), iter) },
             snapshot,
@@ -1661,6 +1719,47 @@ impl std::ops::Deref for RpcSnapshot {
     }
 }
 
+pub struct BlocksByMcSeqnoIter {
+    mc_seqno: u32,
+    inner: weedb::OwnedRawIterator,
+    snapshot: RpcSnapshot,
+}
+
+impl BlocksByMcSeqnoIter {
+    pub fn mc_seqno(&self) -> u32 {
+        self.mc_seqno
+    }
+
+    pub fn snapshot(&self) -> &RpcSnapshot {
+        &self.snapshot
+    }
+}
+
+impl Iterator for BlocksByMcSeqnoIter {
+    // TODO: Extend with LT range?
+    type Item = BlockId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (key, value) = self.inner.item()?;
+        let shard = ShardIdent::new(
+            key[4] as i8 as i32,
+            u64::from_be_bytes(key[5..13].try_into().unwrap()),
+        )
+        .expect("stored shard must have a valid prefix");
+        let seqno = u32::from_be_bytes(key[13..17].try_into().unwrap());
+
+        let block_id = BlockId {
+            shard,
+            seqno,
+            root_hash: HashBytes::from_slice(&value[0..32]),
+            file_hash: HashBytes::from_slice(&value[32..64]),
+        };
+        self.inner.next();
+
+        Some(block_id)
+    }
+}
+
 pub struct CodeHashesIter<'a> {
     inner: rocksdb::DBRawIterator<'a>,
     snapshot: RpcSnapshot,
@@ -1728,11 +1827,16 @@ pub struct BlockTransactionsCursor {
 
 pub struct BlockTransactionIdsIter {
     block_id: BlockId,
+    is_reversed: bool,
     inner: weedb::OwnedRawIterator,
     snapshot: RpcSnapshot,
 }
 
 impl BlockTransactionIdsIter {
+    pub fn is_reversed(&self) -> bool {
+        self.is_reversed
+    }
+
     pub fn block_id(&self) -> &BlockId {
         &self.block_id
     }
@@ -1752,7 +1856,11 @@ impl Iterator for BlockTransactionIdsIter {
             lt: u64::from_be_bytes(key[45..53].try_into().unwrap()),
             hash: HashBytes::from_slice(&value[0..32]),
         });
-        self.inner.next();
+        if self.is_reversed {
+            self.inner.prev();
+        } else {
+            self.inner.next();
+        }
         res
     }
 }
@@ -1764,28 +1872,34 @@ pub struct BlockTransactionsIterBuilder {
 
 impl BlockTransactionsIterBuilder {
     #[inline]
+    pub fn is_reversed(&self) -> bool {
+        self.ids.is_reversed()
+    }
+
+    #[inline]
+    pub fn block_id(&self) -> &BlockId {
+        self.ids.block_id()
+    }
+
+    #[inline]
+    pub fn snapshot(&self) -> &RpcSnapshot {
+        self.ids.snapshot()
+    }
+
+    #[inline]
     pub fn into_ids(self) -> BlockTransactionIdsIter {
         self.ids
     }
 
     pub fn map<F, R>(self, map: F) -> BlockTransactionsIter<F>
     where
-        for<'a> F: FnMut(&'a [u8]) -> R,
+        for<'a> F: FnMut(&'a StdAddr, u64, &'a [u8]) -> R,
     {
         BlockTransactionsIter {
             ids: self.ids,
             transactions_cf: self.transactions_cf,
             map,
         }
-    }
-}
-
-impl std::ops::Deref for BlockTransactionsIterBuilder {
-    type Target = BlockTransactionIdsIter;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.ids
     }
 }
 
@@ -1797,6 +1911,16 @@ pub struct BlockTransactionsIter<F> {
 
 impl<F> BlockTransactionsIter<F> {
     #[inline]
+    pub fn is_reversed(&self) -> bool {
+        self.ids.is_reversed()
+    }
+
+    #[inline]
+    pub fn block_id(&self) -> &BlockId {
+        self.ids.block_id()
+    }
+
+    #[inline]
     pub fn snapshot(&self) -> &RpcSnapshot {
         self.ids.snapshot()
     }
@@ -1807,18 +1931,9 @@ impl<F> BlockTransactionsIter<F> {
     }
 }
 
-impl<F> std::ops::Deref for BlockTransactionsIter<F> {
-    type Target = BlockTransactionIdsIter;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.ids
-    }
-}
-
 impl<F, R> Iterator for BlockTransactionsIter<F>
 where
-    for<'a> F: FnMut(&'a [u8]) -> Option<R>,
+    for<'a> F: FnMut(&'a StdAddr, u64, &'a [u8]) -> Option<R>,
 {
     type Item = R;
 
@@ -1839,7 +1954,11 @@ where
                 // TODO: Maybe return error here?
                 Err(_) => return None,
             };
-            break (self.map)(TransactionData::read_transaction(&value));
+            break (self.map)(
+                &id.account,
+                id.lt,
+                TransactionData::read_transaction(&value),
+            );
         }
     }
 }

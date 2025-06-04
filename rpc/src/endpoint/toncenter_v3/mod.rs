@@ -9,7 +9,7 @@ use axum::routing::get;
 use everscale_types::models::{IntAddr, IntMsgInfo, MsgType};
 use everscale_types::prelude::*;
 use serde::Serialize;
-use tycho_storage::RpcSnapshot;
+use tycho_storage::{RpcSnapshot, TransactionInfo};
 
 use self::models::{Transaction, *};
 use crate::state::{RpcState, RpcStateError};
@@ -18,8 +18,116 @@ mod models;
 
 pub fn router() -> axum::Router<RpcState> {
     axum::Router::new()
+        .route(
+            "/transactionsByMasterchainBlock",
+            get(get_transactions_by_mc_block),
+        )
         .route("/adjacentTransactions", get(get_adjacent_transactions))
         .route("/transactionsByMessage", get(get_transactions_by_message))
+}
+
+// === GET /transactionsByMasterchainBlock ===
+
+async fn get_transactions_by_mc_block(
+    State(state): State<RpcState>,
+    query: Result<Query<TransactionsByMcBlockRequest>, QueryRejection>,
+) -> Result<Response, ErrorResponse> {
+    const MAX_LIMIT: usize = 1000;
+
+    let Query(query) = query?;
+    if query.limit.get() > MAX_LIMIT {
+        return Err(RpcStateError::bad_request(anyhow!(
+            "`limit` is too big, at most {MAX_LIMIT} is allowed"
+        ))
+        .into());
+    }
+
+    let Some(snapshot) = state.rpc_storage_snapshot() else {
+        return Err(RpcStateError::NotReady.into());
+    };
+
+    let Some(block_ids) = state.get_blocks_by_mc_seqno(query.seqno, Some(snapshot.clone()))? else {
+        return Err(ErrorResponse::not_found(format!(
+            "masterchain block {} not found",
+            query.seqno
+        )));
+    };
+
+    handle_blocking(move || {
+        let reverse = query.sort == SortDirection::Desc;
+
+        // Collect blocks in ascending order.
+        let mut block_ids = block_ids.collect::<Vec<_>>();
+        if reverse {
+            // Apply sorting to blocks first.
+            block_ids.reverse();
+        }
+
+        let mc_seqno = query.seqno;
+        let range_from = query.offset;
+        let range_to = query.offset + query.limit.get();
+
+        let mut i = 0usize;
+        let mut transactions = Vec::new();
+        for block_id in block_ids {
+            if i >= range_to {
+                break;
+            }
+
+            let Some(block_transactions) = state.get_block_transactions(
+                &block_id.as_short_id(),
+                reverse,
+                None,
+                Some(snapshot.clone()),
+            )?
+            else {
+                return Err(ErrorResponse::internal(anyhow!(
+                    "block transactions not found for {block_id}"
+                )));
+            };
+
+            // NOTE: Transactions are only briefly sorted by LT.
+            // A proper sort will require either a separate index
+            // or collecting all items first. Neither is optimal, so
+            // let's assume that no one is dependent on the true LT order.
+            block_transactions
+                .map(|account, lt, tx| {
+                    if i >= range_to {
+                        return None;
+                    } else if i < range_from {
+                        i += 1;
+                        return Some(Ok(()));
+                    }
+
+                    let info = TransactionInfo {
+                        account: account.clone(),
+                        lt,
+                        block_id,
+                        mc_seqno,
+                    };
+
+                    let res = (|| {
+                        let cell = Boc::decode(tx)?;
+                        transactions.push(Transaction::load_raw(&info, cell.as_ref())?);
+                        Ok::<_, anyhow::Error>(())
+                    })();
+
+                    i += 1;
+                    Some(res)
+                })
+                .collect::<Result<(), anyhow::Error>>()
+                .map_err(RpcStateError::internal)?;
+        }
+
+        let mut address_book = AddressBook::default();
+        address_book.fill_from_transactions(&transactions);
+
+        Ok(ok_to_response(TransactionsResponse {
+            transactions,
+            address_book,
+        }))
+    })
+    .await
 }
 
 // === GET /adjacentTransactions
@@ -35,9 +143,7 @@ async fn get_adjacent_transactions(
     };
 
     let Some(tx) = state.get_transaction(&query.hash, Some(&snapshot))? else {
-        return Err(ErrorResponse::text_not_found(
-            "adjacent transactions not found",
-        ));
+        return Err(ErrorResponse::not_found("adjacent transactions not found"));
     };
     let tx: everscale_types::models::Transaction =
         BocRepr::decode(tx).map_err(RpcStateError::internal)?;
@@ -173,9 +279,7 @@ async fn get_transactions_by_message(
 
     // Find destination transaction by message.
     let Some(dst_tx_root) = state.get_dst_transaction(&query.msg_hash, Some(&snapshot))? else {
-        return Err(ErrorResponse::text_not_found(
-            "adjacent transactions not found",
-        ));
+        return Err(ErrorResponse::not_found("adjacent transactions not found"));
     };
     let dst_tx_root = Boc::decode(dst_tx_root).map_err(RpcStateError::internal)?;
 
@@ -317,10 +421,10 @@ impl ErrorResponse {
         RpcStateError::Internal(error.into()).into()
     }
 
-    fn text_not_found(msg: &'static str) -> Self {
+    fn not_found<T: Into<Cow<'static, str>>>(msg: T) -> Self {
         Self {
             status_code: StatusCode::NOT_FOUND,
-            error: Cow::Borrowed(msg),
+            error: msg.into(),
         }
     }
 }

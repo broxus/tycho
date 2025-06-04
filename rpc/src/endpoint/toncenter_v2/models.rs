@@ -23,7 +23,9 @@ use tycho_storage::{
 use crate::util::jrpc_extractor::{
     JrpcError, JrpcErrorResponse, JrpcOkResponse, JSONRPC_FIELD, JSONRPC_VERSION,
 };
-use crate::util::serde_helpers::{self, Base64BytesWithLimit};
+use crate::util::serde_helpers::{
+    self, normalize_base64, should_normalize_base64, Base64BytesWithLimit,
+};
 
 // === ID ===
 
@@ -154,17 +156,8 @@ impl<'de> Deserialize<'de> for DetectAddressParams {
         let is_base64 = address.len() == 48;
 
         // Try to normalize a URL-safe base64.
-        if is_base64 {
-            // SAFETY: Content of the slice will remain a valid utf8 slice.
-            let bytes = unsafe { address.as_bytes_mut() };
-            for byte in bytes {
-                match *byte {
-                    b'-' => *byte = b'+',
-                    b'_' => *byte = b'/',
-                    byte if !byte.is_ascii() => return Err(Error::custom("invalid character")),
-                    _ => {}
-                }
-            }
+        if is_base64 && should_normalize_base64(&address) && !normalize_base64(&mut address) {
+            return Err(Error::custom("invalid character"));
         }
 
         let (address, flags) =
@@ -606,7 +599,7 @@ impl Serialize for GetBlockTransactionsExtResponse {
 
                 // NOTE: We use a `.map` from a separate impl thus we cannot use `.try_for_each`.
                 #[allow(clippy::map_collect_result_unit)]
-                let mut iter = iter.map(|item| {
+                let mut iter = iter.map(|_, _, item| {
                     TonlibTransaction::handle_serde::<S, _, _, _, _>(
                         item,
                         &mut buffer,
