@@ -112,6 +112,49 @@ impl RpcStorage {
         InstanceId::from_slice(id.as_ref())
     }
 
+    pub fn get_known_mc_blocks_range(
+        &self,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<(u32, u32)>> {
+        let mut snapshot = snapshot.cloned();
+        if snapshot.is_none() {
+            snapshot = self.snapshot.load_full().map(RpcSnapshot);
+        }
+
+        let table = &self.db.known_blocks;
+
+        let mut range_from = [0x00; tables::KnownBlocks::KEY_LEN];
+        range_from[0] = -1i8 as u8;
+        range_from[1..9].copy_from_slice(&ShardIdent::PREFIX_FULL.to_be_bytes());
+        let mut range_to = [0xff; tables::KnownBlocks::KEY_LEN];
+        range_to[0..9].clone_from_slice(&range_from[0..9]);
+
+        let mut readopts = table.new_read_config();
+        if let Some(snapshot) = &snapshot {
+            readopts.set_snapshot(snapshot);
+        }
+        readopts.set_iterate_lower_bound(range_from.as_slice());
+        readopts.set_iterate_upper_bound(range_to.as_slice());
+        let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&table.cf(), readopts);
+
+        iter.seek(range_from.as_slice());
+        Ok(if let Some(key) = iter.key() {
+            let from_seqno = u32::from_be_bytes(key[9..13].try_into().unwrap());
+            let mut to_seqno = from_seqno;
+
+            iter.seek_for_prev(range_to.as_slice());
+            if let Some(key) = iter.key() {
+                let seqno = u32::from_be_bytes(key[9..13].try_into().unwrap());
+                to_seqno = std::cmp::max(to_seqno, seqno);
+            }
+
+            Some((from_seqno, to_seqno))
+        } else {
+            iter.status()?;
+            None
+        })
+    }
+
     pub fn get_blocks_by_mc_seqno(
         &self,
         mc_seqno: u32,
@@ -135,9 +178,9 @@ impl RpcStorage {
             return Ok(None);
         };
 
-        let mut range_from = [0x00; tables::KnownBlocks::KEY_LEN];
+        let mut range_from = [0x00; tables::BlocksByMcSeqno::KEY_LEN];
         range_from[0..4].clone_from_slice(&mc_seqno.to_be_bytes());
-        let mut range_to = [0xff; tables::KnownBlocks::KEY_LEN];
+        let mut range_to = [0xff; tables::BlocksByMcSeqno::KEY_LEN];
         range_to[0..4].clone_from_slice(&mc_seqno.to_be_bytes());
 
         let table = &self.db.blocks_by_mc_seqno;
@@ -1041,9 +1084,6 @@ impl RpcStorage {
 
         let is_masterchain = block.id().is_masterchain();
         let mc_seqno = mc_block_id.seqno;
-        let brief_block_info = BriefBlockInfo::new(block.as_ref(), block.load_info()?)?;
-        let start_lt = brief_block_info.start_lt;
-        let end_lt = brief_block_info.end_lt;
 
         let shard_hashes = is_masterchain
             .then(|| {
@@ -1058,13 +1098,15 @@ impl RpcStorage {
         let rpc_blacklist = rpc_blacklist.map(|x| x.load());
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
-        tokio::task::spawn_blocking(move || {
+        let start_lt = tokio::task::spawn_blocking(move || {
             let prepare_batch_histogram =
                 HistogramGuard::begin("tycho_storage_rpc_prepare_batch_time");
 
             let _span = span.enter();
 
+            let info = block.load_info()?;
             let extra = block.load_extra()?;
+
             let account_blocks = extra.account_blocks.load()?;
 
             let accounts = if account_blocks.is_empty() {
@@ -1113,16 +1155,8 @@ impl RpcStorage {
             block_tx[1..9].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
             block_tx[9..13].copy_from_slice(&block_id.seqno.to_be_bytes());
 
-            // Add known block id.
+            // Prepare buffer.
             let mut buffer = Vec::with_capacity(64 + BriefBlockInfo::MIN_BYTE_LEN);
-            buffer.extend_from_slice(&tx_info[46..110]); // root_hash + file_hash
-            brief_block_info.write_to_bytes(&mut buffer); // everything else
-
-            write_batch.put_cf(
-                &db.known_blocks.cf(),
-                &block_tx[0..tables::KnownBlocks::KEY_LEN],
-                buffer.as_slice(),
-            );
 
             // Write block info.
             {
@@ -1135,8 +1169,8 @@ impl RpcStorage {
                 buffer.clear();
                 buffer.extend_from_slice(block_id.root_hash.as_slice()); // 0..32
                 buffer.extend_from_slice(block_id.file_hash.as_slice()); // 32..64
-                buffer.extend_from_slice(&start_lt.to_le_bytes()); // 64..72
-                buffer.extend_from_slice(&end_lt.to_le_bytes()); // 72..80
+                buffer.extend_from_slice(&info.start_lt.to_le_bytes()); // 64..72
+                buffer.extend_from_slice(&info.end_lt.to_le_bytes()); // 72..80
                 if let Some(shard_hashes) = shard_hashes {
                     let shards = shard_hashes
                         .iter()
@@ -1179,6 +1213,7 @@ impl RpcStorage {
             let rpc_blacklist = rpc_blacklist.as_deref();
 
             // Iterate through all changed accounts in the block.
+            let mut block_tx_count = 0usize;
             for item in account_blocks.iter() {
                 let (account, _, account_block) = item?;
 
@@ -1195,6 +1230,9 @@ impl RpcStorage {
                 let mut first_tx = true;
                 for item in account_block.transactions.values() {
                     let (_, tx_cell) = item?;
+
+                    // TODO: Should we increase this counter only for non-blacklisted accounts?
+                    block_tx_count += 1;
 
                     let tx = tx_cell.load()?;
 
@@ -1299,6 +1337,19 @@ impl RpcStorage {
                 }
             }
 
+            // Write block info.
+            let brief_block_info =
+                BriefBlockInfo::new(block.as_ref(), info, extra, block_tx_count)?;
+            buffer.clear();
+            buffer.extend_from_slice(&tx_info[46..110]); // root_hash + file_hash
+            brief_block_info.write_to_bytes(&mut buffer); // everything else
+
+            write_batch.put_cf(
+                &db.known_blocks.cf(),
+                &block_tx[0..tables::KnownBlocks::KEY_LEN],
+                buffer.as_slice(),
+            );
+
             drop(prepare_batch_histogram);
 
             let _execute_batch_histogram =
@@ -1307,7 +1358,7 @@ impl RpcStorage {
             db.rocksdb()
                 .write_opt(write_batch, db.transactions.write_config())?;
 
-            Ok::<_, anyhow::Error>(())
+            Ok::<_, anyhow::Error>(info.start_lt)
         })
         .await??;
 
@@ -1575,19 +1626,24 @@ pub struct BriefBlockInfo {
     pub end_lt: u64,
     pub gen_utime: u32,
     pub vert_seqno: u32,
+    pub rand_seed: HashBytes,
+    pub tx_count: u32,
+    pub master_ref: Option<BlockId>,
     pub prev_blocks: Vec<BlockId>,
 }
 
 impl BriefBlockInfo {
     const VERSION: u8 = 0;
-    const MIN_BYTE_LEN: usize = 128;
+    const MIN_BYTE_LEN: usize = 256;
 
-    pub fn new(
+    fn new(
         block: &Block,
-        block_info: &BlockInfo,
+        info: &BlockInfo,
+        extra: &BlockExtra,
+        tx_count: usize,
     ) -> Result<Self, everscale_types::error::Error> {
-        let shard_ident = block_info.shard;
-        let prev_blocks = match block_info.load_prev_ref()? {
+        let shard_ident = info.shard;
+        let prev_blocks = match info.load_prev_ref()? {
             PrevBlockRef::Single(block_ref) => vec![block_ref.as_block_id(shard_ident)],
             PrevBlockRef::AfterMerge { left, right } => vec![
                 left.as_block_id(shard_ident),
@@ -1597,29 +1653,35 @@ impl BriefBlockInfo {
 
         Ok(Self {
             global_id: block.global_id,
-            version: block_info.version,
-            flags: block_info.flags,
-            after_merge: block_info.after_merge,
-            after_split: block_info.after_split,
-            before_split: block_info.before_split,
-            want_merge: block_info.want_merge,
-            want_split: block_info.want_split,
-            validator_list_hash_short: block_info.gen_validator_list_hash_short,
-            catchain_seqno: block_info.gen_catchain_seqno,
-            min_ref_mc_seqno: block_info.min_ref_mc_seqno,
-            is_key_block: block_info.key_block,
-            prev_key_block_seqno: block_info.prev_key_block_seqno,
-            start_lt: block_info.start_lt,
-            end_lt: block_info.end_lt,
-            gen_utime: block_info.gen_utime,
-            vert_seqno: block_info.vert_seqno,
+            version: info.version,
+            flags: info.flags,
+            after_merge: info.after_merge,
+            after_split: info.after_split,
+            before_split: info.before_split,
+            want_merge: info.want_merge,
+            want_split: info.want_split,
+            validator_list_hash_short: info.gen_validator_list_hash_short,
+            catchain_seqno: info.gen_catchain_seqno,
+            min_ref_mc_seqno: info.min_ref_mc_seqno,
+            is_key_block: info.key_block,
+            prev_key_block_seqno: info.prev_key_block_seqno,
+            start_lt: info.start_lt,
+            end_lt: info.end_lt,
+            gen_utime: info.gen_utime,
+            vert_seqno: info.vert_seqno,
+            rand_seed: extra.rand_seed,
+            tx_count: tx_count.try_into().unwrap_or(u32::MAX),
+            master_ref: info
+                .load_master_ref()?
+                .map(|r| r.as_block_id(ShardIdent::MASTERCHAIN)),
             prev_blocks,
         })
     }
 
     fn write_to_bytes(&self, target: &mut Vec<u8>) {
-        // NOTE: Bit 7 and 0 are reserved for future.
-        let packed_flags = ((self.after_merge as u8) << 6)
+        // NOTE: Bit 0 is reserved for future.
+        let packed_flags = ((self.master_ref.is_some() as u8) << 7)
+            | ((self.after_merge as u8) << 6)
             | ((self.before_split as u8) << 5)
             | ((self.after_split as u8) << 4)
             | ((self.want_split as u8) << 3)
@@ -1640,6 +1702,13 @@ impl BriefBlockInfo {
         target.extend_from_slice(&self.end_lt.to_le_bytes());
         target.extend_from_slice(&self.gen_utime.to_le_bytes());
         target.extend_from_slice(&self.vert_seqno.to_le_bytes());
+        target.extend_from_slice(&self.rand_seed.as_slice());
+        target.extend_from_slice(&self.tx_count.to_le_bytes());
+        if let Some(block_id) = &self.master_ref {
+            target.extend_from_slice(&block_id.seqno.to_le_bytes());
+            target.extend_from_slice(block_id.root_hash.as_slice());
+            target.extend_from_slice(block_id.file_hash.as_slice());
+        }
         target.push(self.prev_blocks.len() as u8);
         for block_id in &self.prev_blocks {
             target.extend_from_slice(&block_id.shard.prefix().to_le_bytes());
@@ -1667,6 +1736,25 @@ impl BriefBlockInfo {
         let end_lt = bytes.get_u64_le();
         let gen_utime = bytes.get_u32_le();
         let vert_seqno = bytes.get_u32_le();
+        let rand_seed = HashBytes::from_slice(&bytes[..32]);
+        bytes = &bytes[32..];
+        let tx_count = bytes.get_u32_le();
+
+        let master_ref = if packed_flags & 0b10000000 != 0 {
+            let seqno = bytes.get_u32_le();
+            let root_hash = HashBytes::from_slice(&bytes[0..32]);
+            let file_hash = HashBytes::from_slice(&bytes[32..64]);
+            bytes = &bytes[64..];
+            Some(BlockId {
+                shard: ShardIdent::MASTERCHAIN,
+                seqno,
+                root_hash,
+                file_hash,
+            })
+        } else {
+            None
+        };
+
         let prev_block_count = bytes.get_u8();
         let mut prev_blocks = Vec::with_capacity(prev_block_count as _);
         for _ in 0..prev_block_count {
@@ -1701,6 +1789,9 @@ impl BriefBlockInfo {
             end_lt,
             gen_utime,
             vert_seqno,
+            rand_seed,
+            tx_count,
+            master_ref,
             prev_blocks,
         })
     }

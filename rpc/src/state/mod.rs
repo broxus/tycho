@@ -323,6 +323,18 @@ impl RpcState {
             .map_err(RpcStateError::Internal)
     }
 
+    pub fn get_known_mc_blocks_range(
+        &self,
+        snapshot: Option<&RpcSnapshot>,
+    ) -> Result<Option<(u32, u32)>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_known_mc_blocks_range(snapshot)
+            .map_err(RpcStateError::Internal)
+    }
+
     pub fn get_blocks_by_mc_seqno(
         &self,
         mc_seqno: u32,

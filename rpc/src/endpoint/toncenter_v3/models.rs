@@ -1,14 +1,14 @@
 use std::num::NonZeroUsize;
 
 use everscale_types::models::{
-    BlockId, BlockIdShort, IntAddr, MsgInfo, OwnedMessage, StdAddr, StdAddrBase64Repr,
+    BlockId, BlockIdShort, IntAddr, MsgInfo, OwnedMessage, ShardIdent, StdAddr, StdAddrBase64Repr,
 };
 use everscale_types::num::{Tokens, VarUint24, VarUint56};
 use everscale_types::prelude::*;
 use serde::ser::{SerializeMap, SerializeStruct};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::build_normalized_external_message;
-use tycho_storage::TransactionInfo;
+use tycho_storage::{BriefBlockInfo, TransactionInfo};
 use tycho_util::FastHashSet;
 
 use crate::util::serde_helpers;
@@ -63,6 +63,12 @@ const fn default_sort_direction() -> SortDirection {
 // === Responses ===
 
 #[derive(Debug, Serialize)]
+pub struct MasterchainInfoResponse {
+    pub last: Block,
+    pub first: Block,
+}
+
+#[derive(Debug, Serialize)]
 pub struct BlocksResponse {
     pub block_ids: Vec<BlockId>,
 }
@@ -74,6 +80,92 @@ pub struct TransactionsResponse {
 }
 
 // === Stuff ===
+
+#[derive(Debug, Serialize)]
+pub struct Block {
+    pub workchain: i32,
+    pub shard: ShardPrefix,
+    pub seqno: u32,
+    #[serde(with = "serde_helpers::tonlib_hash")]
+    pub root_hash: HashBytes,
+    #[serde(with = "serde_helpers::tonlib_hash")]
+    pub file_hash: HashBytes,
+    pub global_id: i32,
+    pub version: u32,
+    pub after_merge: bool,
+    pub before_split: bool,
+    pub after_split: bool,
+    pub want_merge: bool,
+    pub want_split: bool,
+    pub key_block: bool,
+    pub vert_seqno_incr: bool,
+    pub flags: u8,
+    #[serde(with = "serde_helpers::string")]
+    pub gen_utime: u32,
+    #[serde(with = "serde_helpers::string")]
+    pub start_lt: u64,
+    #[serde(with = "serde_helpers::string")]
+    pub end_lt: u64,
+    pub validator_list_hash_short: u32,
+    pub gen_catchain_seqno: u32,
+    pub min_ref_mc_seqno: u32,
+    pub prev_key_block_seqno: u32,
+    pub vert_seqno: u32,
+    pub master_ref_seqno: u32,
+    pub rand_seed: HashBytes,
+    pub created_by: HashBytes,
+    pub tx_count: u32,
+    pub masterchain_block_ref: BlockRef,
+    pub prev_blocks: Vec<BlockRef>,
+}
+
+impl Block {
+    pub fn from_stored(block_id: &BlockId, info: BriefBlockInfo) -> Self {
+        let master_ref_seqno = match &info.master_ref {
+            None => block_id.seqno,
+            Some(id) => id.seqno,
+        };
+
+        Self {
+            workchain: block_id.shard.workchain(),
+            shard: ShardPrefix(block_id.shard.prefix()),
+            seqno: block_id.seqno,
+            root_hash: block_id.root_hash,
+            file_hash: block_id.file_hash,
+            global_id: info.global_id,
+            version: info.version,
+            after_merge: info.after_merge,
+            before_split: info.before_split,
+            after_split: info.after_split,
+            want_merge: info.want_merge,
+            want_split: info.want_split,
+            key_block: info.is_key_block,
+            vert_seqno_incr: false, // TODO (if really needed)
+            flags: info.flags,
+            gen_utime: info.gen_utime,
+            start_lt: info.start_lt,
+            end_lt: info.end_lt,
+            validator_list_hash_short: info.validator_list_hash_short,
+            gen_catchain_seqno: info.catchain_seqno,
+            min_ref_mc_seqno: info.min_ref_mc_seqno,
+            prev_key_block_seqno: info.prev_key_block_seqno,
+            vert_seqno: info.vert_seqno,
+            master_ref_seqno: master_ref_seqno,
+            rand_seed: info.rand_seed,
+            created_by: HashBytes::ZERO,
+            tx_count: info.tx_count,
+            masterchain_block_ref: BlockRef(BlockIdShort {
+                shard: ShardIdent::MASTERCHAIN,
+                seqno: master_ref_seqno,
+            }),
+            prev_blocks: info
+                .prev_blocks
+                .iter()
+                .map(|block_id| BlockRef(block_id.as_short_id()))
+                .collect(),
+        }
+    }
+}
 
 #[derive(Serialize)]
 pub struct Transaction {
@@ -182,7 +274,7 @@ impl Serialize for BlockRef {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut s = serializer.serialize_struct("BlockRef", 3)?;
         s.serialize_field("workchain", &self.0.shard.workchain())?;
-        s.serialize_field("shard", &format!("{:016x}", self.0.shard.prefix()))?;
+        s.serialize_field("shard", &ShardPrefix(self.0.shard.prefix()))?;
         s.serialize_field("seqno", &self.0.seqno)?;
         s.end()
     }
@@ -192,6 +284,24 @@ impl From<BlockIdShort> for BlockRef {
     #[inline]
     fn from(value: BlockIdShort) -> Self {
         Self(value)
+    }
+}
+
+#[derive(Debug, Clone)]
+#[repr(transparent)]
+pub struct ShardPrefix(pub u64);
+
+impl Serialize for ShardPrefix {
+    #[inline]
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl std::fmt::Display for ShardPrefix {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.0)
     }
 }
 

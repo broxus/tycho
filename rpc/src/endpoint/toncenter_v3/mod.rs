@@ -6,7 +6,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use everscale_types::models::{IntAddr, IntMsgInfo, MsgType};
+use everscale_types::models::{BlockIdShort, IntAddr, IntMsgInfo, MsgType, ShardIdent};
 use everscale_types::prelude::*;
 use serde::Serialize;
 use tycho_storage::{RpcSnapshot, TransactionInfo};
@@ -18,12 +18,47 @@ mod models;
 
 pub fn router() -> axum::Router<RpcState> {
     axum::Router::new()
+        .route("/masterchainInfo", get(get_masterchain_info))
         .route(
             "/transactionsByMasterchainBlock",
             get(get_transactions_by_mc_block),
         )
         .route("/adjacentTransactions", get(get_adjacent_transactions))
         .route("/transactionsByMessage", get(get_transactions_by_message))
+}
+
+// === GET /masterchainInfo ===
+
+async fn get_masterchain_info(State(state): State<RpcState>) -> Result<Response, ErrorResponse> {
+    let Some(snapshot) = state.rpc_storage_snapshot() else {
+        return Err(RpcStateError::NotReady.into());
+    };
+
+    let Some((from_seqno, to_seqno)) = state.get_known_mc_blocks_range(Some(&snapshot))? else {
+        return Err(RpcStateError::NotReady.into());
+    };
+
+    let get_info = |seqno: u32| {
+        let block_id = BlockIdShort {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno,
+        };
+        state
+            .get_brief_block_info(&block_id, Some(&snapshot))?
+            .ok_or_else(|| {
+                RpcStateError::Internal(anyhow!(
+                    "missing block info for masterchain block {from_seqno}"
+                ))
+            })
+    };
+
+    let (first_block_id, first_info) = get_info(from_seqno)?;
+    let (last_block_id, last_info) = get_info(to_seqno)?;
+
+    Ok(ok_to_response(MasterchainInfoResponse {
+        last: Block::from_stored(&last_block_id, last_info),
+        first: Block::from_stored(&first_block_id, first_info),
+    }))
 }
 
 // === GET /transactionsByMasterchainBlock ===
