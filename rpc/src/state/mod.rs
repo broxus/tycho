@@ -20,9 +20,9 @@ use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::global_config::ZerostateId;
 use tycho_storage::{
     BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor,
-    BlockTransactionsIterBuilder, BriefBlockInfo, BriefShardDescr, CodeHashesIter,
-    KeyBlocksDirection, RpcSnapshot, Storage, TransactionData, TransactionDataExt, TransactionInfo,
-    TransactionsIterBuilder,
+    BlockTransactionsIterBuilder, BlocksByMcSeqnoIter, BriefBlockInfo, BriefShardDescr,
+    CodeHashesIter, KeyBlocksDirection, RpcSnapshot, Storage, TransactionData, TransactionDataExt,
+    TransactionInfo, TransactionsIterBuilder,
 };
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
@@ -323,9 +323,23 @@ impl RpcState {
             .map_err(RpcStateError::Internal)
     }
 
+    pub fn get_blocks_by_mc_seqno(
+        &self,
+        mc_seqno: u32,
+        snapshot: Option<RpcSnapshot>,
+    ) -> Result<Option<BlocksByMcSeqnoIter>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_blocks_by_mc_seqno(mc_seqno, snapshot)
+            .map_err(RpcStateError::Internal)
+    }
+
     pub fn get_block_transactions(
         &self,
         block_id: &BlockIdShort,
+        reverse: bool,
         cursor: Option<&BlockTransactionsCursor>,
         snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionsIterBuilder>, RpcStateError> {
@@ -333,13 +347,14 @@ impl RpcState {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_block_transactions(block_id, cursor, snapshot)
+            .get_block_transactions(block_id, reverse, cursor, snapshot)
             .map_err(RpcStateError::Internal)
     }
 
     pub fn get_block_transaction_ids(
         &self,
         block_id: &BlockIdShort,
+        reverse: bool,
         cursor: Option<&BlockTransactionsCursor>,
         snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionIdsIter>, RpcStateError> {
@@ -347,7 +362,7 @@ impl RpcState {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_block_transaction_ids(block_id, cursor, snapshot)
+            .get_block_transaction_ids(block_id, reverse, cursor, snapshot)
             .map_err(RpcStateError::Internal)
     }
 

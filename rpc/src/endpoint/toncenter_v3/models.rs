@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 
 use everscale_types::models::{
-    BlockIdShort, IntAddr, MsgInfo, OwnedMessage, StdAddr, StdAddrBase64Repr,
+    BlockId, BlockIdShort, IntAddr, MsgInfo, OwnedMessage, StdAddr, StdAddrBase64Repr,
 };
 use everscale_types::num::{Tokens, VarUint24, VarUint56};
 use everscale_types::prelude::*;
@@ -14,6 +14,17 @@ use tycho_util::FastHashSet;
 use crate::util::serde_helpers;
 
 // === Requests ===
+
+#[derive(Debug, Deserialize)]
+pub struct TransactionsByMcBlockRequest {
+    pub seqno: u32,
+    #[serde(default = "default_tx_limit")]
+    pub limit: NonZeroUsize,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_sort_direction")]
+    pub sort: SortDirection,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct AdjacentTransactionsRequest {
@@ -50,6 +61,11 @@ const fn default_sort_direction() -> SortDirection {
 }
 
 // === Responses ===
+
+#[derive(Debug, Serialize)]
+pub struct BlocksResponse {
+    pub block_ids: Vec<BlockId>,
+}
 
 #[derive(Default, Serialize)]
 pub struct TransactionsResponse {

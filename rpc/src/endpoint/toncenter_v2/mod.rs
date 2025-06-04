@@ -619,7 +619,7 @@ async fn handle_get_block_transactions(
         None
     };
 
-    let iter = match state.get_block_transaction_ids(&block_id, cursor.as_ref(), None) {
+    let iter = match state.get_block_transaction_ids(&block_id, false, cursor.as_ref(), None) {
         Ok(Some(iter)) => iter,
         Ok(None) => {
             let e = RpcStateError::Internal(anyhow!("block {block_id} not found"));
@@ -695,7 +695,7 @@ async fn handle_get_block_transactions_ext(
         None
     };
 
-    let iter = match state.get_block_transactions(&block_id, cursor.as_ref(), None) {
+    let iter = match state.get_block_transactions(&block_id, false, cursor.as_ref(), None) {
         Ok(Some(iter)) => iter,
         Ok(None) => {
             let e = RpcStateError::Internal(anyhow!("block {block_id} not found"));
