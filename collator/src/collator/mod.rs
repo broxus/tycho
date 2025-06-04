@@ -632,8 +632,10 @@ impl CollatorStdImpl {
                     // get last store task
                     let last_task = self.store_new_state_tasks.pop().unwrap();
 
+                    const ALWAYS_RELOAD_PREV_STATE: bool = true;
+
                     // if it is finished then we can just reload prev state
-                    if last_task.store_new_state_task.is_finished() {
+                    if last_task.store_new_state_task.is_finished() || ALWAYS_RELOAD_PREV_STATE {
                         last_task.store_new_state_task.await?;
 
                         // and reload pure prev state in working state
