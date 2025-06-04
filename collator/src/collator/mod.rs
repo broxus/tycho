@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -630,79 +629,41 @@ impl CollatorStdImpl {
                     && self.store_new_state_tasks.len()
                         > self.config.untrack_prev_state_after as usize
                 {
-                    let store_new_state_tasks_count = self.store_new_state_tasks.len();
+                    // get last store task
+                    let last_task = self.store_new_state_tasks.pop().unwrap();
 
-                    // try to find last finished store task
-                    let mut last_finished_task = None;
-                    let mut last_not_finished_tasks = VecDeque::new();
-                    while let Some(cx) = self.store_new_state_tasks.pop() {
-                        if cx.store_new_state_task.is_finished() {
-                            last_finished_task = Some(cx);
-                            break;
-                        } else {
-                            // store not finished tasks
-                            last_not_finished_tasks.push_back(cx);
-                        }
-                    }
-                    let last_not_finished_tasks_count = last_not_finished_tasks.len();
+                    // if it is finished then we can just reload prev state
+                    if last_task.store_new_state_task.is_finished() {
+                        last_task.store_new_state_task.await?;
 
-                    let mut last_finished_task_block_id = None;
-                    match &last_finished_task {
-                        Some(last_finished) if last_not_finished_tasks_count > 0 => {
-                            // if found and it is not last then build pure state from it
-                            last_finished_task_block_id = Some(last_finished.block_id);
+                        // and reload pure prev state in working state
+                        Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
+                            .await?;
+                    } else {
+                        // if it is not finished then wait for the previous one and apply merkle update
+                        let prev_task = self.store_new_state_tasks.pop().unwrap();
+                        prev_task.store_new_state_task.await?;
 
-                            // load last stored state
-                            let mut pure_state_root = self
-                                .state_node_adapter
-                                .load_state_root(&last_finished.block_id)
-                                .await?;
-
-                            // apply next state updates
-                            let histogram_apply_merkles = HistogramGuard::begin_with_labels(
-                                "tycho_collator_resume_collation_apply_merkles_time_high",
-                                &labels,
-                            );
-                            while let Some(not_finished) = last_not_finished_tasks.pop_back() {
-                                pure_state_root =
-                                    not_finished.state_update.apply(&pure_state_root)?;
-
-                                // and finalize store task in background
-                                self.background_store_new_state_tx.send(not_finished)?;
-                            }
-                            drop(histogram_apply_merkles);
-
-                            // and update pure prev state in working state
-                            Self::update_prev_data(&mut working_state, pure_state_root).await?;
-                        }
-                        _ => {
-                            // otherwise wait until the last store task finished
-                            if let Some(last) = last_not_finished_tasks.pop_front() {
-                                last.store_new_state_task.await?;
-                            } else if let Some(last) = last_finished_task {
-                                last.store_new_state_task.await?;
-                            }
-
-                            // and reload pure prev state in working state
-                            Self::reload_prev_data(
-                                &mut working_state,
-                                self.state_node_adapter.clone(),
-                            )
+                        // load stored state
+                        let mut pure_state_root = self
+                            .state_node_adapter
+                            .load_state_root(&prev_task.block_id)
                             .await?;
 
-                            // finalize other not finished tasks in background
-                            for cx in last_not_finished_tasks {
-                                self.background_store_new_state_tx.send(cx)?;
-                            }
-                        }
-                    }
+                        // apply state update from last task
+                        let histogram_apply_merkles = HistogramGuard::begin_with_labels(
+                            "tycho_collator_resume_collation_apply_merkles_time_high",
+                            &labels,
+                        );
+                        pure_state_root = last_task.state_update.apply(&pure_state_root)?;
+                        drop(histogram_apply_merkles);
 
-                    tracing::trace!(target: tracing_targets::COLLATOR,
-                        store_new_state_tasks_count,
-                        last_not_finished_tasks_count,
-                        last_finished_task = ?last_finished_task_block_id.map(|id| id.as_short_id().to_string()),
-                        "try update pure prev states in working state",
-                    );
+                        // finalize last store task in background
+                        self.background_store_new_state_tx.send(last_task)?;
+
+                        // and update pure prev state in working state
+                        Self::update_prev_data(&mut working_state, pure_state_root).await?;
+                    }
 
                     // finalize all remaining state store tasks in background
                     for cx in self.store_new_state_tasks.drain(..) {
