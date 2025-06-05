@@ -220,7 +220,7 @@ impl RpcStorage {
         };
         let value = value.as_ref();
 
-        let brief_info = BriefBlockInfo::load_from_bytes(workchain as i32, &value[64..])
+        let brief_info = BriefBlockInfo::load_from_bytes(workchain as i32, &value[68..])
             .context("invalid brief info")?;
 
         let block_id = BlockId {
@@ -369,9 +369,11 @@ impl RpcStorage {
         }
 
         let table = &self.db.known_blocks;
+        let ref_by_mc_seqno;
         let block_id = match table.get_ext(&range_from[0..13], Some(&snapshot))? {
             Some(value) => {
                 let value = value.as_ref();
+                ref_by_mc_seqno = u32::from_le_bytes(value[64..68].try_into().unwrap());
                 BlockId {
                     shard: block_id.shard,
                     seqno: block_id.seqno,
@@ -414,6 +416,7 @@ impl RpcStorage {
 
         Ok(Some(BlockTransactionIdsIter {
             block_id,
+            ref_by_mc_seqno,
             is_reversed: reverse,
             // SAFETY: Iterator was created from the same DB instance.
             inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), iter) },
@@ -424,40 +427,50 @@ impl RpcStorage {
     pub fn get_transactions(
         &self,
         account: &StdAddr,
-        mut last_lt: Option<u64>,
-        mut to_lt: u64,
+        start_lt: Option<u64>,
+        end_lt: Option<u64>,
+        reverse: bool,
         mut snapshot: Option<RpcSnapshot>,
     ) -> Result<TransactionsIterBuilder> {
-        if matches!(last_lt, Some(last_lt) if last_lt < to_lt) {
-            // Make empty iterator if `last_lt < to_lt`.
-            last_lt = Some(u64::MAX);
-            to_lt = u64::MAX - 1;
+        let mut start_lt = start_lt.unwrap_or_default();
+        let mut end_lt = end_lt.unwrap_or(u64::MAX);
+        if end_lt < start_lt {
+            // Make empty iterator if `end_lt < start_lt`.
+            start_lt = u64::MAX - 1;
+            end_lt = u64::MAX;
         }
-
-        let mut key = [0u8; tables::Transactions::KEY_LEN];
-        key[0] = account.workchain as u8;
-        key[1..33].copy_from_slice(account.address.as_ref());
-        key[33..].copy_from_slice(&last_lt.unwrap_or(u64::MAX).to_be_bytes());
-
-        let mut lower_bound = Vec::with_capacity(tables::Transactions::KEY_LEN);
-        lower_bound.extend_from_slice(&key[..33]);
-        lower_bound.extend_from_slice(&to_lt.to_be_bytes());
-
-        let mut readopts = self.db.transactions.new_read_config();
-        readopts.set_iterate_lower_bound(lower_bound);
 
         if snapshot.is_none() {
             snapshot = self.snapshot.load_full().map(RpcSnapshot);
         }
         let snapshot = snapshot.unwrap_or_else(|| RpcSnapshot(Arc::new(self.db.owned_snapshot())));
+
+        let mut range_from = [0u8; tables::Transactions::KEY_LEN];
+        range_from[0] = account.workchain as u8;
+        range_from[1..33].copy_from_slice(account.address.as_ref());
+        range_from[33..41].copy_from_slice(&start_lt.to_be_bytes());
+        let mut range_to = range_from;
+        // NOTE: Compute upper bound as `end_lt + 1` since it will
+        // not be included in the iteration result.
+        range_to[33..41].copy_from_slice(&end_lt.saturating_add(1).to_be_bytes());
+
+        let mut readopts = self.db.transactions.new_read_config();
         readopts.set_snapshot(&snapshot);
+        readopts.set_iterate_lower_bound(range_from.as_slice());
+        readopts.set_iterate_upper_bound(range_to.as_slice());
 
         let rocksdb = self.db.rocksdb();
         let transactions_cf = self.db.transactions.cf();
         let mut iter = rocksdb.raw_iterator_cf_opt(&transactions_cf, readopts);
-        iter.seek_for_prev(key);
+        if reverse {
+            iter.seek_for_prev(range_to.as_slice());
+        } else {
+            iter.seek(range_from.as_slice());
+        }
+        iter.status()?;
 
         Ok(TransactionsIterBuilder {
+            is_reversed: reverse,
             // SAFETY: Iterator was created from the same DB instance.
             inner: unsafe { weedb::OwnedRawIterator::new(rocksdb.clone(), iter) },
             snapshot,
@@ -1341,7 +1354,7 @@ impl RpcStorage {
             let brief_block_info =
                 BriefBlockInfo::new(block.as_ref(), info, extra, block_tx_count)?;
             buffer.clear();
-            buffer.extend_from_slice(&tx_info[46..110]); // root_hash + file_hash
+            buffer.extend_from_slice(&tx_info[46..114]); // root_hash + file_hash + mc_seqno
             brief_block_info.write_to_bytes(&mut buffer); // everything else
 
             write_batch.put_cf(
@@ -1702,7 +1715,7 @@ impl BriefBlockInfo {
         target.extend_from_slice(&self.end_lt.to_le_bytes());
         target.extend_from_slice(&self.gen_utime.to_le_bytes());
         target.extend_from_slice(&self.vert_seqno.to_le_bytes());
-        target.extend_from_slice(&self.rand_seed.as_slice());
+        target.extend_from_slice(self.rand_seed.as_slice());
         target.extend_from_slice(&self.tx_count.to_le_bytes());
         if let Some(block_id) = &self.master_ref {
             target.extend_from_slice(&block_id.seqno.to_le_bytes());
@@ -1918,6 +1931,7 @@ pub struct BlockTransactionsCursor {
 
 pub struct BlockTransactionIdsIter {
     block_id: BlockId,
+    ref_by_mc_seqno: u32,
     is_reversed: bool,
     inner: weedb::OwnedRawIterator,
     snapshot: RpcSnapshot,
@@ -1930,6 +1944,10 @@ impl BlockTransactionIdsIter {
 
     pub fn block_id(&self) -> &BlockId {
         &self.block_id
+    }
+
+    pub fn ref_by_mc_seqno(&self) -> u32 {
+        self.ref_by_mc_seqno
     }
 
     pub fn snapshot(&self) -> &RpcSnapshot {
@@ -1970,6 +1988,11 @@ impl BlockTransactionsIterBuilder {
     #[inline]
     pub fn block_id(&self) -> &BlockId {
         self.ids.block_id()
+    }
+
+    #[inline]
+    pub fn ref_by_mc_seqno(&self) -> u32 {
+        self.ids.ref_by_mc_seqno()
     }
 
     #[inline]
@@ -2062,21 +2085,41 @@ pub struct FullTransactionId {
 }
 
 pub struct TransactionsIterBuilder {
+    is_reversed: bool,
     inner: weedb::OwnedRawIterator,
     // NOTE: We must store the snapshot for as long as iterator is alive.
     snapshot: RpcSnapshot,
 }
 
 impl TransactionsIterBuilder {
+    #[inline]
+    pub fn is_reversed(&self) -> bool {
+        self.is_reversed
+    }
+
+    #[inline]
     pub fn snapshot(&self) -> &RpcSnapshot {
         &self.snapshot
     }
 
-    pub fn map<F, R>(self, map: F) -> TransactionsIter<F>
+    pub fn map<F, R>(self, map: F) -> TransactionsIter<F, false>
     where
         for<'a> F: FnMut(&'a [u8]) -> R,
     {
         TransactionsIter {
+            is_reversed: self.is_reversed,
+            inner: self.inner,
+            map,
+            snapshot: self.snapshot,
+        }
+    }
+
+    pub fn map_ext<F, R>(self, map: F) -> TransactionsIter<F, true>
+    where
+        for<'a> F: FnMut(u64, &'a HashBytes, &'a [u8]) -> R,
+    {
+        TransactionsIter {
+            is_reversed: self.is_reversed,
             inner: self.inner,
             map,
             snapshot: self.snapshot,
@@ -2084,19 +2127,28 @@ impl TransactionsIterBuilder {
     }
 }
 
-pub struct TransactionsIter<F> {
+pub struct TransactionsIter<F, const EXT: bool> {
+    is_reversed: bool,
     inner: weedb::OwnedRawIterator,
     map: F,
     snapshot: RpcSnapshot,
 }
 
-impl<F> TransactionsIter<F> {
+pub type TransactionsExtIter<F> = TransactionsIter<F, true>;
+
+impl<F, const EXT: bool> TransactionsIter<F, EXT> {
+    #[inline]
+    pub fn is_reversed(&self) -> bool {
+        self.is_reversed
+    }
+
+    #[inline]
     pub fn snapshot(&self) -> &RpcSnapshot {
         &self.snapshot
     }
 }
 
-impl<F, R> Iterator for TransactionsIter<F>
+impl<F, R> Iterator for TransactionsIter<F, false>
 where
     for<'a> F: FnMut(&'a [u8]) -> Option<R>,
 {
@@ -2105,7 +2157,33 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         let value = self.inner.value()?;
         let result = (self.map)(TransactionData::read_transaction(value))?;
-        self.inner.prev();
+        if self.is_reversed {
+            self.inner.prev();
+        } else {
+            self.inner.next();
+        }
+        Some(result)
+    }
+}
+
+impl<F, R> Iterator for TransactionsIter<F, true>
+where
+    for<'a> F: FnMut(u64, &'a HashBytes, &'a [u8]) -> Option<R>,
+{
+    type Item = R;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (key, value) = self.inner.item()?;
+        let result = (self.map)(
+            u64::from_be_bytes(key[33..41].try_into().unwrap()),
+            &TransactionData::read_tx_hash(value),
+            TransactionData::read_transaction(value),
+        )?;
+        if self.is_reversed {
+            self.inner.prev();
+        } else {
+            self.inner.next();
+        }
         Some(result)
     }
 }
@@ -2184,6 +2262,10 @@ impl<'a> TransactionData<'a> {
         let mask = TransactionMask::from_bits_retain(value[0]);
         mask.has_msg_hash()
             .then(|| HashBytes::from_slice(&value[33..65]))
+    }
+
+    fn read_tx_hash(value: &[u8]) -> HashBytes {
+        HashBytes::from_slice(&value[1..33])
     }
 
     fn read_transaction<T: AsRef<[u8]> + ?Sized>(value: &T) -> &[u8] {

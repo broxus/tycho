@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 
 use everscale_types::models::{
-    BlockId, BlockIdShort, IntAddr, MsgInfo, OwnedMessage, ShardIdent, StdAddr, StdAddrBase64Repr,
+    BlockId, BlockIdShort, IntAddr, MsgInfo, ShardIdent, StateInit, StdAddr, StdAddrBase64Repr,
 };
 use everscale_types::num::{Tokens, VarUint24, VarUint56};
 use everscale_types::prelude::*;
@@ -9,11 +9,69 @@ use serde::ser::{SerializeMap, SerializeStruct};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::build_normalized_external_message;
 use tycho_storage::{BriefBlockInfo, TransactionInfo};
+use tycho_util::serde_helpers::BorrowedStr;
 use tycho_util::FastHashSet;
 
 use crate::util::serde_helpers;
 
 // === Requests ===
+
+#[derive(Debug, Deserialize)]
+pub struct TransactionsRequest {
+    #[serde(default)]
+    pub workchain: Option<i32>,
+    #[serde(default)]
+    pub shard: Option<ShardPrefix>,
+    #[serde(default)]
+    pub seqno: Option<u32>,
+    #[serde(default)]
+    pub mc_seqno: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "TransactionsRequest::deserialize_address_list"
+    )]
+    pub account: FastHashSet<StdAddr>,
+    #[serde(
+        default,
+        deserialize_with = "TransactionsRequest::deserialize_address_list"
+    )]
+    pub exclude_account: FastHashSet<StdAddr>,
+    #[serde(default, with = "serde_helpers::option_tonlib_hash")]
+    pub hash: Option<HashBytes>,
+    #[serde(default)]
+    pub lt: Option<u64>,
+    #[serde(default)]
+    pub start_utime: Option<u32>,
+    #[serde(default)]
+    pub end_utime: Option<u32>,
+    #[serde(default)]
+    pub start_lt: Option<u64>,
+    #[serde(default)]
+    pub end_lt: Option<u64>,
+    #[serde(default = "default_tx_limit")]
+    pub limit: NonZeroUsize,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_sort_direction")]
+    pub sort: SortDirection,
+}
+
+impl TransactionsRequest {
+    fn deserialize_address_list<'de, D>(deserializer: D) -> Result<FastHashSet<StdAddr>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(transparent)]
+        #[repr(transparent)]
+        struct Item(#[serde(with = "serde_helpers::tonlib_address")] StdAddr);
+
+        Ok(Vec::<_>::deserialize(deserializer)?
+            .into_iter()
+            .map(|Item(addr)| addr)
+            .collect())
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct TransactionsByMcBlockRequest {
@@ -77,6 +135,17 @@ pub struct BlocksResponse {
 pub struct TransactionsResponse {
     pub transactions: Vec<Transaction>,
     pub address_book: AddressBook,
+}
+
+impl TransactionsResponse {
+    pub fn new(transactions: Vec<Transaction>) -> Self {
+        let mut address_book = AddressBook::default();
+        address_book.fill_from_transactions(&transactions);
+        Self {
+            transactions,
+            address_book,
+        }
+    }
 }
 
 // === Stuff ===
@@ -150,7 +219,7 @@ impl Block {
             min_ref_mc_seqno: info.min_ref_mc_seqno,
             prev_key_block_seqno: info.prev_key_block_seqno,
             vert_seqno: info.vert_seqno,
-            master_ref_seqno: master_ref_seqno,
+            master_ref_seqno,
             rand_seed: info.rand_seed,
             created_by: HashBytes::ZERO,
             tx_count: info.tx_count,
@@ -268,7 +337,7 @@ pub struct BriefAccountState {
 
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct BlockRef(BlockIdShort);
+pub struct BlockRef(pub BlockIdShort);
 
 impl Serialize for BlockRef {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -287,7 +356,7 @@ impl From<BlockIdShort> for BlockRef {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 #[repr(transparent)]
 pub struct ShardPrefix(pub u64);
 
@@ -295,6 +364,20 @@ impl Serialize for ShardPrefix {
     #[inline]
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ShardPrefix {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        let BorrowedStr(s) = <_>::deserialize(deserializer)?;
+        if s.len() != 16 {
+            return Err(Error::custom("invalid shard prefix"));
+        }
+        u64::from_str_radix(s.trim_start_matches('0'), 16)
+            .map(Self)
+            .map_err(Error::custom)
     }
 }
 
@@ -669,8 +752,7 @@ pub struct Message {
     pub bounced: Option<bool>,
     pub import_fee: Option<Tokens>,
     pub message_content: MessageContent,
-    // TODO: Replace with state init model.
-    pub init_state: Option<()>,
+    pub init_state: Option<MessageContent>,
     #[serde(with = "serde_helpers::option_tonlib_hash")]
     pub hash_norm: Option<HashBytes>,
 }
@@ -678,23 +760,40 @@ pub struct Message {
 impl Message {
     pub fn load_raw(cell: &DynCell) -> Result<Self, everscale_types::error::Error> {
         let hash = cell.repr_hash();
-        let msg = cell.parse::<OwnedMessage>()?;
 
-        let message_content = if msg.body.0.is_full(&msg.body.1) {
-            MessageContent {
-                hash: *msg.body.1.repr_hash(),
-                body: msg.body.1.clone(),
-                // TODO: Parse content.
+        let mut cs = cell.as_slice()?;
+        let info = MsgInfo::load_from(&mut cs)?;
+
+        let init_state = if cs.load_bit()? {
+            let cell = if cs.load_bit()? {
+                cs.load_reference_cloned()?
+            } else {
+                let mut slice = cs;
+                StateInit::load_from(&mut cs)?;
+                slice.skip_last(cs.size_bits(), cs.size_refs())?;
+                CellBuilder::build_from(slice)?
+            };
+
+            Some(MessageContent {
+                hash: *cell.repr_hash(),
+                body: cell,
                 decoded: None,
-            }
+            })
         } else {
-            let body = CellBuilder::build_from(CellSlice::apply_allow_exotic(&msg.body))?;
-            MessageContent {
-                hash: *body.repr_hash(),
-                body,
-                // TODO: Parse content.
-                decoded: None,
-            }
+            None
+        };
+
+        let body = if cs.load_bit()? {
+            cs.load_reference_cloned()?
+        } else {
+            CellBuilder::build_from(cs)?
+        };
+
+        let message_content = MessageContent {
+            hash: *body.repr_hash(),
+            body,
+            // TODO: Parse content.
+            decoded: None,
         };
 
         let mut res = Self {
@@ -712,10 +811,10 @@ impl Message {
             bounced: None,
             import_fee: None,
             message_content,
-            init_state: None,
+            init_state,
             hash_norm: None,
         };
-        match &msg.info {
+        match &info {
             MsgInfo::Int(info) => {
                 res.ihr_disabled = Some(info.ihr_disabled);
                 res.bounce = Some(info.bounce);

@@ -706,7 +706,7 @@ impl ColumnFamilyOptions<Caches> for TransactionsByInMsg {
 
 /// Processed blocks (to distinguish "no block" from "no block transactions")
 /// - Key: `workchain: i8, shard: u64 (BE), seqno: u32 (BE)`
-/// - Value: `root_hash: [u8; 32], file_hash: [u8; 32], info_version: u8, info...`
+/// - Value: `root_hash: [u8; 32], file_hash: [u8; 32], mc_seqno: u32 (LE), info_version: u8, info...`
 pub struct KnownBlocks;
 
 impl KnownBlocks {
