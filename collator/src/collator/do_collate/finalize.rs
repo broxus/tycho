@@ -1574,7 +1574,7 @@ fn create_merkle_update(
 
     let merkle_update_builder =
         MerkleUpdate::create(old_state_root.as_ref(), new_state_root.as_ref(), usage_tree);
-    let state_update = merkle_update_builder.build()?;
+    let state_update = merkle_update_builder.par_build(par_cells)?;
 
     let elapsed = histogram.finish();
 
