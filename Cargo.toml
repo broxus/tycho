@@ -135,7 +135,7 @@ tycho-storage = { path = "./storage", version = "0.2.10" }
 tycho-util = { path = "./util", version = "0.2.10" }
 
 [patch.crates-io]
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "7a0a2af5376696541878a3aa29b2e92e4bb78fde" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "641c268e0b27ce74a6c18635e698f8abe8630b48" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
