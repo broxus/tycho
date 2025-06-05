@@ -203,31 +203,28 @@ where
     Ok(shards)
 }
 
-#[allow(clippy::type_complexity)]
 pub fn split_aug_dict_raw<K, A, V>(
     dict: AugDict<K, A, V>,
     depth: u8,
-) -> anyhow::Result<FastHashMap<HashBytes, Cell>>
+) -> Result<FastHashMap<HashBytes, Cell>, Error>
 where
-    K: StoreDictKey,
-    V: Store,
-    for<'a> A: AugDictExtra + Store + Load<'a>,
+    K: DictKey,
+    A: Default,
 {
     fn split_dict_impl(
         dict: Option<Cell>,
         key_bit_len: u16,
         depth: u8,
-        split: &mut FastHashMap<HashBytes, Cell>,
-    ) -> anyhow::Result<()> {
-        'split: {
-            if depth > 0 {
-                break 'split;
-            }
+        shards: &mut FastHashMap<HashBytes, Cell>,
+    ) -> Result<(), Error> {
+        if dict.is_none() {
+            return Ok(());
+        }
 
+        let Some(depth) = depth.checked_sub(1) else {
             if let Some(cell) = dict {
-                split.insert(*cell.repr_hash(), cell);
+                shards.insert(*cell.repr_hash(), cell);
             }
-
             return Ok(());
         };
 
@@ -235,21 +232,19 @@ where
             remaining_bit_len,
             left_branch,
             right_branch,
-        } = { dict_split_raw(dict.as_ref(), key_bit_len, Cell::empty_context())? };
+        } = dict_split_raw(dict.as_ref(), key_bit_len, Cell::empty_context())?;
 
-        split_dict_impl(left_branch, remaining_bit_len, depth - 1, split)?;
-        split_dict_impl(right_branch, remaining_bit_len, depth - 1, split)?;
-
-        Ok(())
+        split_dict_impl(left_branch, remaining_bit_len, depth, shards)?;
+        split_dict_impl(right_branch, remaining_bit_len, depth, shards)
     }
 
-    let mut split =
+    let mut shards =
         FastHashMap::with_capacity_and_hasher(2usize.pow(depth as _), Default::default());
 
     let (dict_root, _) = dict.into_parts();
-    split_dict_impl(dict_root.into_root(), K::BITS, depth, &mut split)?;
+    split_dict_impl(dict_root.into_root(), K::BITS, depth, &mut shards)?;
 
-    Ok(split)
+    Ok(shards)
 }
 
 /// Merges multiple `RelaxedAugDict` into a single one using a binary tree approach.

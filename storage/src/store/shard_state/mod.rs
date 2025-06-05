@@ -11,7 +11,6 @@ use tycho_block_util::block::*;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastHashMap;
 use weedb::rocksdb;
 
 use self::cell_storage::*;
@@ -90,10 +89,7 @@ impl ShardStateStorage {
             return Err(ShardStateStorageError::BlockHandleIdMismatch.into());
         }
 
-        let split_accounts =
-            split_aug_dict_raw(state.state().accounts.load()?, self.accounts_split_depth)?;
-
-        self.store_state_root(handle, state.root_cell().clone(), split_accounts, hint)
+        self.store_state_root(handle, state.root_cell().clone(), hint)
             .await
     }
 
@@ -101,7 +97,6 @@ impl ShardStateStorage {
         &self,
         handle: &BlockHandle,
         root_cell: Cell,
-        split_accounts: FastHashMap<HashBytes, Cell>,
         hint: StoreStateHint,
     ) -> Result<bool> {
         if handle.has_state() {
@@ -121,11 +116,25 @@ impl ShardStateStorage {
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
+        let accounts_split_depth = self.accounts_split_depth;
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
             let root_hash = *root_cell.repr_hash();
             let estimated_merkle_update_size = hint.estimate_cell_count();
+
+            let split_accounts = {
+                // Cell#0 - processed_upto
+                // Cell#1 - accounts
+                let shard_accounts = root_cell
+                    .reference_cloned(1)
+                    .context("invalid shard state")?
+                    .parse::<ShardAccounts>()
+                    .context("failed to load shard accounts")?;
+
+                split_aug_dict_raw(shard_accounts, accounts_split_depth)
+                    .context("failed to split shard accounts")?
+            };
 
             let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
             let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);

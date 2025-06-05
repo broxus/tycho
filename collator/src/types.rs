@@ -22,14 +22,42 @@ use crate::validator::ValidationSessionId;
 
 pub mod processed_upto;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CollatorConfig {
+    /// Supported (and produced) block version.
+    ///
+    /// NOTE: Not loaded from config but provided as a constant instead.
+    #[serde(skip_deserializing, skip_serializing)]
     pub supported_block_version: u32,
+
+    /// Supported blockchain capabilities.
+    ///
+    /// Default: [`supported_capabilities`].
+    ///
+    /// NOTE: Not loaded from config but provided as a constant instead.
+    #[serde(skip_deserializing, skip_serializing)]
     pub supported_capabilities: GlobalCapabilities,
+
+    /// Blocks diff threshold after which the node will sync instead of collating.
+    ///
+    /// Default: `3` blocks.
     pub min_mc_block_delta_from_bc_to_sync: u32,
+    /// Run additional value flow check on collated blocks.
+    ///
+    /// Default: `false`.
     pub check_value_flow: bool,
+    /// Run additional blockchain config check on collated blocks.
+    ///
+    /// Default: `true`.
     pub validate_config: bool,
+    /// Skip some parts of collator logic during sync.
+    ///
+    /// Default: `true`.
     pub fast_sync: bool,
+    /// Which "virtual shards depth" to use when processing [`ShardAccounts`].
+    ///
+    /// Default: `4` (means 16 shards).
     pub accounts_split_depth: u8,
 }
 
@@ -44,51 +72,6 @@ impl Default for CollatorConfig {
             fast_sync: true,
             accounts_split_depth: 4,
         }
-    }
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Serialize, Deserialize)]
-struct PartialCollatorConfig {
-    min_mc_block_delta_from_bc_to_sync: u32,
-    check_value_flow: bool,
-    validate_config: bool,
-    #[serde(default = "default_true")]
-    fast_sync: bool,
-}
-
-impl<'de> serde::Deserialize<'de> for CollatorConfig {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let partial = PartialCollatorConfig::deserialize(deserializer)?;
-
-        Ok(Self {
-            min_mc_block_delta_from_bc_to_sync: partial.min_mc_block_delta_from_bc_to_sync,
-            check_value_flow: partial.check_value_flow,
-            validate_config: partial.validate_config,
-            fast_sync: partial.fast_sync,
-            ..Default::default()
-        })
-    }
-}
-
-impl serde::Serialize for CollatorConfig {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        PartialCollatorConfig {
-            min_mc_block_delta_from_bc_to_sync: self.min_mc_block_delta_from_bc_to_sync,
-            check_value_flow: self.check_value_flow,
-            validate_config: self.validate_config,
-            fast_sync: self.fast_sync,
-        }
-        .serialize(serializer)
     }
 }
 
