@@ -965,7 +965,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=2539f576d1558535279a9e3928a62f119d46a215#2539f576d1558535279a9e3928a62f119d46a215"
+source = "git+https://github.com/broxus/everscale-types.git?rev=3c23f629b5b2144d5be596dcb93fd1a146484468#3c23f629b5b2144d5be596dcb93fd1a146484468"
 dependencies = [
  "ahash",
  "anyhow",
@@ -995,7 +995,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-abi-proc"
 version = "0.1.0"
-source = "git+https://github.com/broxus/everscale-types.git?rev=2539f576d1558535279a9e3928a62f119d46a215#2539f576d1558535279a9e3928a62f119d46a215"
+source = "git+https://github.com/broxus/everscale-types.git?rev=3c23f629b5b2144d5be596dcb93fd1a146484468#3c23f629b5b2144d5be596dcb93fd1a146484468"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -1006,7 +1006,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=2539f576d1558535279a9e3928a62f119d46a215#2539f576d1558535279a9e3928a62f119d46a215"
+source = "git+https://github.com/broxus/everscale-types.git?rev=3c23f629b5b2144d5be596dcb93fd1a146484468#3c23f629b5b2144d5be596dcb93fd1a146484468"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3691,7 +3691,7 @@ dependencies = [
 [[package]]
 name = "tycho-executor"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git?rev=c224351e576375430f4a2d66207406998d189946#c224351e576375430f4a2d66207406998d189946"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=f45e047044f6dd054ea8e27905b1b7485fbf3227#f45e047044f6dd054ea8e27905b1b7485fbf3227"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3900,7 +3900,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git?rev=c224351e576375430f4a2d66207406998d189946#c224351e576375430f4a2d66207406998d189946"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=f45e047044f6dd054ea8e27905b1b7485fbf3227#f45e047044f6dd054ea8e27905b1b7485fbf3227"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3921,7 +3921,7 @@ dependencies = [
 [[package]]
 name = "tycho-vm-proc"
 version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git?rev=c224351e576375430f4a2d66207406998d189946#c224351e576375430f4a2d66207406998d189946"
+source = "git+https://github.com/broxus/tycho-vm.git?rev=f45e047044f6dd054ea8e27905b1b7485fbf3227#f45e047044f6dd054ea8e27905b1b7485fbf3227"
 dependencies = [
  "darling",
  "proc-macro2",

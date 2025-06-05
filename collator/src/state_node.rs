@@ -63,7 +63,6 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
         block_id: &BlockId,
         meta: NewBlockMeta,
         state_root: Cell,
-        split_accounts: FastHashMap<HashBytes, Cell>,
         hint: StoreStateHint,
     ) -> Result<bool>;
     /// Return block by its id from node local state
@@ -197,7 +196,6 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         block_id: &BlockId,
         meta: NewBlockMeta,
         state_root: Cell,
-        split_accounts: FastHashMap<HashBytes, Cell>,
         hint: StoreStateHint,
     ) -> Result<bool> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_store_state_root_time");
@@ -212,7 +210,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let updated = self
             .storage
             .shard_state_storage()
-            .store_state_root(&handle, state_root, split_accounts, hint)
+            .store_state_root(&handle, state_root, hint)
             .await?;
 
         Ok(updated)

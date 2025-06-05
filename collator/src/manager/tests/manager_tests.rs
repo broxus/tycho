@@ -2743,7 +2743,6 @@ impl StateNodeAdapter for TestStateNodeAdapter {
         _block_id: &BlockId,
         _meta: NewBlockMeta,
         _state_root: Cell,
-        _split_accounts: FastHashMap<HashBytes, Cell>,
         _hint: StoreStateHint,
     ) -> Result<bool> {
         unreachable!()
