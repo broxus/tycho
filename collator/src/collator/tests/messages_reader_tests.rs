@@ -22,6 +22,7 @@ use super::{
 };
 use crate::collator::MsgsExecutionParamsStuff;
 use crate::collator::messages_buffer::MessageGroup;
+use crate::collator::messages_reader::log_remaining_msgs_stats;
 use crate::collator::types::{AnchorsCache, CumulativeStatistics, ParsedMessage};
 use crate::internal_queue::types::{
     Bound, DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, QueueShardBoundedRange,
@@ -32,7 +33,7 @@ use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
 use crate::types::processed_upto::{
     BlockSeqno, Lt, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff,
 };
-use crate::types::{DebugDisplay, ProcessedToByPartitions};
+use crate::types::{DebugDisplay, DebugIter, ProcessedToByPartitions};
 
 const DEX_PAIR_USDC_NATIVE: u8 = 10;
 const DEX_PAIR_NATIVE_ETH: u8 = 11;
@@ -348,7 +349,9 @@ async fn test_refill_messages() -> Result<()> {
     //--------------
     tracing::trace!("TEST CASE 005: RUN SWAPS");
 
-    for _ in 0..10 {
+    for i in 0..10 {
+        tracing::trace!("TEST CASE 005: STEP {}", i + 1);
+
         let messages = test_adapter
             .msgs_factory
             .create_swap_messages(&dex_wallets, 10)?;
@@ -928,6 +931,43 @@ impl<V: InternalMessageValue> TestCollator<V> {
         // refill in secondary reader
         Self::refill_secondary(&mut secondary_messages_reader)?;
 
+        // log readers states after refill
+        for par_reader in primary_messages_reader.internals_partition_readers.values() {
+            log_remaining_msgs_stats(
+                par_reader,
+                false,
+                "primary messages reader remaining msgs stats",
+            );
+        }
+        tracing::debug!(
+            int_curr_processed_offset = ?DebugIter(primary_messages_reader
+                .internals_partition_readers.iter()
+                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
+            ext_curr_processed_offset = ?DebugIter(primary_messages_reader
+                .externals_reader.reader_state()
+                .by_partitions.iter()
+                .map(|(par_id, par)| (par_id, par.curr_processed_offset))),
+            int_msgs_count_in_buffers = ?DebugIter(primary_messages_reader
+                .internals_partition_readers.iter()
+                .map(|(par_id, par)| (par_id, par.count_messages_in_buffers()))),
+            ext_msgs_count_in_buffers = ?primary_messages_reader.externals_reader.count_messages_in_buffers_by_partitions(),
+            "primary messages reader state",
+        );
+        tracing::debug!(
+            int_curr_processed_offset = ?DebugIter(secondary_messages_reader
+                .internals_partition_readers.iter()
+                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
+            ext_curr_processed_offset = ?DebugIter(secondary_messages_reader
+                .externals_reader.reader_state()
+                .by_partitions.iter()
+                .map(|(par_id, par)| (par_id, par.curr_processed_offset))),
+            int_msgs_count_in_buffers = ?DebugIter(secondary_messages_reader
+                .internals_partition_readers.iter()
+                .map(|(par_id, par)| (par_id, par.count_messages_in_buffers()))),
+            ext_msgs_count_in_buffers = ?secondary_messages_reader.externals_reader.count_messages_in_buffers_by_partitions(),
+            "secondary messages reader state",
+        );
+
         // prepare to execute
         let start_lt = std::cmp::max(self.last_block_gen_lt, mc_gen_lt) + 1000;
         self.curr_lt = start_lt;
@@ -939,13 +979,12 @@ impl<V: InternalMessageValue> TestCollator<V> {
             groups_count += 1;
 
             // read message group in primary
-            let msg_group_opt =
-                Self::collect_message_group(&mut primary_messages_reader, self.curr_lt)?;
+            let msg_group_opt = Self::collect_primary(&mut primary_messages_reader, self.curr_lt)?;
 
             if groups_count == 1 {
                 // read message group in secondary after refill
                 let secondary_msg_group_opt =
-                    Self::collect_message_group(&mut secondary_messages_reader, self.curr_lt)?;
+                    Self::collect_secondary(&mut secondary_messages_reader, self.curr_lt)?;
 
                 // compare messages groups
                 self.assert_message_group_opt_eq(
@@ -1148,6 +1187,21 @@ impl<V: InternalMessageValue> TestCollator<V> {
     }
 
     #[tracing::instrument(skip_all)]
+    fn collect_primary(
+        messages_reader: &mut MessagesReader<V>,
+        curr_lt: Lt,
+    ) -> Result<Option<MessageGroup>> {
+        Self::collect_message_group(messages_reader, curr_lt)
+    }
+
+    #[tracing::instrument(skip_all)]
+    fn collect_secondary(
+        messages_reader: &mut MessagesReader<V>,
+        curr_lt: Lt,
+    ) -> Result<Option<MessageGroup>> {
+        Self::collect_message_group(messages_reader, curr_lt)
+    }
+
     fn collect_message_group(
         messages_reader: &mut MessagesReader<V>,
         curr_lt: Lt,
