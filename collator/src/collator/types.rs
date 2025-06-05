@@ -1615,15 +1615,13 @@ impl CumulativeStatistics {
             .insert(dst_shard, (true, shard_processed_to_by_partitions));
     }
 
-    /// Returns  a reference to the aggregated stats by partitions.
-    /// If the data is marked as dirty, it triggers a lazy recalculation first.
-    pub fn result(&mut self) -> &FastHashMap<QueuePartitionIdx, QueueStatisticsWithRemaning> {
+    /// Returns a reference to the aggregated stats by partitions.
+    pub fn result(&self) -> &FastHashMap<QueuePartitionIdx, QueueStatisticsWithRemaning> {
         &self.result
     }
 
     /// Calc aggregated stats among all partitions.
-    /// If the data is marked as dirty, it triggers a lazy recalculation first.
-    pub fn get_aggregated_result(&mut self) -> QueueStatistics {
+    pub fn get_aggregated_result(&self) -> QueueStatistics {
         let mut res: Option<QueueStatistics> = None;
         for stats in self.result.values() {
             if let Some(aggregated) = res.as_mut() {

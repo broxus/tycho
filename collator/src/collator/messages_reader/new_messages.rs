@@ -94,22 +94,13 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         }
     }
 
-    pub fn take_messages_for_current_shard(
+    pub fn messages_for_current_shard(
         &mut self,
         partition_id: QueuePartitionIdx,
-    ) -> Option<BinaryHeap<Reverse<MessageExt<V>>>> {
-        self.messages_for_current_shard.remove(&partition_id)
-    }
-
-    pub fn set_messages_for_current_shard(
-        &mut self,
-        partition_id: QueuePartitionIdx,
-        messages: BinaryHeap<Reverse<MessageExt<V>>>,
-    ) {
-        if !messages.is_empty() {
-            self.messages_for_current_shard
-                .insert(partition_id, messages);
-        }
+    ) -> &mut BinaryHeap<Reverse<MessageExt<V>>> {
+        self.messages_for_current_shard
+            .get_mut(&partition_id)
+            .unwrap()
     }
 
     pub fn remove_collected_messages(&mut self, collected_messages: &[QueueKey]) {
@@ -215,6 +206,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 .context("new messages range reader should have current shard reader state")?;
             if current_shard_reader_state.to < current_next_lt {
                 current_shard_reader_state.to = current_next_lt;
+
                 last_range_reader.fully_read = false;
                 self.all_ranges_fully_read = false;
             }
@@ -246,33 +238,21 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         new_messages: &mut NewMessagesState<V>,
         current_next_lt: u64,
     ) -> Result<ReadNewMessagesResult> {
+        // TODO: move inside `get_new_messages_range_reader()`
         // update new messages reader "to" boundary on current next lt
         self.update_new_messages_reader_to_boundary(current_next_lt)?;
 
         // if no new messages for current partition then return earlier
         if !new_messages.has_pending_messages_from_partition(self.partition_id) {
             self.set_new_messages_range_reader_fully_read()?;
-            return Ok(ReadNewMessagesResult {
-                taken_messages: vec![],
-                has_pending_new_messages: false,
-                metrics: MessagesReaderMetrics::default(),
-            });
+            return Ok(ReadNewMessagesResult::default());
         }
-
-        // take new messages from state
-        let mut new_messages_for_current_shard = new_messages
-            .take_messages_for_current_shard(self.partition_id)
-            .unwrap_or_default();
 
         // read new messages to buffer
         let res = self.read_new_messages_into_buffer_impl(
-            &mut new_messages_for_current_shard,
+            new_messages.messages_for_current_shard(self.partition_id),
             current_next_lt,
         )?;
-
-        // return new messages to state
-        new_messages
-            .set_messages_for_current_shard(self.partition_id, new_messages_for_current_shard);
 
         Ok(res)
     }
