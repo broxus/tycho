@@ -13,7 +13,9 @@ use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIter
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::{shard_ident_at_depth, BlockStuff};
 use tycho_block_util::config::BlockchainConfigExt;
-use tycho_block_util::dict::{merge_relaxed_aug_dicts, split_aug_dict, RelaxedAugDict};
+use tycho_block_util::dict::{
+    merge_relaxed_aug_dicts, split_aug_dict, split_aug_dict_raw, RelaxedAugDict,
+};
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::ConsensusConfigExt;
@@ -561,6 +563,20 @@ impl Phase<FinalizeState> {
 
             new_state_root = CellBuilder::build_from(&new_observable_state)?;
 
+            const SPLIT_DEPTH: u8 = 5;
+
+            let old_split_at = split_aug_dict_raw(
+                self.state.prev_shard_data.observable_accounts().clone(),
+                SPLIT_DEPTH,
+            )?
+            .into_keys()
+            .collect::<ahash::HashSet<_>>();
+
+            let new_split_at =
+                split_aug_dict_raw(new_observable_state.accounts.load()?, SPLIT_DEPTH)?
+                    .into_keys()
+                    .collect::<ahash::HashSet<_>>();
+
             total_validator_fees = new_observable_state.total_validator_fees.clone();
 
             // calc merkle update
@@ -569,6 +585,8 @@ impl Phase<FinalizeState> {
                 self.state.prev_shard_data.pure_state_root(),
                 &new_state_root,
                 &usage_tree,
+                old_split_at,
+                new_split_at,
             )?;
 
             build_state_update_elapsed = histogram.finish();
@@ -1552,6 +1570,8 @@ fn create_merkle_update(
     old_state_root: &Cell,
     new_state_root: &Cell,
     usage_tree: &UsageTree,
+    old_split_at: ahash::HashSet<HashBytes>,
+    new_split_at: ahash::HashSet<HashBytes>,
 ) -> Result<MerkleUpdate> {
     let labels = [("workchain", shard_id.workchain().to_string())];
     let histogram =
@@ -1559,7 +1579,8 @@ fn create_merkle_update(
 
     let merkle_update_builder =
         MerkleUpdate::create(old_state_root.as_ref(), new_state_root.as_ref(), usage_tree);
-    let state_update = merkle_update_builder.build()?;
+
+    let state_update = merkle_update_builder.par_build(old_split_at, new_split_at)?;
 
     let elapsed = histogram.finish();
 

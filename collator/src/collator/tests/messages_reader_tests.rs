@@ -1094,6 +1094,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         })
     }
 
+    #[allow(clippy::unused_self)]
     #[tracing::instrument(skip_all)]
     fn create_primary_reader(
         &self,
@@ -1111,6 +1112,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         MessagesReader::new(cx, mq_adapter)
     }
 
+    #[allow(clippy::unused_self)]
     #[tracing::instrument(skip_all)]
     fn create_secondary_reader(
         &self,
