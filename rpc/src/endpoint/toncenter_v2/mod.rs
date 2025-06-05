@@ -568,7 +568,7 @@ async fn handle_get_transactions(id: JrpcId, state: RpcState, p: TransactionsPar
         return too_large_limit_response(id);
     }
 
-    match state.get_transactions(&p.address, p.lt, p.to_lt, None) {
+    match state.get_transactions(&p.address, Some(p.to_lt), p.lt, true, None) {
         Ok(list) => ok_to_response(id, GetTransactionsResponse {
             address: &p.address,
             list: RefCell::new(Some(list)),

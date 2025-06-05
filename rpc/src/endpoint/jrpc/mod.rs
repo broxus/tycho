@@ -155,7 +155,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<i64, Method>) -> Res
             } else if p.limit > GetTransactionsListResponse::MAX_LIMIT {
                 return too_large_limit_response(req.id);
             }
-            match state.get_transactions(&p.account, p.last_transaction_lt, 0, None) {
+            match state.get_transactions(&p.account, None, p.last_transaction_lt, true, None) {
                 // TODO: Move serialization to a separate blocking task pool.
                 Ok(list) => ok_to_response(req.id, GetTransactionsListResponse {
                     list: RefCell::new(Some(list)),

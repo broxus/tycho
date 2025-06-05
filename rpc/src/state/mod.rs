@@ -381,15 +381,16 @@ impl RpcState {
     pub fn get_transactions(
         &self,
         account: &StdAddr,
-        last_lt: Option<u64>,
-        to_lt: u64,
+        start_lt: Option<u64>,
+        end_lt: Option<u64>,
+        reverse: bool,
         snapshot: Option<RpcSnapshot>,
     ) -> Result<TransactionsIterBuilder, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_transactions(account, last_lt, to_lt, snapshot)
+            .get_transactions(account, start_lt, end_lt, reverse, snapshot)
             .map_err(RpcStateError::Internal)
     }
 

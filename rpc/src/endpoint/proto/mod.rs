@@ -269,7 +269,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 return invalid_params_response("invalid address");
             };
 
-            match state.get_transactions(&account, p.last_transaction_lt, 0, None) {
+            match state.get_transactions(&account, None, p.last_transaction_lt, true, None) {
                 Ok(list) => {
                     let transactions = list
                         .map(|data| {
