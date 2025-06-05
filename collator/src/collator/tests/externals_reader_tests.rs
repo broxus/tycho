@@ -190,6 +190,7 @@ fn test_read_externals() {
             .collect_messages(
                 *par_id,
                 &mut msg_group,
+                None,
                 &prev_partitions_readers,
                 &msg_groups,
             )
@@ -329,6 +330,7 @@ fn test_read_externals() {
             .collect_messages(
                 *par_id,
                 &mut msg_group,
+                None,
                 &prev_partitions_readers,
                 &msg_groups,
             )
@@ -431,6 +433,7 @@ fn test_read_externals() {
             .collect_messages(
                 *par_id,
                 &mut msg_group,
+                None,
                 &prev_partitions_readers,
                 &msg_groups,
             )
@@ -498,6 +501,7 @@ fn test_read_externals() {
             .collect_messages(
                 *par_id,
                 &mut msg_group,
+                None,
                 &prev_partitions_readers,
                 &msg_groups,
             )
@@ -747,6 +751,7 @@ fn test_read_externals() {
             .collect_messages(
                 *par_id,
                 &mut msg_group,
+                None,
                 &prev_partitions_readers,
                 &msg_groups,
             )
@@ -932,6 +937,7 @@ fn test_read_externals() {
                 .collect_messages(
                     *par_id,
                     &mut msg_group,
+                    None,
                     &prev_partitions_readers,
                     &msg_groups,
                 )

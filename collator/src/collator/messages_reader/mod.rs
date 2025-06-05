@@ -1280,6 +1280,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             let CollectExternalsResult { metrics } = externals_reader.collect_messages(
                 par_reader.partition_id,
                 &mut res.msg_group,
+                Some(par_reader),
                 prev_partitions_readers,
                 prev_msg_groups,
             )?;

@@ -677,6 +677,7 @@ impl ExternalsReader {
         &mut self,
         par_id: QueuePartitionIdx,
         msg_group: &mut MessageGroup,
+        curr_partition_reader: Option<&InternalsPartitionReader<V>>,
         prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> Result<CollectExternalsResult> {
@@ -729,6 +730,7 @@ impl ExternalsReader {
                             let dst_addr =
                                 IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
 
+                            // check by msg group from previous partition (e.g. from partition 0 when collecting from 1)
                             for msg_group in prev_msg_groups.values() {
                                 if msg_group.messages_count() > 0 {
                                     check_ops_count.saturating_add_assign(1);
@@ -740,6 +742,7 @@ impl ExternalsReader {
 
                             // check by previous partitions
                             for prev_par_reader in prev_partitions_readers.values() {
+                                // check buffers in previous partition
                                 for prev_par_range_reader in
                                     prev_par_reader.range_readers().values()
                                 {
@@ -755,9 +758,9 @@ impl ExternalsReader {
                                         }
                                     }
                                 }
+
                                 // check stats in previous partition
                                 check_ops_count.saturating_add_assign(1);
-
                                 if let Some(remaning_msgs_stats) =
                                     &prev_par_reader.remaning_msgs_stats
                                 {
@@ -767,8 +770,9 @@ impl ExternalsReader {
                                 }
                             }
 
-                            // check by previous ranges
+                            // check by previous externals ranges
                             for prev_reader in range_readers.values() {
+                                // check buffer
                                 let buffer = &prev_reader
                                     .reader_state
                                     .get_state_by_partition(par_id)
@@ -777,6 +781,36 @@ impl ExternalsReader {
                                 if buffer.msgs_count() > 0 {
                                     check_ops_count.saturating_add_assign(1);
                                     if buffer.account_messages_count(account_id) > 0 {
+                                        return (true, check_ops_count);
+                                    }
+                                }
+                            }
+
+                            // check by current partition internals reader
+                            if let Some(curr_partition_reader) = curr_partition_reader {
+                                // check buffers in current partition internals reader
+                                for curr_par_range_reader in
+                                    curr_partition_reader.range_readers().values()
+                                {
+                                    if curr_par_range_reader.reader_state.buffer.msgs_count() > 0 {
+                                        check_ops_count.saturating_add_assign(1);
+                                        if curr_par_range_reader
+                                            .reader_state
+                                            .buffer
+                                            .account_messages_count(account_id)
+                                            > 0
+                                        {
+                                            return (true, check_ops_count);
+                                        }
+                                    }
+                                }
+
+                                // check stats in current partition internals reader
+                                check_ops_count.saturating_add_assign(1);
+                                if let Some(remaning_msgs_stats) =
+                                    &curr_partition_reader.remaning_msgs_stats
+                                {
+                                    if remaning_msgs_stats.statistics().contains_key(&dst_addr) {
                                         return (true, check_ops_count);
                                     }
                                 }
