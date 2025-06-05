@@ -1143,6 +1143,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
         let FillMessageGroupResult {
             collected_queue_msgs_keys,
             ops_count,
+            ..
         } = self.reader_state.buffer.fill_message_group::<_, _>(
             msg_group,
             self.buffer_limits.slots_count,
