@@ -13,7 +13,9 @@ use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIter
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::{shard_ident_at_depth, BlockStuff};
 use tycho_block_util::config::BlockchainConfigExt;
-use tycho_block_util::dict::{merge_relaxed_aug_dicts, split_aug_dict, RelaxedAugDict};
+use tycho_block_util::dict::{
+    merge_relaxed_aug_dicts, split_aug_dict, split_aug_dict_raw, RelaxedAugDict,
+};
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::ConsensusConfigExt;
@@ -559,6 +561,10 @@ impl Phase<FinalizeState> {
 
             new_state_root = CellBuilder::build_from(&new_observable_state)?;
 
+            let split_accounts = split_aug_dict_raw(new_observable_state.accounts.load()?, 4)?
+                .into_keys()
+                .collect::<ahash::HashSet<_>>();
+
             total_validator_fees = new_observable_state.total_validator_fees.clone();
 
             // calc merkle update
@@ -567,6 +573,7 @@ impl Phase<FinalizeState> {
                 self.state.prev_shard_data.pure_state_root(),
                 &new_state_root,
                 &usage_tree,
+                split_accounts,
             )?;
 
             build_state_update_elapsed = histogram.finish();
@@ -1546,10 +1553,21 @@ fn create_merkle_update(
     old_state_root: &Cell,
     new_state_root: &Cell,
     usage_tree: &UsageTree,
+    par_cells: ahash::HashSet<HashBytes>,
 ) -> Result<MerkleUpdate> {
     let labels = [("workchain", shard_id.workchain().to_string())];
     let histogram =
         HistogramGuard::begin_with_labels("tycho_collator_create_merkle_update_time_high", &labels);
+
+    // for hash in &par_cells {
+    //     tracing::info!(hash = hash.to_string(), "HASH");
+    // }
+    //
+    // let old = Boc::encode_base64(old_state_root);
+    // let new = Boc::encode_base64(new_state_root);
+    //
+    // tracing::info!(old, "MYTEST");
+    // tracing::info!(new, "MYTEST");
 
     let merkle_update_builder =
         MerkleUpdate::create(old_state_root.as_ref(), new_state_root.as_ref(), usage_tree);
