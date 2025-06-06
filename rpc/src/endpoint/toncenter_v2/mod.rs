@@ -15,6 +15,7 @@ use everscale_types::prelude::*;
 use futures_util::future::Either;
 use num_bigint::BigInt;
 use serde::{Deserialize, Serialize};
+use tokio::sync::OwnedSemaphorePermit;
 use tycho_block_util::message::{
     normalize_external_message, parse_external_message, validate_external_message,
 };
@@ -24,11 +25,13 @@ use tycho_util::sync::rayon_run;
 
 use self::models::*;
 use crate::endpoint::{get_mime_type, APPLICATION_JSON};
+use crate::models::GenTimings;
 use crate::state::{
     BadRequestError, LoadedAccountState, RpcState, RpcStateError, RunGetMethodPermit,
 };
 use crate::util::error_codes::*;
 use crate::util::jrpc_extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
+use crate::util::tonlib_helpers::{compute_method_id, StackParser};
 
 pub mod models;
 
@@ -46,6 +49,7 @@ pub fn router() -> axum::Router<RpcState> {
             get(get_extended_address_information),
         )
         .route("/getWalletInformation", get(get_wallet_information))
+        .route("/getTokenData", get(get_token_data))
         .route("/getTransactions", get(get_transactions))
         .route("/getBlockTransactions", get(get_block_transactions))
         .route("/getBlockTransactionsExt", get(get_block_transactions_ext))
@@ -77,6 +81,7 @@ declare_jrpc_method! {
         GetAddressInformation(AccountParams),
         GetExtendedAddressInformation(AccountParams),
         GetWalletInformation(AccountParams),
+        GetTokenData(AccountParams),
         GetTransactions(TransactionsParams),
         GetBlockTransactions(BlockTransactionsParams),
         GetBlockTransactionsExt(BlockTransactionsParams),
@@ -103,6 +108,7 @@ async fn post_jrpc_impl(State(state): State<RpcState>, req: Jrpc<JrpcId, Method>
         MethodParams::GetWalletInformation(p) => {
             handle_get_wallet_information(req.id, state, p).await
         }
+        MethodParams::GetTokenData(p) => handle_get_token_data(req.id, state, p).await,
         MethodParams::GetTransactions(p) => handle_get_transactions(req.id, state, p).await,
         MethodParams::GetBlockTransactions(p) => {
             handle_get_block_transactions(req.id, state, p).await
@@ -547,6 +553,149 @@ async fn handle_get_wallet_information(id: JrpcId, state: RpcState, p: AccountPa
     })
 }
 
+// === GET /getTokenData ===
+
+fn get_token_data(
+    State(state): State<RpcState>,
+    query: Result<Query<AccountParams>, QueryRejection>,
+) -> impl Future<Output = Response> {
+    match query {
+        Ok(Query(params)) => Either::Left(handle_get_token_data(JrpcId::Skip, state, params)),
+        Err(e) => Either::Right(handle_rejection(e)),
+    }
+}
+
+async fn handle_get_token_data(id: JrpcId, state: RpcState, p: AccountParams) -> Response {
+    enum RunMethodError {
+        RpcError(RpcStateError),
+        Internal(everscale_types::error::Error),
+    }
+
+    fn err_not_appliable(id: JrpcId) -> Response {
+        into_err_response(StatusCode::SERVICE_UNAVAILABLE, JrpcErrorResponse {
+            id: Some(id),
+            code: NOT_READY_CODE,
+            message: Cow::Borrowed("Smart contract is not Jetton or NFT"),
+        })
+    }
+
+    let permit = match acquire_getter_permit(&id, &state).await {
+        Ok(permit) => permit,
+        Err(err_response) => return err_response,
+    };
+    let config = &state.config().run_get_method;
+    let gas_limit = config.vm_getter_gas;
+
+    let LoadedAccountState::Found {
+        state: account_state,
+        mc_ref_handle,
+        timings,
+        ..
+    } = (match state.get_account_state(&p.address) {
+        Ok(item) => item,
+        Err(e) => return error_to_response(id, e),
+    })
+    else {
+        return err_not_appliable(id);
+    };
+
+    let f = move |id: &JrpcId| {
+        const POSSIBLE_TYPES: [TokenDataType; 2] =
+            [TokenDataType::JettonMaster, TokenDataType::JettonWallet];
+
+        let mut parsed_type = None::<(TokenDataType, _)>;
+        for ty in POSSIBLE_TYPES {
+            let res = run_getter(
+                &state,
+                &account_state,
+                timings,
+                compute_method_id(ty.getter_name()),
+                Vec::with_capacity(1),
+                gas_limit / 2,
+            )
+            .map_err(RunMethodError::Internal)?;
+
+            if res.exit_code == 0 {
+                parsed_type = Some((ty, res.stack));
+                break;
+            }
+        }
+
+        let Some((parsed_type, stack)) = parsed_type else {
+            return Ok(None);
+        };
+
+        let _other_mc_ref_handle;
+        let res = match parsed_type {
+            TokenDataType::JettonMaster => match JettonMasterData::from_stack(stack) {
+                Ok(data) => TokenData::JettonMaster(data),
+                Err(_) => return Ok(None),
+            },
+            TokenDataType::JettonWallet => match JettonWalletData::from_stack(stack) {
+                Ok(data) => {
+                    let LoadedAccountState::Found {
+                        state: jetton_master_state,
+                        mc_ref_handle,
+                        timings,
+                        ..
+                    } = state
+                        .get_account_state(&data.jetton)
+                        .map_err(RunMethodError::RpcError)?
+                    else {
+                        return Ok(None);
+                    };
+                    _other_mc_ref_handle = mc_ref_handle;
+
+                    let owner_address = CellBuilder::build_from(&data.owner)
+                        .map(tycho_vm::OwnedCellSlice::new_allow_exotic)
+                        .map_err(RunMethodError::Internal)?;
+
+                    let res = run_getter(
+                        &state,
+                        &jetton_master_state,
+                        timings,
+                        compute_method_id("get_wallet_address"),
+                        tycho_vm::tuple![slice owner_address],
+                        gas_limit / 2,
+                    )
+                    .map_err(RunMethodError::Internal)?;
+
+                    'verify: {
+                        if res.exit_code == 0 {
+                            let mut parser = StackParser::begin_from_bottom(res.stack);
+                            if matches!(
+                                parser.pop_address(),
+                                Ok(computed_addr) if computed_addr == p.address
+                            ) {
+                                break 'verify;
+                            }
+                        }
+                        return Ok(None);
+                    }
+                    TokenData::JettonWallet(data)
+                }
+                Err(_) => return Ok(None),
+            },
+        };
+        let res = ok_to_response(id.clone(), res);
+
+        drop(mc_ref_handle);
+        drop(permit);
+
+        Ok::<_, RunMethodError>(Some(res))
+    };
+
+    rayon_run(move || match f(&id) {
+        Ok(Some(res)) => res,
+        Ok(None) => err_not_appliable(id),
+        Err(RunMethodError::RpcError(e)) => error_to_response(id, e),
+        Err(RunMethodError::Internal(e)) => {
+            error_to_response(id, RpcStateError::Internal(e.into()))
+        }
+    })
+    .await
+}
+
 // === GET /getTransactions ===
 
 fn get_transactions(
@@ -810,39 +959,22 @@ async fn handle_run_get_method(id: JrpcId, state: RpcState, p: RunGetMethodParam
         TooBigStack(usize),
     }
 
-    let config = &state.config().run_get_method;
-    let permit = match state.acquire_run_get_method_permit().await {
-        RunGetMethodPermit::Acquired(permit) => permit,
-        RunGetMethodPermit::Disabled => {
-            return into_err_response(StatusCode::NOT_IMPLEMENTED, JrpcErrorResponse {
-                id: Some(id),
-                code: NOT_SUPPORTED_CODE,
-                message: "method disabled".into(),
-            });
-        }
-        RunGetMethodPermit::Timeout => {
-            return into_err_response(StatusCode::REQUEST_TIMEOUT, JrpcErrorResponse {
-                id: Some(id),
-                code: TIMEOUT_CODE,
-                message: "timeout while waiting for VM slot".into(),
-            });
-        }
+    let permit = match acquire_getter_permit(&id, &state).await {
+        Ok(permit) => permit,
+        Err(err_response) => return err_response,
     };
+    let config = &state.config().run_get_method;
     let gas_limit = config.vm_getter_gas;
     let max_response_stack_items = config.max_response_stack_items;
 
     let f = move || {
         // Prepare stack.
-        let mut items = Vec::with_capacity(p.stack.len() + 1);
+        let mut stack = Vec::with_capacity(p.stack.len() + 1);
         for item in p.stack {
             let item =
                 tycho_vm::RcStackValue::try_from(item).map_err(RunMethodError::InvalidParams)?;
-            items.push(item);
+            stack.push(item);
         }
-        items.push(tycho_vm::RcStackValue::new_dyn_value(BigInt::from(
-            p.method,
-        )));
-        let stack = tycho_vm::Stack::with_items(items);
 
         // Load account state.
         let (block_id, shard_state, _mc_ref_handle, timings) = match state
@@ -868,77 +1000,23 @@ async fn handle_run_get_method(id: JrpcId, state: RpcState, p: RunGetMethodParam
             }
         };
 
-        // Parse account state.
-        let mut balance = CurrencyCollection::ZERO;
-        let mut code = None::<Cell>;
-        let mut data = None::<Cell>;
-        let mut account_libs = Dict::new();
-        let mut state_libs = Dict::new();
-        if let Some(account) = shard_state
-            .load_account()
-            .map_err(RunMethodError::Internal)?
-        {
-            balance = account.balance;
-            if let AccountState::Active(state_init) = account.state {
-                code = state_init.code;
-                data = state_init.data;
-                account_libs = state_init.libraries;
-                state_libs = state.get_libraries();
-            }
-        }
+        let last_transaction_id =
+            TonlibTransactionId::new(shard_state.last_trans_lt, shard_state.last_trans_hash);
 
-        // Prepare VM state.
-        let config = state.get_unpacked_blockchain_config();
+        let res = run_getter(&state, &shard_state, timings, p.method, stack, gas_limit)
+            .map_err(RunMethodError::Internal)?;
 
-        let smc_info = tycho_vm::SmcInfoBase::new()
-            .with_now(timings.gen_utime)
-            .with_block_lt(timings.gen_lt)
-            .with_tx_lt(timings.gen_lt)
-            .with_account_balance(balance)
-            .with_account_addr(p.address.into())
-            .with_config(config.raw.clone())
-            .require_ton_v4()
-            .with_code(code.clone().unwrap_or_default())
-            .with_message_balance(CurrencyCollection::ZERO)
-            .with_storage_fees(Tokens::ZERO)
-            .require_ton_v6()
-            .with_unpacked_config(config.unpacked.as_tuple())
-            .require_ton_v11();
-
-        let libraries = (account_libs, state_libs);
-        let mut vm = tycho_vm::VmState::builder()
-            .with_smc_info(smc_info)
-            .with_code(code)
-            .with_data(data.unwrap_or_default())
-            .with_libraries(&libraries)
-            .with_init_selector(false)
-            .with_raw_stack(tycho_vm::SafeRc::new(stack))
-            .with_gas(tycho_vm::GasParams {
-                max: gas_limit,
-                limit: gas_limit,
-                ..tycho_vm::GasParams::getter()
-            })
-            .with_modifiers(config.modifiers)
-            .build();
-
-        // Run VM.
-        let exit_code = !vm.run();
-        if vm.stack.depth() > max_response_stack_items {
-            return Err(RunMethodError::TooBigStack(vm.stack.depth()));
+        if res.stack.depth() > max_response_stack_items {
+            return Err(RunMethodError::TooBigStack(res.stack.depth()));
         }
 
         // Prepare response.
-        let gas_used = vm.gas.consumed();
-
         Ok::<_, RunMethodError>(RunGetMethodResponse {
             ty: RunGetMethodResponse::TY,
-            exit_code,
-            gas_used,
-            stack: Some(vm.stack),
-            last_transaction_id: TonlibTransactionId::new(
-                shard_state.last_trans_lt,
-                shard_state.last_trans_hash,
-            ),
+            exit_code: res.exit_code,
+            gas_used: res.gas_used,
+            stack: Some(res.stack),
+            last_transaction_id,
             block_id: TonlibBlockId::from(*block_id),
             extra: TonlibExtra,
         })
@@ -1047,6 +1125,119 @@ fn into_err_response(mut status_code: StatusCode, mut res: JrpcErrorResponse<Jrp
         status_code = StatusCode::OK;
     }
     (status_code, res).into_response()
+}
+
+async fn acquire_getter_permit(
+    id: &JrpcId,
+    state: &RpcState,
+) -> Result<OwnedSemaphorePermit, Response> {
+    match state.acquire_run_get_method_permit().await {
+        RunGetMethodPermit::Acquired(permit) => Ok(permit),
+        RunGetMethodPermit::Disabled => Err(into_err_response(
+            StatusCode::NOT_IMPLEMENTED,
+            JrpcErrorResponse {
+                id: Some(id.clone()),
+                code: NOT_SUPPORTED_CODE,
+                message: "method disabled".into(),
+            },
+        )),
+        RunGetMethodPermit::Timeout => Err(into_err_response(
+            StatusCode::REQUEST_TIMEOUT,
+            JrpcErrorResponse {
+                id: Some(id.clone()),
+                code: TIMEOUT_CODE,
+                message: "timeout while waiting for VM slot".into(),
+            },
+        )),
+    }
+}
+
+fn run_getter(
+    state: &RpcState,
+    account_state: &ShardAccount,
+    timings: GenTimings,
+    method_id: i64,
+    mut stack: Vec<tycho_vm::RcStackValue>,
+    gas_limit: u64,
+) -> Result<GetterOutput, everscale_types::error::Error> {
+    // Prepare stack.
+    stack.push(tycho_vm::RcStackValue::new_dyn_value(BigInt::from(
+        method_id,
+    )));
+    let stack = tycho_vm::Stack::with_items(stack);
+
+    // Parse account state.
+    let mut balance = CurrencyCollection::ZERO;
+    let mut code = None::<Cell>;
+    let mut data = None::<Cell>;
+    let mut account_libs = Dict::new();
+    let mut state_libs = Dict::new();
+    let mut address = StdAddr::new(0, HashBytes::ZERO);
+    if let Some(account) = account_state.load_account()? {
+        if let IntAddr::Std(addr) = account.address {
+            address = addr;
+        }
+
+        balance = account.balance;
+
+        if let AccountState::Active(state_init) = account.state {
+            code = state_init.code;
+            data = state_init.data;
+            account_libs = state_init.libraries;
+            state_libs = state.get_libraries();
+        }
+    }
+
+    // Prepare VM state.
+    let config = state.get_unpacked_blockchain_config();
+
+    let smc_info = tycho_vm::SmcInfoBase::new()
+        .with_now(timings.gen_utime)
+        .with_block_lt(timings.gen_lt)
+        .with_tx_lt(timings.gen_lt)
+        .with_account_balance(balance)
+        .with_account_addr(address.clone().into())
+        .with_config(config.raw.clone())
+        .require_ton_v4()
+        .with_code(code.clone().unwrap_or_default())
+        .with_message_balance(CurrencyCollection::ZERO)
+        .with_storage_fees(Tokens::ZERO)
+        .require_ton_v6()
+        .with_unpacked_config(config.unpacked.as_tuple())
+        .require_ton_v11();
+
+    let libraries = (account_libs, state_libs);
+    let mut vm = tycho_vm::VmState::builder()
+        .with_smc_info(smc_info)
+        .with_code(code)
+        .with_data(data.unwrap_or_default())
+        .with_libraries(&libraries)
+        .with_init_selector(false)
+        .with_raw_stack(tycho_vm::SafeRc::new(stack))
+        .with_gas(tycho_vm::GasParams {
+            max: gas_limit,
+            limit: gas_limit,
+            ..tycho_vm::GasParams::getter()
+        })
+        .with_modifiers(config.modifiers)
+        .build();
+
+    // Run VM.
+    let exit_code = !vm.run();
+
+    // Done
+    let gas_used = vm.gas.consumed();
+    Ok(GetterOutput {
+        exit_code,
+        gas_used,
+        stack: vm.stack,
+    })
+}
+
+struct GetterOutput {
+    pub exit_code: i32,
+    pub gas_used: u64,
+    pub stack: tycho_vm::SafeRc<tycho_vm::Stack>,
 }
 
 #[cfg(test)]

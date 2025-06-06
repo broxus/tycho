@@ -3,6 +3,7 @@ use std::num::NonZeroU8;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
+use anyhow::Context;
 use base64::prelude::{Engine as _, BASE64_STANDARD};
 use everscale_types::error::Error;
 use everscale_types::models::{
@@ -15,10 +16,12 @@ use num_bigint::BigInt;
 use rand::Rng;
 use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use tycho_block_util::message::ExtMsgRepr;
 use tycho_storage::{
     BlockTransactionIdsIter, BlockTransactionsIterBuilder, BriefShardDescr, TransactionsIterBuilder,
 };
+use tycho_util::FastHashMap;
 
 use crate::util::jrpc_extractor::{
     JrpcError, JrpcErrorResponse, JrpcOkResponse, JSONRPC_FIELD, JSONRPC_VERSION,
@@ -26,6 +29,7 @@ use crate::util::jrpc_extractor::{
 use crate::util::serde_helpers::{
     self, normalize_base64, should_normalize_base64, Base64BytesWithLimit,
 };
+use crate::util::tonlib_helpers::{load_bytes_rope, StackParser};
 
 // === ID ===
 
@@ -425,6 +429,205 @@ pub struct WalletInformationResponse {
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub fields: Option<WalletFields>,
     pub last_transaction_id: TonlibTransactionId,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", tag = "contract_type")]
+pub enum TokenData {
+    JettonMaster(JettonMasterData),
+    JettonWallet(JettonWalletData),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenDataType {
+    JettonMaster,
+    JettonWallet,
+}
+
+impl TokenDataType {
+    pub const fn getter_name(&self) -> &'static str {
+        match self {
+            Self::JettonMaster => "get_jetton_data",
+            Self::JettonWallet => "get_wallet_data",
+        }
+    }
+}
+
+pub trait GetTokenData: Sized {
+    fn from_stack(stack: RcStack) -> anyhow::Result<Self>;
+}
+
+type RcStack = tycho_vm::SafeRc<tycho_vm::Stack>;
+
+#[derive(Serialize)]
+pub struct JettonMasterData {
+    // NOTE: For some unknown reason the original
+    // implementationo returns this as `int`,
+    // but this definitely will not work for large values.
+    #[serde(with = "serde_helpers::string")]
+    pub total_supply: num_bigint::BigInt,
+    pub mintable: bool,
+    #[serde(with = "serde_helpers::option_tonlib_address")]
+    pub admin_address: Option<StdAddr>,
+    pub jetton_content: TokenDataAttributes,
+    #[serde(with = "Boc")]
+    pub jetton_wallet_code: Cell,
+}
+
+impl GetTokenData for JettonMasterData {
+    fn from_stack(stack: RcStack) -> anyhow::Result<Self> {
+        let mut parser = StackParser::begin_from_bottom(stack);
+        Ok(Self {
+            total_supply: parser.pop_int()?,
+            mintable: parser.pop_bool()?,
+            admin_address: parser.pop_address_or_none()?,
+            jetton_content: parser
+                .pop_cell()?
+                .parse::<TokenDataAttributes>()
+                .context("invalid token data attributes")?,
+            jetton_wallet_code: parser.pop_cell()?,
+        })
+    }
+}
+
+#[derive(Serialize)]
+pub struct JettonWalletData {
+    #[serde(with = "serde_helpers::string")]
+    pub balance: num_bigint::BigInt,
+    #[serde(with = "serde_helpers::tonlib_address")]
+    pub owner: StdAddr,
+    #[serde(with = "serde_helpers::tonlib_address")]
+    pub jetton: StdAddr,
+    #[serde(with = "Boc")]
+    pub jetton_wallet_code: Cell,
+}
+
+impl GetTokenData for JettonWalletData {
+    fn from_stack(stack: RcStack) -> anyhow::Result<Self> {
+        let mut parser = StackParser::begin_from_bottom(stack);
+        Ok(Self {
+            balance: parser.pop_int()?,
+            owner: parser.pop_address()?,
+            jetton: parser.pop_address()?,
+            jetton_wallet_code: parser.pop_cell()?,
+        })
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenDataAttributes {
+    Onchain {
+        data: FastHashMap<TokenDataAttribute, String>,
+    },
+    Offchain {
+        data: String,
+    },
+}
+
+impl TokenDataAttributes {
+    pub fn parse_value(mut value: CellSlice<'_>) -> Result<Vec<u8>, everscale_types::error::Error> {
+        if value.is_data_empty() {
+            value = value.load_reference_as_slice()?;
+        }
+
+        match value.load_u8()? {
+            0x00 => load_bytes_rope(value, false),
+            0x01 => {
+                let dict = Dict::<u32, Cell>::load_from(&mut value)?;
+                let mut data = Vec::new();
+                for item in dict.values() {
+                    let item = item?;
+                    data.extend_from_slice(&load_bytes_rope(item.as_slice()?, false)?);
+                }
+                Ok(data)
+            }
+            _ => Err(everscale_types::error::Error::InvalidTag),
+        }
+    }
+}
+
+impl<'a> Load<'a> for TokenDataAttributes {
+    fn load_from(cs: &mut CellSlice<'a>) -> Result<Self, Error> {
+        match cs.load_u8()? {
+            0x00 => {
+                let mut data = FastHashMap::default();
+                let dict = Dict::<HashBytes, CellSlice<'_>>::load_from(cs)?;
+                for item in dict.iter() {
+                    let (name, value) = item?;
+                    let value = Self::parse_value(value)?;
+                    data.insert(
+                        TokenDataAttribute::resolve(&name),
+                        String::from_utf8_lossy(&value).into_owned(),
+                    );
+                }
+                Ok(Self::Onchain { data })
+            }
+            0x01 => {
+                let data = load_bytes_rope(*cs, false)?;
+                Ok(Self::Offchain {
+                    data: String::from_utf8_lossy(&data).into_owned(),
+                })
+            }
+            _ => Err(Error::InvalidTag),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TokenDataAttribute {
+    Known(&'static str),
+    Unknown(HashBytes),
+}
+
+impl TokenDataAttribute {
+    pub const KNOWN_ATTRIBUTES: [&str; 9] = [
+        "uri",
+        "name",
+        "description",
+        "image",
+        "image_data",
+        "symbol",
+        "decimals",
+        "amount_style",
+        "render_type",
+    ];
+
+    pub fn resolve(hash: &HashBytes) -> Self {
+        static KNOWN: OnceLock<FastHashMap<HashBytes, &'static str>> = OnceLock::new();
+        let known = KNOWN.get_or_init(|| {
+            let mut result = FastHashMap::with_capacity_and_hasher(
+                Self::KNOWN_ATTRIBUTES.len(),
+                Default::default(),
+            );
+            for name in Self::KNOWN_ATTRIBUTES {
+                let hash = sha2::Sha256::digest(name);
+                result.insert(HashBytes(hash.into()), name);
+            }
+            result
+        });
+        match known.get(hash).copied() {
+            Some(name) => Self::Known(name),
+            None => Self::Unknown(*hash),
+        }
+    }
+}
+
+impl std::fmt::Display for TokenDataAttribute {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Known(s) => f.write_str(s),
+            Self::Unknown(s) => std::fmt::Display::fmt(s, f),
+        }
+    }
+}
+
+impl serde::Serialize for TokenDataAttribute {
+    #[inline]
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
 }
 
 #[derive(Serialize)]
@@ -998,7 +1201,7 @@ impl RunGetMethodResponse {
                 } else {
                     ""
                 };
-                write!(f, "{sign}0x{:x}", self.0)
+                write!(f, "{sign}0x{:x}", self.0.magnitude())
             }
         }
 

@@ -13,6 +13,7 @@ use tycho_util::serde_helpers::BorrowedStr;
 use tycho_util::FastHashSet;
 
 use crate::util::serde_helpers;
+use crate::util::tonlib_helpers::load_bytes_rope;
 
 // === Requests ===
 
@@ -908,7 +909,7 @@ impl DecodedContent {
         let tag = cs.load_u32()?;
         match tag {
             0x00000000 => {
-                let bytes = load_bytes_rope(cs)?;
+                let bytes = load_bytes_rope(cs, true)?;
                 Ok(Self::TextComment {
                     comment: String::from_utf8_lossy(&bytes).into_owned(),
                 })
@@ -916,23 +917,6 @@ impl DecodedContent {
             _ => Err(everscale_types::error::Error::InvalidTag),
         }
     }
-}
-
-fn load_bytes_rope(mut cs: CellSlice<'_>) -> Result<Vec<u8>, everscale_types::error::Error> {
-    let mut result = Vec::new();
-    let mut buffer = [0u8; 128];
-    loop {
-        // TODO: Should we trim unaligned bytes?
-        let bytes = cs.load_raw(&mut buffer, cs.size_bits())?;
-        result.extend_from_slice(bytes);
-
-        match cs.size_refs() {
-            0 => break,
-            1 => cs = cs.load_reference_as_slice()?,
-            _ => return Err(everscale_types::error::Error::InvalidData),
-        }
-    }
-    Ok(result)
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
