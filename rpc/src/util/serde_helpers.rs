@@ -46,6 +46,7 @@ pub mod method_id {
     use std::borrow::Cow;
 
     use super::*;
+    use crate::util::tonlib_helpers::compute_method_id;
 
     const MAX_METHOD_NAME_LEN: usize = 128;
 
@@ -69,7 +70,7 @@ pub mod method_id {
                 if bytes.len() > MAX_METHOD_NAME_LEN {
                     return Err(Error::custom("method name is too long"));
                 }
-                everscale_types::crc::crc_16(bytes) as i64 | 0x10000
+                compute_method_id(bytes)
             }
         })
     }

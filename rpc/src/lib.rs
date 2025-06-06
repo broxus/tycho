@@ -11,4 +11,5 @@ mod util {
     pub mod error_codes;
     pub mod jrpc_extractor;
     pub mod serde_helpers;
+    pub mod tonlib_helpers;
 }
