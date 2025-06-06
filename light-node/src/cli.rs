@@ -344,6 +344,7 @@ impl<C> Node<C> {
                 .with_config(config.clone())
                 .with_storage(self.storage.clone())
                 .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
+                .with_zerostate_id(self.zerostate)
                 .build();
 
             rpc_state.init(last_block_id).await?;

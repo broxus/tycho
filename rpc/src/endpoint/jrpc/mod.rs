@@ -141,7 +141,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<i64, Method>) -> Res
             } else if p.limit > GetAccountsByCodeHashResponse::MAX_LIMIT {
                 return too_large_limit_response(req.id);
             }
-            match state.get_accounts_by_code_hash(&p.code_hash, p.continuation.as_ref()) {
+            match state.get_accounts_by_code_hash(&p.code_hash, p.continuation.as_ref(), None) {
                 Ok(list) => ok_to_response(req.id, GetAccountsByCodeHashResponse {
                     list: RefCell::new(Some(list)),
                     limit: p.limit,
@@ -155,7 +155,8 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<i64, Method>) -> Res
             } else if p.limit > GetTransactionsListResponse::MAX_LIMIT {
                 return too_large_limit_response(req.id);
             }
-            match state.get_transactions(&p.account, p.last_transaction_lt, 0) {
+            match state.get_transactions(&p.account, None, p.last_transaction_lt, true, None) {
+                // TODO: Move serialization to a separate blocking task pool.
                 Ok(list) => ok_to_response(req.id, GetTransactionsListResponse {
                     list: RefCell::new(Some(list)),
                     limit: p.limit,
@@ -163,16 +164,23 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<i64, Method>) -> Res
                 Err(e) => error_to_response(req.id, e),
             }
         }
-        MethodParams::GetTransaction(p) => match state.get_transaction(&p.id) {
+        MethodParams::GetTransaction(p) => match state.get_transaction(&p.id, None) {
             Ok(value) => ok_to_response(req.id, value.as_ref().map(encode_base64)),
             Err(e) => error_to_response(req.id, e),
         },
-        MethodParams::GetDstTransaction(p) => match state.get_dst_transaction(&p.message_hash) {
-            Ok(value) => ok_to_response(req.id, value.as_ref().map(encode_base64)),
-            Err(e) => error_to_response(req.id, e),
-        },
-        MethodParams::GetTransactionBlockId(p) => match state.get_transaction_block_id(&p.id) {
-            Ok(value) => ok_to_response(req.id, value.map(|block_id| BlockIdResponse { block_id })),
+        MethodParams::GetDstTransaction(p) => {
+            match state.get_dst_transaction(&p.message_hash, None) {
+                Ok(value) => ok_to_response(req.id, value.as_ref().map(encode_base64)),
+                Err(e) => error_to_response(req.id, e),
+            }
+        }
+        MethodParams::GetTransactionBlockId(p) => match state.get_transaction_info(&p.id, None) {
+            Ok(value) => ok_to_response(
+                req.id,
+                value.map(|info| BlockIdResponse {
+                    block_id: info.block_id,
+                }),
+            ),
             Err(e) => error_to_response(req.id, e),
         },
         MethodParams::GetKeyBlockProof(p) => {
@@ -393,16 +401,16 @@ impl Serialize for GetAccountsByCodeHashResponse<'_> {
     }
 }
 
-struct GetTransactionsListResponse<'a> {
-    list: RefCell<Option<TransactionsIterBuilder<'a>>>,
+struct GetTransactionsListResponse {
+    list: RefCell<Option<TransactionsIterBuilder>>,
     limit: u8,
 }
 
-impl GetTransactionsListResponse<'_> {
+impl GetTransactionsListResponse {
     const MAX_LIMIT: u8 = 100;
 }
 
-impl Serialize for GetTransactionsListResponse<'_> {
+impl Serialize for GetTransactionsListResponse {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -460,6 +468,7 @@ fn error_to_response(id: i64, e: RpcStateError) -> Response {
         RpcStateError::NotReady => (NOT_READY_CODE, Cow::Borrowed("not ready")),
         RpcStateError::NotSupported => (NOT_SUPPORTED_CODE, Cow::Borrowed("method not supported")),
         RpcStateError::Internal(e) => (INTERNAL_ERROR_CODE, e.to_string().into()),
+        RpcStateError::BadRequest(e) => (INVALID_PARAMS_CODE, e.to_string().into()),
     };
 
     JrpcErrorResponse {

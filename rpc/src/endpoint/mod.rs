@@ -13,7 +13,8 @@ use crate::state::RpcState;
 
 mod jrpc;
 mod proto;
-mod toncenter;
+mod toncenter_v2;
+mod toncenter_v3;
 
 pub struct RpcEndpoint {
     listener: TcpListener,
@@ -47,10 +48,11 @@ impl RpcEndpoint {
             .route("/rpc", post(common_route))
             .route("/proto", post(common_route));
 
-        if self.state.config().enable_toncenter_api {
-            router = router
-                .route("/toncenter/v2", post(toncenter_jrpc_route))
-                .route("/toncenter/v2/jsonRPC", post(toncenter_jrpc_route));
+        if self.state.config().enable_toncenter_v2_api {
+            router = router.nest("/toncenter/v2", toncenter_v2::router());
+        }
+        if self.state.config().enable_toncenter_v3_api {
+            router = router.nest("/toncenter/v3", toncenter_v3::router());
         }
 
         let router = router.layer(service).with_state(self.state);
@@ -80,18 +82,6 @@ async fn common_route(state: State<RpcState>, req: Request) -> Response {
         },
         Some(mime) if mime.starts_with(APPLICATION_PROTOBUF) => match req.extract().await {
             Ok(request) => proto::route(state, request).await,
-            Err(e) => e.into_response(),
-        },
-        _ => StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
-    }
-}
-
-async fn toncenter_jrpc_route(state: State<RpcState>, req: Request) -> Response {
-    use axum::http::StatusCode;
-
-    match get_mime_type(&req) {
-        Some(mime) if mime.starts_with(APPLICATION_JSON) => match req.extract().await {
-            Ok(method) => toncenter::route(state, method).await,
             Err(e) => e.into_response(),
         },
         _ => StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),

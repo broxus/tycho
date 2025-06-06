@@ -956,7 +956,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=cd1c9b1d9f8290a679eabea896a5a31a47715833#cd1c9b1d9f8290a679eabea896a5a31a47715833"
+source = "git+https://github.com/broxus/everscale-types.git?rev=2539f576d1558535279a9e3928a62f119d46a215#2539f576d1558535279a9e3928a62f119d46a215"
 dependencies = [
  "ahash",
  "anyhow",
@@ -986,7 +986,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-abi-proc"
 version = "0.1.0"
-source = "git+https://github.com/broxus/everscale-types.git?rev=cd1c9b1d9f8290a679eabea896a5a31a47715833#cd1c9b1d9f8290a679eabea896a5a31a47715833"
+source = "git+https://github.com/broxus/everscale-types.git?rev=2539f576d1558535279a9e3928a62f119d46a215#2539f576d1558535279a9e3928a62f119d46a215"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -997,7 +997,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=cd1c9b1d9f8290a679eabea896a5a31a47715833#cd1c9b1d9f8290a679eabea896a5a31a47715833"
+source = "git+https://github.com/broxus/everscale-types.git?rev=2539f576d1558535279a9e3928a62f119d46a215#2539f576d1558535279a9e3928a62f119d46a215"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3784,6 +3784,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.11",
  "tokio",
@@ -4127,9 +4128,9 @@ dependencies = [
 
 [[package]]
 name = "weedb"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5b35f90e43128653b3623cf75c84a968072ed691426d747dbeaf3755ee5b1d"
+checksum = "7cf44adf22fe2b0679ee6af5dceb5c106d02ea96a838f0dc6253a45f7d1700b8"
 dependencies = [
  "librocksdb-sys",
  "metrics",
