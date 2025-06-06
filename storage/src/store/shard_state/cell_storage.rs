@@ -3,11 +3,14 @@ use std::collections::hash_map;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
+use std::thread::Scope;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bumpalo::Bump;
+use bumpalo_herd::{Herd, Member};
 use bytesize::ByteSize;
+use dashmap::Map;
 use everscale_types::cell::*;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
@@ -253,6 +256,271 @@ impl CellStorage {
         Ok(())
     }
 
+    pub fn store_cell_mt(
+        &self,
+        root: &DynCell,
+        batch: &mut WriteBatch,
+        split_at: FastHashMap<HashBytes, Cell>,
+        capacity: usize,
+    ) -> Result<usize, CellStorageError> {
+        type StoreResult = Result<(), CellStorageError>;
+
+        struct AddedCell<'a> {
+            old_rc: i64,
+            additions: u32,
+            data: Option<&'a [u8]>,
+        }
+
+        struct Alloc<'a> {
+            bump: Member<'a>,
+            buffer: Vec<u8>,
+        }
+
+        struct StoreContext<'a> {
+            db: &'a BaseDb,
+            herd: &'a Herd,
+            raw_cache: &'a RawCellsCache,
+            /// Subtrees to process in parallel.
+            split_at: FastHashMap<HashBytes, Cell>,
+            // TODO: Use `&'a HashBytes` for key?
+            // Pros:
+            //   - Less `memcpy` calls;
+            //   - Less memory occupied (8 bytes per key vs 32 bytes);
+            // Cons:
+            //   - This reference is stored alongside with cell so
+            //     key locations will be very random and iteration
+            //     will be slower than it is with inplace keys.
+            /// Transaction items.
+            transaction: FastDashMap<HashBytes, AddedCell<'a>>,
+            /// References of detached subtrees.
+            delayed_additions: std::sync::Mutex<FastHashMap<HashBytes, u32>>,
+        }
+
+        impl<'a> StoreContext<'a> {
+            fn new(
+                db: &'a BaseDb,
+                herd: &'a Herd,
+                raw_cache: &'a RawCellsCache,
+                split_accounts: FastHashMap<HashBytes, Cell>,
+                capacity: usize,
+            ) -> Self {
+                Self {
+                    db,
+                    raw_cache,
+                    herd,
+                    split_at: split_accounts,
+                    transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
+                        capacity,
+                        Default::default(),
+                        512,
+                    ),
+                    delayed_additions: Default::default(),
+                }
+            }
+
+            fn traverse_cell<'c: 'scope, 'scope, 'env>(
+                &'c self,
+                root: &'c DynCell,
+                scope: &'scope Scope<'scope, 'env>,
+            ) -> StoreResult {
+                let mut alloc = Alloc {
+                    bump: self.herd.get(),
+                    buffer: Vec::with_capacity(512),
+                };
+
+                if !self.insert_cell(root.as_ref(), &mut alloc, 0)? {
+                    return Ok(());
+                }
+
+                let mut stack = Vec::with_capacity(16);
+                stack.push(root.references());
+
+                'outer: loop {
+                    let depth = stack.len();
+                    let Some(iter) = stack.last_mut() else {
+                        break;
+                    };
+
+                    for child in &mut *iter {
+                        // NOTE: The scope is used to reduce function frame size.
+                        {
+                            // Skip cell to store it later in parallel
+                            let child_hash = child.repr_hash();
+                            if self.split_at.contains_key(child_hash) {
+                                let mut delayed_additions = self.delayed_additions.lock().unwrap();
+                                match delayed_additions.entry(*child_hash) {
+                                    hash_map::Entry::Vacant(entry) => {
+                                        // This subtree will be added by another thread,
+                                        // so no additions is needed on first occurence.
+                                        entry.insert(0);
+                                        drop(delayed_additions);
+
+                                        // Spawn processing.
+                                        // TODO: Handle error properly.
+                                        scope.spawn(|| self.traverse_cell(child, scope).unwrap());
+                                    }
+                                    hash_map::Entry::Occupied(mut entry) => {
+                                        // Other thread will add this subtree only once,
+                                        // so we need to adjust references to keep them in sync.
+                                        *entry.get_mut() += 1;
+                                    }
+                                }
+
+                                continue 'outer;
+                            }
+                        }
+
+                        if self.insert_cell(child, &mut alloc, depth)? {
+                            stack.push(child.references());
+                            continue 'outer;
+                        }
+                    }
+
+                    stack.pop();
+                }
+
+                Ok(())
+            }
+
+            fn insert_cell(
+                &self,
+                cell: &DynCell,
+                alloc: &mut Alloc<'a>,
+                depth: usize,
+            ) -> Result<bool, CellStorageError> {
+                use dashmap::mapref::entry::Entry;
+
+                let key = cell.repr_hash();
+
+                // Fast path: cell is already presented in this transaction, just bump refs.
+                if let Some(mut value) = self.transaction.get_mut(key) {
+                    value.additions += 1;
+                    return Ok(false);
+                }
+
+                // Slow path: find an existing stored cell data.
+                // NOTE: We dropped a dashmap lock on purpose so that parallel
+                // threads can do this job without blocking each other on the
+                // same shard (going to rocksdb might be slow).
+
+                let old_rc = self.raw_cache.get_rc_for_insert(self.db, key, depth)?;
+
+                // Prepare `alloc.buffer` if the cell is new (but not flush it to
+                // the bump allocator yet).
+                let is_new = old_rc == 0;
+                if is_new {
+                    let buffer = &mut alloc.buffer;
+                    buffer.clear();
+                    if StorageCell::serialize_to(cell, buffer).is_err() {
+                        return Err(CellStorageError::InvalidCell);
+                    }
+                }
+
+                // Try to insert once more.
+                Ok(match self.transaction.entry(*key) {
+                    Entry::Occupied(mut value) => {
+                        // Some other thread has already inserted this cell.
+                        // In this case we discard buffer data and juse bump refs.
+                        value.get_mut().additions += 1;
+                        false
+                    }
+                    Entry::Vacant(entry) => {
+                        // Copy buffer data to the bump allocator to extend its lifetime.
+                        let data = if is_new {
+                            Some(alloc.bump.alloc_slice_copy(alloc.buffer.as_slice()) as &[u8])
+                        } else {
+                            None
+                        };
+
+                        // Add a new transaction entry.
+                        entry.insert(AddedCell {
+                            old_rc,
+                            additions: 1,
+                            data,
+                        });
+                        is_new
+                    }
+                })
+            }
+
+            fn finalize(self, batch: &mut WriteBatch) -> usize {
+                std::thread::scope(|s| {
+                    // Apply delayed additions before finalizing the transaction.
+                    for (hash, additions) in self.delayed_additions.into_inner().unwrap() {
+                        if additions > 0 {
+                            if let Some(mut item) = self.transaction.get_mut(&hash) {
+                                // TODO: Assert that `item.additions == 1` at first?
+                                item.additions += additions;
+                            } else {
+                                panic!("spawned subtree was not processed");
+                            }
+                        }
+                    }
+
+                    // Split shards evenly between N threads and apply changes to cache.
+                    let num_shards = self.transaction._shard_count();
+                    let num_threads = std::thread::available_parallelism()
+                        .map_or(1, usize::from)
+                        .min(num_shards);
+
+                    let chunk_size = num_shards / num_threads;
+                    assert!(chunk_size >= 1);
+                    let mut additional = num_shards % num_threads;
+
+                    let mut range_start = 0;
+                    for _ in 0..num_threads {
+                        let mut range_end = range_start + chunk_size;
+                        if additional > 0 {
+                            additional -= 1;
+                            range_end += 1;
+                        }
+                        assert!(range_end > range_start);
+
+                        // SAFETY: Index must be in bounds.
+                        let shards = unsafe {
+                            (range_start..range_end).map(|i| self.transaction._get_read_shard(i))
+                        };
+                        range_start = range_end;
+
+                        let cache = self.raw_cache;
+                        s.spawn(move || {
+                            for shard in shards {
+                                for (key, value) in shard {
+                                    let item = value.get();
+                                    let new_rc = item.old_rc + item.additions as i64;
+                                    cache.on_insert_cell(key, new_rc, item.data);
+                                }
+                            }
+                        });
+                    }
+                    assert_eq!(range_start, num_shards);
+
+                    // Merge transaction items into the final batch.
+                    let mut buffer = Vec::with_capacity(512);
+                    let total = self.transaction.len();
+                    let cells_cf = &self.db.cells.cf();
+                    for kv in self.transaction.iter() {
+                        let key = kv.key();
+                        let item = kv.value();
+
+                        buffer.clear();
+                        refcount::add_positive_refount(item.additions, item.data, &mut buffer);
+                        batch.merge_cf(cells_cf, key.as_slice(), &buffer);
+                    }
+                    total
+                })
+            }
+        }
+
+        let herd = Herd::new();
+        let ctx = StoreContext::new(&self.db, &herd, &self.raw_cells_cache, split_at, capacity);
+
+        std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
+
+        Ok(ctx.finalize(batch))
+    }
+
+    #[allow(unused)]
     pub fn store_cell(
         &self,
         batch: &mut WriteBatch,

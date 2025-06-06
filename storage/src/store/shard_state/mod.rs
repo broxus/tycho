@@ -8,6 +8,7 @@ use bytesize::ByteSize;
 use everscale_types::models::*;
 use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
+use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
 use tycho_util::metrics::HistogramGuard;
 use weedb::rocksdb;
@@ -34,6 +35,8 @@ pub struct ShardStateStorage {
     min_ref_mc_state: MinRefMcStateTracker,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
+
+    accounts_split_depth: u8,
 }
 
 impl ShardStateStorage {
@@ -56,6 +59,7 @@ impl ShardStateStorage {
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
+            accounts_split_depth: 4,
         }))
     }
 
@@ -112,20 +116,35 @@ impl ShardStateStorage {
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
+        let accounts_split_depth = self.accounts_split_depth;
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
             let root_hash = *root_cell.repr_hash();
             let estimated_merkle_update_size = hint.estimate_cell_count();
 
+            let split_accounts = {
+                // Cell#0 - processed_upto
+                // Cell#1 - accounts
+                let shard_accounts = root_cell
+                    .reference_cloned(1)
+                    .context("invalid shard state")?
+                    .parse::<ShardAccounts>()
+                    .context("failed to load shard accounts")?;
+
+                split_aug_dict_raw(shard_accounts, accounts_split_depth)
+                    .context("failed to split shard accounts")?
+            };
+
             let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
             let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
 
-            let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time");
+            let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time_high");
 
-            let new_cell_count = cell_storage.store_cell(
-                &mut batch,
+            let new_cell_count = cell_storage.store_cell_mt(
                 root_cell.as_ref(),
+                &mut batch,
+                split_accounts,
                 estimated_merkle_update_size,
             )?;
 

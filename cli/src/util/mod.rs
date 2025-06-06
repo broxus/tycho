@@ -51,7 +51,6 @@ pub fn compute_storage_used(account: &Account) -> Result<StorageUsed> {
     let res = StorageUsed {
         cells: VarUint56::new(res.cell_count),
         bits: VarUint56::new(res.bit_count),
-        public_cells: Default::default(),
     };
 
     anyhow::ensure!(res.bits.is_valid(), "bit count overflow");
