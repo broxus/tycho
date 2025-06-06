@@ -17,6 +17,36 @@ use crate::util::serde_helpers;
 // === Requests ===
 
 #[derive(Debug, Deserialize)]
+pub struct BlocksRequest {
+    #[serde(default)]
+    pub workchain: Option<i32>,
+    #[serde(default)]
+    pub shard: Option<ShardPrefix>,
+    #[serde(default)]
+    pub seqno: Option<u32>,
+    #[serde(default)]
+    pub mc_seqno: Option<u32>,
+    #[serde(default)]
+    pub start_utime: Option<u32>,
+    #[serde(default)]
+    pub end_utime: Option<u32>,
+    #[serde(default)]
+    pub start_lt: Option<u64>,
+    #[serde(default)]
+    pub end_lt: Option<u64>,
+    #[serde(default = "default_blocks_limit")]
+    pub limit: NonZeroUsize,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_sort_direction")]
+    pub sort: SortDirection,
+}
+
+const fn default_blocks_limit() -> NonZeroUsize {
+    NonZeroUsize::new(10).unwrap()
+}
+
+#[derive(Debug, Deserialize)]
 pub struct TransactionsRequest {
     #[serde(default)]
     pub workchain: Option<i32>,
@@ -128,7 +158,7 @@ pub struct MasterchainInfoResponse {
 
 #[derive(Debug, Serialize)]
 pub struct BlocksResponse {
-    pub block_ids: Vec<BlockId>,
+    pub blocks: Vec<Block>,
 }
 
 #[derive(Default, Serialize)]

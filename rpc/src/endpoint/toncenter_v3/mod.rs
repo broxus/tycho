@@ -14,7 +14,7 @@ use everscale_types::models::{
 };
 use everscale_types::prelude::*;
 use serde::Serialize;
-use tycho_storage::{RpcSnapshot, TransactionInfo};
+use tycho_storage::{BriefBlockInfo, RpcSnapshot, TransactionInfo};
 use tycho_util::FastHashSet;
 
 use self::models::{Transaction, *};
@@ -26,6 +26,7 @@ mod models;
 pub fn router() -> axum::Router<RpcState> {
     axum::Router::new()
         .route("/masterchainInfo", get(get_masterchain_info))
+        .route("/blocks", get(get_blocks))
         .route("/transactions", get(get_transactions))
         .route(
             "/transactionsByMasterchainBlock",
@@ -60,13 +61,174 @@ async fn get_masterchain_info(State(state): State<RpcState>) -> Result<Response,
             })
     };
 
-    let (first_block_id, first_info) = get_info(from_seqno)?;
-    let (last_block_id, last_info) = get_info(to_seqno)?;
+    let (first_block_id, _, first_info) = get_info(from_seqno)?;
+    let (last_block_id, _, last_info) = get_info(to_seqno)?;
 
     Ok(ok_to_response(MasterchainInfoResponse {
         last: Block::from_stored(&last_block_id, last_info),
         first: Block::from_stored(&first_block_id, first_info),
     }))
+}
+
+// === GET /blocks ===
+
+async fn get_blocks(
+    State(state): State<RpcState>,
+    query: Result<Query<BlocksRequest>, QueryRejection>,
+) -> Result<Response, ErrorResponse> {
+    const MAX_LIMIT: usize = 1000;
+
+    struct Filters {
+        by_block: Option<BlockIdShort>,
+        by_mc_seqno: Option<u32>,
+        start_utime: Option<u32>,
+        end_utime: Option<u32>,
+        start_lt: Option<u64>,
+        end_lt: Option<u64>,
+        limit: NonZeroUsize,
+        offset: usize,
+        reverse: bool,
+    }
+
+    impl Filters {
+        fn contains(&self, info: &BriefBlockInfo) -> bool {
+            if let Some(start_utime) = self.start_utime {
+                if info.gen_utime < start_utime {
+                    return false;
+                }
+            }
+            if let Some(end_utime) = self.end_utime {
+                if info.gen_utime > end_utime {
+                    return false;
+                }
+            }
+            if let Some(start_lt) = self.start_lt {
+                if info.start_lt < start_lt {
+                    return false;
+                }
+            }
+            if let Some(end_lt) = self.end_lt {
+                // NOTE: Only `start_lt` is used for this filter.
+                if info.start_lt > end_lt {
+                    return false;
+                }
+            }
+            true
+        }
+    }
+
+    impl TryFrom<BlocksRequest> for Filters {
+        type Error = anyhow::Error;
+
+        fn try_from(q: BlocksRequest) -> Result<Self, Self::Error> {
+            let by_block = if q.workchain.is_some() || q.shard.is_some() || q.seqno.is_some() {
+                let (Some(workchain), Some(ShardPrefix(prefix)), Some(seqno)) =
+                    (q.workchain, q.shard, q.seqno)
+                else {
+                    anyhow::bail!("`workchain`, `shard` and `seqno` fields must be used together");
+                };
+                let Some(shard) = ShardIdent::new(workchain, prefix) else {
+                    anyhow::bail!("invalid shard prefix");
+                };
+                Some(BlockIdShort { shard, seqno })
+            } else {
+                None
+            };
+
+            anyhow::ensure!(
+                q.limit.get() <= MAX_LIMIT,
+                "`limit` is too big, at most {MAX_LIMIT} is allowed"
+            );
+
+            Ok(Self {
+                by_block,
+                by_mc_seqno: q.mc_seqno,
+                start_utime: q.start_utime,
+                end_utime: q.end_utime,
+                start_lt: q.start_lt,
+                end_lt: q.end_lt,
+                limit: q.limit,
+                offset: q.offset,
+                reverse: q.sort == SortDirection::Desc,
+            })
+        }
+    }
+
+    let Query(query) = query?;
+    let query = Filters::try_from(query).map_err(RpcStateError::bad_request)?;
+
+    let Some(snapshot) = state.rpc_storage_snapshot() else {
+        return Err(RpcStateError::NotReady.into());
+    };
+
+    handle_blocking(move || {
+        let mut blocks = Vec::new();
+
+        'blocks: {
+            if let Some(block_id) = query.by_block {
+                let Some((block_id, mc_seqno, info)) =
+                    state.get_brief_block_info(&block_id, Some(&snapshot))?
+                else {
+                    break 'blocks;
+                };
+
+                if matches!(query.by_mc_seqno, Some(by_mc_seqno) if by_mc_seqno != mc_seqno)
+                    || !query.contains(&info)
+                {
+                    break 'blocks;
+                }
+
+                blocks.push(Block::from_stored(&block_id, info));
+            } else if let Some(mc_seqno) = query.by_mc_seqno {
+                let Some(block_ids) =
+                    state.get_blocks_by_mc_seqno(mc_seqno, Some(snapshot.clone()))?
+                else {
+                    break 'blocks;
+                };
+                let mut block_ids = block_ids.collect::<Vec<_>>();
+                if query.reverse {
+                    block_ids.reverse();
+                }
+
+                let range_from = query.offset;
+                let range_to = query.offset + query.limit.get();
+
+                let mut i = 0usize;
+                for block_id in block_ids {
+                    if i >= range_to {
+                        break;
+                    }
+
+                    let Some((block_id, _, info)) =
+                        state.get_brief_block_info(&block_id.as_short_id(), Some(&snapshot))?
+                    else {
+                        return Err(ErrorResponse::internal(anyhow!(
+                            "missing block info for {block_id}"
+                        )));
+                    };
+                    if !query.contains(&info) {
+                        continue;
+                    }
+
+                    if i < range_from {
+                        i += 1;
+                        continue;
+                    }
+
+                    blocks.push(Block::from_stored(&block_id, info));
+                    i += 1;
+                }
+            } else {
+                return Err(RpcStateError::bad_request(anyhow!(
+                    "any of `workchain+shard+seqno` or `mc_seqno` filters is required"
+                ))
+                .into());
+            }
+        }
+
+        Ok(ok_to_response(BlocksResponse { blocks }))
+    })
+    .await
 }
 
 // === GET /transactions ===

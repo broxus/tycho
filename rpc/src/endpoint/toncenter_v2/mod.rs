@@ -161,7 +161,7 @@ async fn handle_get_block_header(id: JrpcId, state: RpcState, p: BlockHeaderPara
         );
     };
 
-    let (block_id, info) = match state.get_brief_block_info(
+    let (block_id, _mc_seqno, info) = match state.get_brief_block_info(
         &BlockIdShort {
             shard,
             seqno: p.seqno,

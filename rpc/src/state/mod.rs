@@ -265,7 +265,7 @@ impl RpcState {
         &self,
         block_id: &BlockIdShort,
         snapshot: Option<&RpcSnapshot>,
-    ) -> Result<Option<(BlockId, BriefBlockInfo)>, RpcStateError> {
+    ) -> Result<Option<(BlockId, u32, BriefBlockInfo)>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
