@@ -161,7 +161,9 @@ where
         handle: &BlockHandle,
         prev_root: Cell,
     ) -> Result<ShardStateStuff> {
-        let _histogram = HistogramGuard::begin("tycho_core_apply_block_time");
+        let labels = [("workchain", block.id().shard.workchain().to_string())];
+        let _histogram =
+            HistogramGuard::begin_with_labels("tycho_core_apply_block_time_high", &labels);
 
         let update = block
             .as_ref()

@@ -30,6 +30,7 @@ pub struct CollatorConfig {
     pub check_value_flow: bool,
     pub validate_config: bool,
     pub fast_sync: bool,
+    pub untrack_prev_state_after: u8,
 }
 
 impl Default for CollatorConfig {
@@ -41,12 +42,17 @@ impl Default for CollatorConfig {
             check_value_flow: false,
             validate_config: true,
             fast_sync: true,
+            untrack_prev_state_after: default_5(),
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_5() -> u8 {
+    5
 }
 
 #[derive(Serialize, Deserialize)]
@@ -56,6 +62,8 @@ struct PartialCollatorConfig {
     validate_config: bool,
     #[serde(default = "default_true")]
     fast_sync: bool,
+    #[serde(default = "default_5")]
+    untrack_prev_state_after: u8,
 }
 
 impl<'de> serde::Deserialize<'de> for CollatorConfig {
@@ -70,6 +78,7 @@ impl<'de> serde::Deserialize<'de> for CollatorConfig {
             check_value_flow: partial.check_value_flow,
             validate_config: partial.validate_config,
             fast_sync: partial.fast_sync,
+            untrack_prev_state_after: partial.untrack_prev_state_after,
             ..Default::default()
         })
     }
@@ -85,6 +94,7 @@ impl serde::Serialize for CollatorConfig {
             check_value_flow: self.check_value_flow,
             validate_config: self.validate_config,
             fast_sync: self.fast_sync,
+            untrack_prev_state_after: self.untrack_prev_state_after,
         }
         .serialize(serializer)
     }
