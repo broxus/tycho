@@ -820,10 +820,9 @@ impl Message {
         };
 
         let message_content = MessageContent {
+            decoded: DecodedContent::try_load(body.as_ref()).ok(),
             hash: *body.repr_hash(),
             body,
-            // TODO: Parse content.
-            decoded: None,
         };
 
         let mut res = Self {
@@ -893,7 +892,47 @@ pub struct MessageContent {
     pub hash: HashBytes,
     #[serde(with = "Boc")]
     pub body: Cell,
-    pub decoded: Option<()>,
+    pub decoded: Option<DecodedContent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum DecodedContent {
+    #[serde(rename = "text_comment")]
+    TextComment { comment: String },
+}
+
+impl DecodedContent {
+    pub fn try_load(body: &DynCell) -> Result<Self, everscale_types::error::Error> {
+        let mut cs = body.as_slice()?;
+        let tag = cs.load_u32()?;
+        match tag {
+            0x00000000 => {
+                let bytes = load_bytes_rope(cs)?;
+                Ok(Self::TextComment {
+                    comment: String::from_utf8_lossy(&bytes).into_owned(),
+                })
+            }
+            _ => Err(everscale_types::error::Error::InvalidTag),
+        }
+    }
+}
+
+fn load_bytes_rope(mut cs: CellSlice<'_>) -> Result<Vec<u8>, everscale_types::error::Error> {
+    let mut result = Vec::new();
+    let mut buffer = [0u8; 128];
+    loop {
+        // TODO: Should we trim unaligned bytes?
+        let bytes = cs.load_raw(&mut buffer, cs.size_bits())?;
+        result.extend_from_slice(bytes);
+
+        match cs.size_refs() {
+            0 => break,
+            1 => cs = cs.load_reference_as_slice()?,
+            _ => return Err(everscale_types::error::Error::InvalidData),
+        }
+    }
+    Ok(result)
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
