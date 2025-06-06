@@ -205,7 +205,7 @@ impl RpcStorage {
         &self,
         block_id: &BlockIdShort,
         snapshot: Option<&RpcSnapshot>,
-    ) -> Result<Option<(BlockId, BriefBlockInfo)>> {
+    ) -> Result<Option<(BlockId, u32, BriefBlockInfo)>> {
         let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
             return Ok(None);
         };
@@ -229,8 +229,9 @@ impl RpcStorage {
             root_hash: HashBytes::from_slice(&value[0..32]),
             file_hash: HashBytes::from_slice(&value[32..64]),
         };
+        let mc_seqno = u32::from_le_bytes(value[64..68].try_into().unwrap());
 
-        Ok(Some((block_id, brief_info)))
+        Ok(Some((block_id, mc_seqno, brief_info)))
     }
 
     pub fn get_brief_shards_descr(
