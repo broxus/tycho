@@ -16,8 +16,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::mempool::MempoolAnchorId;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use crate::types::{
-    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ShardDescriptionExt,
-    ShardHashesExt,
+    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ShardHashesExt,
 };
 use crate::utils::block::detect_top_processed_to_anchor;
 
@@ -312,13 +311,7 @@ impl BlockCacheEntry {
         let mut top_shard_blocks_info = vec![];
         let mut top_processed_to_anchor = None;
         let cached_state = if block_id.is_masterchain() {
-            for item in state.shards()?.iter() {
-                let (shard_id, shard_descr) = item?;
-                top_shard_blocks_info.push((
-                    shard_descr.get_block_id(shard_id),
-                    shard_descr.top_sc_block_updated,
-                ));
-            }
+            top_shard_blocks_info = state.get_top_shard_blocks_info()?;
             top_processed_to_anchor = Some(detect_top_processed_to_anchor(
                 state.shards()?.as_vec()?.iter().map(|(_, d)| *d),
                 state

@@ -327,7 +327,7 @@ impl Node {
 
         // We should clear uncommitted queue state because it may contain incorrect diffs
         // that were created before node restart. We will restore queue strictly above last committed state
-        let top_shards = mc_state.get_top_shards()?;
+        let top_shards = mc_state.get_all_top_shards()?;
         message_queue_adapter.clear_uncommitted_state(&top_shards)?;
 
         let validator = ValidatorStdImpl::new(
