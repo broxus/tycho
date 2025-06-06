@@ -1272,7 +1272,7 @@ impl MsgsExecutionParamsExtension for MsgsExecutionParams {
 
 type DiffMaxMessage = QueueKey;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct QueueStatisticsWithRemaning {
     /// Statistics shows all messages count
     pub initial_stats: QueueStatistics,
@@ -1351,6 +1351,7 @@ impl CumulativeStatistics {
             "cumulative_stats_partial_ranges: {:?}",
             ranges
         );
+
         self.load_internal(mq_adapter, partitions, ranges)
     }
 
@@ -1377,6 +1378,7 @@ impl CumulativeStatistics {
                 }
             }
         }
+
         Ok(())
     }
 
@@ -1409,7 +1411,7 @@ impl CumulativeStatistics {
         self.all_shards_processed_to_by_partitions = new_pt;
     }
 
-    fn compute_cumulative_stats_ranges(
+    pub(crate) fn compute_cumulative_stats_ranges(
         current_shard: &ShardIdent,
         all_shards_processed_to_by_partitions: &FastHashMap<
             ShardIdent,
