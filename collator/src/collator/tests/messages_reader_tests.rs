@@ -21,10 +21,10 @@ use super::{
     MessagesReaderContext, ReaderState,
 };
 use crate::collator::messages_buffer::MessageGroup;
-use crate::collator::types::{AnchorsCache, ParsedMessage};
+use crate::collator::types::{AnchorsCache, CumulativeStatistics, ParsedMessage};
 use crate::collator::MsgsExecutionParamsStuff;
 use crate::internal_queue::types::{
-    DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue,
+    Bound, DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, QueueShardBoundedRange,
 };
 use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -160,6 +160,7 @@ async fn test_refill_messages() -> Result<()> {
 
         primary_mq_adapter: primary_mq_adapter.clone(),
         secondary_mq_adapter: secondary_mq_adapter.clone(),
+        prev_ranges: None,
     };
 
     // test master collator
@@ -181,9 +182,9 @@ async fn test_refill_messages() -> Result<()> {
             reader_state: ReaderState::new(&processed_upto),
             has_unprocessed_messages: None,
         }),
-
-        primary_mq_adapter: primary_mq_adapter.clone(),
-        secondary_mq_adapter: secondary_mq_adapter.clone(),
+        primary_mq_adapter,
+        secondary_mq_adapter,
+        prev_ranges: None,
     };
 
     // test adapter
@@ -784,6 +785,7 @@ struct TestCollator<V: InternalMessageValue> {
 
     primary_mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
     secondary_mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
+    prev_ranges: Option<Vec<QueueShardBoundedRange>>,
 }
 
 impl<V: InternalMessageValue> TestCollator<V> {
@@ -838,6 +840,49 @@ impl<V: InternalMessageValue> TestCollator<V> {
             all_shards_processed_to_by_partitions,
         });
 
+        // computing ranges
+
+        let mut mc_top_end_lts = FastHashMap::default();
+
+        for (shard_ident, lt) in &mc_top_shards_end_lts {
+            mc_top_end_lts.insert(*shard_ident, *lt);
+        }
+
+        let ranges = CumulativeStatistics::compute_cumulative_stats_ranges(
+            &self.shard_id,
+            &cumulative_stats_calc_params
+                .clone()
+                .unwrap()
+                .all_shards_processed_to_by_partitions,
+            self.last_block_gen_lt,
+            mc_gen_lt,
+            &mc_top_end_lts,
+        );
+
+        let part_stat_ranges = if is_first_block_after_prev_master {
+            let part_stat_ranges = if let Some(prev_ranges) = &self.prev_ranges {
+                let mut new_ranges_without_current = vec![];
+                for r in &ranges {
+                    if r.shard_ident != self.shard_id {
+                        new_ranges_without_current.push(r.clone());
+                    }
+                }
+                let diff_ranges = diff_ranges(prev_ranges, &new_ranges_without_current);
+
+                Some(diff_ranges)
+            } else {
+                None
+            };
+
+            if !ranges.is_empty() {
+                self.prev_ranges = Some(ranges.clone());
+            }
+
+            part_stat_ranges
+        } else {
+            None
+        };
+
         // create primary reader
         let mut primary_messages_reader = self.create_primary_reader(
             MessagesReaderContext {
@@ -852,7 +897,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 anchors_cache,
                 is_first_block_after_prev_master,
                 cumulative_stats_calc_params: cumulative_stats_calc_params.clone(),
-                part_stat_ranges: None,
+                part_stat_ranges,
             },
             self.primary_mq_adapter.clone(),
         )?;
@@ -1215,6 +1260,39 @@ impl<V: InternalMessageValue> TestCollator<V> {
     fn update_msgs_exec_params(&mut self, msgs_exec_params: MsgsExecutionParamsStuff) {
         self.msgs_exec_params = msgs_exec_params;
     }
+}
+
+fn diff_ranges(
+    prev: &[QueueShardBoundedRange],
+    new_full: &[QueueShardBoundedRange],
+) -> Vec<QueueShardBoundedRange> {
+    let mut prev_max_to: FastHashMap<ShardIdent, &Bound<QueueKey>> = FastHashMap::default();
+    for r in prev {
+        prev_max_to
+            .entry(r.shard_ident)
+            .and_modify(|curr| {
+                *curr = &r.to;
+            })
+            .or_insert(&r.to);
+    }
+
+    new_full
+        .iter()
+        .map(|r| {
+            let from = match prev_max_to.get(&r.shard_ident) {
+                None => panic!("prev_max_to should present"),
+                Some(prev_to) => match prev_to {
+                    Bound::Excluded(k) | Bound::Included(k) => Bound::Excluded(*k),
+                },
+            };
+
+            QueueShardBoundedRange {
+                shard_ident: r.shard_ident,
+                from,
+                to: r.to,
+            }
+        })
+        .collect()
 }
 
 struct TestWorkingState {

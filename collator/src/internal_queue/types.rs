@@ -325,7 +325,7 @@ impl InternalMessageValue for EnqueuedMessage {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Bound<T> {
     Included(T),
     Excluded(T),
