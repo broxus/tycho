@@ -10,6 +10,7 @@ use super::refcount;
 // took from
 // https://github.com/tikv/tikv/blob/d60c7fb6f3657dc5f3c83b0e3fc6ac75636e1a48/src/config/mod.rs#L170
 // todo: need to benchmark and update if it's not optimal
+const DEFAULT_BLOB_FILE_SIZE: u64 = bytesize::GIB;
 const DEFAULT_MIN_BLOB_SIZE: u64 = bytesize::KIB * 32;
 
 /// Stores generic node parameters
@@ -49,7 +50,12 @@ impl ColumnFamilyOptions<Caches> for ArchiveBlockIds {
         opts.set_merge_operator_associative("archive_data_merge", archive_data_merge);
         // data is hardly compressible and dataset is small
         opts.set_compression_type(DBCompressionType::None);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
+        with_blob_db(
+            opts,
+            DEFAULT_BLOB_FILE_SIZE,
+            DEFAULT_MIN_BLOB_SIZE,
+            DBCompressionType::None,
+        );
     }
 }
 
@@ -73,7 +79,12 @@ impl ColumnFamilyOptions<Caches> for Archives {
 
         // data is already compressed
         opts.set_compression_type(DBCompressionType::None);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
+        with_blob_db(
+            opts,
+            DEFAULT_BLOB_FILE_SIZE,
+            DEFAULT_MIN_BLOB_SIZE,
+            DBCompressionType::None,
+        );
 
         opts.set_max_write_buffer_number(8); // 8 * 512MB = 4GB;
         opts.set_write_buffer_size(512 * 1024 * 1024); // 512 per memtable
@@ -165,7 +176,12 @@ impl ColumnFamilyOptions<Caches> for PackageEntries {
         opts.set_write_buffer_size(512 * 1024 * 1024); // 512 per memtable
         opts.set_min_write_buffer_number_to_merge(2); // allow early flush
 
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::Zstd);
+        with_blob_db(
+            opts,
+            DEFAULT_BLOB_FILE_SIZE,
+            DEFAULT_MIN_BLOB_SIZE,
+            DBCompressionType::Zstd,
+        );
 
         // This flag specifies that the implementation should optimize the filters
         // mainly for cases where keys are found rather than also optimize for keys
@@ -204,7 +220,12 @@ impl ColumnFamilyOptions<Caches> for BlockDataEntries {
 
         // data is already compressed
         opts.set_compression_type(DBCompressionType::None);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
+        with_blob_db(
+            opts,
+            DEFAULT_BLOB_FILE_SIZE,
+            DEFAULT_MIN_BLOB_SIZE,
+            DBCompressionType::None,
+        );
     }
 }
 
@@ -405,7 +426,12 @@ impl ColumnFamily for ShardInternalMessages {
 impl ColumnFamilyOptions<Caches> for ShardInternalMessages {
     fn options(opts: &mut Options, caches: &mut Caches) {
         internal_queue_options(opts, caches);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
+        with_blob_db(
+            opts,
+            DEFAULT_BLOB_FILE_SIZE,
+            DEFAULT_MIN_BLOB_SIZE,
+            DBCompressionType::None,
+        );
     }
 }
 
@@ -665,7 +691,12 @@ impl ColumnFamilyOptions<Caches> for Transactions {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
         opts.set_compression_type(DBCompressionType::Zstd);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::Zstd);
+        with_blob_db(
+            opts,
+            DEFAULT_BLOB_FILE_SIZE,
+            DEFAULT_MIN_BLOB_SIZE,
+            DBCompressionType::Zstd,
+        );
     }
 }
 
@@ -807,10 +838,17 @@ fn zstd_block_based_table_factory(opts: &mut Options, caches: &Caches) {
     opts.set_compression_type(DBCompressionType::Zstd);
 }
 
-fn with_blob_db(opts: &mut Options, min_value_size: u64, compression_type: DBCompressionType) {
+fn with_blob_db(
+    opts: &mut Options,
+    file_size: u64,
+    min_value_size: u64,
+    compression_type: DBCompressionType,
+) {
     opts.set_enable_blob_files(true);
+    opts.set_blob_file_size(file_size);
+    opts.set_min_blob_size(min_value_size);
+
     opts.set_enable_blob_gc(true);
 
-    opts.set_min_blob_size(min_value_size);
     opts.set_blob_compression_type(compression_type);
 }
