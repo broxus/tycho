@@ -18,7 +18,7 @@ required-features = ["test"]
 ahash = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
-blake3 = { workspace = true }
+blake3 = { workspace = true, features = ["no_avx512"] }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 bumpalo = { workspace = true }
