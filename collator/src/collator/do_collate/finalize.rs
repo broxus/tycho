@@ -8,7 +8,6 @@ use everscale_types::cell::Lazy;
 use everscale_types::merkle::*;
 use everscale_types::models::{ShardIdent, *};
 use everscale_types::prelude::*;
-use humantime::format_duration;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::{shard_ident_at_depth, BlockStuff};
@@ -25,12 +24,13 @@ use tycho_util::FastHashMap;
 use super::phase::{Phase, PhaseState};
 use super::PrevData;
 use crate::collator::debug_info::BlockDebugInfo;
+use crate::collator::do_collate::work_units::FinalizeWu;
 use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::execution_manager::MessagesExecutor;
 use crate::collator::messages_reader::{FinalizedMessagesReader, MessagesReader};
 use crate::collator::types::{
     BlockCollationData, BlockSerializerCache, ExecuteResult, FinalizeBlockResult,
-    FinalizeMessagesReaderResult, PreparedInMsg, PreparedOutMsg, PublicLibsDiff,
+    FinalizeMessagesReaderResult, FinalizeMetrics, PreparedInMsg, PreparedOutMsg, PublicLibsDiff,
 };
 use crate::internal_queue::types::{DiffStatistics, DiffZone, EnqueuedMessage};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -43,8 +43,10 @@ use crate::types::{
 use crate::utils::block::detect_top_processed_to_anchor;
 
 pub struct FinalizeState {
-    pub execute_result: ExecuteResult,
     pub executor: MessagesExecutor,
+    pub execute_result: ExecuteResult,
+    pub finalize_wu: FinalizeWu,
+    pub finalize_metrics: FinalizeMetrics,
 }
 
 impl PhaseState for FinalizeState {}
@@ -147,26 +149,38 @@ impl Phase<FinalizeState> {
         }
 
         // get queue diff and check for pending internals
-        let create_queue_diff_elapsed;
+        let histogram_create_queue_diff = HistogramGuard::begin_with_labels(
+            "tycho_do_collate_create_queue_diff_time_high",
+            &labels,
+        );
+
         let FinalizedMessagesReader {
             has_unprocessed_messages,
             queue_diff_with_msgs,
             reader_state,
             processed_upto,
             anchors_cache,
-        } = {
-            let histogram_create_queue_diff = HistogramGuard::begin_with_labels(
-                "tycho_do_collate_create_queue_diff_time_high",
-                &labels,
-            );
-            let finalize_message_reader_res = messages_reader.finalize(
-                self.extra.executor.min_next_lt(),
-                &other_updated_top_shard_diffs_info,
-            )?;
-            create_queue_diff_elapsed = histogram_create_queue_diff.finish();
-            finalize_message_reader_res
-        };
+        } = messages_reader.finalize(
+            self.extra.executor.min_next_lt(),
+            &other_updated_top_shard_diffs_info,
+        )?;
 
+        // log updated processed upto
+        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto = {:?}", processed_upto);
+
+        // report actual ranges count to metrics
+        for (par_id, par) in &processed_upto.partitions {
+            let labels = [
+                ("workchain", self.state.shard_id.workchain().to_string()),
+                ("par_id", par_id.to_string()),
+            ];
+            metrics::gauge!("tycho_do_collate_processed_upto_ext_ranges", &labels)
+                .set(par.externals.ranges.len() as f64);
+            metrics::gauge!("tycho_do_collate_processed_upto_int_ranges", &labels)
+                .set(par.internals.ranges.len() as f64);
+        }
+
+        // build diff
         let (min_message, max_message) = {
             let messages = &queue_diff_with_msgs.messages;
             match messages.first_key_value().zip(messages.last_key_value()) {
@@ -190,6 +204,9 @@ impl Phase<FinalizeState> {
             queue_diff_with_msgs.messages.keys().map(|k| &k.hash),
         )
         .serialize();
+
+        self.extra.finalize_metrics.create_queue_diff_elapsed =
+            histogram_create_queue_diff.finish();
 
         let queue_diff_hash = *queue_diff.hash();
         tracing::info!(target: tracing_targets::COLLATOR, queue_diff_hash = %queue_diff_hash);
@@ -241,16 +258,18 @@ impl Phase<FinalizeState> {
             }
         };
 
+        self.extra.finalize_wu.calculate_queue_diff_wu(
+            &self.state.collation_config.work_units_params.finalize,
+            queue_diff_messages_count as u64,
+        );
+
         Ok((
             FinalizeMessagesReaderResult {
                 queue_diff,
-                queue_diff_messages_count,
                 has_unprocessed_messages,
                 reader_state,
                 processed_upto,
                 anchors_cache,
-
-                create_queue_diff_elapsed,
             },
             update_queue_task,
         ))
@@ -272,13 +291,6 @@ impl Phase<FinalizeState> {
             diff_tail_len,
             block_serializer_cache,
         } = ctx;
-
-        let wu_params_finalize = self
-            .state
-            .collation_config
-            .work_units_params
-            .finalize
-            .clone();
 
         let collation_data = &mut self.state.collation_data;
 
@@ -309,13 +321,13 @@ impl Phase<FinalizeState> {
         };
 
         let mut processed_accounts_res = Ok(Default::default());
-        let mut build_account_blocks_elapsed = Duration::ZERO;
+        let mut build_accounts_elapsed = Duration::ZERO;
         let mut in_msgs_res = Ok(Default::default());
         let mut build_in_msgs_elapsed = Duration::ZERO;
         let mut out_msgs_res = Ok(Default::default());
         let mut build_out_msgs_elapsed = Duration::ZERO;
-        let histogram_build_account_blocks_and_messages = HistogramGuard::begin_with_labels(
-            "tycho_collator_finalize_build_account_blocks_and_msgs_time_high",
+        let histogram_build_accounts_and_messages = HistogramGuard::begin_with_labels(
+            "tycho_collator_finalize_build_accounts_and_msgs_time_high",
             labels,
         );
         rayon::scope(|s| {
@@ -337,7 +349,7 @@ impl Phase<FinalizeState> {
             });
 
             let histogram = HistogramGuard::begin_with_labels(
-                "tycho_collator_finalize_build_account_blocks_time_high",
+                "tycho_collator_finalize_build_accounts_time_high",
                 labels,
             );
 
@@ -348,11 +360,16 @@ impl Phase<FinalizeState> {
                 &mut public_libraries,
             );
 
-            build_account_blocks_elapsed = histogram.finish();
+            build_accounts_elapsed = histogram.finish();
         });
 
-        let build_account_blocks_and_messages_elased =
-            histogram_build_account_blocks_and_messages.finish();
+        self.extra
+            .finalize_metrics
+            .build_accounts_and_messages_in_parallel_elased =
+            histogram_build_accounts_and_messages.finish();
+        self.extra.finalize_metrics.build_accounts_elapsed = build_accounts_elapsed;
+        self.extra.finalize_metrics.build_in_msgs_elapsed = build_in_msgs_elapsed;
+        self.extra.finalize_metrics.build_out_msgs_elapsed = build_out_msgs_elapsed;
 
         let processed_accounts = processed_accounts_res?;
         collation_data.accounts_count = processed_accounts.accounts_len as u64;
@@ -384,10 +401,9 @@ impl Phase<FinalizeState> {
         }
 
         // build master state extra or get a ref to last applied master block
-        let build_mc_state_extra_elapsed;
         let (mc_state_extra, master_ref) = if is_masterchain {
             let histogram = HistogramGuard::begin_with_labels(
-                "tycho_collator_finish_build_mc_state_extra_time_high",
+                "tycho_collator_finalize_build_mc_state_extra_time_high",
                 labels,
             );
 
@@ -418,10 +434,9 @@ impl Phase<FinalizeState> {
                 .collation_data
                 .update_ref_min_mc_seqno(min_ref_mc_seqno);
 
-            build_mc_state_extra_elapsed = histogram.finish();
+            self.extra.finalize_metrics.build_mc_state_extra_elapsed = histogram.finish();
             (Some(extra), None)
         } else {
-            build_mc_state_extra_elapsed = Duration::ZERO;
             (None, Some(self.state.mc_data.make_block_ref()))
         };
 
@@ -470,40 +485,38 @@ impl Phase<FinalizeState> {
             new_block_info.set_gen_software(Some(bc_global_version));
         }
 
-        let build_state_update_elapsed;
         let new_state_root;
         let total_validator_fees;
-        let finalize_wu_total;
         let (state_update, new_observable_state) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time_high",
                 labels,
             );
 
+            // calculate and log finalize block wu
             let accounts_count = self.state.collation_data.accounts_count;
             let in_msgs_len = self.state.collation_data.in_msgs.len() as u64;
             let out_msgs_len = self.state.collation_data.out_msgs.len() as u64;
 
-            finalize_wu_total = Self::calc_finalize_wu_total(
+            self.extra.finalize_wu.calculate_finalize_block_wu(
+                &self.state.collation_config.work_units_params.finalize,
+                &self.state.collation_config.work_units_params.execute,
                 accounts_count,
                 in_msgs_len,
                 out_msgs_len,
-                wu_params_finalize,
             );
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "finalize_wu_total: {}, accounts_count: {}, in_msgs: {}, out_msgs: {} ",
-                finalize_wu_total,
-                accounts_count,
-                in_msgs_len,
-                out_msgs_len,
+                "finalize_block_wu: {}, accounts_count: {}, in_msgs: {}, out_msgs: {} ",
+                self.extra.finalize_wu.finalize_block_wu(),
+                accounts_count, in_msgs_len, out_msgs_len,
             );
 
             // compute total wu used from last anchor
             let mut new_wu_used_from_last_anchor = wu_used_from_last_anchor
                 .saturating_add(self.extra.execute_result.prepare_msg_groups_wu.total_wu)
-                .saturating_add(self.extra.execute_result.execute_groups_wu_total)
-                .saturating_add(finalize_wu_total);
+                .saturating_add(self.extra.execute_result.execute_wu.total_wu())
+                .saturating_add(self.extra.finalize_wu.total_wu());
 
             // total wu used should cover max the number of rounds
             // which mempool can be ahead of last applied master block
@@ -522,13 +535,13 @@ impl Phase<FinalizeState> {
 
             tracing::info!(target: tracing_targets::COLLATOR,
                 "wu_used_from_last_anchor update: old={}, new={}, max_limit={}, \
-                prepare_msg_groups_wu_total={}, execute_groups_wu_total={}, finalize_wu_total={}",
+                read_msg_groups_wu_total={}, execute_groups_wu_total={}, finalize_wu_total={}",
                 wu_used_from_last_anchor,
                 new_wu_used_from_last_anchor,
                 max_wu_used_limit,
                 self.extra.execute_result.prepare_msg_groups_wu.total_wu,
-                self.extra.execute_result.execute_groups_wu_total,
-                finalize_wu_total,
+                self.extra.execute_result.execute_wu.total_wu(),
+                self.extra.finalize_wu.total_wu(),
             );
 
             new_wu_used_from_last_anchor = new_wu_used_from_last_anchor.min(max_wu_used_limit);
@@ -594,11 +607,10 @@ impl Phase<FinalizeState> {
                 new_split_at,
             )?;
 
-            build_state_update_elapsed = histogram.finish();
+            self.extra.finalize_metrics.build_state_update_elapsed = histogram.finish();
             (merkle_update, new_observable_state)
         };
 
-        let build_block_elapsed;
         let (new_block, new_block_extra, new_mc_block_extra) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_block_time_high",
@@ -694,9 +706,9 @@ impl Phase<FinalizeState> {
                 file_hash: Boc::file_hash_blake(&data),
             };
 
-            build_block_elapsed = histogram.finish();
-
             let block = BlockStuff::from_block_and_root(&block_id, block, root, data.len());
+
+            self.extra.finalize_metrics.build_block_elapsed = histogram.finish();
 
             (
                 WithArchiveData::new(block, data),
@@ -805,20 +817,7 @@ impl Phase<FinalizeState> {
             processed_upto,
         });
 
-        let total_elapsed = histogram.finish();
-
-        tracing::debug!(
-            target: tracing_targets::COLLATOR,
-            total = %format_duration(total_elapsed),
-            parallel_build_accounts_and_msgs = %format_duration(build_account_blocks_and_messages_elased),
-            only_build_account_blocks = %format_duration(build_account_blocks_elapsed),
-            only_build_in_msgs = %format_duration(build_in_msgs_elapsed),
-            only_build_out_msgs = %format_duration(build_out_msgs_elapsed),
-            build_mc_state_extra = %format_duration(build_mc_state_extra_elapsed),
-            build_state_update = %format_duration(build_state_update_elapsed),
-            build_block = %format_duration(build_block_elapsed),
-            "finalize block timings"
-        );
+        self.extra.finalize_metrics.finalize_block_elapsed = histogram.finish();
 
         Ok((
             FinalizeBlockResult {
@@ -827,65 +826,13 @@ impl Phase<FinalizeState> {
                 mc_data: new_mc_data,
                 new_state_root,
                 new_observable_state,
-                finalize_wu_total,
+                finalize_wu: self.extra.finalize_wu,
+                finalize_metrics: self.extra.finalize_metrics,
                 old_mc_data: self.state.mc_data,
                 collation_config: self.state.collation_config,
             },
             self.extra.execute_result,
         ))
-    }
-
-    fn calc_finalize_wu_total(
-        accounts_count: u64,
-        in_msgs_len: u64,
-        out_msgs_len: u64,
-        wu_params_finalize: WorkUnitsParamsFinalize,
-    ) -> u64 {
-        let WorkUnitsParamsFinalize {
-            build_transactions,
-            build_in_msg,
-            build_accounts,
-            build_out_msg,
-            serialize_min,
-            serialize_accounts,
-            serialize_msg,
-            state_update_min,
-            state_update_accounts,
-            state_update_msg,
-            ..
-        } = wu_params_finalize;
-
-        let accounts_count_logarithm = accounts_count.checked_ilog2().unwrap_or_default() as u64;
-        let build = accounts_count
-            .saturating_mul(accounts_count_logarithm)
-            .saturating_mul(build_accounts as u64);
-        let build_in_msg = in_msgs_len
-            .saturating_mul(in_msgs_len.checked_ilog2().unwrap_or_default() as u64)
-            .saturating_mul(build_in_msg as u64);
-        let build_out_msg = out_msgs_len
-            .saturating_mul(out_msgs_len.checked_ilog2().unwrap_or_default() as u64)
-            .saturating_mul(build_out_msg as u64);
-        let build = build.saturating_add(
-            std::cmp::max(out_msgs_len, in_msgs_len).saturating_mul(build_transactions as u64),
-        );
-        let build = std::cmp::max(build, build_in_msg);
-        let build = std::cmp::max(build, build_out_msg);
-
-        let merkle_calc = std::cmp::max(
-            state_update_min as u64,
-            accounts_count
-                .saturating_mul(accounts_count_logarithm)
-                .saturating_mul(state_update_accounts as u64)
-                .saturating_add(out_msgs_len.saturating_mul(state_update_msg as u64)),
-        );
-
-        let serialize = std::cmp::max(
-            serialize_min as u64,
-            accounts_count.saturating_mul(serialize_accounts as u64),
-        )
-        .saturating_add((in_msgs_len + out_msgs_len).saturating_mul(serialize_msg as u64));
-
-        build.saturating_add(merkle_calc).saturating_add(serialize)
     }
 
     fn create_mc_state_extra(

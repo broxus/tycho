@@ -181,8 +181,11 @@ impl Phase<PrepareState> {
         Ok(Phase::<ExecuteState> {
             extra: ExecuteState {
                 messages_reader,
-                execute_result: None,
                 executor: ExecutorWrapper::new(executor, self.state.shard_id),
+                msgs_reader_metrics: None,
+                prepare_msg_groups_wu: None,
+                execute_metrics: Default::default(),
+                execute_wu: Default::default(),
             },
             state: self.state,
         })
