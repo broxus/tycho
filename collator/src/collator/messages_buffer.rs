@@ -687,6 +687,10 @@ impl MessageGroup {
         self.slots_info.slots.len()
     }
 
+    pub fn accounts_count(&self) -> usize {
+        self.msgs.len()
+    }
+
     pub fn messages_count(&self) -> usize {
         self.slots_info.msgs_count()
     }

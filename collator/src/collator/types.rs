@@ -30,6 +30,8 @@ use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::{MessagesReaderMetrics, ReaderState};
+use crate::collator::do_collate::work_units::{ExecuteWu, FinalizeWu};
+use crate::collator::messages_reader::MetricsTimer;
 use crate::internal_queue::types::{
     AccountStatistics, Bound, DiffStatistics, InternalMessageValue, QueueShardBoundedRange,
     QueueStatistics, SeparatedStatisticsByPartitions,
@@ -422,6 +424,7 @@ pub(super) struct BlockCollationData {
 
     #[cfg(feature = "block-creator-stats")]
     pub block_create_count: FastHashMap<HashBytes, u64>,
+    // TODO: try remove
     pub diff_tail_len: u32,
 }
 
@@ -1172,12 +1175,10 @@ impl AnchorsCache {
 
 pub struct FinalizeMessagesReaderResult {
     pub queue_diff: SerializedQueueDiff,
-    pub queue_diff_messages_count: usize,
     pub has_unprocessed_messages: bool,
     pub reader_state: ReaderState,
     pub processed_upto: ProcessedUptoInfoStuff,
     pub anchors_cache: AnchorsCache,
-    pub create_queue_diff_elapsed: Duration,
 }
 
 pub struct FinalizeCollationResult {
@@ -1185,15 +1186,12 @@ pub struct FinalizeCollationResult {
 }
 
 pub struct ExecuteResult {
-    pub execute_groups_wu_vm_only: u64,
-    pub process_txs_wu: u64,
-    pub execute_groups_wu_total: u64,
     pub prepare_msg_groups_wu: PrepareMsgGroupsWu,
-    pub execute_msgs_total_elapsed: Duration,
-    pub process_txs_total_elapsed: Duration,
-
     /// Accumulated messages reader metrics across all partitions
     pub msgs_reader_metrics: MessagesReaderMetrics,
+
+    pub execute_wu: ExecuteWu,
+    pub execute_metrics: ExecuteMetrics,
 }
 
 pub struct FinalizeBlockResult {
@@ -1203,7 +1201,8 @@ pub struct FinalizeBlockResult {
     pub old_mc_data: Arc<McData>,
     pub new_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
-    pub finalize_wu_total: u64,
+    pub finalize_wu: FinalizeWu,
+    pub finalize_metrics: FinalizeMetrics,
     pub collation_config: Arc<CollationConfig>,
 }
 
@@ -1217,14 +1216,7 @@ pub struct CollationResult {
 
 pub struct FinalResult {
     pub prepare_elapsed: Duration,
-    pub finalize_block_elapsed: Duration,
     pub has_unprocessed_messages: bool,
-    pub queue_diff_messages_count: usize,
-    pub execute_elapsed: Duration,
-    pub execute_tick_elapsed: Duration,
-    pub execute_tock_elapsed: Duration,
-    pub create_queue_diff_elapsed: Duration,
-    pub apply_queue_diff_elapsed: Duration,
 }
 
 #[derive(Debug)]
@@ -1772,4 +1764,43 @@ impl MsgsExecutionParamsStuff {
     pub fn current(&self) -> MappedRwLockReadGuard<'_, MsgsExecutionParams> {
         RwLockReadGuard::map(self.inner.read(), |x| &x.current)
     }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ExecuteMetrics {
+    pub execute_groups_vm_only_timer: MetricsTimer,
+    pub process_txs_timer: MetricsTimer,
+
+    pub execute_tick_elapsed: Duration,
+    pub execute_special_elapsed: Duration,
+    pub execute_incoming_msgs_elapsed: Duration,
+    pub execute_tock_elapsed: Duration,
+}
+
+impl ExecuteMetrics {
+    pub fn execute_groups_total_elapsed(&self) -> Duration {
+        self.execute_groups_vm_only_timer
+            .total_elapsed
+            .saturating_add(self.process_txs_timer.total_elapsed)
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct FinalizeMetrics {
+    pub create_queue_diff_elapsed: Duration,
+    pub apply_queue_diff_elapsed: Duration,
+
+    pub build_accounts_elapsed: Duration,
+    pub build_in_msgs_elapsed: Duration,
+    pub build_out_msgs_elapsed: Duration,
+    pub build_accounts_and_messages_in_parallel_elased: Duration,
+
+    pub build_mc_state_extra_elapsed: Duration,
+
+    pub build_state_update_elapsed: Duration,
+    pub build_block_elapsed: Duration,
+
+    pub finalize_block_elapsed: Duration,
+
+    pub total_timer: MetricsTimer,
 }
