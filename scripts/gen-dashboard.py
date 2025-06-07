@@ -1004,13 +1004,13 @@ def collator_finalize_block() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_account_blocks_and_msgs_time_high",
-            "Build in parallel account blocks, InMsgDescr, OutMsgDescr",
+            "tycho_collator_finalize_build_accounts_and_msgs_time_high",
+            "Build in parallel accounts, InMsgDescr, OutMsgDescr",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_account_blocks_time_high",
-            "only Build account blocks",
+            "tycho_collator_finalize_build_accounts_time_high",
+            "only Build accounts",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -1024,7 +1024,7 @@ def collator_finalize_block() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finish_build_mc_state_extra_time_high",
+            "tycho_collator_finalize_build_mc_state_extra_time_high",
             "Build McStateExtra",
             labels=['workchain=~"$workchain"'],
         ),
@@ -1038,6 +1038,11 @@ def collator_finalize_block() -> RowPanel:
             "inc. Create MerkleUpdate",
             labels=['workchain=~"$workchain"'],
         ),
+        create_heatmap_panel(
+            "tycho_collator_finalize_build_block_time_high",
+            "Build Block",
+            labels=['workchain=~"$workchain"'],
+        ),
         create_gauge_panel(
             "tycho_collator_boc_cache_rev_indices_capacity",
             "BOC Cache rev_indices capacity",
@@ -1046,11 +1051,6 @@ def collator_finalize_block() -> RowPanel:
         create_gauge_panel(
             "tycho_collator_boc_cache_rev_cells_capacity",
             "BOC Cache rev_cells capacity",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_heatmap_panel(
-            "tycho_collator_finalize_build_block_time_high",
-            "Build Block",
             labels=['workchain=~"$workchain"'],
         ),
     ]
@@ -1588,9 +1588,14 @@ def collator_wu_metrics() -> RowPanel:
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_price_on_execute",
-            "Wu price on execute total",
+            "Wu price on execute",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_execute_txs",
+            "Wu spent on execute in vm",
+            labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_price_on_execute_txs",
@@ -1599,19 +1604,133 @@ def collator_wu_metrics() -> RowPanel:
             unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
+            "tycho_do_collate_wu_on_process_txs",
+            "Wu spent on process executed txs",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
             "tycho_do_collate_wu_price_on_process_txs",
             "Wu price on process executed txs",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_on_finalize",
-            "Wu spent on finalize",
+            "tycho_do_collate_wu_on_create_queue_diff",
+            "Wu spent on create queue diff",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_price_on_finalize",
-            "Wu price on finalize",
+            "tycho_do_collate_wu_price_on_create_queue_diff",
+            "Wu price on create queue diff",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_apply_queue_diff",
+            "Wu spent on apply queue diff",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_apply_queue_diff",
+            "Wu price on apply queue diff",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_finalize_total",
+            "Wu spent on finalize (total)",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_finalize_total",
+            "Wu price on finalize (total)",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_finalize_block",
+            "Wu spent on finalize block",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_finalize_block",
+            "Wu price on finalize block",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_block",
+            "Wu spent on build block",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_block",
+            "Wu price on build block",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_state_update",
+            "Wu spent on build state update (Merkle)",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_state_update",
+            "Wu price on build state update (Merkle)",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_accounts_and_messages",
+            "Wu spent on build accounts and messages in parallel",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_accounts_and_messages",
+            "Wu price on build accounts and messages in parallel",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_in_msgs",
+            "Wu spent on build in messages description",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_in_msgs",
+            "Wu price on build in messages description",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_out_msgs",
+            "Wu spent on build out messages description",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_out_msgs",
+            "Wu price on build out messages description",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_shard_accounts",
+            "Wu spent on build and update shard accounts",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_accounts_blocks",
+            "Wu spent on build accounts blocks description",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_build_accounts",
+            "Wu spent on build accounts",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_accounts",
+            "Wu price on build accounts",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
         ),
@@ -1758,12 +1877,17 @@ def collator_special_transactions_metrics() -> RowPanel:
     metrics = [
         create_heatmap_panel(
             "tycho_do_collate_execute_tick_time",
-            "Execute Tick special transactions",
+            "Execute Tick transactions",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_do_collate_execute_tock_time",
-            "Execute Tock special transactions",
+            "Execute Tock transactions",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_execute_special_time",
+            "Execute Special transactions",
             labels=['workchain=~"$workchain"'],
         ),
     ]

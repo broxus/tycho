@@ -1,66 +1,94 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::models::{TickTock, WorkUnitsParamsExecute};
+use everscale_types::models::TickTock;
+use tycho_util::metrics::HistogramGuard;
 
 use super::execution_wrapper::ExecutorWrapper;
 use super::finalize::FinalizeState;
 use super::phase::{Phase, PhaseState};
 use super::work_units::PrepareMsgGroupsWu;
+use crate::collator::do_collate::work_units::ExecuteWu;
 use crate::collator::error::{CollationCancelReason, CollatorError};
-use crate::collator::messages_reader::{GetNextMessageGroupMode, MessagesReader};
-use crate::collator::types::{BlockCollationData, BlockLimitsLevel, ExecuteResult};
+use crate::collator::messages_reader::{
+    GetNextMessageGroupMode, MessagesReader, MessagesReaderMetrics,
+};
+use crate::collator::types::{BlockLimitsLevel, ExecuteMetrics, ExecuteResult};
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
 
 pub struct ExecuteState {
     pub messages_reader: MessagesReader<EnqueuedMessage>,
-    pub execute_result: Option<ExecuteResult>,
     pub executor: ExecutorWrapper,
+    pub prepare_msg_groups_wu: Option<PrepareMsgGroupsWu>,
+    /// Accumulated messages reader metrics across all partitions
+    pub msgs_reader_metrics: Option<MessagesReaderMetrics>,
+    pub execute_wu: ExecuteWu,
+    pub execute_metrics: ExecuteMetrics,
 }
 
 impl PhaseState for ExecuteState {}
 
 impl Phase<ExecuteState> {
     pub fn execute_special_transactions(&mut self) -> Result<()> {
+        let labels = [(
+            "workchain",
+            self.extra.executor.shard_id.workchain().to_string(),
+        )];
+        let histogram =
+            HistogramGuard::begin_with_labels("tycho_do_collate_execute_special_time", &labels);
         let new_messages = self.extra.executor.create_special_transactions(
             &self.state.mc_data.config,
             &mut self.state.collation_data,
         )?;
         self.extra.messages_reader.add_new_messages(new_messages);
+        self.extra.execute_metrics.execute_special_elapsed = histogram.finish();
         Ok(())
     }
 
     pub fn execute_tick_transactions(&mut self) -> Result<()> {
+        let labels = [(
+            "workchain",
+            self.extra.executor.shard_id.workchain().to_string(),
+        )];
+        let histogram =
+            HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", &labels);
         let new_messages = self.extra.executor.create_ticktock_transactions(
             &self.state.mc_data.config,
             TickTock::Tick,
             &mut self.state.collation_data,
         )?;
         self.extra.messages_reader.add_new_messages(new_messages);
+        self.extra.execute_metrics.execute_tick_elapsed = histogram.finish();
         Ok(())
     }
 
     pub fn execute_tock_transactions(&mut self) -> Result<()> {
+        let labels = [(
+            "workchain",
+            self.extra.executor.shard_id.workchain().to_string(),
+        )];
+        let histogram =
+            HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", &labels);
         let new_messages = self.extra.executor.create_ticktock_transactions(
             &self.state.mc_data.config,
             TickTock::Tock,
             &mut self.state.collation_data,
         )?;
         self.extra.messages_reader.add_new_messages(new_messages);
+        self.extra.execute_metrics.execute_tock_elapsed = histogram.finish();
         Ok(())
     }
 
-    pub fn run(&mut self) -> Result<(), CollatorError> {
+    pub fn execute_incoming_messages(&mut self) -> Result<(), CollatorError> {
         let labels = [(
             "workchain",
             self.extra.executor.shard_id.workchain().to_string(),
         )];
+        let histogram =
+            HistogramGuard::begin_with_labels("tycho_do_collate_execute_time_high", &labels);
 
         let mut fill_msgs_total_elapsed = Duration::ZERO;
-        let mut execute_msgs_total_elapsed = Duration::ZERO;
-        let mut process_txs_total_elapsed = Duration::ZERO;
-        let mut execute_groups_wu_vm_only = 0u64;
 
         let mut executed_groups_count = 0;
         loop {
@@ -71,7 +99,7 @@ impl Phase<ExecuteState> {
                 ));
             }
 
-            let mut timer = std::time::Instant::now();
+            let timer = std::time::Instant::now();
             let msg_group_opt = self.extra.messages_reader.get_next_message_group(
                 GetNextMessageGroupMode::Continue,
                 self.extra.executor.executor.min_next_lt(),
@@ -80,28 +108,29 @@ impl Phase<ExecuteState> {
 
             if let Some(msg_group) = msg_group_opt {
                 // Execute messages group
-                timer = std::time::Instant::now();
+                self.extra
+                    .execute_metrics
+                    .execute_groups_vm_only_timer
+                    .start();
                 let group_result = self.extra.executor.executor.execute_group(msg_group)?;
-                execute_msgs_total_elapsed += timer.elapsed();
+                self.extra
+                    .execute_metrics
+                    .execute_groups_vm_only_timer
+                    .stop();
+
                 executed_groups_count += 1;
                 let group_tx_count = group_result.items.len();
                 self.state.collation_data.tx_count += group_tx_count as u64;
                 self.state.collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
                 self.state.collation_data.ext_msgs_skipped_count += group_result.ext_msgs_skipped;
-                execute_groups_wu_vm_only = execute_groups_wu_vm_only
-                    .saturating_add(group_result.total_exec_wu)
-                    .saturating_add(
-                        group_result.ext_msgs_error_count.saturating_mul(
-                            self.state
-                                .collation_config
-                                .work_units_params
-                                .execute
-                                .execute_err as u64,
-                        ),
-                    );
+
+                self.extra.execute_wu.append_executed_group(
+                    &self.state.collation_config.work_units_params.execute,
+                    &group_result,
+                );
 
                 // Process transactions
-                timer = std::time::Instant::now();
+                self.extra.execute_metrics.process_txs_timer.start();
                 let mut new_messages_created_count = 0;
                 for item in group_result.items {
                     let new_messages = self.extra.executor.process_transaction(
@@ -112,7 +141,7 @@ impl Phase<ExecuteState> {
                     new_messages_created_count += new_messages.len();
                     self.extra.messages_reader.add_new_messages(new_messages);
                 }
-                process_txs_total_elapsed += timer.elapsed();
+                self.extra.execute_metrics.process_txs_timer.stop();
 
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     executed_groups_count,
@@ -147,45 +176,48 @@ impl Phase<ExecuteState> {
             }
         }
 
+        self.extra.execute_metrics.execute_incoming_msgs_elapsed = histogram.finish();
+
         // metrics
-        self.state.collation_data.total_execute_msgs_time_mc =
-            execute_msgs_total_elapsed.as_millis();
         metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
             .set(executed_groups_count as f64);
         metrics::histogram!("tycho_do_collate_fill_msgs_total_time_high", &labels)
             .record(fill_msgs_total_elapsed);
-        metrics::histogram!("tycho_do_collate_exec_msgs_total_time_high", &labels)
-            .record(execute_msgs_total_elapsed);
-        metrics::histogram!("tycho_do_collate_process_txs_total_time_high", &labels)
-            .record(process_txs_total_elapsed);
-
-        let process_txs_wu = calc_process_txs_wu(
-            &self.state.collation_data,
-            &self.state.collation_config.work_units_params.execute,
+        metrics::histogram!("tycho_do_collate_exec_msgs_total_time_high", &labels).record(
+            self.extra
+                .execute_metrics
+                .execute_groups_vm_only_timer
+                .total_elapsed,
         );
-        let execute_groups_wu_total = execute_groups_wu_vm_only.saturating_add(process_txs_wu);
+        metrics::histogram!("tycho_do_collate_process_txs_total_time_high", &labels)
+            .record(self.extra.execute_metrics.process_txs_timer.total_elapsed);
+        self.state.collation_data.total_execute_msgs_time_mc = self
+            .extra
+            .execute_metrics
+            .execute_groups_total_elapsed()
+            .as_millis();
 
-        let msgs_reader_metrics_total = self
+        // calc prepare wu
+        let msgs_reader_metrics = self
             .extra
             .messages_reader
             .metrics_by_partitions()
             .get_total();
-
         let prepare_msg_groups_wu = PrepareMsgGroupsWu::calculate(
             &self.state.collation_config.work_units_params.prepare,
-            &msgs_reader_metrics_total,
+            &msgs_reader_metrics,
             fill_msgs_total_elapsed,
         );
 
-        self.extra.execute_result = Some(ExecuteResult {
-            execute_groups_wu_vm_only,
-            process_txs_wu,
-            execute_groups_wu_total,
-            prepare_msg_groups_wu,
-            execute_msgs_total_elapsed,
-            process_txs_total_elapsed,
-            msgs_reader_metrics: msgs_reader_metrics_total,
-        });
+        self.extra.prepare_msg_groups_wu = Some(prepare_msg_groups_wu);
+        self.extra.msgs_reader_metrics = Some(msgs_reader_metrics);
+
+        // calc execute wu
+        self.extra.execute_wu.calculate(
+            &self.state.collation_config.work_units_params.execute,
+            &self.extra.execute_metrics,
+            &self.state.collation_data,
+        );
 
         Ok(())
     }
@@ -196,8 +228,15 @@ impl Phase<ExecuteState> {
         (
             Phase::<FinalizeState> {
                 extra: FinalizeState {
-                    execute_result: self.extra.execute_result.unwrap(),
                     executor,
+                    execute_result: ExecuteResult {
+                        prepare_msg_groups_wu: self.extra.prepare_msg_groups_wu.unwrap(),
+                        msgs_reader_metrics: self.extra.msgs_reader_metrics.unwrap(),
+                        execute_wu: self.extra.execute_wu,
+                        execute_metrics: self.extra.execute_metrics,
+                    },
+                    finalize_wu: Default::default(),
+                    finalize_metrics: Default::default(),
                 },
                 state: self.state,
             },
@@ -275,11 +314,7 @@ impl Phase<ExecuteState> {
             .increment(self.state.collation_data.execute_count_new_int);
 
         // messages collecting timings
-        if let Some(ExecuteResult {
-            msgs_reader_metrics: metrics,
-            ..
-        }) = &self.extra.execute_result
-        {
+        if let Some(metrics) = &self.extra.msgs_reader_metrics {
             metrics::histogram!("tycho_do_collate_init_iterator_time_high", &labels)
                 .record(metrics.init_iterator_timer.total_elapsed);
             metrics::histogram!("tycho_do_collate_read_int_msgs_time_high", &labels)
@@ -292,23 +327,4 @@ impl Phase<ExecuteState> {
                 .record(metrics.add_to_message_groups_timer.total_elapsed);
         }
     }
-}
-
-fn calc_process_txs_wu(
-    collation_data: &BlockCollationData,
-    wu_params_execute: &WorkUnitsParamsExecute,
-) -> u64 {
-    let &WorkUnitsParamsExecute {
-        serialize_enqueue,
-        serialize_dequeue,
-        insert_new_msgs,
-        ..
-    } = wu_params_execute;
-
-    (collation_data.int_enqueue_count)
-        .saturating_mul(serialize_enqueue as u64)
-        .saturating_add((collation_data.int_dequeue_count).saturating_mul(serialize_dequeue as u64))
-        .saturating_add(
-            (collation_data.inserted_new_msgs_count).saturating_mul(insert_new_msgs as u64),
-        )
 }

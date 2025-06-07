@@ -27,8 +27,9 @@ use super::types::{
 };
 use super::{CollatorStdImpl, ForceMasterCollation, ShardDescriptionExt};
 use crate::collator::do_collate::finalize::FinalizeBlockContext;
+use crate::collator::do_collate::work_units::{ExecuteWu, FinalizeWu, PrepareMsgGroupsWu};
 use crate::collator::error::{CollationCancelReason, CollatorError};
-use crate::collator::types::{PartialValueFlow, RandSeed};
+use crate::collator::types::{FinalizeMetrics, PartialValueFlow, RandSeed};
 use crate::internal_queue::types::{Bound, DiffZone, EnqueuedMessage, QueueShardBoundedRange};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
@@ -212,19 +213,16 @@ impl CollatorStdImpl {
         self.anchors_cache = anchors_cache;
 
         let block_id = *finalized.block_candidate.block.id();
-        let finalize_wu_total = finalized.finalize_wu_total;
+        let finalize_wu = finalized.finalize_wu.clone();
 
+        // metrics and logs before collation finalize
         self.report_collation_metrics(&finalized.collation_data);
 
         self.update_stats(&finalized.collation_data);
 
-        self.logs(
-            &execute_result,
-            &final_result,
-            &finalized.collation_data,
-            block_id,
-        );
+        self.log_block_and_stats(&execute_result, &finalized, &final_result);
 
+        // finalize collation
         let FinalizeCollationResult {
             handle_block_candidate_elapsed,
         } = self
@@ -237,9 +235,9 @@ impl CollatorStdImpl {
             )
             .await?;
 
-        let total_elapsed = total_collation_histogram.finish();
+        let collation_total_elapsed = total_collation_histogram.finish();
 
-        // metrics
+        // final metrics and logs
         metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
 
         if let Some(int_queue_len) = int_queue_len {
@@ -248,15 +246,15 @@ impl CollatorStdImpl {
         }
 
         self.report_wu_metrics(
-            &execute_result,
-            finalize_wu_total,
-            final_result.finalize_block_elapsed,
-            total_elapsed,
+            &execute_result.prepare_msg_groups_wu,
+            &execute_result.execute_wu,
+            &finalize_wu,
+            collation_total_elapsed,
         );
 
         // time elapsed from prev block
         let elapsed_from_prev_block = self.timer.elapsed();
-        let collation_mngmnt_overhead = elapsed_from_prev_block - total_elapsed;
+        let collation_mngmnt_overhead = elapsed_from_prev_block - collation_total_elapsed;
         self.timer = std::time::Instant::now();
         metrics::histogram!("tycho_do_collate_from_prev_block_time", &labels)
             .record(elapsed_from_prev_block);
@@ -277,8 +275,8 @@ impl CollatorStdImpl {
         metrics::gauge!("tycho_do_collate_ext_msgs_time_diff", &labels)
             .set(diff_time as f64 / 1000.0);
 
-        self.logs_total(
-            total_elapsed,
+        Self::log_final_timings(
+            collation_total_elapsed,
             block_id,
             block_time_diff,
             collation_mngmnt_overhead,
@@ -324,72 +322,35 @@ impl CollatorStdImpl {
         let prepare_elapsed = histogram_prepare.finish();
 
         // execute tick transaction and special transactions (mint, recover)
-        let execute_tick_elapsed = if shard_id.is_masterchain() {
-            let histogram =
-                HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", &labels);
-
+        if shard_id.is_masterchain() {
             execute_phase.execute_tick_transactions()?;
-
             execute_phase.execute_special_transactions()?;
-
-            histogram.finish()
-        } else {
-            Duration::ZERO
-        };
+        }
 
         // execute incoming messages
-        let execute_elapsed = {
-            let histogram =
-                HistogramGuard::begin_with_labels("tycho_do_collate_execute_time_high", &labels);
-
-            execute_phase.run()?;
-
-            histogram.finish()
-        };
+        execute_phase.execute_incoming_messages()?;
 
         // execute tock transaction
-        let execute_tock_elapsed = if shard_id.is_masterchain() {
-            let histogram =
-                HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", &labels);
-
+        if shard_id.is_masterchain() {
             execute_phase.execute_tock_transactions()?;
-
-            histogram.finish()
-        } else {
-            Duration::ZERO
-        };
+        }
 
         let (mut finalize_phase, messages_reader) = execute_phase.finish();
 
+        // finalize
+        finalize_phase.extra.finalize_metrics.total_timer.start();
+
+        // finalize messages reader
         let (
             FinalizeMessagesReaderResult {
                 queue_diff,
-                queue_diff_messages_count,
                 has_unprocessed_messages,
                 reader_state,
                 processed_upto,
                 anchors_cache,
-                create_queue_diff_elapsed,
             },
             update_queue_task,
         ) = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
-
-        let finalize_block_timer = std::time::Instant::now();
-
-        // log updated processed upto
-        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto = {:?}", processed_upto);
-
-        // report actual ranges count to metrics
-        for (par_id, par) in &processed_upto.partitions {
-            let labels = [
-                ("workchain", shard_id.workchain().to_string()),
-                ("par_id", par_id.to_string()),
-            ];
-            metrics::gauge!("tycho_do_collate_processed_upto_ext_ranges", &labels)
-                .set(par.externals.ranges.len() as f64);
-            metrics::gauge!("tycho_do_collate_processed_upto_int_ranges", &labels)
-                .set(par.internals.ranges.len() as f64);
-        }
 
         // TODO: use build_all_shards_processed_to_by_partitions() and find_min_processed_to_by_shards()
         //      to unify the min_processed_to calculation logic
@@ -423,6 +384,7 @@ impl CollatorStdImpl {
         let diff_tail_len =
             mq_adapter.get_diffs_tail_len(&shard_id, &min_processed_to.unwrap_or_default()) + 1;
 
+        // finalize block
         let span = tracing::Span::current();
         let (finalize_phase_result, update_queue_task_result) = rayon::join(
             || {
@@ -443,11 +405,16 @@ impl CollatorStdImpl {
             // to be sure that queue was updated before block commit and next block collation
             update_queue_task,
         );
-        let (finalized, execute_result) = finalize_phase_result?;
+        let (mut finalized, execute_result) = finalize_phase_result?;
 
-        let finalize_block_elapsed = finalize_block_timer.elapsed();
+        // update finalize metrics and wu
+        finalized.finalize_metrics.apply_queue_diff_elapsed = update_queue_task_result?;
+        finalized.finalize_metrics.total_timer.stop();
+        finalized
+            .finalize_wu
+            .append_elapsed_timings(&finalized.finalize_metrics);
 
-        let apply_queue_diff_elapsed = update_queue_task_result?;
+        Self::log_finalize_timings(&finalized.finalize_metrics);
 
         assert_eq!(
             finalized.collation_data.int_enqueue_count,
@@ -457,14 +424,7 @@ impl CollatorStdImpl {
 
         let final_result = FinalResult {
             prepare_elapsed,
-            finalize_block_elapsed,
             has_unprocessed_messages,
-            queue_diff_messages_count,
-            execute_elapsed,
-            execute_tick_elapsed,
-            execute_tock_elapsed,
-            create_queue_diff_elapsed,
-            apply_queue_diff_elapsed,
         };
 
         Ok(CollationResult {
@@ -1013,114 +973,145 @@ impl CollatorStdImpl {
 
     fn report_wu_metrics(
         &self,
-        execute_result: &ExecuteResult,
-        finalize_wu_total: u64,
-        finalize_block_elapsed: Duration,
-        total_elapsed: Duration,
+        prepare_msg_groups_wu: &PrepareMsgGroupsWu,
+        execute_wu: &ExecuteWu,
+        finalize_wu: &FinalizeWu,
+        collation_total_elapsed: Duration,
     ) {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
         // prepare
         metrics::gauge!("tycho_do_collate_wu_on_prepare", &labels)
-            .set(execute_result.prepare_msg_groups_wu.total_wu as f64);
+            .set(prepare_msg_groups_wu.total_wu as f64);
         metrics::gauge!("tycho_do_collate_wu_price_on_prepare", &labels)
-            .set(execute_result.prepare_msg_groups_wu.total_wu_price());
+            .set(prepare_msg_groups_wu.total_wu_price());
         metrics::gauge!("tycho_do_collate_wu_on_prepare_read_ext_msgs", &labels)
-            .set(execute_result.prepare_msg_groups_wu.read_ext_msgs_wu as f64);
+            .set(prepare_msg_groups_wu.read_ext_msgs_wu as f64);
         metrics::gauge!(
             "tycho_do_collate_wu_price_on_prepare_read_ext_msgs",
             &labels
         )
-        .set(
-            execute_result
-                .prepare_msg_groups_wu
-                .read_ext_msgs_wu_price(),
-        );
+        .set(prepare_msg_groups_wu.read_ext_msgs_wu_price());
         metrics::gauge!(
             "tycho_do_collate_wu_on_prepare_read_existing_int_msgs",
             &labels
         )
-        .set(
-            execute_result
-                .prepare_msg_groups_wu
-                .read_existing_int_msgs_wu as f64,
-        );
+        .set(prepare_msg_groups_wu.read_existing_int_msgs_wu as f64);
         metrics::gauge!(
             "tycho_do_collate_wu_price_on_prepare_read_existing_int_msgs",
             &labels
         )
-        .set(
-            execute_result
-                .prepare_msg_groups_wu
-                .read_existing_int_msgs_wu_price(),
-        );
+        .set(prepare_msg_groups_wu.read_existing_int_msgs_wu_price());
         metrics::gauge!("tycho_do_collate_wu_on_prepare_read_new_int_msgs", &labels)
-            .set(execute_result.prepare_msg_groups_wu.read_new_int_msgs_wu as f64);
+            .set(prepare_msg_groups_wu.read_new_int_msgs_wu as f64);
         metrics::gauge!(
             "tycho_do_collate_wu_price_on_prepare_read_new_int_msgs",
             &labels
         )
-        .set(
-            execute_result
-                .prepare_msg_groups_wu
-                .read_new_int_msgs_wu_price(),
-        );
+        .set(prepare_msg_groups_wu.read_new_int_msgs_wu_price());
         metrics::gauge!("tycho_do_collate_wu_on_prepare_add_msgs_to_groups", &labels)
-            .set(execute_result.prepare_msg_groups_wu.add_msgs_to_groups_wu as f64);
+            .set(prepare_msg_groups_wu.add_msgs_to_groups_wu as f64);
         metrics::gauge!(
             "tycho_do_collate_wu_price_on_prepare_add_msgs_to_groups",
             &labels
         )
-        .set(
-            execute_result
-                .prepare_msg_groups_wu
-                .add_msgs_to_groups_wu_price(),
-        );
+        .set(prepare_msg_groups_wu.add_msgs_to_groups_wu_price());
 
         // execute
         metrics::gauge!("tycho_do_collate_wu_on_execute", &labels)
-            .set(execute_result.execute_groups_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_price_on_execute", &labels).set(
-            (execute_result.execute_msgs_total_elapsed.as_nanos() as f64
-                + execute_result.process_txs_total_elapsed.as_nanos() as f64)
-                / execute_result.execute_groups_wu_total as f64,
-        );
-        metrics::gauge!("tycho_do_collate_wu_price_on_execute_txs", &labels).set(
-            execute_result.execute_msgs_total_elapsed.as_nanos() as f64
-                / execute_result.execute_groups_wu_vm_only as f64,
-        );
-        metrics::gauge!("tycho_do_collate_wu_price_on_process_txs", &labels).set(
-            execute_result.process_txs_total_elapsed.as_nanos() as f64
-                / execute_result.process_txs_wu as f64,
-        );
+            .set(execute_wu.total_wu() as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_execute", &labels)
+            .set(execute_wu.total_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_execute_txs", &labels)
+            .set(execute_wu.execute_groups_vm_only_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_execute_txs", &labels)
+            .set(execute_wu.execute_groups_vm_only_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_process_txs", &labels)
+            .set(execute_wu.process_txs_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_process_txs", &labels)
+            .set(execute_wu.process_txs_wu_price());
 
-        // finalize
-        metrics::gauge!("tycho_do_collate_wu_on_finalize", &labels).set(finalize_wu_total as f64);
-        metrics::gauge!("tycho_do_collate_wu_price_on_finalize", &labels)
-            .set(finalize_block_elapsed.as_nanos() as f64 / finalize_wu_total as f64);
+        // create queue diff
+        metrics::gauge!("tycho_do_collate_wu_on_create_queue_diff", &labels)
+            .set(finalize_wu.create_queue_diff_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_create_queue_diff", &labels)
+            .set(finalize_wu.create_queue_diff_wu_price());
 
-        // finalize
-        metrics::gauge!("tycho_do_collate_wu_total", &labels).set(
-            execute_result.execute_groups_wu_total as f64
-                + finalize_wu_total as f64
-                + execute_result.prepare_msg_groups_wu.total_wu as f64,
-        );
-        metrics::gauge!("tycho_do_collate_wu_price_total", &labels).set(
-            total_elapsed.as_nanos() as f64
-                / (execute_result.execute_groups_wu_total
-                    + finalize_wu_total
-                    + execute_result.prepare_msg_groups_wu.total_wu) as f64,
-        );
+        // apply queue diff
+        metrics::gauge!("tycho_do_collate_wu_on_apply_queue_diff", &labels)
+            .set(finalize_wu.apply_queue_diff_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_apply_queue_diff", &labels)
+            .set(finalize_wu.apply_queue_diff_wu_price());
+
+        // finalize block
+        metrics::gauge!("tycho_do_collate_wu_on_finalize_total", &labels)
+            .set(finalize_wu.total_wu() as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_finalize_total", &labels)
+            .set(finalize_wu.total_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_finalize_block", &labels)
+            .set(finalize_wu.finalize_block_wu() as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_finalize_block", &labels)
+            .set(finalize_wu.finalize_block_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_block", &labels)
+            .set(finalize_wu.build_block_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_block", &labels)
+            .set(finalize_wu.build_block_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_state_update", &labels)
+            .set(finalize_wu.build_state_update_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_state_update", &labels)
+            .set(finalize_wu.build_state_update_wu_price());
+        metrics::gauge!(
+            "tycho_do_collate_wu_on_build_accounts_and_messages",
+            &labels
+        )
+        .set(finalize_wu.max_accounts_in_out_msgs_wu() as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_build_accounts_and_messages",
+            &labels
+        )
+        .set(finalize_wu.build_accounts_and_messages_in_parallel_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_in_msgs", &labels)
+            .set(finalize_wu.build_in_msgs_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_in_msgs", &labels)
+            .set(finalize_wu.build_in_msgs_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_out_msgs", &labels)
+            .set(finalize_wu.build_out_msgs_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_out_msgs", &labels)
+            .set(finalize_wu.build_out_msgs_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_shard_accounts", &labels)
+            .set(finalize_wu.build_shard_accounts_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_on_build_accounts_blocks", &labels)
+            .set(finalize_wu.build_accounts_blocks_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_on_build_accounts", &labels)
+            .set(finalize_wu.build_accounts_wu() as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_accounts", &labels)
+            .set(finalize_wu.build_accounts_wu_price());
+
+        // total
+        let total_wu =
+            prepare_msg_groups_wu.total_wu + execute_wu.total_wu() + finalize_wu.total_wu();
+        metrics::gauge!("tycho_do_collate_wu_total", &labels).set(total_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_total", &labels)
+            .set(collation_total_elapsed.as_nanos() as f64 / total_wu as f64);
     }
 
-    fn logs(
+    fn log_block_and_stats(
         &self,
         execute_result: &ExecuteResult,
+        finalize_result: &FinalizeBlockResult,
         final_result: &FinalResult,
-        collation_data: &BlockCollationData,
-        block_id: BlockId,
     ) {
         tracing::debug!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
+
+        let collation_data = &finalize_result.collation_data;
+
+        let queue_diff_messages_count = finalize_result
+            .block_candidate
+            .queue_diff_aug
+            .data
+            .diff()
+            .messages
+            .len();
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "collated_block_id={}, \
@@ -1134,13 +1125,13 @@ impl CollatorStdImpl {
             has_unprocessed_messages={}, \
             total_execute_msgs_time_mc={}, \
             diffs_tail_len: {}",
-            block_id,
+            finalize_result.block_candidate.block.id(),
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
             collation_data.execute_count_ext, collation_data.ext_msgs_error_count,
             collation_data.execute_count_int, collation_data.execute_count_new_int,
             collation_data.int_enqueue_count, collation_data.int_dequeue_count,
             collation_data.new_msgs_created_count, collation_data.inserted_new_msgs_count,
-            final_result.queue_diff_messages_count,
+            queue_diff_messages_count,
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
             execute_result.msgs_reader_metrics.read_ext_msgs_count,
             execute_result.msgs_reader_metrics.read_existing_msgs_count,
@@ -1153,9 +1144,11 @@ impl CollatorStdImpl {
         tracing::debug!(
             target: tracing_targets::COLLATOR,
             prepare = %format_duration(final_result.prepare_elapsed),
-            execute_tick = %format_duration(final_result.execute_tick_elapsed),
-            execute_tock = %format_duration(final_result.execute_tock_elapsed),
-            execute_total = %format_duration(final_result.execute_elapsed),
+
+            execute_tick = %format_duration(execute_result.execute_metrics.execute_tick_elapsed),
+            execute_special = %format_duration(execute_result.execute_metrics.execute_special_elapsed),
+            execute_incoming_msgs = %format_duration(execute_result.execute_metrics.execute_incoming_msgs_elapsed),
+            execute_tock = %format_duration(execute_result.execute_metrics.execute_tock_elapsed),
 
             fill_msgs_total = %format_duration(execute_result.prepare_msg_groups_wu.total_elapsed),
             init_iterator = %format_duration(execute_result.msgs_reader_metrics.init_iterator_timer.total_elapsed),
@@ -1164,32 +1157,47 @@ impl CollatorStdImpl {
             read_new = %format_duration(execute_result.msgs_reader_metrics.read_new_messages_timer.total_elapsed),
             add_to_groups = %format_duration(execute_result.msgs_reader_metrics.add_to_message_groups_timer.total_elapsed),
 
-            exec_msgs_total = %format_duration(execute_result.execute_msgs_total_elapsed),
-            process_txs_total = %format_duration(execute_result.process_txs_total_elapsed),
+            exec_msgs_total = %format_duration(execute_result.execute_wu.execute_groups_vm_only_elapsed),
+            process_txs_total = %format_duration(execute_result.execute_wu.process_txs_elapsed),
 
-            create_queue_diff = %format_duration(final_result.create_queue_diff_elapsed),
-            apply_queue_diff = %format_duration(final_result.apply_queue_diff_elapsed),
-            finalize_block = %format_duration(final_result.finalize_block_elapsed),
+            create_queue_diff = %format_duration(finalize_result.finalize_metrics.create_queue_diff_elapsed),
+            apply_queue_diff = %format_duration(finalize_result.finalize_metrics.apply_queue_diff_elapsed),
+            finalize_block = %format_duration(finalize_result.finalize_metrics.finalize_block_elapsed),
+            finalize_total = %format_duration(finalize_result.finalize_metrics.total_timer.total_elapsed),
             "collation timings"
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn logs_total(
-        &self,
-        total_elapsed: Duration,
+    fn log_finalize_timings(finalize_metrics: &FinalizeMetrics) {
+        tracing::debug!(
+            target: tracing_targets::COLLATOR,
+            total_elapsed = %format_duration(finalize_metrics.total_timer.total_elapsed),
+            create_queue_diff = %format_duration(finalize_metrics.create_queue_diff_elapsed),
+            apply_queue_diff = %format_duration(finalize_metrics.apply_queue_diff_elapsed),
+            finalize_block = %format_duration(finalize_metrics.finalize_block_elapsed),
+            parallel_build_accounts_and_msgs = %format_duration(finalize_metrics.build_accounts_and_messages_in_parallel_elased),
+            only_build_accounts = %format_duration(finalize_metrics.build_accounts_elapsed),
+            only_build_in_msgs = %format_duration(finalize_metrics.build_in_msgs_elapsed),
+            only_build_out_msgs = %format_duration(finalize_metrics.build_out_msgs_elapsed),
+            build_mc_state_extra = %format_duration(finalize_metrics.build_mc_state_extra_elapsed),
+            build_state_update = %format_duration(finalize_metrics.build_state_update_elapsed),
+            build_block = %format_duration(finalize_metrics.build_block_elapsed),
+            "finalize block timings"
+        );
+    }
+
+    fn log_final_timings(
+        collation_total_elapsed: Duration,
         block_id: BlockId,
         block_time_diff: i64,
         collation_mngmnt_overhead: Duration,
         elapsed_from_prev_block: Duration,
         handle_block_candidate_elapsed: Duration,
     ) {
-        tracing::debug!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
-
         tracing::info!(target: tracing_targets::COLLATOR,
             "collated_block_id={}, time_diff={}, \
             collation_time={}, elapsed_from_prev_block={}, overhead={}",
-            block_id, block_time_diff, total_elapsed.as_millis(),
+            block_id, block_time_diff, collation_total_elapsed.as_millis(),
             elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
         );
 
@@ -1198,7 +1206,7 @@ impl CollatorStdImpl {
             block_time_diff = block_time_diff,
             from_prev_block = %format_duration(elapsed_from_prev_block),
             overhead = %format_duration(collation_mngmnt_overhead),
-            total = %format_duration(total_elapsed),
+            total = %format_duration(collation_total_elapsed),
             handle_block_candidate = %format_duration(handle_block_candidate_elapsed),
             "total collation timings"
         );
