@@ -1571,6 +1571,15 @@ fn create_merkle_update(
 
     let merkle_update_builder =
         MerkleUpdate::create(old_state_root.as_ref(), new_state_root.as_ref(), usage_tree);
+
+    tracing::info!(
+        "create_merkle_update_new: {}",
+        Boc::encode_base64(new_state_root)
+    );
+    tracing::info!(
+        "create_merkle_update_old: {}",
+        Boc::encode_base64(old_state_root)
+    );
     let state_update = merkle_update_builder.mt_build(new_cells, old_cells)?;
 
     let elapsed = histogram.finish();
