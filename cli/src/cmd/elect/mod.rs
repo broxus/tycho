@@ -21,13 +21,14 @@ use tycho_block_util::config::{
     apply_price_factor, build_elections_data_to_sign, compute_gas_price_factor,
 };
 use tycho_control::ControlClient;
+use tycho_core::node::NodeKeys;
 use tycho_network::PeerId;
 use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 use tycho_util::time::{now_millis, now_sec};
 
-use crate::node::{ElectionsConfig, NodeKeys};
+use crate::node::ElectionsConfig;
 use crate::util::elector::data::Ref;
 use crate::util::elector::methods::ParticiateInElectionsInput;
 use crate::util::jrpc_client::{self, JrpcClient};

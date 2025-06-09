@@ -8,7 +8,7 @@ use tycho_network::{OverlayId, PeerInfo};
 
 use crate::proto::blockchain::OverlayIdData;
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct GlobalConfig {
     pub bootstrap_peers: Vec<PeerInfo>,
     pub zerostate: ZerostateId,
