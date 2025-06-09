@@ -111,7 +111,10 @@ impl<T1, T2, T3> StarterBuilder<(T1, T2, T3, ())> {
 
 impl<T> StarterBuilder<T> {
     pub fn with_queue_state_handler<H: QueueStateHandler>(mut self, handler: H) -> Self {
-        self.optional_fields.queue_state_handler = Some(Box::new(handler));
+        self.optional_fields.queue_state_handler = Some(castaway::match_type!(handler, {
+            Box<dyn QueueStateHandler> as handler => handler,
+            handler => Box::new(handler),
+        }));
         self
     }
 }
@@ -228,4 +231,28 @@ pub trait QueueStateHandler: Send + Sync + 'static {
         file: File,
         block_id: &BlockId,
     ) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+impl<T: QueueStateHandler + ?Sized> QueueStateHandler for Arc<T> {
+    async fn import_from_file(
+        &self,
+        top_update: &OutMsgQueueUpdates,
+        file: File,
+        block_id: &BlockId,
+    ) -> Result<()> {
+        T::import_from_file(self, top_update, file, block_id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: QueueStateHandler + ?Sized> QueueStateHandler for Box<T> {
+    async fn import_from_file(
+        &self,
+        top_update: &OutMsgQueueUpdates,
+        file: File,
+        block_id: &BlockId,
+    ) -> Result<()> {
+        T::import_from_file(self, top_update, file, block_id).await
+    }
 }

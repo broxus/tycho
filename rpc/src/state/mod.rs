@@ -19,6 +19,7 @@ use tycho_core::block_strider::{
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::global_config::ZerostateId;
+use tycho_core::node::NodeBase;
 use tycho_core::storage::{CoreStorage, KeyBlocksDirection};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
@@ -184,6 +185,36 @@ impl RpcState {
             config: RpcConfig::default(),
             mandatory_fields: ((), (), ()),
         }
+    }
+
+    pub async fn init_simple(
+        mc_block_id: &BlockId,
+        node: &NodeBase,
+        config: &RpcConfig,
+    ) -> Result<(RpcBlockSubscriber, RpcStateSubscriber)> {
+        let rpc_state = RpcState::builder()
+            .with_config(config.clone())
+            .with_storage(node.core_storage.clone())
+            .with_blockchain_rpc_client(node.blockchain_rpc_client.clone())
+            .with_zerostate_id(node.global_config.zerostate)
+            .build()?;
+
+        rpc_state.init(mc_block_id).await?;
+
+        let endpoint = rpc_state
+            .bind_endpoint()
+            .await
+            .context("failed to setup RPC server endpoint")?;
+
+        tracing::info!(listen_addr = %config.listen_addr, "RPC server started");
+        tokio::task::spawn(async move {
+            if let Err(e) = endpoint.serve().await {
+                tracing::error!("RPC server failed: {e:?}");
+            }
+            tracing::info!("RPC server stopped");
+        });
+
+        Ok(rpc_state.split())
     }
 
     pub fn split(self) -> (RpcBlockSubscriber, RpcStateSubscriber) {

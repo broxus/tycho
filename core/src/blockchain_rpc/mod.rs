@@ -1,3 +1,6 @@
+pub use self::broadcast_listener::{
+    BoxBroadcastListener, BroadcastListener, BroadcastListenerExt, NoopBroadcastListener,
+};
 pub use self::client::{
     BlockDataFull, BlockDataFullWithNeighbour, BlockchainRpcClient, BlockchainRpcClientBuilder,
     BlockchainRpcClientConfig, DataRequirement, PendingArchive, PendingArchiveResponse,
@@ -5,9 +8,9 @@ pub use self::client::{
 };
 pub use self::service::{
     BlockchainRpcService, BlockchainRpcServiceBuilder, BlockchainRpcServiceConfig,
-    BroadcastListener, NoopBroadcastListener,
 };
 
+mod broadcast_listener;
 mod client;
 mod service;
 

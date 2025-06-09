@@ -4,13 +4,13 @@ use std::sync::Arc;
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use everscale_types::models::BlockId;
-use futures_util::Future;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::validate_external_message;
-use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, ServiceRequest};
+use tycho_network::{try_handle_prefix, Response, Service, ServiceRequest};
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 
+use crate::blockchain_rpc::broadcast_listener::{BroadcastListener, NoopBroadcastListener};
 use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
@@ -19,28 +19,6 @@ use crate::storage::{
 };
 
 const RPC_METHOD_TIMINGS_METRIC: &str = "tycho_blockchain_rpc_method_time";
-
-pub trait BroadcastListener: Send + Sync + 'static {
-    type HandleMessageFut<'a>: Future<Output = ()> + Send + 'a;
-
-    fn handle_message(
-        &self,
-        meta: Arc<InboundRequestMeta>,
-        message: Bytes,
-    ) -> Self::HandleMessageFut<'_>;
-}
-
-#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
-pub struct NoopBroadcastListener;
-
-impl BroadcastListener for NoopBroadcastListener {
-    type HandleMessageFut<'a> = futures_util::future::Ready<()>;
-
-    #[inline]
-    fn handle_message(&self, _: Arc<InboundRequestMeta>, _: Bytes) -> Self::HandleMessageFut<'_> {
-        futures_util::future::ready(())
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -136,10 +114,18 @@ impl<T1, T2> BlockchainRpcServiceBuilder<(T1, T2)> {
     }
 }
 
-#[derive(Clone)]
 #[repr(transparent)]
 pub struct BlockchainRpcService<B = NoopBroadcastListener> {
     inner: Arc<Inner<B>>,
+}
+
+impl<B> Clone for BlockchainRpcService<B> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl BlockchainRpcService<()> {

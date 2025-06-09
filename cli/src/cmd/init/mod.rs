@@ -9,9 +9,10 @@ use everscale_types::models::StdAddr;
 use rand::Rng;
 use serde::Serialize;
 use tycho_core::global_config::GlobalConfig;
+use tycho_core::node::NodeKeys;
 use tycho_util::FastHashMap;
 
-use crate::node::{ElectionsConfig, NodeConfig, NodeKeys, SimpleElectionsConfig};
+use crate::node::{ElectionsConfig, NodeConfig, SimpleElectionsConfig};
 use crate::util::{create_dir_all, print_json, FpTokens};
 use crate::BaseArgs;
 

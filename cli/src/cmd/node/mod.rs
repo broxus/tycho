@@ -4,12 +4,13 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tycho_core::global_config::GlobalConfig;
+use tycho_core::node::NodeKeys;
 use tycho_util::cli::logger::{init_logger, set_abort_with_tracing};
 use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
 
 pub use self::control::CmdControl;
-use crate::node::{Node, NodeConfig, NodeKeys};
+use crate::node::{Node, NodeConfig};
 use crate::BaseArgs;
 
 mod control;
@@ -112,20 +113,7 @@ impl CmdRun {
                     .context("failed to load global config")?;
 
             let node_keys_path = args.node_keys_path(self.keys.as_ref());
-            let node_keys = if node_keys_path.exists() {
-                NodeKeys::from_file(node_keys_path).context("failed to load node keys")?
-            } else {
-                let keys = rand::random::<NodeKeys>();
-                tracing::warn!(
-                    node_keys_path = %node_keys_path.display(),
-                    public_key = %keys.public_key(),
-                    "generated new node keys",
-                );
-
-                keys.save_to_file(node_keys_path)
-                    .context("failed to save new node keys")?;
-                keys
-            };
+            let node_keys = NodeKeys::load_or_create(node_keys_path)?;
 
             let public_ip = resolve_public_ip(node_config.public_ip).await?;
             let socket_addr = SocketAddr::new(public_ip, node_config.port);

@@ -17,6 +17,7 @@ use tycho_consensus::prelude::{
 use tycho_consensus::test_utils::{test_logger, AnchorConsumer, LastAnchorFile};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
+use tycho_core::node::NodeKeys;
 use tycho_core::storage::{CoreStorage, NewBlockMeta};
 use tycho_network::PeerId;
 use tycho_storage::fs::Dir;
@@ -26,7 +27,7 @@ use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
 use tycho_util::futures::JoinTask;
 
-use crate::node::{NodeConfig, NodeKeys};
+use crate::node::NodeConfig;
 
 /// run a node
 #[derive(Parser)]
@@ -200,10 +201,10 @@ impl Mempool {
                     local_addr,
                     &keys.as_secret(),
                     Some(public_addr),
-                    node_config.dht,
-                    Some(node_config.peer_resolver),
-                    Some(node_config.overlay),
-                    node_config.network,
+                    node_config.dht.clone(),
+                    Some(node_config.peer_resolver.clone()),
+                    Some(node_config.overlay.clone()),
+                    node_config.network.clone(),
                 );
 
             let key_pair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
@@ -232,10 +233,10 @@ impl Mempool {
         };
 
         // Setup storage
-        let ctx = StorageContext::new(node_config.storage)
+        let ctx = StorageContext::new(node_config.storage.clone())
             .await
             .context("failed to create storage context")?;
-        let storage = CoreStorage::open(ctx, node_config.core_storage)
+        let storage = CoreStorage::open(ctx, node_config.core_storage.clone())
             .await
             .context("failed to create storage")?;
 

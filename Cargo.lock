@@ -3660,6 +3660,7 @@ dependencies = [
  "bumpalo-herd",
  "bytes",
  "bytesize",
+ "castaway",
  "crc32c",
  "dashmap",
  "everscale-crypto",
