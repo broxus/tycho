@@ -19,6 +19,16 @@ where
     serde_path_to_error::deserialize(de).map_err(Into::into)
 }
 
+pub fn save_json_to_file<T, P>(value: T, path: P) -> Result<()>
+where
+    T: Serialize,
+    P: AsRef<Path>,
+{
+    let data = serde_json::to_string_pretty(&value)?;
+    std::fs::write(path, data)?;
+    Ok(())
+}
+
 pub mod socket_addr {
     use std::net::SocketAddr;
 

@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use futures_util::future;
 use futures_util::future::BoxFuture;
@@ -22,52 +21,32 @@ use tycho_collator::validator::{
 };
 use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig, ControlServerVersion};
 use tycho_core::block_strider::{
-    ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
-    BlockStrider, BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
-    ColdBootType, FileZerostateProvider, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
-    PersistentBlockStriderState, PsSubscriber, ShardStateApplier, Starter, StarterConfig,
-    StateSubscriber, StateSubscriberContext, StorageBlockProvider,
+    BlockProvider, BlockProviderExt, BlockSubscriberExt, ColdBootType, GcSubscriber,
+    MetricsSubscriber, OptionalBlockStuff, PsSubscriber, ShardStateApplier, StateSubscriber,
+    StateSubscriberContext,
 };
-use tycho_core::blockchain_rpc::{
-    BlockchainRpcClient, BlockchainRpcService, BroadcastListener, SelfBroadcastListener,
-};
-use tycho_core::global_config::{GlobalConfig, MempoolGlobalConfig, ZerostateId};
-use tycho_core::overlay_client::PublicOverlayClient;
-use tycho_core::storage::{CoreStorage, NodeSyncState};
-use tycho_network::{
-    DhtClient, DhtService, InboundRequestMeta, Network, OverlayService, PeerResolver,
-    PublicOverlay, Router,
-};
+use tycho_core::blockchain_rpc::{BroadcastListener, SelfBroadcastListener};
+use tycho_core::global_config::{GlobalConfig, MempoolGlobalConfig};
+use tycho_core::node::{NodeBase, NodeKeys};
+use tycho_core::storage::NodeSyncState;
+use tycho_network::InboundRequestMeta;
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::StorageContext;
 use tycho_util::futures::JoinTask;
 
-pub use self::config::{ElectionsConfig, NodeConfig, NodeKeys, SimpleElectionsConfig};
+pub use self::config::{ElectionsConfig, NodeConfig, SimpleElectionsConfig};
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::JemallocMemoryProfiler;
 
 mod config;
 
 pub struct Node {
-    keypair: Arc<ed25519::KeyPair>,
+    base: NodeBase,
 
-    zerostate: ZerostateId,
-
-    network: Network,
-    dht_client: DhtClient,
-    peer_resolver: PeerResolver,
-    overlay_service: OverlayService,
-    storage: CoreStorage,
     queue_state_factory: QueueStateImplFactory,
     rpc_mempool_adapter: RpcMempoolAdapter,
-    blockchain_rpc_client: BlockchainRpcClient,
-
-    starter_config: StarterConfig,
     rpc_config: Option<RpcConfig>,
     control_config: ControlServerConfig,
     control_socket: PathBuf,
-    blockchain_block_provider_config: BlockchainBlockProviderConfig,
-    archive_block_provider_config: ArchiveBlockProviderConfig,
 
     collator_config: CollatorConfig,
     validator_config: ValidatorStdImplConfig,
@@ -83,127 +62,36 @@ impl Node {
         global_config: GlobalConfig,
         control_socket: PathBuf,
     ) -> Result<Self> {
-        // Setup network
-        let keypair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
-        let local_id = keypair.public_key.into();
-
-        let (dht_tasks, dht_service) = DhtService::builder(local_id)
-            .with_config(node_config.dht)
-            .build();
-
-        let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
-            .with_config(node_config.overlay)
-            .with_dht_service(dht_service.clone())
-            .build();
-
-        let router = Router::builder()
-            .route(dht_service.clone())
-            .route(overlay_service.clone())
-            .build();
-
-        let local_addr = SocketAddr::from((node_config.local_ip, node_config.port));
-
-        let network = Network::builder()
-            .with_config(node_config.network)
-            .with_private_key(keys.secret.0)
-            .with_remote_addr(public_addr)
-            .build(local_addr, router)
-            .context("failed to build node network")?;
-
-        dht_tasks.spawn(&network);
-        overlay_tasks.spawn(&network);
-
-        let dht_client = dht_service.make_client(&network);
-        let peer_resolver = dht_service
-            .make_peer_resolver()
-            .with_config(node_config.peer_resolver)
-            .build(&network);
-
-        let mut bootstrap_peers = 0usize;
-        for peer in global_config.bootstrap_peers {
-            let is_new = dht_client.add_peer(Arc::new(peer))?;
-            bootstrap_peers += is_new as usize;
-        }
-
-        tracing::info!(
-            %local_id,
-            %local_addr,
-            %public_addr,
-            bootstrap_peers,
-            "initialized network"
-        );
-
-        // Setup storage
-        let ctx = StorageContext::new(node_config.storage)
-            .await
-            .context("failed to create storage context")?;
-        let storage = CoreStorage::open(ctx, node_config.core_storage).await?;
-        tracing::info!(
-            root_dir = %storage.context().root_dir().path().display(),
-            "initialized storage"
-        );
-
-        // Setup queue storage
-        let queue_state_factory = QueueStateImplFactory::new(storage.context().clone())?;
+        let base = NodeBase::builder(&node_config.base, &global_config)
+            .init_network(public_addr, &keys.as_secret())?
+            .init_storage()
+            .await?;
 
         // Setup blockchain rpc
-        let zerostate = global_config.zerostate;
-
         let rpc_mempool_adapter = RpcMempoolAdapter {
             inner: Arc::new(MempoolAdapterStdImpl::new(
-                keypair.clone(),
-                &network,
-                &peer_resolver,
-                &overlay_service,
-                storage.context(),
+                base.keypair().clone(),
+                base.network(),
+                base.peer_resolver(),
+                base.overlay_service(),
+                base.storage_context(),
                 &node_config.mempool,
             )?),
         };
+        let base = base
+            .init_blockchain_rpc(rpc_mempool_adapter.clone(), rpc_mempool_adapter.clone())?
+            .build()?;
 
-        let blockchain_rpc_service = BlockchainRpcService::builder()
-            .with_config(node_config.blockchain_rpc_service)
-            .with_storage(storage.clone())
-            .with_broadcast_listener(rpc_mempool_adapter.clone())
-            .build();
-
-        let public_overlay = PublicOverlay::builder(zerostate.compute_public_overlay_id())
-            .with_peer_resolver(peer_resolver.clone())
-            .named("blockchain_rpc")
-            .build(blockchain_rpc_service);
-        overlay_service.add_public_overlay(&public_overlay);
-
-        let blockchain_rpc_client = BlockchainRpcClient::builder()
-            .with_config(node_config.blockchain_rpc_client)
-            .with_public_overlay_client(PublicOverlayClient::new(
-                network.clone(),
-                public_overlay,
-                node_config.public_overlay_client,
-            ))
-            .with_self_broadcast_listener(rpc_mempool_adapter.clone())
-            .build();
-
-        tracing::info!(
-            overlay_id = %blockchain_rpc_client.overlay().overlay_id(),
-            "initialized blockchain rpc"
-        );
+        // Setup queue storage
+        let queue_state_factory = QueueStateImplFactory::new(base.storage_context.clone())?;
 
         Ok(Self {
-            keypair,
-            network,
-            zerostate,
-            dht_client,
-            peer_resolver,
-            overlay_service,
-            storage,
+            base,
             queue_state_factory,
             rpc_mempool_adapter,
-            blockchain_rpc_client,
-            starter_config: node_config.starter,
             rpc_config: node_config.rpc,
             control_config: node_config.control,
             control_socket,
-            blockchain_block_provider_config: node_config.blockchain_block_provider,
-            archive_block_provider_config: node_config.archive_block_provider,
             collator_config: node_config.collator,
             validator_config: node_config.validator,
             internal_queue_config: node_config.internal_queue,
@@ -213,64 +101,37 @@ impl Node {
 
     pub async fn wait_for_neighbours(&self) {
         // Ensure that there are some neighbours
-        tracing::info!("waiting for initial neighbours");
-        self.blockchain_rpc_client
-            .overlay_client()
-            .neighbours()
-            .wait_for_peers(1)
-            .await;
-        tracing::info!("found initial neighbours");
+        self.base.wait_for_neighbours(1).await;
     }
 
     /// Initialize the node and return the init block id.
     pub async fn boot(&self, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
-        let node_state = self.storage.node_state();
-        let last_mc_block_id = match node_state.load_last_mc_block_id() {
-            Some(block_id) => block_id,
-            None => {
-                Starter::builder()
-                    .with_storage(self.storage.clone())
-                    .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
-                    .with_zerostate_id(self.zerostate)
-                    .with_config(self.starter_config.clone())
-                    .with_queue_state_handler(QueueStateHandler {
-                        storage: self.queue_state_factory.storage.clone(),
-                    })
-                    .build()
-                    .cold_boot(
-                        ColdBootType::LatestPersistent,
-                        zerostates.map(FileZerostateProvider),
-                    )
-                    .await?
-            }
-        };
-
-        tracing::info!(
-            %last_mc_block_id,
-            "boot finished"
-        );
-
-        Ok(last_mc_block_id)
+        self.base
+            .boot(
+                ColdBootType::LatestPersistent,
+                zerostates,
+                Some(Box::new(QueueStateHandler {
+                    storage: self.queue_state_factory.storage.clone(),
+                })),
+            )
+            .await
     }
 
     pub async fn run(self, last_block_id: &BlockId) -> Result<()> {
+        let base = &self.base;
+
         // Force load last applied state
-        let mc_state = self
-            .storage
+        let mc_state = base
+            .core_storage
             .shard_state_storage()
             .load_state(last_block_id)
             .await?;
 
-        let validator_subscriber = self
-            .blockchain_rpc_client
-            .overlay_client()
-            .validators_resolver()
-            .clone();
-
         {
             let config = mc_state.config_params()?;
             let current_validator_set = config.get_current_validator_set()?;
-            validator_subscriber.update_validator_set(&current_validator_set);
+            base.validator_resolver()
+                .update_validator_set(&current_validator_set);
         }
 
         // Create mempool adapter
@@ -288,29 +149,9 @@ impl Node {
 
         // Create RPC
         let (rpc_block_subscriber, rpc_state_subscriber) = if let Some(config) = &self.rpc_config {
-            let rpc_state = RpcState::builder()
-                .with_config(config.clone())
-                .with_storage(self.storage.clone())
-                .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
-                .with_zerostate_id(self.zerostate)
-                .build()?;
-
-            rpc_state.init(last_block_id).await?;
-
-            let endpoint = rpc_state
-                .bind_endpoint()
+            RpcState::init_simple(last_block_id, base, config)
                 .await
-                .context("failed to setup RPC server endpoint")?;
-
-            tracing::info!(listen_addr = %config.listen_addr, "RPC server started");
-            tokio::task::spawn(async move {
-                if let Err(e) = endpoint.serve().await {
-                    tracing::error!("RPC server failed: {e:?}");
-                }
-                tracing::info!("RPC server stopped");
-            });
-
-            Some(rpc_state.split())
+                .map(Some)?
         } else {
             None
         }
@@ -333,27 +174,29 @@ impl Node {
 
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {
-                network: self.dht_client.network().clone(),
-                peer_resolver: self.peer_resolver.clone(),
-                overlays: self.overlay_service.clone(),
-                zerostate_id: self.zerostate.as_block_id(),
+                network: base.network.clone(),
+                peer_resolver: base.peer_resolver.clone(),
+                overlays: base.overlay_service.clone(),
+                zerostate_id: base.global_config.zerostate.as_block_id(),
             },
-            self.keypair.clone(),
+            base.keypair.clone(),
             self.validator_config,
         );
 
         // Explicitly handle the initial state
-        let sync_context = match self.storage.node_state().get_node_sync_state() {
+        let sync_context = match base.core_storage.node_state().get_node_sync_state() {
             None => anyhow::bail!("Failed to determine node sync state"),
             Some(NodeSyncState::PersistentState) => CollatorSyncContext::Persistent,
             Some(NodeSyncState::Blocks) => CollatorSyncContext::Historical,
         };
 
         let collation_manager = CollationManager::start(
-            self.keypair.clone(),
+            base.keypair.clone(),
             self.collator_config.clone(),
             Arc::new(message_queue_adapter),
-            |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone(), sync_context),
+            |listener| {
+                StateNodeAdapterStdImpl::new(listener, base.core_storage.clone(), sync_context)
+            },
             mempool_adapter,
             validator.clone(),
             CollatorStdImplFactory,
@@ -369,17 +212,17 @@ impl Node {
 
         tracing::info!("collator started");
 
-        let gc_subscriber = GcSubscriber::new(self.storage.clone());
-        let ps_subscriber = PsSubscriber::new(self.storage.clone());
+        let gc_subscriber = GcSubscriber::new(base.core_storage.clone());
+        let ps_subscriber = PsSubscriber::new(base.core_storage.clone());
 
         // Create control server
         let control_server = {
             let mut builder = ControlServer::builder()
-                .with_network(&self.network)
+                .with_network(&base.network)
                 .with_gc_subscriber(gc_subscriber.clone())
-                .with_storage(self.storage.clone())
-                .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
-                .with_validator_keypair(self.keypair.clone())
+                .with_storage(base.core_storage.clone())
+                .with_blockchain_rpc_client(base.blockchain_rpc_client.clone())
+                .with_validator_keypair(base.keypair.clone())
                 .with_collator(Arc::new(CollatorControl {
                     config: self.collator_config.clone(),
                 }));
@@ -419,63 +262,43 @@ impl Node {
             })
         };
 
-        // Create block strider
-        let archive_block_provider = ArchiveBlockProvider::new(
-            self.blockchain_rpc_client.clone(),
-            self.storage.clone(),
-            self.archive_block_provider_config.clone(),
-        );
-
-        let blockchain_block_provider = BlockchainBlockProvider::new(
-            self.blockchain_rpc_client.clone(),
-            self.storage.clone(),
-            self.blockchain_block_provider_config,
-        );
-
         // TODO: Uncomment when archive block provider can initiate downloads for shard blocks.
         // blockchain_block_provider =
         //     blockchain_block_provider.with_fallback(archive_block_provider.clone());
 
-        let storage_block_provider = StorageBlockProvider::new(self.storage.clone());
-
+        let archive_block_provider = base.build_archive_block_provider();
+        let blockchain_block_provider = base.build_blockchain_block_provider();
+        let storage_block_provider = base.build_storage_block_provider();
         let collator_block_provider = CollatorBlockProvider {
             adapter: collation_manager.state_node_adapter().clone(),
         };
 
-        let strider_state =
-            PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
-
-        let block_strider = BlockStrider::builder()
-            .with_provider(
-                collator
-                    .new_sync_point(CollatorSyncContext::Historical)
-                    .chain(archive_block_provider)
-                    .chain(collator.new_sync_point(CollatorSyncContext::Recent))
-                    .chain((
-                        blockchain_block_provider,
-                        storage_block_provider,
-                        collator_block_provider,
-                    )),
-            )
-            .with_state(strider_state)
-            .with_block_subscriber(
-                (
-                    ShardStateApplier::new(
-                        self.storage.clone(),
-                        (
-                            collator,
-                            rpc_state_subscriber,
-                            ps_subscriber,
-                            control_server,
-                        ),
+        let block_strider = base.build_strider(
+            collator
+                .new_sync_point(CollatorSyncContext::Historical)
+                .chain(archive_block_provider)
+                .chain(collator.new_sync_point(CollatorSyncContext::Recent))
+                .chain((
+                    blockchain_block_provider,
+                    storage_block_provider,
+                    collator_block_provider,
+                )),
+            (
+                ShardStateApplier::new(
+                    base.core_storage.clone(),
+                    (
+                        collator,
+                        rpc_state_subscriber,
+                        ps_subscriber,
+                        control_server,
                     ),
-                    rpc_block_subscriber,
-                    validator_subscriber,
-                    MetricsSubscriber,
-                )
-                    .chain(gc_subscriber),
+                ),
+                rpc_block_subscriber,
+                base.validator_resolver().clone(),
+                MetricsSubscriber,
             )
-            .build();
+                .chain(gc_subscriber),
+        );
 
         // Run block strider
         tracing::info!("block strider started");

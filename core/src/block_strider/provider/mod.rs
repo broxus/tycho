@@ -95,7 +95,10 @@ pub trait BlockProviderExt: Sized {
 
 impl<B: BlockProvider> BlockProviderExt for B {
     fn boxed(self) -> BoxBlockProvider {
-        BoxBlockProvider::new(self)
+        castaway::match_type!(self, {
+            BoxBlockProvider as provider => provider,
+            provider => BoxBlockProvider::new(provider),
+        })
     }
 
     fn chain<T: BlockProvider>(self, other: T) -> ChainBlockProvider<Self, T> {
