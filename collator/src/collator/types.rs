@@ -1062,6 +1062,11 @@ pub struct ExecutedTransaction {
     pub burned: Tokens,
 }
 
+#[derive(Clone, Debug)]
+pub struct SkippedTransaction {
+    pub gas_used: u64,
+}
+
 pub struct ParsedMessage {
     pub info: MsgInfo,
     pub dst_in_current_shard: bool,
