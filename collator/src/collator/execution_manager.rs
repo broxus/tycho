@@ -13,7 +13,9 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
 use super::messages_buffer::MessageGroup;
-use super::types::{AccountId, ExecutedTransaction, ParsedMessage, ShardAccountStuff};
+use super::types::{
+    AccountId, ExecutedTransaction, ParsedMessage, ShardAccountStuff, SkippedTransaction,
+};
 use crate::tracing_targets;
 
 pub(super) struct MessagesExecutor {
@@ -225,38 +227,43 @@ impl MessagesExecutor {
         *ext_msgs_skipped += executed.ext_msgs_skipped;
 
         let mut current_wu = 0u64;
+        let mut consume_gas_wu = |total_gas: u64| {
+            current_wu = current_wu
+                .saturating_add(self.wu_params_execute.prepare as u64)
+                .saturating_add(
+                    total_gas
+                        .saturating_mul(self.wu_params_execute.execute as u64)
+                        .saturating_div(self.wu_params_execute.execute_delimiter as u64),
+                );
+        };
 
         *max_account_msgs_exec_time = (*max_account_msgs_exec_time).max(executed.exec_time);
         *total_exec_time += executed.exec_time;
         *group_max_vert_size = cmp::max(*group_max_vert_size, executed.transactions.len());
 
         for tx in executed.transactions {
-            let Some(executed) = tx.result else {
-                tracing::trace!(
-                    target: tracing_targets::EXEC_MANAGER,
-                    account_addr = %executed.account_state.account_addr,
-                    message_hash = %tx.in_message.cell.repr_hash(),
-                    "skipped external message",
-                );
-                *ext_msgs_error_count += 1;
-                continue;
-            };
+            match tx.result {
+                TransactionResult::Executed(executed) => {
+                    self.min_next_lt = cmp::max(self.min_next_lt, executed.next_lt);
+                    consume_gas_wu(executed.gas_used);
 
-            self.min_next_lt = cmp::max(self.min_next_lt, executed.next_lt);
+                    items.push(ExecutedTickItem {
+                        in_message: tx.in_message,
+                        executed,
+                    });
+                }
+                TransactionResult::Skipped(skipped) => {
+                    tracing::trace!(
+                        target: tracing_targets::EXEC_MANAGER,
+                        account_addr = %executed.account_state.account_addr,
+                        message_hash = %tx.in_message.cell.repr_hash(),
+                        "skipped external message",
+                    );
 
-            current_wu = current_wu
-                .saturating_add(self.wu_params_execute.prepare as u64)
-                .saturating_add(
-                    executed
-                        .gas_used
-                        .saturating_mul(self.wu_params_execute.execute as u64)
-                        .saturating_div(self.wu_params_execute.execute_delimiter as u64),
-                );
-
-            items.push(ExecutedTickItem {
-                in_message: tx.in_message,
-                executed,
-            });
+                    consume_gas_wu(skipped.gas_used);
+                    *ext_msgs_error_count += 1;
+                }
+            }
         }
 
         self.accounts_cache
@@ -322,7 +329,7 @@ impl MessagesExecutor {
         )
         .map(|executed| (account_stuff, executed))?;
 
-        if let Some(tx) = &executed.result {
+        if let TransactionResult::Executed(tx) = &executed.result {
             self.min_next_lt = cmp::max(min_next_lt, tx.next_lt);
         }
         self.accounts_cache.add_account_stuff(account_stuff);
@@ -334,25 +341,25 @@ impl MessagesExecutor {
         &mut self,
         mut account_stuff: Box<ShardAccountStuff>,
         tick_tock: TickTock,
-    ) -> Result<Option<ExecutedTransaction>> {
+    ) -> Result<TransactionResult> {
         let min_next_lt = self.min_next_lt;
         let config = self.config.clone();
         let params = self.params.clone();
 
-        let Some(executed) = execute_ticktock_transaction(
+        let executed = execute_ticktock_transaction(
             &mut account_stuff,
             tick_tock,
             min_next_lt,
             &config,
             &params,
-        )?
-        else {
-            return Ok(None);
-        };
+        )?;
 
-        self.min_next_lt = cmp::max(min_next_lt, executed.next_lt);
+        if let TransactionResult::Executed(tx) = &executed {
+            self.min_next_lt = cmp::max(min_next_lt, tx.next_lt);
+        }
+
         self.accounts_cache.add_account_stuff(account_stuff);
-        Ok(Some(executed))
+        Ok(executed)
     }
 }
 
@@ -439,8 +446,13 @@ pub struct ExecutedTransactions {
 }
 
 pub struct ExecutedOrdinaryTransaction {
-    pub result: Option<ExecutedTransaction>,
+    pub result: TransactionResult,
     pub in_message: Box<ParsedMessage>,
+}
+
+pub enum TransactionResult {
+    Executed(ExecutedTransaction),
+    Skipped(SkippedTransaction),
 }
 
 fn execute_ordinary_transaction_impl(
@@ -478,7 +490,9 @@ fn execute_ordinary_transaction_impl(
         // TODO: Export `inspector.exit_code` to metrics.
         Err(TxError::Skipped) if is_external => {
             return Ok(ExecutedOrdinaryTransaction {
-                result: None,
+                result: TransactionResult::Skipped(SkippedTransaction {
+                    gas_used: inspector.total_gas_used,
+                }),
                 in_message,
             })
         }
@@ -494,10 +508,10 @@ fn execute_ordinary_transaction_impl(
     );
 
     Ok(ExecutedOrdinaryTransaction {
-        result: Some(ExecutedTransaction {
+        result: TransactionResult::Executed(ExecutedTransaction {
             transaction: output.transaction,
             out_msgs: output.transaction_meta.out_msgs,
-            gas_used: output.transaction_meta.gas_used,
+            gas_used: inspector.total_gas_used,
             next_lt: output.transaction_meta.next_lt,
             burned: output.burned,
         }),
@@ -511,7 +525,7 @@ fn execute_ticktock_transaction(
     min_lt: u64,
     config: &ParsedConfig,
     params: &ExecutorParams,
-) -> Result<Option<ExecutedTransaction>> {
+) -> Result<TransactionResult> {
     tracing::trace!(
         target: tracing_targets::EXEC_MANAGER,
         account_addr = %account_stuff.account_addr,
@@ -533,7 +547,11 @@ fn execute_ticktock_transaction(
 
     let output = match uncommited {
         Ok(uncommited) => uncommited.commit()?,
-        Err(TxError::Skipped) => return Ok(None),
+        Err(TxError::Skipped) => {
+            return Ok(TransactionResult::Skipped(SkippedTransaction {
+                gas_used: inspector.total_gas_used,
+            }))
+        }
         Err(TxError::Fatal(e)) => return Err(e),
     };
 
@@ -545,10 +563,10 @@ fn execute_ticktock_transaction(
         inspector.public_libs_diff,
     );
 
-    Ok(Some(ExecutedTransaction {
+    Ok(TransactionResult::Executed(ExecutedTransaction {
         transaction: output.transaction,
         out_msgs: output.transaction_meta.out_msgs,
-        gas_used: output.transaction_meta.gas_used,
+        gas_used: inspector.total_gas_used,
         next_lt: output.transaction_meta.next_lt,
         burned: output.burned,
     }))

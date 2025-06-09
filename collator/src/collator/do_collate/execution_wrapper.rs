@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use everscale_types::cell::{CellBuilder, CellSlice, HashBytes, Lazy};
 use everscale_types::models::{
     BaseMessage, BlockchainConfig, CurrencyCollection, ImportFees, InMsg, InMsgExternal,
@@ -10,7 +10,7 @@ use everscale_types::models::{
 };
 use tycho_block_util::queue::QueueKey;
 
-use crate::collator::execution_manager::MessagesExecutor;
+use crate::collator::execution_manager::{MessagesExecutor, TransactionResult};
 use crate::collator::types::{
     BlockCollationData, ExecutedTransaction, ParsedMessage, PreparedInMsg, PreparedOutMsg,
     SpecialOrigin,
@@ -161,11 +161,11 @@ impl ExecutorWrapper {
             .executor
             .execute_ordinary_transaction(account_stuff, in_message)?;
 
-        let executor_output = executed
-            .result
-            .context("special transactions can't be skipped")?;
+        let TransactionResult::Executed(tx) = executed.result else {
+            anyhow::bail!("special transactions can't be skipped");
+        };
 
-        self.process_transaction(executor_output, Some(executed.in_message), collation_data)
+        self.process_transaction(tx, Some(executed.in_message), collation_data)
     }
 
     pub fn create_ticktock_transactions(
@@ -220,7 +220,7 @@ impl ExecutorWrapper {
             return Ok(Vec::new());
         };
 
-        let Some(executor_output) = self
+        let TransactionResult::Executed(executor_output) = self
             .executor
             .execute_ticktock_transaction(account_stuff, kind)?
         else {
