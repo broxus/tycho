@@ -48,7 +48,7 @@ pub struct RpcConfig {
     /// Default: `false`.
     pub enable_toncenter_v3_api: bool,
 
-    pub storage: RpcStorage,
+    pub storage: RpcStorageConfig,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -90,7 +90,7 @@ impl Default for RunGetMethodConfig {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum RpcStorage {
+pub enum RpcStorageConfig {
     Full {
         /// Transactions garbage collector configuration.
         ///
@@ -113,7 +113,7 @@ pub enum RpcStorage {
     StateOnly,
 }
 
-impl RpcStorage {
+impl RpcStorageConfig {
     pub fn is_full(&self) -> bool {
         matches!(self, Self::Full { .. })
     }
@@ -151,7 +151,7 @@ impl Default for RpcConfig {
             run_get_method: RunGetMethodConfig::default(),
             enable_toncenter_v2_api: false,
             enable_toncenter_v3_api: false,
-            storage: RpcStorage::Full {
+            storage: RpcStorageConfig::Full {
                 gc: Some(Default::default()),
                 force_reindex: false,
                 blacklist_path: None,
