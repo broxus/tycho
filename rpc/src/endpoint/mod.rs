@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRef, Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::RequestExt;
@@ -11,21 +11,145 @@ pub use self::jrpc::JrpcEndpointCache;
 pub use self::proto::ProtoEndpointCache;
 use crate::state::RpcState;
 
-mod jrpc;
-mod proto;
+pub mod jrpc;
+pub mod proto;
+
+pub struct RpcEndpointBuilder<C = ()> {
+    common: RpcEndpointBuilderCommon,
+    custom_routes: C,
+}
+
+impl Default for RpcEndpointBuilder {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            common: Default::default(),
+            custom_routes: (),
+        }
+    }
+}
+
+impl RpcEndpointBuilder<()> {
+    pub fn empty() -> Self {
+        Self {
+            common: RpcEndpointBuilderCommon::empty(),
+            custom_routes: (),
+        }
+    }
+
+    pub fn with_custom_routes<S>(
+        self,
+        routes: axum::Router<S>,
+    ) -> RpcEndpointBuilder<axum::Router<S>>
+    where
+        RpcState: FromRef<S>,
+        S: Send + Sync,
+    {
+        RpcEndpointBuilder {
+            common: self.common,
+            custom_routes: routes,
+        }
+    }
+
+    pub async fn bind(self, state: RpcState) -> Result<RpcEndpoint> {
+        let listener = state.bind_socket().await?;
+        Ok(RpcEndpoint::from_parts(
+            listener,
+            self.common.build(),
+            state,
+        ))
+    }
+}
+
+impl<C> RpcEndpointBuilder<C> {
+    pub fn with_healthcheck_route<T: Into<String>>(mut self, route: T) -> Self {
+        self.common.healthcheck_route = Some(route.into());
+        self
+    }
+
+    pub fn with_base_routes<I, T>(mut self, routes: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.common.base_routes = routes.into_iter().map(Into::into).collect();
+        self
+    }
+}
+
+impl<S> RpcEndpointBuilder<axum::Router<S>>
+where
+    RpcState: FromRef<S>,
+    S: Send + Sync + Clone + 'static,
+{
+    pub async fn bind(self, state: S) -> Result<RpcEndpoint> {
+        let listener = RpcState::from_ref(&state).bind_socket().await?;
+        Ok(RpcEndpoint::from_parts(
+            listener,
+            self.common.build::<S>().merge(self.custom_routes),
+            state,
+        ))
+    }
+}
+
+struct RpcEndpointBuilderCommon {
+    healthcheck_route: Option<String>,
+    base_routes: Vec<String>,
+}
+
+impl Default for RpcEndpointBuilderCommon {
+    fn default() -> Self {
+        Self {
+            healthcheck_route: Some("/".to_owned()),
+            base_routes: vec!["/".to_owned(), "/rpc".to_owned(), "/proto".to_owned()],
+        }
+    }
+}
+
+impl RpcEndpointBuilderCommon {
+    pub fn empty() -> Self {
+        Self {
+            healthcheck_route: None,
+            base_routes: Vec::new(),
+        }
+    }
+
+    fn build<S>(self) -> axum::Router<S>
+    where
+        RpcState: FromRef<S>,
+        S: Clone + Send + Sync + 'static,
+    {
+        let mut router = axum::Router::new();
+
+        if let Some(route) = self.healthcheck_route {
+            router = router.route(&route, get(health_check));
+        }
+        for route in self.base_routes {
+            router = router.route(&route, post(common_route));
+        }
+
+        router
+    }
+}
 
 pub struct RpcEndpoint {
     listener: TcpListener,
-    state: RpcState,
+    router: axum::Router<()>,
 }
 
 impl RpcEndpoint {
-    pub async fn bind(state: RpcState) -> Result<Self> {
-        let listener = TcpListener::bind(state.config().listen_addr).await?;
-        Ok(Self { listener, state })
+    pub fn builder() -> RpcEndpointBuilder {
+        RpcEndpointBuilder::default()
     }
 
-    pub async fn serve(self) -> std::io::Result<()> {
+    pub fn empty_builder() -> RpcEndpointBuilder {
+        RpcEndpointBuilder::empty()
+    }
+
+    pub fn from_parts<S>(listener: TcpListener, router: axum::Router<S>, state: S) -> Self
+    where
+        S: Clone + Send + Sync + 'static,
+    {
         use tower::ServiceBuilder;
         use tower_http::cors::CorsLayer;
         use tower_http::timeout::TimeoutLayer;
@@ -40,16 +164,14 @@ impl RpcEndpoint {
         let service = service.layer(tower_http::compression::CompressionLayer::new().gzip(true));
 
         // Prepare routes
-        let router = axum::Router::new()
-            .route("/", get(health_check))
-            .route("/", post(common_route))
-            .route("/rpc", post(common_route))
-            .route("/proto", post(common_route));
+        let router = router.layer(service).with_state(state);
 
-        let router = router.layer(service).with_state(self.state);
+        // Done
+        Self { listener, router }
+    }
 
-        // Start server
-        axum::serve(self.listener, router).await
+    pub async fn serve(self) -> std::io::Result<()> {
+        axum::serve(self.listener, self.router).await
     }
 }
 

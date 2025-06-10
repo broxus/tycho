@@ -9,6 +9,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
 use parking_lot::RwLock;
+use tokio::net::TcpListener;
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
@@ -28,7 +29,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
 
-use crate::config::{BlackListConfig, RpcConfig, RpcStorage, TransactionsGcConfig};
+use crate::config::{BlackListConfig, RpcConfig, RpcStorageConfig, TransactionsGcConfig};
 use crate::endpoint::{JrpcEndpointCache, ProtoEndpointCache, RpcEndpoint};
 use crate::models::{GenTimings, StateTimings};
 
@@ -47,7 +48,7 @@ impl RpcStateBuilder {
         let mut blacklisted_accounts = None::<BlacklistedAccounts>;
         let mut blacklist_watcher_handle = None;
 
-        if let RpcStorage::Full {
+        if let RpcStorageConfig::Full {
             gc, blacklist_path, ..
         } = &self.config.storage
         {
@@ -207,8 +208,12 @@ impl RpcState {
         }
     }
 
+    pub async fn bind_socket(&self) -> std::io::Result<TcpListener> {
+        TcpListener::bind(self.config().listen_addr).await
+    }
+
     pub async fn bind_endpoint(&self) -> Result<RpcEndpoint> {
-        RpcEndpoint::bind(self.clone()).await
+        RpcEndpoint::builder().bind(self.clone()).await
     }
 
     pub fn config(&self) -> &RpcConfig {

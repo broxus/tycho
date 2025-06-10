@@ -338,6 +338,7 @@ impl<C> Node<C> {
 
         Ok(())
     }
+
     pub async fn create_rpc(&self, last_block_id: &BlockId) -> Result<Option<RpcState>> {
         let rpc_state = if let Some(config) = &self.rpc_config {
             let rpc_state = RpcState::builder()
