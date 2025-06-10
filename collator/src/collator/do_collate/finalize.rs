@@ -563,12 +563,12 @@ impl Phase<FinalizeState> {
 
             new_state_root = CellBuilder::build_from(&new_observable_state)?;
 
-            let new_accounts = split_aug_dict_raw(new_observable_state.accounts.load()?, 4)?
+            let new_accounts = split_aug_dict_raw(new_observable_state.accounts.load()?, 5)?
                 .into_keys()
                 .collect::<ahash::HashSet<_>>();
 
             let old_accounts =
-                split_aug_dict_raw(self.state.prev_shard_data.observable_accounts().clone(), 4)?
+                split_aug_dict_raw(self.state.prev_shard_data.observable_accounts().clone(), 5)?
                     .into_keys()
                     .collect::<ahash::HashSet<_>>();
 
