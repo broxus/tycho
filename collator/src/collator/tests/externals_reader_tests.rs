@@ -186,10 +186,11 @@ fn test_read_externals() {
             .increment_curr_processed_offset(par_id)
             .unwrap();
         let mut msg_group = MessageGroup::default();
-        let CollectExternalsResult { metrics: _ } = externals_reader
+        let CollectExternalsResult { metrics: _, .. } = externals_reader
             .collect_messages(
                 *par_id,
                 &mut msg_group,
+                None,
                 &prev_partitions_readers,
                 &msg_groups,
             )
@@ -325,10 +326,11 @@ fn test_read_externals() {
             .increment_curr_processed_offset(par_id)
             .unwrap();
         let mut msg_group = MessageGroup::default();
-        let CollectExternalsResult { metrics: _ } = externals_reader
+        let CollectExternalsResult { metrics: _, .. } = externals_reader
             .collect_messages(
                 *par_id,
                 &mut msg_group,
+                None,
                 &prev_partitions_readers,
                 &msg_groups,
             )
@@ -427,10 +429,11 @@ fn test_read_externals() {
             .increment_curr_processed_offset(par_id)
             .unwrap();
         let mut msg_group = MessageGroup::default();
-        let CollectExternalsResult { metrics: _ } = externals_reader
+        let CollectExternalsResult { metrics: _, .. } = externals_reader
             .collect_messages(
                 *par_id,
                 &mut msg_group,
+                None,
                 &prev_partitions_readers,
                 &msg_groups,
             )
@@ -494,10 +497,11 @@ fn test_read_externals() {
             .increment_curr_processed_offset(par_id)
             .unwrap();
         let mut msg_group = MessageGroup::default();
-        let CollectExternalsResult { metrics: _ } = externals_reader
+        let CollectExternalsResult { metrics: _, .. } = externals_reader
             .collect_messages(
                 *par_id,
                 &mut msg_group,
+                None,
                 &prev_partitions_readers,
                 &msg_groups,
             )
@@ -743,10 +747,11 @@ fn test_read_externals() {
             .increment_curr_processed_offset(par_id)
             .unwrap();
         let mut msg_group = MessageGroup::default();
-        let CollectExternalsResult { metrics: _ } = externals_reader
+        let CollectExternalsResult { metrics: _, .. } = externals_reader
             .collect_messages(
                 *par_id,
                 &mut msg_group,
+                None,
                 &prev_partitions_readers,
                 &msg_groups,
             )
@@ -928,10 +933,11 @@ fn test_read_externals() {
                 .increment_curr_processed_offset(par_id)
                 .unwrap();
             let mut msg_group = MessageGroup::default();
-            let CollectExternalsResult { metrics: _ } = externals_reader
+            let CollectExternalsResult { metrics: _, .. } = externals_reader
                 .collect_messages(
                     *par_id,
                     &mut msg_group,
+                    None,
                     &prev_partitions_readers,
                     &msg_groups,
                 )
