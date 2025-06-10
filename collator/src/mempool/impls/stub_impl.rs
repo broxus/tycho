@@ -4,13 +4,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use async_trait::async_trait;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use humantime::format_duration;
 use parking_lot::RwLock;
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use scopeguard::defer;
 use tycho_network::PeerId;
 
@@ -28,6 +29,16 @@ pub struct MempoolAdapterStubImpl {
 }
 
 impl MempoolAdapterStubImpl {
+    pub async fn get_first_anchor(&self) -> Arc<MempoolAnchor> {
+        loop {
+            if let Some((_anchor_id, anchor)) = self.anchors_cache.read().first_key_value() {
+                return anchor.clone();
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(1320)).await;
+        }
+    }
+
     pub fn with_stub_externals(
         listener: Arc<dyn MempoolEventListener>,
         now: Option<u64>,
@@ -50,6 +61,21 @@ impl MempoolAdapterStubImpl {
             paths.sort();
 
             tokio::spawn(Self::file_externals_generator(a, paths));
+            Ok(())
+        })
+    }
+
+    pub fn with_dumped_anchors_externals(
+        listener: Arc<dyn MempoolEventListener>,
+        dir_path: impl AsRef<Path>,
+    ) -> Result<Arc<Self>> {
+        Self::with_generator(listener, move |a| {
+            let mut paths = std::fs::read_dir(dir_path)?
+                .map(|res| res.map(|e| e.path()))
+                .collect::<Result<Vec<_>, _>>()?;
+            paths.sort();
+
+            tokio::spawn(Self::dumped_anchors_externals_generator(a, paths));
             Ok(())
         })
     }
@@ -165,6 +191,66 @@ impl MempoolAdapterStubImpl {
             self.listener.on_new_anchor(anchor).await.unwrap();
         }
     }
+
+    #[tracing::instrument(skip_all)]
+    async fn dumped_anchors_externals_generator(self: Arc<Self>, paths: Vec<PathBuf>) {
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "started");
+        defer! {
+            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
+        }
+
+        let mut iter = paths.into_iter();
+
+        let mut last_chain_time = 0;
+        let mut prev_anchor_id = None;
+        loop {
+            if prev_anchor_id.is_some() {
+                if self.sleep_between_anchors.load(Ordering::Acquire) {
+                    tokio::time::sleep(make_round_interval() * 4).await;
+                } else {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+
+            let anchor = 'anchor: {
+                if let Some(path) = iter.next() {
+                    match make_anchor_from_externals_dump_file(prev_anchor_id, &path) {
+                        Ok(anchor) => {
+                            break 'anchor anchor;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                target: tracing_targets::MEMPOOL_ADAPTER,
+                                prev_anchor_id,
+                                path = %path.display(),
+                                "failed to make anchor from file: {e:?}"
+                            );
+                        }
+                    }
+                }
+
+                make_empty_anchor(
+                    prev_anchor_id.unwrap_or_default() + 4,
+                    prev_anchor_id.unwrap_or_default(),
+                    last_chain_time + 1336,
+                )
+            };
+
+            last_chain_time = anchor.chain_time;
+            prev_anchor_id = Some(anchor.id);
+            self.anchors_cache.write().insert(anchor.id, anchor.clone());
+
+            tracing::debug!(
+                target: tracing_targets::MEMPOOL_ADAPTER,
+                anchor_id = anchor.id,
+                chain_time = anchor.chain_time,
+                externals = anchor.externals.len(),
+                "anchor added to cache",
+            );
+
+            self.listener.on_new_anchor(anchor).await.unwrap();
+        }
+    }
 }
 
 #[async_trait]
@@ -186,33 +272,34 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         let mut last_attempt_at = None;
         loop {
             let Some(anchor) = self.anchors_cache.read().get(&anchor_id).cloned() else {
-                let last_anchor_id = self
+                if let Some(last_anchor_id) = self
                     .anchors_cache
                     .read()
                     .last_key_value()
                     .map(|(_, last_anchor)| last_anchor.id)
-                    .unwrap_or_default();
-                if last_anchor_id > anchor_id {
-                    return Ok(GetAnchorResult::NotExist);
-                } else {
-                    let delta = anchor_id.saturating_sub(last_anchor_id);
-                    if delta > 20 {
-                        self.sleep_between_anchors.store(false, Ordering::Release);
-                        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
-                            "sleep_between_anchors set to False because anchor_id {} ahead last {} on {} > 20",
-                            anchor_id, last_anchor_id, delta,
-                        );
-                        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
-                            "STUB: mempool return None because requested anchor_id {} ahead last {} on {} > 20",
-                            anchor_id, last_anchor_id, delta,
-                        );
+                {
+                    if last_anchor_id > anchor_id {
                         return Ok(GetAnchorResult::NotExist);
-                    } else if delta > 3 {
-                        self.sleep_between_anchors.store(false, Ordering::Release);
-                        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
-                            "sleep_between_anchors set to False because anchor_id {} ahead last {} on {} > 3",
-                            anchor_id, last_anchor_id, delta,
-                        );
+                    } else {
+                        let delta = anchor_id.saturating_sub(last_anchor_id);
+                        if delta > 20 {
+                            self.sleep_between_anchors.store(false, Ordering::Release);
+                            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
+                                "sleep_between_anchors set to False because anchor_id {} ahead last {} on {} > 20",
+                                anchor_id, last_anchor_id, delta,
+                            );
+                            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
+                                "STUB: mempool return None because requested anchor_id {} ahead last {} on {} > 20",
+                                anchor_id, last_anchor_id, delta,
+                            );
+                            return Ok(GetAnchorResult::NotExist);
+                        } else if delta > 3 {
+                            self.sleep_between_anchors.store(false, Ordering::Release);
+                            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
+                                "sleep_between_anchors set to False because anchor_id {} ahead last {} on {} > 3",
+                                anchor_id, last_anchor_id, delta,
+                            );
+                        }
                     }
                 }
 
@@ -454,7 +541,45 @@ pub(crate) fn make_anchor_from_file(
 }
 
 fn make_round_interval() -> Duration {
-    Duration::from_millis(rand::thread_rng().gen_range(240..340))
+    let mut rng = StdRng::seed_from_u64(5678);
+    Duration::from_millis(rng.gen_range(240..340))
+}
+
+pub(crate) fn make_anchor_from_externals_dump_file(
+    prev_id: Option<MempoolAnchorId>,
+    path: &Path,
+) -> Result<Arc<MempoolAnchor>> {
+    let file_name = path.file_name().unwrap().to_str().unwrap();
+    tracing::debug!(
+        target: tracing_targets::MEMPOOL_ADAPTER,
+        file_name,
+        "read externals dump from file"
+    );
+
+    let splits: Vec<_> = file_name.split('.').collect();
+    let file_name_without_ext = splits[0];
+    let splits: Vec<_> = file_name_without_ext.split('_').collect();
+    let anchor_id = splits[1].parse().unwrap();
+    let chain_time = splits[2].parse().unwrap();
+
+    let mut externals = vec![];
+    let data = std::fs::read_to_string(path)?;
+    for item in data.lines() {
+        let cell = Boc::decode_base64(item)?;
+        let message: Message<'_> = cell.parse()?;
+        let MsgInfo::ExtIn(info) = message.info else {
+            bail!("anchor dump should contain only externals")
+        };
+        externals.push(Arc::new(ExternalMessage { cell, info }));
+    }
+
+    Ok(Arc::new(MempoolAnchor {
+        id: anchor_id,
+        prev_id,
+        author: PeerId(Default::default()),
+        chain_time,
+        externals,
+    }))
 }
 
 #[cfg(test)]

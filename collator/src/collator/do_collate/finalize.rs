@@ -156,6 +156,7 @@ impl Phase<FinalizeState> {
             let finalize_message_reader_res = messages_reader.finalize(
                 self.extra.executor.min_next_lt(),
                 &other_updated_top_shard_diffs_info,
+                true,
             )?;
             create_queue_diff_elapsed = histogram_create_queue_diff.finish();
             finalize_message_reader_res

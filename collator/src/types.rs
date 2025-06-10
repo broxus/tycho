@@ -284,7 +284,7 @@ pub struct BlockStuffForSync {
 }
 
 /// (`ShardIdent`, seqno, subset `short_hash`)
-pub(crate) type CollationSessionId = (ShardIdent, u32, u32);
+pub type CollationSessionId = (ShardIdent, u32, u32);
 
 #[derive(Clone)]
 pub struct CollationSessionInfo {
