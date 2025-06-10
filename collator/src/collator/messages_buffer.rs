@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque, btree_map};
+use std::collections::{BTreeMap, VecDeque};
 
 use rayon::iter::IntoParallelIterator;
 use tycho_block_util::queue::QueueKey;
@@ -30,7 +30,6 @@ pub struct MessagesBuffer {
     msgs: FastIndexMap<HashBytes, VecDeque<Box<ParsedMessage>>>,
     int_count: usize,
     ext_count: usize,
-    sorted_index: BTreeMap<usize, FastHashSet<HashBytes>>,
 }
 
 impl MessagesBuffer {
@@ -71,34 +70,7 @@ impl MessagesBuffer {
         let account_id = dst.as_std().map(|a| a.address).unwrap_or_default();
 
         // insert message to buffer
-        let prev_msgs_count = match self.msgs.entry(account_id) {
-            indexmap::map::Entry::Vacant(vacant) => {
-                vacant.insert([msg].into());
-                0
-            }
-            indexmap::map::Entry::Occupied(mut occupied) => {
-                let entry = occupied.get_mut();
-                let prev_count = entry.len();
-                entry.push_back(msg);
-                prev_count
-            }
-        };
-
-        // update sorted by count index
-        // remove account_id from previous count bracket
-        if prev_msgs_count > 0 {
-            let accounts = self.sorted_index.get_mut(&prev_msgs_count).unwrap();
-            accounts.remove(&account_id);
-        }
-        // add account_id to the next count bracket
-        match self.sorted_index.entry(prev_msgs_count + 1) {
-            btree_map::Entry::Vacant(vacant) => {
-                vacant.insert([account_id].into_iter().collect());
-            }
-            btree_map::Entry::Occupied(mut occupied) => {
-                occupied.get_mut().insert(account_id);
-            }
-        }
+        self.msgs.entry(account_id).or_default().push_back(msg);
     }
 
     pub fn remove_messages_by_accounts(&mut self, addresses_to_remove: &FastHashSet<HashBytes>) {
@@ -653,8 +625,24 @@ impl MessagesBuffer {
             BufferFillStateByCount::NotFull
         };
 
-        // TODO: msgs-v3: check if we can already fill required slots
-        let by_slots = BufferFillStateBySlots::CanNotFill;
+        let mut by_slots = BufferFillStateBySlots::CanNotFill;
+
+        if self.msgs.len() >= limits.slots_count {
+            let (full_slots, _) =
+                self.msgs
+                    .iter()
+                    .fold((0, 0), |(full_slots, current_slot_count), (_, msgs)| {
+                        let current_slot_count = current_slot_count + msgs.len();
+                        if current_slot_count >= limits.slot_vert_size {
+                            (full_slots + 1, 0)
+                        } else {
+                            (full_slots, current_slot_count)
+                        }
+                    });
+            if full_slots >= limits.slots_count {
+                by_slots = BufferFillStateBySlots::CanFill;
+            }
+        }
 
         (by_count, by_slots)
     }
