@@ -8,10 +8,10 @@ use everscale_types::prelude::*;
 use serde::ser::{SerializeMap, SerializeStruct};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::build_normalized_external_message;
-use tycho_storage::{BriefBlockInfo, TransactionInfo};
 use tycho_util::serde_helpers::BorrowedStr;
 use tycho_util::FastHashSet;
 
+use crate::state::{BriefBlockInfo, TransactionInfo};
 use crate::util::serde_helpers;
 use crate::util::tonlib_helpers::load_bytes_rope;
 

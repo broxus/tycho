@@ -19,7 +19,6 @@ use tokio::sync::OwnedSemaphorePermit;
 use tycho_block_util::message::{
     normalize_external_message, parse_external_message, validate_external_message,
 };
-use tycho_storage::BlockTransactionsCursor;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
@@ -27,7 +26,8 @@ use self::models::*;
 use crate::endpoint::{get_mime_type, APPLICATION_JSON};
 use crate::models::GenTimings;
 use crate::state::{
-    BadRequestError, LoadedAccountState, RpcState, RpcStateError, RunGetMethodPermit,
+    BadRequestError, BlockTransactionsCursor, LoadedAccountState, RpcState, RpcStateError,
+    RunGetMethodPermit,
 };
 use crate::util::error_codes::*;
 use crate::util::jrpc_extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};

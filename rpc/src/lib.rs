@@ -3,8 +3,13 @@ pub use self::config::{
 };
 pub use self::endpoint::{jrpc, proto, RpcEndpoint, RpcEndpointBuilder};
 pub use self::state::{
-    BadRequestError, LatestBlockchainConfig, LatestMcInfo, LoadedAccountState, RpcBlockSubscriber,
-    RpcState, RpcStateBuilder, RpcStateError, RpcStateSubscriber, RunGetMethodPermit,
+    BadRequestError, BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor,
+    BlockTransactionsIter, BlockTransactionsIterBuilder, BlocksByMcSeqnoIter, BriefBlockInfo,
+    BriefShardDescr, CodeHashesIter, FullTransactionId, LatestBlockchainConfig, LatestMcInfo,
+    LoadedAccountState, RawCodeHashesIter, RpcBlockSubscriber, RpcSnapshot, RpcState,
+    RpcStateBuilder, RpcStateError, RpcStateSubscriber, RpcStorage, RunGetMethodPermit,
+    TransactionData, TransactionDataExt, TransactionInfo, TransactionMask, TransactionsExtIter,
+    TransactionsIter, TransactionsIterBuilder,
 };
 
 mod config;

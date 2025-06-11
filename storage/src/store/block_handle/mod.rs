@@ -377,7 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn merge_operator_works() -> anyhow::Result<()> {
-        let (storage, _tmp_dir) = Storage::new_temp().await?;
+        let (storage, _tmp_dir) = Storage::open_temp().await?;
 
         let block_handles = storage.block_handle_storage();
 

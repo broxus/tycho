@@ -20,7 +20,7 @@ use tycho_network::{
     DhtClient, DhtService, Network, OverlayService, PeerResolver, PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::Storage;
+use tycho_storage::{Storage, StorageContext};
 use tycho_util::cli::resolve_public_ip;
 
 use crate::config::{NodeConfig, NodeKeys};
@@ -169,15 +169,10 @@ impl<C> Node<C> {
         );
 
         // Setup storage
-        let storage = Storage::builder()
-            .with_config(node_config.storage)
-            .with_rpc_storage(
-                node_config
-                    .rpc
-                    .as_ref()
-                    .is_some_and(|x| x.storage.is_full()),
-            )
-            .build()
+        let ctx = StorageContext::new(node_config.storage)
+            .await
+            .context("failed to create storage context")?;
+        let storage = Storage::open(ctx)
             .await
             .context("failed to create storage")?;
         tracing::info!(
@@ -346,7 +341,7 @@ impl<C> Node<C> {
                 .with_storage(self.storage.clone())
                 .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
                 .with_zerostate_id(self.zerostate)
-                .build();
+                .build()?;
 
             rpc_state.init(last_block_id).await?;
 

@@ -14,12 +14,11 @@ use everscale_types::models::{
 };
 use everscale_types::prelude::*;
 use serde::Serialize;
-use tycho_storage::{BriefBlockInfo, RpcSnapshot, TransactionInfo};
 use tycho_util::FastHashSet;
 
 use self::models::{Transaction, *};
 use crate::endpoint::APPLICATION_JSON;
-use crate::state::{RpcState, RpcStateError};
+use crate::state::{BriefBlockInfo, RpcSnapshot, RpcState, RpcStateError, TransactionInfo};
 
 mod models;
 

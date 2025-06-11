@@ -18,11 +18,11 @@ use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use tycho_block_util::message::ExtMsgRepr;
-use tycho_storage::{
-    BlockTransactionIdsIter, BlockTransactionsIterBuilder, BriefShardDescr, TransactionsIterBuilder,
-};
 use tycho_util::FastHashMap;
 
+use crate::state::{
+    BlockTransactionIdsIter, BlockTransactionsIterBuilder, BriefShardDescr, TransactionsIterBuilder,
+};
 use crate::util::jrpc_extractor::{
     JrpcError, JrpcErrorResponse, JrpcOkResponse, JSONRPC_FIELD, JSONRPC_VERSION,
 };

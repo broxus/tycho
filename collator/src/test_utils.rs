@@ -32,7 +32,7 @@ pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilt
 }
 
 pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDir)> {
-    let (storage, tmp_dir) = Storage::new_temp().await?;
+    let (storage, tmp_dir) = Storage::open_temp().await?;
     let shard_states = storage.shard_state_storage();
 
     // master state
@@ -153,7 +153,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDi
 
 pub async fn create_test_queue_adapter<V: InternalMessageValue>(
 ) -> Result<(Arc<dyn MessageQueueAdapter<V>>, tempfile::TempDir)> {
-    let (storage, tmp_dir) = Storage::new_temp().await?;
+    let (storage, tmp_dir) = Storage::open_temp().await?;
     let queue_state_factory = QueueStateImplFactory::new(storage.clone());
     let queue_factory = QueueFactoryStdImpl {
         state: queue_state_factory,
