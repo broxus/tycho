@@ -1,10 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tycho_util::metrics::spawn_metrics_loop;
-use weedb::rocksdb;
-use weedb::rocksdb::Env;
+use weedb::rocksdb::{self, Env};
 
 pub use self::config::*;
 pub use self::db::*;
@@ -56,6 +55,12 @@ impl StorageBuilder {
             }
         };
 
+        let mut env = Env::new().context("failed to create a new RocksDB environemnt")?;
+        let thread_pool_size = std::cmp::max(threads as i32 / 2, 2);
+        env.set_background_threads(thread_pool_size);
+        env.set_low_priority_background_threads(thread_pool_size);
+        env.set_high_priority_background_threads(thread_pool_size);
+
         let update_options = |opts: &mut rocksdb::Options, threads: usize, fdlimit: u64| {
             opts.set_paranoid_checks(false);
 
@@ -82,11 +87,6 @@ impl StorageBuilder {
             opts.set_max_background_flushes(threads as i32 / 2);
             #[allow(deprecated)]
             opts.set_max_background_compactions(threads as i32 / 2);
-
-            let mut env = Env::new().expect("Failed to create rocksdb env");
-            env.set_background_threads(threads as i32 / 2);
-            env.set_low_priority_background_threads(threads as i32 / 2);
-            env.set_high_priority_background_threads(threads as i32 / 2);
 
             opts.set_env(&env);
 
