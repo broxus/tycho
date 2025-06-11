@@ -1572,7 +1572,7 @@ fn create_merkle_update(
     let merkle_update_builder =
         MerkleUpdate::create(old_state_root.as_ref(), new_state_root.as_ref(), usage_tree);
 
-    let state_update = merkle_update_builder.mt_build(new_cells, old_cells)?;
+    let state_update = merkle_update_builder.rayon_build(new_cells, old_cells)?;
 
     let elapsed = histogram.finish();
 

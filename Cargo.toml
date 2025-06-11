@@ -49,7 +49,7 @@ dirs = "5.0.1"
 ed25519 = "2.0"
 ed25519-dalek = "2.1"
 everscale-crypto = { version = "0.3", features = ["tl-proto", "serde"] }
-everscale-types = { version = "0.1.2", features = ["tycho"] }
+everscale-types = { version = "0.1.2", features = ["tycho", "rayon"] }
 exponential-backoff = "1"
 fdlimit = "0.3.0"
 futures-util = "0.3"
@@ -136,7 +136,7 @@ tycho-storage = { path = "./storage", version = "0.2.10" }
 tycho-util = { path = "./util", version = "0.2.10" }
 
 [patch.crates-io]
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "7cf9bad759816ebf81c20140961c1ebde827df1e" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "3d9cb5d469d38955d0d0efe3c9f6a93fe54e14e5" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"

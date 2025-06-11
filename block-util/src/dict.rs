@@ -299,55 +299,6 @@ where
     Ok(res)
 }
 
-#[allow(clippy::type_complexity)]
-pub fn split_aug_dict_raw<K, A, V>(
-    dict: AugDict<K, A, V>,
-    depth: u8,
-) -> anyhow::Result<FastHashMap<HashBytes, Cell>>
-where
-    K: StoreDictKey,
-    V: Store,
-    for<'a> A: AugDictExtra + Store + Load<'a>,
-{
-    fn split_dict_impl(
-        dict: Option<Cell>,
-        key_bit_len: u16,
-        depth: u8,
-        split: &mut FastHashMap<HashBytes, Cell>,
-    ) -> anyhow::Result<()> {
-        'split: {
-            if depth > 0 {
-                break 'split;
-            }
-
-            if let Some(cell) = dict {
-                split.insert(*cell.repr_hash(), cell);
-            }
-
-            return Ok(());
-        };
-
-        let PartialSplitDict {
-            remaining_bit_len,
-            left_branch,
-            right_branch,
-        } = { dict_split_raw(dict.as_ref(), key_bit_len, Cell::empty_context())? };
-
-        split_dict_impl(left_branch, remaining_bit_len, depth - 1, split)?;
-        split_dict_impl(right_branch, remaining_bit_len, depth - 1, split)?;
-
-        Ok(())
-    }
-
-    let mut split =
-        FastHashMap::with_capacity_and_hasher(2usize.pow(depth as _), Default::default());
-
-    let (dict_root, _) = dict.into_parts();
-    split_dict_impl(dict_root.into_root(), K::BITS, depth, &mut split)?;
-
-    Ok(split)
-}
-
 #[cfg(test)]
 mod tests {
     use std::marker::PhantomData;
