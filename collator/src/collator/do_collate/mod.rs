@@ -128,7 +128,7 @@ impl CollatorStdImpl {
             next_block_id_short,
             next_chain_time,
             created_by,
-            &mc_data_stuff,
+            &mc_data_stuff.current,
             &prev_shard_data,
             top_shard_blocks_info,
         )?;
@@ -822,7 +822,7 @@ impl CollatorStdImpl {
         next_block_id_short: BlockIdShort,
         next_chain_time: u64,
         created_by: HashBytes,
-        mc_data_stuff: &McDataStuff,
+        mc_data: &Arc<McData>,
         prev_shard_data: &PrevData,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<Box<BlockCollationData>> {
@@ -843,10 +843,7 @@ impl CollatorStdImpl {
         }
 
         // prepare block collation data
-        let block_limits = mc_data_stuff
-            .current
-            .config
-            .get_block_limits(is_masterchain)?;
+        let block_limits = mc_data.config.get_block_limits(is_masterchain)?;
         tracing::debug!(target: tracing_targets::COLLATOR,
             "Block limits: {:?}",
             block_limits
@@ -855,7 +852,7 @@ impl CollatorStdImpl {
         let mut collation_data_builder = BlockCollationDataBuilder::new(
             next_block_id_short,
             rand_seed,
-            mc_data_stuff.current.block_id.seqno,
+            mc_data.block_id.seqno,
             next_chain_time,
             created_by,
             self.mempool_config_override.clone(),
@@ -872,21 +869,19 @@ impl CollatorStdImpl {
 
             if let Some(top_shard_blocks_info) = top_shard_blocks_info {
                 Self::import_new_shard_top_blocks_for_masterchain(
-                    &mc_data_stuff.current,
+                    mc_data,
                     &mut collation_data_builder,
                     top_shard_blocks_info,
                 )?;
             }
         } else {
-            collation_data_builder.mc_shards_processed_to_by_partitions = mc_data_stuff
-                .current
-                .shards_processed_to_by_partitions
-                .clone();
+            collation_data_builder.mc_shards_processed_to_by_partitions =
+                mc_data.shards_processed_to_by_partitions.clone();
         }
 
         let start_lt = Self::calc_start_lt(
-            mc_data_stuff.current.gen_lt,
-            mc_data_stuff.current.lt_align(),
+            mc_data.gen_lt,
+            mc_data.lt_align(),
             prev_shard_data.gen_lt(),
             is_masterchain,
             collation_data_builder.shards_max_end_lt,
@@ -897,10 +892,10 @@ impl CollatorStdImpl {
         // compute created / minted / recovered / from_prev_block
         let prev_total_balance = &prev_shard_data.observable_accounts().root_extra().balance;
         Self::init_value_flow(
-            &mc_data_stuff.current.config,
-            &mc_data_stuff.current.global_balance,
+            &mc_data.config,
+            &mc_data.global_balance,
             prev_total_balance,
-            &mc_data_stuff.current.total_validator_fees,
+            &mc_data.total_validator_fees,
             &mut collation_data,
         )?;
 

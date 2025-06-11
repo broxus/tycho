@@ -382,7 +382,7 @@ fn test_get_anchors_processing_info() {
     // on zerostate will return None
     let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
         &shard_id,
-        &mc_data_stuff,
+        &mc_data_stuff.current,
         &prev_block_id,
         prev_gen_chain_time,
         prev_processed_upto_externals.processed_to,
@@ -443,7 +443,7 @@ fn test_get_anchors_processing_info() {
     // will get anchors processing info from prev shard state
     let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
         &shard_id,
-        &mc_data_stuff,
+        &mc_data_stuff.current,
         &prev_block_id,
         prev_gen_chain_time,
         prev_processed_upto_externals.processed_to,
@@ -502,7 +502,7 @@ fn test_get_anchors_processing_info() {
     };
     let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
         &shard_id,
-        &mc_data_stuff,
+        &mc_data_stuff.current,
         &prev_block_id,
         prev_gen_chain_time,
         prev_processed_upto_externals.processed_to,
@@ -558,7 +558,7 @@ fn test_get_anchors_processing_info() {
     };
     let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
         &shard_id,
-        &mc_data_stuff,
+        &mc_data_stuff.current,
         &prev_block_id,
         prev_gen_chain_time,
         prev_processed_upto_externals.processed_to,
