@@ -223,7 +223,7 @@ impl Phase<ExecuteState> {
 
         // messages metrics by partitions
         for (par_id, par_metrics) in self.extra.messages_reader.metrics_by_partitions().iter() {
-            if *par_id == 0 {
+            if par_id.is_zero() {
                 metrics::counter!("tycho_do_collate_msgs_read_count_int", &labels)
                     .increment(par_metrics.read_existing_msgs_count);
                 metrics::counter!("tycho_do_collate_msgs_read_count_new_int", &labels)

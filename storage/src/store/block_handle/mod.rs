@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use everscale_types::models::BlockId;
 use tycho_block_util::block::{BlockStuff, ShardHeights};
+use tycho_storage_traits::StoredValue;
 use tycho_util::FastDashMap;
 
 pub(crate) use self::handle::BlockDataGuard;
@@ -9,7 +10,6 @@ pub use self::handle::{BlockHandle, WeakBlockHandle};
 pub use self::meta::{BlockFlags, BlockMeta, LoadedBlockMeta, NewBlockMeta};
 use crate::db::*;
 use crate::store::PartialBlockId;
-use crate::util::*;
 
 mod handle;
 mod meta;
@@ -377,7 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn merge_operator_works() -> anyhow::Result<()> {
-        let (storage, _tmp_dir) = Storage::new_temp().await?;
+        let (storage, _tmp_dir) = Storage::open_temp().await?;
 
         let block_handles = storage.block_handle_storage();
 

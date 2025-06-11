@@ -3,8 +3,7 @@ use std::hash::Hash;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use tycho_block_util::archive::ArchiveEntryType;
-
-use super::{StoredValue, StoredValueBuffer};
+use tycho_storage_traits::{StoredValue, StoredValueBuffer};
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 pub struct PartialBlockId {

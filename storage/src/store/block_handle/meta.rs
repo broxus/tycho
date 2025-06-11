@@ -1,8 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Buf;
-
-use crate::util::{StoredValue, StoredValueBuffer};
+use tycho_storage_traits::{StoredValue, StoredValueBuffer};
 
 #[derive(Debug, Copy, Clone)]
 pub struct NewBlockMeta {

@@ -3,6 +3,8 @@ mod effects;
 mod engine;
 mod intercom;
 mod models;
+// TODO: Move into submodules, e.g. merge with `MempoolAdapterStore`.
+mod storage;
 #[cfg(feature = "test")]
 pub mod test_utils;
 

@@ -5,12 +5,7 @@ use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
-use tycho_storage::model::{
-    CommitPointerValue, DiffInfo, DiffInfoKey, DiffTailKey, ShardsInternalMessagesKey, StatKey,
-};
-use tycho_storage::snapshot::InternalQueueSnapshot;
-use tycho_storage::transaction::InternalQueueTransaction;
-use tycho_storage::Storage;
+use tycho_storage::{Storage, StorageContext};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -19,7 +14,14 @@ use crate::internal_queue::types::{
     AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter,
     QueueDiffWithMessages, QueueShardRange, SeparatedStatisticsByPartitions,
 };
+use crate::storage::models::{
+    CommitPointerValue, DiffInfo, DiffInfoKey, DiffTailKey, ShardsInternalMessagesKey, StatKey,
+};
+use crate::storage::snapshot::InternalQueueSnapshot;
+use crate::storage::transaction::InternalQueueTransaction;
+use crate::storage::InternalQueueStorage;
 use crate::types::ProcessedTo;
+
 // CONFIG
 
 pub struct QueueStateConfig {
@@ -28,41 +30,44 @@ pub struct QueueStateConfig {
 
 // FACTORY
 
+pub trait QueueStateFactory<V: InternalMessageValue> {
+    type QueueState: QueueState<V>;
+
+    fn create(&self) -> Result<Self::QueueState>;
+}
+
 impl<F, R, V> QueueStateFactory<V> for F
 where
-    F: Fn() -> R,
+    F: Fn() -> Result<R>,
     R: QueueState<V>,
     V: InternalMessageValue,
 {
     type QueueState = R;
 
-    fn create(&self) -> Self::QueueState {
+    fn create(&self) -> Result<Self::QueueState> {
         self()
     }
 }
 
 pub struct QueueStateImplFactory {
-    pub storage: Storage,
+    pub storage: InternalQueueStorage,
 }
 
 impl QueueStateImplFactory {
-    pub fn new(storage: Storage) -> Self {
-        Self { storage }
+    pub fn new(ctx: StorageContext) -> Result<Self> {
+        let storage = InternalQueueStorage::open(ctx)?;
+        Ok(Self { storage })
     }
 }
 
 impl<V: InternalMessageValue> QueueStateFactory<V> for QueueStateImplFactory {
     type QueueState = QueueStateStdImpl;
 
-    fn create(&self) -> Self::QueueState {
-        QueueStateStdImpl::new(self.storage.clone())
+    fn create(&self) -> Result<Self::QueueState> {
+        Ok(QueueStateStdImpl {
+            storage: self.storage.clone(),
+        })
     }
-}
-
-pub trait QueueStateFactory<V: InternalMessageValue> {
-    type QueueState: QueueState<V>;
-
-    fn create(&self) -> Self::QueueState;
 }
 
 // TRAIT
@@ -139,19 +144,13 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
 // IMPLEMENTATION
 
 pub struct QueueStateStdImpl {
-    storage: Storage,
-}
-
-impl QueueStateStdImpl {
-    pub fn new(storage: Storage) -> Self {
-        Self { storage }
-    }
+    storage: InternalQueueStorage,
 }
 
 impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
     fn snapshot(&self) -> InternalQueueSnapshot {
         let _histogram = HistogramGuard::begin("tycho_internal_queue_snapshot_time");
-        self.storage.internal_queue_storage().make_snapshot()
+        self.storage.make_snapshot()
     }
 
     fn iterator(
@@ -176,7 +175,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
     fn delete(&self, partition: QueuePartitionIdx, ranges: &[QueueShardRange]) -> Result<()> {
         let mut queue_ranges = vec![];
         for range in ranges {
-            queue_ranges.push(tycho_storage::model::QueueRange {
+            queue_ranges.push(crate::storage::models::QueueRange {
                 partition,
                 shard_ident: range.shard_ident,
                 from: range.from,
@@ -184,7 +183,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
             });
         }
 
-        let tx = self.storage.internal_queue_storage().begin_transaction();
+        let tx = self.storage.begin_transaction();
         tx.delete(&queue_ranges)?;
         tx.write()
     }
@@ -194,7 +193,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         commit_pointers: &FastHashMap<ShardIdent, (QueueKey, u32)>,
         mc_block_id: &BlockId,
     ) -> Result<()> {
-        let mut tx = self.storage.internal_queue_storage().begin_transaction();
+        let mut tx = self.storage.begin_transaction();
         tx.commit_messages(commit_pointers)?;
         tx.set_last_applied_mc_block_id(mc_block_id);
         tx.write()
@@ -207,7 +206,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         result: &mut AccountStatistics,
     ) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_internal_queue_statistics_load_time");
-        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        let snapshot = self.storage.make_snapshot();
         snapshot.collect_stats_in_range(
             &range.shard_ident,
             partition,
@@ -224,7 +223,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
     ) -> Result<SeparatedStatisticsByPartitions> {
         let _histogram =
             HistogramGuard::begin("tycho_internal_queue_separated_statistics_load_time");
-        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        let snapshot = self.storage.make_snapshot();
 
         let result = snapshot.collect_separated_stats_in_range_for_partitions(
             &range.shard_ident,
@@ -237,12 +236,12 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
     }
 
     fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>> {
-        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        let snapshot = self.storage.make_snapshot();
         snapshot.get_last_committed_mc_block_id()
     }
 
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32 {
-        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        let snapshot = self.storage.make_snapshot();
         snapshot.calc_diffs_tail(&DiffTailKey {
             shard_ident: *shard_ident,
             max_message: *from,
@@ -255,7 +254,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         seqno: u32,
         zone: DiffZone,
     ) -> Result<Option<DiffInfo>> {
-        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        let snapshot = self.storage.make_snapshot();
 
         let diff_info_bytes = snapshot.get_diff_info(&DiffInfoKey {
             shard_ident: *shard_ident,
@@ -297,15 +296,12 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
     }
 
     fn get_last_applied_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>> {
-        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        let snapshot = self.storage.make_snapshot();
         snapshot.get_last_applied_diff_seqno(shard_ident)
     }
 
     fn get_commit_pointers(&self) -> Result<FastHashMap<ShardIdent, CommitPointerValue>> {
-        self.storage
-            .internal_queue_storage()
-            .make_snapshot()
-            .read_commit_pointers()
+        self.storage.make_snapshot().read_commit_pointers()
     }
 
     fn write_diff(
@@ -315,7 +311,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         hash: HashBytes,
         diff: QueueDiffWithMessages<V>,
     ) -> Result<()> {
-        let mut tx = self.storage.internal_queue_storage().begin_transaction();
+        let mut tx = self.storage.begin_transaction();
 
         Self::add_messages(
             &mut tx,
@@ -361,9 +357,9 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         partitions: &FastHashSet<QueuePartitionIdx>,
         top_shards: &[ShardIdent],
     ) -> Result<()> {
-        let snapshot = self.storage.internal_queue_storage().make_snapshot();
+        let snapshot = self.storage.make_snapshot();
         let pointers = snapshot.read_commit_pointers()?;
-        let tx = self.storage.internal_queue_storage().begin_transaction();
+        let tx = self.storage.begin_transaction();
         tx.clear_uncommitted(partitions, &pointers, top_shards)?;
         tx.write()
     }

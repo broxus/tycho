@@ -813,7 +813,7 @@ impl ExternalsReader {
         res.metrics.expired_ext_msgs_count += expired_msgs_count;
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            partition_id = par_id,
+            partition_id = %par_id,
             ext_curr_processed_offset = curr_processed_offset,
             read_ext_msgs_count = res.metrics.read_ext_msgs_count,
             expired_ext_msgs_count = res.metrics.expired_ext_msgs_count,
@@ -912,7 +912,7 @@ impl ExternalsRangeReader {
 
         let mut metrics_by_partitions = MessagesReaderMetricsByPartitions::default();
         metrics_by_partitions
-            .get_mut(0)
+            .get_mut(QueuePartitionIdx::ZERO)
             .read_ext_messages_timer
             .start();
 
@@ -1236,12 +1236,12 @@ impl ExternalsRangeReader {
         // accumulate time metrics
         {
             metrics_by_partitions
-                .get_mut(0)
+                .get_mut(QueuePartitionIdx::ZERO)
                 .read_ext_messages_timer
                 .stop();
             let add_to_msgs_groups_total_elapsed =
                 metrics_by_partitions.add_to_message_groups_total_elapsed();
-            let par_0_metrics = metrics_by_partitions.get_mut(0);
+            let par_0_metrics = metrics_by_partitions.get_mut(QueuePartitionIdx::ZERO);
             par_0_metrics.read_ext_messages_timer.stop();
             par_0_metrics.read_ext_messages_timer.total_elapsed -= add_to_msgs_groups_total_elapsed;
         }

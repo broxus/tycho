@@ -1,10 +1,11 @@
+use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use everscale_types::boc::Boc;
-use everscale_types::models::{BlockId, ShardStateUnsplit};
+use everscale_types::models::{BlockId, OutMsgQueueUpdates, ShardStateUnsplit};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::Storage;
@@ -25,6 +26,101 @@ pub struct StarterConfig {
     pub custom_boot_offset: Option<Duration>,
 }
 
+pub struct StarterBuilder<
+    MandatoryFields = (Storage, BlockchainRpcClient, ZerostateId, StarterConfig),
+> {
+    mandatory_fields: MandatoryFields,
+    optional_fields: BuilderFields,
+}
+
+impl Default for StarterBuilder<((), (), (), ())> {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            mandatory_fields: Default::default(),
+            optional_fields: Default::default(),
+        }
+    }
+}
+
+impl StarterBuilder {
+    pub fn build(self) -> Starter {
+        let (storage, blockchain_rpc_client, zerostate, config) = self.mandatory_fields;
+        let BuilderFields {
+            queue_state_handler,
+        } = self.optional_fields;
+
+        Starter {
+            inner: Arc::new(StarterInner {
+                storage,
+                blockchain_rpc_client,
+                zerostate,
+                config,
+                queue_state_handler,
+            }),
+        }
+    }
+}
+
+impl<T2, T3, T4> StarterBuilder<((), T2, T3, T4)> {
+    // TODO: Use `CoreStorage`.
+    pub fn with_storage(self, storage: Storage) -> StarterBuilder<(Storage, T2, T3, T4)> {
+        let ((), client, id, config) = self.mandatory_fields;
+        StarterBuilder {
+            mandatory_fields: (storage, client, id, config),
+            optional_fields: self.optional_fields,
+        }
+    }
+}
+
+impl<T1, T3, T4> StarterBuilder<(T1, (), T3, T4)> {
+    pub fn with_blockchain_rpc_client(
+        self,
+        client: BlockchainRpcClient,
+    ) -> StarterBuilder<(T1, BlockchainRpcClient, T3, T4)> {
+        let (storage, (), id, config) = self.mandatory_fields;
+        StarterBuilder {
+            mandatory_fields: (storage, client, id, config),
+            optional_fields: self.optional_fields,
+        }
+    }
+}
+
+impl<T1, T2, T4> StarterBuilder<(T1, T2, (), T4)> {
+    pub fn with_zerostate_id(
+        self,
+        zerostate_id: ZerostateId,
+    ) -> StarterBuilder<(T1, T2, ZerostateId, T4)> {
+        let (storage, client, (), config) = self.mandatory_fields;
+        StarterBuilder {
+            mandatory_fields: (storage, client, zerostate_id, config),
+            optional_fields: self.optional_fields,
+        }
+    }
+}
+
+impl<T1, T2, T3> StarterBuilder<(T1, T2, T3, ())> {
+    pub fn with_config(self, config: StarterConfig) -> StarterBuilder<(T1, T2, T3, StarterConfig)> {
+        let (storage, client, id, ()) = self.mandatory_fields;
+        StarterBuilder {
+            mandatory_fields: (storage, client, id, config),
+            optional_fields: self.optional_fields,
+        }
+    }
+}
+
+impl<T> StarterBuilder<T> {
+    pub fn with_queue_state_handler<H: QueueStateHandler>(mut self, handler: H) -> Self {
+        self.optional_fields.queue_state_handler = Some(Box::new(handler));
+        self
+    }
+}
+
+#[derive(Default)]
+struct BuilderFields {
+    queue_state_handler: Option<Box<dyn QueueStateHandler>>,
+}
+
 /// Bootstrapping utils.
 // TODO: Use it as a block provider?
 #[derive(Clone)]
@@ -34,24 +130,16 @@ pub struct Starter {
 }
 
 impl Starter {
-    pub fn new(
-        storage: Storage,
-        blockchain_rpc_client: BlockchainRpcClient,
-        zerostate: ZerostateId,
-        config: StarterConfig,
-    ) -> Self {
-        Self {
-            inner: Arc::new(StarterInner {
-                storage,
-                blockchain_rpc_client,
-                zerostate,
-                config,
-            }),
-        }
+    pub fn builder() -> StarterBuilder<((), (), (), ())> {
+        StarterBuilder::default()
     }
 
     pub fn config(&self) -> &StarterConfig {
         &self.inner.config
+    }
+
+    pub fn queue_state_handler(&self) -> Option<&dyn QueueStateHandler> {
+        self.inner.queue_state_handler.as_deref()
     }
 
     /// Boot type when the node has not yet started syncing
@@ -79,6 +167,7 @@ struct StarterInner {
     blockchain_rpc_client: BlockchainRpcClient,
     zerostate: ZerostateId,
     config: StarterConfig,
+    queue_state_handler: Option<Box<dyn QueueStateHandler>>,
 }
 
 pub trait ZerostateProvider {
@@ -129,4 +218,14 @@ fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<Shar
     };
 
     ShardStateStuff::from_root(&block_id, root, tracker)
+}
+
+#[async_trait::async_trait]
+pub trait QueueStateHandler: Send + Sync + 'static {
+    async fn import_from_file(
+        &self,
+        top_update: &OutMsgQueueUpdates,
+        file: File,
+        block_id: &BlockId,
+    ) -> Result<()>;
 }

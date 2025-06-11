@@ -1,8 +1,8 @@
 use anyhow::Result;
+use tycho_storage::StoredValue;
 use weedb::OwnedRawIterator;
 
-use crate::model::{InternalQueueMessage, ShardsInternalMessagesKey};
-use crate::util::StoredValue;
+use super::models::{InternalQueueMessage, ShardsInternalMessagesKey};
 
 /// Iterator for internal queue messages.
 pub struct InternalQueueMessagesIter {

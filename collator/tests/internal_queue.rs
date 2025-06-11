@@ -21,8 +21,9 @@ use tycho_collator::internal_queue::types::{
     DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, PartitionRouter,
     QueueDiffWithMessages, QueueShardRange,
 };
-use tycho_storage::snapshot::{AccountStatistics, InternalQueueSnapshot};
-use tycho_storage::Storage;
+use tycho_collator::storage::snapshot::{AccountStatistics, InternalQueueSnapshot};
+use tycho_collator::storage::InternalQueueStorage;
+use tycho_storage::StorageContext;
 use tycho_util::FastHashSet;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,7 +118,7 @@ fn test_statistics_check_statistics(
 
     let mut statistics_low_priority_partition = AccountStatistics::default();
     queue.load_diff_statistics(
-        1,
+        QueuePartitionIdx(1),
         &QueueShardRange {
             shard_ident: ShardIdent::new_full(0),
             from: QueueKey {
@@ -147,7 +148,7 @@ fn test_statistics_check_statistics(
     let mut statistics_normal_priority_partition = AccountStatistics::default();
 
     queue.load_diff_statistics(
-        0,
+        QueuePartitionIdx(0),
         &QueueShardRange {
             shard_ident: ShardIdent::new_full(0),
             from: QueueKey {
@@ -171,7 +172,7 @@ fn test_statistics_check_statistics(
     let mut statistics_low_priority_partition = AccountStatistics::default();
     // check first diff, there are 15000 messages in low partition
     queue.load_diff_statistics(
-        1,
+        QueuePartitionIdx(1),
         &QueueShardRange {
             shard_ident: ShardIdent::new_full(0),
             from: QueueKey {
@@ -201,7 +202,7 @@ fn test_statistics_check_statistics(
     let mut statistics_low_priority_partition = AccountStatistics::default();
 
     queue.load_diff_statistics(
-        1,
+        QueuePartitionIdx(1),
         &QueueShardRange {
             shard_ident: ShardIdent::new_full(0),
             from: QueueKey {
@@ -232,18 +233,16 @@ fn test_statistics_check_statistics(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
-        state: QueueStateImplFactory {
-            storage: storage.clone(),
-        },
+        state: QueueStateImplFactory::new(ctx)?,
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
     };
 
-    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create();
+    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
 
     let mc_block = BlockId {
         shard: ShardIdent::MASTERCHAIN,
@@ -279,14 +278,14 @@ async fn test_queue() -> anyhow::Result<()> {
         let stored_object = create_stored_object(i, dest_1_low_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
-        partition_router.insert_dst(&stored_object.dest, 1)?;
+        partition_router.insert_dst(&stored_object.dest, QueuePartitionIdx(1))?;
     }
 
     for i in 10001..=15000 {
         let stored_object = create_stored_object(i, dest_2_low_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
-        partition_router.insert_dst(&stored_object.dest, 1)?;
+        partition_router.insert_dst(&stored_object.dest, QueuePartitionIdx(1))?;
     }
 
     let dest_3_normal_priority = RouterAddr::from(StdAddr::new(0, HashBytes::from([3; 32])));
@@ -303,14 +302,14 @@ async fn test_queue() -> anyhow::Result<()> {
             Some(&Default::default()),
             &dest_1_low_priority.to_int_addr()
         ),
-        1
+        QueuePartitionIdx(1)
     );
     assert_eq!(
         partition_router.get_partition(
             Some(&Default::default()),
             &dest_2_low_priority.to_int_addr()
         ),
-        1
+        QueuePartitionIdx(1)
     );
     assert_eq!(
         partition_router.get_partition(
@@ -402,14 +401,14 @@ async fn test_queue() -> anyhow::Result<()> {
         let stored_object = create_stored_object(i, dest_1_low_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
-        partition_router.insert_dst(&stored_object.dest, 1)?;
+        partition_router.insert_dst(&stored_object.dest, QueuePartitionIdx(1))?;
     }
 
     for i in 30001..=35000 {
         let stored_object = create_stored_object(i, dest_2_low_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
-        partition_router.insert_dst(&stored_object.dest, 1)?;
+        partition_router.insert_dst(&stored_object.dest, QueuePartitionIdx(1))?;
     }
 
     let dest_3_normal_priority = RouterAddr::from(StdAddr::new(0, HashBytes::from([3; 32])));
@@ -426,14 +425,14 @@ async fn test_queue() -> anyhow::Result<()> {
             Some(&IntAddr::default()),
             &dest_1_low_priority.to_int_addr()
         ),
-        1
+        QueuePartitionIdx(1)
     );
     assert_eq!(
         partition_router.get_partition(
             Some(&IntAddr::default()),
             &dest_2_low_priority.to_int_addr()
         ),
-        1
+        QueuePartitionIdx(1)
     );
     assert_eq!(
         partition_router.get_partition(
@@ -492,8 +491,8 @@ async fn test_queue() -> anyhow::Result<()> {
 
     let mut partitions = FastHashSet::default();
 
-    partitions.insert(1);
-    partitions.insert(QueuePartitionIdx::default());
+    partitions.insert(QueuePartitionIdx(1));
+    partitions.insert(QueuePartitionIdx(0));
 
     queue.apply_diff(
         diff_with_messages.clone(),
@@ -587,7 +586,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     ranges.push(queue_range);
 
-    let iterators = queue.iterator(1, &ranges, ShardIdent::MASTERCHAIN)?;
+    let iterators = queue.iterator(QueuePartitionIdx(1), &ranges, ShardIdent::MASTERCHAIN)?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
@@ -628,7 +627,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     ranges.push(queue_range);
 
-    let iterators = queue.iterator(1, &ranges, ShardIdent::MASTERCHAIN)?;
+    let iterators = queue.iterator(QueuePartitionIdx(1), &ranges, ShardIdent::MASTERCHAIN)?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
@@ -686,7 +685,7 @@ async fn test_queue() -> anyhow::Result<()> {
         dest_2_low_priority,
         dest_3_normal_priority,
     )?;
-    queue.clear_uncommitted_state(&vec![0, 1].into_iter().collect(), &[])?;
+    queue.clear_uncommitted_state(&FastHashSet::from_iter([0, 1].map(QueuePartitionIdx)), &[])?;
     test_statistics_check_statistics(
         &queue,
         dest_1_low_priority,
@@ -699,18 +698,16 @@ async fn test_queue() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
-        state: QueueStateImplFactory {
-            storage: storage.clone(),
-        },
+        state: QueueStateImplFactory::new(ctx)?,
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
     };
 
-    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create();
+    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
 
     // create first block with queue diff
     let block1 = BlockIdShort {
@@ -729,14 +726,14 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         let stored_object = create_stored_object(i, dest_1_low_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
-        partition_router.insert_dst(&stored_object.dest, 1)?;
+        partition_router.insert_dst(&stored_object.dest, QueuePartitionIdx(1))?;
     }
 
     for i in 20001..=30000 {
         let stored_object = create_stored_object(i, dest_1_low_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
-        partition_router.insert_dst(&stored_object.dest, 1)?;
+        partition_router.insert_dst(&stored_object.dest, QueuePartitionIdx(1))?;
     }
 
     for i in 100000..=150000 {
@@ -790,7 +787,7 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         let stored_object = create_stored_object(i, dest_1_low_priority)?;
         diff.messages
             .insert(stored_object.key(), stored_object.clone());
-        partition_router.insert_dst(&stored_object.dest, 1)?;
+        partition_router.insert_dst(&stored_object.dest, QueuePartitionIdx(1))?;
     }
 
     for i in 200000..=250000 {
@@ -893,7 +890,7 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
 
     for partition in &[1, 0] {
         for range in &r {
-            queue.load_diff_statistics(*partition, range, &mut statistics)?;
+            queue.load_diff_statistics(QueuePartitionIdx(*partition), range, &mut statistics)?;
         }
     }
     assert_eq!(statistics.len(), 2);
@@ -904,7 +901,7 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         .unwrap_or_default();
     assert_eq!(stat, 30000);
 
-    let iterators = queue.iterator(1, &ranges, ShardIdent::MASTERCHAIN)?;
+    let iterators = queue.iterator(QueuePartitionIdx(1), &ranges, ShardIdent::MASTERCHAIN)?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
@@ -925,16 +922,16 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue_clear() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
-        state: QueueStateImplFactory { storage },
+        state: QueueStateImplFactory::new(ctx)?,
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
     };
 
-    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create();
+    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
     let block = BlockIdShort {
         shard: ShardIdent::new_full(0),
         seqno: 0,
@@ -1003,7 +1000,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
     println!("iterator next msg before clean = {:?}", msg);
     assert!(msg.is_some());
 
-    queue.clear_uncommitted_state(&vec![0, 1].into_iter().collect(), &[
+    queue.clear_uncommitted_state(&FastHashSet::from_iter([0, 1].map(QueuePartitionIdx)), &[
         ShardIdent::MASTERCHAIN,
         ShardIdent::new_full(0),
     ])?;
@@ -1031,8 +1028,8 @@ fn test_router() -> anyhow::Result<()> {
         account: HashBytes::from([2; 32]),
     };
 
-    partition_router.insert_dst(&dest_1.to_int_addr(), 1)?;
-    partition_router.insert_src(&src_1.to_int_addr().clone(), 2)?;
+    partition_router.insert_dst(&dest_1.to_int_addr(), QueuePartitionIdx(1))?;
+    partition_router.insert_src(&src_1.to_int_addr().clone(), QueuePartitionIdx(2))?;
 
     let res = partition_router.get_partition(Some(&IntAddr::default()), &dest_1.to_int_addr());
     assert_eq!(res, 1);
@@ -1182,9 +1179,9 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
         messages,
         router_partitions_src: Default::default(),
         router_partitions_dst: BTreeMap::from([
-            (1, BTreeSet::from([addr1])),
-            (2, BTreeSet::from([addr2])),
-            (3, BTreeSet::from([addr3])),
+            (QueuePartitionIdx(1), BTreeSet::from([addr1])),
+            (QueuePartitionIdx(2), BTreeSet::from([addr2])),
+            (QueuePartitionIdx(3), BTreeSet::from([addr3])),
         ]),
     };
 
@@ -1230,16 +1227,16 @@ fn create_dump_msg_envelope(message: Lazy<OwnedMessage>) -> Lazy<MsgEnvelope> {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
-        state: QueueStateImplFactory { storage },
+        state: QueueStateImplFactory::new(ctx)?,
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
     };
 
-    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create();
+    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
 
     let block_mc1 = BlockId {
         shard: ShardIdent::MASTERCHAIN,
@@ -1305,8 +1302,8 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     let mut partitions = FastHashSet::default();
 
-    partitions.insert(1);
-    partitions.insert(QueuePartitionIdx::default());
+    partitions.insert(QueuePartitionIdx(1));
+    partitions.insert(QueuePartitionIdx(0));
     // apply two diffs
     queue.apply_diff(
         diff_mc1,
@@ -1410,7 +1407,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
     // -- test case 4
     // clear uncommitted state with second diff
-    queue.clear_uncommitted_state(&vec![0, 1].into_iter().collect(), &[])?;
+    queue.clear_uncommitted_state(&FastHashSet::from_iter([0, 1].map(QueuePartitionIdx)), &[])?;
 
     let diff_len_mc = queue.get_diffs_tail_len(&ShardIdent::MASTERCHAIN, &QueueKey::MIN);
     // uncommitted: 0; committed: 1
@@ -1442,10 +1439,10 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_version() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
-        state: QueueStateImplFactory { storage },
+        state: QueueStateImplFactory::new(ctx)?,
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
@@ -1453,10 +1450,10 @@ async fn test_version() -> anyhow::Result<()> {
 
     let mut partitions = FastHashSet::default();
 
-    partitions.insert(1);
-    partitions.insert(QueuePartitionIdx::default());
+    partitions.insert(QueuePartitionIdx(1));
+    partitions.insert(QueuePartitionIdx(0));
 
-    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create();
+    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
 
     let block_mc1 = BlockId {
         shard: ShardIdent::MASTERCHAIN,
@@ -1548,18 +1545,16 @@ async fn test_version() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
-        state: QueueStateImplFactory {
-            storage: storage.clone(),
-        },
+        state: QueueStateImplFactory::new(ctx)?,
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
     };
 
-    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create();
+    let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
 
     // create first block with queue diff
     let block1 = BlockId {
@@ -1604,7 +1599,7 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
             let stored_object = create_stored_object(i.into(), low_priority)?;
             diff.messages
                 .insert(stored_object.key(), stored_object.clone());
-            partition_router.insert_dst(&stored_object.dest, 1)?;
+            partition_router.insert_dst(&stored_object.dest, QueuePartitionIdx(1))?;
         }
 
         let diff_with_messages = QueueDiffWithMessages {
@@ -1697,8 +1692,8 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
 
     let mut statistics = AccountStatistics::default();
 
-    queue.load_diff_statistics(1, &stat_range1, &mut statistics)?;
-    queue.load_diff_statistics(1, &stat_range2, &mut statistics)?;
+    queue.load_diff_statistics(QueuePartitionIdx(1), &stat_range1, &mut statistics)?;
+    queue.load_diff_statistics(QueuePartitionIdx(1), &stat_range2, &mut statistics)?;
 
     let stat = statistics
         .get(&low_priority.to_int_addr())
@@ -1707,7 +1702,7 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
 
     assert_eq!(stat, 300);
 
-    let iterators = queue.iterator(1, &ranges, ShardIdent::MASTERCHAIN)?;
+    let iterators = queue.iterator(QueuePartitionIdx(1), &ranges, ShardIdent::MASTERCHAIN)?;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let mut read_count = 0;
@@ -1757,7 +1752,7 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
 
     queue.commit_diff(
         &[(mc_block2, true), (block2, true)],
-        &vec![0, 1].into_iter().collect(),
+        &FastHashSet::from_iter([0, 1].map(QueuePartitionIdx)),
     )?;
 
     let res = queue.get_diff_info(&ShardIdent::new_full(0), 1, DiffZone::Committed)?;
@@ -1789,7 +1784,7 @@ async fn prepare_data_from_prepared_persistent_state(
     block_id_str: &str,
     diff_hash_str: &str,
     tail_len: u32,
-    storage: &Storage,
+    storage: &InternalQueueStorage,
 ) -> anyhow::Result<(BlockId, OutMsgQueueUpdates)> {
     let diff_hash = HashBytes::from_str(diff_hash_str)?;
     let top_update = OutMsgQueueUpdates {
@@ -1803,8 +1798,7 @@ async fn prepare_data_from_prepared_persistent_state(
     let db = tycho_storage::FileDb::new_readonly(full_path.parent().unwrap());
     let file = db.file(full_path.file_name().unwrap()).read(true).open()?;
 
-    let internal_queue = storage.internal_queue_storage();
-    internal_queue
+    storage
         .import_from_file(&top_update, file, block_id)
         .await?;
 
@@ -1814,19 +1808,18 @@ async fn prepare_data_from_prepared_persistent_state(
 #[tokio::test]
 async fn test_import_persistent_state() -> anyhow::Result<()> {
     // init storage
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
 
     // init queue
     let queue_factory = QueueFactoryStdImpl {
-        state: QueueStateImplFactory {
-            storage: storage.clone(),
-        },
+        state: QueueStateImplFactory::new(ctx)?,
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
     };
+    let storage = &queue_factory.state.storage;
 
-    let queue: QueueImpl<QueueStateStdImpl, EnqueuedMessage> = queue_factory.create();
+    let queue: QueueImpl<QueueStateStdImpl, EnqueuedMessage> = queue_factory.create()?;
 
     // import shard persistent state
     let (shard_block_id, shard_top_update) = prepare_data_from_prepared_persistent_state(
@@ -1837,7 +1830,7 @@ async fn test_import_persistent_state() -> anyhow::Result<()> {
         "794fe9ce31b7919d2b6ca9ae0f97501f4017382a273b8f3ee512dcfcb5b14482",
         // tail_len
         3,
-        &storage
+        storage,
     ).await?;
 
     // should be none because it mc block state is not imported
@@ -1853,10 +1846,10 @@ async fn test_import_persistent_state() -> anyhow::Result<()> {
         "5795ca5d1b8d0c1ce96394eef851bde718ff2e14fd2840098ed2bb7640f278c5",
         // tail_len
         1,
-        &storage,
+        storage,
     ).await?;
 
-    let snapshot = storage.internal_queue_storage().make_snapshot();
+    let snapshot = storage.make_snapshot();
 
     // check shard queue
     check_imported_queue(&queue, &shard_block_id, &shard_top_update, &snapshot)?;
@@ -1889,7 +1882,7 @@ fn check_imported_queue(
 
     let separated_stats = snapshot.collect_separated_stats_in_range_for_partitions(
         &block_id.shard,
-        &vec![0, 1].into_iter().collect(),
+        &FastHashSet::from_iter([0, 1].map(QueuePartitionIdx)),
         &QueueKey::MIN,
         &QueueKey::MAX,
     )?;
@@ -1909,7 +1902,7 @@ fn check_imported_queue(
     let mut stat = AccountStatistics::default();
     snapshot.collect_stats_in_range(
         &block_id.shard,
-        0,
+        QueuePartitionIdx(0),
         &QueueKey::MIN,
         &QueueKey::MAX,
         &mut stat,
@@ -1935,12 +1928,13 @@ fn check_imported_queue(
 
     let mut read_messages = 0;
 
-    let mut iterator = queue.iterator(0, &iter_range, ShardIdent::MASTERCHAIN)?;
+    let mut iterator =
+        queue.iterator(QueuePartitionIdx(0), &iter_range, ShardIdent::MASTERCHAIN)?;
     while iterator.next()?.is_some() {
         read_messages += 1;
     }
 
-    let mut iterator = queue.iterator(0, &iter_range, ShardIdent::BASECHAIN)?;
+    let mut iterator = queue.iterator(QueuePartitionIdx(0), &iter_range, ShardIdent::BASECHAIN)?;
 
     while iterator.next()?.is_some() {
         read_messages += 1;

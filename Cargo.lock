@@ -3456,17 +3456,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "trait-variant"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70977707304198400eb4835a78f6a9f928bf41bba420deb8fdb175cd965d77a7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.96",
-]
-
-[[package]]
 name = "triomphe"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3497,6 +3486,7 @@ dependencies = [
  "rayon",
  "thiserror 2.0.11",
  "tl-proto",
+ "tycho-storage-traits",
  "tycho-util",
 ]
 
@@ -3579,7 +3569,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "trait-variant",
  "tycho-block-util",
  "tycho-collator",
  "tycho-consensus",
@@ -3589,6 +3578,7 @@ dependencies = [
  "tycho-storage",
  "tycho-util",
  "tycho-vm",
+ "weedb",
 ]
 
 [[package]]
@@ -3598,6 +3588,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "arc-swap",
+ "bitflags",
  "blake3",
  "bumpalo",
  "bytes",
@@ -3777,13 +3768,16 @@ dependencies = [
 name = "tycho-rpc"
 version = "0.2.10"
 dependencies = [
+ "ahash",
  "anyhow",
  "arc-swap",
  "axum",
  "base64",
+ "bitflags",
  "bytes",
  "everscale-types",
  "futures-util",
+ "humantime",
  "metrics",
  "moka",
  "num-bigint",
@@ -3806,6 +3800,7 @@ dependencies = [
  "tycho-storage",
  "tycho-util",
  "tycho-vm",
+ "weedb",
 ]
 
 [[package]]
@@ -3859,8 +3854,18 @@ dependencies = [
  "tracing",
  "triomphe",
  "tycho-block-util",
+ "tycho-storage-traits",
  "tycho-util",
  "weedb",
+]
+
+[[package]]
+name = "tycho-storage-traits"
+version = "0.2.10"
+dependencies = [
+ "bytes",
+ "everscale-types",
+ "smallvec",
 ]
 
 [[package]]
@@ -4138,9 +4143,9 @@ dependencies = [
 
 [[package]]
 name = "weedb"
-version = "0.4.2"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cf44adf22fe2b0679ee6af5dceb5c106d02ea96a838f0dc6253a45f7d1700b8"
+checksum = "af8b0c2772cfae47b546954a7f2bd4c12b34120d2035894a54c0704b42b37220"
 dependencies = [
  "librocksdb-sys",
  "metrics",

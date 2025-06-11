@@ -94,13 +94,13 @@ async fn test_collation_process_on_stubs() {
 
     tracing::info!("Trying to start CollationManager");
 
-    let queue_state_factory = QueueStateImplFactory::new(storage.clone());
+    let queue_state_factory = QueueStateImplFactory::new(storage.context().clone()).unwrap();
 
     let queue_factory = QueueFactoryStdImpl {
         state: queue_state_factory,
         config: Default::default(),
     };
-    let queue = queue_factory.create();
+    let queue = queue_factory.create().unwrap();
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
     let now = tycho_util::time::now_millis();

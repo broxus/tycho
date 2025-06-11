@@ -34,7 +34,7 @@ impl<K: Eq + Hash + Clone, V> SlotSubscriptions<K, V> {
 
         SlotSubscription {
             subscriptions: &self.subscriptions,
-            block_id: key,
+            key,
             index: Some(index as u32),
             rx,
         }
@@ -98,7 +98,7 @@ impl<T: Clone> Subscriptions<T> {
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct SlotSubscription<'a, K: Eq + Hash, V> {
     subscriptions: &'a FastDashMap<K, Subscriptions<V>>,
-    block_id: &'a K,
+    key: &'a K,
     index: Option<u32>,
     rx: oneshot::Receiver<V>,
 }
@@ -126,7 +126,7 @@ impl<K: Eq + Hash, V> Drop for SlotSubscription<'_, K, V> {
             return;
         };
 
-        self.subscriptions.remove_if_mut(self.block_id, |_, slots| {
+        self.subscriptions.remove_if_mut(self.key, |_, slots| {
             slots.remove(index as usize);
             slots.active == 0
         });

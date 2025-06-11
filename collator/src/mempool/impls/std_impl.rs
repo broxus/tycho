@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::Instrument;
 use tycho_consensus::prelude::*;
 use tycho_network::{Network, OverlayService, PeerResolver};
-use tycho_storage::MempoolStorage;
+use tycho_storage::StorageContext;
 
 use crate::mempool::impls::std_impl::anchor_handler::AnchorHandler;
 use crate::mempool::impls::std_impl::cache::Cache;
@@ -45,12 +45,12 @@ impl MempoolAdapterStdImpl {
         network: &Network,
         peer_resolver: &PeerResolver,
         overlay_service: &OverlayService,
-        mempool_storage: &MempoolStorage,
+        storage_context: &StorageContext,
         mempool_node_config: &MempoolNodeConfig,
-    ) -> Self {
+    ) -> Result<Self> {
         let config_builder = MempoolConfigBuilder::new(mempool_node_config);
 
-        Self {
+        Ok(Self {
             cache: Default::default(),
             net_args: EngineNetworkArgs {
                 key_pair,
@@ -63,10 +63,11 @@ impl MempoolAdapterStdImpl {
                 state_update_queue: Default::default(),
                 engine_session: None,
             }),
-            store: MempoolAdapterStore::new(mempool_storage.clone(), RoundWatch::default()),
+            store: MempoolAdapterStore::new(storage_context.clone(), RoundWatch::default())
+                .context("failed to create mempool adapter storage")?,
             input_buffer: InputBuffer::default(),
             top_known_anchor: RoundWatch::default(),
-        }
+        })
     }
 
     /// **Warning:** changes from `GlobalConfig` may be rewritten by applied mc state

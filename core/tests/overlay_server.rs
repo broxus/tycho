@@ -158,7 +158,7 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
 async fn overlay_server_with_empty_storage() -> Result<()> {
     tycho_util::test::init_logger("overlay_server_with_empty_storage", "info");
 
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (storage, _tmp_dir) = Storage::open_temp().await?;
 
     let nodes = network::make_network(storage, 10);
 

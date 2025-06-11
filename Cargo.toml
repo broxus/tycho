@@ -20,6 +20,7 @@ members = [
     "rpc",
     "simulator",
     "storage",
+    "storage-traits",
     "util",
     "light-node",
 ]
@@ -115,9 +116,8 @@ tracing-appender = "0.2.3"
 tracing-flame = "0.2"
 tracing-stackdriver = "0.10.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-trait-variant = "0.1.2"
 triomphe = "0.1.11"
-weedb = "0.4.2"
+weedb = "0.4.5"
 zstd-safe = "7.2"
 zstd-sys = "2.0"
 
@@ -133,6 +133,7 @@ tycho-core = { path = "./core", version = "0.2.10" }
 tycho-network = { path = "./network", version = "0.2.10" }
 tycho-rpc = { path = "./rpc", version = "0.2.10" }
 tycho-storage = { path = "./storage", version = "0.2.10" }
+tycho-storage-traits = { path = "./storage-traits", version = "0.2.10" }
 tycho-util = { path = "./util", version = "0.2.10" }
 
 [patch.crates-io]

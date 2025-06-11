@@ -1,5 +1,5 @@
 use everscale_types::models::*;
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_util::FastHashMap;
 
 use crate::collator::do_collate::calculate_min_internals_processed_to_for_shard;
@@ -20,11 +20,11 @@ fn test_calculate_min_processed_to_masterchain() {
 
     let mut processed_to_by_partitions = ProcessedToByPartitions::default();
     processed_to_by_partitions.insert(
-        0,
+        QueuePartitionIdx(0),
         [(shard_id, QueueKey::max_for_lt(4))].into_iter().collect(),
     );
     processed_to_by_partitions.insert(
-        1,
+        QueuePartitionIdx(1),
         [(shard_id, QueueKey::max_for_lt(3))].into_iter().collect(),
     );
 
@@ -73,11 +73,11 @@ fn test_calculate_min_processed_to_shard() {
     // Check updated shard
     let mut processed_to_by_partitions = ProcessedToByPartitions::default();
     processed_to_by_partitions.insert(
-        0,
+        QueuePartitionIdx(0),
         [(shard_id, QueueKey::max_for_lt(8))].into_iter().collect(),
     );
     processed_to_by_partitions.insert(
-        1,
+        QueuePartitionIdx(1),
         [(shard_id, QueueKey::max_for_lt(7))].into_iter().collect(),
     );
 
@@ -116,11 +116,11 @@ fn test_calculate_min_processed_to_shard() {
     // Verify combination with masterchain value
     let mut processed_to_by_partitions = ProcessedToByPartitions::default();
     processed_to_by_partitions.insert(
-        0,
+        QueuePartitionIdx(0),
         [(shard_id, QueueKey::max_for_lt(12))].into_iter().collect(),
     );
     processed_to_by_partitions.insert(
-        1,
+        QueuePartitionIdx(1),
         [(shard_id, QueueKey::max_for_lt(10))].into_iter().collect(),
     );
 

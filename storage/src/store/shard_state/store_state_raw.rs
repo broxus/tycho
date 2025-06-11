@@ -7,6 +7,7 @@ use everscale_types::cell::*;
 use everscale_types::models::BlockId;
 use everscale_types::util::ArrayVec;
 use tycho_block_util::state::*;
+use tycho_storage_traits::StoredValue;
 use tycho_util::io::ByteOrderRead;
 use tycho_util::progress_bar::*;
 use tycho_util::FastHashMap;
@@ -16,7 +17,6 @@ use super::cell_storage::*;
 use super::entries_buffer::*;
 use crate::db::*;
 use crate::store::{BriefBocHeader, ShardStateReader, TempFileStorage};
-use crate::util::StoredValue;
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
@@ -555,6 +555,7 @@ mod test {
     use weedb::rocksdb::{IteratorMode, WriteBatch};
 
     use super::*;
+    use crate::context::StorageContext;
     use crate::{Storage, StorageConfig};
 
     #[tokio::test]
@@ -581,16 +582,16 @@ mod test {
         }
         tracing::info!("Decompressed the archive");
 
-        let storage = Storage::builder()
-            .with_config(StorageConfig {
-                root_dir: current_test_path.join("db"),
-                rocksdb_enable_metrics: false,
-                rocksdb_lru_capacity: ByteSize::mb(256),
-                cells_cache_size: ByteSize::mb(256),
-                ..Default::default()
-            })
-            .build()
-            .await?;
+        let ctx = StorageContext::new(StorageConfig {
+            root_dir: current_test_path.join("db"),
+            rocksdb_enable_metrics: false,
+            rocksdb_lru_capacity: ByteSize::mb(256),
+            cells_cache_size: ByteSize::mb(256),
+            ..Default::default()
+        })
+        .await?;
+        let storage = Storage::open(ctx).await?;
+
         let base_db = storage.base_db();
         let cell_storage = &storage.shard_state_storage().cell_storage;
 
@@ -656,7 +657,7 @@ mod test {
     async fn rand_cells_storage() -> Result<()> {
         tycho_util::test::init_logger("rand_cells_storage", "debug");
 
-        let (storage, _tempdir) = Storage::new_temp().await?;
+        let (storage, _tempdir) = Storage::open_temp().await?;
         let base_db = storage.base_db();
         let cell_storage = &storage.shard_state_storage().cell_storage;
 

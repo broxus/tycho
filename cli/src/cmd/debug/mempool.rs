@@ -18,7 +18,7 @@ use tycho_consensus::test_utils::{test_logger, AnchorConsumer, LastAnchorFile};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_network::PeerId;
-use tycho_storage::{FileDb, NewBlockMeta, Storage};
+use tycho_storage::{FileDb, NewBlockMeta, Storage, StorageContext};
 use tycho_util::cli::logger::init_logger;
 use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
@@ -230,9 +230,10 @@ impl Mempool {
         };
 
         // Setup storage
-        let storage = Storage::builder()
-            .with_config(node_config.storage)
-            .build()
+        let ctx = StorageContext::new(node_config.storage)
+            .await
+            .context("failed to create storage context")?;
+        let storage = Storage::open(ctx)
             .await
             .context("failed to create storage")?;
 
@@ -305,9 +306,9 @@ impl Mempool {
 
         let bind = EngineBinding {
             mempool_adapter_store: MempoolAdapterStore::new(
-                self.storage.mempool_storage().clone(),
+                self.storage.context().clone(),
                 anchor_consumer.commit_round.clone(),
-            ),
+            )?,
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: anchor_consumer.top_known_anchor.clone(),
             output: committed_tx,
