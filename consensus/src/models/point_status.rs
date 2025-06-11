@@ -1,10 +1,10 @@
 use std::fmt::{Debug, Display, Formatter};
 
 use tycho_network::PeerId;
-use tycho_storage::point_status::{AnchorFlags, StatusFlags};
 
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Digest, PointId, PointInfo, Round};
+use crate::storage::point_status::{AnchorFlags, StatusFlags};
 
 pub enum PointRestoreSelect {
     /// Note: currently all points with `Exists` statuses must repeat `verify()`,

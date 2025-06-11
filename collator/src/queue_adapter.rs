@@ -3,8 +3,6 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
-use tycho_storage::model::DiffInfo;
-use tycho_storage::snapshot::AccountStatistics;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -16,6 +14,8 @@ use crate::internal_queue::types::{
     DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
     QueueShardRange, QueueStatistics, SeparatedStatisticsByPartitions,
 };
+use crate::storage::models::DiffInfo;
+use crate::storage::snapshot::AccountStatistics;
 use crate::tracing_targets;
 use crate::types::{DebugDisplayOpt, DebugIter, DisplayIter, DisplayTupleRef};
 
@@ -228,9 +228,10 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         );
 
         // TODO: get partitions from queue state
-        let partitions = &vec![0, 1].into_iter().collect();
+        let partitions = FastHashSet::from_iter([QueuePartitionIdx(0), QueuePartitionIdx(1)]);
 
-        self.queue.clear_uncommitted_state(partitions, top_shards)?;
+        self.queue
+            .clear_uncommitted_state(&partitions, top_shards)?;
 
         let elapsed = start_time.elapsed();
         tracing::info!(target: tracing_targets::MQ_ADAPTER,

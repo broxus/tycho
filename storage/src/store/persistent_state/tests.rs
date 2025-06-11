@@ -12,13 +12,14 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_util::compression::zstd_decompress;
 
 use super::*;
+use crate::context::StorageContext;
 use crate::{NewBlockMeta, Storage, StorageConfig};
 
 #[tokio::test]
 async fn persistent_shard_state() -> Result<()> {
     tycho_util::test::init_logger("persistent_shard_state", "debug");
 
-    let (storage, tmp_dir) = Storage::new_temp().await?;
+    let (storage, tmp_dir) = Storage::open_temp().await?;
     assert!(storage.node_state().load_init_mc_block_id().is_none());
 
     let shard_states = storage.shard_state_storage();
@@ -157,10 +158,8 @@ async fn persistent_shard_state() -> Result<()> {
     drop(storage);
 
     // And reload it
-    let new_storage = Storage::builder()
-        .with_config(StorageConfig::new_potato(tmp_dir.path()))
-        .build()
-        .await?;
+    let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
+    let new_storage = Storage::open(ctx).await?;
 
     let new_persistent_states = new_storage.persistent_state_storage();
 
@@ -194,7 +193,7 @@ async fn persistent_queue_state_read_write() -> Result<()> {
         out_msgs: OutMsgDescr,
     }
 
-    let (storage, _temp_dir) = Storage::new_temp().await?;
+    let (storage, _temp_dir) = Storage::open_temp().await?;
 
     let target_mc_seqno = 10;
 

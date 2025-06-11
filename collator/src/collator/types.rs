@@ -1259,7 +1259,7 @@ impl MsgsExecutionParamsExtension for MsgsExecutionParams {
         let mut res = BTreeMap::new();
         for item in self.group_slots_fractions.iter() {
             let (par_id, fraction) = item?;
-            res.insert(par_id, fraction);
+            res.insert(QueuePartitionIdx(par_id), fraction);
         }
         Ok(res)
     }

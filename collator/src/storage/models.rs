@@ -8,9 +8,8 @@ use tycho_block_util::queue::{
     RouterPartitions,
 };
 use tycho_block_util::tl;
+use tycho_storage::{StoredValue, StoredValueBuffer};
 use tycho_util::FastHashMap;
-
-use crate::util::{StoredValue, StoredValueBuffer};
 
 pub struct InternalQueueMessage<'a> {
     pub key: ShardsInternalMessagesKey,
@@ -72,64 +71,6 @@ impl StoredValue for ShardsInternalMessagesKey {
             shard_ident,
             internal_message_key,
         }
-    }
-}
-
-impl StoredValue for QueueKey {
-    const SIZE_HINT: usize = 8 + 32;
-
-    type OnStackSlice = [u8; Self::SIZE_HINT];
-
-    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
-        buffer.write_raw_slice(&self.lt.to_be_bytes());
-        buffer.write_raw_slice(&self.hash.0);
-    }
-
-    fn deserialize(reader: &mut &[u8]) -> Self {
-        if reader.len() < Self::SIZE_HINT {
-            panic!("Insufficient data for deserialization")
-        }
-
-        let mut lt_bytes = [0u8; 8];
-        lt_bytes.copy_from_slice(&reader[..8]);
-        let lt = u64::from_be_bytes(lt_bytes);
-        *reader = &reader[8..];
-
-        let mut hash_bytes = [0u8; 32];
-        hash_bytes.copy_from_slice(&reader[..32]);
-        let hash = HashBytes(hash_bytes);
-        *reader = &reader[32..];
-
-        Self { lt, hash }
-    }
-}
-
-impl StoredValue for RouterAddr {
-    const SIZE_HINT: usize = 1 + 32;
-    type OnStackSlice = [u8; Self::SIZE_HINT];
-
-    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
-        buffer.write_raw_slice(&[self.workchain as u8]);
-        buffer.write_raw_slice(&self.account.0);
-    }
-
-    fn deserialize(reader: &mut &[u8]) -> Self
-    where
-        Self: Sized,
-    {
-        if reader.len() < Self::SIZE_HINT {
-            panic!("Insufficient data for deserialization");
-        }
-
-        let workchain = reader[0] as i8;
-        *reader = &reader[1..];
-
-        let mut account_bytes = [0u8; 32];
-        account_bytes.copy_from_slice(&reader[..32]);
-        let account = HashBytes(account_bytes);
-        *reader = &reader[32..];
-
-        Self { workchain, account }
     }
 }
 
@@ -279,29 +220,6 @@ pub struct QueueRange {
     pub partition: QueuePartitionIdx,
     pub from: QueueKey,
     pub to: QueueKey,
-}
-
-impl StoredValue for QueuePartitionIdx {
-    const SIZE_HINT: usize = std::mem::size_of::<QueuePartitionIdx>();
-
-    type OnStackSlice = [u8; Self::SIZE_HINT];
-
-    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
-        buffer.write_raw_slice(&self.to_be_bytes());
-    }
-
-    fn deserialize(reader: &mut &[u8]) -> Self {
-        if reader.len() < Self::SIZE_HINT {
-            panic!("Insufficient data for deserialization");
-        }
-
-        let mut partition_bytes = [0u8; 2];
-        partition_bytes.copy_from_slice(&reader[..2]);
-        let partition = u16::from_be_bytes(partition_bytes);
-        *reader = &reader[2..];
-
-        partition
-    }
 }
 
 #[test]

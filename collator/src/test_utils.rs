@@ -12,7 +12,7 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{NewBlockMeta, Storage};
+use tycho_storage::{NewBlockMeta, Storage, StorageContext};
 
 use crate::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
 use crate::internal_queue::state::storage::QueueStateImplFactory;
@@ -32,7 +32,7 @@ pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilt
 }
 
 pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDir)> {
-    let (storage, tmp_dir) = Storage::new_temp().await?;
+    let (storage, tmp_dir) = Storage::open_temp().await?;
     let shard_states = storage.shard_state_storage();
 
     // master state
@@ -153,13 +153,13 @@ pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDi
 
 pub async fn create_test_queue_adapter<V: InternalMessageValue>(
 ) -> Result<(Arc<dyn MessageQueueAdapter<V>>, tempfile::TempDir)> {
-    let (storage, tmp_dir) = Storage::new_temp().await?;
-    let queue_state_factory = QueueStateImplFactory::new(storage.clone());
+    let (ctx, tmp_dir) = StorageContext::new_temp().await?;
+    let queue_state_factory = QueueStateImplFactory::new(ctx)?;
     let queue_factory = QueueFactoryStdImpl {
         state: queue_state_factory,
         config: Default::default(),
     };
-    let queue = queue_factory.create();
+    let queue = queue_factory.create()?;
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
     Ok((Arc::new(message_queue_adapter), tmp_dir))
 }

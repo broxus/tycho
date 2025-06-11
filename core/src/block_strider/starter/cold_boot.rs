@@ -751,7 +751,6 @@ impl StarterInner {
     ) -> Result<()> {
         let block_id = block_handle.id();
 
-        let internal_queue = self.storage.internal_queue_storage();
         let temp = self.storage.temp_file_storage();
 
         let state_file = temp.file(format!("queue_state_{block_id}"));
@@ -779,9 +778,11 @@ impl StarterInner {
                 }
             };
 
-            internal_queue
-                .import_from_file(top_update, file, *block_id)
-                .await?;
+            if let Some(queue_state_handler) = &self.queue_state_handler {
+                queue_state_handler
+                    .import_from_file(top_update, file, block_id)
+                    .await?;
+            }
 
             remove_state_file.await;
 

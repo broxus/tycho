@@ -10,6 +10,7 @@ use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
+use tycho_storage_traits::StoredValue;
 use tycho_util::metrics::HistogramGuard;
 use weedb::rocksdb;
 
@@ -17,7 +18,6 @@ use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
 use crate::db::*;
 use crate::store::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, TempFileStorage};
-use crate::util::*;
 
 mod cell_storage;
 mod entries_buffer;

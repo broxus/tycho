@@ -10,7 +10,7 @@ use super::refcount;
 // took from
 // https://github.com/tikv/tikv/blob/d60c7fb6f3657dc5f3c83b0e3fc6ac75636e1a48/src/config/mod.rs#L170
 // todo: need to benchmark and update if it's not optimal
-const DEFAULT_MIN_BLOB_SIZE: u64 = bytesize::KIB * 32;
+pub const DEFAULT_MIN_BLOB_SIZE: u64 = bytesize::KIB * 32;
 
 /// Stores generic node parameters
 /// - Key: `...`
@@ -392,54 +392,7 @@ impl ColumnFamilyOptions<Caches> for BlockConnections {
     }
 }
 
-/// Stores persistent internal messages
-pub struct ShardInternalMessages;
-impl ColumnFamily for ShardInternalMessages {
-    const NAME: &'static str = "shard_int_messages";
-
-    fn read_options(opts: &mut ReadOptions) {
-        opts.set_verify_checksums(true);
-    }
-}
-
-impl ColumnFamilyOptions<Caches> for ShardInternalMessages {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        internal_queue_options(opts, caches);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
-    }
-}
-
-pub struct InternalMessageStatistics;
-impl ColumnFamily for InternalMessageStatistics {
-    const NAME: &'static str = "int_msg_statistics";
-
-    fn read_options(opts: &mut ReadOptions) {
-        opts.set_verify_checksums(true);
-    }
-}
-
-impl ColumnFamilyOptions<Caches> for InternalMessageStatistics {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        internal_queue_options(opts, caches);
-    }
-}
-
-fn internal_queue_options(opts: &mut Options, caches: &mut Caches) {
-    let mut block_factory = BlockBasedOptions::default();
-    block_factory.set_block_cache(&caches.block_cache);
-    block_factory.set_format_version(6);
-
-    opts.set_block_based_table_factory(&block_factory);
-    opts.set_disable_auto_compactions(true);
-    opts.set_compression_type(DBCompressionType::None);
-
-    opts.set_level_compaction_dynamic_level_bytes(true);
-
-    // optimize for bulk inserts and single writer
-    opts.set_max_write_buffer_number(2); // 2 * 256MB = 512MB
-    opts.set_min_write_buffer_number_to_merge(2); // allow early flush
-    opts.set_write_buffer_size(256 * 1024 * 1024); // 256 per memtable
-}
+// === Old collator storage ===
 
 // TODO should be deleted
 pub struct ShardInternalMessagesOld;
@@ -496,64 +449,6 @@ impl ColumnFamilyOptions<Caches> for InternalMessageStatsUncommitedOld {
     fn options(_opts: &mut Options, _caches: &mut Caches) {}
 }
 
-pub struct InternalMessageVar;
-impl ColumnFamily for InternalMessageVar {
-    const NAME: &'static str = "int_msg_var";
-
-    fn read_options(opts: &mut ReadOptions) {
-        opts.set_verify_checksums(true);
-    }
-}
-
-impl ColumnFamilyOptions<Caches> for InternalMessageVar {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        internal_queue_options(opts, caches);
-    }
-}
-pub struct InternalMessageDiffsTail;
-impl ColumnFamily for InternalMessageDiffsTail {
-    const NAME: &'static str = "int_msg_diffs_tail";
-
-    fn read_options(opts: &mut ReadOptions) {
-        opts.set_verify_checksums(true);
-    }
-}
-
-impl ColumnFamilyOptions<Caches> for InternalMessageDiffsTail {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        internal_queue_options(opts, caches);
-    }
-}
-
-pub struct InternalMessageDiffInfo;
-impl ColumnFamily for InternalMessageDiffInfo {
-    const NAME: &'static str = "int_msg_diff_info";
-
-    fn read_options(opts: &mut ReadOptions) {
-        opts.set_verify_checksums(true);
-    }
-}
-
-impl ColumnFamilyOptions<Caches> for InternalMessageDiffInfo {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        internal_queue_options(opts, caches);
-    }
-}
-
-pub struct InternalMessageCommitPointer;
-impl ColumnFamily for InternalMessageCommitPointer {
-    const NAME: &'static str = "int_msg_commit_pointer";
-
-    fn read_options(opts: &mut ReadOptions) {
-        opts.set_verify_checksums(true);
-    }
-}
-
-impl ColumnFamilyOptions<Caches> for InternalMessageCommitPointer {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        internal_queue_options(opts, caches);
-    }
-}
 fn archive_data_merge(
     _: &[u8],
     current_value: Option<&[u8]>,
@@ -595,7 +490,9 @@ fn block_handle_merge(
     Some(value.to_vec())
 }
 
-fn default_block_based_table_factory(opts: &mut Options, caches: &Caches) {
+// === Helpers ===
+
+pub fn default_block_based_table_factory(opts: &mut Options, caches: &Caches) {
     opts.set_level_compaction_dynamic_level_bytes(true);
     let mut block_factory = BlockBasedOptions::default();
     block_factory.set_block_cache(&caches.block_cache);
@@ -604,7 +501,7 @@ fn default_block_based_table_factory(opts: &mut Options, caches: &Caches) {
 }
 
 // setting our shared cache instead of individual caches for each cf
-fn optimize_for_point_lookup(opts: &mut Options, caches: &Caches) {
+pub fn optimize_for_point_lookup(opts: &mut Options, caches: &Caches) {
     //     https://github.com/facebook/rocksdb/blob/81aeb15988e43c49952c795e32e5c8b224793589/options/options.cc
     //     BlockBasedTableOptions block_based_options;
     //     block_based_options.data_block_index_type =
@@ -628,7 +525,7 @@ fn optimize_for_point_lookup(opts: &mut Options, caches: &Caches) {
     opts.set_memtable_whole_key_filtering(true);
 }
 
-fn optimize_for_level_compaction(opts: &mut Options, budget: ByteSize) {
+pub fn optimize_for_level_compaction(opts: &mut Options, budget: ByteSize) {
     opts.set_write_buffer_size(budget.as_u64() as usize / 4);
     // this means we'll use 50% extra memory in the worst case, but will reduce
     //  write stalls.
@@ -646,235 +543,14 @@ fn optimize_for_level_compaction(opts: &mut Options, budget: ByteSize) {
     opts.set_max_bytes_for_level_base(budget.as_u64());
 }
 
-// === JRPC tables ===
-
-/// Stores raw transactions
-/// - Key: `workchain: i8, account: [u8; 32], lt: u64`
-/// - Value: `transaction mask: u8, transaction hash: [u8; 32], message hash: [u8; 32], transaction BOC`
-pub struct Transactions;
-
-impl Transactions {
-    pub const KEY_LEN: usize = 1 + 32 + 8;
-}
-
-impl ColumnFamily for Transactions {
-    const NAME: &'static str = "transactions";
-}
-
-impl ColumnFamilyOptions<Caches> for Transactions {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-        opts.set_compression_type(DBCompressionType::Zstd);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::Zstd);
-    }
-}
-
-/// Transaction hash to full key
-/// - Key: `tx_hash: [u8; 32]`
-/// - Value: `workchain: i8, account: [u8; 32], lt: u64 (BE), shard_depth: u8, seqno: u32 (LE), root_hash: [u8; 32], file_hash: [u8; 32], mc_seqno: u32 (LE)`
-pub struct TransactionsByHash;
-
-impl TransactionsByHash {
-    pub const VALUE_SHORT_LEN: usize = Transactions::KEY_LEN;
-    pub const VALUE_FULL_LEN: usize = Transactions::KEY_LEN + 1 + 4 + 32 + 32 + 4;
-}
-
-impl ColumnFamily for TransactionsByHash {
-    const NAME: &'static str = "transactions_by_hash";
-}
-
-impl ColumnFamilyOptions<Caches> for TransactionsByHash {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-    }
-}
-
-/// Inbound message hash to full transaction key
-/// - Key: `msg_hash: [u8; 32]`
-/// - Value: `workchain: i8, account: [u8; 32], lt: u64`
-pub struct TransactionsByInMsg;
-
-impl ColumnFamily for TransactionsByInMsg {
-    const NAME: &'static str = "transactions_by_in_msg";
-}
-
-impl ColumnFamilyOptions<Caches> for TransactionsByInMsg {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-    }
-}
-
-/// Processed blocks (to distinguish "no block" from "no block transactions")
-/// - Key: `workchain: i8, shard: u64 (BE), seqno: u32 (BE)`
-/// - Value: `root_hash: [u8; 32], file_hash: [u8; 32], mc_seqno: u32 (LE), info_version: u8, info...`
-pub struct KnownBlocks;
-
-impl KnownBlocks {
-    pub const KEY_LEN: usize = 1 + 8 + 4;
-}
-
-impl ColumnFamily for KnownBlocks {
-    const NAME: &'static str = "known_blocks";
-}
-
-impl ColumnFamilyOptions<Caches> for KnownBlocks {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-    }
-}
-
-/// Transactions grouped by short block id.
-/// - Key: `workchain: i8, shard: u64 (BE), seqno: u32 (BE), account: [u8; 32], lt: u64 (BE)`.
-/// - Value: `tx_hash: [u8; 32]`.
-pub struct BlockTransactions;
-
-impl BlockTransactions {
-    pub const KEY_LEN: usize = 1 + 8 + 4 + 32 + 8;
-    pub const VALUE_LEN: usize = 32;
-}
-
-impl ColumnFamily for BlockTransactions {
-    const NAME: &'static str = "block_transactions";
-}
-
-impl ColumnFamilyOptions<Caches> for BlockTransactions {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-    }
-}
-
-/// Blocks by logical time.
-///
-/// - Key: `mc_seqno: u32 (BE), workchain: i8, shard: u64 (BE), seqno: u32 (BE)`
-/// - Value: `root_hash: [u8; 32], file_hash: [u8; 32], start_lt: u64 (LE), end_lt: (LE)`
-///
-/// # Additional value for masterchain
-/// - `shard_count: u32 (LE), shard_count * (workchain: i8, shard: u64 (LE), seqno: u32 (LE)),
-///   root_hash: [u8; 32], file_hash: [u8; 32], start_lt: u64 (LE), end_lt: (LE))`
-pub struct BlocksByMcSeqno;
-
-impl BlocksByMcSeqno {
-    pub const KEY_LEN: usize = 4 + 1 + 8 + 4;
-    pub const VALUE_LEN: usize = 32 + 32 + 8 + 8;
-
-    pub const DESCR_OFFSET: usize = Self::VALUE_LEN + 4;
-    pub const DESCR_LEN: usize = 1 + 8 + 4 + Self::VALUE_LEN;
-}
-
-impl ColumnFamily for BlocksByMcSeqno {
-    const NAME: &'static str = "blocks_by_mc_seqno";
-}
-
-impl ColumnFamilyOptions<Caches> for BlocksByMcSeqno {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-    }
-}
-
-/// Code hash with account address
-/// - Key: `code_hash: [u8; 32], workchain: i8, account: [u8; 32]`
-/// - Value: empty
-pub struct CodeHashes;
-
-impl CodeHashes {
-    pub const KEY_LEN: usize = 32 + 1 + 32;
-}
-
-impl ColumnFamily for CodeHashes {
-    const NAME: &'static str = "code_hashes";
-}
-
-impl ColumnFamilyOptions<Caches> for CodeHashes {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-    }
-}
-
-/// Account address to code hash
-/// - Key: `workchain: i8, account: [u8; 32]`
-/// - Value: `code_hash: [u8; 32]`
-pub struct CodeHashesByAddress;
-
-impl CodeHashesByAddress {
-    pub const KEY_LEN: usize = 1 + 32;
-}
-
-impl ColumnFamily for CodeHashesByAddress {
-    const NAME: &'static str = "code_hashes_by_address";
-}
-
-impl ColumnFamilyOptions<Caches> for CodeHashesByAddress {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-    }
-}
-
-/// Stores mempool point data
-/// - Key: `round: u32, digest: [u8; 32]`
-/// - Value: `Point`
-pub struct Points;
-
-impl ColumnFamily for Points {
-    const NAME: &'static str = "points";
-}
-
-impl ColumnFamilyOptions<Caches> for Points {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        optimize_for_point_lookup(opts, caches);
-        opts.set_disable_auto_compactions(true);
-
-        opts.set_enable_blob_files(true);
-        opts.set_enable_blob_gc(false); // manual
-        opts.set_min_blob_size(DEFAULT_MIN_BLOB_SIZE);
-        opts.set_blob_compression_type(DBCompressionType::None);
-    }
-}
-
-/// Stores truncated mempool point data
-/// - Key: `round: u32, digest: [u8; 32]`
-/// - Value: `PointInfo`
-pub struct PointsInfo;
-
-impl ColumnFamily for PointsInfo {
-    const NAME: &'static str = "points_info";
-}
-
-impl ColumnFamilyOptions<Caches> for PointsInfo {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        optimize_for_point_lookup(opts, caches);
-        opts.set_disable_auto_compactions(true);
-    }
-}
-
-/// Stores mempool point flags
-/// - Key: `round: u32, digest: [u8; 32]` as in [`Points`]
-/// - Value: [`tycho_consensus::models::point_status::PointStatusStored`]
-///   - also see  [`crate::point_status::StatusFlags::try_from_stored`]
-pub struct PointsStatus;
-
-impl PointsStatus {}
-
-impl ColumnFamily for PointsStatus {
-    const NAME: &'static str = "points_status";
-}
-
-impl ColumnFamilyOptions<Caches> for PointsStatus {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        optimize_for_point_lookup(opts, caches);
-        opts.set_disable_auto_compactions(true);
-
-        opts.set_merge_operator_associative("points_status_merge", crate::point_status::merge);
-    }
-}
-
-fn zstd_block_based_table_factory(opts: &mut Options, caches: &Caches) {
+pub fn zstd_block_based_table_factory(opts: &mut Options, caches: &Caches) {
     let mut block_factory = BlockBasedOptions::default();
     block_factory.set_block_cache(&caches.block_cache);
     opts.set_block_based_table_factory(&block_factory);
     opts.set_compression_type(DBCompressionType::Zstd);
 }
 
-fn with_blob_db(opts: &mut Options, min_value_size: u64, compression_type: DBCompressionType) {
+pub fn with_blob_db(opts: &mut Options, min_value_size: u64, compression_type: DBCompressionType) {
     opts.set_enable_blob_files(true);
     opts.set_enable_blob_gc(true);
 

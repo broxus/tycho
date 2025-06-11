@@ -12,9 +12,9 @@ use indexmap::IndexMap;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
-use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
+use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
 use tycho_network::PeerId;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use super::{
     CumulativeStatsCalcParams, FinalizedMessagesReader, GetNextMessageGroupMode, MessagesReader,
@@ -698,7 +698,7 @@ where
                     )
                 },
             ));
-            let partitions = [0, 1].into_iter().collect();
+            let partitions = FastHashSet::from_iter([QueuePartitionIdx(0), QueuePartitionIdx(1)]);
             self.mc_collator
                 .primary_mq_adapter
                 .commit_diff(mc_top_blocks, &partitions)?;

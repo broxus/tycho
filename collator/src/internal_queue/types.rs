@@ -575,10 +575,11 @@ pub enum DiffZone {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use tycho_storage::model::DiffInfo;
     use tycho_util::FastHashSet;
 
     use super::*;
+    use crate::storage::models::DiffInfo;
+
     #[test]
     fn test_partition_router_from_btreemap() {
         let addr1 = RouterAddr {
@@ -599,16 +600,16 @@ mod tests {
         };
 
         let mut dest_map = BTreeMap::new();
-        dest_map.insert(1, BTreeSet::from([addr1, addr2]));
-        dest_map.insert(2, BTreeSet::from([addr3]));
+        dest_map.insert(QueuePartitionIdx(1), BTreeSet::from([addr1, addr2]));
+        dest_map.insert(QueuePartitionIdx(2), BTreeSet::from([addr3]));
 
         let mut src_map = BTreeMap::new();
-        src_map.insert(10, BTreeSet::from([addr4]));
+        src_map.insert(QueuePartitionIdx(10), BTreeSet::from([addr4]));
 
         let partition_router = PartitionRouter::with_partitions(&src_map, &dest_map);
 
         {
-            let expected_partitions = [1, 2, 10].into_iter().collect::<FastHashSet<_>>();
+            let expected_partitions = FastHashSet::from_iter([1, 2, 10].map(QueuePartitionIdx));
             for par_id in partition_router.partitions_stats().keys() {
                 assert!(expected_partitions.contains(par_id));
             }
@@ -618,15 +619,15 @@ mod tests {
             // Dest
             let dest_router = &partition_router.dst;
             // addr1 и addr2 -> partition 1
-            assert_eq!(*dest_router.get(&addr1).unwrap(), 1);
-            assert_eq!(*dest_router.get(&addr2).unwrap(), 1);
+            assert_eq!(*dest_router.get(&addr1).unwrap(), QueuePartitionIdx(1));
+            assert_eq!(*dest_router.get(&addr2).unwrap(), QueuePartitionIdx(1));
             // addr3 -> partition 2
-            assert_eq!(*dest_router.get(&addr3).unwrap(), 2);
+            assert_eq!(*dest_router.get(&addr3).unwrap(), QueuePartitionIdx(2));
 
             // Src
             let src_router = &partition_router.src;
             // addr4 -> partition 10
-            assert_eq!(*src_router.get(&addr4).unwrap(), 10);
+            assert_eq!(*src_router.get(&addr4).unwrap(), QueuePartitionIdx(10));
         }
     }
 
@@ -645,7 +646,7 @@ mod tests {
 
         let mut router_partitions_src = RouterPartitions::new();
         router_partitions_src.insert(
-            1,
+            QueuePartitionIdx(1),
             BTreeSet::from([RouterAddr {
                 workchain: 0,
                 account: HashBytes([0x01; 32]),
@@ -654,7 +655,7 @@ mod tests {
 
         let mut router_partitions_dst = RouterPartitions::new();
         router_partitions_dst.insert(
-            2,
+            QueuePartitionIdx(2),
             BTreeSet::from([RouterAddr {
                 workchain: 0,
                 account: HashBytes([0x02; 32]),

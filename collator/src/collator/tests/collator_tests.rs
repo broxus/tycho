@@ -6,6 +6,7 @@ use everscale_types::dict::Dict;
 use everscale_types::models::{
     BlockId, BlockchainConfig, CurrencyCollection, ShardIdent, ValidatorInfo,
 };
+use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_block_util::state::MinRefMcStateTracker;
 
 use crate::collator::types::AnchorsCache;
@@ -412,7 +413,7 @@ fn test_get_anchors_processing_info() {
     mc_data
         .processed_upto
         .partitions
-        .insert(0, ProcessedUptoPartitionStuff {
+        .insert(QueuePartitionIdx(0), ProcessedUptoPartitionStuff {
             externals: ExternalsProcessedUptoStuff {
                 processed_to: (1752, 12000),
                 ranges: [(967, ExternalsRangeInfo {
@@ -466,7 +467,7 @@ fn test_get_anchors_processing_info() {
     mc_data
         .processed_upto
         .partitions
-        .insert(0, ProcessedUptoPartitionStuff {
+        .insert(QueuePartitionIdx(0), ProcessedUptoPartitionStuff {
             externals: ExternalsProcessedUptoStuff {
                 processed_to: (1756, 7000),
                 ranges: [(968, ExternalsRangeInfo {
@@ -520,7 +521,7 @@ fn test_get_anchors_processing_info() {
     mc_data
         .processed_upto
         .partitions
-        .insert(0, ProcessedUptoPartitionStuff {
+        .insert(QueuePartitionIdx(0), ProcessedUptoPartitionStuff {
             externals: ExternalsProcessedUptoStuff {
                 processed_to: (1816, 23429),
                 ranges: [(1005, ExternalsRangeInfo {

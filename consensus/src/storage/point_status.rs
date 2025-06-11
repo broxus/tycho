@@ -1,6 +1,6 @@
 use weedb::rocksdb::MergeOperands;
 
-use crate::{BytesFmt, MempoolStorage};
+use super::{BytesFmt, MempoolStorage};
 
 const MEMPOOL_DB_STATUS_MERGE: &str = "MEMPOOL_DB_STATUS_MERGE";
 

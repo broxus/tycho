@@ -14,7 +14,7 @@ use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::{shard_ident_at_depth, BlockStuff};
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::{merge_relaxed_aug_dicts, split_aug_dict, RelaxedAugDict};
-use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
+use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::ConsensusConfigExt;
 use tycho_util::metrics::HistogramGuard;
@@ -136,7 +136,11 @@ impl Phase<FinalizeState> {
 
             other_updated_top_shard_diffs_info.insert(
                 top_block_id.shard,
-                mq_adapter.get_router_and_statistics(&top_block_id.as_short_id(), diff_info, 0)?,
+                mq_adapter.get_router_and_statistics(
+                    &top_block_id.as_short_id(),
+                    diff_info,
+                    QueuePartitionIdx::ZERO,
+                )?,
             );
         }
 

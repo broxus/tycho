@@ -3,16 +3,17 @@ use std::collections::BTreeMap;
 use ahash::HashMapExt;
 use everscale_types::models::{BlockId, IntAddr, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
+use tycho_storage::StoredValue;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::{OwnedRawIterator, OwnedSnapshot};
 
-use crate::model::{
+use super::db::InternalQueueDB;
+use super::iterator::InternalQueueMessagesIter;
+use super::models::{
     CommitPointerKey, CommitPointerValue, DiffInfoKey, DiffTailKey, ShardsInternalMessagesKey,
     StatKey,
 };
-use crate::store::internal_queue::iterator::InternalQueueMessagesIter;
-use crate::util::StoredValue;
-use crate::{InternalQueueDB, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY};
+use super::INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY;
 
 pub type AccountStatistics = FastHashMap<IntAddr, u64>;
 pub type SeparatedStatisticsByPartitions =
