@@ -7,7 +7,7 @@ use tycho_storage::{NewBlockMeta, Storage};
 use crate::utils;
 
 pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
-    let (storage, tmp_dir) = Storage::new_temp().await?;
+    let (storage, tmp_dir) = Storage::open_temp().await?;
     let handles = storage.block_handle_storage();
     let blocks = storage.block_storage();
 

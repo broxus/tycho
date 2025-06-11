@@ -22,7 +22,8 @@ pub use self::provider::{
     EmptyBlockProvider, OptionalBlockStuff, ProofChecker, RetryConfig, StorageBlockProvider,
 };
 pub use self::starter::{
-    ColdBootType, FileZerostateProvider, Starter, StarterConfig, ZerostateProvider,
+    ColdBootType, FileZerostateProvider, QueueStateHandler, Starter, StarterBuilder, StarterConfig,
+    ZerostateProvider,
 };
 pub use self::state::{
     BlockStriderState, CommitMasterBlock, CommitShardBlock, PersistentBlockStriderState,

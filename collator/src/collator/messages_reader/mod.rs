@@ -100,6 +100,9 @@ pub(super) struct MessagesReaderContext {
     pub part_stat_ranges: Option<Vec<QueueShardBoundedRange>>,
 }
 
+const MAIN_PARTITION_ID: QueuePartitionIdx = QueuePartitionIdx::ZERO;
+const LP_PARTITION_ID: QueuePartitionIdx = QueuePartitionIdx(1);
+
 impl<V: InternalMessageValue> MessagesReader<V> {
     pub fn new(
         cx: MessagesReaderContext,
@@ -171,8 +174,13 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 previous_cumulative_statistics.expect("cumulative statistics should exist")
             };
 
-            if let Some(partition_stats) = inner_cumulative_statistics.result().get(&1) {
-                new_messages.init_partition_router(1, partition_stats.initial_stats.statistics());
+            if let Some(partition_stats) =
+                inner_cumulative_statistics.result().get(&LP_PARTITION_ID)
+            {
+                new_messages.init_partition_router(
+                    LP_PARTITION_ID,
+                    partition_stats.initial_stats.statistics(),
+                );
             }
 
             cumulative_statistics = Some(inner_cumulative_statistics);
@@ -213,25 +221,27 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         // create internals readers by partitions
         let mut partition_reader_states = cx.reader_state.internals.partitions;
 
-        let par_reader_state = partition_reader_states.remove(&0).unwrap_or_default();
+        let par_reader_state = partition_reader_states
+            .remove(&MAIN_PARTITION_ID)
+            .unwrap_or_default();
 
         let mut remaning_msg_stats = None;
         if let Some(internal_queue_statistics) = res.internal_queue_statistics.as_mut() {
             remaning_msg_stats = Some(InternalsPartitionReaderRemainingStats {
                 msgs_stats: internal_queue_statistics
                     .result()
-                    .get(&0)
+                    .get(&MAIN_PARTITION_ID)
                     .map(|par| par.remaning_stats.clone())
                     .unwrap_or(ConcurrentQueueStatistics::new(cx.for_shard_id)),
                 stats_just_loaded: cumulative_stats_just_loaded,
             });
         }
 
-        let BufferLimits { target, max } = internals.get(&0).unwrap();
+        let BufferLimits { target, max } = internals.get(&MAIN_PARTITION_ID).unwrap();
 
         let par_reader = InternalsPartitionReader::new(
             InternalsPartitionReaderContext {
-                partition_id: 0,
+                partition_id: MAIN_PARTITION_ID,
                 for_shard_id: cx.for_shard_id,
                 block_seqno: cx.block_seqno,
                 target_limits: *target,
@@ -245,29 +255,33 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             },
             mq_adapter.clone(),
         )?;
-        res.internals_partition_readers.insert(0, par_reader);
-        res.readers_stages.insert(0, initial_reader_stage);
+        res.internals_partition_readers
+            .insert(MAIN_PARTITION_ID, par_reader);
+        res.readers_stages
+            .insert(MAIN_PARTITION_ID, initial_reader_stage);
 
         // low-priority partition 1
-        let par_reader_state = partition_reader_states.remove(&1).unwrap_or_default();
+        let par_reader_state = partition_reader_states
+            .remove(&LP_PARTITION_ID)
+            .unwrap_or_default();
 
         let mut remaining_msg_stats = None;
         if let Some(internal_queue_statistics) = res.internal_queue_statistics.as_mut() {
             remaining_msg_stats = Some(InternalsPartitionReaderRemainingStats {
                 msgs_stats: internal_queue_statistics
                     .result()
-                    .get(&1)
+                    .get(&LP_PARTITION_ID)
                     .map(|par| par.remaning_stats.clone())
                     .unwrap_or(ConcurrentQueueStatistics::new(cx.for_shard_id)),
                 stats_just_loaded: cumulative_stats_just_loaded,
             });
         }
 
-        let BufferLimits { target, max } = internals.get(&1).unwrap();
+        let BufferLimits { target, max } = internals.get(&LP_PARTITION_ID).unwrap();
 
         let par_reader = InternalsPartitionReader::new(
             InternalsPartitionReaderContext {
-                partition_id: 1,
+                partition_id: LP_PARTITION_ID,
                 for_shard_id: cx.for_shard_id,
                 block_seqno: cx.block_seqno,
                 target_limits: *target,
@@ -281,8 +295,10 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             },
             mq_adapter,
         )?;
-        res.internals_partition_readers.insert(1, par_reader);
-        res.readers_stages.insert(1, initial_reader_stage);
+        res.internals_partition_readers
+            .insert(LP_PARTITION_ID, par_reader);
+        res.readers_stages
+            .insert(LP_PARTITION_ID, initial_reader_stage);
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             readers_stages = ?res.readers_stages,
@@ -455,7 +471,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 for par_id in self
                     .internals_partition_readers
                     .keys()
-                    .filter(|&&par_id| par_id > 0)
+                    .filter(|&&par_id| !par_id.is_zero())
                 {
                     let count = partitions_stats.get(par_id).copied().unwrap_or_default();
                     let labels = [
@@ -468,7 +484,10 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             }
 
             // remove moved accounts from partition 0 buffer
-            let par_reader = self.internals_partition_readers.get_mut(&0).unwrap();
+            let par_reader = self
+                .internals_partition_readers
+                .get_mut(&MAIN_PARTITION_ID)
+                .unwrap();
             if let Ok(last_int_range_reader) = par_reader.get_last_range_reader_mut() {
                 if last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages {
                     last_int_range_reader
@@ -561,7 +580,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
         for (dest_int_address, msgs_count) in aggregated_stats {
             let existing_partition = partition_router.get_partition(None, &dest_int_address);
-            if existing_partition != 0 {
+            if !existing_partition.is_zero() {
                 continue;
             }
 
@@ -578,7 +597,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                         "move address {} to partition 1 because it has {} messages",
                         dest_int_address, msgs_count,
                     );
-                    partition_router.insert_dst(&dest_int_address, 1)?;
+                    partition_router.insert_dst(&dest_int_address, LP_PARTITION_ID)?;
                     moved_from_par_0_accounts.insert(dest_int_address.get_address());
                 }
             } else {
@@ -615,7 +634,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                             dest_int_address, remote_shard_partition,
                         );
 
-                        if remote_shard_partition != 0 {
+                        if !remote_shard_partition.is_zero() {
                             tracing::trace!(target: tracing_targets::COLLATOR,
                                 "move address {} to partition {} because it has partition {} in shard top diff",
                                 dest_int_address, remote_shard_partition, remote_shard_partition,
@@ -626,7 +645,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                         }
 
                         // if remote partition == 0 then we need to check statistics
-                        let remote_msgs_count = match statistics.partition(0) {
+                        let remote_msgs_count = match statistics.partition(MAIN_PARTITION_ID) {
                             None => {
                                 tracing::trace!(target: tracing_targets::COLLATOR,
                                     "use aggregated stats for address {} because\
@@ -657,7 +676,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                         "move address {} to partition 1 because it has {} messages",
                         dest_int_address, total_msgs,
                     );
-                    partition_router.insert_dst(&dest_int_address, 1)?;
+                    partition_router.insert_dst(&dest_int_address, LP_PARTITION_ID)?;
                     moved_from_par_0_accounts.insert(dest_int_address.get_address());
                 }
             }
@@ -1034,7 +1053,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         );
 
         // aggregate message group
-        let par_0_metrics = metrics_by_partitions.get_mut(0);
+        let par_0_metrics = metrics_by_partitions.get_mut(MAIN_PARTITION_ID);
         par_0_metrics.add_to_message_groups_timer.start();
         let msg_group = msg_groups
             .into_iter()
@@ -1161,8 +1180,9 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         const ADDITIONAL_EXTERNALS_COUNT: usize = 0;
 
         // internals: normal partition 0: 80% of `group_limit`, but min 1
-        let par_0_slots_fraction = slots_fractions.get(&0).cloned().unwrap() as usize;
-        internals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
+        let par_0_slots_fraction =
+            slots_fractions.get(&MAIN_PARTITION_ID).cloned().unwrap() as usize;
+        internals_buffer_limits_by_partitions.insert(MAIN_PARTITION_ID, MessagesBufferLimits {
             max_count: msgs_buffer_max_count,
             slots_count: group_limit
                 .saturating_mul(par_0_slots_fraction)
@@ -1171,15 +1191,15 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             slot_vert_size: group_vert_size,
         });
         // externals: normal partition 0: 100%, but min 2, vert size + ADDITIONAL_EXTERNALS_COUNT
-        externals_buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
+        externals_buffer_limits_by_partitions.insert(MAIN_PARTITION_ID, MessagesBufferLimits {
             max_count: msgs_buffer_max_count,
             slots_count: group_limit.saturating_mul(100).saturating_div(100).max(2),
             slot_vert_size: group_vert_size + ADDITIONAL_EXTERNALS_COUNT,
         });
 
         // internals: low-priority partition 1: 10%, but min 1
-        let par_1_slots_fraction = slots_fractions.get(&1).cloned().unwrap() as usize;
-        internals_buffer_limits_by_partitions.insert(1, MessagesBufferLimits {
+        let par_1_slots_fraction = slots_fractions.get(&LP_PARTITION_ID).cloned().unwrap() as usize;
+        internals_buffer_limits_by_partitions.insert(LP_PARTITION_ID, MessagesBufferLimits {
             max_count: msgs_buffer_max_count,
             slots_count: group_limit
                 .saturating_mul(par_1_slots_fraction)
@@ -1189,8 +1209,10 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         });
         // externals: low-priority partition 1: equal to internals, vert size + ADDITIONAL_EXTERNALS_COUNT
         {
-            let int_buffer_limits = internals_buffer_limits_by_partitions.get(&1).unwrap();
-            externals_buffer_limits_by_partitions.insert(1, MessagesBufferLimits {
+            let int_buffer_limits = internals_buffer_limits_by_partitions
+                .get(&LP_PARTITION_ID)
+                .unwrap();
+            externals_buffer_limits_by_partitions.insert(LP_PARTITION_ID, MessagesBufferLimits {
                 max_count: msgs_buffer_max_count,
                 slots_count: int_buffer_limits.slots_count,
                 slot_vert_size: int_buffer_limits.slot_vert_size + ADDITIONAL_EXTERNALS_COUNT,
@@ -1220,31 +1242,39 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         let mut internals = BTreeMap::new();
 
         // normal partition 0
-        let target_limits = internals_buffer_limits_by_partitions.remove(&0).unwrap();
+        let target_limits = internals_buffer_limits_by_partitions
+            .remove(&MAIN_PARTITION_ID)
+            .unwrap();
         let max_limits = {
-            let ext_limits = externals_buffer_limits_by_partitions.get(&0).unwrap();
+            let ext_limits = externals_buffer_limits_by_partitions
+                .get(&MAIN_PARTITION_ID)
+                .unwrap();
             MessagesBufferLimits {
                 max_count: msgs_buffer_max_count,
                 slots_count: ext_limits.slots_count,
                 slot_vert_size: target_limits.slot_vert_size,
             }
         };
-        internals.insert(0, BufferLimits {
+        internals.insert(MAIN_PARTITION_ID, BufferLimits {
             target: target_limits,
             max: max_limits,
         });
 
         // low-priority partition 1
-        let target_limits = internals_buffer_limits_by_partitions.remove(&1).unwrap();
+        let target_limits = internals_buffer_limits_by_partitions
+            .remove(&LP_PARTITION_ID)
+            .unwrap();
         let max_limits = {
-            let ext_limits = externals_buffer_limits_by_partitions.get(&1).unwrap();
+            let ext_limits = externals_buffer_limits_by_partitions
+                .get(&LP_PARTITION_ID)
+                .unwrap();
             MessagesBufferLimits {
                 max_count: msgs_buffer_max_count,
                 slots_count: ext_limits.slots_count,
                 slot_vert_size: target_limits.slot_vert_size,
             }
         };
-        internals.insert(1, BufferLimits {
+        internals.insert(LP_PARTITION_ID, BufferLimits {
             target: target_limits,
             max: max_limits,
         });
@@ -1382,7 +1412,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             let old = *curr;
             *curr = new;
             tracing::debug!(target: tracing_targets::COLLATOR,
-                partition_id,
+                %partition_id,
                 ?old,
                 ?new,
                 "messages partition reader stage updated",
@@ -1408,7 +1438,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             // log only first time
             if !all_internals_collected_before {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    partition_id = par_reader.partition_id,
+                    partition_id = %par_reader.partition_id,
                     int_processed_to = ?par_reader.reader_state().processed_to,
                     int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
                     last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
@@ -1429,7 +1459,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         // then we can finalize existing internals read state
         // and switch to the "new messages processing" stage
         tracing::trace!(target: tracing_targets::COLLATOR,
-            curr_partition_id = par_reader.partition_id,
+            curr_partition_id = %par_reader.partition_id,
             prev_partitions_all_read_existing_collected = ?DebugIter(prev_partitions_readers.iter().map(|(par_id, par)| (*par_id, par.all_read_existing_messages_collected()))),
             other_partitions_all_read_existing_collected = ?DebugIter(other_partitions_readers.iter().map(|(par_id, par)| (*par_id, par.all_read_existing_messages_collected()))),
             "check if read existing messages collected in other partitions",
@@ -1496,7 +1526,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             // log only first time
             if !all_internals_collected_before {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    partition_id = par_reader.partition_id,
+                    partition_id = %par_reader.partition_id,
                     int_processed_to = ?par_reader.reader_state().processed_to,
                     int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
                     last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),

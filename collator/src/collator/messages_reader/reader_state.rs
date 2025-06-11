@@ -147,19 +147,21 @@ pub struct ExternalsReaderState {
 }
 
 impl ExternalsReaderState {
-    pub fn get_state_by_partition_mut(
+    pub fn get_state_by_partition_mut<T: Into<QueuePartitionIdx>>(
         &mut self,
-        par_id: QueuePartitionIdx,
+        par_id: T,
     ) -> Result<&mut ExternalsReaderStateByPartition> {
+        let par_id = par_id.into();
         self.by_partitions
             .get_mut(&par_id)
             .with_context(|| format!("externals reader state not exists for partition {}", par_id))
     }
 
-    pub fn get_state_by_partition(
+    pub fn get_state_by_partition<T: Into<QueuePartitionIdx>>(
         &self,
-        par_id: QueuePartitionIdx,
+        par_id: T,
     ) -> Result<&ExternalsReaderStateByPartition> {
+        let par_id = par_id.into();
         self.by_partitions
             .get(&par_id)
             .with_context(|| format!("externals reader state not exists for partition {}", par_id))
@@ -184,10 +186,11 @@ pub struct ExternalsRangeReaderState {
 }
 
 impl ExternalsRangeReaderState {
-    pub fn get_state_by_partition_mut(
+    pub fn get_state_by_partition_mut<T: Into<QueuePartitionIdx>>(
         &mut self,
-        par_id: QueuePartitionIdx,
+        par_id: T,
     ) -> Result<&mut ExternalsRangeReaderStateByPartition> {
+        let par_id = par_id.into();
         self.by_partitions.get_mut(&par_id).with_context(|| {
             format!(
                 "externals range reader state not exists for partition {}",
@@ -196,10 +199,11 @@ impl ExternalsRangeReaderState {
         })
     }
 
-    pub fn get_state_by_partition(
+    pub fn get_state_by_partition<T: Into<QueuePartitionIdx>>(
         &self,
-        par_id: QueuePartitionIdx,
+        par_id: T,
     ) -> Result<&ExternalsRangeReaderStateByPartition> {
+        let par_id = par_id.into();
         self.by_partitions.get(&par_id).with_context(|| {
             format!(
                 "externals range reader state not exists for partition {}",

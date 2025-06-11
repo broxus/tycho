@@ -3,16 +3,18 @@ use std::cmp::Ordering;
 use anyhow::{ensure, Result};
 use everscale_types::models::{BlockId, IntAddr, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
+use tycho_storage::StoredValue;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::WriteBatch;
 use weedb::{rocksdb, BoundedCfHandle, ColumnFamily, OwnedSnapshot, Table};
 
-use crate::model::{
+use super::db::InternalQueueDB;
+use super::models::{
     CommitPointerKey, CommitPointerValue, DiffInfoKey, DiffTailKey, QueueRange,
     ShardsInternalMessagesKey, StatKey,
 };
-use crate::util::StoredValue;
-use crate::{InternalQueueDB, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY};
+use super::INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY;
+
 pub struct InternalQueueTransaction {
     pub db: InternalQueueDB,
     pub batch: WriteBatch,

@@ -1,16 +1,26 @@
-pub mod point_status;
-
 use std::fmt::{Display, Formatter};
 
+use anyhow::Result;
+use tycho_storage::StorageContext;
 use tycho_util::metrics::HistogramGuard;
 use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
 
-use crate::MempoolDb;
+pub use self::db::MempoolDb;
+
+mod db;
+pub mod point_status;
+mod tables;
+
+pub const MEMPOOL_DB_SUBDIR: &str = "mempool";
 
 #[derive(Clone)]
 pub struct MempoolStorage {
+    // NOTE: Context should have at least the lifetime of the created DB.
+    #[allow(unused)]
+    pub ctx: StorageContext,
     pub db: MempoolDb,
 }
+
 impl MempoolStorage {
     pub const KEY_LEN: usize = 4 + 32;
 
@@ -18,9 +28,11 @@ impl MempoolStorage {
         Self::fill_prefix(round, key);
         key[4..].copy_from_slice(&digest[..]);
     }
+
     pub fn fill_prefix(round: u32, key: &mut [u8; Self::KEY_LEN]) {
         key[..4].copy_from_slice(&round.to_be_bytes()[..]);
     }
+
     /// function of limited usage: zero round does not exist by application logic
     /// and 4 zero bytes usually represents empty value in storage;
     /// here None represents value less than 4 bytes
@@ -33,6 +45,7 @@ impl MempoolStorage {
             Some(u32::from_be_bytes(round_bytes))
         }
     }
+
     pub fn format_key(bytes: &[u8]) -> String {
         if let Some(round) = Self::parse_round(bytes) {
             if bytes.len() == Self::KEY_LEN {
@@ -43,6 +56,21 @@ impl MempoolStorage {
         } else {
             format!("unknown short {} bytes {}", bytes.len(), BytesFmt(bytes))
         }
+    }
+
+    /// Opens an existing or creates a new mempool `RocksDB` instance.
+    pub fn open(ctx: StorageContext) -> Result<Self> {
+        let db = ctx.open_preconfigured(MEMPOOL_DB_SUBDIR)?;
+
+        // TODO: Add migrations here if needed. However, it might require making this method `async`.
+
+        Ok(Self { ctx, db })
+    }
+
+    /// Returns the underlying storage context.
+    #[allow(unused)]
+    pub fn context(&self) -> &StorageContext {
+        &self.ctx
     }
 
     /// delete all stored data up to provided value (exclusive);
@@ -158,6 +186,7 @@ impl MempoolStorage {
 }
 
 pub struct BytesFmt<'a>(pub &'a [u8]);
+
 impl Display for BytesFmt<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let len = f.precision().unwrap_or(self.0.len());

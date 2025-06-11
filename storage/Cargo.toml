@@ -46,6 +46,7 @@ weedb = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }
+tycho-storage-traits = { workspace = true }
 tycho-util = { workspace = true }
 
 [dev-dependencies]

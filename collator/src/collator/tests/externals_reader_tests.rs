@@ -73,7 +73,9 @@ fn test_read_externals() {
     );
 
     let mut partition_router = PartitionRouter::new();
-    partition_router.insert_dst(&dst_addrs[3], 1).unwrap();
+    partition_router
+        .insert_dst(&dst_addrs[3], QueuePartitionIdx(1))
+        .unwrap();
 
     let msgs_exec_params = MsgsExecutionParams {
         externals_expire_timeout: 100,
@@ -84,26 +86,26 @@ fn test_read_externals() {
         MsgsExecutionParamsStuff::create(Some(msgs_exec_params.clone()), msgs_exec_params);
 
     let mut buffer_limits_by_partitions = BTreeMap::new();
-    buffer_limits_by_partitions.insert(0, MessagesBufferLimits {
+    buffer_limits_by_partitions.insert(QueuePartitionIdx(0), MessagesBufferLimits {
         max_count: 12,
         slots_count: 5,
         slot_vert_size: 4,
     });
-    buffer_limits_by_partitions.insert(1, MessagesBufferLimits {
+    buffer_limits_by_partitions.insert(QueuePartitionIdx(1), MessagesBufferLimits {
         max_count: 12,
         slots_count: 1,
         slot_vert_size: 4,
     });
 
     let mut reader_state = ReaderState::default();
-    reader_state
-        .internals
-        .partitions
-        .insert(0, InternalsPartitionReaderState::default());
-    reader_state
-        .internals
-        .partitions
-        .insert(1, InternalsPartitionReaderState::default());
+    reader_state.internals.partitions.insert(
+        QueuePartitionIdx(0),
+        InternalsPartitionReaderState::default(),
+    );
+    reader_state.internals.partitions.insert(
+        QueuePartitionIdx(1),
+        InternalsPartitionReaderState::default(),
+    );
 
     let internals_reader_state = reader_state.internals;
     let externals_reader_state = reader_state.externals;
@@ -203,9 +205,9 @@ fn test_read_externals() {
     }
     print_state(&externals_reader);
 
-    let msg_group = msg_groups.get(&0).unwrap();
+    let msg_group = msg_groups.get(&QueuePartitionIdx(0)).unwrap();
     assert_eq!(msg_group.messages_count(), 11);
-    let msg_group = msg_groups.get(&1).unwrap();
+    let msg_group = msg_groups.get(&QueuePartitionIdx(1)).unwrap();
     assert_eq!(msg_group.messages_count(), 4);
 
     let by_par = externals_reader
@@ -444,9 +446,9 @@ fn test_read_externals() {
     }
     print_state(&externals_reader);
 
-    let msg_group = msg_groups.get(&0).unwrap();
+    let msg_group = msg_groups.get(&QueuePartitionIdx(0)).unwrap();
     assert_eq!(msg_group.messages_count(), 12);
-    let msg_group = msg_groups.get(&1).unwrap();
+    let msg_group = msg_groups.get(&QueuePartitionIdx(1)).unwrap();
     assert_eq!(msg_group.messages_count(), 4);
 
     let by_par = externals_reader
@@ -511,9 +513,9 @@ fn test_read_externals() {
     }
     print_state(&externals_reader);
 
-    let msg_group = msg_groups.get(&0).unwrap();
+    let msg_group = msg_groups.get(&QueuePartitionIdx(0)).unwrap();
     assert_eq!(msg_group.messages_count(), 1);
-    let msg_group = msg_groups.get(&1).unwrap();
+    let msg_group = msg_groups.get(&QueuePartitionIdx(1)).unwrap();
     assert_eq!(msg_group.messages_count(), 2);
 
     let by_par = externals_reader
@@ -760,9 +762,9 @@ fn test_read_externals() {
     }
     print_state(&externals_reader);
 
-    let msg_group = msg_groups.get(&0).unwrap();
+    let msg_group = msg_groups.get(&QueuePartitionIdx(0)).unwrap();
     assert_eq!(msg_group.messages_count(), 11);
-    let msg_group = msg_groups.get(&1).unwrap();
+    let msg_group = msg_groups.get(&QueuePartitionIdx(1)).unwrap();
     assert_eq!(msg_group.messages_count(), 4);
 
     let by_par = externals_reader

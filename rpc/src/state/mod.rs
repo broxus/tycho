@@ -19,19 +19,21 @@ use tycho_core::block_strider::{
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::global_config::ZerostateId;
-use tycho_storage::{
-    BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor,
-    BlockTransactionsIterBuilder, BlocksByMcSeqnoIter, BriefBlockInfo, BriefShardDescr,
-    CodeHashesIter, KeyBlocksDirection, RpcSnapshot, Storage, TransactionData, TransactionDataExt,
-    TransactionInfo, TransactionsIterBuilder,
-};
+use tycho_storage::{KeyBlocksDirection, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
 
+pub use self::storage::*;
 use crate::config::{BlackListConfig, RpcConfig, RpcStorageConfig, TransactionsGcConfig};
 use crate::endpoint::{JrpcEndpointCache, ProtoEndpointCache, RpcEndpoint};
 use crate::models::{GenTimings, StateTimings};
+
+mod db;
+mod storage;
+pub mod tables;
+
+const RPC_DB_SUBDIR: &str = "rpc";
 
 pub struct RpcStateBuilder<MandatoryFields = (Storage, BlockchainRpcClient, ZerostateId)> {
     config: RpcConfig,
@@ -39,8 +41,8 @@ pub struct RpcStateBuilder<MandatoryFields = (Storage, BlockchainRpcClient, Zero
 }
 
 impl RpcStateBuilder {
-    pub fn build(self) -> RpcState {
-        let (storage, blockchain_rpc_client, zerostate_id) = self.mandatory_fields;
+    pub fn build(self) -> Result<RpcState> {
+        let (core_storage, blockchain_rpc_client, zerostate_id) = self.mandatory_fields;
 
         let gc_notify = Arc::new(Notify::new());
 
@@ -48,27 +50,35 @@ impl RpcStateBuilder {
         let mut blacklisted_accounts = None::<BlacklistedAccounts>;
         let mut blacklist_watcher_handle = None;
 
-        if let RpcStorageConfig::Full {
-            gc, blacklist_path, ..
-        } = &self.config.storage
-        {
-            if let Some(config) = gc {
-                gc_handle = Some(tokio::spawn(transactions_gc(
-                    config.clone(),
-                    storage.clone(),
-                    gc_notify.clone(),
-                )));
-            }
+        let rpc_storage = match &self.config.storage {
+            RpcStorageConfig::Full {
+                gc, blacklist_path, ..
+            } => {
+                let db = core_storage.context().open_preconfigured(RPC_DB_SUBDIR)?;
+                let rpc_storage = Arc::new(RpcStorage::new(db));
 
-            if let Some(path) = blacklist_path {
-                let accounts = BlacklistedAccounts::default();
-                blacklisted_accounts = Some(accounts.clone());
-                blacklist_watcher_handle = Some(tokio::spawn(watch_blacklisted_accounts(
-                    path.clone(),
-                    accounts,
-                )));
+                if let Some(config) = gc {
+                    gc_handle = Some(tokio::spawn(transactions_gc(
+                        config.clone(),
+                        core_storage.clone(),
+                        rpc_storage.clone(),
+                        gc_notify.clone(),
+                    )));
+                }
+
+                if let Some(path) = blacklist_path {
+                    let accounts = BlacklistedAccounts::default();
+                    blacklisted_accounts = Some(accounts.clone());
+                    blacklist_watcher_handle = Some(tokio::spawn(watch_blacklisted_accounts(
+                        path.clone(),
+                        accounts,
+                    )));
+                }
+
+                Some(rpc_storage)
             }
-        }
+            RpcStorageConfig::StateOnly => None,
+        };
 
         let download_block_semaphore =
             tokio::sync::Semaphore::new(self.config.max_parallel_block_downloads);
@@ -80,10 +90,11 @@ impl RpcStateBuilder {
         // NOTE: Only a stub here.
         let parsed_config = Arc::new(LatestBlockchainConfig::default());
 
-        RpcState {
+        Ok(RpcState {
             inner: Arc::new(Inner {
                 config: self.config,
-                storage,
+                core_storage,
+                rpc_storage,
                 blockchain_rpc_client,
                 mc_info: RwLock::new(LatestMcInfo {
                     block_id: Arc::new(BlockId {
@@ -112,7 +123,7 @@ impl RpcStateBuilder {
                 blacklisted_accounts,
                 blacklist_watcher_handle,
             }),
-        }
+        })
     }
 }
 
@@ -225,7 +236,7 @@ impl RpcState {
     }
 
     pub fn is_full(&self) -> bool {
-        self.inner.storage.rpc_storage().is_some()
+        self.inner.rpc_storage.is_some()
     }
 
     pub fn load_timings(&self) -> arc_swap::Guard<Arc<StateTimings>> {
@@ -249,7 +260,7 @@ impl RpcState {
     }
 
     pub fn rpc_storage_snapshot(&self) -> Option<RpcSnapshot> {
-        let rpc_storage = self.inner.storage.rpc_storage()?;
+        let rpc_storage = self.inner.rpc_storage.as_ref()?;
         rpc_storage.load_snapshot()
     }
 
@@ -271,7 +282,7 @@ impl RpcState {
         block_id: &BlockIdShort,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<(BlockId, u32, BriefBlockInfo)>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -284,7 +295,7 @@ impl RpcState {
         mc_seqno: u32,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<Vec<BriefShardDescr>>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -320,7 +331,7 @@ impl RpcState {
         continuation: Option<&StdAddr>,
         snapshot: Option<RpcSnapshot>,
     ) -> Result<CodeHashesIter<'_>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -332,7 +343,7 @@ impl RpcState {
         &self,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<(u32, u32)>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -345,7 +356,7 @@ impl RpcState {
         mc_seqno: u32,
         snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlocksByMcSeqnoIter>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -360,7 +371,7 @@ impl RpcState {
         cursor: Option<&BlockTransactionsCursor>,
         snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionsIterBuilder>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -375,7 +386,7 @@ impl RpcState {
         cursor: Option<&BlockTransactionsCursor>,
         snapshot: Option<RpcSnapshot>,
     ) -> Result<Option<BlockTransactionIdsIter>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -391,7 +402,7 @@ impl RpcState {
         reverse: bool,
         snapshot: Option<RpcSnapshot>,
     ) -> Result<TransactionsIterBuilder, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -404,7 +415,7 @@ impl RpcState {
         hash: &HashBytes,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<TransactionData<'_>>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -417,7 +428,7 @@ impl RpcState {
         hash: &HashBytes,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<TransactionDataExt<'a>>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -430,7 +441,7 @@ impl RpcState {
         hash: &HashBytes,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<TransactionInfo>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -444,7 +455,7 @@ impl RpcState {
         message_lt: u64,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<impl AsRef<[u8]> + 'a>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -457,7 +468,7 @@ impl RpcState {
         in_msg_hash: &HashBytes,
         snapshot: Option<&RpcSnapshot>,
     ) -> Result<Option<impl AsRef<[u8]> + 'a>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
+        let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
         storage
@@ -470,8 +481,8 @@ impl RpcState {
         &self,
         key_block_seqno: u32,
     ) -> Option<(BlockId, impl AsRef<[u8]> + Send + Sync + 'static)> {
-        let blocks = self.inner.storage.block_storage();
-        let handles = self.inner.storage.block_handle_storage();
+        let blocks = self.inner.core_storage.block_storage();
+        let handles = self.inner.core_storage.block_handle_storage();
 
         let handle = handles.load_key_block_handle(key_block_seqno)?;
         let data = blocks.load_block_proof_raw(&handle).await.ok()?;
@@ -483,8 +494,8 @@ impl RpcState {
         &self,
         block_id: &BlockId,
     ) -> Option<impl AsRef<[u8]> + Send + Sync + 'static> {
-        let blocks = self.inner.storage.block_storage();
-        let handles = self.inner.storage.block_handle_storage();
+        let blocks = self.inner.core_storage.block_storage();
+        let handles = self.inner.core_storage.block_handle_storage();
 
         let handle = handles.load_handle(block_id)?;
         blocks.load_block_proof_raw(&handle).await.ok()
@@ -495,8 +506,8 @@ impl RpcState {
         &self,
         block_id: &BlockId,
     ) -> Option<impl AsRef<[u8]> + Send + Sync + 'static> {
-        let blocks = self.inner.storage.block_storage();
-        let handles = self.inner.storage.block_handle_storage();
+        let blocks = self.inner.core_storage.block_storage();
+        let handles = self.inner.core_storage.block_handle_storage();
 
         let handle = handles.load_handle(block_id)?;
         blocks.load_block_data_raw(&handle).await.ok()
@@ -548,7 +559,7 @@ impl BlockSubscriber for RpcBlockSubscriber {
 
                 // NOTE: Update snapshot only for masterchain because it is handled last.
                 // It is updated only after processing all shards and mc block.
-                if let Some(rpc_storage) = self.inner.storage.rpc_storage() {
+                if let Some(rpc_storage) = &self.inner.rpc_storage {
                     rpc_storage.update_snapshot();
                 }
             }
@@ -565,7 +576,8 @@ pub enum RunGetMethodPermit {
 
 struct Inner {
     config: RpcConfig,
-    storage: Storage,
+    core_storage: Storage,
+    rpc_storage: Option<Arc<RpcStorage>>,
     blockchain_rpc_client: BlockchainRpcClient,
     mc_info: RwLock<LatestMcInfo>,
     mc_accounts: RwLock<Option<CachedAccounts>>,
@@ -621,9 +633,9 @@ impl Inner {
     async fn init(self: &Arc<Self>, mc_block_id: &BlockId) -> Result<()> {
         anyhow::ensure!(mc_block_id.is_masterchain(), "not a masterchain state");
 
-        let blocks = self.storage.block_storage();
-        let block_handles = self.storage.block_handle_storage();
-        let shard_states = self.storage.shard_state_storage();
+        let blocks = self.core_storage.block_storage();
+        let block_handles = self.core_storage.block_handle_storage();
+        let shard_states = self.core_storage.shard_state_storage();
 
         // Try to init the latest known key block cache
         'key_block: {
@@ -651,8 +663,8 @@ impl Inner {
         let mut mc_state = shard_states.load_state(mc_block_id).await?;
         self.update_timings(mc_state.as_ref().gen_utime, mc_state.as_ref().seqno);
 
-        if let Some(rpc_storage) = self.storage.rpc_storage() {
-            let node_instance_id = self.storage.node_state().load_instance_id();
+        if let Some(rpc_storage) = &self.rpc_storage {
+            let node_instance_id = self.core_storage.node_state().load_instance_id();
             let rpc_instance_id = rpc_storage.load_instance_id();
 
             let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
@@ -772,7 +784,7 @@ impl Inner {
             self.update_mc_block_cache(block)?;
         }
 
-        if let Some(rpc_storage) = self.storage.rpc_storage() {
+        if let Some(rpc_storage) = &self.rpc_storage {
             rpc_storage
                 .update(
                     mc_block_id,
@@ -837,7 +849,7 @@ impl Inner {
             last_mc_block_seqno: seqno,
             last_mc_utime: mc_gen_utime,
             mc_time_diff: time_diff,
-            smallest_known_lt: self.storage.rpc_storage().map(|s| s.min_tx_lt()),
+            smallest_known_lt: self.rpc_storage.as_ref().map(|s| s.min_tx_lt()),
         }));
     }
 
@@ -1014,11 +1026,13 @@ impl CachedAccounts {
 
 type ShardAccountsDict = Dict<HashBytes, (DepthBalanceInfo, ShardAccount)>;
 
-async fn transactions_gc(config: TransactionsGcConfig, storage: Storage, gc_notify: Arc<Notify>) {
-    let Some(persistent_storage) = storage.rpc_storage() else {
-        return;
-    };
-
+// TODO: Use only rpc storage to find closest key block LT.
+async fn transactions_gc(
+    config: TransactionsGcConfig,
+    core_storage: Storage,
+    rpc_storage: Arc<RpcStorage>,
+    gc_notify: Arc<Notify>,
+) {
     let Ok(tx_ttl_sec) = config.tx_ttl.as_secs().try_into() else {
         return;
     };
@@ -1028,7 +1042,7 @@ async fn transactions_gc(config: TransactionsGcConfig, storage: Storage, gc_noti
         gc_notify.notified().await;
 
         let target_utime = now_sec().saturating_sub(tx_ttl_sec);
-        let gc_range = match find_closest_key_block_lt(&storage, target_utime).await {
+        let gc_range = match find_closest_key_block_lt(&core_storage, target_utime).await {
             Ok(lt) => lt,
             Err(e) => {
                 tracing::error!(target_utime, "failed to find the closest key block lt: {e}");
@@ -1036,7 +1050,7 @@ async fn transactions_gc(config: TransactionsGcConfig, storage: Storage, gc_noti
             }
         };
 
-        if let Err(e) = persistent_storage
+        if let Err(e) = rpc_storage
             .remove_old_transactions(gc_range.mc_seqno, gc_range.lt, config.keep_tx_per_account)
             .await
         {
@@ -1185,7 +1199,7 @@ mod test {
         service_query_fn, BoxCloneService, Network, NetworkConfig, OverlayId, PublicOverlay,
         Response, ServiceExt, ServiceRequest,
     };
-    use tycho_storage::{Storage, StorageConfig};
+    use tycho_storage::{Storage, StorageConfig, StorageContext};
 
     use crate::{RpcConfig, RpcState};
 
@@ -1245,11 +1259,8 @@ mod test {
         tycho_util::test::init_logger("rpc_state_handle_block", "debug");
 
         let tmp_dir = tempfile::tempdir()?;
-        let storage = Storage::builder()
-            .with_config(StorageConfig::new_potato(tmp_dir.path()))
-            .with_rpc_storage(true)
-            .build()
-            .await?;
+        let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
+        let storage = Storage::open(ctx).await?;
 
         let config = RpcConfig::default();
 
@@ -1275,7 +1286,7 @@ mod test {
             .with_storage(storage)
             .with_blockchain_rpc_client(blockchain_rpc_client)
             .with_zerostate_id(ZerostateId::default())
-            .build();
+            .build()?;
 
         let block = get_block();
 
@@ -1321,11 +1332,8 @@ mod test {
         let config = RpcConfig::default();
 
         let tmp_dir = tempfile::tempdir()?;
-        let storage = Storage::builder()
-            .with_config(StorageConfig::new_potato(tmp_dir.path()))
-            .with_rpc_storage(true)
-            .build()
-            .await?;
+        let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
+        let storage = Storage::open(ctx).await?;
 
         let network = make_network()?;
 
@@ -1349,7 +1357,7 @@ mod test {
             .with_storage(storage)
             .with_blockchain_rpc_client(blockchain_rpc_client)
             .with_zerostate_id(ZerostateId::default())
-            .build();
+            .build()?;
 
         let block = get_empty_block();
 

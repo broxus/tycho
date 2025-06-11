@@ -3,26 +3,42 @@ use std::fs::File;
 use anyhow::Result;
 use everscale_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
+use tycho_storage::{MappedFile, QueueStateReader, StorageContext, StoredValue};
 use tycho_util::FastHashMap;
 
-use crate::model::{
+use self::db::InternalQueueDB;
+use self::models::{
     CommitPointerKey, CommitPointerValue, DiffInfo, DiffInfoKey, DiffTailKey,
     ShardsInternalMessagesKey, StatKey,
 };
-use crate::store::internal_queue::snapshot::InternalQueueSnapshot;
-use crate::store::internal_queue::transaction::InternalQueueTransaction;
-use crate::util::StoredValue;
-use crate::{
-    InternalQueueDB, MappedFile, QueueStateReader, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY,
-};
+use self::snapshot::InternalQueueSnapshot;
+use self::transaction::InternalQueueTransaction;
+
+pub mod db;
+pub mod iterator;
+pub mod models;
+pub mod snapshot;
+pub mod tables;
+pub mod transaction;
+
+// Constants
+pub const INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY: &[u8] = b"last_committed_mc_block_id";
+const INT_QUEUE_SUBDIR: &str = "int_queue";
+
 #[derive(Clone)]
 pub struct InternalQueueStorage {
+    #[allow(unused)]
+    context: StorageContext,
     db: InternalQueueDB,
 }
 
 impl InternalQueueStorage {
-    pub fn new(db: InternalQueueDB) -> Self {
-        Self { db }
+    pub fn open(context: StorageContext) -> Result<Self> {
+        let db = context.open_preconfigured(INT_QUEUE_SUBDIR)?;
+
+        // TODO: Add migrations here if needed. However, it might require making this method `async`.
+
+        Ok(Self { context, db })
     }
 
     pub fn db(&self) -> &InternalQueueDB {

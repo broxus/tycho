@@ -10,13 +10,16 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
+ahash = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }
+bitflags = { workspace = true }
 bytes = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
+humantime = { workspace = true }
 metrics = { workspace = true }
 moka = { workspace = true }
 num-bigint = { workspace = true }
@@ -33,6 +36,7 @@ tower = { workspace = true }
 tower-http = { workspace = true, features = ["cors", "timeout"] }
 tracing = { workspace = true }
 tycho-vm = { workspace = true }
+weedb = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }

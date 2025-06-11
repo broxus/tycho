@@ -2,8 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::Future;
+use tokio::task::AbortHandle;
 
-pub fn spawn_metrics_loop<T, F, FR>(context: &Arc<T>, interval: Duration, f: F)
+pub fn spawn_metrics_loop<T, F, FR>(context: &Arc<T>, interval: Duration, f: F) -> AbortHandle
 where
     T: Send + Sync + 'static,
     F: Fn(Arc<T>) -> FR + Send + Sync + 'static,
@@ -20,5 +21,6 @@ where
                 break;
             }
         }
-    });
+    })
+    .abort_handle()
 }

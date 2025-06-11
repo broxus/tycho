@@ -1,0 +1,19 @@
+[package]
+name = "tycho-storage-traits"
+description = "Traits used by Tycho storage."
+include = ["./LICENSE-*", "./README.md"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# crates.io deps
+bytes = { workspace = true }
+everscale-types = { workspace = true, features = ["blake3", "rayon"] }
+smallvec = { workspace = true }
+
+[lints]
+workspace = true

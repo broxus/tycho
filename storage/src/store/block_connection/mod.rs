@@ -1,5 +1,6 @@
 use everscale_types::models::*;
 use parking_lot::RwLock;
+use tycho_storage_traits::StoredValue;
 
 use crate::db::*;
 use crate::store::{BlockFlags, BlockHandle};

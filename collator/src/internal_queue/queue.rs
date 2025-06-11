@@ -7,7 +7,6 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
-use tycho_storage::model::DiffInfo;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
@@ -22,6 +21,7 @@ use crate::internal_queue::types::{
     AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, QueueDiffWithMessages,
     QueueShardRange,
 };
+use crate::storage::models::DiffInfo;
 use crate::{internal_queue, tracing_targets};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,17 +42,17 @@ impl Default for QueueConfig {
 pub trait QueueFactory<V: InternalMessageValue> {
     type Queue: Queue<V>;
 
-    fn create(&self) -> Self::Queue;
+    fn create(&self) -> Result<Self::Queue>;
 }
 
 impl<F, R, V: InternalMessageValue> QueueFactory<V> for F
 where
-    F: Fn() -> R,
+    F: Fn() -> Result<R>,
     R: Queue<V>,
 {
     type Queue = R;
 
-    fn create(&self) -> Self::Queue {
+    fn create(&self) -> Result<Self::Queue> {
         self()
     }
 }
@@ -127,17 +127,17 @@ where
 impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
     type Queue = QueueImpl<QueueStateStdImpl, V>;
 
-    fn create(&self) -> Self::Queue {
-        let state = <QueueStateImplFactory as QueueStateFactory<V>>::create(&self.state);
+    fn create(&self) -> Result<Self::Queue> {
+        let state = <QueueStateImplFactory as QueueStateFactory<V>>::create(&self.state)?;
         let state = Arc::new(state);
         let gc = GcManager::start::<V>(state.clone(), self.config.gc_interval);
-        QueueImpl {
+        Ok(QueueImpl {
             state,
             gc,
             global_lock: RwLock::new(()),
             shard_locks: FastDashMap::default(),
             _phantom_data: Default::default(),
-        }
+        })
     }
 }
 
