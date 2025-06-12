@@ -1741,7 +1741,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn parallel_store_data() -> Result<()> {
-        let (storage, _tmp_dir) = Storage::new_temp().await?;
+        let (storage, _tmp_dir) = Storage::open_temp().await?;
 
         let shard = ShardIdent::MASTERCHAIN;
         for seqno in 0..1000 {
@@ -1847,7 +1847,7 @@ mod tests {
         const CONNECTION_TYPES: [BlockConnection; 2] =
             [BlockConnection::Prev1, BlockConnection::Next1];
 
-        let (storage, _tmp_dir) = Storage::new_temp().await?;
+        let (storage, _tmp_dir) = Storage::open_temp().await?;
 
         let blocks = storage.block_storage();
         let block_handles = storage.block_handle_storage();

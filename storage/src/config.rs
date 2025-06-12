@@ -23,6 +23,7 @@ pub struct StorageConfig {
     /// Default: calculated based on the available memory.
     pub rocksdb_lru_capacity: ByteSize,
 
+    // === TODO: split everything after this to a separate config: ===
     /// Runtime cells cache size.
     ///
     /// Default: calculated based on the available memory.

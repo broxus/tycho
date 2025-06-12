@@ -182,7 +182,7 @@ fn make_network(
                         };
 
                         let (mock_storage, _tmp_dir) =
-                            Storage::new_temp().await.expect("new storage");
+                            Storage::open_temp().await.expect("new storage");
 
                         let bind = EngineBinding {
                             mempool_adapter_store: MempoolAdapterStore::new(

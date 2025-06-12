@@ -3777,13 +3777,16 @@ dependencies = [
 name = "tycho-rpc"
 version = "0.2.10"
 dependencies = [
+ "ahash",
  "anyhow",
  "arc-swap",
  "axum",
  "base64",
+ "bitflags",
  "bytes",
  "everscale-types",
  "futures-util",
+ "humantime",
  "metrics",
  "moka",
  "num-bigint",
@@ -3793,6 +3796,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.11",
  "tokio",
@@ -3805,6 +3809,7 @@ dependencies = [
  "tycho-storage",
  "tycho-util",
  "tycho-vm",
+ "weedb",
 ]
 
 [[package]]
@@ -4137,9 +4142,9 @@ dependencies = [
 
 [[package]]
 name = "weedb"
-version = "0.4.1"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5b35f90e43128653b3623cf75c84a968072ed691426d747dbeaf3755ee5b1d"
+checksum = "af8b0c2772cfae47b546954a7f2bd4c12b34120d2035894a54c0704b42b37220"
 dependencies = [
  "librocksdb-sys",
  "metrics",

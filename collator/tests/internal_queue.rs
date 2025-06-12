@@ -232,7 +232,7 @@ fn test_statistics_check_statistics(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (storage, _tmp_dir) = Storage::open_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
         state: QueueStateImplFactory {
@@ -699,7 +699,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (storage, _tmp_dir) = Storage::open_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
         state: QueueStateImplFactory {
@@ -925,7 +925,7 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue_clear() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (storage, _tmp_dir) = Storage::open_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
         state: QueueStateImplFactory { storage },
@@ -1230,7 +1230,7 @@ fn create_dump_msg_envelope(message: Lazy<OwnedMessage>) -> Lazy<MsgEnvelope> {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (storage, _tmp_dir) = Storage::open_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
         state: QueueStateImplFactory { storage },
@@ -1442,7 +1442,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_version() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (storage, _tmp_dir) = Storage::open_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
         state: QueueStateImplFactory { storage },
@@ -1548,7 +1548,7 @@ async fn test_version() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (storage, _tmp_dir) = Storage::open_temp().await?;
 
     let queue_factory = QueueFactoryStdImpl {
         state: QueueStateImplFactory {
@@ -1814,7 +1814,7 @@ async fn prepare_data_from_prepared_persistent_state(
 #[tokio::test]
 async fn test_import_persistent_state() -> anyhow::Result<()> {
     // init storage
-    let (storage, _tmp_dir) = Storage::new_temp().await?;
+    let (storage, _tmp_dir) = Storage::open_temp().await?;
 
     // init queue
     let queue_factory = QueueFactoryStdImpl {

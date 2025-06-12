@@ -21,7 +21,9 @@ use tycho_core::block_strider::{
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_network::PeerId;
-use tycho_storage::{ArchiveId, ArchivesGcConfig, NewBlockMeta, Storage, StorageConfig};
+use tycho_storage::{
+    ArchiveId, ArchivesGcConfig, NewBlockMeta, Storage, StorageConfig, StorageContext,
+};
 use tycho_util::compression::{zstd_decompress, ZstdDecompressStream};
 use tycho_util::project_root;
 
@@ -188,7 +190,8 @@ impl ArchiveHandlerInner {
 }
 
 async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> Result<Storage> {
-    let storage = Storage::builder().with_config(config).build().await?;
+    let ctx = StorageContext::new(config).await?;
+    let storage = Storage::open(ctx).await?;
 
     let (handle, _) =
         storage

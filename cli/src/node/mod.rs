@@ -38,7 +38,7 @@ use tycho_network::{
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::{NodeSyncState, Storage};
+use tycho_storage::{NodeSyncState, Storage, StorageContext};
 use tycho_util::futures::JoinTask;
 
 pub use self::config::{ElectionsConfig, NodeConfig, NodeKeys, SimpleElectionsConfig};
@@ -132,17 +132,10 @@ impl Node {
         );
 
         // Setup storage
-        let storage = Storage::builder()
-            .with_config(node_config.storage)
-            .with_rpc_storage(
-                node_config
-                    .rpc
-                    .as_ref()
-                    .is_some_and(|x| x.storage.is_full()),
-            )
-            .build()
+        let ctx = StorageContext::new(node_config.storage)
             .await
-            .context("failed to create storage")?;
+            .context("failed to create storage context")?;
+        let storage = Storage::open(ctx).await?;
         tracing::info!(
             root_dir = %storage.root().path().display(),
             "initialized storage"
@@ -290,7 +283,8 @@ impl Node {
                 .with_config(config.clone())
                 .with_storage(self.storage.clone())
                 .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
-                .build();
+                .with_zerostate_id(self.zerostate)
+                .build()?;
 
             rpc_state.init(last_block_id).await?;
 

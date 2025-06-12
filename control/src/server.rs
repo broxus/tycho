@@ -927,27 +927,21 @@ impl ManualCompaction {
             tracing::info!("manager stopped");
         }
 
+        let ctx = storage.context();
         loop {
             if manual_rx.changed().await.is_err() {
                 break;
             }
 
-            let Some(trigger) = *manual_rx.borrow_and_update() else {
+            let Some(trigger) = manual_rx.borrow_and_update().clone() else {
                 continue;
             };
 
-            match trigger {
-                proto::TriggerCompactionRequest::Base => {
-                    storage.base_db().trigger_compaction().await;
-                }
-                proto::TriggerCompactionRequest::Mempool => {
-                    storage.mempool_db().trigger_compaction().await;
-                }
-                proto::TriggerCompactionRequest::Rpc => {
-                    if let Some(rpc_db) = storage.rpc_db() {
-                        rpc_db.trigger_compaction().await;
-                    }
-                }
+            if !ctx.trigger_rocksdb_compaction(&trigger.database) {
+                tracing::warn!(
+                    db_name = trigger.database,
+                    "tried to trigger compaction for an unknown DB instance"
+                );
             }
         }
     }
