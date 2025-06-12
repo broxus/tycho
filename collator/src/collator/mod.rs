@@ -995,7 +995,7 @@ impl CollatorStdImpl {
 
     fn get_anchors_processing_info(
         shard_id: &ShardIdent,
-        mc_data: &Arc<McData>,
+        mc_data: &McData,
         prev_block_id: &BlockId,
         prev_gen_chain_time: u64,
         prev_externals_processed_to: (MempoolAnchorId, u64),

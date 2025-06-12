@@ -650,7 +650,7 @@ impl CollatorStdImpl {
     }
 
     fn import_new_shard_top_blocks_for_masterchain(
-        mc_data: &Arc<McData>,
+        mc_data: &McData,
         collation_data_builder: &mut BlockCollationDataBuilder,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<()> {
@@ -822,7 +822,7 @@ impl CollatorStdImpl {
         next_block_id_short: BlockIdShort,
         next_chain_time: u64,
         created_by: HashBytes,
-        mc_data: &Arc<McData>,
+        mc_data: &McData,
         prev_shard_data: &PrevData,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<Box<BlockCollationData>> {
