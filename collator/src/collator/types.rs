@@ -1272,19 +1272,13 @@ impl MsgsExecutionParamsExtension for MsgsExecutionParams {
 
 type DiffMaxMessage = QueueKey;
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct QueueStatisticsWithRemaning {
     /// Statistics shows all messages count
     pub initial_stats: QueueStatistics,
     /// Statistics shows remaining not read messages.
     /// We reduce initial statistics by the number of messages that were read.
     pub remaning_stats: ConcurrentQueueStatistics,
-}
-
-impl QueueStatisticsWithRemaning {
-    pub fn total_messages(&self) -> u64 {
-        self.remaning_stats.total_messages()
-    }
 }
 
 pub struct CumulativeStatistics {
@@ -1481,7 +1475,7 @@ impl CumulativeStatistics {
             .entry(partition)
             .or_insert_with(|| QueueStatisticsWithRemaning {
                 initial_stats: QueueStatistics::default(),
-                remaning_stats: ConcurrentQueueStatistics::default(),
+                remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
             });
         entry.initial_stats.append(&diff_partition_stats);
         entry.remaning_stats.append(&diff_partition_stats);
@@ -1521,7 +1515,13 @@ impl CumulativeStatistics {
     ) {
         for (&partition, diff_partition_stats) in diff_stats.iter() {
             // append to cumulative stats
-            let partition_stats = self.result.entry(partition).or_default();
+            let partition_stats =
+                self.result
+                    .entry(partition)
+                    .or_insert_with(|| QueueStatisticsWithRemaning {
+                        initial_stats: QueueStatistics::default(),
+                        remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
+                    });
             partition_stats.initial_stats.append(diff_partition_stats);
             partition_stats.remaning_stats.append(diff_partition_stats);
 
@@ -1545,7 +1545,12 @@ impl CumulativeStatistics {
                 if let Some(partition_processed_to) =
                     shard_processed_to_by_partitions.get(partition)
                 {
-                    let cumulative_stats = self.result.entry(*partition).or_default();
+                    let cumulative_stats = self.result.entry(*partition).or_insert_with(|| {
+                        QueueStatisticsWithRemaning {
+                            initial_stats: QueueStatistics::default(),
+                            remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
+                        }
+                    });
                     if let Some(to_key) = partition_processed_to.get(src_shard) {
                         let mut to_remove_diffs = vec![];
                         // find diffs that below processed_to border and remove destination accounts from stats
@@ -1609,10 +1614,10 @@ impl CumulativeStatistics {
         res.unwrap_or_default()
     }
 
-    pub fn total_messages(&self) -> u64 {
+    pub fn remaining_total_for_own_shard(&self) -> u64 {
         self.result
             .values()
-            .map(|stats| stats.total_messages())
+            .map(|stats| stats.remaning_stats.tracked_total())
             .sum()
     }
 }
@@ -1646,13 +1651,26 @@ impl fmt::Debug for CumulativeStatistics {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ConcurrentQueueStatistics {
     statistics: Arc<FastDashMap<IntAddr, u64>>,
-    total: Arc<AtomicU64>,
+    track_shard: ShardIdent,
+    tracked_total: Arc<AtomicU64>,
 }
 
 impl ConcurrentQueueStatistics {
+    pub fn new(track_shard: ShardIdent) -> Self {
+        Self {
+            statistics: Arc::new(Default::default()),
+            track_shard,
+            tracked_total: Arc::new(Default::default()),
+        }
+    }
+
+    pub fn tracked_total(&self) -> u64 {
+        self.tracked_total.load(Ordering::Relaxed)
+    }
+
     pub fn statistics(&self) -> &FastDashMap<IntAddr, u64> {
         &self.statistics
     }
@@ -1662,32 +1680,38 @@ impl ConcurrentQueueStatistics {
     }
 
     pub fn decrement_for_account(&self, account_addr: IntAddr, count: u64) {
-        if let DashMapEntry::Occupied(mut occupied) = self.statistics.entry(account_addr) {
+        if let DashMapEntry::Occupied(mut occupied) = self.statistics.entry(account_addr.clone()) {
             let value = occupied.get_mut();
             *value -= count;
             if *value == 0 {
                 occupied.remove();
             }
-            self.total.fetch_sub(count, Ordering::Relaxed);
+            if self.track_shard.contains_address(&account_addr) {
+                self.tracked_total.fetch_sub(count, Ordering::Relaxed);
+            }
         } else {
             panic!("attempt to decrement non-existing account");
         }
     }
 
     pub fn append(&self, other: &AccountStatistics) {
-        let mut delta = 0;
+        let mut delta_tracked = 0;
+
         for (account_addr, &msgs_count) in other {
             self.statistics
                 .entry(account_addr.clone())
                 .and_modify(|count| *count += msgs_count)
                 .or_insert(msgs_count);
-            delta += msgs_count;
-        }
-        self.total.fetch_add(delta, Ordering::Relaxed);
-    }
 
-    pub fn total_messages(&self) -> u64 {
-        self.total.load(Ordering::Relaxed)
+            if self.track_shard.contains_address(account_addr) {
+                delta_tracked += msgs_count;
+            }
+        }
+
+        if delta_tracked != 0 {
+            self.tracked_total
+                .fetch_add(delta_tracked, Ordering::Relaxed);
+        }
     }
 }
 
