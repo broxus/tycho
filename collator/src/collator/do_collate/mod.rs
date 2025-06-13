@@ -2,7 +2,7 @@ use std::collections::hash_map;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
@@ -23,19 +23,19 @@ use super::messages_reader::ReaderState;
 use super::types::{
     AnchorInfo, AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
     CollationResult, ExecuteResult, FinalResult, FinalizeBlockResult, FinalizeCollationResult,
-    FinalizeMessagesReaderResult, PrevData, ShardDescriptionExt, WorkingState,
+    FinalizeMessagesReaderResult, PrevData, WorkingState,
 };
-use super::{CollatorStdImpl, ForceMasterCollation};
+use super::{CollatorStdImpl, ForceMasterCollation, ShardDescriptionExt};
 use crate::collator::do_collate::finalize::FinalizeBlockContext;
 use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::types::{PartialValueFlow, RandSeed};
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::{Bound, DiffZone, EnqueuedMessage, QueueShardBoundedRange};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
-    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedToByPartitions,
-    ShardDescriptionShort, TopBlockDescription, TopShardBlockInfo,
+    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, McDataStuff, ProcessedToByPartitions,
+    ShardDescriptionShort, ShardDescriptionShortExt, TopBlockDescription, TopShardBlockInfo,
 };
 
 #[cfg(test)]
@@ -71,7 +71,7 @@ impl CollatorStdImpl {
 
         let WorkingState {
             next_block_id_short,
-            mc_data,
+            mc_data_stuff,
             collation_config,
             wu_used_from_last_anchor,
             prev_shard_data,
@@ -80,14 +80,14 @@ impl CollatorStdImpl {
             ..
         } = *working_state;
 
-        let mc_block_id = mc_data.block_id;
+        let mc_block_id = mc_data_stuff.current.block_id;
         let prev_shard_data = prev_shard_data.unwrap();
         let usage_tree = usage_tree.unwrap();
         let tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "Start collating block: mc_data_block_id={}, prev_block_ids={}, top_shard_blocks_ids: {:?}",
-            mc_data.block_id.as_short_id(),
+            mc_data_stuff.current.block_id.as_short_id(),
             DisplayBlockIdsIntoIter(prev_shard_data.blocks_ids()),
             top_shard_blocks_info.as_ref().map(|v| DisplayBlockIdsIter(
                 v.iter().map(|i| &i.block_id)
@@ -104,11 +104,31 @@ impl CollatorStdImpl {
         };
         let created_by = author.to_bytes().into();
 
+        let is_first_block_after_prev_master = is_first_block_after_prev_master(
+            prev_shard_data.blocks_ids()[0], // TODO: consider split/merge
+            &mc_data_stuff.current.shards,
+        );
+        let part_stat_ranges =
+            if is_first_block_after_prev_master && mc_data_stuff.current.block_id.seqno > 0 {
+                if next_block_id_short.is_masterchain() {
+                    self.mc_compute_part_stat_ranges(
+                        &mc_data_stuff,
+                        top_shard_blocks_info.clone().unwrap(),
+                    )
+                    .await?
+                } else {
+                    self.compute_part_stat_ranges(&mc_data_stuff, &next_block_id_short)
+                        .await?
+                }
+            } else {
+                None
+            };
+
         let collation_data = self.create_collation_data(
             next_block_id_short,
             next_chain_time,
             created_by,
-            &mc_data,
+            &mc_data_stuff.current,
             &prev_shard_data,
             top_shard_blocks_info,
         )?;
@@ -116,19 +136,15 @@ impl CollatorStdImpl {
         let anchors_cache = std::mem::take(&mut self.anchors_cache);
         let block_serializer_cache = self.block_serializer_cache.clone();
 
-        let is_first_block_after_prev_master = is_first_block_after_prev_master(
-            prev_shard_data.blocks_ids()[0], // TODO: consider split/merge
-            &mc_data.shards,
-        );
-
         let state = Box::new(ActualState {
             collation_config,
             collation_data,
-            mc_data,
+            mc_data_stuff,
             prev_shard_data,
             shard_id: self.shard_id,
             collation_is_cancelled: CancellationFlag::new(),
             is_first_block_after_prev_master,
+            part_stat_ranges,
         });
         let collation_is_cancelled = state.collation_is_cancelled.clone();
 
@@ -280,7 +296,7 @@ impl CollatorStdImpl {
     ) -> Result<CollationResult, CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
-        let mc_data = state.mc_data.clone();
+        let mc_data_stuff = state.mc_data_stuff.clone();
 
         let collation_is_cancelled = state.collation_is_cancelled.clone();
 
@@ -376,7 +392,8 @@ impl CollatorStdImpl {
             .get_min_internals_processed_to_by_shards()
             .get(&shard_id)
             .cloned();
-        let min_processed_to_from_mc_data = mc_data
+        let min_processed_to_from_mc_data = mc_data_stuff
+            .current
             .processed_upto
             .get_min_internals_processed_to_by_shards()
             .get(&shard_id)
@@ -633,7 +650,7 @@ impl CollatorStdImpl {
     }
 
     fn import_new_shard_top_blocks_for_masterchain(
-        mc_data: &Arc<McData>,
+        mc_data: &McData,
         collation_data_builder: &mut BlockCollationDataBuilder,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<()> {
@@ -805,7 +822,7 @@ impl CollatorStdImpl {
         next_block_id_short: BlockIdShort,
         next_chain_time: u64,
         created_by: HashBytes,
-        mc_data: &Arc<McData>,
+        mc_data: &McData,
         prev_shard_data: &PrevData,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<Box<BlockCollationData>> {
@@ -929,8 +946,8 @@ impl CollatorStdImpl {
 
             let new_queue_diff_hash = *finalized.block_candidate.queue_diff_aug.diff_hash();
 
-            let collation_config = match &finalized.mc_data {
-                Some(mcd) => Arc::new(mcd.config.get_collation_config()?),
+            let collation_config = match &finalized.mc_data_stuff {
+                Some(mcd) => Arc::new(mcd.current.config.get_collation_config()?),
                 None => finalized.collation_config,
             };
 
@@ -939,14 +956,16 @@ impl CollatorStdImpl {
                 .on_block_candidate(BlockCollationResult {
                     collation_session_id: self.collation_session.id(),
                     candidate: finalized.block_candidate,
-                    prev_mc_block_id: finalized.old_mc_data.block_id,
-                    mc_data: finalized.mc_data.clone(),
+                    prev_mc_block_id: finalized.old_mc_data_stuff.current.block_id,
+                    mc_data_stuff: finalized.mc_data_stuff.clone(),
                     collation_config: collation_config.clone(),
                     force_next_mc_block,
                 })
                 .await?;
 
-            let new_mc_data = finalized.mc_data.unwrap_or(finalized.old_mc_data);
+            let new_mc_data_stuff = finalized
+                .mc_data_stuff
+                .unwrap_or(finalized.old_mc_data_stuff);
 
             // spawn update PrevData and working state
             self.prepare_working_state_update(
@@ -955,7 +974,7 @@ impl CollatorStdImpl {
                 finalized.new_state_root,
                 store_new_state_task,
                 new_queue_diff_hash,
-                new_mc_data,
+                new_mc_data_stuff,
                 collation_config,
                 has_unprocessed_messages,
                 reader_state,
@@ -1179,6 +1198,121 @@ impl CollatorStdImpl {
             handle_block_candidate = %format_duration(handle_block_candidate_elapsed),
             "total collation timings"
         );
+    }
+
+    /// Collect ranges for loading statistics if current block is first after master
+    /// Using previous masterchain block diff for range
+    /// and other shards diffs between previous masterchain block - 1 and previous masterchain block
+    async fn compute_part_stat_ranges(
+        &self,
+        mc_data_stuff: &McDataStuff,
+        block_id_short: &BlockIdShort,
+    ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
+        let Some(prev_state) = &mc_data_stuff.previous else {
+            return Ok(None);
+        };
+
+        let prev_shards: FastHashMap<_, _> = prev_state.shards.iter().cloned().collect();
+
+        let mut shard_pairs = Vec::new();
+        for (shard, curr) in mc_data_stuff.current.shards.iter() {
+            if curr.top_sc_block_updated && *shard != block_id_short.shard {
+                if let Some(prev) = prev_shards.get(shard) {
+                    shard_pairs.push((
+                        *shard,
+                        prev.get_block_id(*shard),
+                        curr.get_block_id(*shard),
+                    ));
+                }
+            }
+        }
+
+        self.build_ranges(&mc_data_stuff.current.block_id, shard_pairs)
+            .await
+    }
+
+    /// Collect ranges for loading cumulative statistics if collation block is master
+    /// Using range from previous masterchain block diff
+    /// and diffs between previous masterchain top blocks and current top blocks
+    async fn mc_compute_part_stat_ranges(
+        &self,
+        mc_data_stuff: &McDataStuff,
+        top_shard_blocks_info: Vec<TopBlockDescription>,
+    ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
+        let prev_shards: FastHashMap<_, _> = mc_data_stuff.current.shards.iter().cloned().collect();
+
+        let mut shard_pairs = Vec::new();
+        for top in top_shard_blocks_info {
+            if let Some(prev) = prev_shards.get(&top.block_id.shard) {
+                shard_pairs.push((
+                    top.block_id.shard,
+                    prev.get_block_id(top.block_id.shard),
+                    top.block_id,
+                ));
+            }
+        }
+
+        self.build_ranges(&mc_data_stuff.current.block_id, shard_pairs)
+            .await
+    }
+
+    async fn build_ranges(
+        &self,
+        master_block_id: &BlockId,
+        shard_pairs: Vec<(ShardIdent, BlockId, BlockId)>,
+    ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
+        let Some(master_max_msg) = self
+            .get_diff_max_message(master_block_id)
+            .await
+            .context("loading diff for mc block")?
+        else {
+            return Ok(None);
+        };
+
+        // add mc block diff range
+        let mut ranges = vec![QueueShardBoundedRange {
+            shard_ident: master_block_id.shard,
+            from: Bound::Included(master_max_msg),
+            to: Bound::Included(master_max_msg),
+        }];
+
+        for (shard, prev_id, curr_id) in shard_pairs {
+            if prev_id.seqno == 0 {
+                return Ok(None);
+            }
+
+            let (first_msg, last_msg) = tokio::try_join!(
+                self.get_diff_max_message(&prev_id),
+                self.get_diff_max_message(&curr_id)
+            )
+            .context("loading shard diffs")?;
+
+            match (first_msg, last_msg) {
+                (Some(first), Some(last)) => ranges.push(QueueShardBoundedRange {
+                    shard_ident: shard,
+                    from: Bound::Excluded(first),
+                    to: Bound::Included(last),
+                }),
+                _ => return Ok(None),
+            }
+        }
+
+        Ok(Some(ranges))
+    }
+
+    /// Helper function that retrieves `max_message` from either MQ or state diff
+    async fn get_diff_max_message(&self, block_id: &BlockId) -> Result<Option<QueueKey>> {
+        if let Some(diff) =
+            self.mq_adapter
+                .get_diff_info(&block_id.shard, block_id.seqno, DiffZone::Both)?
+        {
+            Ok(Some(diff.max_message))
+        } else if let Some(diff) = self.state_node_adapter.load_diff(block_id).await? {
+            Ok(Some(diff.diff().max_message))
+        } else {
+            tracing::warn!(target: tracing_targets::COLLATOR, "diff not found by block: {block_id:?}");
+            Ok(None)
+        }
     }
 }
 

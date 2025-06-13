@@ -16,7 +16,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::mempool::MempoolAnchorId;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use crate::types::{
-    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ShardDescriptionExt,
+    ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ShardDescriptionShortExt,
     ShardHashesExt,
 };
 use crate::utils::block::detect_top_processed_to_anchor;

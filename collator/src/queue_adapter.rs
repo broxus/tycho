@@ -14,7 +14,7 @@ use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManag
 use crate::internal_queue::state::storage::QueueStateStdImpl;
 use crate::internal_queue::types::{
     DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
-    QueueShardRange, QueueStatistics, SeparatedStatisticsByPartitions,
+    QueueShardBoundedRange, QueueShardRange, QueueStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::tracing_targets;
 use crate::types::{DebugDisplayOpt, DebugIter, DisplayIter, DisplayTupleRef};
@@ -32,7 +32,7 @@ where
         &self,
         for_shard_id: ShardIdent,
         partition: QueuePartitionIdx,
-        ranges: Vec<QueueShardRange>,
+        ranges: Vec<QueueShardBoundedRange>,
     ) -> Result<Box<dyn QueueIterator<V>>>;
 
     /// Returns statistics for the specified ranges by partition
@@ -40,7 +40,7 @@ where
     fn get_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
-        ranges: &[QueueShardRange],
+        ranges: &[QueueShardBoundedRange],
     ) -> Result<QueueStatistics>;
 
     /// Apply diff to the current queue uncommitted state (waiting for the operation to complete)
@@ -83,7 +83,7 @@ where
     fn load_separated_diff_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
-        range: &QueueShardRange,
+        range: &QueueShardBoundedRange,
     ) -> Result<SeparatedStatisticsByPartitions>;
     /// Get partition router and statistics for the specified block
     fn get_router_and_statistics(
@@ -106,14 +106,11 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         &self,
         for_shard_id: ShardIdent,
         partition: QueuePartitionIdx,
-        mut ranges: Vec<QueueShardRange>,
+        ranges: Vec<QueueShardBoundedRange>,
     ) -> Result<Box<dyn QueueIterator<V>>> {
         let histogram = HistogramGuard::begin("tycho_internal_queue_create_iterator_time");
 
-        for range in ranges.iter_mut() {
-            range.from = range.from.next_value();
-            range.to = range.to.next_value();
-        }
+        let ranges = ranges.into_iter().map(Into::into).collect::<Vec<_>>();
 
         metrics::counter!("tycho_collator_queue_adapter_iterators_count").increment(1);
 
@@ -134,17 +131,15 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     fn get_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
-        ranges: &[QueueShardRange],
+        ranges: &[QueueShardBoundedRange],
     ) -> Result<QueueStatistics> {
         let start_time = std::time::Instant::now();
 
         let mut result = AccountStatistics::default();
 
-        let mut ranges = ranges.to_vec();
+        let ranges: Vec<QueueShardRange> = ranges.iter().cloned().map(Into::into).collect();
 
-        for range in ranges.iter_mut() {
-            range.from = range.from.next_value();
-            range.to = range.to.next_value();
+        for range in &ranges {
             for partition in partitions {
                 self.queue
                     .load_diff_statistics(*partition, range, &mut result)?;
@@ -303,13 +298,9 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     fn load_separated_diff_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
-        range: &QueueShardRange,
+        range: &QueueShardBoundedRange,
     ) -> Result<SeparatedStatisticsByPartitions> {
         let start_time = std::time::Instant::now();
-
-        let mut range = range.clone();
-        range.from = range.from.next_value();
-        range.to = range.to.next_value();
 
         tracing::debug!(target: tracing_targets::MQ_ADAPTER,
             "load_separated_diff_statistics started"
@@ -317,7 +308,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
         let res = self
             .queue
-            .load_separated_diff_statistics(partitions, &range)?;
+            .load_separated_diff_statistics(partitions, &range.clone().into())?;
 
         let elapsed = start_time.elapsed();
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
