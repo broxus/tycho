@@ -804,20 +804,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dashmap"
-version = "6.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
-dependencies = [
- "cfg-if",
- "crossbeam-utils",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core",
-]
-
-[[package]]
 name = "data-encoding"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1004,7 +990,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=3d9cb5d469d38955d0d0efe3c9f6a93fe54e14e5#3d9cb5d469d38955d0d0efe3c9f6a93fe54e14e5"
+source = "git+https://github.com/broxus/everscale-types.git?rev=953f9b0096b505fa7e357a124bc018c773106bc5#953f9b0096b505fa7e357a124bc018c773106bc5"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1013,7 +999,6 @@ dependencies = [
  "blake3",
  "bytes",
  "crc32c",
- "dashmap 6.1.0",
  "ed25519-dalek",
  "everscale-crypto",
  "everscale-types-abi-proc",
@@ -1035,7 +1020,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-abi-proc"
 version = "0.1.0"
-source = "git+https://github.com/broxus/everscale-types.git?rev=3d9cb5d469d38955d0d0efe3c9f6a93fe54e14e5#3d9cb5d469d38955d0d0efe3c9f6a93fe54e14e5"
+source = "git+https://github.com/broxus/everscale-types.git?rev=953f9b0096b505fa7e357a124bc018c773106bc5#953f9b0096b505fa7e357a124bc018c773106bc5"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -1046,7 +1031,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=3d9cb5d469d38955d0d0efe3c9f6a93fe54e14e5#3d9cb5d469d38955d0d0efe3c9f6a93fe54e14e5"
+source = "git+https://github.com/broxus/everscale-types.git?rev=953f9b0096b505fa7e357a124bc018c773106bc5#953f9b0096b505fa7e357a124bc018c773106bc5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3903,7 +3888,7 @@ dependencies = [
  "bumpalo",
  "bytes",
  "clap",
- "dashmap 5.5.3",
+ "dashmap",
  "everscale-crypto",
  "everscale-types",
  "futures-util",
@@ -4043,7 +4028,7 @@ dependencies = [
  "bytesize",
  "castaway",
  "clap",
- "dashmap 5.5.3",
+ "dashmap",
  "ed25519",
  "everscale-crypto",
  "exponential-backoff",
@@ -4134,7 +4119,7 @@ dependencies = [
  "bytes",
  "bytesize",
  "crc32c",
- "dashmap 5.5.3",
+ "dashmap",
  "everscale-types",
  "fdlimit",
  "futures-util",
@@ -4173,7 +4158,7 @@ dependencies = [
  "bytes",
  "castaway",
  "criterion",
- "dashmap 5.5.3",
+ "dashmap",
  "futures-util",
  "getip",
  "humantime",
