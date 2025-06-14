@@ -5,17 +5,28 @@ use base64::Engine;
 use clap::Parser;
 use tycho_util::serde_helpers::load_json_from_file;
 
-use crate::config::SimulatorConfig;
-use crate::helm::{ClusterType, HelmConfig, HelmRunner, SharedConfigs};
+use crate::backend::Helm;
+use crate::config::{BuilderValues, HelmValues, SharedConfigs, SimulatorConfig};
 
 #[derive(Parser)]
-pub struct PrepareCommand {
-    #[clap(short, long)]
-    pub cluster_type: Option<ClusterType>,
-}
+pub struct PrepareCommand;
 
 impl PrepareCommand {
-    pub fn run(self, config: &SimulatorConfig) -> Result<()> {
+    pub fn run(config: &SimulatorConfig) -> Result<()> {
+        // create builder values only if a file does not exist
+        let builder_values = &config.project_root.simulator.helm.builder.values;
+        let builder_values: BuilderValues =
+            if std::fs::exists(builder_values).context("`builder` chart values")? {
+                println!("loading existing `builder` chart values");
+                load_json_from_file(builder_values).context("read `builder` chart values")?
+            } else {
+                println!("creating new `builder` chart values");
+                let default = BuilderValues::default();
+                std::fs::write(builder_values, serde_json::to_string_pretty(&default)?)
+                    .context("write `builder` chart values")?;
+                default
+            };
+
         let (global_config, node_secrets) = prepare_global_config(config)?;
         let node_config = prepare_node_config(config)?;
         let zerostate = load_zerostate(config)?;
@@ -32,11 +43,23 @@ impl PrepareCommand {
             logger,
         };
 
-        let helm_config = HelmConfig::new(&config.pod, shared_configs, node_secrets);
+        let helm_values = HelmValues::new(
+            config.cluster_type,
+            &config.pod,
+            &builder_values,
+            shared_configs,
+            node_secrets,
+        );
 
-        helm_config.write(&config.project_root)?;
+        println!("writing `tycho` chart values");
+        // write the values file
+        // yaml is a superset of json, so we can use serde_json to write yaml
+        std::fs::write(
+            &config.project_root.simulator.helm.tycho.values,
+            serde_json::to_string_pretty(&helm_values)?,
+        )?;
 
-        HelmRunner::lint(config)?;
+        Helm::lint(config)?;
 
         println!("finished prepare");
         Ok(())

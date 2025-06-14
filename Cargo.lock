@@ -3805,7 +3805,6 @@ dependencies = [
  "anyhow",
  "base64",
  "clap",
- "fs_extra",
  "serde",
  "serde_json",
  "tycho-util",
