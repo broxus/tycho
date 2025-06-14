@@ -34,7 +34,7 @@ spec:
         - name: {{ .Chart.Name }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.tychoImage.repository }}:{{ .Values.tychoImage.tag }}"
           command:
             - bash
             - -c
@@ -60,7 +60,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
           ports:
             - name: udp
               containerPort: {{ .Values.service.port }}
@@ -93,10 +93,10 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 {{- if .Values.persistence }}
-  {{- if not .Values.persistence.isLocal }}
+  {{- if not .Values.persistence.hostPath }}
   volumeClaimTemplates:
     - metadata:
-        name: data
+        name: data-volume
         labels:
           {{- include "tycho.labels" . | nindent 10 }}
       {{- with .Values.persistence.annotations }}
@@ -109,6 +109,6 @@ spec:
           - {{ .Values.persistence.accessMode }}
         resources:
           requests:
-            storage: {{ .Values.persistence.size }}{{ .Values.persistence.sizeType }}
+            storage: {{ .Values.persistence.sizePerPod }}{{ .Values.persistence.sizeType }}
   {{- end }}
 {{- end }}

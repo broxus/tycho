@@ -1,5 +1,9 @@
 ## Network simulator
 
+### How this works in a nutshell
+Simulator copies helm chart to `.scratch`, generates `values.yaml` and then runs helm install.
+
+
 ### Prerequisites
 Simulator depends on project structure and works only inside git project root:
 ```bash
@@ -21,6 +25,10 @@ cd ./tycho
 > **Warning**  
 > DON'T SKIP firewall configuration, otherwise, the simulator will not work
 > properly.
+
+### GKE
+- Enable k8s egress: to pull images for Helm charts from public repos, see [StackOverflow answer](https://stackoverflow.com/a/57664750).
+- to build the image in k8s, see [builder subchart](./helm//builder/README.md)
 
 ### Usage
 Prepare:
@@ -48,11 +56,12 @@ At this point you may edit default values in generated files before they are app
 
 Use simulator:
 ```bash
-simulator build
 simulator prepare
-simulator node start
+simulator build local
+simulator start
 simulator node logs -f
-simulator node exec -n 0 -it /bin/bash
+simulator node shell -n 0
+simulator stop
 simulator clean
 ```
 
@@ -61,7 +70,7 @@ simulator clean
 ```bash
 helm repo add chaos-mesh https://charts.chaos-mesh.org
 kubectl create ns chaos-mesh
-helm install chaos-mesh chaos-mesh/chaos-mesh -n=chaos-mesh --set chaosDaemon.runtime=containerd --set chaosDaemon.socketPath=/run/containerd/containerd.sock --version 2.6.3
+helm install chaos-mesh chaos-mesh/chaos-mesh -n=chaos-mesh --set chaosDaemon.runtime=containerd --set chaosDaemon.socketPath=/run/containerd/containerd.sock --version 2.7.1
 
 helm repo add grafana https://grafana.github.io/helm-charts
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
@@ -105,8 +114,3 @@ cd ../scripts/
 python ./gen-dashboard.py | wl-copy
 xdg-open http://localhost:3000/dashboard/import
 ```
-
-## How this works in a nutshell
-
-- simulator copies helm chart to `.scratch`, generates `values.yaml` and then
-  run helm install
