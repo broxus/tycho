@@ -1,4 +1,4 @@
-{{- if and .Values.persistence .Values.persistence.isLocal }}
+{{- if .Values.persistence.hostPath }}
 kind: PersistentVolume
 apiVersion: v1
 metadata:
@@ -16,5 +16,5 @@ spec:
     name: {{ include "tycho.fullname" . }}-data-local-claim
     namespace: {{ .Release.Namespace }}
   hostPath:
-    path: {{ .Values.persistence.localPath }}
+    path: {{ .Values.persistence.hostPath }}
 {{- end }}

@@ -1,21 +1,18 @@
 use clap::Parser;
 
+use crate::backend::Helm;
 use crate::config::SimulatorConfig;
-use crate::helm::{ClusterType, HelmRunner};
 
 #[derive(Parser)]
-pub struct CleanCommand {
-    #[clap(short, long)]
-    pub cluster_type: Option<ClusterType>,
-}
+pub struct CleanCommand;
 
 impl CleanCommand {
-    pub fn run(self, config: &SimulatorConfig) -> bool {
+    pub fn run(config: &SimulatorConfig) -> bool {
         println!("starting clean");
 
         let mut is_ok = true;
 
-        match HelmRunner::uninstall(config) {
+        match Helm::uninstall(config) {
             Ok(_) => println!("\nOK: nodes stopped"),
             Err(err) => {
                 println!("\nWARN during stop node: {err}");
@@ -23,10 +20,18 @@ impl CleanCommand {
             }
         }
 
-        match std::fs::remove_dir_all(&config.project_root.scratch.dir) {
-            Ok(_) => println!("\nOK: scratch dir removed"),
+        let tycho_values = &config.project_root.simulator.helm.tycho.values;
+        match std::fs::exists(tycho_values) {
+            Ok(false) => {}
+            Ok(true) => match std::fs::remove_file(tycho_values) {
+                Ok(_) => println!("\nOK: removed `tycho` chart values file"),
+                Err(err) => {
+                    println!("\nWARN during remove `tycho` chart values file: {err}");
+                    is_ok = false;
+                }
+            },
             Err(err) => {
-                println!("\nWARN during remove scratch dir: {err}");
+                println!("\nERR cannot access `tycho` chart values file: {err}");
                 is_ok = false;
             }
         }
