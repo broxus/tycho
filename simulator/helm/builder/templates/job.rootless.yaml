@@ -1,0 +1,98 @@
+# https://github.com/moby/buildkit/blob/master/examples/kubernetes/job.rootless.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tycho-builder
+spec:
+  template:
+    # for caveats of rootless mode
+    # see https://github.com/moby/buildkit/blob/master/docs/rootless.md#containerized-deployment
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: tycho-builder-prepare
+          image: alpine/git
+          command:
+            - sh
+            - -c
+            - >
+              cd /workspace;
+              git clone {{ .Values.git.url }};
+              cd ./tycho;
+              {{- if .Values.git.revision }}
+              git reset --hard {{ .Values.git.revision }};
+              {{- end }}
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      containers:
+        - name: tycho-builder-buildkit
+          image: moby/buildkit:master-rootless
+          env:
+            - name: BUILDKITD_FLAGS
+              value: --oci-worker-no-process-sandbox
+            - name: DOCKER_CONFIG
+              value: /home/user/.docker
+          command:
+            - sh
+            - -c
+            - >
+              {{- with .Values }}
+              cd /workspace/tycho;
+              if {{ .baseImage.build }}; then
+              buildctl-daemonless.sh --debug build
+              --frontend dockerfile.v0
+              --local context=.
+              --local dockerfile=.
+              --opt filename=base.Dockerfile
+              --import-cache type=registry,ref={{ .registry.name }}/{{ .baseImage.repository }}
+              --export-cache type=registry,ref={{ .registry.name }}/{{ .baseImage.repository }}
+              --output type=image,name={{ .registry.name }}/{{ .baseImage.repository }}:{{ .baseImage.tag }},push=true;
+              fi;
+              buildctl-daemonless.sh --debug build
+              --frontend dockerfile.v0
+              --local context=.
+              --local dockerfile=.
+              --opt build-arg:BASE={{ .registry.name }}/{{ .baseImage.repository }}:{{ .baseImage.tag }}
+              --opt filename=tycho.Dockerfile
+              --import-cache type=registry,ref={{ .registry.name }}/{{ .tychoImage.repository }}
+              --export-cache type=registry,ref={{ .registry.name }}/{{ .tychoImage.repository }}
+              --output type=image,name={{ .registry.name }}/{{ .tychoImage.repository }}:{{ .tychoImage.tag }},push=true;
+              {{- end }}
+          securityContext:
+            # Needs Kubernetes >= 1.19
+            seccompProfile:
+              type: Unconfined
+            # Needs Kubernetes >= 1.30
+            appArmorProfile:
+              type: Unconfined
+            # To change UID/GID, you need to rebuild the image
+            runAsUser: 1000
+            runAsGroup: 1000
+          volumeMounts:
+            - name: workspace
+              readOnly: true
+              mountPath: /workspace
+            # Dockerfile has `VOLUME /home/user/.local/share/buildkit` by default too,
+            # but the default VOLUME does not work with rootless on Google's Container-Optimized OS
+            # as it is mounted with `nosuid,nodev`.
+            # https://github.com/moby/buildkit/issues/879#issuecomment-1240347038
+            - mountPath: /home/user/.local/share/buildkit
+              name: buildkitd
+            - mountPath: /home/user/.docker/config.json
+              name: docker-config
+              readOnly: true
+              subPath: .dockerconfigjson
+      # To push the image, you also need to create `~/.docker/config.json` secret
+      # and set $DOCKER_CONFIG to `/path/to/.docker` directory.
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: buildkitd
+          emptyDir: {}
+        - name: docker-config
+          secret:
+            secretName: {{ .Values.registry.secretName }}

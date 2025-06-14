@@ -5,47 +5,107 @@ use base64::Engine;
 use clap::Parser;
 use tycho_util::serde_helpers::load_json_from_file;
 
-use crate::config::SimulatorConfig;
-use crate::helm::{ClusterType, HelmConfig, HelmRunner, SharedConfigs};
+use crate::backend::Helm;
+use crate::config::{BuilderValues, HelmValues, SharedConfigs, SimulatorConfig};
 
 #[derive(Parser)]
-pub struct PrepareCommand {
-    #[clap(short, long)]
-    pub cluster_type: Option<ClusterType>,
-}
+pub struct PrepareCommand;
 
 impl PrepareCommand {
-    pub fn run(self, config: &SimulatorConfig) -> Result<()> {
-        let (global_config, node_secrets) = prepare_global_config(config)?;
-        let node_config = prepare_node_config(config)?;
+    pub fn run(config: &SimulatorConfig) -> Result<()> {
+        // create builder values only if a file does not exist
+        let builder_values = &config.project_root.simulator.helm.builder.values;
+        let builder_values: BuilderValues =
+            if std::fs::exists(builder_values).context("`builder` chart values")? {
+                println!("loading existing `builder` chart values");
+                load_json_from_file(builder_values).context("read `builder` chart values")?
+            } else {
+                println!("creating new `builder` chart values");
+                let default = BuilderValues::default();
+                std::fs::write(builder_values, serde_json::to_string_pretty(&default)?)
+                    .context("write `builder` chart values")?;
+                default
+            };
+        let global_conf_data = prepare_global_config(config)?;
         let zerostate = load_zerostate(config)?;
         let logger = serde_json::to_string(
             &load_json_from_file::<serde_json::Value, _>(&config.project_root.logger)
                 .context("load logger.json")?,
         )?;
 
+        let pod_milli_cpu: u16 = 1400; // TODO estimate based on node count
+        let threads = u8::try_from(pod_milli_cpu.div_ceil(1000)).context("too many threads")?;
+
+        let node_config = prepare_node_config(config, threads)?;
+
         let shared_configs = SharedConfigs {
             rust_log: "info,tycho_network=trace".to_string(),
-            global_config,
+            global_config: global_conf_data.global_config,
             config: node_config,
             zerostate,
             logger,
         };
 
-        let helm_config = HelmConfig::new(&config.pod, shared_configs, node_secrets);
+        let consensus_config = match global_conf_data.consensus_config {
+            Some(mempool_config) => mempool_config,
+            None => {
+                let zerostate_json: serde_json::Value =
+                    load_json_from_file(&config.project_root.temp.zerostate_json)?;
+                serde_path_to_error::deserialize(&zerostate_json["params"]["29"])?
+            }
+        };
 
-        helm_config.write(&config.project_root)?;
+        let pod_disk_gb = {
+            let max_rounds = (consensus_config.commit_history_rounds
+                + consensus_config.deduplicate_rounds
+                + consensus_config.max_consensus_lag_rounds
+                + consensus_config.sync_support_rounds) as u128;
+            let kb_per_round = (global_conf_data.node_secrets.len()
+                * consensus_config.payload_batch_bytes) as u128;
+            // 6/5 is +20% provisioning
+            let raw = (max_rounds * kb_per_round * 6 / 5).div_ceil(1024 * 1024 * 1024);
+            u8::try_from(raw).context("too many disk GBs")?
+        };
 
-        HelmRunner::lint(config)?;
+        let helm_values = HelmValues::new(
+            config.cluster_type,
+            &config.pod,
+            &builder_values,
+            shared_configs,
+            global_conf_data.node_secrets,
+            pod_disk_gb,
+            pod_milli_cpu,
+        );
+
+        println!("writing `tycho` chart values");
+        // write the values file
+        // yaml is a superset of json, so we can use serde_json to write yaml
+        std::fs::write(
+            &config.project_root.simulator.helm.tycho.values,
+            serde_json::to_string_pretty(&helm_values)?,
+        )?;
+
+        Helm::lint(config)?;
 
         println!("finished prepare");
         Ok(())
     }
 }
 
-fn prepare_global_config(config: &SimulatorConfig) -> Result<(String, Vec<String>)> {
+struct GlobalConfData {
+    global_config: String,
+    consensus_config: Option<ConsensusConfigPart>,
+    node_secrets: Vec<String>,
+}
+
+fn prepare_global_config(config: &SimulatorConfig) -> Result<GlobalConfData> {
     let mut global_config: serde_json::Value =
         load_json_from_file(&config.project_root.temp.global_config).context("global config")?;
+
+    let mempool_config = global_config
+        .get("mempool")
+        .map(serde_path_to_error::deserialize)
+        .transpose()?;
 
     let bootstrap_peers_field: &mut serde_json::Value = global_config
         .get_mut("bootstrap_peers")
@@ -67,7 +127,11 @@ fn prepare_global_config(config: &SimulatorConfig) -> Result<(String, Vec<String
 
     *bootstrap_peers_field = serde_json::json!(bootstrap_peers);
 
-    Ok((serde_json::to_string(&global_config)?, node_secrets))
+    Ok(GlobalConfData {
+        global_config: serde_json::to_string(&global_config)?,
+        consensus_config: mempool_config,
+        node_secrets,
+    })
 }
 
 /// NOTE keys file index is shifted by +1 compared with pod name index
@@ -88,7 +152,7 @@ fn make_node(config: &SimulatorConfig, node_index: usize) -> Result<Node> {
         .with_context(|| format!("failed to init node-{node_index}"))
 }
 
-fn prepare_node_config(config: &SimulatorConfig) -> Result<String> {
+fn prepare_node_config(config: &SimulatorConfig, threads: u8) -> Result<String> {
     let mut node_config: serde_json::Value =
         load_json_from_file(&config.project_root.config).context("node config")?;
 
@@ -99,6 +163,9 @@ fn prepare_node_config(config: &SimulatorConfig) -> Result<String> {
 
     node_config["metrics"]["listen_addr"] =
         serde_json::json!(format!("0.0.0.0:{}", config.pod.metrics_port));
+
+    node_config["threads"]["rayon_threads"] = serde_json::json!(threads);
+    node_config["threads"]["tokio_workers"] = serde_json::json!(threads);
 
     let storage_root_dir: &mut serde_json::Value = node_config
         .get_mut("storage")
@@ -122,6 +189,15 @@ fn load_zerostate(config: &SimulatorConfig) -> Result<String> {
     let zerostate_base64 = base64::engine::general_purpose::STANDARD.encode(zerostate_bytes);
 
     Ok(zerostate_base64)
+}
+
+#[derive(serde::Deserialize)]
+struct ConsensusConfigPart {
+    payload_batch_bytes: usize,
+    commit_history_rounds: usize,
+    deduplicate_rounds: usize,
+    max_consensus_lag_rounds: usize,
+    sync_support_rounds: usize,
 }
 
 struct Node {

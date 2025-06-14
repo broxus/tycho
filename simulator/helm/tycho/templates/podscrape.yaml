@@ -1,6 +1,6 @@
 {{- if .Values.serviceMonitor.enabled }}
-apiVersion: monitoring.coreos.com/v1
-kind: PodMonitor
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
 metadata:
   name: {{ include "tycho.fullname" . }}
   {{- if .Values.serviceMonitor.namespace }}
@@ -13,8 +13,7 @@ metadata:
     {{- if .Values.serviceMonitor.additionalLabels }}
     {{- toYaml .Values.serviceMonitor.additionalLabels | nindent 4 }}
     {{- end }}
-    {{/* kubectl get prometheus -n monitoring -o json | jq ".items[0].spec.podMonitorSelector" */}}
-    release: prometheus-operator
+    release: vmks
 spec:
   podMetricsEndpoints:
     - port: metrics
@@ -28,7 +27,7 @@ spec:
       {{- if .Values.serviceMonitor.honorLabels }}
       honorLabels: {{ .Values.serviceMonitor.honorLabels }}
       {{- end }}
-      relabelings:
+      relabelConfigs:
         - sourceLabels: [__meta_kubernetes_pod_name]
           targetLabel: instance
       {{- if .Values.serviceMonitor.metricRelabelings }}
