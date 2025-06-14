@@ -1,43 +1,44 @@
-#![allow(clippy::unused_self, clippy::print_stdout, clippy::print_stderr)]
+#![allow(clippy::print_stdout)]
 
 use std::process::Command;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use crate::commands::{BuildCommand, CleanCommand, NodeCommand, PrepareCommand};
+use crate::backend::Helm;
+use crate::commands::{BuildCommand, CleanCommand, NodeCommand, PrepareCommand, StartCommand};
 use crate::config::SimulatorConfig;
 
+mod backend;
 mod commands;
 mod config;
-mod helm;
 
 fn main() -> Result<()> {
     let args: Cli = Cli::parse();
-    test_prerequisites()?;
 
-    let config = SimulatorConfig::new().context("create config")?;
+    test_prerequisites()?;
+    let config = SimulatorConfig::new()?;
 
     match args.command {
-        Commands::Prepare(cmd) => {
-            let clean = CleanCommand {
-                cluster_type: cmd.cluster_type,
-            };
-            clean.run(&config);
-            cmd.run(&config)
-        }
-        Commands::Clean(cmd) => {
-            if cmd.run(&config) {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!("there were errors during clean"))
+        Commands::Build(cmd) => cmd.run(&config)?,
+        Commands::Clean => {
+            if !CleanCommand::run(&config) {
+                anyhow::bail!("there were errors during clean");
             }
         }
-        Commands::Build(cmd) => cmd.run(&config),
-        Commands::Node(cmd) => cmd.run(&config),
+        Commands::Node(cmd) => cmd.run()?,
+        Commands::Prepare => {
+            CleanCommand::run(&config);
+            PrepareCommand::run(&config)?;
+        }
+        Commands::Start(cmd) => cmd.run(&config)?,
+        Commands::Stop => Helm::uninstall(&config)?,
     }
+
+    Ok(())
 }
 
+/// Network simulator
 #[derive(Parser)]
 struct Cli {
     #[clap(subcommand)]
@@ -47,11 +48,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Setup config files for network simulation
-    Prepare(PrepareCommand),
-    /// Cleans up the network simulation setup. By default logs are not removed
-    Clean(CleanCommand),
+    Prepare,
+    /// Helm uninstalls `tycho` chart and deletes its `values` file
+    Clean,
     /// Builds docker image
+    #[clap(subcommand)]
     Build(BuildCommand),
+    /// Helm installs `tycho` chart
+    Start(StartCommand),
+    /// Helm uninstalls `tycho` chart
+    Stop,
     /// Node management
     #[clap(subcommand)]
     Node(NodeCommand),
@@ -61,21 +67,14 @@ fn test_prerequisites() -> Result<()> {
     Command::new("git")
         .arg("--version")
         .output()
-        .context("git not found, will not determine project root")?;
-    Command::new("docker")
-        .arg("--version")
+        .context("git not found")?;
+    Command::new("kubectl")
+        .arg("version")
         .output()
-        .context("docker not found")?;
-    Command::new("docker")
-        .arg("compose")
-        .arg("--version")
+        .context("kubectl not found")?;
+    Command::new("helm")
+        .arg("version")
         .output()
-        .context("docker-compose not found")?;
-    Command::new("docker")
-        .arg("buildx")
-        .arg("--version")
-        .output()?;
-    Command::new("helm").arg("version").output()?;
-    Command::new("cargo").arg("--version").output()?;
+        .context("helm not found")?;
     Ok(())
 }

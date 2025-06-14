@@ -10,7 +10,6 @@
 .zed/
 
 perf.data*
-.scratch
 
 .DS_Store
 
@@ -24,5 +23,7 @@ logger.json
 
 /db/
 /.temp/
+
+simulator/**/values.yaml
 
 __pycache__/

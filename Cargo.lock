@@ -3819,9 +3819,9 @@ dependencies = [
  "anyhow",
  "base64",
  "clap",
- "fs_extra",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "tycho-util",
 ]
 
