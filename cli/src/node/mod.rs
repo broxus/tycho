@@ -13,7 +13,7 @@ use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::state::storage::QueueStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::MempoolAdapterStdImpl;
+use tycho_collator::mempool::{MempoolAdapter, MempoolAdapterStdImpl};
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollatorConfig;
@@ -568,7 +568,7 @@ impl tycho_control::Collator for CollatorControl {
 
 #[derive(Clone)]
 struct RpcMempoolAdapter {
-    inner: Arc<MempoolAdapterStdImpl>,
+    inner: Arc<dyn MempoolAdapter>,
 }
 
 impl BroadcastListener for RpcMempoolAdapter {
