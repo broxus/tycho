@@ -12,7 +12,8 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{NewBlockMeta, Storage, StorageContext};
+use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
+use tycho_storage::StorageContext;
 
 use crate::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
 use crate::internal_queue::state::storage::QueueStateImplFactory;
@@ -31,8 +32,9 @@ pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilt
         .ok();
 }
 
-pub async fn prepare_test_storage() -> anyhow::Result<(Storage, tempfile::TempDir)> {
-    let (storage, tmp_dir) = Storage::open_temp().await?;
+pub async fn prepare_test_storage() -> anyhow::Result<(CoreStorage, tempfile::TempDir)> {
+    let (ctx, tmp_dir) = StorageContext::new_temp().await?;
+    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
     let shard_states = storage.shard_state_storage();
 
     // master state

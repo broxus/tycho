@@ -5,7 +5,7 @@ use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
-use tycho_storage::{Storage, StorageContext};
+use tycho_storage::StorageContext;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -21,12 +21,6 @@ use crate::storage::snapshot::InternalQueueSnapshot;
 use crate::storage::transaction::InternalQueueTransaction;
 use crate::storage::InternalQueueStorage;
 use crate::types::ProcessedTo;
-
-// CONFIG
-
-pub struct QueueStateConfig {
-    pub storage: Storage,
-}
 
 // FACTORY
 

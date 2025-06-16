@@ -7,7 +7,7 @@ use everscale_types::cell::*;
 use everscale_types::models::BlockId;
 use everscale_types::util::ArrayVec;
 use tycho_block_util::state::*;
-use tycho_storage_traits::StoredValue;
+use tycho_storage::{MappedFile, StoredValue, TempFileStorage};
 use tycho_util::io::ByteOrderRead;
 use tycho_util::progress_bar::*;
 use tycho_util::FastHashMap;
@@ -15,13 +15,12 @@ use weedb::{rocksdb, BoundedCfHandle};
 
 use super::cell_storage::*;
 use super::entries_buffer::*;
-use crate::db::*;
-use crate::store::{BriefBocHeader, ShardStateReader, TempFileStorage};
+use crate::storage::{BriefBocHeader, CoreDb, ShardStateReader};
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
 pub struct StoreStateContext {
-    pub db: BaseDb,
+    pub db: CoreDb,
     pub cell_storage: Arc<CellStorage>,
     pub temp_file_storage: TempFileStorage,
     pub min_ref_mc_state: MinRefMcStateTracker,
@@ -247,7 +246,7 @@ struct FinalizationContext<'a> {
 }
 
 impl<'a> FinalizationContext<'a> {
-    fn new(db: &'a BaseDb) -> Self {
+    fn new(db: &'a CoreDb) -> Self {
         Self {
             pruned_branches: Default::default(),
             cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
@@ -258,7 +257,7 @@ impl<'a> FinalizationContext<'a> {
         }
     }
 
-    fn clear_temp_cells(&self, db: &BaseDb) -> std::result::Result<(), rocksdb::Error> {
+    fn clear_temp_cells(&self, db: &CoreDb) -> std::result::Result<(), rocksdb::Error> {
         let from = &[0x00; 32];
         let to = &[0xff; 32];
         db.rocksdb().delete_range_cf(&self.temp_cells_cf, from, to)
@@ -551,12 +550,12 @@ mod test {
     use everscale_types::prelude::Dict;
     use rand::prelude::SliceRandom;
     use rand::{Rng, SeedableRng};
+    use tycho_storage::{StorageConfig, StorageContext};
     use tycho_util::project_root;
     use weedb::rocksdb::{IteratorMode, WriteBatch};
 
     use super::*;
-    use crate::context::StorageContext;
-    use crate::{Storage, StorageConfig};
+    use crate::storage::{CoreStorage, CoreStorageConfig};
 
     #[tokio::test]
     #[ignore]
@@ -586,19 +585,21 @@ mod test {
             root_dir: current_test_path.join("db"),
             rocksdb_enable_metrics: false,
             rocksdb_lru_capacity: ByteSize::mb(256),
+        })
+        .await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig {
             cells_cache_size: ByteSize::mb(256),
             ..Default::default()
         })
         .await?;
-        let storage = Storage::open(ctx).await?;
 
-        let base_db = storage.base_db();
+        let core_db = storage.db();
         let cell_storage = &storage.shard_state_storage().cell_storage;
 
         let store_ctx = StoreStateContext {
-            db: base_db.clone(),
+            db: core_db.clone(),
             cell_storage: cell_storage.clone(),
-            temp_file_storage: storage.temp_file_storage().clone(),
+            temp_file_storage: storage.context().temp_files().clone(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
         };
 
@@ -615,12 +616,12 @@ mod test {
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");
-        states_gc(cell_storage, base_db).await?;
+        states_gc(cell_storage, core_db).await?;
 
         Ok(())
     }
 
-    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &BaseDb) -> Result<()> {
+    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CoreDb) -> Result<()> {
         let states_iterator = db.shard_states.iterator(IteratorMode::Start);
         let bump = bumpalo::Bump::new();
 
@@ -657,8 +658,10 @@ mod test {
     async fn rand_cells_storage() -> Result<()> {
         tycho_util::test::init_logger("rand_cells_storage", "debug");
 
-        let (storage, _tempdir) = Storage::open_temp().await?;
-        let base_db = storage.base_db();
+        let (ctx, _tempdir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+
+        let core_db = storage.db();
         let cell_storage = &storage.shard_state_storage().cell_storage;
 
         let mut rng = StdRng::seed_from_u64(1337);
@@ -725,9 +728,9 @@ mod test {
 
             cell_keys.push(*cell_hash);
 
-            base_db
+            core_db
                 .rocksdb()
-                .write_opt(batch, base_db.cells.write_config())?;
+                .write_opt(batch, core_db.cells.write_config())?;
 
             tracing::info!("Iteration {i} Finished. traversed: {traversed}",);
         }
@@ -742,18 +745,18 @@ mod test {
             traverse_cell((cell as Arc<DynCell>).as_ref());
 
             let (res, batch) = cell_storage.remove_cell(&bump, &key)?;
-            base_db
+            core_db
                 .rocksdb()
-                .write_opt(batch, base_db.cells.write_config())?;
+                .write_opt(batch, core_db.cells.write_config())?;
             tracing::info!("Gc {id} of {total} done. Traversed: {res}",);
             bump.reset();
         }
 
         // two compactions in row. First one run merge operators, second one will remove all tombstones
-        base_db.trigger_compaction().await;
-        base_db.trigger_compaction().await;
+        core_db.trigger_compaction().await;
+        core_db.trigger_compaction().await;
 
-        let cells_left = base_db.cells.iterator(IteratorMode::Start).count();
+        let cells_left = core_db.cells.iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
         Ok(())

@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::{BlockIdRelation, BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
-use tycho_storage::Storage;
 use tycho_util::serde_helpers;
 use tycho_util::sync::rayon_run;
 
@@ -22,6 +21,7 @@ use crate::block_strider::provider::{
 use crate::block_strider::BlockProvider;
 use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::{Neighbour, PunishReason};
+use crate::storage::CoreStorage;
 
 // TODO: Use backoff instead of simple polling.
 
@@ -79,7 +79,7 @@ pub struct BlockchainBlockProvider {
 impl BlockchainBlockProvider {
     pub fn new(
         client: BlockchainRpcClient,
-        storage: Storage,
+        storage: CoreStorage,
         config: BlockchainBlockProviderConfig,
     ) -> Self {
         let proof_checker = ProofChecker::new(storage);

@@ -12,8 +12,10 @@ use tokio::sync::{broadcast, watch};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_core::storage::{
+    BlockHandle, CoreStorage, MaybeExistingHandle, NewBlockMeta, StoreStateHint,
+};
 use tycho_network::PeerId;
-use tycho_storage::{BlockHandle, MaybeExistingHandle, NewBlockMeta, Storage, StoreStateHint};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use tycho_util::{FastDashMap, FastHashMap};
@@ -93,7 +95,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
 pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, Arc<BlockStuffForSync>>>,
-    storage: Storage,
+    storage: CoreStorage,
     broadcaster: broadcast::Sender<BlockId>,
 
     sync_context_tx: watch::Sender<CollatorSyncContext>,
@@ -104,7 +106,7 @@ pub struct StateNodeAdapterStdImpl {
 impl StateNodeAdapterStdImpl {
     pub fn new(
         listener: Arc<dyn StateNodeEventListener>,
-        storage: Storage,
+        storage: CoreStorage,
         initial_sync_context: CollatorSyncContext,
     ) -> Self {
         let (sync_context_tx, mut sync_context_rx) = watch::channel(initial_sync_context);

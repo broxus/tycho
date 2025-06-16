@@ -15,7 +15,6 @@ use tycho_block_util::block::{
 };
 use tycho_block_util::queue::QueueDiffStuffAug;
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{MaybeExistingHandle, NewBlockMeta, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers;
 
@@ -24,6 +23,7 @@ pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProv
 pub use self::box_provider::BoxBlockProvider;
 use self::futures::SelectNonEmptyFut;
 pub use self::storage_provider::StorageBlockProvider;
+use crate::storage::{CoreStorage, MaybeExistingHandle, NewBlockMeta};
 
 mod archive_provider;
 mod blockchain_provider;
@@ -418,13 +418,13 @@ pub struct CheckProof<'a> {
 // TODO: Rename to something better since it checks proofs queue diffs now,
 //       and I don't want to parse block info twice to check queue diff separately.
 pub struct ProofChecker {
-    storage: Storage,
+    storage: CoreStorage,
     cached_zerostate: ArcSwapAny<Option<ShardStateStuff>>,
     cached_prev_key_block_proof: ArcSwapAny<Option<BlockProofStuff>>,
 }
 
 impl ProofChecker {
-    pub fn new(storage: Storage) -> Self {
+    pub fn new(storage: CoreStorage) -> Self {
         Self {
             storage,
             cached_zerostate: Default::default(),

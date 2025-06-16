@@ -1,20 +1,21 @@
 use everscale_types::models::*;
 use parking_lot::RwLock;
-use tycho_storage_traits::StoredValue;
+use tycho_storage::StoredValue;
 
-use crate::db::*;
-use crate::store::{BlockFlags, BlockHandle};
-use crate::util::*;
+use super::block_handle::{BlockFlags, BlockHandle};
+use super::db::CoreDb;
+use super::tables;
+use super::util::{read_block_id_le, write_block_id_le, SlotSubscriptions};
 
 /// Stores relations between blocks
 pub struct BlockConnectionStorage {
-    db: BaseDb,
+    db: CoreDb,
     next1_subscriptions: SlotSubscriptions<BlockId, BlockId>,
     store_next1: RwLock<()>,
 }
 
 impl BlockConnectionStorage {
-    pub fn new(db: BaseDb) -> Self {
+    pub fn new(db: CoreDb) -> Self {
         Self {
             db,
             next1_subscriptions: Default::default(),

@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tycho_block_util::archive::ArchiveVerifier;
 use tycho_network::{PublicOverlay, Request};
-use tycho_storage::PersistentStateKind;
 use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
 use tycho_util::serde_helpers;
@@ -25,6 +24,7 @@ use crate::overlay_client::{
 };
 use crate::proto::blockchain::*;
 use crate::proto::overlay::BroadcastPrefix;
+use crate::storage::PersistentStateKind;
 
 /// A listener for self-broadcasted messages.
 ///

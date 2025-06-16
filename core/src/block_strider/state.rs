@@ -2,7 +2,8 @@ use std::sync::Mutex;
 
 use everscale_types::models::BlockId;
 use tycho_block_util::block::ShardHeights;
-use tycho_storage::Storage;
+
+use crate::storage::CoreStorage;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CommitMasterBlock<'a> {
@@ -27,11 +28,11 @@ pub trait BlockStriderState: Send + Sync + 'static {
 
 pub struct PersistentBlockStriderState {
     zerostate_id: BlockId,
-    storage: Storage,
+    storage: CoreStorage,
 }
 
 impl PersistentBlockStriderState {
-    pub fn new(zerostate_id: BlockId, storage: Storage) -> Self {
+    pub fn new(zerostate_id: BlockId, storage: CoreStorage) -> Self {
         Self {
             zerostate_id,
             storage,

@@ -33,12 +33,13 @@ use tycho_core::blockchain_rpc::{
 };
 use tycho_core::global_config::{GlobalConfig, MempoolGlobalConfig, ZerostateId};
 use tycho_core::overlay_client::PublicOverlayClient;
+use tycho_core::storage::{CoreStorage, NodeSyncState};
 use tycho_network::{
     DhtClient, DhtService, InboundRequestMeta, Network, OverlayService, PeerResolver,
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::{NodeSyncState, Storage, StorageContext};
+use tycho_storage::StorageContext;
 use tycho_util::futures::JoinTask;
 
 pub use self::config::{ElectionsConfig, NodeConfig, NodeKeys, SimpleElectionsConfig};
@@ -56,7 +57,7 @@ pub struct Node {
     dht_client: DhtClient,
     peer_resolver: PeerResolver,
     overlay_service: OverlayService,
-    storage: Storage,
+    storage: CoreStorage,
     queue_state_factory: QueueStateImplFactory,
     rpc_mempool_adapter: RpcMempoolAdapter,
     blockchain_rpc_client: BlockchainRpcClient,
@@ -136,9 +137,9 @@ impl Node {
         let ctx = StorageContext::new(node_config.storage)
             .await
             .context("failed to create storage context")?;
-        let storage = Storage::open(ctx).await?;
+        let storage = CoreStorage::open(ctx, node_config.core_storage).await?;
         tracing::info!(
-            root_dir = %storage.root().path().display(),
+            root_dir = %storage.context().root_dir().path().display(),
             "initialized storage"
         );
 

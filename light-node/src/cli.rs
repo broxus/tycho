@@ -16,11 +16,12 @@ use tycho_core::blockchain_rpc::{
 };
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::overlay_client::PublicOverlayClient;
+use tycho_core::storage::CoreStorage;
 use tycho_network::{
     DhtClient, DhtService, Network, OverlayService, PeerResolver, PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::{Storage, StorageContext};
+use tycho_storage::StorageContext;
 use tycho_util::cli::resolve_public_ip;
 
 use crate::config::{NodeConfig, NodeKeys};
@@ -95,7 +96,7 @@ pub struct Node<C> {
     dht_client: DhtClient,
     peer_resolver: PeerResolver,
     overlay_service: OverlayService,
-    storage: Storage,
+    storage: CoreStorage,
     blockchain_rpc_client: BlockchainRpcClient,
 
     rpc_config: Option<RpcConfig>,
@@ -172,11 +173,11 @@ impl<C> Node<C> {
         let ctx = StorageContext::new(node_config.storage)
             .await
             .context("failed to create storage context")?;
-        let storage = Storage::open(ctx)
+        let storage = CoreStorage::open(ctx, node_config.core_storage)
             .await
             .context("failed to create storage")?;
         tracing::info!(
-            root_dir = %storage.root().path().display(),
+            root_dir = %storage.context().root_dir().path().display(),
             "initialized storage"
         );
 
@@ -378,7 +379,7 @@ impl<C> Node<C> {
         &self.overlay_service
     }
 
-    pub fn storage(&self) -> &Storage {
+    pub fn storage(&self) -> &CoreStorage {
         &self.storage
     }
 

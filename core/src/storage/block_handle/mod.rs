@@ -2,14 +2,13 @@ use std::sync::Arc;
 
 use everscale_types::models::BlockId;
 use tycho_block_util::block::{BlockStuff, ShardHeights};
-use tycho_storage_traits::StoredValue;
+use tycho_storage::StoredValue;
 use tycho_util::FastDashMap;
 
 pub(crate) use self::handle::BlockDataGuard;
 pub use self::handle::{BlockHandle, WeakBlockHandle};
 pub use self::meta::{BlockFlags, BlockMeta, LoadedBlockMeta, NewBlockMeta};
-use crate::db::*;
-use crate::store::PartialBlockId;
+use super::{CoreDb, PartialBlockId};
 
 mod handle;
 mod meta;
@@ -17,12 +16,12 @@ mod meta;
 type BlockHandleCache = FastDashMap<BlockId, WeakBlockHandle>;
 
 pub struct BlockHandleStorage {
-    db: BaseDb,
+    db: CoreDb,
     cache: Arc<BlockHandleCache>,
 }
 
 impl BlockHandleStorage {
-    pub fn new(db: BaseDb) -> Self {
+    pub fn new(db: CoreDb) -> Self {
         Self {
             db,
             cache: Arc::new(Default::default()),
@@ -371,13 +370,15 @@ impl Iterator for KeyBlocksIterator<'_> {
 #[cfg(test)]
 mod tests {
     use everscale_types::models::ShardIdent;
+    use tycho_storage::StorageContext;
 
     use super::*;
-    use crate::Storage;
+    use crate::storage::{CoreStorage, CoreStorageConfig};
 
     #[tokio::test]
     async fn merge_operator_works() -> anyhow::Result<()> {
-        let (storage, _tmp_dir) = Storage::open_temp().await?;
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
 
         let block_handles = storage.block_handle_storage();
 

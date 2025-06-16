@@ -9,7 +9,6 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{
     BlockIdExt, BlockIdRelation, BlockStuff, BlockStuffAug, ShardHeights,
 };
-use tycho_storage::Storage;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
@@ -38,6 +37,7 @@ pub use self::subscriber::{
     DelayedTasksJoinHandle, DelayedTasksSpawner, GcSubscriber, ManualGcTrigger, MetricsSubscriber,
     NoopSubscriber, PsSubscriber, StateSubscriber, StateSubscriberContext, StateSubscriberExt,
 };
+use crate::storage::CoreStorage;
 
 mod archive_handler;
 mod block_saver;
@@ -92,7 +92,7 @@ impl<T1, T2> BlockStriderBuilder<T1, T2, ()> {
 impl<T1, T2> BlockStriderBuilder<T1, T2, ()> {
     pub fn with_state_subscriber<S>(
         self,
-        storage: Storage,
+        storage: CoreStorage,
         state_subscriber: S,
     ) -> BlockStriderBuilder<T1, T2, ShardStateApplier<S>>
     where

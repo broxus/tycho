@@ -2,12 +2,13 @@ use std::cmp::Ordering;
 
 use everscale_types::models::*;
 use parking_lot::Mutex;
+use tycho_storage::util::InstanceId;
 
-use crate::db::*;
-use crate::util::*;
+use super::util::{read_block_id_le, write_block_id_le};
+use super::CoreDb;
 
 pub struct NodeStateStorage {
-    db: BaseDb,
+    db: CoreDb,
     last_mc_block_id: BlockIdCache,
     init_mc_block_id: BlockIdCache,
 }
@@ -18,7 +19,7 @@ pub enum NodeSyncState {
 }
 
 impl NodeStateStorage {
-    pub fn new(db: BaseDb) -> Self {
+    pub fn new(db: CoreDb) -> Self {
         let this = Self {
             db,
             last_mc_block_id: (Default::default(), LAST_MC_BLOCK_ID),
