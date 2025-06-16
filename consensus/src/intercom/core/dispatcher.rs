@@ -95,4 +95,20 @@ impl Dispatcher {
         };
         Box::pin(future)
     }
+
+    #[cfg(feature = "mock-feedback")]
+    pub fn send_feedback(
+        &self,
+        peer_id: &PeerId,
+        request: &Request,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
+        let peer_id = *peer_id;
+        let overlay = self.overlay.clone();
+        let network = self.network.clone();
+
+        let request = request.clone();
+
+        let future = async move { overlay.send(&network, &peer_id, request).await };
+        Box::pin(future)
+    }
 }

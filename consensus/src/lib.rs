@@ -2,6 +2,8 @@ mod dag;
 mod effects;
 mod engine;
 mod intercom;
+#[cfg(feature = "mock-feedback")]
+pub mod mock_feedback;
 mod models;
 #[cfg(feature = "test")]
 pub mod test_utils;
