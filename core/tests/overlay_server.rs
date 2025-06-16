@@ -13,8 +13,9 @@ use tycho_core::blockchain_rpc::{
 };
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::proto::blockchain::{KeyBlockIds, PersistentStateInfo};
+use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta, PersistentStateKind};
 use tycho_network::{DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay};
-use tycho_storage::{MappedFile, NewBlockMeta, PersistentStateKind, Storage};
+use tycho_storage::{MappedFile, StorageContext};
 
 use crate::network::TestNode;
 
@@ -57,7 +58,7 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
     }
 
     impl Node {
-        fn with_random_key(storage: Storage, broadcast_counter: BroadcastCounter) -> Self {
+        fn with_random_key(storage: CoreStorage, broadcast_counter: BroadcastCounter) -> Self {
             const OVERLAY_ID: OverlayId = OverlayId([0x33; 32]);
 
             let base = network::NodeBase::with_random_key();
@@ -158,7 +159,8 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
 async fn overlay_server_with_empty_storage() -> Result<()> {
     tycho_util::test::init_logger("overlay_server_with_empty_storage", "info");
 
-    let (storage, _tmp_dir) = Storage::open_temp().await?;
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
 
     let nodes = network::make_network(storage, 10);
 
@@ -303,7 +305,7 @@ async fn overlay_server_persistent_state() -> Result<()> {
         .await?;
 
     {
-        let mut zerostate_file = storage.temp_file_storage().unnamed_file().open()?;
+        let mut zerostate_file = storage.context().temp_files().unnamed_file().open()?;
         std::io::copy(
             &mut std::convert::identity(ZEROSTATE_BOC),
             &mut zerostate_file,
@@ -344,7 +346,7 @@ async fn overlay_server_persistent_state() -> Result<()> {
     let temp_file = client
         .download_persistent_state(
             pending_state,
-            storage.temp_file_storage().unnamed_file().open()?,
+            storage.context().temp_files().unnamed_file().open()?,
         )
         .await?;
 

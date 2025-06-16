@@ -19,7 +19,7 @@ use tycho_core::block_strider::{
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::global_config::ZerostateId;
-use tycho_storage::{KeyBlocksDirection, Storage};
+use tycho_core::storage::{CoreStorage, KeyBlocksDirection};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
@@ -35,7 +35,7 @@ pub mod tables;
 
 const RPC_DB_SUBDIR: &str = "rpc";
 
-pub struct RpcStateBuilder<MandatoryFields = (Storage, BlockchainRpcClient, ZerostateId)> {
+pub struct RpcStateBuilder<MandatoryFields = (CoreStorage, BlockchainRpcClient, ZerostateId)> {
     config: RpcConfig,
     mandatory_fields: MandatoryFields,
 }
@@ -128,7 +128,7 @@ impl RpcStateBuilder {
 }
 
 impl<T2, T3> RpcStateBuilder<((), T2, T3)> {
-    pub fn with_storage(self, storage: Storage) -> RpcStateBuilder<(Storage, T2, T3)> {
+    pub fn with_storage(self, storage: CoreStorage) -> RpcStateBuilder<(CoreStorage, T2, T3)> {
         let (_, bc_rpc_client, zerostate_id) = self.mandatory_fields;
 
         RpcStateBuilder {
@@ -576,7 +576,7 @@ pub enum RunGetMethodPermit {
 
 struct Inner {
     config: RpcConfig,
-    core_storage: Storage,
+    core_storage: CoreStorage,
     rpc_storage: Option<Arc<RpcStorage>>,
     blockchain_rpc_client: BlockchainRpcClient,
     mc_info: RwLock<LatestMcInfo>,
@@ -1029,7 +1029,7 @@ type ShardAccountsDict = Dict<HashBytes, (DepthBalanceInfo, ShardAccount)>;
 // TODO: Use only rpc storage to find closest key block LT.
 async fn transactions_gc(
     config: TransactionsGcConfig,
-    core_storage: Storage,
+    core_storage: CoreStorage,
     rpc_storage: Arc<RpcStorage>,
     gc_notify: Arc<Notify>,
 ) {
@@ -1098,7 +1098,7 @@ pub async fn watch_blacklisted_accounts(config_path: PathBuf, accounts: Blacklis
     }
 }
 
-async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<GcRange> {
+async fn find_closest_key_block_lt(storage: &CoreStorage, utime: u32) -> Result<GcRange> {
     let block_handle_storage = storage.block_handle_storage();
 
     // Find the key block with max seqno which was preduced not later than `utime`
@@ -1186,22 +1186,18 @@ impl From<axum::extract::rejection::JsonRejection> for BadRequestError {
 mod test {
     use std::str::FromStr;
 
-    use anyhow::Result;
-    use everscale_types::boc::Boc;
-    use everscale_types::models::{Block, BlockId};
-    use everscale_types::prelude::HashBytes;
-    use tycho_block_util::block::{BlockStuff, BlockStuffAug};
-    use tycho_core::block_strider::{BlockSubscriber, BlockSubscriberContext, DelayedTasks};
-    use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService};
-    use tycho_core::global_config::ZerostateId;
+    use tycho_block_util::block::BlockStuffAug;
+    use tycho_core::block_strider::DelayedTasks;
+    use tycho_core::blockchain_rpc::BlockchainRpcService;
     use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
+    use tycho_core::storage::CoreStorageConfig;
     use tycho_network::{
         service_query_fn, BoxCloneService, Network, NetworkConfig, OverlayId, PublicOverlay,
         Response, ServiceExt, ServiceRequest,
     };
-    use tycho_storage::{Storage, StorageConfig, StorageContext};
+    use tycho_storage::StorageContext;
 
-    use crate::{RpcConfig, RpcState};
+    use super::*;
 
     fn echo_service() -> BoxCloneService<ServiceRequest, Response> {
         let handle = |request: ServiceRequest| async move {
@@ -1258,9 +1254,8 @@ mod test {
     async fn _rpc_state_handle_block() -> Result<()> {
         tycho_util::test::init_logger("rpc_state_handle_block", "debug");
 
-        let tmp_dir = tempfile::tempdir()?;
-        let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
-        let storage = Storage::open(ctx).await?;
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
 
         let config = RpcConfig::default();
 
@@ -1331,9 +1326,8 @@ mod test {
 
         let config = RpcConfig::default();
 
-        let tmp_dir = tempfile::tempdir()?;
-        let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
-        let storage = Storage::open(ctx).await?;
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
 
         let network = make_network()?;
 

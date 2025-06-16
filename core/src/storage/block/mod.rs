@@ -20,7 +20,7 @@ use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, ShardHeights,
 };
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
-use tycho_storage_traits::StoredValue;
+use tycho_storage::StoredValue;
 use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::{rayon_run, CancellationFlag};
@@ -28,11 +28,10 @@ use tycho_util::{FastHashSet, FastHasherState};
 use weedb::{rocksdb, ColumnFamily, OwnedPinnableSlice};
 
 pub use self::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId};
-use crate::db::*;
-use crate::util::*;
-use crate::{
-    BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage,
-    BlocksCacheConfig, HandleCreationStatus, NewBlockMeta,
+use super::util::SlotSubscriptions;
+use super::{
+    tables, BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage,
+    BlocksCacheConfig, CoreDb, HandleCreationStatus, NewBlockMeta,
 };
 
 mod package_entry;
@@ -41,7 +40,7 @@ const METRIC_LOAD_BLOCK_TOTAL: &str = "tycho_storage_load_block_total";
 const METRIC_BLOCK_CACHE_HIT_TOTAL: &str = "tycho_storage_block_cache_hit_total";
 
 pub struct BlockStorage {
-    db: BaseDb,
+    db: CoreDb,
     blocks_cache: BlocksCache,
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
@@ -58,7 +57,7 @@ impl BlockStorage {
     // === Init stuff ===
 
     pub fn new(
-        db: BaseDb,
+        db: CoreDb,
         config: BlockStorageConfig,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_connection_storage: Arc<BlockConnectionStorage>,
@@ -1352,7 +1351,7 @@ impl Drop for CommitArchiveTask {
 }
 
 struct ArchiveWriter<'a> {
-    db: &'a BaseDb,
+    db: &'a CoreDb,
     archive_id: u32,
     chunk_len: usize,
     total_len: u64,
@@ -1362,7 +1361,7 @@ struct ArchiveWriter<'a> {
 }
 
 impl<'a> ArchiveWriter<'a> {
-    fn new(db: &'a BaseDb, archive_id: u32, chunk_len: u64) -> Result<Self> {
+    fn new(db: &'a CoreDb, archive_id: u32, chunk_len: u64) -> Result<Self> {
         let chunk_len = chunk_len as usize;
 
         let mut zstd_compressor = ZstdCompressStream::new(9, chunk_len)?;
@@ -1495,7 +1494,7 @@ struct ArchiveIds {
 }
 
 fn remove_blocks(
-    db: BaseDb,
+    db: CoreDb,
     max_blocks_per_batch: Option<usize>,
     mc_seqno: u32,
     shard_heights: ShardHeights,
@@ -1733,16 +1732,18 @@ enum BlockStorageError {
 mod tests {
     use std::pin::pin;
 
-    use ahash::HashMap;
     use tycho_block_util::archive::WithArchiveData;
+    use tycho_storage::StorageContext;
     use tycho_util::futures::JoinTask;
+    use tycho_util::FastHashMap;
 
     use super::*;
-    use crate::{BlockConnection, Storage};
+    use crate::storage::{BlockConnection, CoreStorage, CoreStorageConfig};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn parallel_store_data() -> Result<()> {
-        let (storage, _tmp_dir) = Storage::open_temp().await?;
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
 
         let shard = ShardIdent::MASTERCHAIN;
         for seqno in 0..1000 {
@@ -1848,17 +1849,14 @@ mod tests {
         const CONNECTION_TYPES: [BlockConnection; 2] =
             [BlockConnection::Prev1, BlockConnection::Next1];
 
-        let (storage, _tmp_dir) = Storage::open_temp().await?;
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
 
         let blocks = storage.block_storage();
         let block_handles = storage.block_handle_storage();
         let block_connections = storage.block_connection_storage();
 
-        let mut shard_block_ids: std::collections::HashMap<
-            ShardIdent,
-            Vec<BlockId>,
-            ahash::RandomState,
-        > = HashMap::<ShardIdent, Vec<BlockId>>::default();
+        let mut shard_block_ids = FastHashMap::<ShardIdent, Vec<BlockId>>::default();
 
         for shard in [ShardIdent::MASTERCHAIN, ShardIdent::BASECHAIN] {
             let entry = shard_block_ids.entry(shard).or_default();
@@ -1903,7 +1901,7 @@ mod tests {
             total_blocks_removed: 69 + 49,
         });
 
-        let removed_ranges = HashMap::from_iter([
+        let removed_ranges = FastHashMap::from_iter([
             (ShardIdent::MASTERCHAIN, vec![1..=69]),
             (ShardIdent::BASECHAIN, vec![1..=49]),
         ]);

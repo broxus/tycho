@@ -27,8 +27,8 @@ use tycho_core::block_strider::{
     GcSubscriber, ManualGcTrigger, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
+use tycho_core::storage::{ArchiveId, BlockHandle, CoreStorage};
 use tycho_network::Network;
-use tycho_storage::{ArchiveId, BlockHandle, Storage};
 use tycho_util::FastHashMap;
 
 use crate::collator::Collator;
@@ -152,7 +152,7 @@ impl Drop for ControlEndpoint {
 }
 
 pub struct ControlServerBuilder<
-    MandatoryFields = (Network, Storage, GcSubscriber, BlockchainRpcClient),
+    MandatoryFields = (Network, CoreStorage, GcSubscriber, BlockchainRpcClient),
 > {
     mandatory_fields: MandatoryFields,
     memory_profiler: Option<Arc<dyn MemoryProfiler>>,
@@ -234,7 +234,10 @@ impl<T2, T3, T4> ControlServerBuilder<((), T2, T3, T4)> {
 }
 
 impl<T1, T3, T4> ControlServerBuilder<(T1, (), T3, T4)> {
-    pub fn with_storage(self, storage: Storage) -> ControlServerBuilder<(T1, Storage, T3, T4)> {
+    pub fn with_storage(
+        self,
+        storage: CoreStorage,
+    ) -> ControlServerBuilder<(T1, CoreStorage, T3, T4)> {
         let (t1, _, t3, t4) = self.mandatory_fields;
         ControlServerBuilder {
             mandatory_fields: (t1, storage, t3, t4),
@@ -757,7 +760,7 @@ struct Inner {
     node_info: proto::NodeInfo,
     config_response: ArcSwapOption<proto::BlockchainConfigResponse>,
     gc_subscriber: GcSubscriber,
-    storage: Storage,
+    storage: CoreStorage,
     blockchain_rpc_client: BlockchainRpcClient,
     manual_compaction: ManualCompaction,
     memory_profiler: Arc<dyn MemoryProfiler>,
@@ -904,7 +907,7 @@ struct ManualCompaction {
 }
 
 impl ManualCompaction {
-    pub fn new(storage: Storage) -> Self {
+    pub fn new(storage: CoreStorage) -> Self {
         let (compaction_trigger, manual_compaction_rx) =
             watch::channel(None::<proto::TriggerCompactionRequest>);
 
@@ -921,7 +924,7 @@ impl ManualCompaction {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn watcher(mut manual_rx: ManualTriggerRx, storage: Storage) {
+    async fn watcher(mut manual_rx: ManualTriggerRx, storage: CoreStorage) {
         tracing::info!("manager started");
         defer! {
             tracing::info!("manager stopped");

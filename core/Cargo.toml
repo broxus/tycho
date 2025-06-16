@@ -13,21 +13,34 @@ license.workspace = true
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
+bitflags = { workspace = true }
+bumpalo = { workspace = true }
+bumpalo-herd = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 bytesize = { workspace = true }
+crc32c = { workspace = true }
+dashmap = { workspace = true }
 everscale-types = { workspace = true, features = ["blake3", "rayon"] }
 futures-util = { workspace = true }
 humantime = { workspace = true }
 metrics = { workspace = true }
+moka = { workspace = true }
 parking_lot = { workspace = true }
+parking_lot_core = { workspace = true }
 pin-project-lite = { workspace = true }
+quick_cache = { workspace = true }
 rand = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
+sha2 = { workspace = true }
+smallvec = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["rt", "fs"] }
 tracing = { workspace = true }
+triomphe = { workspace = true }
+weedb = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }
@@ -39,6 +52,7 @@ tycho-util = { workspace = true }
 everscale-crypto = { workspace = true }
 tempfile = { workspace = true }
 tycho-block-util = { workspace = true, features = ["test"] }
+tycho-core = { workspace = true, features = ["test"] }
 tycho-network = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }

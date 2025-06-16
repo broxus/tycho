@@ -3,7 +3,8 @@ use std::fs::File;
 use anyhow::Result;
 use everscale_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
-use tycho_storage::{MappedFile, QueueStateReader, StorageContext, StoredValue};
+use tycho_core::storage::QueueStateReader;
+use tycho_storage::{MappedFile, StorageContext, StoredValue};
 use tycho_util::FastHashMap;
 
 use self::db::InternalQueueDB;

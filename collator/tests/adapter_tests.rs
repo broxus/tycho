@@ -17,7 +17,8 @@ use tycho_collator::types::BlockStuffForSync;
 use tycho_core::block_strider::{
     BlockStrider, EmptyBlockProvider, PersistentBlockStriderState, PrintSubscriber,
 };
-use tycho_storage::Storage;
+use tycho_core::storage::{CoreStorage, CoreStorageConfig};
+use tycho_storage::StorageContext;
 
 struct MockEventListener {
     accepted_count: Arc<AtomicUsize>,
@@ -36,7 +37,10 @@ impl StateNodeEventListener for MockEventListener {
 
 #[tokio::test]
 async fn test_add_and_get_block() {
-    let (mock_storage, _tmp_dir) = Storage::open_temp().await.unwrap();
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await.unwrap();
+    let mock_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato())
+        .await
+        .unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
@@ -106,7 +110,10 @@ async fn test_storage_accessors() {
 
 #[tokio::test]
 async fn test_add_and_get_next_block() {
-    let (mock_storage, _tmp_dir) = Storage::open_temp().await.unwrap();
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await.unwrap();
+    let mock_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato())
+        .await
+        .unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),

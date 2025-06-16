@@ -7,11 +7,11 @@ use everscale_crypto::ed25519;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tycho_core::blockchain_rpc::BlockchainRpcService;
+use tycho_core::storage::CoreStorage;
 use tycho_network::{
     DhtClient, DhtConfig, DhtService, Network, OverlayConfig, OverlayId, OverlayService, PeerId,
     PeerResolver, PublicOverlay, Router,
 };
-use tycho_storage::Storage;
 
 pub struct NodeBase {
     pub network: Network,
@@ -95,7 +95,7 @@ impl Node {
         &self.public_overlay
     }
 
-    fn with_random_key(storage: Storage) -> Self {
+    fn with_random_key(storage: CoreStorage) -> Self {
         let NodeBase {
             network,
             dht_service,
@@ -122,7 +122,7 @@ impl Node {
     }
 }
 
-pub fn make_network(storage: Storage, node_count: usize) -> Vec<Node> {
+pub fn make_network(storage: CoreStorage, node_count: usize) -> Vec<Node> {
     let nodes = (0..node_count)
         .map(|_| Node::with_random_key(storage.clone()))
         .collect::<Vec<_>>();
