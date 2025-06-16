@@ -13,11 +13,12 @@ use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tycho_block_util::archive::Archive;
 use tycho_block_util::block::{BlockIdRelation, BlockStuffAug};
-use tycho_storage::{MappedFile, Storage};
+use tycho_storage::MappedFile;
 
 use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive, PendingArchiveResponse};
 use crate::overlay_client::{Neighbour, PunishReason};
+use crate::storage::CoreStorage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -42,7 +43,7 @@ pub struct ArchiveBlockProvider {
 impl ArchiveBlockProvider {
     pub fn new(
         client: BlockchainRpcClient,
-        storage: Storage,
+        storage: CoreStorage,
         config: ArchiveBlockProviderConfig,
     ) -> Self {
         let proof_checker = ProofChecker::new(storage.clone());
@@ -150,7 +151,7 @@ impl ArchiveBlockProvider {
 }
 
 struct Inner {
-    storage: Storage,
+    storage: CoreStorage,
 
     client: BlockchainRpcClient,
     proof_checker: ProofChecker,
@@ -309,7 +310,7 @@ struct ArchiveInfo {
 
 struct ArchiveDownloader {
     client: BlockchainRpcClient,
-    storage: Storage,
+    storage: CoreStorage,
     memory_threshold: ByteSize,
 }
 
@@ -401,7 +402,7 @@ impl ArchiveDownloader {
 
     fn get_archive_writer(&self, pending: &PendingArchive) -> Result<ArchiveWriter> {
         Ok(if pending.size.get() > self.memory_threshold.as_u64() {
-            let file = self.storage.temp_file_storage().unnamed_file().open()?;
+            let file = self.storage.context().temp_files().unnamed_file().open()?;
             ArchiveWriter::File(std::io::BufWriter::new(file))
         } else {
             ArchiveWriter::Bytes(BytesMut::new().writer())

@@ -18,7 +18,6 @@ bumpalo = { workspace = true }
 bumpalo-herd = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
-crc32c = { workspace = true }
 dashmap = { workspace = true }
 everscale-types = { workspace = true, features = ["tycho", "stats"] }
 fdlimit = { workspace = true }

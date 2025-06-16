@@ -3,23 +3,28 @@ use bytesize::ByteSize;
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, CellBuilder, CellSlice, HashBytes, Lazy};
 use everscale_types::models::{
-    CurrencyCollection, IntMsgInfo, IntermediateAddr, Message, MsgEnvelope, MsgInfo, OutMsg,
-    OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, ShardIdent,
+    BlockId, CurrencyCollection, IntMsgInfo, IntermediateAddr, Message, MsgEnvelope, MsgInfo,
+    OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, ShardIdent,
 };
 use everscale_types::num::Tokens;
-use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
+use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueueStateHeader};
 use tycho_block_util::state::ShardStateStuff;
+use tycho_storage::{StorageConfig, StorageContext};
 use tycho_util::compression::zstd_decompress;
+use tycho_util::FastHashSet;
 
-use super::*;
-use crate::context::StorageContext;
-use crate::{NewBlockMeta, Storage, StorageConfig};
+use crate::storage::persistent_state::{
+    CacheKey, PersistentStateKind, QueueStateReader, QueueStateWriter,
+};
+use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
 
 #[tokio::test]
 async fn persistent_shard_state() -> Result<()> {
     tycho_util::test::init_logger("persistent_shard_state", "debug");
 
-    let (storage, tmp_dir) = Storage::open_temp().await?;
+    let (ctx, tmp_dir) = StorageContext::new_temp().await?;
+    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+
     assert!(storage.node_state().load_init_mc_block_id().is_none());
 
     let shard_states = storage.shard_state_storage();
@@ -159,7 +164,7 @@ async fn persistent_shard_state() -> Result<()> {
 
     // And reload it
     let ctx = StorageContext::new(StorageConfig::new_potato(tmp_dir.path())).await?;
-    let new_storage = Storage::open(ctx).await?;
+    let new_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
 
     let new_persistent_states = new_storage.persistent_state_storage();
 
@@ -193,7 +198,8 @@ async fn persistent_queue_state_read_write() -> Result<()> {
         out_msgs: OutMsgDescr,
     }
 
-    let (storage, _temp_dir) = Storage::open_temp().await?;
+    let (ctx, _temp_dir) = StorageContext::new_temp().await?;
+    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
 
     let target_mc_seqno = 10;
 

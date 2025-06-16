@@ -3,19 +3,19 @@ use everscale_types::models::BlockId;
 use futures_util::future;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
-use tycho_storage::Storage;
 
 use crate::block_strider::provider::OptionalBlockStuff;
 use crate::block_strider::BlockProvider;
+use crate::storage::CoreStorage;
 
 // TODO: Add an explicit storage provider type
 
 pub struct StorageBlockProvider {
-    storage: Storage,
+    storage: CoreStorage,
 }
 
 impl StorageBlockProvider {
-    pub fn new(storage: Storage) -> Self {
+    pub fn new(storage: CoreStorage) -> Self {
         Self { storage }
     }
 }

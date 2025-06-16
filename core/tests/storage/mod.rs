@@ -2,12 +2,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tempfile::TempDir;
-use tycho_storage::{NewBlockMeta, Storage};
+use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
+use tycho_storage::StorageContext;
 
 use crate::utils;
 
-pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
-    let (storage, tmp_dir) = Storage::open_temp().await?;
+pub(crate) async fn init_storage() -> Result<(CoreStorage, TempDir)> {
+    let (ctx, tmp_dir) = StorageContext::new_temp().await?;
+    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+
     let handles = storage.block_handle_storage();
     let blocks = storage.block_storage();
 

@@ -5,13 +5,13 @@ use everscale_types::cell::Cell;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
-use tycho_storage::{BlockHandle, Storage, StoreStateHint};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
 use crate::block_strider::{
     BlockSaver, BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
+use crate::storage::{BlockHandle, CoreStorage, StoreStateHint};
 
 #[repr(transparent)]
 pub struct ShardStateApplier<S> {
@@ -22,7 +22,7 @@ impl<S> ShardStateApplier<S>
 where
     S: StateSubscriber,
 {
-    pub fn new(storage: Storage, state_subscriber: S) -> Self {
+    pub fn new(storage: CoreStorage, state_subscriber: S) -> Self {
         Self {
             inner: Arc::new(Inner {
                 block_saver: BlockSaver::new(storage.clone()),
@@ -236,7 +236,7 @@ enum RefMcStateHandles {
 }
 
 struct Inner<S> {
-    storage: Storage,
+    storage: CoreStorage,
     state_subscriber: S,
     block_saver: BlockSaver,
 }

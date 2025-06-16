@@ -8,11 +8,11 @@ use everscale_types::boc::Boc;
 use everscale_types::models::{BlockId, OutMsgQueueUpdates, ShardStateUnsplit};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_storage::Storage;
 use tycho_util::serde_helpers;
 
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
+use crate::storage::CoreStorage;
 
 mod cold_boot;
 
@@ -27,7 +27,7 @@ pub struct StarterConfig {
 }
 
 pub struct StarterBuilder<
-    MandatoryFields = (Storage, BlockchainRpcClient, ZerostateId, StarterConfig),
+    MandatoryFields = (CoreStorage, BlockchainRpcClient, ZerostateId, StarterConfig),
 > {
     mandatory_fields: MandatoryFields,
     optional_fields: BuilderFields,
@@ -64,7 +64,7 @@ impl StarterBuilder {
 
 impl<T2, T3, T4> StarterBuilder<((), T2, T3, T4)> {
     // TODO: Use `CoreStorage`.
-    pub fn with_storage(self, storage: Storage) -> StarterBuilder<(Storage, T2, T3, T4)> {
+    pub fn with_storage(self, storage: CoreStorage) -> StarterBuilder<(CoreStorage, T2, T3, T4)> {
         let ((), client, id, config) = self.mandatory_fields;
         StarterBuilder {
             mandatory_fields: (storage, client, id, config),
@@ -163,7 +163,7 @@ pub enum ColdBootType {
 }
 
 struct StarterInner {
-    storage: Storage,
+    storage: CoreStorage,
     blockchain_rpc_client: BlockchainRpcClient,
     zerostate: ZerostateId,
     config: StarterConfig,

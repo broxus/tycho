@@ -15,6 +15,7 @@ use tokio::time::Instant;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::RefMcStateHandle;
+use tycho_storage::{FileDb, MappedFile};
 use tycho_util::sync::CancellationFlag;
 use tycho_util::FastHashSet;
 
@@ -22,9 +23,9 @@ pub use self::queue_state::reader::{QueueDiffReader, QueueStateReader};
 pub use self::queue_state::writer::QueueStateWriter;
 pub use self::shard_state::reader::{BriefBocHeader, ShardStateReader};
 pub use self::shard_state::writer::ShardStateWriter;
-use super::{KeyBlocksDirection, ShardStateStorage};
-use crate::db::{BaseDb, FileDb, MappedFile};
-use crate::store::{BlockHandle, BlockHandleStorage, BlockStorage};
+use super::{
+    BlockHandle, BlockHandleStorage, BlockStorage, CoreDb, KeyBlocksDirection, ShardStateStorage,
+};
 
 mod queue_state {
     pub mod reader;
@@ -83,7 +84,7 @@ pub struct PersistentStateStorage {
 
 impl PersistentStateStorage {
     pub fn new(
-        db: BaseDb,
+        db: CoreDb,
         files_dir: &FileDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
@@ -634,7 +635,7 @@ impl PersistentStateStorage {
 }
 
 struct Inner {
-    db: BaseDb,
+    db: CoreDb,
     storage_dir: FileDb,
     block_handles: Arc<BlockHandleStorage>,
     blocks: Arc<BlockStorage>,

@@ -10,21 +10,20 @@ use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
-use tycho_storage_traits::StoredValue;
+use tycho_storage::{StoredValue, TempFileStorage};
 use tycho_util::metrics::HistogramGuard;
 use weedb::rocksdb;
 
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
-use crate::db::*;
-use crate::store::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, TempFileStorage};
+use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CoreDb};
 
 mod cell_storage;
 mod entries_buffer;
 mod store_state_raw;
 
 pub struct ShardStateStorage {
-    db: BaseDb,
+    db: CoreDb,
 
     block_handle_storage: Arc<BlockHandleStorage>,
     block_storage: Arc<BlockStorage>,
@@ -41,7 +40,7 @@ pub struct ShardStateStorage {
 
 impl ShardStateStorage {
     pub fn new(
-        db: BaseDb,
+        db: CoreDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
         temp_file_storage: TempFileStorage,

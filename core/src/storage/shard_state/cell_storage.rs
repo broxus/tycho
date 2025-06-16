@@ -14,15 +14,16 @@ use dashmap::Map;
 use everscale_types::cell::*;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
+use tycho_storage::refcount;
 use tycho_util::metrics::{spawn_metrics_loop, HistogramGuard};
 use tycho_util::{FastDashMap, FastHashMap, FastHasherState};
 use weedb::rocksdb::WriteBatch;
 use weedb::{rocksdb, BoundedCfHandle};
 
-use crate::db::*;
+use crate::storage::CoreDb;
 
 pub struct CellStorage {
-    db: BaseDb,
+    db: CoreDb,
     cells_cache: Arc<CellsIndex>,
     raw_cells_cache: Arc<RawCellsCache>,
 }
@@ -30,7 +31,7 @@ pub struct CellStorage {
 type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
 
 impl CellStorage {
-    pub fn new(db: BaseDb, cache_size_bytes: ByteSize) -> Arc<Self> {
+    pub fn new(db: CoreDb, cache_size_bytes: ByteSize) -> Arc<Self> {
         let cells_cache = Default::default();
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
 
@@ -92,7 +93,7 @@ impl CellStorage {
 
         struct Context<'a> {
             cells_cf: BoundedCfHandle<'a>,
-            db: &'a BaseDb,
+            db: &'a CoreDb,
             buffer: Vec<u8>,
             transaction: FastHashMap<HashBytes, TempCell>,
             new_cells_batch: rocksdb::WriteBatch,
@@ -101,7 +102,7 @@ impl CellStorage {
         }
 
         impl<'a> Context<'a> {
-            fn new(db: &'a BaseDb, raw_cache: &'a RawCellsCache) -> Self {
+            fn new(db: &'a CoreDb, raw_cache: &'a RawCellsCache) -> Self {
                 Self {
                     cells_cf: db.cells.cf(),
                     db,
@@ -277,7 +278,7 @@ impl CellStorage {
         }
 
         struct StoreContext<'a> {
-            db: &'a BaseDb,
+            db: &'a CoreDb,
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
@@ -298,7 +299,7 @@ impl CellStorage {
 
         impl<'a> StoreContext<'a> {
             fn new(
-                db: &'a BaseDb,
+                db: &'a CoreDb,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
                 split_accounts: FastHashMap<HashBytes, Cell>,
@@ -534,7 +535,7 @@ impl CellStorage {
         }
 
         struct Context<'a> {
-            db: &'a BaseDb,
+            db: &'a CoreDb,
             raw_cells_cache: &'a RawCellsCache,
             alloc: &'a Bump,
             transaction: FastHashMap<&'a HashBytes, AddedCell<'a>>,
@@ -1216,7 +1217,7 @@ impl RawCellsCache {
 
     fn get_raw(
         &self,
-        db: &BaseDb,
+        db: &CoreDb,
         key: &HashBytes,
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
         use quick_cache::sync::GuardResult;
@@ -1253,7 +1254,7 @@ impl RawCellsCache {
 
     fn get_rc_for_insert(
         &self,
-        db: &BaseDb,
+        db: &CoreDb,
         key: &HashBytes,
         depth: usize,
     ) -> Result<i64, CellStorageError> {
@@ -1291,7 +1292,7 @@ impl RawCellsCache {
 
     fn get_rc_for_delete(
         &self,
-        db: &BaseDb,
+        db: &CoreDb,
         key: &HashBytes,
         refs_buffer: &mut Vec<HashBytes>,
     ) -> Result<i64, CellStorageError> {

@@ -12,7 +12,7 @@ use prepare::PrepareState;
 use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::MinRefMcStateTracker;
-use tycho_storage::{NewBlockMeta, StoreStateHint};
+use tycho_core::storage::{NewBlockMeta, StoreStateHint};
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;

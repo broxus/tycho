@@ -15,7 +15,7 @@ use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::MempoolGlobalConfig;
-use tycho_storage::ShardStateStorageError;
+use tycho_core::storage::ShardStateStorageError;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 use types::{

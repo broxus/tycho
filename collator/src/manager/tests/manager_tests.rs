@@ -19,7 +19,7 @@ use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_storage::{BlockHandle, NewBlockMeta, StoreStateHint};
+use tycho_core::storage::{BlockHandle, NewBlockMeta, StoreStateHint};
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
 use super::{BlockCacheStoreResult, BlockSeqno, CollationManager};
