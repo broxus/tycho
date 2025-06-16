@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::Bytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use humantime::format_duration;
@@ -349,6 +350,10 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         let mut anchors_cache = self.anchors_cache.write();
         anchors_cache.retain(|anchor_id, _| anchor_id >= &before_anchor_id);
         Ok(())
+    }
+
+    fn send_external(&self, _: Bytes) {
+        ()
     }
 }
 

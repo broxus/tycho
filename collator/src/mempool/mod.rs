@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::Bytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tycho_network::PeerId;
@@ -18,6 +19,7 @@ mod impls {
     #[cfg(test)]
     pub(crate) use self::stub_impl::{make_stub_anchor, make_stub_external};
 
+    mod simulator_impl;
     mod std_impl;
     mod stub_impl;
 }
@@ -80,6 +82,9 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// We can do this for anchors that processed in blocks
     /// which included in signed master - we do not need them anymore
     fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()>;
+
+    /// Push external message into Mempool
+    fn send_external(&self, message: Bytes);
 }
 
 // === Types ===

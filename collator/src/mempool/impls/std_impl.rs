@@ -250,10 +250,6 @@ impl MempoolAdapterStdImpl {
 
         Ok(session)
     }
-
-    pub fn send_external(&self, message: Bytes) {
-        self.input_buffer.push(message);
-    }
 }
 
 impl MempoolAdapterFactory for Arc<MempoolAdapterStdImpl> {
@@ -332,5 +328,9 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
         self.cache.clear(before_anchor_id);
         Ok(())
+    }
+
+    fn send_external(&self, message: Bytes) {
+        self.input_buffer.push(message);
     }
 }
