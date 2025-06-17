@@ -11,6 +11,7 @@ use tycho_block_util::block::*;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::FastHashSet;
 use weedb::rocksdb;
 
 use self::cell_storage::*;
@@ -102,7 +103,10 @@ impl ShardStateStorage {
         if handle.has_state() {
             return Ok(false);
         }
+
+        let gc_lock_store = HistogramGuard::begin("tycho_storage_cell_gc_lock_store_time_high");
         let _gc_lock = self.gc_lock.lock().await;
+        gc_lock_store.finish();
 
         // Double check if the state is already stored
         if handle.has_state() {
@@ -228,8 +232,6 @@ impl ShardStateStorage {
         let mut states_read_options = self.db.shard_states.new_read_config();
         states_read_options.set_snapshot(&snapshot);
 
-        let mut alloc = bumpalo::Bump::new();
-
         // Create iterator
         let mut iter = raw.raw_iterator_cf_opt(&shard_states_cf.bound(), states_read_options);
         iter.seek_to_first();
@@ -238,7 +240,7 @@ impl ShardStateStorage {
         let mut removed_states = 0usize;
         let mut removed_cells = 0usize;
         loop {
-            let _hist = HistogramGuard::begin("tycho_storage_state_gc_time");
+            let _hist = HistogramGuard::begin("tycho_storage_state_gc_time_high");
             let (key, value) = match iter.item() {
                 Some(item) => item,
                 None => match iter.status() {
@@ -258,29 +260,53 @@ impl ShardStateStorage {
                 continue;
             }
 
-            alloc.reset();
-
             {
+                let gc_lock_remove =
+                    HistogramGuard::begin("tycho_storage_cell_gc_lock_remove_time_high");
                 let _guard = self.gc_lock.lock().await;
+                gc_lock_remove.finish();
 
                 let db = self.db.clone();
                 let cell_storage = self.cell_storage.clone();
                 let key = key.to_vec();
+                let accounts_split_depth = self.accounts_split_depth;
 
-                let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
-                    let (stats, mut batch) = cell_storage.remove_cell(&alloc, &root_hash)?;
+                let total = tokio::task::spawn_blocking(move || {
+                    let in_mem_remove =
+                        HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
+
+                    let root_cell = Cell::from(cell_storage.load_cell(root_hash)? as Arc<_>);
+
+                    let split_accounts = {
+                        // Cell#0 - processed_upto
+                        // Cell#1 - accounts
+                        let shard_accounts = root_cell
+                            .reference_cloned(1)
+                            .context("invalid shard state")?
+                            .parse::<ShardAccounts>()
+                            .context("failed to load shard accounts")?;
+
+                        split_aug_dict_raw(shard_accounts, accounts_split_depth)
+                            .context("failed to split shard accounts")?
+                            .into_keys()
+                            .collect::<FastHashSet<HashBytes>>()
+                    };
+
+                    let (stats, mut batch) =
+                        cell_storage.remove_cell_mt(&root_hash, split_accounts)?;
+
+                    in_mem_remove.finish();
 
                     batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
                     db.raw()
                         .rocksdb()
                         .write_opt(batch, db.cells.write_config())?;
 
-                    Ok::<_, anyhow::Error>((stats, alloc))
+                    Ok::<_, anyhow::Error>(stats)
                 })
                 .await??;
 
                 removed_cells += total;
-                alloc = inner_alloc; // Reuse allocation without passing alloc by ref
 
                 tracing::debug!(removed_cells = total, %block_id);
             }
