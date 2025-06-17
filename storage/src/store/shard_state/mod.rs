@@ -102,7 +102,10 @@ impl ShardStateStorage {
         if handle.has_state() {
             return Ok(false);
         }
+
+        let gc_lock_store = HistogramGuard::begin("tycho_storage_cell_gc_lock_store_time_high");
         let _gc_lock = self.gc_lock.lock().await;
+        gc_lock_store.finish();
 
         // Double check if the state is already stored
         if handle.has_state() {
@@ -261,7 +264,10 @@ impl ShardStateStorage {
             alloc.reset();
 
             {
+                let gc_lock_remove =
+                    HistogramGuard::begin("tycho_storage_cell_gc_lock_remove_time_high");
                 let _guard = self.gc_lock.lock().await;
+                gc_lock_remove.finish();
 
                 let db = self.db.clone();
                 let cell_storage = self.cell_storage.clone();

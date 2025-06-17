@@ -848,6 +848,9 @@ def storage() -> RowPanel:
             "tycho_storage_cell_in_mem_store_time_high", "Time to store cell without write"
         ),
         create_heatmap_panel(
+            "tycho_storage_cell_gc_lock_store_time_high", "Time to wait gc mutex during store"
+        ),
+        create_heatmap_panel(
             "tycho_storage_batch_write_time", "Time to write merge in write batch"
         ),
         create_heatmap_quantile_panel(
@@ -912,6 +915,9 @@ def storage() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_storage_state_gc_time", "time spent to gc single root"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_cell_gc_lock_remove_time_high", "Time to wait gc mutex during remove"
         ),
         create_heatmap_panel(
             "tycho_storage_load_block_data_time", "Time to load block data"
