@@ -53,7 +53,7 @@ impl Phase<PrepareState> {
 
         // init executor
         let preloaded_bc_config = Arc::new(ParsedConfig::parse(
-            self.state.mc_data_stuff.current.config.clone(),
+            self.state.mc_data.config.clone(),
             self.state.collation_data.gen_utime,
         )?);
         let capabilities = preloaded_bc_config.global.capabilities;
@@ -62,7 +62,7 @@ impl Phase<PrepareState> {
             self.state.collation_data.next_lt,
             preloaded_bc_config,
             Arc::new(ExecutorParams {
-                libraries: self.state.mc_data_stuff.current.libraries.clone(),
+                libraries: self.state.mc_data.libraries.clone(),
                 // generated unix time
                 block_unixtime: self.state.collation_data.gen_utime,
                 // block's start logical time
@@ -76,7 +76,7 @@ impl Phase<PrepareState> {
                 vm_modifiers: tycho_vm::BehaviourModifiers {
                     signature_with_id: capabilities
                         .contains(GlobalCapability::CapSignatureWithId)
-                        .then_some(self.state.mc_data_stuff.current.global_id),
+                        .then_some(self.state.mc_data.global_id),
                     ..Default::default()
                 },
             }),
@@ -98,8 +98,7 @@ impl Phase<PrepareState> {
                 .collect()
         } else {
             self.state
-                .mc_data_stuff
-                .current
+                .mc_data
                 .shards
                 .iter()
                 .map(|(k, v)| (*k, v.end_lt))
@@ -113,15 +112,14 @@ impl Phase<PrepareState> {
                 .get_updated_processed_upto()
                 .get_internals_processed_to_by_partitions(),
             self.state
-                .mc_data_stuff
-                .current
+                .mc_data
                 .processed_upto
                 .get_internals_processed_to_by_partitions(),
             self.state
                 .collation_data
                 .mc_shards_processed_to_by_partitions
                 .clone(),
-            &self.state.mc_data_stuff.current.shards,
+            &self.state.mc_data.shards,
         );
 
         let msgs_exec_params = MsgsExecutionParamsStuff::create(
@@ -140,7 +138,7 @@ impl Phase<PrepareState> {
                 block_seqno: self.state.collation_data.block_id_short.seqno,
                 next_chain_time: self.state.collation_data.get_gen_chain_time(),
                 msgs_exec_params,
-                mc_state_gen_lt: self.state.mc_data_stuff.current.gen_lt,
+                mc_state_gen_lt: self.state.mc_data.gen_lt,
                 prev_state_gen_lt: self.state.prev_shard_data.gen_lt(),
                 mc_top_shards_end_lts,
                 cumulative_stats_calc_params: Some(CumulativeStatsCalcParams {

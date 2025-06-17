@@ -5,7 +5,7 @@ use tycho_util::sync::CancellationFlag;
 
 use super::{BlockCollationData, PrevData};
 use crate::internal_queue::types::QueueShardBoundedRange;
-use crate::types::McDataStuff;
+use crate::types::McData;
 
 pub struct Phase<S: PhaseState> {
     pub state: Box<ActualState>,
@@ -17,7 +17,7 @@ pub trait PhaseState {}
 pub struct ActualState {
     pub collation_config: Arc<CollationConfig>,
     pub collation_data: Box<BlockCollationData>,
-    pub mc_data_stuff: McDataStuff,
+    pub mc_data: Arc<McData>,
     pub prev_shard_data: PrevData,
     pub shard_id: ShardIdent,
     /// For graceful collation cancellation

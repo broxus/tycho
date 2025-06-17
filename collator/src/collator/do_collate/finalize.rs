@@ -35,7 +35,7 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use crate::types::{
-    BlockCandidate, CollationSessionInfo, CollatorConfig, McData, McDataStuff,
+    BlockCandidate, CollationSessionInfo, CollatorConfig, McData, PrevMcData,
     ShardDescriptionShortExt, ShardHashesExt,
 };
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -92,8 +92,7 @@ impl Phase<FinalizeState> {
             } else {
                 let mut top_other_updated_shard_blocks_ids: Vec<BlockId> = self
                     .state
-                    .mc_data_stuff
-                    .current
+                    .mc_data
                     .shards
                     .iter()
                     .filter(|(shard, descr)| {
@@ -102,7 +101,7 @@ impl Phase<FinalizeState> {
                     .map(|(shard_ident, descr)| descr.get_block_id(*shard_ident))
                     .collect();
 
-                top_other_updated_shard_blocks_ids.push(self.state.mc_data_stuff.current.block_id);
+                top_other_updated_shard_blocks_ids.push(self.state.mc_data.block_id);
 
                 top_other_updated_shard_blocks_ids
             };
@@ -289,7 +288,7 @@ impl Phase<FinalizeState> {
         let mut public_libraries = executor.executor_params().libraries.clone();
 
         let is_masterchain = shard.is_masterchain();
-        let config_address = &self.state.mc_data_stuff.current.config.address;
+        let config_address = &self.state.mc_data.config.address;
 
         // Compute a masterchain block seqno which will reference this block.
         let ref_by_mc_seqno = if is_masterchain {
@@ -297,7 +296,7 @@ impl Phase<FinalizeState> {
             collation_data.block_id_short.seqno
         } else {
             // And the next masterchain block for shards
-            self.state.mc_data_stuff.current.block_id.seqno + 1
+            self.state.mc_data.block_id.seqno + 1
         };
 
         let mut processed_accounts_res = Ok(Default::default());
@@ -359,7 +358,7 @@ impl Phase<FinalizeState> {
             &processed_accounts.shard_accounts,
             &in_msgs,
             &out_msgs,
-            &self.state.mc_data_stuff.current.config,
+            &self.state.mc_data.config,
         )?;
 
         // Validate value flow with simple rules.
@@ -367,7 +366,7 @@ impl Phase<FinalizeState> {
             Self::check_value_flow(
                 &value_flow,
                 &self.state.collation_data,
-                &self.state.mc_data_stuff.current.config,
+                &self.state.mc_data.config,
                 &self.state.prev_shard_data,
                 &in_msgs,
                 &out_msgs,
@@ -414,10 +413,7 @@ impl Phase<FinalizeState> {
             (Some(extra), None)
         } else {
             build_mc_state_extra_elapsed = Duration::ZERO;
-            (
-                None,
-                Some(self.state.mc_data_stuff.current.make_block_ref()),
-            )
+            (None, Some(self.state.mc_data.make_block_ref()))
         };
 
         // HACK: make every 3-d block incorrect on debug if env variable defined
@@ -443,7 +439,7 @@ impl Phase<FinalizeState> {
             gen_validator_list_hash_short: collation_session.collators().short_hash,
             gen_catchain_seqno: collation_session.seqno(),
             min_ref_mc_seqno: self.state.collation_data.min_ref_mc_seqno,
-            prev_key_block_seqno: self.state.mc_data_stuff.current.prev_key_block_seqno,
+            prev_key_block_seqno: self.state.mc_data.prev_key_block_seqno,
             master_ref: master_ref.as_ref().map(Lazy::new).transpose()?,
             ..Default::default()
         };
@@ -457,12 +453,7 @@ impl Phase<FinalizeState> {
         // info.want_split = false;
         // info.want_merge = false;
 
-        let bc_global_version = self
-            .state
-            .mc_data_stuff
-            .current
-            .config
-            .get_global_version()?;
+        let bc_global_version = self.state.mc_data.config.get_global_version()?;
         if bc_global_version
             .capabilities
             .contains(GlobalCapability::CapReportVersion)
@@ -510,8 +501,7 @@ impl Phase<FinalizeState> {
             // because mempool will not produce more anchors
             let max_consensus_lag_rounds = self
                 .state
-                .mc_data_stuff
-                .current
+                .mc_data
                 .config
                 .get_consensus_config()?
                 .max_consensus_lag_rounds as u64;
@@ -536,7 +526,7 @@ impl Phase<FinalizeState> {
 
             // build new state
             let mut new_observable_state = Box::new(ShardStateUnsplit {
-                global_id: self.state.mc_data_stuff.current.global_id,
+                global_id: self.state.mc_data.global_id,
                 shard_ident: new_block_info.shard,
                 seqno: new_block_info.seqno,
                 vert_seqno: 0,
@@ -640,7 +630,7 @@ impl Phase<FinalizeState> {
 
             // construct block
             let block = Block {
-                global_id: self.state.mc_data_stuff.current.global_id,
+                global_id: self.state.mc_data.global_id,
                 info: Lazy::new(&new_block_info)?,
                 value_flow: Lazy::new(&value_flow)?,
                 state_update: Lazy::new(&state_update)?,
@@ -713,7 +703,7 @@ impl Phase<FinalizeState> {
 
         let processed_to_anchor_id = processed_upto.get_min_externals_processed_to()?.0;
 
-        let mc_data_stuff = match mc_state_extra {
+        let new_mc_data = match mc_state_extra {
             None => None,
             Some(extra) => {
                 let prev_key_block_seqno = if extra.after_key_block {
@@ -731,7 +721,7 @@ impl Phase<FinalizeState> {
                     processed_to_anchor_id,
                 );
 
-                let current_mc_data = Arc::new(McData {
+                Some(Arc::new(McData {
                     global_id: new_block.as_ref().global_id,
                     block_id: *new_block.id(),
 
@@ -755,15 +745,10 @@ impl Phase<FinalizeState> {
                         .collation_data
                         .mc_shards_processed_to_by_partitions
                         .clone(),
-                    prev_mc_block_id: Some(self.state.mc_data_stuff.current.block_id),
-                });
-
-                let mc_data_stuff = McDataStuff {
-                    current: current_mc_data,
-                    previous: Some(self.state.mc_data_stuff.current.clone()),
-                };
-
-                Some(mc_data_stuff)
+                    prev_mc_data: Some(PrevMcData {
+                        shards: self.state.mc_data.shards.clone(),
+                    }),
+                }))
             }
         };
 
@@ -790,9 +775,9 @@ impl Phase<FinalizeState> {
             value_flow,
             created_by: self.state.collation_data.created_by,
             queue_diff_aug: queue_diff.build(&new_block_id),
-            consensus_info: mc_data_stuff.as_ref().map_or_else(
-                || self.state.mc_data_stuff.current.consensus_info,
-                |mcd| mcd.current.consensus_info,
+            consensus_info: new_mc_data.as_ref().map_or_else(
+                || self.state.mc_data.consensus_info,
+                |mcd| mcd.consensus_info,
             ),
             processed_upto,
         });
@@ -816,11 +801,11 @@ impl Phase<FinalizeState> {
             FinalizeBlockResult {
                 collation_data: self.state.collation_data,
                 block_candidate,
-                mc_data_stuff,
-                old_mc_data_stuff: self.state.mc_data_stuff,
+                mc_data: new_mc_data,
                 new_state_root,
                 new_observable_state,
                 finalize_wu_total,
+                old_mc_data: self.state.mc_data,
                 collation_config: self.state.collation_config,
             },
             self.extra.execute_result,
