@@ -10,56 +10,36 @@ license.workspace = true
 
 [dependencies]
 # crates.io deps
-ahash = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
-bitflags = { workspace = true }
-bumpalo = { workspace = true }
-bumpalo-herd = { workspace = true }
-bytes = { workspace = true }
 bytesize = { workspace = true }
-dashmap = { workspace = true }
-everscale-types = { workspace = true, features = ["tycho", "stats"] }
 fdlimit = { workspace = true }
-humantime = { workspace = true }
 libc = { workspace = true }
 metrics = { workspace = true }
-moka = { workspace = true }
-parking_lot = { workspace = true }
-parking_lot_core = { workspace = true }
-quick_cache = { workspace = true }
 rand = { workspace = true }
 rlimit = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
-sha2 = { workspace = true }
-smallvec = { workspace = true }
 sysinfo = { workspace = true }
 tempfile = { workspace = true }
-thiserror = { workspace = true }
-tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["rt", "fs", "io-util"] }
 tracing = { workspace = true }
-triomphe = { workspace = true }
 weedb = { workspace = true }
 
 # local deps
-tycho-block-util = { workspace = true }
 tycho-storage-traits = { workspace = true }
 tycho-util = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 bytesize = { workspace = true }
-futures-util = { workspace = true }
 rand = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 
-tycho-block-util = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
 
 [features]
-test = ["tycho-block-util/test"]
+test = []
 
 [lints]
 workspace = true

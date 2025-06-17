@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tycho_storage::StoredValue;
+use tycho_storage::kv::StoredValue;
 use weedb::OwnedRawIterator;
 
 use super::models::{InternalQueueMessage, ShardsInternalMessagesKey};

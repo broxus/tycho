@@ -4,7 +4,9 @@ use anyhow::Result;
 use everscale_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
 use tycho_core::storage::QueueStateReader;
-use tycho_storage::{MappedFile, StorageContext, StoredValue};
+use tycho_storage::fs::MappedFile;
+use tycho_storage::kv::StoredValue;
+use tycho_storage::StorageContext;
 use tycho_util::FastHashMap;
 
 use self::db::InternalQueueDB;

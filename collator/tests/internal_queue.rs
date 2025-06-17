@@ -1795,7 +1795,7 @@ async fn prepare_data_from_prepared_persistent_state(
     let block_id = BlockId::from_str(block_id_str)?;
 
     let full_path = std::path::Path::new(file_path);
-    let db = tycho_storage::FileDb::new_readonly(full_path.parent().unwrap());
+    let db = tycho_storage::fs::Dir::new_readonly(full_path.parent().unwrap());
     let file = db.file(full_path.file_name().unwrap()).read(true).open()?;
 
     storage

@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use everscale_types::models::*;
 use parking_lot::Mutex;
-use tycho_storage::util::InstanceId;
+use tycho_storage::kv::InstanceId;
 
 use super::util::{read_block_id_le, write_block_id_le};
 use super::CoreDb;

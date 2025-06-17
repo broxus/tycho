@@ -1,22 +1,12 @@
-use tycho_storage::{Migrations, WithMigrations};
-use tycho_util::sync::CancellationFlag;
-use weedb::{Caches, MigrationError, Semver, WeeDb};
+use tycho_storage::kv::NamedTables;
+use weedb::{Caches, WeeDb};
 
 use super::tables;
 
 pub type MempoolDb = WeeDb<MempoolTables>;
 
-impl WithMigrations for MempoolTables {
+impl NamedTables for MempoolTables {
     const NAME: &'static str = "mempool";
-    const VERSION: Semver = [0, 0, 1];
-
-    fn register_migrations(
-        _migrations: &mut Migrations<Self>,
-        _cancelled: CancellationFlag,
-    ) -> Result<(), MigrationError> {
-        // TODO: register migrations here
-        Ok(())
-    }
 }
 
 weedb::tables! {

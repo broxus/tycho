@@ -1,33 +1,11 @@
 use bytesize::ByteSize;
 use weedb::rocksdb::{BlockBasedOptions, DBCompressionType, DataBlockIndexType, Options};
-use weedb::{Caches, ColumnFamily, ColumnFamilyOptions};
+use weedb::Caches;
 
-// took from
-// https://github.com/tikv/tikv/blob/d60c7fb6f3657dc5f3c83b0e3fc6ac75636e1a48/src/config/mod.rs#L170
-// todo: need to benchmark and update if it's not optimal
+/// took from
+/// <https://github.com/tikv/tikv/blob/d60c7fb6f3657dc5f3c83b0e3fc6ac75636e1a48/src/config/mod.rs#L170>
+/// todo: need to benchmark and update if it's not optimal
 pub const DEFAULT_MIN_BLOB_SIZE: u64 = bytesize::KIB * 32;
-
-/// Stores generic node parameters
-/// - Key: `...`
-/// - Value: `...`
-pub struct State;
-
-impl ColumnFamily for State {
-    const NAME: &'static str = "state";
-}
-
-impl ColumnFamilyOptions<Caches> for State {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
-
-        opts.set_optimize_filters_for_hits(true);
-        optimize_for_point_lookup(opts, caches);
-    }
-}
-
-// === Base tables ===
-
-// === Helpers ===
 
 pub fn default_block_based_table_factory(opts: &mut Options, caches: &Caches) {
     opts.set_level_compaction_dynamic_level_bytes(true);
@@ -37,7 +15,7 @@ pub fn default_block_based_table_factory(opts: &mut Options, caches: &Caches) {
     opts.set_block_based_table_factory(&block_factory);
 }
 
-// setting our shared cache instead of individual caches for each cf
+/// Set our shared cache instead of individual caches for each cf.
 pub fn optimize_for_point_lookup(opts: &mut Options, caches: &Caches) {
     //     https://github.com/facebook/rocksdb/blob/81aeb15988e43c49952c795e32e5c8b224793589/options/options.cc
     //     BlockBasedTableOptions block_based_options;

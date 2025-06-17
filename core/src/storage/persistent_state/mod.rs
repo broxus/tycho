@@ -15,7 +15,7 @@ use tokio::time::Instant;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::RefMcStateHandle;
-use tycho_storage::{FileDb, MappedFile};
+use tycho_storage::fs::{Dir, MappedFile};
 use tycho_util::sync::CancellationFlag;
 use tycho_util::FastHashSet;
 
@@ -85,7 +85,7 @@ pub struct PersistentStateStorage {
 impl PersistentStateStorage {
     pub fn new(
         db: CoreDb,
-        files_dir: &FileDb,
+        files_dir: &Dir,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
         shard_state_storage: Arc<ShardStateStorage>,
@@ -636,7 +636,7 @@ impl PersistentStateStorage {
 
 struct Inner {
     db: CoreDb,
-    storage_dir: FileDb,
+    storage_dir: Dir,
     block_handles: Arc<BlockHandleStorage>,
     blocks: Arc<BlockStorage>,
     shard_states: Arc<ShardStateStorage>,
@@ -649,7 +649,7 @@ struct Inner {
 }
 
 impl Inner {
-    fn prepare_persistent_states_dir(&self, mc_seqno: u32) -> Result<FileDb> {
+    fn prepare_persistent_states_dir(&self, mc_seqno: u32) -> Result<Dir> {
         let states_dir = self.mc_states_dir(mc_seqno);
         if !states_dir.path().is_dir() {
             tracing::info!(mc_seqno, "creating persistent state directory");
@@ -658,8 +658,8 @@ impl Inner {
         Ok(states_dir)
     }
 
-    fn mc_states_dir(&self, mc_seqno: u32) -> FileDb {
-        FileDb::new_readonly(self.storage_dir.path().join(mc_seqno.to_string()))
+    fn mc_states_dir(&self, mc_seqno: u32) -> Dir {
+        Dir::new_readonly(self.storage_dir.path().join(mc_seqno.to_string()))
     }
 
     fn clear_outdated_state_entries(&self, recent_block_id: &BlockId) -> Result<()> {

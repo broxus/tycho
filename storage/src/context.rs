@@ -12,8 +12,8 @@ use tycho_util::FastHashMap;
 use weedb::{rocksdb, WeakWeeDbRaw};
 
 use crate::config::StorageConfig;
-use crate::db::{FileDb, WeeDbExt, WithMigrations};
-use crate::store::TempFileStorage;
+use crate::fs::{Dir, TempFileStorage};
+use crate::kv::{NamedTables, WeeDbExt};
 
 const FILES_SUBDIR: &str = "files";
 
@@ -36,7 +36,7 @@ impl StorageContext {
     }
 
     pub async fn new(config: StorageConfig) -> Result<Self> {
-        let root_dir = FileDb::new(&config.root_dir)?;
+        let root_dir = Dir::new(&config.root_dir)?;
         let files_dir = root_dir.create_subdir(FILES_SUBDIR)?;
 
         let temp_files =
@@ -111,11 +111,11 @@ impl StorageContext {
         &self.inner.config
     }
 
-    pub fn root_dir(&self) -> &FileDb {
+    pub fn root_dir(&self) -> &Dir {
         &self.inner.root_dir
     }
 
-    pub fn files_dir(&self) -> &FileDb {
+    pub fn files_dir(&self) -> &Dir {
         &self.inner.files_dir
     }
 
@@ -176,7 +176,7 @@ impl StorageContext {
     pub fn open_preconfigured<P, T>(&self, subdir: P) -> Result<weedb::WeeDb<T>>
     where
         P: AsRef<Path>,
-        T: WithMigrations<Context = weedb::Caches> + 'static,
+        T: NamedTables<Context = weedb::Caches> + 'static,
     {
         let subdir = subdir.as_ref();
         tracing::debug!(subdir = %subdir.display(), "opening RocksDB instance");
@@ -240,8 +240,8 @@ impl StorageContext {
 
 struct StorageContextInner {
     config: StorageConfig,
-    root_dir: FileDb,
-    files_dir: FileDb,
+    root_dir: Dir,
+    files_dir: Dir,
     temp_files: TempFileStorage,
     threads: usize,
     fdlimit: u64,

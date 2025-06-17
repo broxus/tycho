@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use anyhow::{ensure, Result};
 use everscale_types::models::{BlockId, IntAddr, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
-use tycho_storage::StoredValue;
+use tycho_storage::kv::StoredValue;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::WriteBatch;
 use weedb::{rocksdb, BoundedCfHandle, ColumnFamily, OwnedSnapshot, Table};

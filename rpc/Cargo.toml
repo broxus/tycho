@@ -22,14 +22,12 @@ futures-util = { workspace = true }
 humantime = { workspace = true }
 metrics = { workspace = true }
 moka = { workspace = true }
-num-bigint = { workspace = true }
 parking_lot = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 tower = { workspace = true }
@@ -45,7 +43,6 @@ tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tycho-network = { workspace = true }
 tycho-util = { workspace = true, features = ["test"] }
 
