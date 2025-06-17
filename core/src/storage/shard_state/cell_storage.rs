@@ -16,7 +16,7 @@ use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
 use tycho_storage::kv::refcount;
 use tycho_util::metrics::{spawn_metrics_loop, HistogramGuard};
-use tycho_util::{FastDashMap, FastHashMap, FastHasherState};
+use tycho_util::{FastDashMap, FastHashMap, FastHashSet, FastHasherState};
 use weedb::rocksdb::WriteBatch;
 use weedb::{rocksdb, BoundedCfHandle};
 
@@ -343,32 +343,29 @@ impl CellStorage {
                     };
 
                     for child in &mut *iter {
-                        // NOTE: The scope is used to reduce function frame size.
-                        {
-                            // Skip cell to store it later in parallel
-                            let child_hash = child.repr_hash();
-                            if self.split_at.contains_key(child_hash) {
-                                let mut delayed_additions = self.delayed_additions.lock().unwrap();
-                                match delayed_additions.entry(*child_hash) {
-                                    hash_map::Entry::Vacant(entry) => {
-                                        // This subtree will be added by another thread,
-                                        // so no additions is needed on first occurence.
-                                        entry.insert(0);
-                                        drop(delayed_additions);
+                        // Skip cell to store it later in parallel
+                        let child_hash = child.repr_hash();
+                        if self.split_at.contains_key(child_hash) {
+                            let mut delayed_additions = self.delayed_additions.lock().unwrap();
+                            match delayed_additions.entry(*child_hash) {
+                                hash_map::Entry::Vacant(entry) => {
+                                    // This subtree will be added by another thread,
+                                    // so no additions is needed on first occurence.
+                                    entry.insert(0);
+                                    drop(delayed_additions);
 
-                                        // Spawn processing.
-                                        // TODO: Handle error properly.
-                                        scope.spawn(|| self.traverse_cell(child, scope).unwrap());
-                                    }
-                                    hash_map::Entry::Occupied(mut entry) => {
-                                        // Other thread will add this subtree only once,
-                                        // so we need to adjust references to keep them in sync.
-                                        *entry.get_mut() += 1;
-                                    }
+                                    // Spawn processing.
+                                    // TODO: Handle error properly.
+                                    scope.spawn(|| self.traverse_cell(child, scope).unwrap());
                                 }
-
-                                continue 'outer;
+                                hash_map::Entry::Occupied(mut entry) => {
+                                    // Other thread will add this subtree only once,
+                                    // so we need to adjust references to keep them in sync.
+                                    *entry.get_mut() += 1;
+                                }
                             }
+
+                            continue 'outer;
                         }
 
                         if self.insert_cell(child, &mut alloc, depth)? {
@@ -521,7 +518,6 @@ impl CellStorage {
         Ok(ctx.finalize(batch))
     }
 
-    #[allow(unused)]
     pub fn store_cell(
         &self,
         batch: &mut WriteBatch,
@@ -637,7 +633,6 @@ impl CellStorage {
             }
         }
 
-        // Write transaction to the `WriteBatch`
         Ok(ctx.finalize(batch))
     }
 
@@ -673,37 +668,254 @@ impl CellStorage {
         Ok(cell)
     }
 
+    pub fn remove_cell_mt(
+        &self,
+        herd: &Herd,
+        root: &HashBytes,
+        split_at: FastHashSet<HashBytes>,
+    ) -> Result<(usize, WriteBatch), CellStorageError> {
+        type RemoveResult = Result<(), CellStorageError>;
+
+        struct Alloc<'a> {
+            bump: Member<'a>,
+            buffer: Vec<HashBytes>,
+        }
+
+        struct RemoveContext<'a> {
+            db: &'a CoreDb,
+            herd: &'a Herd,
+            raw_cache: &'a RawCellsCache,
+            /// Subtrees to process in parallel.
+            split_at: FastHashSet<HashBytes>,
+            // TODO: Use `&'a HashBytes` for key?
+            // Pros:
+            //   - Less `memcpy` calls;
+            //   - Less memory occupied (8 bytes per key vs 32 bytes);
+            // Cons:
+            //   - This reference is stored alongside with cell so
+            //     key locations will be very random and iteration
+            //     will be slower than it is with inplace keys.
+            /// Transaction items.
+            transaction: FastDashMap<HashBytes, RemovedCell<'a>>,
+            /// References of detached subtrees.
+            delayed_removes: std::sync::Mutex<FastHashMap<HashBytes, u32>>,
+        }
+
+        impl<'a> RemoveContext<'a> {
+            fn new(
+                db: &'a CoreDb,
+                herd: &'a Herd,
+                raw_cache: &'a RawCellsCache,
+                split_at: FastHashSet<HashBytes>,
+            ) -> Self {
+                Self {
+                    db,
+                    raw_cache,
+                    herd,
+                    split_at,
+                    transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
+                        128,
+                        Default::default(),
+                        512,
+                    ),
+                    delayed_removes: Default::default(),
+                }
+            }
+
+            fn traverse_cell<'c: 'scope, 'scope, 'env>(
+                &'c self,
+                hash: &'c HashBytes,
+                scope: &'scope Scope<'scope, 'env>,
+            ) -> RemoveResult {
+                let mut alloc = Alloc {
+                    bump: self.herd.get(),
+                    buffer: Vec::with_capacity(4),
+                };
+
+                let Some(refs) = self.remove_cell(hash, &mut alloc)? else {
+                    return Ok(());
+                };
+
+                let mut stack = Vec::with_capacity(16);
+                stack.push(refs.iter());
+
+                // While some cells left
+                'outer: loop {
+                    let Some(iter) = stack.last_mut() else {
+                        break;
+                    };
+
+                    for child_hash in iter.by_ref() {
+                        // Skip cell to remove it later in parallel
+                        if self.split_at.contains(child_hash) {
+                            let mut delayed_removes = self.delayed_removes.lock().unwrap();
+                            match delayed_removes.entry(*child_hash) {
+                                hash_map::Entry::Vacant(entry) => {
+                                    // This subtree will be removed by another thread,
+                                    // so no removes is needed on first occurrence.
+                                    entry.insert(0);
+                                    drop(delayed_removes);
+
+                                    // Spawn processing.
+                                    // TODO: Handle error properly.
+                                    scope.spawn(|| {
+                                        self.traverse_cell(child_hash, scope).unwrap();
+                                    });
+                                }
+                                hash_map::Entry::Occupied(mut entry) => {
+                                    // Other thread will remove this subtree only once,
+                                    // so we need to adjust references to keep them in sync.
+                                    *entry.get_mut() += 1;
+                                }
+                            }
+
+                            continue 'outer;
+                        }
+
+                        // Process the current cell.
+                        let refs = self.remove_cell(child_hash, &mut alloc)?;
+
+                        if let Some(refs) = refs {
+                            // And proceed to its refs if any.
+                            stack.push(refs.iter());
+                            continue 'outer;
+                        }
+                    }
+
+                    stack.pop();
+                }
+
+                Ok(())
+            }
+
+            fn remove_cell(
+                &self,
+                repr_hash: &HashBytes,
+                alloc: &mut Alloc<'a>,
+            ) -> Result<Option<&'a [HashBytes]>, CellStorageError> {
+                use dashmap::mapref::entry::Entry;
+
+                // Fast path: cell is already presented in this transaction, just update refs.
+                if let Some(mut value) = self.transaction.get_mut(repr_hash) {
+                    return value.remove();
+                }
+
+                // Slow path: find an existing stored cell data.
+                // NOTE: We dropped a dashmap lock on purpose so that parallel
+                // threads can do this job without blocking each other on the
+                // same shard (going to rocksdb might be slow).
+
+                let buffer = &mut alloc.buffer;
+                let old_rc = self
+                    .raw_cache
+                    .get_rc_for_delete(self.db, repr_hash, buffer)?;
+                debug_assert!(old_rc > 0);
+
+                // Try to remove once more.
+                match self.transaction.entry(*repr_hash) {
+                    // Some other thread has already removed this cell.
+                    // In this case we just used the existing entry state.
+                    Entry::Occupied(mut value) => value.get_mut().remove(),
+                    Entry::Vacant(v) => Ok(v
+                        .insert(RemovedCell {
+                            old_rc,
+                            removes: 1,
+                            refs: alloc.bump.alloc_slice_copy(buffer.as_slice()),
+                        })
+                        .next_refs()),
+                }
+            }
+
+            fn finalize(self, batch: &mut WriteBatch) -> usize {
+                let _hist = HistogramGuard::begin("tycho_storage_batch_write_parallel_time_high");
+
+                // Write transaction to the `WriteBatch`
+                std::thread::scope(|s| {
+                    // Apply delayed removes before finalizing the transaction.
+                    for (hash, removes) in self.delayed_removes.into_inner().unwrap() {
+                        if removes > 0 {
+                            if let Some(mut item) = self.transaction.get_mut(&hash) {
+                                item.removes += removes;
+                            } else {
+                                panic!("spawned subtree was not processed");
+                            }
+                        }
+                    }
+
+                    // Split shards evenly between N threads and apply changes to cache.
+                    let num_shards = self.transaction._shard_count();
+                    let num_threads = std::thread::available_parallelism()
+                        .map_or(1, usize::from)
+                        .min(num_shards);
+
+                    let chunk_size = num_shards / num_threads;
+                    assert!(chunk_size >= 1);
+                    let mut additional = num_shards % num_threads;
+
+                    let mut range_start = 0;
+                    for _ in 0..num_threads {
+                        let mut range_end = range_start + chunk_size;
+                        if additional > 0 {
+                            additional -= 1;
+                            range_end += 1;
+                        }
+                        assert!(range_end > range_start);
+
+                        // SAFETY: Index must be in bounds.
+                        let shards = unsafe {
+                            (range_start..range_end).map(|i| self.transaction._get_read_shard(i))
+                        };
+                        range_start = range_end;
+
+                        let cache = self.raw_cache;
+                        s.spawn(move || {
+                            for shard in shards {
+                                for (key, value) in shard {
+                                    let item = value.get();
+
+                                    let new_rc = item.old_rc - item.removes as i64;
+                                    cache.on_remove_cell(key, new_rc);
+                                }
+                            }
+                        });
+                    }
+                    assert_eq!(range_start, num_shards);
+
+                    // Merge transaction items into the final batch.
+                    let total = self.transaction.len();
+                    let cells_cf = &self.db.cells.cf();
+                    for kv in self.transaction.iter() {
+                        let key = kv.key();
+                        let item = kv.value();
+
+                        batch.merge_cf(
+                            cells_cf,
+                            key.as_slice(),
+                            refcount::encode_negative_refcount(item.removes),
+                        );
+                    }
+                    total
+                })
+            }
+        }
+
+        let ctx = RemoveContext::new(&self.db, herd, &self.raw_cells_cache, split_at);
+
+        std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
+
+        // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
+        //       and a bit more just in case.
+        let total = ctx.transaction.len();
+        let mut batch = WriteBatch::with_capacity_bytes(total * (32 + 8 + 8));
+
+        Ok((ctx.finalize(&mut batch), batch))
+    }
+
     pub fn remove_cell(
         &self,
         alloc: &Bump,
         hash: &HashBytes,
     ) -> Result<(usize, WriteBatch), CellStorageError> {
-        #[derive(Clone, Copy)]
-        struct RemovedCell<'a> {
-            old_rc: i64,
-            removes: u32,
-            refs: &'a [HashBytes],
-        }
-
-        impl<'a> RemovedCell<'a> {
-            fn remove(&mut self) -> Result<Option<&'a [HashBytes]>, CellStorageError> {
-                self.removes += 1;
-                if self.removes as i64 <= self.old_rc {
-                    Ok(self.next_refs())
-                } else {
-                    Err(CellStorageError::CounterMismatch)
-                }
-            }
-
-            fn next_refs(&self) -> Option<&'a [HashBytes]> {
-                if self.old_rc > self.removes as i64 {
-                    None
-                } else {
-                    Some(self.refs)
-                }
-            }
-        }
-
         let cells = &self.db.cells;
         let cells_cf = &cells.cf();
 
@@ -756,7 +968,7 @@ impl CellStorage {
         drop(stack);
 
         // Write transaction to the `WriteBatch`
-        let _hist = HistogramGuard::begin("tycho_storage_batch_write_time");
+        let _hist = HistogramGuard::begin("tycho_storage_batch_write_time_high");
         let total = transaction.len();
 
         // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
@@ -780,6 +992,31 @@ impl CellStorage {
     pub fn drop_cell(&self, hash: &HashBytes) {
         if self.cells_cache.remove(hash).is_some() {
             metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
+        }
+    }
+}
+
+struct RemovedCell<'a> {
+    old_rc: i64,
+    removes: u32,
+    refs: &'a [HashBytes],
+}
+
+impl<'a> RemovedCell<'a> {
+    fn remove(&mut self) -> Result<Option<&'a [HashBytes]>, CellStorageError> {
+        self.removes += 1;
+        if self.removes as i64 <= self.old_rc {
+            Ok(self.next_refs())
+        } else {
+            Err(CellStorageError::CounterMismatch)
+        }
+    }
+
+    fn next_refs(&self) -> Option<&'a [HashBytes]> {
+        if self.old_rc > self.removes as i64 {
+            None
+        } else {
+            Some(self.refs)
         }
     }
 }

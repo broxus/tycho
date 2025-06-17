@@ -858,7 +858,7 @@ def storage() -> RowPanel:
             quantile="0.999",
         ),
         create_heatmap_panel(
-            "tycho_storage_state_update_time", "Time to write state update to rocksdb"
+            "tycho_storage_state_update_time_high", "Time to write state update to rocksdb"
         ),
         create_heatmap_panel(
             "tycho_storage_state_store_time",
@@ -868,7 +868,13 @@ def storage() -> RowPanel:
             "tycho_storage_cell_in_mem_store_time_high", "Time to store cell without write"
         ),
         create_heatmap_panel(
-            "tycho_storage_batch_write_time", "Time to write merge in write batch"
+            "tycho_storage_cell_gc_lock_store_time_high", "Time to wait gc mutex during store"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_batch_write_time_high", "Time to write merge in write batch"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_batch_write_parallel_time_high", "Time to write merge in write batch in parallel"
         ),
         create_heatmap_quantile_panel(
             "tycho_storage_state_update_size_bytes",
@@ -931,7 +937,13 @@ def storage() -> RowPanel:
             "tycho_storage_state_gc_cells_count", "number of deleted cells during gc"
         ),
         create_heatmap_panel(
-            "tycho_storage_state_gc_time", "time spent to gc single root"
+            "tycho_storage_state_gc_time_high", "time spent to gc single root"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_cell_in_mem_remove_time_high", "Time to remove cell without write"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_cell_gc_lock_remove_time_high", "Time to wait gc mutex during remove"
         ),
         create_heatmap_panel(
             "tycho_storage_load_block_data_time", "Time to load block data"
