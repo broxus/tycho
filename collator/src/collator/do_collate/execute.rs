@@ -24,7 +24,7 @@ impl PhaseState for ExecuteState {}
 impl Phase<ExecuteState> {
     pub fn execute_special_transactions(&mut self) -> Result<()> {
         let new_messages = self.extra.executor.create_special_transactions(
-            &self.state.mc_data_stuff.current.config,
+            &self.state.mc_data.config,
             &mut self.state.collation_data,
         )?;
         self.extra.messages_reader.add_new_messages(new_messages);
@@ -33,7 +33,7 @@ impl Phase<ExecuteState> {
 
     pub fn execute_tick_transactions(&mut self) -> Result<()> {
         let new_messages = self.extra.executor.create_ticktock_transactions(
-            &self.state.mc_data_stuff.current.config,
+            &self.state.mc_data.config,
             TickTock::Tick,
             &mut self.state.collation_data,
         )?;
@@ -43,7 +43,7 @@ impl Phase<ExecuteState> {
 
     pub fn execute_tock_transactions(&mut self) -> Result<()> {
         let new_messages = self.extra.executor.create_ticktock_transactions(
-            &self.state.mc_data_stuff.current.config,
+            &self.state.mc_data.config,
             TickTock::Tock,
             &mut self.state.collation_data,
         )?;

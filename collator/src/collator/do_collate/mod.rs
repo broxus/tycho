@@ -34,7 +34,7 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
-    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, McDataStuff, ProcessedToByPartitions,
+    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedToByPartitions,
     ShardDescriptionShort, ShardDescriptionShortExt, TopBlockDescription, TopShardBlockInfo,
 };
 
@@ -71,7 +71,7 @@ impl CollatorStdImpl {
 
         let WorkingState {
             next_block_id_short,
-            mc_data_stuff,
+            mc_data,
             collation_config,
             wu_used_from_last_anchor,
             prev_shard_data,
@@ -80,14 +80,14 @@ impl CollatorStdImpl {
             ..
         } = *working_state;
 
-        let mc_block_id = mc_data_stuff.current.block_id;
+        let mc_block_id = mc_data.block_id;
         let prev_shard_data = prev_shard_data.unwrap();
         let usage_tree = usage_tree.unwrap();
         let tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "Start collating block: mc_data_block_id={}, prev_block_ids={}, top_shard_blocks_ids: {:?}",
-            mc_data_stuff.current.block_id.as_short_id(),
+            mc_data.block_id.as_short_id(),
             DisplayBlockIdsIntoIter(prev_shard_data.blocks_ids()),
             top_shard_blocks_info.as_ref().map(|v| DisplayBlockIdsIter(
                 v.iter().map(|i| &i.block_id)
@@ -106,29 +106,25 @@ impl CollatorStdImpl {
 
         let is_first_block_after_prev_master = is_first_block_after_prev_master(
             prev_shard_data.blocks_ids()[0], // TODO: consider split/merge
-            &mc_data_stuff.current.shards,
+            &mc_data.shards,
         );
-        let part_stat_ranges =
-            if is_first_block_after_prev_master && mc_data_stuff.current.block_id.seqno > 0 {
-                if next_block_id_short.is_masterchain() {
-                    self.mc_compute_part_stat_ranges(
-                        &mc_data_stuff,
-                        top_shard_blocks_info.clone().unwrap(),
-                    )
+        let part_stat_ranges = if is_first_block_after_prev_master && mc_data.block_id.seqno > 0 {
+            if next_block_id_short.is_masterchain() {
+                self.mc_compute_part_stat_ranges(&mc_data, top_shard_blocks_info.clone().unwrap())
                     .await?
-                } else {
-                    self.compute_part_stat_ranges(&mc_data_stuff, &next_block_id_short)
-                        .await?
-                }
             } else {
-                None
-            };
+                self.compute_part_stat_ranges(&mc_data, &next_block_id_short)
+                    .await?
+            }
+        } else {
+            None
+        };
 
         let collation_data = self.create_collation_data(
             next_block_id_short,
             next_chain_time,
             created_by,
-            &mc_data_stuff.current,
+            &mc_data,
             &prev_shard_data,
             top_shard_blocks_info,
         )?;
@@ -139,7 +135,7 @@ impl CollatorStdImpl {
         let state = Box::new(ActualState {
             collation_config,
             collation_data,
-            mc_data_stuff,
+            mc_data,
             prev_shard_data,
             shard_id: self.shard_id,
             collation_is_cancelled: CancellationFlag::new(),
@@ -307,7 +303,7 @@ impl CollatorStdImpl {
     ) -> Result<CollationResult, CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
-        let mc_data_stuff = state.mc_data_stuff.clone();
+        let mc_data = state.mc_data.clone();
 
         let collation_is_cancelled = state.collation_is_cancelled.clone();
 
@@ -403,8 +399,7 @@ impl CollatorStdImpl {
             .get_min_internals_processed_to_by_shards()
             .get(&shard_id)
             .cloned();
-        let min_processed_to_from_mc_data = mc_data_stuff
-            .current
+        let min_processed_to_from_mc_data = mc_data
             .processed_upto
             .get_min_internals_processed_to_by_shards()
             .get(&shard_id)
@@ -957,8 +952,8 @@ impl CollatorStdImpl {
 
             let new_queue_diff_hash = *finalized.block_candidate.queue_diff_aug.diff_hash();
 
-            let collation_config = match &finalized.mc_data_stuff {
-                Some(mcd) => Arc::new(mcd.current.config.get_collation_config()?),
+            let collation_config = match &finalized.mc_data {
+                Some(mcd) => Arc::new(mcd.config.get_collation_config()?),
                 None => finalized.collation_config,
             };
 
@@ -967,16 +962,14 @@ impl CollatorStdImpl {
                 .on_block_candidate(BlockCollationResult {
                     collation_session_id: self.collation_session.id(),
                     candidate: finalized.block_candidate,
-                    prev_mc_block_id: finalized.old_mc_data_stuff.current.block_id,
-                    mc_data_stuff: finalized.mc_data_stuff.clone(),
+                    prev_mc_block_id: finalized.old_mc_data.block_id,
+                    mc_data: finalized.mc_data.clone(),
                     collation_config: collation_config.clone(),
                     force_next_mc_block,
                 })
                 .await?;
 
-            let new_mc_data_stuff = finalized
-                .mc_data_stuff
-                .unwrap_or(finalized.old_mc_data_stuff);
+            let new_mc_data = finalized.mc_data.unwrap_or(finalized.old_mc_data);
 
             // spawn update PrevData and working state
             self.prepare_working_state_update(
@@ -985,7 +978,7 @@ impl CollatorStdImpl {
                 finalized.new_state_root,
                 store_new_state_task,
                 new_queue_diff_hash,
-                new_mc_data_stuff,
+                new_mc_data,
                 collation_config,
                 has_unprocessed_messages,
                 reader_state,
@@ -1216,17 +1209,17 @@ impl CollatorStdImpl {
     /// and other shards diffs between previous masterchain block - 1 and previous masterchain block
     async fn compute_part_stat_ranges(
         &self,
-        mc_data_stuff: &McDataStuff,
+        mc_data: &McData,
         block_id_short: &BlockIdShort,
     ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
-        let Some(prev_state) = &mc_data_stuff.previous else {
+        let Some(prev_mc_data) = &mc_data.prev_mc_data else {
             return Ok(None);
         };
 
-        let prev_shards: FastHashMap<_, _> = prev_state.shards.iter().cloned().collect();
+        let prev_shards: FastHashMap<_, _> = prev_mc_data.shards.iter().cloned().collect();
 
         let mut shard_pairs = Vec::new();
-        for (shard, curr) in mc_data_stuff.current.shards.iter() {
+        for (shard, curr) in mc_data.shards.iter() {
             if curr.top_sc_block_updated && *shard != block_id_short.shard {
                 if let Some(prev) = prev_shards.get(shard) {
                     shard_pairs.push((
@@ -1238,8 +1231,7 @@ impl CollatorStdImpl {
             }
         }
 
-        self.build_ranges(&mc_data_stuff.current.block_id, shard_pairs)
-            .await
+        self.build_ranges(&mc_data.block_id, shard_pairs).await
     }
 
     /// Collect ranges for loading cumulative statistics if collation block is master
@@ -1247,10 +1239,10 @@ impl CollatorStdImpl {
     /// and diffs between previous masterchain top blocks and current top blocks
     async fn mc_compute_part_stat_ranges(
         &self,
-        mc_data_stuff: &McDataStuff,
+        mc_data: &McData,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
-        let prev_shards: FastHashMap<_, _> = mc_data_stuff.current.shards.iter().cloned().collect();
+        let prev_shards: FastHashMap<_, _> = mc_data.shards.iter().cloned().collect();
 
         let mut shard_pairs = Vec::new();
         for top in top_shard_blocks_info {
@@ -1263,8 +1255,7 @@ impl CollatorStdImpl {
             }
         }
 
-        self.build_ranges(&mc_data_stuff.current.block_id, shard_pairs)
-            .await
+        self.build_ranges(&mc_data.block_id, shard_pairs).await
     }
 
     async fn build_ranges(

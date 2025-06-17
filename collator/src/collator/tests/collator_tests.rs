@@ -370,7 +370,7 @@ fn test_get_anchors_processing_info() {
         top_processed_to_anchor: 0,
         ref_mc_state_handle: tracker.insert(0),
         shards_processed_to_by_partitions: Default::default(),
-        prev_mc_block_id: None,
+        prev_mc_data: None,
     };
 
     //------
@@ -490,7 +490,6 @@ fn test_get_anchors_processing_info() {
     //------
     // will get anchors processing info from prev shard state
     // because it is still ahead of master
-
     let anchors_proc_info_opt = CollatorStdImpl::get_anchors_processing_info(
         &shard_id,
         &mc_data,
