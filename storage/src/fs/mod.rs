@@ -3,10 +3,11 @@
 
 use std::borrow::Cow;
 use std::ffi::OsStr;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -14,11 +15,96 @@ pub use self::mapped_file::{MappedFile, MappedFileMut};
 
 mod mapped_file;
 
-#[derive(Clone)]
-pub struct FileDb(Arc<FileDbInner>);
+const BASE_DIR: &str = "temp";
 
-impl FileDb {
-    /// Creates a new `FileDb` instance.
+#[derive(Clone)]
+pub struct TempFileStorage {
+    storage_dir: Dir,
+}
+
+impl TempFileStorage {
+    const MAX_FILE_TTL: Duration = Duration::from_secs(86400); // 1 day
+
+    pub fn new(files_dir: &Dir) -> Result<Self> {
+        Ok(Self {
+            storage_dir: files_dir.create_subdir(BASE_DIR)?,
+        })
+    }
+
+    pub async fn remove_outdated_files(&self) -> Result<()> {
+        let now = std::time::SystemTime::now();
+
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || {
+            this.retain_files(|path, metadata| match metadata.modified() {
+                Ok(modified) => {
+                    let since_modified = now.duration_since(modified).unwrap_or(Duration::ZERO);
+                    since_modified <= Self::MAX_FILE_TTL
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "failed to check file metadata: {e:?}"
+                    );
+                    false
+                }
+            })
+        })
+        .await?
+    }
+
+    pub fn retain_files<F>(&self, mut f: F) -> Result<()>
+    where
+        F: FnMut(&Path, &Metadata) -> bool,
+    {
+        let entries = self.storage_dir.entries()?;
+        for e in entries {
+            let e = e?;
+
+            let path = e.path();
+            let Ok(metadata) = std::fs::metadata(&path) else {
+                tracing::warn!(
+                    path = %path.display(),
+                    "failed to check downloaded file metadata: {e:?}"
+                );
+                continue;
+            };
+
+            let is_file = metadata.is_file();
+            let keep = is_file && f(&path, &metadata);
+            tracing::debug!(keep, path = %path.display(), "found downloaded file");
+
+            if keep {
+                continue;
+            }
+
+            let e = if is_file {
+                std::fs::remove_file(&path)
+            } else {
+                std::fs::remove_dir_all(&path)
+            };
+            if let Err(e) = e {
+                tracing::warn!(path = %path.display(), "failed to remove downloads entry: {e:?}");
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn file<P: AsRef<Path>>(&self, rel_path: P) -> FileBuilder {
+        self.storage_dir.file(&rel_path)
+    }
+
+    pub fn unnamed_file(&self) -> UnnamedFileBuilder {
+        self.storage_dir.unnamed_file()
+    }
+}
+
+#[derive(Clone)]
+pub struct Dir(Arc<DirInner>);
+
+impl Dir {
+    /// Creates a new `Dir` instance.
     /// If the `root` directory does not exist, it will be created.
     pub fn new<P>(root: P) -> Result<Self>
     where
@@ -26,17 +112,17 @@ impl FileDb {
     {
         std::fs::create_dir_all(root.as_ref())
             .with_context(|| format!("failed to create {}", root.as_ref().display()))?;
-        Ok(Self(Arc::new(FileDbInner {
+        Ok(Self(Arc::new(DirInner {
             base_dir: root.as_ref().to_path_buf(),
         })))
     }
 
-    /// Creates a new `FileDb` without creating the root directory tree
+    /// Creates a new `Dir` without creating the root directory tree
     pub fn new_readonly<P>(root: P) -> Self
     where
         P: AsRef<Path>,
     {
-        Self(Arc::new(FileDbInner {
+        Self(Arc::new(DirInner {
             base_dir: root.as_ref().to_path_buf(),
         }))
     }
@@ -72,16 +158,16 @@ impl FileDb {
         }
     }
 
-    /// Creates `FileDb` instance for a subdirectory of the current one.
+    /// Creates `Dir` instance for a subdirectory of the current one.
     /// **Note**: The subdirectory will not be created if it does not exist.
     /// Use `create_subdir` to create it.
     pub fn subdir_readonly<P: AsRef<Path>>(&self, rel_path: P) -> Self {
-        Self(Arc::new(FileDbInner {
+        Self(Arc::new(DirInner {
             base_dir: self.0.base_dir.join(rel_path),
         }))
     }
 
-    /// Creates `FileDb` instance for a subdirectory of the current one.
+    /// Creates `Dir` instance for a subdirectory of the current one.
     /// The subdirectory will be created if it does not exist.
     pub fn create_subdir<P: AsRef<Path>>(&self, rel_path: P) -> Result<Self> {
         Self::new(self.0.base_dir.join(rel_path))
@@ -96,7 +182,7 @@ impl FileDb {
     }
 }
 
-struct FileDbInner {
+struct DirInner {
     base_dir: PathBuf,
 }
 

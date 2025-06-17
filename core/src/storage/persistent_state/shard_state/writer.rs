@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use everscale_types::cell::{CellDescriptor, HashBytes};
 use everscale_types::models::*;
 use smallvec::SmallVec;
-use tycho_storage::FileDb;
+use tycho_storage::fs::Dir;
+use tycho_storage::kv::refcount;
 use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::FastHashMap;
@@ -16,7 +17,7 @@ use crate::storage::CoreDb;
 
 pub struct ShardStateWriter<'a> {
     db: &'a CoreDb,
-    states_dir: &'a FileDb,
+    states_dir: &'a Dir,
     block_id: &'a BlockId,
 }
 
@@ -36,7 +37,7 @@ impl<'a> ShardStateWriter<'a> {
         PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
     }
 
-    pub fn new(db: &'a CoreDb, states_dir: &'a FileDb, block_id: &'a BlockId) -> Self {
+    pub fn new(db: &'a CoreDb, states_dir: &'a Dir, block_id: &'a BlockId) -> Self {
         Self {
             db,
             states_dir,
@@ -257,7 +258,7 @@ impl<'a> ShardStateWriter<'a> {
                         .get_pinned_cf_opt(&cf, hash, read_options)?
                         .ok_or(CellWriterError::CellNotFound)?;
 
-                    let value = match tycho_storage::refcount::strip_refcount(value.as_ref()) {
+                    let value = match refcount::strip_refcount(value.as_ref()) {
                         Some(bytes) => bytes,
                         None => {
                             return Err(CellWriterError::CellNotFound.into());

@@ -19,7 +19,8 @@ use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::storage::{CoreStorage, NewBlockMeta};
 use tycho_network::PeerId;
-use tycho_storage::{FileDb, StorageContext};
+use tycho_storage::fs::Dir;
+use tycho_storage::StorageContext;
 use tycho_util::cli::logger::init_logger;
 use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
@@ -291,7 +292,7 @@ impl Mempool {
         })
     }
 
-    pub fn file_storage(storage: &CoreStorage) -> Result<FileDb> {
+    pub fn file_storage(storage: &CoreStorage) -> Result<Dir> {
         storage.context().root_dir().create_subdir("mempool_files")
     }
 

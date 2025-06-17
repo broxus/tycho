@@ -15,7 +15,8 @@ use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::proto::blockchain::{KeyBlockIds, PersistentStateInfo};
 use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta, PersistentStateKind};
 use tycho_network::{DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay};
-use tycho_storage::{MappedFile, StorageContext};
+use tycho_storage::fs::MappedFile;
+use tycho_storage::StorageContext;
 
 use crate::network::TestNode;
 

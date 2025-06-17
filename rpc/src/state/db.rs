@@ -1,4 +1,4 @@
-use tycho_storage::{Migrations, WithMigrations};
+use tycho_storage::kv::{Migrations, NamedTables, StateVersionProvider, WithMigrations};
 use tycho_util::sync::CancellationFlag;
 use weedb::{Caches, MigrationError, Semver, WeeDb};
 
@@ -6,12 +6,21 @@ use super::tables;
 
 pub type RpcDb = WeeDb<RpcTables>;
 
-impl WithMigrations for RpcTables {
+impl NamedTables for RpcTables {
     const NAME: &'static str = "rpc";
+}
+
+impl WithMigrations for RpcTables {
     const VERSION: Semver = [0, 1, 0];
 
+    type VersionProvider = StateVersionProvider<tables::State>;
+
+    fn new_version_provider() -> Self::VersionProvider {
+        StateVersionProvider::new::<Self>()
+    }
+
     fn register_migrations(
-        _migrations: &mut Migrations<Self>,
+        _migrations: &mut Migrations<Self::VersionProvider, Self>,
         _cancelled: CancellationFlag,
     ) -> Result<(), MigrationError> {
         // migrations.register([0, 0, 1], [0, 0, 2], move |db| Ok(()))?;
@@ -22,7 +31,7 @@ impl WithMigrations for RpcTables {
 
 weedb::tables! {
     pub struct RpcTables<Caches> {
-        pub state: tycho_storage::tables::State,
+        pub state: tables::State,
         pub transactions: tables::Transactions,
         pub transactions_by_hash: tables::TransactionsByHash,
         pub transactions_by_in_msg: tables::TransactionsByInMsg,

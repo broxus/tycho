@@ -9,7 +9,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::util::InstanceId;
+use tycho_storage::kv::InstanceId;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::{FastHashMap, FastHashSet};

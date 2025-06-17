@@ -1,14 +1,31 @@
 use bytesize::ByteSize;
-use tycho_storage::refcount;
-use tycho_storage::tables::{
+use tycho_storage::kv::{
     default_block_based_table_factory, optimize_for_level_compaction, optimize_for_point_lookup,
-    with_blob_db, DEFAULT_MIN_BLOB_SIZE,
+    refcount, with_blob_db, DEFAULT_MIN_BLOB_SIZE,
 };
 use weedb::rocksdb::{
     self, BlockBasedIndexType, BlockBasedOptions, CompactionPri, DBCompressionType,
     DataBlockIndexType, MemtableFactory, MergeOperands, Options, ReadOptions, SliceTransform,
 };
 use weedb::{Caches, ColumnFamily, ColumnFamilyOptions};
+
+/// Stores generic node parameters
+/// - Key: `...`
+/// - Value: `...`
+pub struct State;
+
+impl ColumnFamily for State {
+    const NAME: &'static str = "state";
+}
+
+impl ColumnFamilyOptions<Caches> for State {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        default_block_based_table_factory(opts, caches);
+
+        opts.set_optimize_filters_for_hits(true);
+        optimize_for_point_lookup(opts, caches);
+    }
+}
 
 /// Stores prepared archives
 /// - Key: `u32 (BE)` (archive id)

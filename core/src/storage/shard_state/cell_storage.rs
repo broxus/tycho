@@ -14,7 +14,7 @@ use dashmap::Map;
 use everscale_types::cell::*;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
-use tycho_storage::refcount;
+use tycho_storage::kv::refcount;
 use tycho_util::metrics::{spawn_metrics_loop, HistogramGuard};
 use tycho_util::{FastDashMap, FastHashMap, FastHasherState};
 use weedb::rocksdb::WriteBatch;

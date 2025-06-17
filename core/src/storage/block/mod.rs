@@ -20,7 +20,7 @@ use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, ShardHeights,
 };
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
-use tycho_storage::StoredValue;
+use tycho_storage::kv::StoredValue;
 use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::{rayon_run, CancellationFlag};

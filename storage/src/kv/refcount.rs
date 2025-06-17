@@ -4,6 +4,10 @@ use std::convert::TryInto;
 use weedb::rocksdb;
 use weedb::rocksdb::compaction_filter::Decision;
 
+pub type RcType = i64;
+
+pub const RC_BYTES: usize = std::mem::size_of::<RcType>();
+
 pub fn merge_operator(
     _key: &[u8],
     existing: Option<&[u8]>,
@@ -81,7 +85,3 @@ pub fn encode_positive_refcount(rc: u32) -> [u8; RC_BYTES] {
 pub fn encode_negative_refcount(rc: u32) -> [u8; RC_BYTES] {
     (-RcType::from(rc)).to_le_bytes()
 }
-
-type RcType = i64;
-
-const RC_BYTES: usize = std::mem::size_of::<RcType>();

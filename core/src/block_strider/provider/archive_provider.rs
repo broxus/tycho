@@ -13,7 +13,7 @@ use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tycho_block_util::archive::Archive;
 use tycho_block_util::block::{BlockIdRelation, BlockStuffAug};
-use tycho_storage::MappedFile;
+use tycho_storage::fs::MappedFile;
 
 use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive, PendingArchiveResponse};

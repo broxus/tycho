@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tycho_storage::{StorageContext, WeeDbExt};
+use tycho_storage::kv::ApplyMigrations;
+use tycho_storage::StorageContext;
 
 pub use self::block::{
     ArchiveId, BlockDataEntryKey, BlockGcStats, BlockStorage, BlockStorageConfig,
