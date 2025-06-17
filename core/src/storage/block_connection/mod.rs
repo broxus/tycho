@@ -1,6 +1,6 @@
 use everscale_types::models::*;
 use parking_lot::RwLock;
-use tycho_storage::StoredValue;
+use tycho_storage::kv::StoredValue;
 
 use super::block_handle::{BlockFlags, BlockHandle};
 use super::db::CoreDb;

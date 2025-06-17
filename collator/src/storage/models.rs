@@ -8,7 +8,7 @@ use tycho_block_util::queue::{
     RouterPartitions,
 };
 use tycho_block_util::tl;
-use tycho_storage::{StoredValue, StoredValueBuffer};
+use tycho_storage::kv::{StoredValue, StoredValueBuffer};
 use tycho_util::FastHashMap;
 
 pub struct InternalQueueMessage<'a> {

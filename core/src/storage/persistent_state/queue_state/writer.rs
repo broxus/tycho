@@ -6,7 +6,7 @@ use bumpalo::Bump;
 use everscale_types::boc;
 use everscale_types::models::BlockId;
 use tycho_block_util::queue::{QueueDiffMessagesIter, QueueState, QueueStateHeader};
-use tycho_storage::FileDb;
+use tycho_storage::fs::Dir;
 use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::FastHasherState;
@@ -14,7 +14,7 @@ use tycho_util::FastHasherState;
 const FILE_BUFFER_LEN: usize = 128 * 1024 * 1024; // 128 MB
 
 pub struct QueueStateWriter<'a> {
-    states_dir: &'a FileDb,
+    states_dir: &'a Dir,
     block_id: &'a BlockId,
     state: QueueStateHeader,
     messages: Vec<QueueDiffMessagesIter>,
@@ -37,7 +37,7 @@ impl<'a> QueueStateWriter<'a> {
     }
 
     pub fn new(
-        states_dir: &'a FileDb,
+        states_dir: &'a Dir,
         block_id: &'a BlockId,
         state: QueueStateHeader,
         messages: Vec<QueueDiffMessagesIter>,

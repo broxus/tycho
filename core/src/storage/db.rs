@@ -1,4 +1,4 @@
-use tycho_storage::{Migrations, StateVersionProvider, WithMigrations};
+use tycho_storage::kv::{Migrations, NamedTables, StateVersionProvider, WithMigrations};
 use tycho_util::sync::CancellationFlag;
 use weedb::{Caches, MigrationError, Semver, VersionProvider, WeeDb};
 
@@ -13,9 +13,7 @@ pub trait CoreDbExt {
 impl CoreDbExt for CoreDb {
     // TEMP: Set a proper version on start. Remove on testnet reset.
     fn normalize_version(&self) -> anyhow::Result<()> {
-        let provider = StateVersionProvider {
-            db_name: CoreTables::NAME,
-        };
+        let provider = CoreTables::new_version_provider();
 
         // Check if there is NO VERSION
         if provider.get_version(self.raw())?.is_some() {
@@ -39,12 +37,21 @@ impl CoreDbExt for CoreDb {
     }
 }
 
-impl WithMigrations for CoreTables {
+impl NamedTables for CoreTables {
     const NAME: &'static str = "base";
+}
+
+impl WithMigrations for CoreTables {
     const VERSION: Semver = [0, 0, 3];
 
+    type VersionProvider = StateVersionProvider<tables::State>;
+
+    fn new_version_provider() -> Self::VersionProvider {
+        StateVersionProvider::new::<Self>()
+    }
+
     fn register_migrations(
-        migrations: &mut Migrations<Self>,
+        migrations: &mut Migrations<Self::VersionProvider, Self>,
         cancelled: CancellationFlag,
     ) -> Result<(), MigrationError> {
         migrations.register([0, 0, 1], [0, 0, 2], move |db| {
@@ -58,7 +65,7 @@ impl WithMigrations for CoreTables {
 
 weedb::tables! {
     pub struct CoreTables<Caches> {
-        pub state: tycho_storage::tables::State,
+        pub state: tables::State,
         pub archives: tables::Archives,
         pub archive_block_ids: tables::ArchiveBlockIds,
         pub block_handles: tables::BlockHandles,
@@ -84,7 +91,7 @@ mod core_migrations {
 
     use everscale_types::boc::Boc;
     use tycho_block_util::archive::ArchiveEntryType;
-    use tycho_storage::StoredValue;
+    use tycho_storage::kv::StoredValue;
     use weedb::rocksdb::CompactOptions;
 
     use super::*;

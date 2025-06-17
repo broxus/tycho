@@ -10,7 +10,8 @@ use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
-use tycho_storage::{StoredValue, TempFileStorage};
+use tycho_storage::fs::TempFileStorage;
+use tycho_storage::kv::StoredValue;
 use tycho_util::metrics::HistogramGuard;
 use weedb::rocksdb;
 

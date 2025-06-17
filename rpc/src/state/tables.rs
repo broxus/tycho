@@ -1,6 +1,27 @@
-use tycho_storage::tables::{with_blob_db, zstd_block_based_table_factory, DEFAULT_MIN_BLOB_SIZE};
+use tycho_storage::kv::{
+    default_block_based_table_factory, optimize_for_point_lookup, with_blob_db,
+    zstd_block_based_table_factory, DEFAULT_MIN_BLOB_SIZE,
+};
 use weedb::rocksdb::{DBCompressionType, Options};
 use weedb::{Caches, ColumnFamily, ColumnFamilyOptions};
+
+/// Stores generic node parameters
+/// - Key: `...`
+/// - Value: `...`
+pub struct State;
+
+impl ColumnFamily for State {
+    const NAME: &'static str = "state";
+}
+
+impl ColumnFamilyOptions<Caches> for State {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        default_block_based_table_factory(opts, caches);
+
+        opts.set_optimize_filters_for_hits(true);
+        optimize_for_point_lookup(opts, caches);
+    }
+}
 
 /// Stores raw transactions
 /// - Key: `workchain: i8, account: [u8; 32], lt: u64`

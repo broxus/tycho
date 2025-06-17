@@ -1,4 +1,4 @@
-use tycho_storage::tables::{with_blob_db, DEFAULT_MIN_BLOB_SIZE};
+use tycho_storage::kv::{with_blob_db, DEFAULT_MIN_BLOB_SIZE};
 use weedb::rocksdb::{BlockBasedOptions, DBCompressionType, Options, ReadOptions};
 use weedb::{Caches, ColumnFamily, ColumnFamilyOptions};
 

@@ -12,7 +12,7 @@ use tycho_block_util::archive::{ArchiveData, WithArchiveData};
 use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_storage::FileBuilder;
+use tycho_storage::fs::FileBuilder;
 use tycho_util::futures::JoinTask;
 use tycho_util::sync::rayon_run;
 use tycho_util::time::now_sec;
@@ -622,8 +622,6 @@ impl StarterInner {
         mc_block_id: &BlockId,
         block_id: &BlockId,
     ) -> Result<(BlockHandle, ShardStateStuff)> {
-        use tycho_storage::FileBuilder;
-
         enum StoreZeroStateFrom {
             File(FileBuilder),
             State(ShardStateStuff),

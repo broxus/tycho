@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use ahash::HashMapExt;
 use everscale_types::models::{BlockId, IntAddr, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
-use tycho_storage::StoredValue;
+use tycho_storage::kv::StoredValue;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::{OwnedRawIterator, OwnedSnapshot};
 

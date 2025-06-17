@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use everscale_types::models::BlockId;
 use tycho_block_util::block::{BlockStuff, ShardHeights};
-use tycho_storage::StoredValue;
+use tycho_storage::kv::StoredValue;
 use tycho_util::FastDashMap;
 
 pub(crate) use self::handle::BlockDataGuard;

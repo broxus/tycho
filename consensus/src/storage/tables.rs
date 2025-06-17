@@ -1,4 +1,4 @@
-use tycho_storage::tables::{optimize_for_point_lookup, DEFAULT_MIN_BLOB_SIZE};
+use tycho_storage::kv::{optimize_for_point_lookup, DEFAULT_MIN_BLOB_SIZE};
 use weedb::rocksdb::{DBCompressionType, Options};
 use weedb::{Caches, ColumnFamily, ColumnFamilyOptions};
 
