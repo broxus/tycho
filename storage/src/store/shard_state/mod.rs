@@ -241,7 +241,7 @@ impl ShardStateStorage {
         let mut removed_states = 0usize;
         let mut removed_cells = 0usize;
         loop {
-            let _hist = HistogramGuard::begin("tycho_storage_state_gc_time");
+            let _hist = HistogramGuard::begin("tycho_storage_state_gc_time_high");
             let (key, value) = match iter.item() {
                 Some(item) => item,
                 None => match iter.status() {
@@ -274,7 +274,12 @@ impl ShardStateStorage {
                 let key = key.to_vec();
 
                 let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
+                    let in_mem_remove =
+                        HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
+
                     let (stats, mut batch) = cell_storage.remove_cell(&alloc, &root_hash)?;
+
+                    in_mem_remove.finish();
 
                     batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
                     db.raw()
