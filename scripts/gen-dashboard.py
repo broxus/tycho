@@ -838,7 +838,7 @@ def storage() -> RowPanel:
             quantile="0.999",
         ),
         create_heatmap_panel(
-            "tycho_storage_state_update_time", "Time to write state update to rocksdb"
+            "tycho_storage_state_update_time_high", "Time to write state update to rocksdb"
         ),
         create_heatmap_panel(
             "tycho_storage_state_store_time",

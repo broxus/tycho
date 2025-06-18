@@ -165,7 +165,7 @@ impl ShardStateStorage {
 
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
-            let hist = HistogramGuard::begin("tycho_storage_state_update_time");
+            let hist = HistogramGuard::begin("tycho_storage_state_update_time_high");
             metrics::histogram!("tycho_storage_state_update_size_bytes")
                 .record(batch.size_in_bytes() as f64);
             metrics::histogram!("tycho_storage_state_update_size_predicted_bytes")
