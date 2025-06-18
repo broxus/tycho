@@ -673,6 +673,7 @@ impl CellStorage {
 
     pub fn remove_cell_mt(
         &self,
+        herd: &Herd,
         root: &HashBytes,
         split_at: FastHashSet<HashBytes>,
     ) -> Result<(usize, WriteBatch), CellStorageError> {
@@ -848,7 +849,8 @@ impl CellStorage {
             fn finalize(self, batch: &mut WriteBatch) -> usize {
                 std::thread::scope(|s| {
                     // Write transaction to the `WriteBatch`
-                    let _hist = HistogramGuard::begin("tycho_storage_batch_write_time");
+                    let _hist =
+                        HistogramGuard::begin("tycho_storage_batch_write_parallel_time_high");
 
                     // Apply delayed removes before finalizing the transaction.
                     for (hash, removes) in self.delayed_removes.into_inner().unwrap() {
@@ -918,8 +920,7 @@ impl CellStorage {
             }
         }
 
-        let herd = Herd::new();
-        let ctx = RemoveContext::new(&self.db, &herd, &self.raw_cells_cache, split_at);
+        let ctx = RemoveContext::new(&self.db, herd, &self.raw_cells_cache, split_at);
 
         std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
 
@@ -931,7 +932,6 @@ impl CellStorage {
         Ok((ctx.finalize(&mut batch), batch))
     }
 
-    #[allow(unused)]
     pub fn remove_cell(
         &self,
         alloc: &Bump,
@@ -1015,7 +1015,7 @@ impl CellStorage {
         drop(stack);
 
         // Write transaction to the `WriteBatch`
-        let _hist = HistogramGuard::begin("tycho_storage_batch_write_time");
+        let _hist = HistogramGuard::begin("tycho_storage_batch_write_time_high");
         let total = transaction.len();
 
         // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,

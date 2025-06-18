@@ -127,30 +127,38 @@ impl ShardStateStorage {
             let root_hash = *root_cell.repr_hash();
             let estimated_merkle_update_size = hint.estimate_cell_count();
 
-            let split_accounts = {
-                // Cell#0 - processed_upto
-                // Cell#1 - accounts
-                let shard_accounts = root_cell
-                    .reference_cloned(1)
-                    .context("invalid shard state")?
-                    .parse::<ShardAccounts>()
-                    .context("failed to load shard accounts")?;
-
-                split_aug_dict_raw(shard_accounts, accounts_split_depth)
-                    .context("failed to split shard accounts")?
-            };
-
             let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
             let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time_high");
 
-            let new_cell_count = cell_storage.store_cell_mt(
-                root_cell.as_ref(),
-                &mut batch,
-                split_accounts,
-                estimated_merkle_update_size,
-            )?;
+            let new_cell_count = if block_id.is_masterchain() {
+                cell_storage.store_cell(
+                    &mut batch,
+                    root_cell.as_ref(),
+                    estimated_merkle_update_size,
+                )?
+            } else {
+                let split_accounts = {
+                    // Cell#0 - processed_upto
+                    // Cell#1 - accounts
+                    let shard_accounts = root_cell
+                        .reference_cloned(1)
+                        .context("invalid shard state")?
+                        .parse::<ShardAccounts>()
+                        .context("failed to load shard accounts")?;
+
+                    split_aug_dict_raw(shard_accounts, accounts_split_depth)
+                        .context("failed to split shard accounts")?
+                };
+
+                cell_storage.store_cell_mt(
+                    root_cell.as_ref(),
+                    &mut batch,
+                    split_accounts,
+                    estimated_merkle_update_size,
+                )?
+            };
 
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
@@ -232,6 +240,8 @@ impl ShardStateStorage {
         let mut states_read_options = self.db.shard_states.new_read_config();
         states_read_options.set_snapshot(&snapshot);
 
+        let mut alloc = bumpalo_herd::Herd::new();
+
         // Create iterator
         let mut iter = raw.raw_iterator_cf_opt(&shard_states_cf.bound(), states_read_options);
         iter.seek_to_first();
@@ -260,6 +270,8 @@ impl ShardStateStorage {
                 continue;
             }
 
+            alloc.reset();
+
             {
                 let gc_lock_remove =
                     HistogramGuard::begin("tycho_storage_cell_gc_lock_remove_time_high");
@@ -271,29 +283,32 @@ impl ShardStateStorage {
                 let key = key.to_vec();
                 let accounts_split_depth = self.accounts_split_depth;
 
-                let total = tokio::task::spawn_blocking(move || {
+                let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
                     let in_mem_remove =
                         HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
 
-                    let root_cell = Cell::from(cell_storage.load_cell(root_hash)? as Arc<_>);
+                    let (stats, mut batch) = if block_id.is_masterchain() {
+                        cell_storage.remove_cell(alloc.get().as_bump(), &root_hash)?
+                    } else {
+                        let root_cell = Cell::from(cell_storage.load_cell(root_hash)? as Arc<_>);
 
-                    let split_accounts = {
-                        // Cell#0 - processed_upto
-                        // Cell#1 - accounts
-                        let shard_accounts = root_cell
-                            .reference_cloned(1)
-                            .context("invalid shard state")?
-                            .parse::<ShardAccounts>()
-                            .context("failed to load shard accounts")?;
+                        let split_accounts = {
+                            // Cell#0 - processed_upto
+                            // Cell#1 - accounts
+                            let shard_accounts = root_cell
+                                .reference_cloned(1)
+                                .context("invalid shard state")?
+                                .parse::<ShardAccounts>()
+                                .context("failed to load shard accounts")?;
 
-                        split_aug_dict_raw(shard_accounts, accounts_split_depth)
-                            .context("failed to split shard accounts")?
-                            .into_keys()
-                            .collect::<FastHashSet<HashBytes>>()
+                            split_aug_dict_raw(shard_accounts, accounts_split_depth)
+                                .context("failed to split shard accounts")?
+                                .into_keys()
+                                .collect::<FastHashSet<HashBytes>>()
+                        };
+
+                        cell_storage.remove_cell_mt(&alloc, &root_hash, split_accounts)?
                     };
-
-                    let (stats, mut batch) =
-                        cell_storage.remove_cell_mt(&root_hash, split_accounts)?;
 
                     in_mem_remove.finish();
 
@@ -302,11 +317,12 @@ impl ShardStateStorage {
                         .rocksdb()
                         .write_opt(batch, db.cells.write_config())?;
 
-                    Ok::<_, anyhow::Error>(stats)
+                    Ok::<_, anyhow::Error>((stats, alloc))
                 })
                 .await??;
 
                 removed_cells += total;
+                alloc = inner_alloc; // Reuse allocation without passing alloc by ref
 
                 tracing::debug!(removed_cells = total, %block_id);
             }
