@@ -277,7 +277,7 @@ impl CellStorage {
         }
 
         struct StoreContext<'a> {
-            db: &'a BaseDb,
+            db: &'a CellsDb,
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
@@ -298,7 +298,7 @@ impl CellStorage {
 
         impl<'a> StoreContext<'a> {
             fn new(
-                db: &'a BaseDb,
+                db: &'a CellsDb,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
                 split_accounts: FastHashMap<HashBytes, Cell>,
@@ -710,7 +710,7 @@ impl CellStorage {
         }
 
         struct RemoveContext<'a> {
-            db: &'a BaseDb,
+            db: &'a CellsDb,
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
@@ -731,7 +731,7 @@ impl CellStorage {
 
         impl<'a> RemoveContext<'a> {
             fn new(
-                db: &'a BaseDb,
+                db: &'a CellsDb,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
                 split_accounts: FastHashSet<HashBytes>,
