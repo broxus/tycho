@@ -4,6 +4,8 @@ use std::process::Command;
 
 pub mod compression;
 pub mod io;
+#[cfg(feature = "mem")]
+pub mod mem;
 pub mod progress_bar;
 pub mod serde_helpers;
 pub mod time;

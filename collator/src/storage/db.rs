@@ -1,5 +1,5 @@
-use tycho_storage::kv::NamedTables;
-use weedb::{Caches, WeeDb};
+use tycho_storage::kv::{NamedTables, TableContext};
+use weedb::WeeDb;
 
 use super::tables;
 
@@ -12,7 +12,7 @@ impl NamedTables for InternalQueueTables {
 // TODO: Add migrations.
 
 weedb::tables! {
-    pub struct InternalQueueTables<Caches> {
+    pub struct InternalQueueTables<TableContext> {
         pub internal_message_var: tables::InternalMessageVar,
         pub internal_message_diffs_tail: tables::InternalMessageDiffsTail,
         pub internal_message_diff_info: tables::InternalMessageDiffInfo,

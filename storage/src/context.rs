@@ -13,7 +13,7 @@ use weedb::{rocksdb, WeakWeeDbRaw};
 
 use crate::config::StorageConfig;
 use crate::fs::{Dir, TempFileStorage};
-use crate::kv::{NamedTables, WeeDbExt};
+use crate::kv::{NamedTables, TableContext, WeeDbExt};
 
 const FILES_SUBDIR: &str = "files";
 
@@ -53,9 +53,6 @@ impl StorageContext {
                 Err(_) => 256,
             },
         };
-
-        let rocksdb_caches =
-            weedb::Caches::with_capacity(config.rocksdb_lru_capacity.as_u64() as _);
 
         let mut rocksdb_env =
             rocksdb::Env::new().context("failed to create a new RocksDB environemnt")?;
@@ -98,7 +95,7 @@ impl StorageContext {
                 temp_files,
                 threads,
                 fdlimit,
-                rocksdb_caches,
+                rocksdb_table_context: Default::default(),
                 rocksdb_env,
                 rocksdb_instances_lock: Default::default(),
                 rocksdb_instances,
@@ -131,8 +128,8 @@ impl StorageContext {
         self.inner.fdlimit
     }
 
-    pub fn rocksdb_caches(&self) -> &weedb::Caches {
-        &self.inner.rocksdb_caches
+    pub fn rocksdb_table_context(&self) -> &TableContext {
+        &self.inner.rocksdb_table_context
     }
 
     pub fn rocksdb_env(&self) -> &rocksdb::Env {
@@ -173,10 +170,22 @@ impl StorageContext {
         }
     }
 
+    pub fn validate_options<T>(&self) -> Result<()>
+    where
+        T: NamedTables<Context = TableContext> + 'static,
+    {
+        let this = self.inner.as_ref();
+        // TODO: Make configuration fallible in `weedb`?
+        weedb::WeeDbRaw::builder("nonexisting", this.rocksdb_table_context.clone())
+            .with_options(|opts, _| self.apply_default_options(opts))
+            .with_tables::<T>();
+        Ok(())
+    }
+
     pub fn open_preconfigured<P, T>(&self, subdir: P) -> Result<weedb::WeeDb<T>>
     where
         P: AsRef<Path>,
-        T: NamedTables<Context = weedb::Caches> + 'static,
+        T: NamedTables<Context = TableContext> + 'static,
     {
         let subdir = subdir.as_ref();
         tracing::debug!(subdir = %subdir.display(), "opening RocksDB instance");
@@ -184,14 +193,17 @@ impl StorageContext {
         let this = self.inner.as_ref();
 
         let db_dir = this.root_dir.create_subdir(subdir)?;
-        let db = weedb::WeeDb::<T>::builder_prepared(db_dir.path(), this.rocksdb_caches.clone())
-            .with_metrics_enabled(this.config.rocksdb_enable_metrics)
-            .with_options(|opts, _| self.apply_default_options(opts))
-            .build()?;
+        let db =
+            weedb::WeeDb::<T>::builder_prepared(db_dir.path(), this.rocksdb_table_context.clone())
+                .with_metrics_enabled(this.config.rocksdb_enable_metrics)
+                .with_options(|opts, _| self.apply_default_options(opts))
+                .build()?;
 
         if let Some(name) = db.db_name() {
             self.add_rocksdb_instance(name, db.raw());
         }
+
+        tracing::debug!(current_rocksdb_buffer_usage = ?self.rocksdb_table_context().buffer_usage());
 
         Ok(db)
     }
@@ -245,7 +257,7 @@ struct StorageContextInner {
     temp_files: TempFileStorage,
     threads: usize,
     fdlimit: u64,
-    rocksdb_caches: weedb::Caches,
+    rocksdb_table_context: TableContext,
     rocksdb_env: rocksdb::Env,
     rocksdb_instances_lock: Mutex<()>,
     rocksdb_instances: Arc<ArcSwap<KnownInstances>>,

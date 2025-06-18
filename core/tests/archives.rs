@@ -369,8 +369,8 @@ async fn heavy_archives() -> Result<()> {
     // Init storage
     let config = StorageConfig {
         root_dir: current_test_path.join("db"),
-        rocksdb_lru_capacity: ByteSize::kb(1024 * 1024),
         rocksdb_enable_metrics: false,
+        rocksdb_lru_capacity: ByteSize::mib(256),
     };
 
     let zerostate_path = integration_test_path.join("zerostate.boc");
