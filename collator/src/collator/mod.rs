@@ -1777,6 +1777,22 @@ impl CollatorStdImpl {
                 let force_import_anchor_by_used_wu =
                     wu_used_from_last_anchor > wu_used_to_import_next_anchor;
 
+                // report wu used related metrics
+                metrics::gauge!("tycho_collator_wu_used_from_last_anchor", &[(
+                    "type",
+                    "wu_one_anchor"
+                ),])
+                .set(wu_used_to_import_next_anchor as f64);
+                metrics::gauge!("tycho_collator_wu_used_from_last_anchor", &[(
+                    "type",
+                    "wu_used_sum"
+                ),])
+                .set(wu_used_from_last_anchor as f64);
+                let can_import_anchors_count =
+                    wu_used_from_last_anchor.saturating_div(wu_used_to_import_next_anchor);
+                metrics::gauge!("tycho_collator_can_import_anchors_count")
+                    .set(can_import_anchors_count as f64);
+
                 // decide if should import anchors
                 let (last_imported_anchor_id, last_imported_chain_time) = self
                     .anchors_cache
