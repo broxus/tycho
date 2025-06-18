@@ -1,6 +1,8 @@
-use tycho_storage::kv::{Migrations, NamedTables, StateVersionProvider, WithMigrations};
+use tycho_storage::kv::{
+    Migrations, NamedTables, StateVersionProvider, TableContext, WithMigrations,
+};
 use tycho_util::sync::CancellationFlag;
-use weedb::{Caches, MigrationError, Semver, VersionProvider, WeeDb};
+use weedb::{MigrationError, Semver, VersionProvider, WeeDb};
 
 use super::tables;
 
@@ -64,7 +66,7 @@ impl WithMigrations for CoreTables {
 }
 
 weedb::tables! {
-    pub struct CoreTables<Caches> {
+    pub struct CoreTables<TableContext> {
         pub state: tables::State,
         pub archives: tables::Archives,
         pub archive_block_ids: tables::ArchiveBlockIds,

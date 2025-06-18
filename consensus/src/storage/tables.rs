@@ -1,6 +1,6 @@
-use tycho_storage::kv::{optimize_for_point_lookup, DEFAULT_MIN_BLOB_SIZE};
+use tycho_storage::kv::{optimize_for_point_lookup, TableContext, DEFAULT_MIN_BLOB_SIZE};
 use weedb::rocksdb::{DBCompressionType, Options};
-use weedb::{Caches, ColumnFamily, ColumnFamilyOptions};
+use weedb::{ColumnFamily, ColumnFamilyOptions};
 
 use super::point_status;
 
@@ -13,9 +13,9 @@ impl ColumnFamily for Points {
     const NAME: &'static str = "points";
 }
 
-impl ColumnFamilyOptions<Caches> for Points {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        optimize_for_point_lookup(opts, caches);
+impl ColumnFamilyOptions<TableContext> for Points {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        optimize_for_point_lookup(opts, ctx);
         opts.set_disable_auto_compactions(true);
 
         opts.set_enable_blob_files(true);
@@ -34,9 +34,9 @@ impl ColumnFamily for PointsInfo {
     const NAME: &'static str = "points_info";
 }
 
-impl ColumnFamilyOptions<Caches> for PointsInfo {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        optimize_for_point_lookup(opts, caches);
+impl ColumnFamilyOptions<TableContext> for PointsInfo {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        optimize_for_point_lookup(opts, ctx);
         opts.set_disable_auto_compactions(true);
     }
 }
@@ -53,9 +53,9 @@ impl ColumnFamily for PointsStatus {
     const NAME: &'static str = "points_status";
 }
 
-impl ColumnFamilyOptions<Caches> for PointsStatus {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        optimize_for_point_lookup(opts, caches);
+impl ColumnFamilyOptions<TableContext> for PointsStatus {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        optimize_for_point_lookup(opts, ctx);
         opts.set_disable_auto_compactions(true);
 
         opts.set_merge_operator_associative("points_status_merge", point_status::merge);

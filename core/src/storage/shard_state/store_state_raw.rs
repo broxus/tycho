@@ -585,7 +585,6 @@ mod test {
         let ctx = StorageContext::new(StorageConfig {
             root_dir: current_test_path.join("db"),
             rocksdb_enable_metrics: false,
-            rocksdb_lru_capacity: ByteSize::mb(256),
         })
         .await?;
         let storage = CoreStorage::open(ctx, CoreStorageConfig {

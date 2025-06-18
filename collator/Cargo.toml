@@ -17,8 +17,9 @@ arc-swap = { workspace = true }
 async-trait = { workspace = true }
 backon = { workspace = true }
 blake3 = { workspace = true }
-bytes = { workspace = true }
 bumpalo = { workspace = true }
+bytes = { workspace = true }
+bytesize = { workspace = true }
 everscale-crypto = { workspace = true }
 everscale-types = { workspace = true, features = ["rand", "blake3", "rayon"] }
 futures-util = { workspace = true }

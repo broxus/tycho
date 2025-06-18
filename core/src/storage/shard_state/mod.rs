@@ -70,6 +70,10 @@ impl ShardStateStorage {
         }
     }
 
+    pub fn reset_raw_cells_cache(&self, cache_size_bytes: ByteSize) {
+        self.cell_storage.reset_raw_cells_cache(cache_size_bytes);
+    }
+
     // TODO: implement metrics
     // pub fn cache_metrics(&self) -> CacheStats {
     // self.cell_storage.cache_stats()

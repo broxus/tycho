@@ -7,6 +7,7 @@ use std::thread::Scope;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use bumpalo::Bump;
 use bumpalo_herd::{Herd, Member};
 use bytesize::ByteSize;
@@ -25,7 +26,7 @@ use crate::storage::CoreDb;
 pub struct CellStorage {
     db: CoreDb,
     cells_cache: Arc<CellsIndex>,
-    raw_cells_cache: Arc<RawCellsCache>,
+    raw_cells_cache: ArcSwap<RawCellsCache>,
 }
 
 type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
@@ -35,17 +36,22 @@ impl CellStorage {
         let cells_cache = Default::default();
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
 
-        spawn_metrics_loop(
-            &raw_cells_cache.clone(),
-            Duration::from_secs(5),
-            |c| async move { c.refresh_metrics() },
-        );
-
-        Arc::new(Self {
+        let this = Arc::new(Self {
             db,
             cells_cache,
-            raw_cells_cache,
-        })
+            raw_cells_cache: ArcSwap::new(raw_cells_cache),
+        });
+
+        spawn_metrics_loop(&this, Duration::from_secs(5), |c| async move {
+            c.raw_cells_cache.load_full().refresh_metrics();
+        });
+
+        this
+    }
+
+    pub fn reset_raw_cells_cache(&self, cache_size_bytes: ByteSize) {
+        self.raw_cells_cache
+            .store(Arc::new(RawCellsCache::new(cache_size_bytes.as_u64())));
     }
 
     pub fn apply_temp_cell(&self, root: &HashBytes) -> Result<()> {
@@ -226,7 +232,8 @@ impl CellStorage {
             }
         }
 
-        let mut ctx = Context::new(&self.db, &self.raw_cells_cache);
+        let raw_cells_cache = self.raw_cells_cache.load_full();
+        let mut ctx = Context::new(&self.db, &raw_cells_cache);
 
         let mut stack = Vec::with_capacity(16);
         if let InsertedCell::New(iter) = ctx.insert_cell(root)? {
@@ -514,7 +521,8 @@ impl CellStorage {
         }
 
         let herd = Herd::new();
-        let ctx = StoreContext::new(&self.db, &herd, &self.raw_cells_cache, split_at, capacity);
+        let raw_cells_cache = self.raw_cells_cache.load_full();
+        let ctx = StoreContext::new(&self.db, &herd, &raw_cells_cache, split_at, capacity);
 
         std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
 
@@ -598,11 +606,12 @@ impl CellStorage {
         }
 
         let alloc = bumpalo::Bump::new();
+        let raw_cells_cache = self.raw_cells_cache.load_full();
 
         // Prepare context and handles
         let mut ctx = Context {
             db: &self.db,
-            raw_cells_cache: &self.raw_cells_cache,
+            raw_cells_cache: &raw_cells_cache,
             alloc: &alloc,
             transaction: FastHashMap::with_capacity_and_hasher(
                 estimated_cell_count,
@@ -653,7 +662,7 @@ impl CellStorage {
             }
         }
 
-        let cell = match self.raw_cells_cache.get_raw(&self.db, &hash) {
+        let cell = match self.raw_cells_cache.load().get_raw(&self.db, &hash) {
             Ok(Some(value)) => match StorageCell::deserialize(self.clone(), &value.slice) {
                 Some(cell) => Arc::new(cell),
                 None => return Err(CellStorageError::InvalidCell),
@@ -707,6 +716,8 @@ impl CellStorage {
         let cells = &self.db.cells;
         let cells_cf = &cells.cf();
 
+        let raw_cells_cache = self.raw_cells_cache.load_full();
+
         let mut transaction: FastHashMap<&HashBytes, RemovedCell<'_>> =
             FastHashMap::with_capacity_and_hasher(128, Default::default());
         let mut buffer = Vec::with_capacity(4);
@@ -725,11 +736,8 @@ impl CellStorage {
                 let refs = match transaction.entry(cell_id) {
                     hash_map::Entry::Occupied(mut v) => v.get_mut().remove()?,
                     hash_map::Entry::Vacant(v) => {
-                        let old_rc = self.raw_cells_cache.get_rc_for_delete(
-                            &self.db,
-                            cell_id,
-                            &mut buffer,
-                        )?;
+                        let old_rc =
+                            raw_cells_cache.get_rc_for_delete(&self.db, cell_id, &mut buffer)?;
                         debug_assert!(old_rc > 0);
 
                         v.insert(RemovedCell {
@@ -771,7 +779,7 @@ impl CellStorage {
             );
 
             let new_rc = item.old_rc - item.removes as i64;
-            self.raw_cells_cache.on_remove_cell(key, new_rc);
+            raw_cells_cache.on_remove_cell(key, new_rc);
         }
 
         Ok((total, batch))
@@ -1198,7 +1206,6 @@ impl RawCellsCache {
             quick_cache::OptionsBuilder::new()
                 .shards(SHARDS)
                 .estimated_items_capacity(estimated_cell_cache_capacity as usize)
-                .weight_capacity(size_in_bytes)
                 .hot_allocation(0.8)
                 .build()
                 .unwrap(),

@@ -1,6 +1,8 @@
-use tycho_storage::kv::{Migrations, NamedTables, StateVersionProvider, WithMigrations};
+use tycho_storage::kv::{
+    Migrations, NamedTables, StateVersionProvider, TableContext, WithMigrations,
+};
 use tycho_util::sync::CancellationFlag;
-use weedb::{Caches, MigrationError, Semver, WeeDb};
+use weedb::{MigrationError, Semver, WeeDb};
 
 use super::tables;
 
@@ -30,7 +32,7 @@ impl WithMigrations for RpcTables {
 }
 
 weedb::tables! {
-    pub struct RpcTables<Caches> {
+    pub struct RpcTables<TableContext> {
         pub state: tables::State,
         pub transactions: tables::Transactions,
         pub transactions_by_hash: tables::TransactionsByHash,

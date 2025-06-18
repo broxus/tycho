@@ -1,9 +1,9 @@
 use tycho_storage::kv::{
     default_block_based_table_factory, optimize_for_point_lookup, with_blob_db,
-    zstd_block_based_table_factory, DEFAULT_MIN_BLOB_SIZE,
+    zstd_block_based_table_factory, TableContext, DEFAULT_MIN_BLOB_SIZE,
 };
 use weedb::rocksdb::{DBCompressionType, Options};
-use weedb::{Caches, ColumnFamily, ColumnFamilyOptions};
+use weedb::{ColumnFamily, ColumnFamilyOptions};
 
 /// Stores generic node parameters
 /// - Key: `...`
@@ -14,12 +14,12 @@ impl ColumnFamily for State {
     const NAME: &'static str = "state";
 }
 
-impl ColumnFamilyOptions<Caches> for State {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for State {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        default_block_based_table_factory(opts, ctx);
 
         opts.set_optimize_filters_for_hits(true);
-        optimize_for_point_lookup(opts, caches);
+        optimize_for_point_lookup(opts, ctx);
     }
 }
 
@@ -36,9 +36,9 @@ impl ColumnFamily for Transactions {
     const NAME: &'static str = "transactions";
 }
 
-impl ColumnFamilyOptions<Caches> for Transactions {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for Transactions {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
         opts.set_compression_type(DBCompressionType::Zstd);
         with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::Zstd);
     }
@@ -58,9 +58,9 @@ impl ColumnFamily for TransactionsByHash {
     const NAME: &'static str = "transactions_by_hash";
 }
 
-impl ColumnFamilyOptions<Caches> for TransactionsByHash {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for TransactionsByHash {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
     }
 }
 
@@ -73,9 +73,9 @@ impl ColumnFamily for TransactionsByInMsg {
     const NAME: &'static str = "transactions_by_in_msg";
 }
 
-impl ColumnFamilyOptions<Caches> for TransactionsByInMsg {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for TransactionsByInMsg {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
     }
 }
 
@@ -92,9 +92,9 @@ impl ColumnFamily for KnownBlocks {
     const NAME: &'static str = "known_blocks";
 }
 
-impl ColumnFamilyOptions<Caches> for KnownBlocks {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for KnownBlocks {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
     }
 }
 
@@ -112,9 +112,9 @@ impl ColumnFamily for BlockTransactions {
     const NAME: &'static str = "block_transactions";
 }
 
-impl ColumnFamilyOptions<Caches> for BlockTransactions {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for BlockTransactions {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
     }
 }
 
@@ -140,9 +140,9 @@ impl ColumnFamily for BlocksByMcSeqno {
     const NAME: &'static str = "blocks_by_mc_seqno";
 }
 
-impl ColumnFamilyOptions<Caches> for BlocksByMcSeqno {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for BlocksByMcSeqno {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
     }
 }
 
@@ -159,9 +159,9 @@ impl ColumnFamily for CodeHashes {
     const NAME: &'static str = "code_hashes";
 }
 
-impl ColumnFamilyOptions<Caches> for CodeHashes {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for CodeHashes {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
     }
 }
 
@@ -178,8 +178,8 @@ impl ColumnFamily for CodeHashesByAddress {
     const NAME: &'static str = "code_hashes_by_address";
 }
 
-impl ColumnFamilyOptions<Caches> for CodeHashesByAddress {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for CodeHashesByAddress {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        zstd_block_based_table_factory(opts, ctx);
     }
 }

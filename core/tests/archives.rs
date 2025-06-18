@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bytes::BytesMut;
-use bytesize::ByteSize;
 use everscale_types::models::{BlockId, ShardStateUnsplit};
 use everscale_types::prelude::*;
 use futures_util::future;
@@ -369,7 +368,6 @@ async fn heavy_archives() -> Result<()> {
     // Init storage
     let config = StorageConfig {
         root_dir: current_test_path.join("db"),
-        rocksdb_lru_capacity: ByteSize::kb(1024 * 1024),
         rocksdb_enable_metrics: false,
     };
 

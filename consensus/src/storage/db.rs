@@ -1,5 +1,5 @@
-use tycho_storage::kv::NamedTables;
-use weedb::{Caches, WeeDb};
+use tycho_storage::kv::{NamedTables, TableContext};
+use weedb::WeeDb;
 
 use super::tables;
 
@@ -14,7 +14,7 @@ weedb::tables! {
     /// Overlay id defines data version: data will be removed on mismatch during boot.
     /// - Key: `overlay id: [u8; 32]`
     /// - Value: None
-    pub struct MempoolTables<Caches> {
+    pub struct MempoolTables<TableContext> {
         pub points: tables::Points,
         pub points_info: tables:: PointsInfo,
         pub points_status: tables::PointsStatus,
