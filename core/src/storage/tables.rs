@@ -1,13 +1,13 @@
 use bytesize::ByteSize;
 use tycho_storage::kv::{
     default_block_based_table_factory, optimize_for_level_compaction, optimize_for_point_lookup,
-    refcount, with_blob_db, DEFAULT_MIN_BLOB_SIZE,
+    refcount, with_blob_db, TableContext, DEFAULT_MIN_BLOB_SIZE,
 };
 use weedb::rocksdb::{
     self, BlockBasedIndexType, BlockBasedOptions, CompactionPri, DBCompressionType,
     DataBlockIndexType, MemtableFactory, MergeOperands, Options, ReadOptions, SliceTransform,
 };
-use weedb::{Caches, ColumnFamily, ColumnFamilyOptions};
+use weedb::{ColumnFamily, ColumnFamilyOptions};
 
 /// Stores generic node parameters
 /// - Key: `...`
@@ -18,12 +18,12 @@ impl ColumnFamily for State {
     const NAME: &'static str = "state";
 }
 
-impl ColumnFamilyOptions<Caches> for State {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for State {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        default_block_based_table_factory(opts, ctx);
 
         opts.set_optimize_filters_for_hits(true);
-        optimize_for_point_lookup(opts, caches);
+        optimize_for_point_lookup(opts, ctx);
     }
 }
 
@@ -36,10 +36,12 @@ impl ColumnFamily for ArchiveBlockIds {
     const NAME: &'static str = "archive_block_ids";
 }
 
-impl ColumnFamilyOptions<Caches> for ArchiveBlockIds {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
-        optimize_for_level_compaction(opts, ByteSize::mib(512u64));
+impl ColumnFamilyOptions<TableContext> for ArchiveBlockIds {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        default_block_based_table_factory(opts, ctx);
+
+        // Uses 128MB * 6 = 768 GB
+        optimize_for_level_compaction(opts, ctx, ByteSize::mib(128), 6);
 
         opts.set_merge_operator_associative("archive_data_merge", archive_data_merge);
         // data is hardly compressible and dataset is small
@@ -61,18 +63,16 @@ impl ColumnFamily for Archives {
     const NAME: &'static str = "archives";
 }
 
-impl ColumnFamilyOptions<Caches> for Archives {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
-        optimize_for_level_compaction(opts, ByteSize::mib(512u64));
+impl ColumnFamilyOptions<TableContext> for Archives {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        default_block_based_table_factory(opts, ctx);
+
+        // Uses 512 * 8 = 4 GB
+        optimize_for_level_compaction(opts, ctx, ByteSize::mib(512), 8);
 
         // data is already compressed
         opts.set_compression_type(DBCompressionType::None);
         with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
-
-        opts.set_max_write_buffer_number(8); // 8 * 512MB = 4GB;
-        opts.set_write_buffer_size(512 * 1024 * 1024); // 512 per memtable
-        opts.set_min_write_buffer_number_to_merge(2); // allow early flush
     }
 }
 
@@ -89,20 +89,13 @@ impl ColumnFamily for BlockHandles {
     }
 }
 
-impl ColumnFamilyOptions<Caches> for BlockHandles {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        optimize_for_level_compaction(opts, ByteSize::mib(512u64));
-
-        let mut block_factory = BlockBasedOptions::default();
-        block_factory.set_block_cache(&caches.block_cache);
-
-        block_factory.set_index_type(BlockBasedIndexType::HashSearch);
-        block_factory.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
-        block_factory.set_format_version(5);
+impl ColumnFamilyOptions<TableContext> for BlockHandles {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        // Uses 128MB * 6 = 768 GB
+        optimize_for_level_compaction(opts, ctx, ByteSize::mib(128), 6);
 
         opts.set_merge_operator_associative("block_handle_merge", block_handle_merge);
-        opts.set_block_based_table_factory(&block_factory);
-        optimize_for_point_lookup(opts, caches);
+        optimize_for_point_lookup(opts, ctx);
     }
 }
 
@@ -119,7 +112,7 @@ impl ColumnFamily for KeyBlocks {
     }
 }
 
-impl ColumnFamilyOptions<Caches> for KeyBlocks {}
+impl ColumnFamilyOptions<TableContext> for KeyBlocks {}
 
 /// Maps block id (partial) to file hash
 pub struct FullBlockIds;
@@ -132,9 +125,9 @@ impl ColumnFamily for FullBlockIds {
     }
 }
 
-impl ColumnFamilyOptions<Caches> for FullBlockIds {
-    fn options(opts: &mut rocksdb::Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for FullBlockIds {
+    fn options(opts: &mut rocksdb::Options, ctx: &mut TableContext) {
+        default_block_based_table_factory(opts, ctx);
     }
 }
 
@@ -151,14 +144,22 @@ impl ColumnFamily for PackageEntries {
     const NAME: &'static str = "package_entries";
 }
 
-impl ColumnFamilyOptions<Caches> for PackageEntries {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for PackageEntries {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        default_block_based_table_factory(opts, ctx);
         opts.set_compression_type(DBCompressionType::Zstd);
 
-        opts.set_max_write_buffer_number(8); // 8 * 512MB = 4GB;
-        opts.set_write_buffer_size(512 * 1024 * 1024); // 512 per memtable
-        opts.set_min_write_buffer_number_to_merge(2); // allow early flush
+        // Uses 8 * 512MB = 4GB
+        let buffer_size = ByteSize::mib(512);
+        let buffers_to_merge = 2;
+        let buffer_count = 8;
+        opts.set_write_buffer_size(buffer_size.as_u64() as _);
+        opts.set_max_write_buffer_number(buffer_count);
+        opts.set_min_write_buffer_number_to_merge(buffers_to_merge); // allow early flush
+        ctx.track_buffer_usage(
+            ByteSize(buffer_size.as_u64() * buffers_to_merge as u64),
+            ByteSize(buffer_size.as_u64() * buffer_count as u64),
+        );
 
         with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::Zstd);
 
@@ -192,10 +193,12 @@ impl ColumnFamily for BlockDataEntries {
     const NAME: &'static str = "block_data_entries";
 }
 
-impl ColumnFamilyOptions<Caches> for BlockDataEntries {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
-        optimize_for_level_compaction(opts, ByteSize::mib(512u64));
+impl ColumnFamilyOptions<TableContext> for BlockDataEntries {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        default_block_based_table_factory(opts, ctx);
+
+        // Uses 128MB * 6 = 768 GB
+        optimize_for_level_compaction(opts, ctx, ByteSize::mib(127), 6);
 
         // data is already compressed
         opts.set_compression_type(DBCompressionType::None);
@@ -212,9 +215,9 @@ impl ColumnFamily for ShardStates {
     const NAME: &'static str = "shard_states";
 }
 
-impl ColumnFamilyOptions<Caches> for ShardStates {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
+impl ColumnFamilyOptions<TableContext> for ShardStates {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        default_block_based_table_factory(opts, ctx);
         opts.set_compression_type(DBCompressionType::Zstd);
     }
 }
@@ -228,17 +231,26 @@ impl ColumnFamily for Cells {
     const NAME: &'static str = "cells";
 }
 
-impl ColumnFamilyOptions<Caches> for Cells {
-    fn options(opts: &mut Options, block_cache: &mut Caches) {
+impl ColumnFamilyOptions<TableContext> for Cells {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
         opts.set_level_compaction_dynamic_level_bytes(true);
 
         opts.set_merge_operator_associative("cell_merge", refcount::merge_operator);
         opts.set_compaction_filter("cell_compaction", refcount::compaction_filter);
 
         // optimize for bulk inserts and single writer
-        opts.set_max_write_buffer_number(8); // 8 * 512MB = 4GB
-        opts.set_min_write_buffer_number_to_merge(2); // allow early flush
-        opts.set_write_buffer_size(512 * 1024 * 1024); // 512 per memtable
+
+        // Uses 8 * 512MB = 4GB
+        let buffer_size = ByteSize::mib(512);
+        let buffers_to_merge = 2;
+        let buffer_count = 8;
+        opts.set_write_buffer_size(buffer_size.as_u64() as _);
+        opts.set_max_write_buffer_number(buffer_count);
+        opts.set_min_write_buffer_number_to_merge(buffers_to_merge); // allow early flush
+        ctx.track_buffer_usage(
+            ByteSize(buffer_size.as_u64() * buffers_to_merge as u64),
+            ByteSize(buffer_size.as_u64() * buffer_count as u64),
+        );
 
         opts.set_max_successive_merges(0); // it will eat cpu, we are doing first merge in hashmap anyway.
 
@@ -260,7 +272,7 @@ impl ColumnFamilyOptions<Caches> for Cells {
 
         // todo: some how make block cache separate for cells,
         // using 3/4 of all available cache space
-        block_factory.set_block_cache(&block_cache.block_cache);
+        block_factory.set_block_cache(&ctx.caches().block_cache);
 
         // 10 bits per key, stored at the end of the sst
         block_factory.set_bloom_filter(10.0, false);
@@ -346,10 +358,10 @@ impl ColumnFamily for TempCells {
     const NAME: &'static str = "temp_cells";
 }
 
-impl ColumnFamilyOptions<Caches> for TempCells {
-    fn options(opts: &mut rocksdb::Options, caches: &mut Caches) {
+impl ColumnFamilyOptions<TableContext> for TempCells {
+    fn options(opts: &mut rocksdb::Options, ctx: &mut TableContext) {
         let mut block_factory = BlockBasedOptions::default();
-        block_factory.set_block_cache(&caches.block_cache);
+        block_factory.set_block_cache(&ctx.caches().block_cache);
         block_factory.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
         block_factory.set_whole_key_filtering(true);
         block_factory.set_checksum_type(rocksdb::ChecksumType::NoChecksum);
@@ -379,11 +391,10 @@ impl ColumnFamily for BlockConnections {
     }
 }
 
-impl ColumnFamilyOptions<Caches> for BlockConnections {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
-
-        optimize_for_point_lookup(opts, caches);
+impl ColumnFamilyOptions<TableContext> for BlockConnections {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        default_block_based_table_factory(opts, ctx);
+        optimize_for_point_lookup(opts, ctx);
     }
 }
 
@@ -399,8 +410,8 @@ impl ColumnFamily for ShardInternalMessagesOld {
     }
 }
 
-impl ColumnFamilyOptions<Caches> for ShardInternalMessagesOld {
-    fn options(_opts: &mut Options, _caches: &mut Caches) {}
+impl ColumnFamilyOptions<TableContext> for ShardInternalMessagesOld {
+    fn options(_opts: &mut Options, _ctx: &mut TableContext) {}
 }
 
 // TODO should be deleted
@@ -412,8 +423,8 @@ impl ColumnFamily for ShardInternalMessagesUncommitedOld {
         opts.set_verify_checksums(true);
     }
 }
-impl ColumnFamilyOptions<Caches> for ShardInternalMessagesUncommitedOld {
-    fn options(_opts: &mut Options, _caches: &mut Caches) {}
+impl ColumnFamilyOptions<TableContext> for ShardInternalMessagesUncommitedOld {
+    fn options(_opts: &mut Options, _ctx: &mut TableContext) {}
 }
 
 // TODO should be deleted
@@ -426,8 +437,8 @@ impl ColumnFamily for InternalMessageStatsOld {
     }
 }
 
-impl ColumnFamilyOptions<Caches> for InternalMessageStatsOld {
-    fn options(_opts: &mut Options, _caches: &mut Caches) {}
+impl ColumnFamilyOptions<TableContext> for InternalMessageStatsOld {
+    fn options(_opts: &mut Options, _ctx: &mut TableContext) {}
 }
 
 // TODO should be deleted
@@ -440,8 +451,8 @@ impl ColumnFamily for InternalMessageStatsUncommitedOld {
     }
 }
 
-impl ColumnFamilyOptions<Caches> for InternalMessageStatsUncommitedOld {
-    fn options(_opts: &mut Options, _caches: &mut Caches) {}
+impl ColumnFamilyOptions<TableContext> for InternalMessageStatsUncommitedOld {
+    fn options(_opts: &mut Options, _ctx: &mut TableContext) {}
 }
 
 fn archive_data_merge(

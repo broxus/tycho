@@ -20,7 +20,6 @@ rand = { workspace = true }
 rlimit = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
-sysinfo = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "fs", "io-util"] }
 tracing = { workspace = true }
@@ -28,7 +27,7 @@ weedb = { workspace = true }
 
 # local deps
 tycho-storage-traits = { workspace = true }
-tycho-util = { workspace = true }
+tycho-util = { workspace = true, features = ["mem"] }
 
 [dev-dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }

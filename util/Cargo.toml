@@ -15,6 +15,7 @@ ahash = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
+bytesize = { workspace = true, optional = true }
 castaway = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
@@ -22,12 +23,15 @@ getip = { workspace = true, optional = true }
 humantime = { workspace = true }
 libc = { workspace = true, optional = true }
 metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true, optional = true }
 rand = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
+sysinfo = { workspace = true, optional = true }
 thiserror = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true, optional = true }
 tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "rt"] }
 tracing = { workspace = true }
@@ -37,9 +41,6 @@ tracing-subscriber = { workspace = true, optional = true }
 zstd-safe = { workspace = true, features = ["std", "zstdmt"] }
 zstd-sys = { workspace = true }
 
-metrics-exporter-prometheus = { workspace = true, optional = true }
-tikv-jemalloc-ctl = { workspace = true, optional = true }
-
 [dev-dependencies]
 criterion = "0.5.1"
 tempfile = { workspace = true }
@@ -48,6 +49,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [features]
 test = ["dep:tracing-subscriber"]
+mem = ["dep:bytesize", "dep:sysinfo"]
 cli = [
     "dep:getip",
     "dep:libc",
