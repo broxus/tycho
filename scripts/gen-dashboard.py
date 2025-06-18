@@ -1176,18 +1176,26 @@ def collation_metrics() -> RowPanel:
             "Number of accounts per block",
             labels=['workchain=~"$workchain"'],
         ),
+        create_counter_panel(
+            "tycho_collator_anchor_import_cancelled_count",
+            "Number of anchor import cancelled",
+            labels_selectors=['workchain=~"$workchain"'],
+        ),
         create_gauge_panel(
             "tycho_collator_shard_blocks_count_btw_anchors",
             "Number of Shard Blocks before import next anchor",
         ),
         create_gauge_panel(
+            "tycho_collator_wu_used_from_last_anchor",
+            "Wu used from last anchor and wu used to import one anchor",
+        ),
+        create_gauge_panel(
+            "tycho_collator_can_import_anchors_count",
+            "Number of anchors that can be imported by wu used",
+        ),
+        create_gauge_panel(
             "tycho_collator_import_next_anchor_count",
             "Number of imported anchors per tick",
-        ),
-        create_counter_panel(
-            "tycho_collator_anchor_import_cancelled_count",
-            "Number of anchor import cancelled",
-            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_collator_anchor_import_skipped_count",
