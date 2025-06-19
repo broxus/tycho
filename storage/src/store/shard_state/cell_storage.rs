@@ -517,7 +517,12 @@ impl CellStorage {
 
         std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
 
-        Ok(ctx.finalize(batch))
+        let new_cell_count = ctx.finalize(batch);
+
+        metrics::histogram!("tycho_storage_cells_tree_cache_size")
+            .record(self.cells_cache.len() as f64);
+
+        Ok(new_cell_count)
     }
 
     pub fn store_cell(
@@ -635,14 +640,20 @@ impl CellStorage {
             }
         }
 
-        Ok(ctx.finalize(batch))
+        let new_cell_count = ctx.finalize(batch);
+
+        metrics::histogram!("tycho_storage_cells_tree_cache_size")
+            .record(self.cells_cache.len() as f64);
+
+        Ok(new_cell_count)
     }
 
     pub fn load_cell(
         self: &Arc<Self>,
         hash: HashBytes,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
-        let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
+        // TODO: make less expensive
+        // let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
         if let Some(cell) = self.cells_cache.get(&hash) {
             if let Some(cell) = cell.upgrade() {
@@ -659,13 +670,7 @@ impl CellStorage {
             Err(e) => return Err(CellStorageError::Internal(e)),
         };
 
-        if self
-            .cells_cache
-            .insert(hash, Arc::downgrade(&cell))
-            .is_none()
-        {
-            metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
-        }
+        self.cells_cache.insert(hash, Arc::downgrade(&cell));
 
         Ok(cell)
     }
@@ -928,7 +933,12 @@ impl CellStorage {
         let total = ctx.transaction.len();
         let mut batch = WriteBatch::with_capacity_bytes(total * (32 + 8 + 8));
 
-        Ok((ctx.finalize(&mut batch), batch))
+        let new_cell_count = ctx.finalize(&mut batch);
+
+        metrics::histogram!("tycho_storage_cells_tree_cache_size")
+            .record(self.cells_cache.len() as f64);
+
+        Ok((new_cell_count, batch))
     }
 
     pub fn remove_cell(
@@ -1032,13 +1042,14 @@ impl CellStorage {
             self.raw_cells_cache.on_remove_cell(key, new_rc);
         }
 
+        metrics::histogram!("tycho_storage_cells_tree_cache_size")
+            .record(self.cells_cache.len() as f64);
+
         Ok((total, batch))
     }
 
     pub fn drop_cell(&self, hash: &HashBytes) {
-        if self.cells_cache.remove(hash).is_some() {
-            metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
-        }
+        self.cells_cache.remove(hash);
     }
 }
 
