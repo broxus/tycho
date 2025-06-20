@@ -278,6 +278,8 @@ impl Phase<FinalizeState> {
 
         let collation_data = &mut self.state.collation_data;
 
+        let accounts_split_depth = collator_config.accounts_split_depth;
+
         let shard = collation_data.block_id_short.shard;
 
         let labels = &[("workchain", shard.workchain().to_string())];
@@ -337,7 +339,7 @@ impl Phase<FinalizeState> {
             processed_accounts_res = Self::build_accounts(
                 executor,
                 config_address,
-                collator_config.accounts_split_depth,
+                accounts_split_depth,
                 &mut public_libraries,
             );
 
@@ -563,17 +565,15 @@ impl Phase<FinalizeState> {
 
             new_state_root = CellBuilder::build_from(&new_observable_state)?;
 
-            const SPLIT_DEPTH: u8 = 5;
-
             let old_split_at = split_aug_dict_raw(
                 self.state.prev_shard_data.observable_accounts().clone(),
-                SPLIT_DEPTH,
+                accounts_split_depth,
             )?
             .into_keys()
             .collect::<ahash::HashSet<_>>();
 
             let new_split_at =
-                split_aug_dict_raw(new_observable_state.accounts.load()?, SPLIT_DEPTH)?
+                split_aug_dict_raw(new_observable_state.accounts.load()?, accounts_split_depth)?
                     .into_keys()
                     .collect::<ahash::HashSet<_>>();
 
