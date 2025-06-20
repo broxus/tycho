@@ -8,10 +8,9 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::effects::TaskTracker;
 use crate::engine::lifecycle::recover::{EngineRecoverLoop, RunAttributes};
 use crate::engine::lifecycle::session::isolated::SpanFields;
-use crate::engine::lifecycle::{EngineNetwork, FixHistoryFlag};
+use crate::engine::lifecycle::{EngineBinding, EngineNetwork, EngineNetworkArgs, FixHistoryFlag};
 use crate::engine::{Engine, MempoolMergedConfig};
 use crate::intercom::InitPeers;
-use crate::prelude::{EngineBinding, EngineNetworkArgs};
 
 pub struct EngineSession {
     genesis_info: GenesisInfo,
@@ -44,7 +43,20 @@ impl EngineSession {
         let run_attrs = Arc::new(Mutex::new(RunAttributes {
             tracker: task_tracker.clone(),
             is_stopping: false,
-            peer_schedule: net.peer_schedule,
+            peer_schedule: net.peer_schedule.clone(),
+            #[cfg(feature = "mock-feedback")]
+            mock_feedback: {
+                use crate::mock_feedback::MockFeedbackSender;
+                net.responder.set_top_known_anchor(&bind.top_known_anchor);
+                let sender = MockFeedbackSender::new(
+                    net.dispatcher.clone(),
+                    net.peer_schedule,
+                    bind.top_known_anchor.clone(),
+                    &init_peers,
+                    net_args.network.peer_id(),
+                );
+                task_tracker.ctx().spawn(sender.run())
+            },
             last_peers: init_peers,
         }));
 
@@ -102,9 +114,9 @@ mod isolated {
     use tycho_network::{OverlayId, PeerId};
 
     use crate::effects::AltFormat;
+    use crate::engine::lifecycle::EngineNetworkArgs;
     use crate::engine::MempoolMergedConfig;
     use crate::models::Round;
-    use crate::prelude::EngineNetworkArgs;
 
     pub struct SpanFields {
         peer_id: PeerId,

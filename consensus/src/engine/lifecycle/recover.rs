@@ -4,10 +4,11 @@ use futures_util::never::Never;
 use parking_lot::Mutex;
 
 use crate::effects::{AltFormat, Cancelled, Task, TaskTracker};
-use crate::engine::lifecycle::{EngineError, EngineNetwork, FixHistoryFlag};
+use crate::engine::lifecycle::{
+    EngineBinding, EngineError, EngineNetwork, EngineNetworkArgs, FixHistoryFlag,
+};
 use crate::engine::{Engine, MempoolMergedConfig};
 use crate::intercom::{InitPeers, PeerSchedule};
-use crate::prelude::{EngineBinding, EngineNetworkArgs};
 
 pub struct EngineRecoverLoop {
     // to create new engine run
@@ -31,6 +32,8 @@ pub struct RunAttributes {
     pub is_stopping: bool,
     pub peer_schedule: PeerSchedule,
     pub last_peers: InitPeers,
+    #[cfg(feature = "mock-feedback")]
+    pub mock_feedback: Task<()>,
 }
 
 impl EngineRecoverLoop {
@@ -77,6 +80,22 @@ impl EngineRecoverLoop {
                     &guard.last_peers,
                 );
                 guard.peer_schedule = net.peer_schedule.clone();
+
+                #[cfg(feature = "mock-feedback")]
+                {
+                    use crate::mock_feedback::MockFeedbackSender;
+                    net.responder
+                        .set_top_known_anchor(&self.bind.top_known_anchor);
+                    let sender = MockFeedbackSender::new(
+                        net.dispatcher.clone(),
+                        net.peer_schedule.clone(),
+                        self.bind.top_known_anchor.clone(),
+                        &guard.last_peers,
+                        self.net_args.network.peer_id(),
+                    );
+                    guard.mock_feedback = guard.tracker.ctx().spawn(sender.run());
+                }
+
                 (guard.tracker.clone(), net)
             };
 
