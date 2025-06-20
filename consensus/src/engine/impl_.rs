@@ -102,7 +102,7 @@ impl Engine {
 
         let peer_schedule_updater = engine_ctx.task().spawn({
             let peer_schedule = net.peer_schedule.clone();
-            peer_schedule.run_updater()
+            peer_schedule.downgrade().run_updater()
         });
 
         Self {
