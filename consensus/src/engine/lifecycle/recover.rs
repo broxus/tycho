@@ -8,7 +8,7 @@ use crate::engine::lifecycle::{
     EngineBinding, EngineError, EngineNetwork, EngineNetworkArgs, FixHistoryFlag,
 };
 use crate::engine::{Engine, MempoolMergedConfig};
-use crate::intercom::{InitPeers, PeerSchedule};
+use crate::intercom::{InitPeers, WeakPeerSchedule};
 
 pub struct EngineRecoverLoop {
     // to create new engine run
@@ -30,7 +30,7 @@ impl Drop for EngineRecoverLoop {
 pub struct RunAttributes {
     pub tracker: TaskTracker,
     pub is_stopping: bool,
-    pub peer_schedule: PeerSchedule,
+    pub peer_schedule: WeakPeerSchedule,
     pub last_peers: InitPeers,
     #[cfg(feature = "mock-feedback")]
     pub mock_feedback: Task<()>,
@@ -79,7 +79,7 @@ impl EngineRecoverLoop {
                     &self.merged_conf,
                     &guard.last_peers,
                 );
-                guard.peer_schedule = net.peer_schedule.clone();
+                guard.peer_schedule = net.peer_schedule.downgrade();
 
                 #[cfg(feature = "mock-feedback")]
                 {
@@ -88,7 +88,7 @@ impl EngineRecoverLoop {
                         .set_top_known_anchor(&self.bind.top_known_anchor);
                     let sender = MockFeedbackSender::new(
                         net.dispatcher.clone(),
-                        net.peer_schedule.clone(),
+                        guard.peer_schedule.clone(),
                         self.bind.top_known_anchor.clone(),
                         &guard.last_peers,
                         self.net_args.network.peer_id(),
