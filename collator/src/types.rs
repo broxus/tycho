@@ -59,6 +59,10 @@ pub struct CollatorConfig {
     ///
     /// Default: `4` (means 16 shards).
     pub accounts_split_depth: u8,
+    /// Which "virtual shards depth" to use when processing [`MerkleUpdate`].
+    ///
+    /// Default: `5` (means 32 shards).
+    pub merkle_split_depth: u8,
 }
 
 impl Default for CollatorConfig {
@@ -71,6 +75,7 @@ impl Default for CollatorConfig {
             validate_config: true,
             fast_sync: true,
             accounts_split_depth: 4,
+            merkle_split_depth: 5,
         }
     }
 }
