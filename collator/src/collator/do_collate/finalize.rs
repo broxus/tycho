@@ -279,6 +279,7 @@ impl Phase<FinalizeState> {
         let collation_data = &mut self.state.collation_data;
 
         let accounts_split_depth = collator_config.accounts_split_depth;
+        let merkle_split_depth = collator_config.merkle_split_depth;
 
         let shard = collation_data.block_id_short.shard;
 
@@ -567,13 +568,13 @@ impl Phase<FinalizeState> {
 
             let old_split_at = split_aug_dict_raw(
                 self.state.prev_shard_data.observable_accounts().clone(),
-                accounts_split_depth,
+                merkle_split_depth,
             )?
             .into_keys()
             .collect::<ahash::HashSet<_>>();
 
             let new_split_at =
-                split_aug_dict_raw(new_observable_state.accounts.load()?, accounts_split_depth)?
+                split_aug_dict_raw(new_observable_state.accounts.load()?, merkle_split_depth)?
                     .into_keys()
                     .collect::<ahash::HashSet<_>>();
 
