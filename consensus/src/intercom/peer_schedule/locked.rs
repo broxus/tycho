@@ -6,7 +6,6 @@ use tycho_util::FastHashSet;
 use crate::effects::Task;
 use crate::intercom::peer_schedule::stateful::PeerScheduleStateful;
 use crate::intercom::peer_schedule::{PeerState, WeakPeerSchedule};
-use crate::intercom::PeerSchedule;
 use crate::models::PeerCount;
 
 pub struct PeerScheduleLocked {
@@ -60,7 +59,7 @@ impl PeerScheduleLocked {
             for peer_id in to_forget {
                 entries.remove(&peer_id);
             }
-            PeerSchedule::resolved_waiters(&self.local_id, &entries.downgrade())
+            WeakPeerSchedule::resolved_waiters(&self.local_id, &entries.downgrade())
         };
         self.resolve_peers_task = parent.new_resolve_task(resolved_waiters);
     }
@@ -93,7 +92,7 @@ impl PeerScheduleLocked {
 
             let read_entries = write_entries.downgrade();
 
-            PeerSchedule::resolved_waiters(&self.local_id, &read_entries)
+            WeakPeerSchedule::resolved_waiters(&self.local_id, &read_entries)
         };
 
         self.resolve_peers_task = parent.new_resolve_task(resolved_waiters);
