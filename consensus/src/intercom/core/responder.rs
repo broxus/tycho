@@ -16,9 +16,18 @@ use crate::intercom::core::{
 use crate::intercom::{BroadcastFilter, Downloader, Uploader};
 
 #[derive(Clone, Default)]
-pub struct Responder(Arc<ArcSwapOption<ResponderInner>>);
+pub struct Responder(Arc<ResponderInner>);
 
+#[derive(Default)]
 struct ResponderInner {
+    current: ArcSwapOption<ResponderCurrent>,
+    #[cfg(feature = "mock-feedback")]
+    top_known_anchor: std::sync::OnceLock<
+        crate::engine::round_watch::RoundWatch<crate::engine::round_watch::TopKnownAnchor>,
+    >,
+}
+
+struct ResponderCurrent {
     // state and storage components go here
     broadcast_filter: BroadcastFilter,
     head: DagHead,
@@ -28,6 +37,18 @@ struct ResponderInner {
 }
 
 impl Responder {
+    #[cfg(feature = "mock-feedback")]
+    pub fn set_top_known_anchor(
+        &self,
+        top_known_anchor: &crate::engine::round_watch::RoundWatch<
+            crate::engine::round_watch::TopKnownAnchor,
+        >,
+    ) {
+        if (self.0.top_known_anchor.set(top_known_anchor.clone())).is_err() {
+            panic!("top known anchor in responder is already initialized")
+        };
+    }
+
     pub fn update(
         &self,
         broadcast_filter: &BroadcastFilter,
@@ -44,7 +65,7 @@ impl Responder {
         //  Otherwise local Signer will skip BroadcastFilter check and search in DAG directly,
         //  will not find cached point and will ask to repeat broadcast once more, and local
         //  BroadcastFilter may account such repeated broadcast as malicious.
-        self.0.store(Some(Arc::new(ResponderInner {
+        self.0.current.store(Some(Arc::new(ResponderCurrent {
             broadcast_filter: broadcast_filter.clone(),
             head: head.clone(),
             downloader: downloader.clone(),
@@ -66,6 +87,15 @@ impl Service<ServiceRequest> for Responder {
 
     #[inline]
     fn on_message(&self, _req: ServiceRequest) -> Self::OnMessageFuture {
+        #[cfg(feature = "mock-feedback")]
+        {
+            use crate::mock_feedback::RoundBoxed;
+            if let Ok(data) = _req.parse_tl::<RoundBoxed>() {
+                if let Some(tka) = self.0.top_known_anchor.get() {
+                    tka.set_max(data.round);
+                }
+            }
+        }
         future::ready(())
     }
 }
@@ -100,7 +130,7 @@ impl Responder {
             }
         };
 
-        let Some(inner) = self.0.load_full() else {
+        let Some(inner) = self.0.current.load_full() else {
             return Some(match raw_query_tag {
                 QueryRequestTag::Broadcast => {
                     // do nothing: sender has retry loop via signature request
