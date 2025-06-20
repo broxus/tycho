@@ -351,12 +351,13 @@ impl FinalizeWu {
         // TODO: should use accounts count in state to calc wu for merkle update
 
         // calc build state update
-        //  * calc update of all updated accounts in (accounts_count)*log(state_accounts_count)
+        //  * calc update of all updated accounts in parallel in (accounts_count)*log(state_accounts_count)/(threads_count)
         //  * use min value if calculated is less
         self.build_state_update_wu = std::cmp::max(
             state_update_min as u64,
             accounts_count
                 .saturating_mul(accounts_count_log)
+                .saturating_div(threads_count)
                 .saturating_mul(state_update_accounts as u64),
         );
 
