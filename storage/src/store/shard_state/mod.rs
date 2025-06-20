@@ -11,6 +11,7 @@ use tycho_block_util::block::*;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::FastHashSet;
 use weedb::rocksdb;
 
 use self::cell_storage::*;
@@ -102,7 +103,10 @@ impl ShardStateStorage {
         if handle.has_state() {
             return Ok(false);
         }
+
+        let gc_lock_store = HistogramGuard::begin("tycho_storage_cell_gc_lock_store_time_high");
         let _gc_lock = self.gc_lock.lock().await;
+        gc_lock_store.finish();
 
         // Double check if the state is already stored
         if handle.has_state() {
@@ -123,37 +127,45 @@ impl ShardStateStorage {
             let root_hash = *root_cell.repr_hash();
             let estimated_merkle_update_size = hint.estimate_cell_count();
 
-            let split_accounts = {
-                // Cell#0 - processed_upto
-                // Cell#1 - accounts
-                let shard_accounts = root_cell
-                    .reference_cloned(1)
-                    .context("invalid shard state")?
-                    .parse::<ShardAccounts>()
-                    .context("failed to load shard accounts")?;
-
-                split_aug_dict_raw(shard_accounts, accounts_split_depth)
-                    .context("failed to split shard accounts")?
-            };
-
             let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
             let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time_high");
 
-            let new_cell_count = cell_storage.store_cell_mt(
-                root_cell.as_ref(),
-                &mut batch,
-                split_accounts,
-                estimated_merkle_update_size,
-            )?;
+            let new_cell_count = if block_id.is_masterchain() {
+                cell_storage.store_cell(
+                    &mut batch,
+                    root_cell.as_ref(),
+                    estimated_merkle_update_size,
+                )?
+            } else {
+                let split_accounts = {
+                    // Cell#0 - processed_upto
+                    // Cell#1 - accounts
+                    let shard_accounts = root_cell
+                        .reference_cloned(1)
+                        .context("invalid shard state")?
+                        .parse::<ShardAccounts>()
+                        .context("failed to load shard accounts")?;
+
+                    split_aug_dict_raw(shard_accounts, accounts_split_depth)
+                        .context("failed to split shard accounts")?
+                };
+
+                cell_storage.store_cell_mt(
+                    root_cell.as_ref(),
+                    &mut batch,
+                    split_accounts,
+                    estimated_merkle_update_size,
+                )?
+            };
 
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
-            let hist = HistogramGuard::begin("tycho_storage_state_update_time");
+            let hist = HistogramGuard::begin("tycho_storage_state_update_time_high");
             metrics::histogram!("tycho_storage_state_update_size_bytes")
                 .record(batch.size_in_bytes() as f64);
             metrics::histogram!("tycho_storage_state_update_size_predicted_bytes")
@@ -228,7 +240,7 @@ impl ShardStateStorage {
         let mut states_read_options = self.db.shard_states.new_read_config();
         states_read_options.set_snapshot(&snapshot);
 
-        let mut alloc = bumpalo::Bump::new();
+        let mut alloc = bumpalo_herd::Herd::new();
 
         // Create iterator
         let mut iter = raw.raw_iterator_cf_opt(&shard_states_cf.bound(), states_read_options);
@@ -238,7 +250,7 @@ impl ShardStateStorage {
         let mut removed_states = 0usize;
         let mut removed_cells = 0usize;
         loop {
-            let _hist = HistogramGuard::begin("tycho_storage_state_gc_time");
+            let _hist = HistogramGuard::begin("tycho_storage_state_gc_time_high");
             let (key, value) = match iter.item() {
                 Some(item) => item,
                 None => match iter.status() {
@@ -261,14 +273,44 @@ impl ShardStateStorage {
             alloc.reset();
 
             {
+                let gc_lock_remove =
+                    HistogramGuard::begin("tycho_storage_cell_gc_lock_remove_time_high");
                 let _guard = self.gc_lock.lock().await;
+                gc_lock_remove.finish();
 
                 let db = self.db.clone();
                 let cell_storage = self.cell_storage.clone();
                 let key = key.to_vec();
+                let accounts_split_depth = self.accounts_split_depth;
 
                 let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
-                    let (stats, mut batch) = cell_storage.remove_cell(&alloc, &root_hash)?;
+                    let in_mem_remove =
+                        HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
+
+                    let (stats, mut batch) = if block_id.is_masterchain() {
+                        cell_storage.remove_cell(alloc.get().as_bump(), &root_hash)?
+                    } else {
+                        let root_cell = Cell::from(cell_storage.load_cell(root_hash)? as Arc<_>);
+
+                        let split_accounts = {
+                            // Cell#0 - processed_upto
+                            // Cell#1 - accounts
+                            let shard_accounts = root_cell
+                                .reference_cloned(1)
+                                .context("invalid shard state")?
+                                .parse::<ShardAccounts>()
+                                .context("failed to load shard accounts")?;
+
+                            split_aug_dict_raw(shard_accounts, accounts_split_depth)
+                                .context("failed to split shard accounts")?
+                                .into_keys()
+                                .collect::<FastHashSet<HashBytes>>()
+                        };
+
+                        cell_storage.remove_cell_mt(&alloc, &root_hash, split_accounts)?
+                    };
+
+                    in_mem_remove.finish();
 
                     batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
                     db.raw()
