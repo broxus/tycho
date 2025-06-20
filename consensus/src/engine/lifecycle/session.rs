@@ -39,18 +39,18 @@ impl EngineSession {
             merged_conf,
             FixHistoryFlag::default(),
         );
-
+        let peer_schedule = net.peer_schedule.downgrade();
         let run_attrs = Arc::new(Mutex::new(RunAttributes {
             tracker: task_tracker.clone(),
             is_stopping: false,
-            peer_schedule: net.peer_schedule.clone(),
+            peer_schedule: peer_schedule.clone(),
             #[cfg(feature = "mock-feedback")]
             mock_feedback: {
                 use crate::mock_feedback::MockFeedbackSender;
                 net.responder.set_top_known_anchor(&bind.top_known_anchor);
                 let sender = MockFeedbackSender::new(
                     net.dispatcher.clone(),
-                    net.peer_schedule,
+                    peer_schedule,
                     bind.top_known_anchor.clone(),
                     &init_peers,
                     net_args.network.peer_id(),
@@ -85,7 +85,9 @@ impl EngineSession {
 
     pub fn set_peers(&self, peers: InitPeers) {
         let mut run_attrs = self.run_attrs.lock();
-        run_attrs.peer_schedule.set_peers(&peers);
+        if let Some(peer_schedule) = run_attrs.peer_schedule.upgrade() {
+            peer_schedule.set_peers(&peers);
+        }
         run_attrs.last_peers = peers;
     }
 

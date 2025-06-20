@@ -8,7 +8,7 @@ use tokio::time::MissedTickBehavior;
 use tycho_network::{PeerId, Request};
 
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
-use crate::intercom::{Dispatcher, InitPeers, PeerSchedule};
+use crate::intercom::{Dispatcher, InitPeers, WeakPeerSchedule};
 use crate::models::Round;
 
 #[derive(TlRead, TlWrite)]
@@ -23,7 +23,7 @@ pub struct RoundBoxed {
 
 pub struct MockFeedbackSender {
     dispatcher: Dispatcher,
-    peer_schedule: PeerSchedule,
+    peer_schedule: WeakPeerSchedule,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
     window: Window,
 }
@@ -31,7 +31,7 @@ pub struct MockFeedbackSender {
 impl MockFeedbackSender {
     pub fn new(
         dispatcher: Dispatcher,
-        peer_schedule: PeerSchedule,
+        peer_schedule: WeakPeerSchedule,
         top_known_anchor: RoundWatch<TopKnownAnchor>,
         init_peers: &InitPeers,
         peer_id: &PeerId,
@@ -76,8 +76,11 @@ impl MockFeedbackSender {
             let request = Request::from_tl(RoundBoxed {
                 round: self.top_known_anchor.get(),
             });
+            let Some(peer_schedule) = self.peer_schedule.upgrade() else {
+                return;
+            };
             let receivers = {
-                let guard = self.peer_schedule.read();
+                let guard = peer_schedule.read();
                 guard.data.broadcast_receivers().clone()
             };
 
