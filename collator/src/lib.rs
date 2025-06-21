@@ -3,6 +3,8 @@ pub mod internal_queue;
 pub mod manager;
 pub mod mempool;
 pub mod state_node;
+// TODO: Move into submodules, e.g. merge with internal queue.
+pub mod storage;
 pub mod types;
 pub mod validator;
 

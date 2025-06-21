@@ -9,7 +9,7 @@ use bytes::Bytes;
 use itertools::Itertools;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::OverlayId;
-use tycho_storage::MempoolStorage;
+use tycho_storage::StorageContext;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{DBRawIterator, IteratorMode, ReadOptions, WriteBatch};
@@ -21,6 +21,7 @@ use crate::models::{
     Digest, Point, PointInfo, PointRestore, PointRestoreSelect, PointStatus, PointStatusStored,
     PointStatusStoredRef, PointStatusValidated, Round,
 };
+use crate::storage::MempoolStorage;
 
 #[derive(Clone)]
 pub struct MempoolAdapterStore {
@@ -71,11 +72,14 @@ trait MempoolStoreImpl: Send + Sync {
 }
 
 impl MempoolAdapterStore {
-    pub fn new(storage: MempoolStorage, commit_finished: RoundWatch<Commit>) -> Self {
-        MempoolAdapterStore {
+    // TODO: Should it accept the `MempoolStorage` itself?
+    pub fn new(ctx: StorageContext, commit_finished: RoundWatch<Commit>) -> Result<Self> {
+        let storage = MempoolStorage::open(ctx)?;
+
+        Ok(MempoolAdapterStore {
             storage,
             commit_finished,
-        }
+        })
     }
 
     /// allows to remove no more needed data before sync and store of newly created dag part

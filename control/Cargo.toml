@@ -32,7 +32,6 @@ tracing = { workspace = true }
 tycho-block-util = { workspace = true, optional = true }
 tycho-core = { workspace = true, optional = true }
 tycho-network = { workspace = true, optional = true }
-tycho-storage = { workspace = true, optional = true }
 tycho-util = { workspace = true }
 
 [features]
@@ -45,5 +44,4 @@ server = [
     "dep:tycho-block-util",
     "dep:tycho-core",
     "dep:tycho-network",
-    "dep:tycho-storage",
 ]

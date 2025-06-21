@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
-use tycho_storage::{BlocksGcType, Storage};
 use tycho_util::metrics::HistogramGuard;
 
 use crate::block_strider::subscriber::find_longest_diffs_tail;
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
+use crate::storage::{BlocksGcType, CoreStorage};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ManualGcTrigger {
@@ -34,7 +34,7 @@ pub struct GcSubscriber {
 }
 
 impl GcSubscriber {
-    pub fn new(storage: Storage) -> Self {
+    pub fn new(storage: CoreStorage) -> Self {
         let last_key_block_seqno = storage
             .block_handle_storage()
             .find_last_key_block()
@@ -118,7 +118,11 @@ impl GcSubscriber {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn archives_gc(mut tick_rx: TickRx, mut manual_rx: ManualTriggerRx, storage: Storage) {
+    async fn archives_gc(
+        mut tick_rx: TickRx,
+        mut manual_rx: ManualTriggerRx,
+        storage: CoreStorage,
+    ) {
         let Some(config) = storage.config().archives_gc else {
             tracing::warn!("manager disabled");
             return;
@@ -199,7 +203,7 @@ impl GcSubscriber {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn blocks_gc(mut tick_rx: TickRx, mut manual_rx: ManualTriggerRx, storage: Storage) {
+    async fn blocks_gc(mut tick_rx: TickRx, mut manual_rx: ManualTriggerRx, storage: CoreStorage) {
         let Some(config) = storage.config().blocks_gc else {
             tracing::warn!("manager disabled");
             return;
@@ -339,7 +343,7 @@ impl GcSubscriber {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn states_gc(mut tick_rx: TickRx, mut manual_rx: ManualTriggerRx, storage: Storage) {
+    async fn states_gc(mut tick_rx: TickRx, mut manual_rx: ManualTriggerRx, storage: CoreStorage) {
         let Some(config) = storage.config().states_gc else {
             tracing::warn!("manager disabled");
             return;

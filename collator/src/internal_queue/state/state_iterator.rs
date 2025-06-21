@@ -7,11 +7,11 @@ use ahash::HashMapExt;
 use anyhow::{bail, Context, Result};
 use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::QueueKey;
-use tycho_storage::iterator::InternalQueueMessagesIter;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::shard_iterator::{IterResult, ShardIterator};
 use crate::internal_queue::types::InternalMessageValue;
+use crate::storage::iterator::InternalQueueMessagesIter;
 
 pub struct ShardIteratorWithRange {
     pub iter: InternalQueueMessagesIter,

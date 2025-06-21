@@ -15,7 +15,7 @@ use tycho_consensus::prelude::{
 };
 use tycho_consensus::test_utils::*;
 use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
-use tycho_storage::Storage;
+use tycho_storage::StorageContext;
 
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -181,14 +181,12 @@ fn make_network(
                             }
                         };
 
-                        let (mock_storage, _tmp_dir) =
-                            Storage::new_temp().await.expect("new storage");
+                        let (ctx, _tmp_dir) =
+                            StorageContext::new_temp().await.expect("new storage");
 
                         let bind = EngineBinding {
-                            mempool_adapter_store: MempoolAdapterStore::new(
-                                mock_storage.mempool_storage().clone(),
-                                commit_round,
-                            ),
+                            mempool_adapter_store: MempoolAdapterStore::new(ctx, commit_round)
+                                .unwrap(),
                             input_buffer: InputBuffer::new_stub(
                                 cli.payload_step,
                                 cli.steps_until_full,

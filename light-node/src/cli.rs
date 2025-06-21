@@ -16,11 +16,12 @@ use tycho_core::blockchain_rpc::{
 };
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::overlay_client::PublicOverlayClient;
+use tycho_core::storage::CoreStorage;
 use tycho_network::{
     DhtClient, DhtService, Network, OverlayService, PeerResolver, PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::Storage;
+use tycho_storage::StorageContext;
 use tycho_util::cli::resolve_public_ip;
 
 use crate::config::{NodeConfig, NodeKeys};
@@ -95,7 +96,7 @@ pub struct Node<C> {
     dht_client: DhtClient,
     peer_resolver: PeerResolver,
     overlay_service: OverlayService,
-    storage: Storage,
+    storage: CoreStorage,
     blockchain_rpc_client: BlockchainRpcClient,
 
     rpc_config: Option<RpcConfig>,
@@ -169,19 +170,14 @@ impl<C> Node<C> {
         );
 
         // Setup storage
-        let storage = Storage::builder()
-            .with_config(node_config.storage)
-            .with_rpc_storage(
-                node_config
-                    .rpc
-                    .as_ref()
-                    .is_some_and(|x| x.storage.is_full()),
-            )
-            .build()
+        let ctx = StorageContext::new(node_config.storage)
+            .await
+            .context("failed to create storage context")?;
+        let storage = CoreStorage::open(ctx, node_config.core_storage)
             .await
             .context("failed to create storage")?;
         tracing::info!(
-            root_dir = %storage.root().path().display(),
+            root_dir = %storage.context().root_dir().path().display(),
             "initialized storage"
         );
 
@@ -268,14 +264,14 @@ impl<C> Node<C> {
         let last_mc_block_id = match node_state.load_last_mc_block_id() {
             Some(block_id) => block_id,
             None => {
-                Starter::new(
-                    self.storage.clone(),
-                    self.blockchain_rpc_client.clone(),
-                    self.zerostate,
-                    self.starter_config.clone(),
-                )
-                .cold_boot(boot_type, zerostates.map(FileZerostateProvider))
-                .await?
+                Starter::builder()
+                    .with_storage(self.storage.clone())
+                    .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
+                    .with_zerostate_id(self.zerostate)
+                    .with_config(self.starter_config.clone())
+                    .build()
+                    .cold_boot(boot_type, zerostates.map(FileZerostateProvider))
+                    .await?
             }
         };
 
@@ -338,13 +334,15 @@ impl<C> Node<C> {
 
         Ok(())
     }
+
     pub async fn create_rpc(&self, last_block_id: &BlockId) -> Result<Option<RpcState>> {
         let rpc_state = if let Some(config) = &self.rpc_config {
             let rpc_state = RpcState::builder()
                 .with_config(config.clone())
                 .with_storage(self.storage.clone())
                 .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
-                .build();
+                .with_zerostate_id(self.zerostate)
+                .build()?;
 
             rpc_state.init(last_block_id).await?;
 
@@ -381,7 +379,7 @@ impl<C> Node<C> {
         &self.overlay_service
     }
 
-    pub fn storage(&self) -> &Storage {
+    pub fn storage(&self) -> &CoreStorage {
         &self.storage
     }
 

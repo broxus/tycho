@@ -151,9 +151,19 @@ impl ConnectionManager {
                 }
                 Some(partial_connection) = self.pending_partial_connections.join_next() => {
                     metrics::gauge!(METRIC_CONNECTIONS_PARTIAL).decrement(1);
-                    // NOTE: unwrap here is to propagate panic from the spawned future
-                    if let Some(PartialConnection { connection, timeout_at }) = partial_connection.unwrap() {
-                        self.handle_incoming_impl(connection, None, timeout_at);
+
+                    match partial_connection {
+                        Ok(None) => {}
+                        Ok(Some(PartialConnection {
+                            connection,
+                            timeout_at,
+                        })) => self.handle_incoming_impl(connection, None, timeout_at),
+                        // NOTE: unwrap here is to propagate panic from the spawned future
+                        Err(e) => {
+                            if e.is_panic() {
+                                std::panic::resume_unwind(e.into_panic());
+                            }
+                        }
                     }
                 }
                 Some(connection_handler_output) = self.connection_handlers.join_next() => {

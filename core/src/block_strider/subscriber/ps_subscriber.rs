@@ -4,9 +4,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::RefMcStateHandle;
-use tycho_storage::{BlockHandle, Storage};
 
 use crate::block_strider::{StateSubscriber, StateSubscriberContext};
+use crate::storage::{BlockHandle, CoreStorage};
 
 /// Persistent state subscriber.
 #[derive(Clone)]
@@ -15,7 +15,7 @@ pub struct PsSubscriber {
 }
 
 impl PsSubscriber {
-    pub fn new(storage: Storage) -> Self {
+    pub fn new(storage: CoreStorage) -> Self {
         let last_key_block_utime = storage
             .block_handle_storage()
             .find_last_key_block()
@@ -61,7 +61,7 @@ impl StateSubscriber for PsSubscriber {
 
 struct Inner {
     last_key_block_utime: AtomicU32,
-    storage: Storage,
+    storage: CoreStorage,
 }
 
 impl Inner {

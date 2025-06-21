@@ -38,12 +38,7 @@ pub struct RpcConfig {
     /// Configuration of getter requests.
     pub run_get_method: RunGetMethodConfig,
 
-    /// Enable `/toncenter/v2/*` endpoints.
-    ///
-    /// Default: `false`.
-    pub enable_toncenter_api: bool,
-
-    pub storage: RpcStorage,
+    pub storage: RpcStorageConfig,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -85,7 +80,7 @@ impl Default for RunGetMethodConfig {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum RpcStorage {
+pub enum RpcStorageConfig {
     Full {
         /// Transactions garbage collector configuration.
         ///
@@ -108,7 +103,7 @@ pub enum RpcStorage {
     StateOnly,
 }
 
-impl RpcStorage {
+impl RpcStorageConfig {
     pub fn is_full(&self) -> bool {
         matches!(self, Self::Full { .. })
     }
@@ -144,8 +139,7 @@ impl Default for RpcConfig {
             allow_huge_requests: false,
             max_parallel_block_downloads: 10,
             run_get_method: RunGetMethodConfig::default(),
-            enable_toncenter_api: false,
-            storage: RpcStorage::Full {
+            storage: RpcStorageConfig::Full {
                 gc: Some(Default::default()),
                 force_reindex: false,
                 blacklist_path: None,

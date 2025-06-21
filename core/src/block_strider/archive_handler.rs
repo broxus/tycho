@@ -4,12 +4,12 @@ use anyhow::Result;
 use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
-use tycho_storage::Storage;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::block_strider::{
     ArchiveSubscriber, ArchiveSubscriberContext, BlockSubscriber, BlockSubscriberContext,
 };
+use crate::storage::CoreStorage;
 
 #[repr(transparent)]
 pub struct ArchiveHandler<S> {
@@ -20,7 +20,7 @@ impl<S> ArchiveHandler<S>
 where
     S: ArchiveSubscriber,
 {
-    pub fn new(storage: Storage, archive_subscriber: S) -> Result<Self> {
+    pub fn new(storage: CoreStorage, archive_subscriber: S) -> Result<Self> {
         let rx = storage.block_storage().subscribe_to_archive_ids();
 
         Ok(Self {
@@ -94,7 +94,7 @@ where
 }
 
 struct Inner<S> {
-    storage: Storage,
+    storage: CoreStorage,
     archive_subscriber: S,
     archive_listener: ArchiveListener,
 }

@@ -2,13 +2,13 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::str::FromStr;
 
 use anyhow::Context;
-use tycho_storage::FileDb;
+use tycho_storage::fs::{Dir, FileBuilder};
 
 pub struct LastAnchorFile {
     file: std::fs::File,
 }
 impl LastAnchorFile {
-    pub fn new(mut file_builder: tycho_storage::FileBuilder) -> anyhow::Result<Self> {
+    pub fn new(mut file_builder: FileBuilder) -> anyhow::Result<Self> {
         Ok(Self {
             file: file_builder
                 .truncate(false)
@@ -19,7 +19,7 @@ impl LastAnchorFile {
         })
     }
 
-    pub fn reopen_in(file_db: &FileDb) -> anyhow::Result<Self> {
+    pub fn reopen_in(file_db: &Dir) -> anyhow::Result<Self> {
         let mut builder = file_db.file("last_anchor").with_extension("txt");
         builder.create(true);
         Self::new(builder)
@@ -64,7 +64,7 @@ mod test {
     #[test]
     fn re_read() -> anyhow::Result<()> {
         let tmp_dir = tempfile::tempdir().context("new temp dir")?;
-        let file_db = FileDb::new(tmp_dir.path()).context("new file db")?;
+        let file_db = Dir::new(tmp_dir.path()).context("new file db")?;
 
         let mut file = LastAnchorFile::reopen_in(&file_db).context("open")?;
 

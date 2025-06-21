@@ -8,13 +8,15 @@ use futures_util::Future;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::validate_external_message;
 use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, ServiceRequest};
-use tycho_storage::{ArchiveId, BlockConnection, KeyBlocksDirection, PersistentStateKind, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
+use crate::storage::{
+    ArchiveId, BlockConnection, CoreStorage, KeyBlocksDirection, PersistentStateKind,
+};
 
 const RPC_METHOD_TIMINGS_METRIC: &str = "tycho_blockchain_rpc_method_time";
 
@@ -69,7 +71,7 @@ pub struct BlockchainRpcServiceBuilder<MandatoryFields> {
     mandatory_fields: MandatoryFields,
 }
 
-impl<B> BlockchainRpcServiceBuilder<(B, Storage)>
+impl<B> BlockchainRpcServiceBuilder<(B, CoreStorage)>
 where
     B: BroadcastListener,
 {
@@ -87,7 +89,10 @@ where
 }
 
 impl<T1> BlockchainRpcServiceBuilder<(T1, ())> {
-    pub fn with_storage(self, storage: Storage) -> BlockchainRpcServiceBuilder<(T1, Storage)> {
+    pub fn with_storage(
+        self,
+        storage: CoreStorage,
+    ) -> BlockchainRpcServiceBuilder<(T1, CoreStorage)> {
         let (broadcast_listener, _) = self.mandatory_fields;
 
         BlockchainRpcServiceBuilder {
@@ -345,13 +350,13 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
 }
 
 struct Inner<B> {
-    storage: Storage,
+    storage: CoreStorage,
     config: BlockchainRpcServiceConfig,
     broadcast_listener: B,
 }
 
 impl<B> Inner<B> {
-    fn storage(&self) -> &Storage {
+    fn storage(&self) -> &CoreStorage {
         &self.storage
     }
 

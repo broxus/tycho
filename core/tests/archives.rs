@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bytes::BytesMut;
-use bytesize::ByteSize;
 use everscale_types::models::{BlockId, ShardStateUnsplit};
 use everscale_types::prelude::*;
 use futures_util::future;
@@ -20,8 +19,9 @@ use tycho_core::block_strider::{
 };
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use tycho_core::overlay_client::PublicOverlayClient;
+use tycho_core::storage::{ArchiveId, CoreStorage, CoreStorageConfig, NewBlockMeta};
 use tycho_network::PeerId;
-use tycho_storage::{ArchiveId, ArchivesGcConfig, NewBlockMeta, Storage, StorageConfig};
+use tycho_storage::{StorageConfig, StorageContext};
 use tycho_util::compression::{zstd_decompress, ZstdDecompressStream};
 use tycho_util::project_root;
 
@@ -187,8 +187,9 @@ impl ArchiveHandlerInner {
     }
 }
 
-async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> Result<Storage> {
-    let storage = Storage::builder().with_config(config).build().await?;
+async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> Result<CoreStorage> {
+    let ctx = StorageContext::new(config).await?;
+    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
 
     let (handle, _) =
         storage
@@ -257,18 +258,7 @@ async fn archives() -> Result<()> {
     let tmp_dir = tempfile::tempdir()?;
 
     // Init storage
-    let config = StorageConfig {
-        root_dir: tmp_dir.path().to_owned(),
-        rocksdb_lru_capacity: ByteSize::kb(1024),
-        cells_cache_size: ByteSize::kb(1024),
-        archive_chunk_size: ByteSize::kb(1024),
-        rocksdb_enable_metrics: false,
-        split_block_tasks: 100,
-        archives_gc: Some(ArchivesGcConfig::default()),
-        states_gc: None,
-        blocks_gc: None,
-        blocks_cache: Default::default(),
-    };
+    let config = StorageConfig::new_potato(tmp_dir.path());
 
     let zerostate_data = utils::read_file("zerostate.boc")?;
     let zerostate = utils::parse_zerostate(&zerostate_data)?;
@@ -378,15 +368,7 @@ async fn heavy_archives() -> Result<()> {
     // Init storage
     let config = StorageConfig {
         root_dir: current_test_path.join("db"),
-        rocksdb_lru_capacity: ByteSize::kb(1024 * 1024),
-        cells_cache_size: ByteSize::kb(1024 * 1024),
-        archive_chunk_size: ByteSize::kb(1024),
         rocksdb_enable_metrics: false,
-        split_block_tasks: 100,
-        archives_gc: Some(ArchivesGcConfig::default()),
-        states_gc: None,
-        blocks_gc: None,
-        blocks_cache: Default::default(),
     };
 
     let zerostate_path = integration_test_path.join("zerostate.boc");
@@ -618,7 +600,7 @@ async fn heavy_archives() -> Result<()> {
 }
 
 async fn check_archive(
-    storage: &Storage,
+    storage: &CoreStorage,
     original_archive: &[u8],
     archive_chunk_size: usize,
     seqno: u32,

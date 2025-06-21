@@ -3,18 +3,18 @@ use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
-use tycho_storage::{BlockConnection, BlockHandle, NewBlockMeta, Storage};
 
 use crate::block_strider::{BlockSubscriber, BlockSubscriberContext};
+use crate::storage::{BlockConnection, BlockHandle, CoreStorage, NewBlockMeta};
 
 #[repr(transparent)]
 #[derive(Clone)]
 pub struct BlockSaver {
-    storage: Storage,
+    storage: CoreStorage,
 }
 
 impl BlockSaver {
-    pub fn new(storage: Storage) -> Self {
+    pub fn new(storage: CoreStorage) -> Self {
         Self { storage }
     }
 

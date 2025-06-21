@@ -186,7 +186,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 let reader = self.insert_range_reader(reader.seqno, reader);
 
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    partition_id = reader.partition_id,
+                    partition_id = %reader.partition_id,
                     for_shard_id = %reader.for_shard_id,
                     seqno = reader.seqno,
                     fully_read = reader.fully_read,
@@ -354,14 +354,14 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             ) {
                 if matches!(fill_state_by_slots, BufferFillStateBySlots::CanFill) {
                     tracing::debug!(target: tracing_targets::COLLATOR,
-                        partition_id,
+                        %partition_id,
                         seqno = range_reader.seqno,
                         "new messages reader: can fill message group on ({}x{})",
                         max_limits.slots_count, max_limits.slot_vert_size,
                     );
                 } else {
                     tracing::debug!(target: tracing_targets::COLLATOR,
-                        partition_id,
+                        %partition_id,
                         seqno = range_reader.seqno,
                         "new messages reader: message buffer filled on {}/{}",
                         range_reader.reader_state.buffer.msgs_count(), max_limits.max_count,

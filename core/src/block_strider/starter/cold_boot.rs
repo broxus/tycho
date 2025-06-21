@@ -12,10 +12,7 @@ use tycho_block_util::archive::{ArchiveData, WithArchiveData};
 use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_storage::{
-    BlockHandle, FileBuilder, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
-    PersistentStateKind, Storage,
-};
+use tycho_storage::fs::FileBuilder;
 use tycho_util::futures::JoinTask;
 use tycho_util::sync::rayon_run;
 use tycho_util::time::now_sec;
@@ -26,6 +23,10 @@ use crate::block_strider::{CheckProof, ProofChecker};
 use crate::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
+use crate::storage::{
+    BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
+    PersistentStateKind,
+};
 
 impl StarterInner {
     #[tracing::instrument(skip_all)]
@@ -621,8 +622,6 @@ impl StarterInner {
         mc_block_id: &BlockId,
         block_id: &BlockId,
     ) -> Result<(BlockHandle, ShardStateStuff)> {
-        use tycho_storage::FileBuilder;
-
         enum StoreZeroStateFrom {
             File(FileBuilder),
             State(ShardStateStuff),
@@ -632,7 +631,7 @@ impl StarterInner {
         let persistent_states = self.storage.persistent_state_storage();
         let block_handles = self.storage.block_handle_storage();
 
-        let temp = self.storage.temp_file_storage();
+        let temp = self.storage.context().temp_files();
 
         let state_file = temp.file(format!("state_{block_id}"));
         let state_file_path = state_file.path().to_owned();
@@ -751,8 +750,7 @@ impl StarterInner {
     ) -> Result<()> {
         let block_id = block_handle.id();
 
-        let internal_queue = self.storage.internal_queue_storage();
-        let temp = self.storage.temp_file_storage();
+        let temp = self.storage.context().temp_files();
 
         let state_file = temp.file(format!("queue_state_{block_id}"));
         let state_file_path = state_file.path().to_owned();
@@ -779,9 +777,11 @@ impl StarterInner {
                 }
             };
 
-            internal_queue
-                .import_from_file(top_update, file, *block_id)
-                .await?;
+            if let Some(queue_state_handler) = &self.queue_state_handler {
+                queue_state_handler
+                    .import_from_file(top_update, file, block_id)
+                    .await?;
+            }
 
             remove_state_file.await;
 
@@ -824,7 +824,7 @@ impl StarterInner {
 }
 
 async fn download_block_proof_task(
-    storage: Storage,
+    storage: CoreStorage,
     rpc_client: BlockchainRpcClient,
     block_id: BlockId,
 ) -> BlockProofStuffAug {

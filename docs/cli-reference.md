@@ -409,7 +409,7 @@ Trigger a compaction in database
 ###### **Options:**
 
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
-* `-d`, `--database <DATABASE>`
+* `-d`, `--database <DATABASE>` — DB name. Possible values are: `base`, `mempool`, `rpc` or other
 
   Possible values: `base`, `mempool`, `rpc`
 

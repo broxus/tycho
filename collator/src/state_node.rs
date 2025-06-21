@@ -12,8 +12,10 @@ use tokio::sync::{broadcast, watch};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_core::storage::{
+    BlockHandle, CoreStorage, MaybeExistingHandle, NewBlockMeta, StoreStateHint,
+};
 use tycho_network::PeerId;
-use tycho_storage::{BlockHandle, MaybeExistingHandle, NewBlockMeta, Storage, StoreStateHint};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use tycho_util::{FastDashMap, FastHashMap};
@@ -93,7 +95,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
 pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, Arc<BlockStuffForSync>>>,
-    storage: Storage,
+    storage: CoreStorage,
     broadcaster: broadcast::Sender<BlockId>,
 
     sync_context_tx: watch::Sender<CollatorSyncContext>,
@@ -104,7 +106,7 @@ pub struct StateNodeAdapterStdImpl {
 impl StateNodeAdapterStdImpl {
     pub fn new(
         listener: Arc<dyn StateNodeEventListener>,
-        storage: Storage,
+        storage: CoreStorage,
         initial_sync_context: CollatorSyncContext,
     ) -> Self {
         let (sync_context_tx, mut sync_context_rx) = watch::channel(initial_sync_context);
@@ -579,11 +581,10 @@ fn prepare_block_proof(
 ) -> Result<PreparedProof> {
     let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_prepare_block_proof_time");
 
-    let mut usage_tree = UsageTree::new(UsageTreeMode::OnLoad).with_subtrees();
+    let usage_tree = UsageTree::new(UsageTreeMode::OnLoad).with_subtrees();
     let tracked_cell = usage_tree.track(block_stuff.root_cell());
     let block = tracked_cell.parse::<Block>()?;
-    let subtree = block.value_flow.inner().as_ref();
-    usage_tree.add_subtree(subtree);
+    block.value_flow.inner().as_ref().touch_recursive();
 
     let block_info = block.load_info()?;
 
@@ -597,8 +598,15 @@ fn prepare_block_proof(
     let _state_update = block.load_state_update();
 
     if let Some(custom) = block.load_extra()?.load_custom()? {
+        // Include full shard description info.
+        if let Some(root) = custom.shards.as_dict().root() {
+            root.touch_recursive();
+        }
+
         if let Some(config) = &custom.config {
+            // Include collation configuration params.
             config.get::<ConfigParam28>()?;
+            // Include all validator sets.
             for param_id in 32..=38 {
                 if let Some(mut vset) = config.get_raw(param_id)? {
                     ValidatorSet::load_from(&mut vset)?;

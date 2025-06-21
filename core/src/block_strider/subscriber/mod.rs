@@ -7,7 +7,6 @@ use futures_util::future::{self, BoxFuture};
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{BlockHandle, Storage};
 
 pub use self::futures::{
     DelayedTasks, DelayedTasksJoinHandle, DelayedTasksSpawner, OptionHandleFut, OptionPrepareFut,
@@ -15,6 +14,7 @@ pub use self::futures::{
 pub use self::gc_subscriber::{GcSubscriber, ManualGcTrigger};
 pub use self::metrics_subscriber::MetricsSubscriber;
 pub use self::ps_subscriber::PsSubscriber;
+use crate::storage::{BlockHandle, CoreStorage};
 
 mod futures;
 mod gc_subscriber;
@@ -202,7 +202,7 @@ impl<B: StateSubscriber> StateSubscriberExt for B {
 
 pub struct ArchiveSubscriberContext<'a> {
     pub archive_id: u32,
-    pub storage: &'a tycho_storage::Storage,
+    pub storage: &'a CoreStorage,
 }
 
 pub trait ArchiveSubscriber: Send + Sync + 'static {
@@ -508,7 +508,7 @@ pub mod test {
     }
 }
 
-pub async fn find_longest_diffs_tail(mc_block: BlockId, storage: &Storage) -> Result<usize> {
+pub async fn find_longest_diffs_tail(mc_block: BlockId, storage: &CoreStorage) -> Result<usize> {
     let mc_block_stuff = load_mc_block_stuff(mc_block, storage).await?;
 
     let shard_block_handles = load_shard_block_handles(&mc_block_stuff, storage).await?;
@@ -531,7 +531,7 @@ pub async fn find_longest_diffs_tail(mc_block: BlockId, storage: &Storage) -> Re
     Ok(result_tail_len)
 }
 
-async fn load_mc_block_stuff(mc_seqno: BlockId, storage: &Storage) -> Result<BlockStuff> {
+async fn load_mc_block_stuff(mc_seqno: BlockId, storage: &CoreStorage) -> Result<BlockStuff> {
     let mc_handle = storage.block_handle_storage().load_handle(&mc_seqno);
     if let Some(mc_handle) = mc_handle {
         let mc_block_stuff = storage.block_storage().load_block_data(&mc_handle).await?;
@@ -543,7 +543,7 @@ async fn load_mc_block_stuff(mc_seqno: BlockId, storage: &Storage) -> Result<Blo
 
 async fn load_shard_block_handles(
     mc_block_stuff: &BlockStuff,
-    storage: &Storage,
+    storage: &CoreStorage,
 ) -> Result<Vec<BlockHandle>> {
     let block_handles = storage.block_handle_storage();
     let mut shard_block_handles = Vec::new();

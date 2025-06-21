@@ -258,6 +258,36 @@ impl std::fmt::Display for QueueKey {
     }
 }
 
+#[cfg(feature = "storage")]
+impl tycho_storage_traits::StoredValue for QueueKey {
+    const SIZE_HINT: usize = 8 + 32;
+
+    type OnStackSlice = [u8; Self::SIZE_HINT];
+
+    fn serialize<T: tycho_storage_traits::StoredValueBuffer>(&self, buffer: &mut T) {
+        buffer.write_raw_slice(&self.lt.to_be_bytes());
+        buffer.write_raw_slice(&self.hash.0);
+    }
+
+    fn deserialize(reader: &mut &[u8]) -> Self {
+        if reader.len() < Self::SIZE_HINT {
+            panic!("Insufficient data for deserialization")
+        }
+
+        let mut lt_bytes = [0u8; 8];
+        lt_bytes.copy_from_slice(&reader[..8]);
+        let lt = u64::from_be_bytes(lt_bytes);
+        *reader = &reader[8..];
+
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes.copy_from_slice(&reader[..32]);
+        let hash = HashBytes(hash_bytes);
+        *reader = &reader[32..];
+
+        Self { lt, hash }
+    }
+}
+
 pub fn get_short_hash_string(hash: &HashBytes) -> String {
     let mut short_hash = [0u8; 8];
     hex::encode_to_slice(&hash.as_array()[..4], &mut short_hash).ok();
@@ -358,7 +388,122 @@ impl<'tl> TlRead<'tl> for RouterAddr {
     }
 }
 
-pub type QueuePartitionIdx = u16;
+#[cfg(feature = "storage")]
+impl tycho_storage_traits::StoredValue for RouterAddr {
+    const SIZE_HINT: usize = 1 + 32;
+    type OnStackSlice = [u8; Self::SIZE_HINT];
+
+    fn serialize<T: tycho_storage_traits::StoredValueBuffer>(&self, buffer: &mut T) {
+        buffer.write_raw_slice(&[self.workchain as u8]);
+        buffer.write_raw_slice(&self.account.0);
+    }
+
+    fn deserialize(reader: &mut &[u8]) -> Self
+    where
+        Self: Sized,
+    {
+        if reader.len() < Self::SIZE_HINT {
+            panic!("Insufficient data for deserialization");
+        }
+
+        let workchain = reader[0] as i8;
+        *reader = &reader[1..];
+
+        let mut account_bytes = [0u8; 32];
+        account_bytes.copy_from_slice(&reader[..32]);
+        let account = HashBytes(account_bytes);
+        *reader = &reader[32..];
+
+        Self { workchain, account }
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct QueuePartitionIdx(pub u16);
+
+impl QueuePartitionIdx {
+    pub const ZERO: Self = Self(0);
+    pub const MIN: Self = Self(u16::MIN);
+    pub const MAX: Self = Self(u16::MAX);
+
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl PartialEq<QueuePartitionIdx> for u16 {
+    #[inline]
+    fn eq(&self, other: &QueuePartitionIdx) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialEq<&QueuePartitionIdx> for u16 {
+    #[inline]
+    fn eq(&self, other: &&QueuePartitionIdx) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialEq<u16> for QueuePartitionIdx {
+    #[inline]
+    fn eq(&self, other: &u16) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<&u16> for QueuePartitionIdx {
+    #[inline]
+    fn eq(&self, other: &&u16) -> bool {
+        self.0 == **other
+    }
+}
+
+impl std::fmt::Display for QueuePartitionIdx {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl From<u16> for QueuePartitionIdx {
+    #[inline]
+    fn from(value: u16) -> Self {
+        Self(value)
+    }
+}
+
+impl From<QueuePartitionIdx> for u16 {
+    #[inline]
+    fn from(value: QueuePartitionIdx) -> Self {
+        value.0
+    }
+}
+
+#[cfg(feature = "storage")]
+impl tycho_storage_traits::StoredValue for QueuePartitionIdx {
+    const SIZE_HINT: usize = std::mem::size_of::<QueuePartitionIdx>();
+
+    type OnStackSlice = [u8; Self::SIZE_HINT];
+
+    fn serialize<T: tycho_storage_traits::StoredValueBuffer>(&self, buffer: &mut T) {
+        buffer.write_raw_slice(&self.0.to_be_bytes());
+    }
+
+    fn deserialize(reader: &mut &[u8]) -> Self {
+        if reader.len() < Self::SIZE_HINT {
+            panic!("Insufficient data for deserialization");
+        }
+
+        let mut partition_bytes = [0u8; 2];
+        partition_bytes.copy_from_slice(&reader[..2]);
+        let partition = u16::from_be_bytes(partition_bytes);
+        *reader = &reader[2..];
+
+        Self(partition)
+    }
+}
 
 pub type RouterPartitions = BTreeMap<QueuePartitionIdx, BTreeSet<RouterAddr>>;
 
@@ -433,7 +578,7 @@ pub mod router_partitions_map {
     {
         packet.write_u32(items.len() as u32);
         for (partition, accounts) in items {
-            packet.write_u32(*partition as u32);
+            packet.write_u32(partition.0 as u32);
             packet.write_u32(accounts.len() as u32);
             for account in accounts {
                 account.write_to(packet);
@@ -483,7 +628,7 @@ pub mod router_partitions_map {
                 debug_assert!(is_unique);
             }
 
-            partitions.insert(partition_index, accounts);
+            partitions.insert(partition_index.into(), accounts);
         }
 
         Ok(partitions)
@@ -714,7 +859,7 @@ mod tests {
                 HashBytes::from([0x03; 32]),
             ],
             router_partitions_src: Default::default(),
-            router_partitions_dst: BTreeMap::from([(1, BTreeSet::from([addr1, addr2]))]),
+            router_partitions_dst: BTreeMap::from([(1.into(), BTreeSet::from([addr1, addr2]))]),
         };
 
         let bytes = tl_proto::serialize(&diff);
@@ -772,7 +917,7 @@ mod tests {
                     HashBytes::from([0x03; 32]),
                 ],
                 router_partitions_src: Default::default(),
-                router_partitions_dst: BTreeMap::from([(1, BTreeSet::from([addr1, addr2]))]),
+                router_partitions_dst: BTreeMap::from([(1.into(), BTreeSet::from([addr1, addr2]))]),
             };
 
             // NOTE: We need this for the hash computation.

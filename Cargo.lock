@@ -3456,17 +3456,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "trait-variant"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70977707304198400eb4835a78f6a9f928bf41bba420deb8fdb175cd965d77a7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.96",
-]
-
-[[package]]
 name = "triomphe"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3497,6 +3486,7 @@ dependencies = [
  "rayon",
  "thiserror 2.0.11",
  "tl-proto",
+ "tycho-storage-traits",
  "tycho-util",
 ]
 
@@ -3518,7 +3508,6 @@ dependencies = [
  "futures-util",
  "hex",
  "humantime",
- "metrics",
  "num-bigint",
  "parking_lot",
  "rand",
@@ -3560,6 +3549,7 @@ dependencies = [
  "blake3",
  "bumpalo",
  "bytes",
+ "bytesize",
  "everscale-crypto",
  "everscale-types",
  "futures-util",
@@ -3579,7 +3569,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "trait-variant",
  "tycho-block-util",
  "tycho-collator",
  "tycho-consensus",
@@ -3589,6 +3578,7 @@ dependencies = [
  "tycho-storage",
  "tycho-util",
  "tycho-vm",
+ "weedb",
 ]
 
 [[package]]
@@ -3598,6 +3588,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "arc-swap",
+ "bitflags",
  "blake3",
  "bumpalo",
  "bytes",
@@ -3654,7 +3645,6 @@ dependencies = [
  "tycho-block-util",
  "tycho-core",
  "tycho-network",
- "tycho-storage",
  "tycho-util",
 ]
 
@@ -3665,27 +3655,40 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
+ "bitflags",
+ "bumpalo",
+ "bumpalo-herd",
  "bytes",
  "bytesize",
+ "crc32c",
+ "dashmap",
  "everscale-crypto",
  "everscale-types",
  "futures-util",
  "humantime",
  "metrics",
+ "moka",
  "parking_lot",
+ "parking_lot_core",
  "pin-project-lite",
+ "quick_cache",
  "rand",
  "scopeguard",
  "serde",
+ "sha2",
+ "smallvec",
  "tempfile",
  "thiserror 2.0.11",
  "tl-proto",
  "tokio",
  "tracing",
+ "triomphe",
  "tycho-block-util",
+ "tycho-core",
  "tycho-network",
  "tycho-storage",
  "tycho-util",
+ "weedb",
 ]
 
 [[package]]
@@ -3777,23 +3780,24 @@ dependencies = [
 name = "tycho-rpc"
 version = "0.2.10"
 dependencies = [
+ "ahash",
  "anyhow",
  "arc-swap",
  "axum",
  "base64",
+ "bitflags",
  "bytes",
  "everscale-types",
  "futures-util",
+ "humantime",
  "metrics",
  "moka",
- "num-bigint",
  "parking_lot",
  "prost",
  "rand",
  "scopeguard",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.11",
  "tokio",
  "tower",
@@ -3805,6 +3809,7 @@ dependencies = [
  "tycho-storage",
  "tycho-util",
  "tycho-vm",
+ "weedb",
 ]
 
 [[package]]
@@ -3824,42 +3829,31 @@ dependencies = [
 name = "tycho-storage"
 version = "0.2.10"
 dependencies = [
- "ahash",
  "anyhow",
  "arc-swap",
- "bitflags",
- "bumpalo",
- "bumpalo-herd",
- "bytes",
  "bytesize",
- "crc32c",
- "dashmap",
- "everscale-types",
  "fdlimit",
- "futures-util",
- "humantime",
  "libc",
  "metrics",
- "moka",
- "parking_lot",
- "parking_lot_core",
- "quick_cache",
  "rand",
  "rlimit",
  "scopeguard",
  "serde",
- "sha2",
- "smallvec",
- "sysinfo",
  "tempfile",
- "thiserror 2.0.11",
- "tl-proto",
  "tokio",
  "tracing",
- "triomphe",
- "tycho-block-util",
+ "tycho-storage-traits",
  "tycho-util",
  "weedb",
+]
+
+[[package]]
+name = "tycho-storage-traits"
+version = "0.2.10"
+dependencies = [
+ "bytes",
+ "everscale-types",
+ "smallvec",
 ]
 
 [[package]]
@@ -3870,6 +3864,7 @@ dependencies = [
  "anyhow",
  "base64",
  "bytes",
+ "bytesize",
  "castaway",
  "criterion",
  "dashmap",
@@ -3884,6 +3879,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "sysinfo",
  "tempfile",
  "thiserror 2.0.11",
  "tikv-jemalloc-ctl",
@@ -4137,9 +4133,9 @@ dependencies = [
 
 [[package]]
 name = "weedb"
-version = "0.4.1"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5b35f90e43128653b3623cf75c84a968072ed691426d747dbeaf3755ee5b1d"
+checksum = "af8b0c2772cfae47b546954a7f2bd4c12b34120d2035894a54c0704b42b37220"
 dependencies = [
  "librocksdb-sys",
  "metrics",

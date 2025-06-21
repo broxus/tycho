@@ -101,7 +101,7 @@ impl TryFrom<ProcessedUptoInfo> for ProcessedUptoInfoStuff {
                 par_stuff.internals.ranges.insert(seqno, int_range);
             }
 
-            res.partitions.insert(par_id, par_stuff);
+            res.partitions.insert(par_id.into(), par_stuff);
         }
 
         if let Some(msgs_exec_params) = value.msgs_exec_params {
@@ -145,7 +145,7 @@ impl TryFrom<ProcessedUptoInfoStuff> for ProcessedUptoInfo {
                 par.internals.ranges.set(seqno, int_range)?;
             }
 
-            res.partitions.set(par_id, par)?;
+            res.partitions.set(par_id.0, par)?;
         }
 
         if let Some(msgs_exec_params) = value.msgs_exec_params {

@@ -1,8 +1,8 @@
 use anyhow::Result;
 use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::QueueKey;
-use tycho_storage::iterator::InternalQueueMessagesIter;
 
+use crate::storage::iterator::InternalQueueMessagesIter;
 use crate::types::ShortAddr;
 
 pub enum IterResult<'a> {

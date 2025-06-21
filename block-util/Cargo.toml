@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 tl-proto = { workspace = true }
 
 # local deps
+tycho-storage-traits = { workspace = true, optional = true }
 tycho-util = { workspace = true }
 
 [dev-dependencies]
@@ -37,7 +38,9 @@ base64 = { workspace = true }
 criterion = { workspace = true }
 
 [features]
+default = ["storage"]
 test = []
+storage = ["dep:tycho-storage-traits"]
 
 [lints]
 workspace = true

@@ -17,8 +17,10 @@ use tycho_consensus::prelude::{
 use tycho_consensus::test_utils::{test_logger, AnchorConsumer, LastAnchorFile};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
+use tycho_core::storage::{CoreStorage, NewBlockMeta};
 use tycho_network::PeerId;
-use tycho_storage::{FileDb, NewBlockMeta, Storage};
+use tycho_storage::fs::Dir;
+use tycho_storage::StorageContext;
 use tycho_util::cli::logger::init_logger;
 use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
@@ -172,7 +174,7 @@ struct Mempool {
     net_args: EngineNetworkArgs,
     init_peers: InitPeers,
 
-    storage: Storage,
+    storage: CoreStorage,
     input_buffer: InputBuffer,
     merged_conf: MempoolMergedConfig,
 }
@@ -230,9 +232,10 @@ impl Mempool {
         };
 
         // Setup storage
-        let storage = Storage::builder()
-            .with_config(node_config.storage)
-            .build()
+        let ctx = StorageContext::new(node_config.storage)
+            .await
+            .context("failed to create storage context")?;
+        let storage = CoreStorage::open(ctx, node_config.core_storage)
             .await
             .context("failed to create storage")?;
 
@@ -246,7 +249,7 @@ impl Mempool {
         )?;
 
         tracing::info!(
-            root_dir = %storage.root().path().display(),
+            root_dir = %storage.context().root_dir().path().display(),
             "initialized storage"
         );
 
@@ -289,8 +292,8 @@ impl Mempool {
         })
     }
 
-    pub fn file_storage(storage: &Storage) -> Result<FileDb> {
-        storage.root().create_subdir("mempool_files")
+    pub fn file_storage(storage: &CoreStorage) -> Result<Dir> {
+        storage.context().root_dir().create_subdir("mempool_files")
     }
 
     pub async fn boot(
@@ -305,9 +308,9 @@ impl Mempool {
 
         let bind = EngineBinding {
             mempool_adapter_store: MempoolAdapterStore::new(
-                self.storage.mempool_storage().clone(),
+                self.storage.context().clone(),
                 anchor_consumer.commit_round.clone(),
-            ),
+            )?,
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: anchor_consumer.top_known_anchor.clone(),
             output: committed_tx,
@@ -329,7 +332,7 @@ impl Mempool {
 
 async fn load_mc_zerostate(
     provider: FileZerostateProvider,
-    storage: &Storage,
+    storage: &CoreStorage,
     mc_zerostate_id: &ZerostateId,
 ) -> Result<ShardStateStuff> {
     let zerostates = provider

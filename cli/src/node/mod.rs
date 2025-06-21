@@ -33,12 +33,13 @@ use tycho_core::blockchain_rpc::{
 };
 use tycho_core::global_config::{GlobalConfig, MempoolGlobalConfig, ZerostateId};
 use tycho_core::overlay_client::PublicOverlayClient;
+use tycho_core::storage::{CoreStorage, NodeSyncState};
 use tycho_network::{
     DhtClient, DhtService, InboundRequestMeta, Network, OverlayService, PeerResolver,
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::{NodeSyncState, Storage};
+use tycho_storage::StorageContext;
 use tycho_util::futures::JoinTask;
 
 pub use self::config::{ElectionsConfig, NodeConfig, NodeKeys, SimpleElectionsConfig};
@@ -56,7 +57,8 @@ pub struct Node {
     dht_client: DhtClient,
     peer_resolver: PeerResolver,
     overlay_service: OverlayService,
-    storage: Storage,
+    storage: CoreStorage,
+    queue_state_factory: QueueStateImplFactory,
     rpc_mempool_adapter: RpcMempoolAdapter,
     blockchain_rpc_client: BlockchainRpcClient,
 
@@ -132,21 +134,17 @@ impl Node {
         );
 
         // Setup storage
-        let storage = Storage::builder()
-            .with_config(node_config.storage)
-            .with_rpc_storage(
-                node_config
-                    .rpc
-                    .as_ref()
-                    .is_some_and(|x| x.storage.is_full()),
-            )
-            .build()
+        let ctx = StorageContext::new(node_config.storage)
             .await
-            .context("failed to create storage")?;
+            .context("failed to create storage context")?;
+        let storage = CoreStorage::open(ctx, node_config.core_storage).await?;
         tracing::info!(
-            root_dir = %storage.root().path().display(),
+            root_dir = %storage.context().root_dir().path().display(),
             "initialized storage"
         );
+
+        // Setup queue storage
+        let queue_state_factory = QueueStateImplFactory::new(storage.context().clone())?;
 
         // Setup blockchain rpc
         let zerostate = global_config.zerostate;
@@ -157,9 +155,9 @@ impl Node {
                 &network,
                 &peer_resolver,
                 &overlay_service,
-                storage.mempool_storage(),
+                storage.context(),
                 &node_config.mempool,
-            )),
+            )?),
         };
 
         let blockchain_rpc_service = BlockchainRpcService::builder()
@@ -197,6 +195,7 @@ impl Node {
             peer_resolver,
             overlay_service,
             storage,
+            queue_state_factory,
             rpc_mempool_adapter,
             blockchain_rpc_client,
             starter_config: node_config.starter,
@@ -229,17 +228,20 @@ impl Node {
         let last_mc_block_id = match node_state.load_last_mc_block_id() {
             Some(block_id) => block_id,
             None => {
-                Starter::new(
-                    self.storage.clone(),
-                    self.blockchain_rpc_client.clone(),
-                    self.zerostate,
-                    self.starter_config.clone(),
-                )
-                .cold_boot(
-                    ColdBootType::LatestPersistent,
-                    zerostates.map(FileZerostateProvider),
-                )
-                .await?
+                Starter::builder()
+                    .with_storage(self.storage.clone())
+                    .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
+                    .with_zerostate_id(self.zerostate)
+                    .with_config(self.starter_config.clone())
+                    .with_queue_state_handler(QueueStateHandler {
+                        storage: self.queue_state_factory.storage.clone(),
+                    })
+                    .build()
+                    .cold_boot(
+                        ColdBootType::LatestPersistent,
+                        zerostates.map(FileZerostateProvider),
+                    )
+                    .await?
             }
         };
 
@@ -290,7 +292,8 @@ impl Node {
                 .with_config(config.clone())
                 .with_storage(self.storage.clone())
                 .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
-                .build();
+                .with_zerostate_id(self.zerostate)
+                .build()?;
 
             rpc_state.init(last_block_id).await?;
 
@@ -316,13 +319,11 @@ impl Node {
         // Create collator
         tracing::info!("starting collator");
 
-        let queue_state_factory = QueueStateImplFactory::new(self.storage.clone());
-
         let queue_factory = QueueFactoryStdImpl {
-            state: queue_state_factory,
+            state: self.queue_state_factory,
             config: self.internal_queue_config,
         };
-        let queue = queue_factory.create();
+        let queue = queue_factory.create()?;
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
         // We should clear uncommitted queue state because it may contain incorrect diffs
@@ -588,5 +589,23 @@ impl BroadcastListener for RpcMempoolAdapter {
 impl SelfBroadcastListener for RpcMempoolAdapter {
     async fn handle_message(&self, message: Bytes) {
         self.inner.send_external(message);
+    }
+}
+
+struct QueueStateHandler {
+    storage: tycho_collator::storage::InternalQueueStorage,
+}
+
+#[async_trait::async_trait]
+impl tycho_core::block_strider::QueueStateHandler for QueueStateHandler {
+    async fn import_from_file(
+        &self,
+        top_update: &OutMsgQueueUpdates,
+        file: std::fs::File,
+        block_id: &BlockId,
+    ) -> Result<()> {
+        self.storage
+            .import_from_file(top_update, file, *block_id)
+            .await
     }
 }

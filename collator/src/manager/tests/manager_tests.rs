@@ -19,7 +19,7 @@ use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_storage::{BlockHandle, NewBlockMeta, StoreStateHint};
+use tycho_core::storage::{BlockHandle, NewBlockMeta, StoreStateHint};
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
 use super::{BlockCacheStoreResult, BlockSeqno, CollationManager};
@@ -503,7 +503,7 @@ async fn test_queue_restore_on_sync() {
     //---------
     // test data
     let shard = ShardIdent::new_full(0);
-    let partitions: FastHashSet<QueuePartitionIdx> = [0, 1].into_iter().collect();
+    let partitions = FastHashSet::from_iter([QueuePartitionIdx(0), QueuePartitionIdx(1)]);
 
     let mut last_sc_block_stuff;
     let mut last_mc_block_stuff;
@@ -2006,14 +2006,14 @@ impl TestProcessedToStuff {
         .collect();
         Self {
             sc_processed_to_info: [
-                (0, default_partition_processed_to.clone()),
-                (1, default_partition_processed_to.clone()),
+                (QueuePartitionIdx(0), default_partition_processed_to.clone()),
+                (QueuePartitionIdx(1), default_partition_processed_to.clone()),
             ]
             .into_iter()
             .collect(),
             mc_processed_to_info: [
-                (0, default_partition_processed_to.clone()),
-                (1, default_partition_processed_to.clone()),
+                (QueuePartitionIdx(0), default_partition_processed_to.clone()),
+                (QueuePartitionIdx(1), default_partition_processed_to.clone()),
             ]
             .into_iter()
             .collect(),
