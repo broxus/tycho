@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use futures_util::never::Never;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use itertools::Itertools;
@@ -7,6 +8,7 @@ use tl_proto::{TlRead, TlWrite};
 use tokio::time::MissedTickBehavior;
 use tycho_network::{PeerId, Request};
 
+use crate::effects::{Cancelled, TaskResult};
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
 use crate::intercom::{Dispatcher, InitPeers, WeakPeerSchedule};
 use crate::models::Round;
@@ -52,7 +54,7 @@ impl MockFeedbackSender {
         }
     }
 
-    pub async fn run(self) {
+    pub async fn run(self) -> TaskResult<Never> {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -77,7 +79,7 @@ impl MockFeedbackSender {
                 round: self.top_known_anchor.get(),
             });
             let Some(peer_schedule) = self.peer_schedule.upgrade() else {
-                return;
+                return Err(Cancelled());
             };
             let receivers = {
                 let guard = peer_schedule.read();

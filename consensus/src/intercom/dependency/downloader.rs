@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{future, StreamExt};
+use futures_util::StreamExt;
 use rand::{thread_rng, RngCore};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -16,7 +16,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
-use crate::effects::{AltFormat, Ctx, DownloadCtx};
+use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, TaskResult};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::{ConsensusConfigExt, MempoolConfig};
 use crate::intercom::core::{PointByIdResponse, PointQueryResult, QueryRequest};
@@ -108,7 +108,7 @@ impl Downloader {
         dependers_rx: mpsc::UnboundedReceiver<PeerId>,
         verified_broadcast: oneshot::Receiver<DownloadResult>,
         ctx: DownloadCtx,
-    ) -> Option<DownloadResult> {
+    ) -> TaskResult<Option<DownloadResult>> {
         let _guard = self.inner.limiter.enter(point_id.round, ctx.conf()).await;
 
         if point_id.round + ctx.conf().consensus.min_front_rounds()
@@ -130,7 +130,7 @@ impl Downloader {
         dependers_rx: mpsc::UnboundedReceiver<PeerId>,
         broadcast_result: oneshot::Receiver<DownloadResult>,
         ctx: DownloadCtx,
-    ) -> Option<DownloadResult> {
+    ) -> TaskResult<Option<DownloadResult>> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_download_task_time");
         ctx.meter_start(point_id);
         let span_guard = ctx.span().enter();
@@ -179,7 +179,7 @@ impl Downloader {
         let downloaded = task
             .run(dependers_rx, broadcast_result)
             .instrument(span)
-            .await;
+            .await?;
 
         DownloadCtx::meter_task::<T>(&task);
 
@@ -190,7 +190,7 @@ impl Downloader {
             );
         }
 
-        downloaded
+        Ok(downloaded)
     }
 }
 
@@ -220,7 +220,7 @@ impl<T: DownloadType> DownloadTask<T> {
         &mut self,
         mut dependers_rx: mpsc::UnboundedReceiver<PeerId>,
         mut broadcast_result: oneshot::Receiver<DownloadResult>,
-    ) -> Option<DownloadResult> {
+    ) -> TaskResult<Option<DownloadResult>> {
         let mut interval = tokio::time::interval(Duration::from_millis(
             self.ctx.conf().consensus.download_retry_millis as _,
         ));
@@ -228,14 +228,12 @@ impl<T: DownloadType> DownloadTask<T> {
         // give equal time to every attempt, ignoring local runtime delays; do not `Burst` requests
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        loop {
+        let maybe_found = loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 Ok(bcast_result) = &mut broadcast_result => break Some(bcast_result),
                 Some(depender) = dependers_rx.recv() => self.add_depender(&depender),
-                update = self.updates.recv() => if self.match_peer_updates(update).is_err() {
-                    future::pending::<()>().await;
-                },
+                update = self.updates.recv() => self.match_peer_updates(update)?,
                 Some((peer_id, result)) = self.downloading.next() =>
                     match self.verify(&peer_id, result) {
                         Some(found) => break Some(found),
@@ -248,9 +246,10 @@ impl<T: DownloadType> DownloadTask<T> {
                 // most rare arm to make progress despite slow responding peers
                 _ = interval.tick() => self.download_random(), // first tick fires immediately
             }
-        }
+        };
         // on exit futures are dropped and receivers are cleaned,
         // senders will stay in `DagPointFuture` that owns current task
+        Ok(maybe_found)
     }
 
     fn add_depender(&mut self, peer_id: &PeerId) {
@@ -417,7 +416,7 @@ impl<T: DownloadType> DownloadTask<T> {
     fn match_peer_updates(
         &mut self,
         result: Result<(PeerId, PeerState), RecvError>,
-    ) -> Result<(), ()> {
+    ) -> TaskResult<()> {
         match result {
             Ok((peer_id, new)) => {
                 self.undone_peers.entry(peer_id).and_modify(|status| {
@@ -431,7 +430,7 @@ impl<T: DownloadType> DownloadTask<T> {
             }
             Err(err @ RecvError::Closed) => {
                 tracing::error!(error = display(err), "peer updates");
-                Err(())
+                Err(Cancelled())
             }
         }
     }

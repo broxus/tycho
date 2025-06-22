@@ -3,6 +3,7 @@ use std::sync::Arc;
 use futures_util::never::Never;
 use parking_lot::Mutex;
 
+use crate::dag::HistoryConflict;
 use crate::effects::{AltFormat, Cancelled, Task, TaskTracker};
 use crate::engine::lifecycle::{
     EngineBinding, EngineError, EngineNetwork, EngineNetworkArgs, FixHistoryFlag,
@@ -33,11 +34,11 @@ pub struct RunAttributes {
     pub peer_schedule: WeakPeerSchedule,
     pub last_peers: InitPeers,
     #[cfg(feature = "mock-feedback")]
-    pub mock_feedback: Task<()>,
+    pub mock_feedback: Task<Never>,
 }
 
 impl EngineRecoverLoop {
-    pub async fn run_loop(self, mut engine_run: Task<Result<Never, EngineError>>) {
+    pub async fn run_loop(self, mut engine_run: Task<Result<Never, HistoryConflict>>) {
         loop {
             tracing::info!(
                 peer_id = %self.net_args.network.peer_id().alt(),
@@ -63,8 +64,8 @@ impl EngineRecoverLoop {
             drop(task_tracker);
 
             let fix_history = match never_ok {
-                Err(Cancelled()) | Ok(Err(EngineError::Cancelled)) => break,
-                Ok(Err(EngineError::HistoryConflict(_))) => FixHistoryFlag(true),
+                Err(Cancelled()) => break,
+                Ok(Err(HistoryConflict(_))) => FixHistoryFlag(true),
             };
 
             let (task_tracker, net) = {
@@ -107,7 +108,12 @@ impl EngineRecoverLoop {
                 fix_history,
             );
 
-            engine_run = task_tracker.ctx().spawn(engine.run());
+            engine_run = task_tracker.ctx().spawn(async move {
+                match engine.run().await {
+                    Err(EngineError::Cancelled) => Err(Cancelled()),
+                    Err(EngineError::HistoryConflict(e)) => Ok(Err(e)),
+                }
+            });
         }
     }
 }

@@ -4,6 +4,7 @@ use std::sync::{Arc, Weak};
 
 use arc_swap::{ArcSwap, Guard};
 use everscale_crypto::ed25519::KeyPair;
+use futures_util::never::Never;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use parking_lot::lock_api::{RwLockReadGuard, RwLockWriteGuard};
@@ -15,7 +16,7 @@ use tycho_network::{
     PrivateOverlayEntriesReadGuard,
 };
 
-use crate::effects::{AltFmt, AltFormat, Task, TaskTracker};
+use crate::effects::{AltFmt, AltFormat, Cancelled, Task, TaskResult, TaskTracker};
 use crate::engine::MempoolMergedConfig;
 use crate::intercom::peer_schedule::locked::PeerScheduleLocked;
 use crate::intercom::peer_schedule::stateless::PeerScheduleStateless;
@@ -276,7 +277,7 @@ impl WeakPeerSchedule {
         self.0.upgrade().map(PeerSchedule)
     }
 
-    pub async fn run_updater(self) {
+    pub async fn run_updater(self) -> TaskResult<Never> {
         tracing::info!("starting peer schedule updates");
         scopeguard::defer!(tracing::warn!("peer schedule updater stopped"));
 
@@ -297,7 +298,7 @@ impl WeakPeerSchedule {
             }
             None => {
                 tracing::warn!("peer schedule dropped, cannot create updater");
-                return;
+                return Err(Cancelled());
             }
         };
 
@@ -306,7 +307,7 @@ impl WeakPeerSchedule {
                 Ok(ref event @ PrivateOverlayEntriesEvent::Removed(peer)) if peer != local_id => {
                     let Some(strong) = self.upgrade() else {
                         tracing::warn!("peer schedule dropped, stopping updater");
-                        break;
+                        break Err(Cancelled());
                     };
                     let mut guard = strong.write();
                     let restart = guard.set_state(&peer, PeerState::Unknown);
@@ -340,7 +341,7 @@ impl WeakPeerSchedule {
                     tracing::error!(
                         "peer info updates channel closed, cannot maintain node connectivity"
                     );
-                    break;
+                    break Err(Cancelled());
                 }
                 Err(broadcast::error::RecvError::Lagged(amount)) => {
                     tracing::error!(
@@ -391,13 +392,14 @@ impl WeakPeerSchedule {
             while let Some(known_peer_handle) = resolved_waiters.next().await {
                 let Some(peer_schedule) = self.upgrade() else {
                     tracing::warn!("peer schedule is dropped, cannot apply resolve update");
-                    break;
+                    return Err(Cancelled());
                 };
                 _ = peer_schedule
                     .write()
                     .set_state(&known_peer_handle.peer_info().id, PeerState::Resolved);
                 gauge.decrement(1);
             }
+            Ok(())
         }))
     }
 }

@@ -1,5 +1,5 @@
 pub use args::*;
-pub use error::*;
+pub(super) use error::*;
 pub use session::*;
 
 mod args;
