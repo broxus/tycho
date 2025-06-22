@@ -1,6 +1,8 @@
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicU32;
+use std::sync::{atomic, Arc};
 
-use tokio::sync::watch;
+use tokio::sync::Notify;
 
 use crate::models::Round;
 
@@ -58,16 +60,21 @@ pub struct Commit;
 impl Source for Commit {}
 
 #[derive(Clone)]
-pub struct RoundWatch<T: Source> {
-    tx: watch::Sender<Round>,
+pub struct RoundWatch<T: Source>(Arc<RoundWatchInner<T>>);
+
+pub struct RoundWatchInner<T: Source> {
+    notify: Notify,
+    round: AtomicU32,
     _phantom_data: PhantomData<T>,
 }
+
 impl<T: Source> Default for RoundWatch<T> {
     fn default() -> Self {
-        Self {
-            tx: watch::Sender::new(Round::BOTTOM),
+        Self(Arc::new(RoundWatchInner {
+            notify: Notify::new(),
+            round: AtomicU32::new(Round::BOTTOM.0),
             _phantom_data: Default::default(),
-        }
+        }))
     }
 }
 
@@ -76,57 +83,60 @@ impl<T: Source> RoundWatch<T> {
     ///
     /// either use only on sender side, or prefer [`RoundWatcher::get`]
     pub fn get(&self) -> Round {
-        *self.tx.borrow()
+        Round(self.0.round.load(atomic::Ordering::Acquire))
     }
 
     pub fn set_max_raw(&self, value: u32) {
-        self.set_max(Round(value));
+        if self.0.round.fetch_max(value, atomic::Ordering::AcqRel) < value {
+            self.0.notify.notify_waiters();
+        }
     }
 
     pub fn set_max(&self, value: Round) {
-        self.tx.send_if_modified(|old| {
-            let old_is_lesser = *old < value;
-            if old_is_lesser {
-                // let mut type_name = std::any::type_name::<T>();
-                // type_name = type_name.split(":").last().unwrap_or(type_name);
-                // tracing::warn!("{type_name} {} -> {}", old.0, value.0);
-                *old = value;
-            }
-            old_is_lesser
-        });
+        self.set_max_raw(value.0);
     }
 
     // not available to collator or adapter
     pub fn receiver(&self) -> RoundWatcher<T> {
         RoundWatcher {
-            rx: self.tx.subscribe(),
-            _phantom_data: Default::default(),
+            watch: self.clone(),
+            // SAFETY: parent is kept in struct so `Notified` preserves parent lifetime
+            last_value: self.get(),
         }
     }
 }
 
 // no `Clone` and not available to collator or adapter
 pub struct RoundWatcher<T: Source> {
-    rx: watch::Receiver<Round>,
-    _phantom_data: PhantomData<T>,
+    watch: RoundWatch<T>,
+    last_value: Round,
 }
 
 impl<T: Source> RoundWatcher<T> {
-    /// the only way to inspect the value upon creation, as [`Self::next`] will not return it
+    /// the only way to inspect the current value; [`Self::next`] may return it or a greater one
     pub fn get(&self) -> Round {
-        *self.rx.borrow()
+        self.watch.get()
     }
 
     /// does not return (hardly viable) default value, as any other prior [`Self`] creation
     pub async fn next(&mut self) -> Round {
-        match self.rx.changed().await {
-            Ok(()) => *self.rx.borrow_and_update(),
-            Err(e) => {
-                let mut type_name = std::any::type_name::<T>();
-                type_name = type_name.split(":").last().unwrap_or(type_name);
-                tracing::error!("{type_name} watch sender is dropped, {e}");
-                futures_util::future::pending().await
-            }
+        let notified = self.watch.0.notify.notified();
+
+        let last_value = self.watch.get();
+        if self.last_value < last_value {
+            self.last_value = last_value;
+            return last_value;
         }
+
+        notified.await;
+
+        let last_value = self.watch.get();
+        assert!(
+            self.last_value < last_value,
+            "notified value is not greater than previous"
+        );
+        self.last_value = last_value;
+
+        last_value
     }
 }
