@@ -30,10 +30,10 @@ impl TaskTracker {
 }
 
 impl TaskCtx<'_> {
-    pub fn spawn<F>(&self, task: F) -> Task<F::Output>
+    pub fn spawn<R, F>(&self, task: F) -> Task<R>
     where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
+        R: Send + 'static,
+        F: Future<Output = TaskResult<R>> + Send + 'static,
     {
         if self.0.is_closed() {
             return Task::aborted();
@@ -54,7 +54,7 @@ impl TaskCtx<'_> {
             return Task::aborted();
         }
         Task {
-            handle: self.0.spawn_blocking(task),
+            handle: self.0.spawn_blocking(|| Ok(task())),
             completed: false,
         }
     }
@@ -66,7 +66,7 @@ impl TaskCtx<'_> {
 /// keeps a [`tokio_util::sync::CancellationToken`] inside its task
 #[must_use = "this Future returns Result that must be used"]
 pub struct Task<R> {
-    handle: JoinHandle<R>,
+    handle: JoinHandle<TaskResult<R>>,
     completed: bool,
 }
 
@@ -75,7 +75,7 @@ impl<R> Task<R> {
     where
         R: Send + 'static,
     {
-        let task = tokio::spawn(futures_util::future::pending::<R>());
+        let task = tokio::spawn(futures_util::future::ready(Err(Cancelled())));
         task.abort();
         Task {
             handle: task,
@@ -105,11 +105,11 @@ impl<T> Future for Task<T> {
         let res = futures_util::ready!(self.handle.poll_unpin(cx));
         self.completed = true;
         Poll::Ready(match res {
-            Ok(value) => Ok(value),
+            Ok(Ok(value)) => Ok(value),
             Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
             // Should only happen when task tracker is closed or on program termination
             // Blocking task can be cancelled only until it starts running
-            Err(_) => Err(Cancelled()),
+            Err(_) | Ok(Err(Cancelled())) => Err(Cancelled()),
         })
     }
 }

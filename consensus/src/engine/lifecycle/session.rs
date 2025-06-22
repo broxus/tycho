@@ -5,10 +5,12 @@ use parking_lot::Mutex;
 use tokio::sync::oneshot;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::effects::TaskTracker;
+use crate::effects::{Cancelled, TaskTracker};
 use crate::engine::lifecycle::recover::{EngineRecoverLoop, RunAttributes};
 use crate::engine::lifecycle::session::isolated::SpanFields;
-use crate::engine::lifecycle::{EngineBinding, EngineNetwork, EngineNetworkArgs, FixHistoryFlag};
+use crate::engine::lifecycle::{
+    EngineBinding, EngineError, EngineNetwork, EngineNetworkArgs, FixHistoryFlag,
+};
 use crate::engine::{Engine, MempoolMergedConfig};
 use crate::intercom::InitPeers;
 
@@ -67,7 +69,12 @@ impl EngineSession {
                 merged_conf: merged_conf.clone(),
                 run_attrs: run_attrs.clone(),
             }
-            .run_loop(task_tracker.ctx().spawn(engine.run())),
+            .run_loop(task_tracker.ctx().spawn(async move {
+                match engine.run().await {
+                    Err(EngineError::Cancelled) => Err(Cancelled()),
+                    Err(EngineError::HistoryConflict(e)) => Ok(Err(e)),
+                }
+            })),
         ));
 
         Self {

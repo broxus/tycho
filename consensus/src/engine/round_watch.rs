@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 
 use tokio::sync::watch;
 
+use crate::effects::{Cancelled, TaskResult};
 use crate::models::Round;
 
 /// Marker trait to distinguish between data sources despite variable names
@@ -118,14 +119,14 @@ impl<T: Source> RoundWatcher<T> {
     }
 
     /// does not return (hardly viable) default value, as any other prior [`Self`] creation
-    pub async fn next(&mut self) -> Round {
+    pub async fn next(&mut self) -> TaskResult<Round> {
         match self.rx.changed().await {
-            Ok(()) => *self.rx.borrow_and_update(),
+            Ok(()) => Ok(*self.rx.borrow_and_update()),
             Err(e) => {
                 let mut type_name = std::any::type_name::<T>();
                 type_name = type_name.split(":").last().unwrap_or(type_name);
-                tracing::error!("{type_name} watch sender is dropped, {e}");
-                futures_util::future::pending().await
+                tracing::warn!("{type_name} watch sender is dropped, {e}");
+                Err(Cancelled())
             }
         }
     }

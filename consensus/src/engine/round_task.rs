@@ -89,9 +89,10 @@ impl RoundTaskReady {
         let task_ctx = round_ctx.task();
         let round_ctx = round_ctx.clone();
         self.prev_broadcast = Some(task_ctx.spawn(async move {
-            broadcaster.run_continue(&round_ctx).await;
+            broadcaster.run_continue(&round_ctx).await?;
             _ = stub_rx;
             _ = stub_tx;
+            Ok(())
         }));
     }
 
@@ -244,14 +245,14 @@ impl RoundTaskReady {
                         collector_signal_rx,
                         &round_ctx,
                     );
-                    let new_last_own_point = broadcaster.run().await;
+                    let new_last_own_point = broadcaster.run().await?;
                     drop(prev_bcast); // aborts after current broadcast finishes
                     let task_ctx = round_ctx.task();
                     let round_ctx = round_ctx.clone();
                     let new_prev_bcast =
                         task_ctx.spawn(async move { broadcaster.run_continue(&round_ctx).await });
                     // join the check, just not to miss it; it must have completed already
-                    self_check.await??;
+                    self_check.await?;
                     Ok(Some((new_prev_bcast, new_last_own_point)))
                 } else {
                     // drop(collector_signal_rx); // goes out of scope
@@ -271,9 +272,9 @@ impl RoundTaskReady {
                 let next_round = head.next().round();
                 let collector = collector
                     .run(collector_ctx, head, collector_signal_tx, bcaster_ready_rx)
-                    .await;
+                    .await?;
                 consensus_round.set_max(next_round);
-                collector
+                Ok(collector)
             }
         });
 
@@ -292,7 +293,7 @@ impl RoundTaskReady {
         downloader: Downloader,
         store: MempoolStore,
         round_ctx: &RoundCtx,
-    ) -> Task<TaskResult<()>> {
+    ) -> Task<()> {
         let task_ctx = round_ctx.task();
         let round_ctx = round_ctx.clone();
         task_ctx.spawn(async move {
@@ -324,18 +325,17 @@ impl RoundTaskReady {
     }
 }
 
-type BroadcasterRunResult = TaskResult<Option<(Task<()>, Arc<LastOwnPoint>)>>;
 pub struct RoundTaskRunning {
     state: RoundTaskState,
     last_own_point: Option<Arc<LastOwnPoint>>,
-    broadcaster_run: Task<BroadcasterRunResult>,
+    broadcaster_run: Task<Option<(Task<()>, Arc<LastOwnPoint>)>>,
     collector_run: Task<Collector>,
 }
 
 impl RoundTaskRunning {
     pub async fn until_ready(self) -> TaskResult<RoundTaskReady> {
         let (collector, bcast_result) = tokio::try_join!(self.collector_run, self.broadcaster_run)?;
-        let (prev_broadcast, last_own_point) = match bcast_result? {
+        let (prev_broadcast, last_own_point) = match bcast_result {
             None => (None, self.last_own_point),
             Some((new_prev_bcast, new_last_own_point)) => {
                 (Some(new_prev_bcast), Some(new_last_own_point))

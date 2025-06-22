@@ -6,7 +6,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::dag::{DagHead, DagRound};
 use crate::dyn_event;
-use crate::effects::{CollectCtx, Ctx};
+use crate::effects::{CollectCtx, Ctx, TaskResult};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::intercom::BroadcasterSignal;
 use crate::models::Round;
@@ -32,7 +32,7 @@ impl Collector {
         head: DagHead,
         collector_signal: watch::Sender<CollectorSignal>,
         bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
-    ) -> Self {
+    ) -> TaskResult<Self> {
         let mut task = CollectorTask {
             consensus_round: self.consensus_round,
             ctx,
@@ -43,13 +43,13 @@ impl Collector {
             is_bcaster_ready_ok: false,
         };
 
-        task.run(bcaster_signal).await;
+        task.run(bcaster_signal).await?;
 
         metrics::counter!("tycho_mempool_collected_broadcasts_count")
             .increment(head.current().threshold().count().total() as u64);
-        Self {
+        Ok(Self {
             consensus_round: task.consensus_round,
-        }
+        })
     }
 }
 struct CollectorTask {
@@ -69,7 +69,10 @@ struct CollectorTask {
 impl CollectorTask {
     /// includes @ r+0 must include own point @ r+0 iff the one is produced
     /// returns includes for our point at the next round
-    async fn run(&mut self, mut bcaster_signal: oneshot::Receiver<BroadcasterSignal>) {
+    async fn run(
+        &mut self,
+        mut bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
+    ) -> TaskResult<()> {
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
             self.ctx.conf().consensus.broadcast_retry_millis as _,
         ));
@@ -85,7 +88,7 @@ impl CollectorTask {
                 () = &mut threshold, if !self.is_includes_ready => {
                     self.is_includes_ready = true;
                     if self.is_ready() {
-                        return;
+                        break;
                     }
                 },
                 // broadcaster signal is rare and must not be postponed
@@ -93,18 +96,18 @@ impl CollectorTask {
                     if self.should_fail(bcaster_signal) {
                         // has to jump over one round
                         // return Err(self.next_dag_round.round().next())
-                        return; // step to next round, preserving next includes
+                        break; // step to next round, preserving next includes
                     }
                     // bcaster sends its signal immediately after receiving Signal::Retry,
                     // so we don't have to wait for one more interval
                     if self.is_ready() {
-                        return;
+                        break;
                     }
                 },
                 // tick is more frequent than bcaster signal, leads to completion too
                 _ = retry_interval.tick() => {
                     if self.is_ready() {
-                        return;
+                        break;
                     } else {
                         self.collector_signal.send_replace(
                             CollectorSignal::Retry { ready: self.is_includes_ready }
@@ -113,13 +116,14 @@ impl CollectorTask {
                 },
                 // very frequent event that may seldom cause completion
                 consensus_round = self.consensus_round.next() => {
-                    if self.match_consensus(consensus_round).is_err() {
-                        return;
+                    if self.match_consensus(consensus_round?).is_err() {
+                        break;
                     }
                 },
                 else => unreachable!("unhandled match arm in Collector tokio::select"),
             }
         }
+        Ok(())
     }
 
     fn should_fail(&mut self, signal: BroadcasterSignal) -> bool {
