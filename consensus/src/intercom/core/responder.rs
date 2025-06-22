@@ -49,6 +49,12 @@ impl Responder {
         };
     }
 
+    /// as `Self` is passed to Overlay as a `Service` and may be cloned there,
+    /// free `DagHead` and other resources upon `Engine` termination
+    pub fn dispose(&self) {
+        self.0.current.store(None);
+    }
+
     pub fn update(
         &self,
         broadcast_filter: &BroadcastFilter,
