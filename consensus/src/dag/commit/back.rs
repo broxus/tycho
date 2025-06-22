@@ -12,7 +12,7 @@ use tycho_network::PeerId;
 use crate::dag::commit::anchor_chain::EnqueuedAnchor;
 use crate::dag::commit::SyncError;
 use crate::dag::{DagRound, HistoryConflict};
-use crate::effects::{AltFmt, AltFormat, Cancelled};
+use crate::effects::{AltFmt, AltFormat, Cancelled, TaskResult};
 use crate::engine::MempoolConfig;
 use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PointInfo, Round, ValidPoint};
 
@@ -134,13 +134,13 @@ impl DagBack {
             if stage.is_used.load(atomic::Ordering::Relaxed) {
                 break;
             };
+            #[allow(clippy::single_match, reason = "explicitly match all variants")]
             match Self::any_ready_valid_trigger(dag_round, &stage.leader) {
-                Ok(trigger) => {
+                Ok(Some(trigger)) => {
                     // iter is from newest to oldest, restore historical order
                     triggers.push_front(trigger.info().clone());
                 }
-                Err(SyncError::TryLater) => {} // skip
-                Err(SyncError::HistoryConflict(round)) => return Err(HistoryConflict(round)),
+                Ok(None) | Err(Cancelled()) => {} // skip
             }
         }
         // tracing::warn!("dag length {} all_triggers: {string}", self.rounds.len());
@@ -468,17 +468,13 @@ impl DagBack {
     fn any_ready_valid_trigger(
         dag_round: &DagRound,
         author: &PeerId,
-    ) -> Result<ValidPoint, SyncError> {
+    ) -> TaskResult<Option<ValidPoint>> {
         dag_round
             .view(author, |loc| {
                 loc.versions
                     .values()
                     // better try later than wait now if some point is still downloading
                     .filter_map(|version| version.clone().now_or_never())
-                    .map(|task_result| match task_result {
-                        Ok(dag_point) => Ok(dag_point),
-                        Err(Cancelled()) => Err(SyncError::TryLater),
-                    })
                     // take any suitable
                     .filter_map_ok(move |dag_point| match dag_point {
                         DagPoint::Valid(valid) => {
@@ -488,18 +484,15 @@ impl DagBack {
                                 None
                             }
                         }
-                        not_valid if not_valid.is_certified() => {
-                            Some(Err(SyncError::HistoryConflict(dag_round.round())))
-                        }
-                        DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_) => {
-                            None
-                        }
+                        // trigger may be invalid and not discovered by majority
+                        // while this node is syncing, so do not throw history conflict
+                        _ => None,
                     })
                     .flatten()
                     .find_or_first(|result| result.is_ok())
             })
             .flatten()
-            .unwrap_or(Err(SyncError::TryLater))
+            .transpose()
     }
 
     // needed only in commit where all points are validated and stored in DAG
