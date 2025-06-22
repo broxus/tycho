@@ -4,6 +4,7 @@ use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
+use futures_util::never::Never;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, TryStreamExt};
 use itertools::{Either, Itertools};
@@ -31,7 +32,7 @@ pub struct Engine {
     output: mpsc::UnboundedSender<MempoolOutput>,
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
-    _peer_schedule_updater: Task<()>,
+    peer_schedule_updater: Task<Never>,
     init_task: Option<Task<FixHistoryFlag>>,
     ctx: EngineCtx,
 }
@@ -111,7 +112,7 @@ impl Engine {
             output: bind.output.clone(),
             db_cleaner,
             round_task,
-            _peer_schedule_updater: peer_schedule_updater,
+            peer_schedule_updater,
             init_task: Some(init_task),
             ctx: engine_ctx,
         }
@@ -340,14 +341,14 @@ impl Engine {
     }
 
     // this future never completes with Ok result
-    pub async fn run(mut self) -> EngineResult<futures_util::never::Never> {
+    pub async fn run(mut self) -> EngineResult<Never> {
         // Option<Option<_>> to distinguish first round, when dag must not be advanced before run
         let mut start_replay_bcasts = Some(self.pre_run().await?);
         let _scopeguard = scopeguard::guard(self.ctx.span().clone(), |start_span| {
             start_span.in_scope(|| tracing::warn!("mempool engine run stopped"));
         });
         let mut round_ctx = RoundCtx::new(&self.ctx, self.dag.top().round());
-        let _db_clean_task: Task<()> = self.db_cleaner.new_task(
+        let db_clean_task: Task<Never> = self.db_cleaner.new_task(
             self.round_task.state.consensus_round.receiver(),
             self.round_task.state.top_known_anchor.receiver(),
             &round_ctx,
@@ -359,6 +360,17 @@ impl Engine {
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
             // commit may take longer than a round if it ends with a jump to catch up with consensus
+
+            if self.peer_schedule_updater.is_finished() {
+                match self.peer_schedule_updater.await {
+                    Err(e) => return Err(e.into()), // never Ok
+                }
+            }
+            if db_clean_task.is_finished() {
+                match db_clean_task.await {
+                    Err(e) => return Err(e.into()), // never Ok
+                }
+            }
 
             {
                 let (old_dag_top_round, next_round) = if start_replay_bcasts.is_some() {
@@ -450,7 +462,7 @@ impl Engine {
                     round_task = &mut round_task_run => {
                         self.round_task = round_task?;
                         break;
-                    }
+                    },
                 }
             }
         }

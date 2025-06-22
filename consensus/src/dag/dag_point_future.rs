@@ -111,7 +111,7 @@ impl DagPointFuture {
                 );
                 dag_point
             };
-            LIMIT.spawn_blocking(ctx.task(), full_fn).await
+            Ok(LIMIT.spawn_blocking(ctx.task(), full_fn).await)
         });
 
         Self(DagPointFutureType::Validate {
@@ -152,7 +152,7 @@ impl DagPointFuture {
                 state.resolve(&dag_point);
                 dag_point
             };
-            LIMIT.spawn_blocking(ctx.task(), full_fn).await
+            Ok(LIMIT.spawn_blocking(ctx.task(), full_fn).await)
         });
 
         Self(DagPointFutureType::Validate {
@@ -215,7 +215,7 @@ impl DagPointFuture {
         });
 
         DagPointFuture(DagPointFutureType::Validate {
-            task: Shared::new((async move { nested.await??.await }).boxed()),
+            task: Shared::new((async move { nested.await?.await }).boxed()),
             cert: cert_clone,
         })
     }
@@ -261,7 +261,7 @@ impl DagPointFuture {
             let store = store.clone();
             let downloaded = downloader
                 .run(&point_id, dependers_rx, broadcast_rx, download_ctx)
-                .await;
+                .await?;
             match downloaded {
                 Some(DownloadResult::Verified(point)) => {
                     let info = point.info().clone();
@@ -344,7 +344,7 @@ impl DagPointFuture {
         });
 
         DagPointFuture(DagPointFutureType::Download {
-            task: Shared::new((async move { nested.await??.await }).boxed()),
+            task: Shared::new((async move { nested.await?.await }).boxed()),
             cert: cert_clone,
             dependers_tx,
             resolve: Arc::new(OnceTake::new(broadcast_tx)),
@@ -452,7 +452,7 @@ impl DagPointFuture {
 
                     Ok(store_task)
                 };
-                let lazy = (async move { ctx.task().spawn(future).await??.await }).boxed();
+                let lazy = (async move { ctx.task().spawn(future).await?.await }).boxed();
                 DagPointFuture(DagPointFutureType::Validate {
                     task: Shared::new(lazy),
                     cert: cert_clone,
