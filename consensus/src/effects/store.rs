@@ -6,6 +6,7 @@ use ahash::{HashMapExt, HashSetExt};
 use anyhow::{Context, Result};
 use bumpalo::Bump;
 use bytes::Bytes;
+use futures_util::never::Never;
 use itertools::Itertools;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::OverlayId;
@@ -258,7 +259,7 @@ impl DbCleaner {
         mut consensus_round: RoundWatcher<Consensus>,
         mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
         round_ctx: &RoundCtx,
-    ) -> Task<()> {
+    ) -> Task<Never> {
         let storage = self.storage.clone();
         let task_ctx = round_ctx.task();
         let round_ctx = round_ctx.clone();
@@ -273,9 +274,9 @@ impl DbCleaner {
             loop {
                 tokio::select! {
                     biased;
-                    new_consensus = consensus_round.next() => consensus = new_consensus,
-                    new_committed = committed_round.next() => committed = new_committed,
-                    new_top_known = top_known_anchor.next() => top_known = new_top_known,
+                    new_consensus = consensus_round.next() => consensus = new_consensus?,
+                    new_committed = committed_round.next() => committed = new_committed?,
+                    new_top_known = top_known_anchor.next() => top_known = new_top_known?,
                 }
 
                 metrics::gauge!("tycho_mempool_consensus_current_round").set(consensus.0);
@@ -321,13 +322,10 @@ impl DbCleaner {
                             }
                         }
                     });
-                    match task.await {
-                        Ok(()) => prev_least_to_keep = new_least_to_keep,
-                        Err(Cancelled()) => {
-                            tracing::warn!("mempool clean task DB cancelled");
-                            break;
-                        }
-                    }
+                    task.await.inspect_err(|Cancelled()| {
+                        tracing::warn!("mempool clean DB task cancelled");
+                    })?;
+                    prev_least_to_keep = new_least_to_keep;
                 }
             }
         })
