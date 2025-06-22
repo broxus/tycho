@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{future, StreamExt};
+use futures_util::StreamExt;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, oneshot, watch};
 use tokio::time::MissedTickBehavior;
@@ -14,7 +14,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::LastOwnPoint;
 use crate::dyn_event;
-use crate::effects::{AltFormat, BroadcastCtx, Ctx, RoundCtx};
+use crate::effects::{AltFormat, BroadcastCtx, Cancelled, Ctx, RoundCtx, TaskResult};
 use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::core::{BroadcastResponse, QueryRequest, SignatureResponse};
 use crate::intercom::peer_schedule::PeerState;
@@ -104,7 +104,7 @@ impl Broadcaster {
     }
 
     /// returns evidence for broadcast point
-    pub async fn run(&mut self) -> Arc<LastOwnPoint> {
+    pub async fn run(&mut self) -> TaskResult<Arc<LastOwnPoint>> {
         // how this was supposed to work:
         // * in short: broadcast to all and gather signatures from those who accepted the point
         // * both broadcast and signature tasks have their own retry loop for every peer
@@ -140,11 +140,7 @@ impl Broadcaster {
                     }
                 }
                 // rare event essential for up-to-date retries
-                update = self.peer_updates.recv() => {
-                    if self.match_peer_updates(update).is_err() {
-                        future::pending::<()>().await;
-                    };
-                }
+                update = self.peer_updates.recv() => self.match_peer_updates(update)?,
                 // either request signature immediately or postpone until retry
                 Some((peer_id, result)) = self.bcast_futures.next() => {
                     self.match_broadcast_result(&peer_id, result);
@@ -159,16 +155,16 @@ impl Broadcaster {
                 }
             }
         }
-        Arc::new(LastOwnPoint {
+        Ok(Arc::new(LastOwnPoint {
             digest: *self.point.info().digest(),
             evidence: mem::take(&mut self.signatures).into_iter().collect(),
             includes: self.point.info().includes().clone(),
             round: self.point.info().round(),
             signers: self.signers_count,
-        })
+        }))
     }
 
-    pub async fn run_continue(mut self, round_ctx: &RoundCtx) {
+    pub async fn run_continue(mut self, round_ctx: &RoundCtx) -> TaskResult<()> {
         self.ctx = BroadcastCtx::new(round_ctx, &self.point);
 
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
@@ -183,11 +179,7 @@ impl Broadcaster {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 // rare event essential for up-to-date retries
-                update = self.peer_updates.recv() => {
-                    if self.match_peer_updates(update).is_err() {
-                        future::pending::<()>().await;
-                    };
-                }
+                update = self.peer_updates.recv() => self.match_peer_updates(update)?,
                 _ = retry_interval.tick() => {
                     BroadcastCtx::retry(self.sig_peers.len());
                     for peer in mem::take(&mut self.sig_peers) {
@@ -400,7 +392,7 @@ impl Broadcaster {
     fn match_peer_updates(
         &mut self,
         result: Result<(PeerId, PeerState), RecvError>,
-    ) -> Result<(), ()> {
+    ) -> TaskResult<()> {
         match result {
             Ok((peer_id, new_state)) => {
                 tracing::info!(
@@ -434,7 +426,7 @@ impl Broadcaster {
                     error = display(err),
                     "peer state update"
                 );
-                Err(())
+                Err(Cancelled())
             }
         }
     }
