@@ -345,7 +345,12 @@ impl Engine {
     pub async fn run(mut self) -> EngineResult<Never> {
         // Option<Option<_>> to distinguish first round, when dag must not be advanced before run
         let mut start_replay_bcasts = Some(self.pre_run().await?);
-        let _scopeguard = scopeguard::guard(self.ctx.span().clone(), |start_span| {
+        let in_guard = (
+            self.round_task.state.responder.clone(),
+            self.ctx.span().clone(),
+        );
+        let _scopeguard = scopeguard::guard(in_guard, |(responder, start_span)| {
+            responder.dispose();
             start_span.in_scope(|| tracing::warn!("mempool engine run stopped"));
         });
         let mut round_ctx = RoundCtx::new(&self.ctx, self.dag.top().round());
