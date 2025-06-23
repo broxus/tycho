@@ -29,7 +29,7 @@ use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::execution_manager::MessagesExecutor;
 use crate::collator::messages_reader::{FinalizedMessagesReader, MessagesReader};
 use crate::collator::types::{
-    BlockCollationData, BlockSerializerCache, ExecuteResult, FinalizeBlockResult,
+    AccountExistence, BlockCollationData, BlockSerializerCache, ExecuteResult, FinalizeBlockResult,
     FinalizeMessagesReaderResult, FinalizeMetrics, PreparedInMsg, PreparedOutMsg, PublicLibsDiff,
 };
 use crate::internal_queue::types::{DiffStatistics, DiffZone, EnqueuedMessage};
@@ -292,12 +292,10 @@ impl Phase<FinalizeState> {
             block_serializer_cache,
         } = ctx;
 
-        let collation_data = &mut self.state.collation_data;
-
         let accounts_split_depth = collator_config.accounts_split_depth;
         let merkle_split_depth = collator_config.merkle_split_depth;
 
-        let shard = collation_data.block_id_short.shard;
+        let shard = self.state.collation_data.block_id_short.shard;
 
         let labels = &[("workchain", shard.workchain().to_string())];
         let histogram =
@@ -314,7 +312,7 @@ impl Phase<FinalizeState> {
         // Compute a masterchain block seqno which will reference this block.
         let ref_by_mc_seqno = if is_masterchain {
             // The block itself for the masterchain
-            collation_data.block_id_short.seqno
+            self.state.collation_data.block_id_short.seqno
         } else {
             // And the next masterchain block for shards
             self.state.mc_data.block_id.seqno + 1
@@ -336,7 +334,7 @@ impl Phase<FinalizeState> {
                     "tycho_collator_finalize_build_in_msgs_time_high",
                     labels,
                 );
-                in_msgs_res = Self::build_in_msgs(&collation_data.in_msgs);
+                in_msgs_res = Self::build_in_msgs(&self.state.collation_data.in_msgs);
                 build_in_msgs_elapsed = histogram.finish();
             });
             s.spawn(|_| {
@@ -344,7 +342,7 @@ impl Phase<FinalizeState> {
                     "tycho_collator_finalize_build_out_msgs_time_high",
                     labels,
                 );
-                out_msgs_res = Self::build_out_msgs(&collation_data.out_msgs);
+                out_msgs_res = Self::build_out_msgs(&self.state.collation_data.out_msgs);
                 build_out_msgs_elapsed = histogram.finish();
             });
 
@@ -363,23 +361,27 @@ impl Phase<FinalizeState> {
             build_accounts_elapsed = histogram.finish();
         });
 
+        let processed_accounts = processed_accounts_res?;
+        let in_msgs = in_msgs_res?;
+        let out_msgs = out_msgs_res?;
+
+        // update metrics
         self.extra
             .finalize_metrics
             .build_accounts_and_messages_in_parallel_elased =
             histogram_build_accounts_and_messages.finish();
+        self.extra.finalize_metrics.update_shard_accounts_elapsed =
+            processed_accounts.update_shard_accounts_elapsed;
+        self.extra.finalize_metrics.build_accounts_blocks_elapsed =
+            processed_accounts.build_accounts_blocks_elapsed;
         self.extra.finalize_metrics.build_accounts_elapsed = build_accounts_elapsed;
         self.extra.finalize_metrics.build_in_msgs_elapsed = build_in_msgs_elapsed;
         self.extra.finalize_metrics.build_out_msgs_elapsed = build_out_msgs_elapsed;
 
-        let processed_accounts = processed_accounts_res?;
-        collation_data.accounts_count = processed_accounts.accounts_len as u64;
-        let in_msgs = in_msgs_res?;
-        let out_msgs = out_msgs_res?;
-
         // TODO: update new_config_opt from hard fork
 
         // Compute value flow.
-        let value_flow = collation_data.finalize_value_flow(
+        let value_flow = self.state.collation_data.finalize_value_flow(
             &processed_accounts.account_blocks,
             &processed_accounts.shard_accounts,
             &in_msgs,
@@ -454,7 +456,7 @@ impl Phase<FinalizeState> {
         let mut new_block_info = BlockInfo {
             version,
             key_block: matches!(&mc_state_extra, Some(extra) if extra.after_key_block),
-            shard: self.state.collation_data.block_id_short.shard,
+            shard,
             seqno: self.state.collation_data.block_id_short.seqno,
             gen_utime: self.state.collation_data.gen_utime,
             gen_utime_ms: self.state.collation_data.gen_utime_ms,
@@ -493,23 +495,49 @@ impl Phase<FinalizeState> {
                 labels,
             );
 
+            // calculate shard accounts count
+            // get old count
+            let prev_state = &self.state.prev_shard_data.pure_states()[0];
+            let mut shard_accounts_count = prev_state.state().underload_history;
+            // fallback: count accounts in dict
+            // NOTE: will be executed only once after node update
+            if shard_accounts_count == 0 {
+                shard_accounts_count =
+                    prev_state.state().accounts.load()?.raw_keys().count() as u64;
+            }
+            // update count
+            shard_accounts_count = shard_accounts_count
+                .saturating_add(processed_accounts.added_accounts_count)
+                .saturating_sub(processed_accounts.removed_accounts_count);
+
+            self.state.collation_data.shard_accounts_count = shard_accounts_count;
+            self.state.collation_data.updated_accounts_count =
+                processed_accounts.updated_accounts_count;
+            self.state.collation_data.added_accounts_count =
+                processed_accounts.added_accounts_count;
+            self.state.collation_data.removed_accounts_count =
+                processed_accounts.removed_accounts_count;
+
             // calculate and log finalize block wu
-            let accounts_count = self.state.collation_data.accounts_count;
+            let updated_accounts_count = self.state.collation_data.updated_accounts_count;
             let in_msgs_len = self.state.collation_data.in_msgs.len() as u64;
             let out_msgs_len = self.state.collation_data.out_msgs.len() as u64;
 
             self.extra.finalize_wu.calculate_finalize_block_wu(
                 &self.state.collation_config.work_units_params.finalize,
                 &self.state.collation_config.work_units_params.execute,
-                accounts_count,
+                shard_accounts_count,
+                updated_accounts_count,
                 in_msgs_len,
                 out_msgs_len,
             );
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "finalize_block_wu: {}, accounts_count: {}, in_msgs: {}, out_msgs: {} ",
+                "finalize_block_wu: {}, state_accounts_count: {}, \
+                updated_accounts_count: {}, in_msgs: {}, out_msgs: {} ",
                 self.extra.finalize_wu.finalize_block_wu(),
-                accounts_count, in_msgs_len, out_msgs_len,
+                shard_accounts_count, updated_accounts_count,
+                in_msgs_len, out_msgs_len,
             );
 
             // compute total wu used from last anchor
@@ -560,7 +588,7 @@ impl Phase<FinalizeState> {
                 before_split: new_block_info.before_split,
                 accounts: Lazy::new(&processed_accounts.shard_accounts)?,
                 overload_history: new_wu_used_from_last_anchor,
-                underload_history: 0,
+                underload_history: shard_accounts_count,
                 total_balance: value_flow.to_next_block.clone(),
                 total_validator_fees: self.state.prev_shard_data.total_validator_fees().clone(),
                 libraries: Dict::new(),
@@ -700,7 +728,7 @@ impl Phase<FinalizeState> {
             };
 
             let block_id = BlockId {
-                shard: self.state.collation_data.block_id_short.shard,
+                shard,
                 seqno: self.state.collation_data.block_id_short.seqno,
                 root_hash: *root.repr_hash(),
                 file_hash: Boc::file_hash_blake(&data),
@@ -1104,6 +1132,8 @@ impl Phase<FinalizeState> {
         public_libraries: &mut Dict<HashBytes, LibDescr>,
     ) -> Result<ProcessedAccounts> {
         let shard_ident = executor.shard_id();
+        let labels = [("workchain", shard_ident.workchain().to_string())];
+
         let is_masterchain = shard_ident.is_masterchain();
         let workchain = shard_ident.workchain();
 
@@ -1121,6 +1151,15 @@ impl Phase<FinalizeState> {
 
         let mut public_libraries_diff = PublicLibsDiff::new(public_libraries.clone());
 
+        // count added and removed accounts to track the total shard accounts count
+        let mut added_accounts_count = 0;
+        let mut removed_accounts_count = 0;
+
+        // Update shard accounts
+        let histogram = HistogramGuard::begin_with_labels(
+            "tycho_collator_finalize_update_shard_accounts_time_high",
+            &labels,
+        );
         let updated_accounts = updated_accounts
             .filter(|account| !account.transactions.is_empty())
             .map(|mut updated_account| {
@@ -1152,16 +1191,24 @@ impl Phase<FinalizeState> {
                         .context("failed to add public libraries diff")?;
                 }
 
-                let op = if updated_account.exists {
-                    let extra = DepthBalanceInfo {
-                        // NOTE: will need to set when we implement accounts split/merge logic
-                        split_depth: 0,
-                        balance: updated_account.balance.clone(),
-                    };
-                    let value = updated_account.shard_account.clone();
-                    Some((extra, value))
-                } else {
-                    None
+                // count added and removed accounts
+                if updated_account.exists == AccountExistence::Created {
+                    added_accounts_count += 1;
+                } else if updated_account.exists == AccountExistence::Removed {
+                    removed_accounts_count += 1;
+                }
+
+                let op = match updated_account.exists {
+                    AccountExistence::Exists | AccountExistence::Created => {
+                        let extra = DepthBalanceInfo {
+                            // NOTE: will need to set when we implement accounts split/merge logic
+                            split_depth: 0,
+                            balance: updated_account.balance.clone(),
+                        };
+                        let value = updated_account.shard_account.clone();
+                        Some((extra, value))
+                    }
+                    AccountExistence::NotExists | AccountExistence::Removed => None,
                 };
 
                 let shard_ident =
@@ -1174,32 +1221,6 @@ impl Phase<FinalizeState> {
                 Ok(updated_account)
             })
             .collect::<Result<Vec<_>>>()?;
-
-        // Build account transactions in parallel.
-        let account_blocks = updated_accounts
-            .into_par_iter()
-            .map(|updated_account| {
-                // Add account block.
-                let transactions = AugDict::try_from_btree(&updated_account.transactions)
-                    .context("failed to build account block transactions")?;
-
-                Ok::<_, anyhow::Error>(AccountBlock {
-                    state_update: updated_account.build_hash_update(),
-                    account: updated_account.account_addr,
-                    transactions,
-                })
-            })
-            .collect_vec_list();
-
-        let account_blocks = account_blocks
-            .into_iter()
-            .flat_map(move |chunk| {
-                chunk.into_iter().map(|res| {
-                    let account_block = res?;
-                    Ok((account_block.account, account_block))
-                })
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
 
         account_modifications
             .par_iter_mut()
@@ -1234,13 +1255,47 @@ impl Phase<FinalizeState> {
             merge_relaxed_aug_dicts(updated_shard_accounts)?
         };
 
-        let accounts_len = account_blocks.len();
+        let update_shard_accounts_elapsed = histogram.finish();
+
+        // Build account transactions in parallel
+        let histogram = HistogramGuard::begin_with_labels(
+            "tycho_collator_finalize_build_accounts_blocks_time_high",
+            &labels,
+        );
+        let account_blocks = updated_accounts
+            .into_par_iter()
+            .map(|updated_account| {
+                // Add account block.
+                let transactions = AugDict::try_from_btree(&updated_account.transactions)
+                    .context("failed to build account block transactions")?;
+
+                Ok::<_, anyhow::Error>(AccountBlock {
+                    state_update: updated_account.build_hash_update(),
+                    account: updated_account.account_addr,
+                    transactions,
+                })
+            })
+            .collect_vec_list();
+
+        let account_blocks = account_blocks
+            .into_iter()
+            .flat_map(move |chunk| {
+                chunk.into_iter().map(|res| {
+                    let account_block = res?;
+                    Ok((account_block.account, account_block))
+                })
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+
+        let updated_accounts_count = account_blocks.len() as u64;
 
         let account_blocks = RelaxedAugDict::try_from_sorted_iter_any(
             account_blocks
                 .into_iter()
                 .map(|(k, v)| (k, v.transactions.root_extra().clone(), v)),
         )?;
+
+        let build_accounts_blocks_elapsed = histogram.finish();
 
         // TODO: Can be moved into a rayon `s.spawn` to update libraries in parallel with accounts.
         //       But this might add some visible overhead since we need to wait for a free worker.
@@ -1252,7 +1307,11 @@ impl Phase<FinalizeState> {
             account_blocks: account_blocks.build()?,
             shard_accounts,
             new_config_params,
-            accounts_len,
+            updated_accounts_count,
+            added_accounts_count,
+            removed_accounts_count,
+            update_shard_accounts_elapsed,
+            build_accounts_blocks_elapsed,
         })
     }
 
@@ -1514,7 +1573,11 @@ struct ProcessedAccounts {
     account_blocks: AccountBlocks,
     shard_accounts: ShardAccounts,
     new_config_params: Option<BlockchainConfigParams>,
-    accounts_len: usize,
+    updated_accounts_count: u64,
+    added_accounts_count: u64,
+    removed_accounts_count: u64,
+    update_shard_accounts_elapsed: Duration,
+    build_accounts_blocks_elapsed: Duration,
 }
 
 fn create_merkle_update(

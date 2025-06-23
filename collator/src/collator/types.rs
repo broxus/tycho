@@ -132,6 +132,10 @@ impl PrevData {
         Ok((prev_data, usage_tree))
     }
 
+    pub fn pure_states(&self) -> &Vec<ShardStateStuff> {
+        &self.pure_states
+    }
+
     pub fn observable_states(&self) -> &Vec<ShardStateStuff> {
         &self.observable_states
     }
@@ -322,7 +326,10 @@ impl BlockCollationDataBuilder {
             start_lt,
             next_lt: start_lt + 1,
             tx_count: 0,
-            accounts_count: 0,
+            shard_accounts_count: 0,
+            updated_accounts_count: 0,
+            added_accounts_count: 0,
+            removed_accounts_count: 0,
             total_execute_msgs_time_mc: 0,
             execute_count_all: 0,
             execute_count_ext: 0,
@@ -358,7 +365,11 @@ pub(super) struct BlockCollationData {
     pub gen_utime_ms: u16,
 
     pub tx_count: u64,
-    pub accounts_count: u64,
+
+    pub shard_accounts_count: u64,
+    pub updated_accounts_count: u64,
+    pub added_accounts_count: u64,
+    pub removed_accounts_count: u64,
 
     pub block_limit: BlockLimitStats,
 
@@ -655,9 +666,17 @@ pub(super) struct ShardAccountStuff {
     pub initial_state_hash: HashBytes,
     pub balance: CurrencyCollection,
     pub public_libs_diff: AccountPublicLibsDiff,
-    pub exists: bool,
+    pub exists: AccountExistence,
     pub transactions: BTreeMap<u64, (CurrencyCollection, Lazy<Transaction>)>,
     pub min_next_lt: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AccountExistence {
+    Exists,
+    NotExists,
+    Created,
+    Removed,
 }
 
 pub type AccountPublicLibsDiff = FastHashMap<HashBytes, Option<Cell>>;
@@ -682,10 +701,10 @@ impl ShardAccountStuff {
                 special = acc_flags.unwrap_or_default();
             }
             balance = account.balance;
-            exists = true;
+            exists = AccountExistence::Exists;
         } else {
             balance = CurrencyCollection::ZERO;
-            exists = false;
+            exists = AccountExistence::NotExists;
         }
 
         Ok(Self {
@@ -726,7 +745,7 @@ impl ShardAccountStuff {
             initial_state_hash,
             balance: CurrencyCollection::ZERO,
             public_libs_diff: FastHashMap::new(),
-            exists: false,
+            exists: AccountExistence::NotExists,
             transactions: Default::default(),
             // NOTE: No need to align logical time for non-existing accounts.
             min_next_lt: 0,
@@ -779,8 +798,16 @@ impl ShardAccountStuff {
         self.transactions
             .insert(lt, (tx_meta.total_fees.into(), tx));
         self.balance = account_meta.balance;
-        self.exists = account_meta.exists;
         self.min_next_lt = tx_meta.next_lt;
+
+        // update account exists flag
+        self.exists = match (self.exists, account_meta.exists) {
+            (AccountExistence::NotExists, true) => AccountExistence::Created,
+            (AccountExistence::Created, false) => AccountExistence::NotExists,
+            (AccountExistence::Exists, false) => AccountExistence::Removed,
+            (AccountExistence::Removed, true) => AccountExistence::Exists,
+            (state, _) => state,
+        };
 
         if is_masterchain {
             // Sort diff in reverse order (sort must be stable here).
@@ -1795,9 +1822,14 @@ pub(super) struct FinalizeMetrics {
     pub create_queue_diff_elapsed: Duration,
     pub apply_queue_diff_elapsed: Duration,
 
+    pub update_shard_accounts_elapsed: Duration,
+    pub build_accounts_blocks_elapsed: Duration,
+
     pub build_accounts_elapsed: Duration,
+
     pub build_in_msgs_elapsed: Duration,
     pub build_out_msgs_elapsed: Duration,
+
     pub build_accounts_and_messages_in_parallel_elased: Duration,
 
     pub build_mc_state_extra_elapsed: Duration,

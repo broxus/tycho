@@ -235,8 +235,12 @@ pub struct FinalizeWu {
     pub apply_queue_diff_wu: u64,
     pub apply_queue_diff_elapsed: Duration,
 
-    pub build_shard_accounts_wu: u64,
+    pub update_shard_accounts_wu: u64,
+    pub update_shard_accounts_elapsed: Duration,
+
     pub build_accounts_blocks_wu: u64,
+    pub build_accounts_blocks_elapsed: Duration,
+
     pub build_accounts_elapsed: Duration,
 
     pub build_in_msgs_wu: u64,
@@ -277,7 +281,8 @@ impl FinalizeWu {
         &mut self,
         wu_params_finalize: &WorkUnitsParamsFinalize,
         wu_params_execute: &WorkUnitsParamsExecute,
-        accounts_count: u64,
+        shard_accounts_count: u64,
+        updated_accounts_count: u64,
         in_msgs_len: u64,
         out_msgs_len: u64,
     ) {
@@ -299,28 +304,31 @@ impl FinalizeWu {
             ..
         } = wu_params_execute;
 
-        let threads_count = (max_threads_count as u64).min(accounts_count).max(1);
+        let threads_count = (max_threads_count as u64)
+            .min(updated_accounts_count)
+            .max(1);
 
-        let accounts_count_log = accounts_count.checked_ilog2().unwrap_or_default() as u64;
+        let shard_accounts_count_log =
+            shard_accounts_count.checked_ilog2().unwrap_or_default() as u64;
+        let updated_accounts_count_log =
+            updated_accounts_count.checked_ilog2().unwrap_or_default() as u64;
         let in_msgs_len_log = in_msgs_len.checked_ilog2().unwrap_or_default() as u64;
         let out_msgs_len_log = out_msgs_len.checked_ilog2().unwrap_or_default() as u64;
 
-        // TODO: should use accounts count in state to calc wu for updating shards accounts map
-
         // calc update shard accounts:
-        //  * prepare account modifications in (accounts_count)
-        //  * then update map of shard accounts in parallel in (accounts_count)*log(state_accounts_count)/(threads_count)
-        self.build_shard_accounts_wu = accounts_count
+        //  * prepare account modifications in (updated_accounts_count)
+        //  * then update map of shard accounts in parallel in (updated_accounts_count)*log(shard_accounts_count)/(threads_count)
+        self.update_shard_accounts_wu = updated_accounts_count
             .saturating_add(
-                accounts_count
-                    .saturating_mul(accounts_count_log)
+                updated_accounts_count
+                    .saturating_mul(shard_accounts_count_log)
                     .saturating_div(threads_count),
             )
             .saturating_mul(build_accounts as u64);
 
         // calc build account blocks:
         //  * build maps of transactions by accounts in parallel in (txs_count)*log(txs_count/threads_count)/(threads_count)
-        //  * then build AugDict of accounts blocks in (accounts_count)*log(accounts_count)
+        //  * then build AugDict of accounts blocks in (updated_accounts_count)*log(updated_accounts_count)
         let in_msgs_len_div_threads_count_log = in_msgs_len
             .saturating_div(threads_count)
             .checked_ilog2()
@@ -328,7 +336,7 @@ impl FinalizeWu {
         self.build_accounts_blocks_wu = in_msgs_len
             .saturating_mul(in_msgs_len_div_threads_count_log)
             .saturating_div(threads_count)
-            .saturating_add(accounts_count.saturating_mul(accounts_count_log))
+            .saturating_add(updated_accounts_count.saturating_mul(updated_accounts_count_log))
             .saturating_mul(build_transactions as u64);
 
         // calc build in msgs:
@@ -343,25 +351,23 @@ impl FinalizeWu {
             .saturating_mul(out_msgs_len_log)
             .saturating_mul(build_out_msg as u64);
 
-        // TODO: should use accounts count in state to calc wu for merkle update
-
         // calc build state update
-        //  * calc update of all updated accounts in parallel in (accounts_count)*log(state_accounts_count)/(threads_count)
+        //  * calc update of all updated accounts in parallel in (updated_accounts_count)*log(shard_accounts_count)/(threads_count)
         //  * use min value if calculated is less
         self.build_state_update_wu = std::cmp::max(
             state_update_min as u64,
-            accounts_count
-                .saturating_mul(accounts_count_log)
+            updated_accounts_count
+                .saturating_mul(shard_accounts_count_log)
                 .saturating_div(threads_count)
                 .saturating_mul(state_update_accounts as u64),
         );
 
         // calc build block
-        //  * serialize each account block in (accounts_count) and use min value if calculated is less
+        //  * serialize each account block in (updated_accounts_count) and use min value if calculated is less
         //  * serialize in msgs and out msgs in (in_msgs_len + out_msgs_len)
         self.build_block_wu = std::cmp::max(
             serialize_min as u64,
-            accounts_count.saturating_mul(serialize_accounts as u64),
+            updated_accounts_count.saturating_mul(serialize_accounts as u64),
         )
         .saturating_add((in_msgs_len + out_msgs_len).saturating_mul(serialize_msg as u64));
     }
@@ -370,7 +376,11 @@ impl FinalizeWu {
         self.create_queue_diff_elapsed = finalize_metrics.create_queue_diff_elapsed;
         self.apply_queue_diff_elapsed = finalize_metrics.apply_queue_diff_elapsed;
 
+        self.update_shard_accounts_elapsed = finalize_metrics.update_shard_accounts_elapsed;
+        self.build_accounts_blocks_elapsed = finalize_metrics.build_accounts_blocks_elapsed;
+
         self.build_accounts_elapsed = finalize_metrics.build_accounts_elapsed;
+
         self.build_in_msgs_elapsed = finalize_metrics.build_in_msgs_elapsed;
         self.build_out_msgs_elapsed = finalize_metrics.build_out_msgs_elapsed;
 
@@ -385,8 +395,22 @@ impl FinalizeWu {
         self.total_elapsed = finalize_metrics.total_timer.total_elapsed;
     }
 
+    pub fn update_shard_accounts_wu_price(&self) -> f64 {
+        if self.update_shard_accounts_wu == 0 {
+            return 0.0;
+        }
+        self.update_shard_accounts_elapsed.as_nanos() as f64 / self.update_shard_accounts_wu as f64
+    }
+
+    pub fn build_accounts_blocks_wu_price(&self) -> f64 {
+        if self.build_accounts_blocks_wu == 0 {
+            return 0.0;
+        }
+        self.build_accounts_blocks_elapsed.as_nanos() as f64 / self.build_accounts_blocks_wu as f64
+    }
+
     pub fn build_accounts_wu(&self) -> u64 {
-        self.build_shard_accounts_wu + self.build_accounts_blocks_wu
+        self.update_shard_accounts_wu + self.build_accounts_blocks_wu
     }
 
     pub fn build_accounts_wu_price(&self) -> f64 {

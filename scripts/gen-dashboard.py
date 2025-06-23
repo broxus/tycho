@@ -460,6 +460,26 @@ def core_bc() -> RowPanel:
             "Out/In message ratio per block",
             quantile="0.999",
         ),
+        create_gauge_panel(
+            "tycho_shard_accounts_count",
+            "Number of accounts in state",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_accounts_per_block",
+            "Number of accounts per block",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_added_accounts_count",
+            "Number of added accounts in block",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_removed_accounts_count",
+            "Number of removed accounts in block",
+            labels=['workchain=~"$workchain"'],
+        ),
         create_heatmap_quantile_panel(
             "tycho_bc_out_msg_acc_ratio",
             "Out message/Account ratio per block",
@@ -1004,6 +1024,11 @@ def collator_finalize_block() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_collator_finalize_build_mc_state_extra_time_high",
+            "Build McStateExtra",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_collator_finalize_build_accounts_and_msgs_time_high",
             "Build in parallel accounts, InMsgDescr, OutMsgDescr",
             labels=['workchain=~"$workchain"'],
@@ -1014,6 +1039,16 @@ def collator_finalize_block() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_collator_finalize_update_shard_accounts_time_high",
+            "incl. Update Shard Accounts",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_finalize_build_accounts_blocks_time_high",
+            "incl. Build Accounts Blocks",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_collator_finalize_build_in_msgs_time_high",
             "only Build InMsgDescr",
             labels=['workchain=~"$workchain"'],
@@ -1021,11 +1056,6 @@ def collator_finalize_block() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_finalize_build_out_msgs_time_high",
             "only Build OutMsgDescr",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_heatmap_panel(
-            "tycho_collator_finalize_build_mc_state_extra_time_high",
-            "Build McStateExtra",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -1722,13 +1752,23 @@ def collator_wu_metrics() -> RowPanel:
             unit_format=UNITS.NANO_SECONDS,
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_on_build_shard_accounts",
-            "Wu spent on build and update shard accounts",
+            "tycho_do_collate_wu_on_update_shard_accounts",
+            "Wu spent on update shard accounts",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_update_shard_accounts",
+            "Wu price on update shard accounts",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_on_build_accounts_blocks",
             "Wu spent on build accounts blocks description",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_build_accounts_blocks",
+            "Wu price on build accounts blocks description",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
