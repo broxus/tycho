@@ -962,8 +962,15 @@ impl CollatorStdImpl {
     fn report_collation_metrics(&self, collation_data: &BlockCollationData) {
         let mut labels = vec![("workchain", self.shard_id.workchain().to_string())];
 
+        metrics::gauge!("tycho_shard_accounts_count", &labels)
+            .set(collation_data.shard_accounts_count as f64);
         metrics::gauge!("tycho_do_collate_accounts_per_block", &labels)
-            .set(collation_data.accounts_count as f64);
+            .set(collation_data.updated_accounts_count as f64);
+        metrics::gauge!("tycho_do_collate_added_accounts_count", &labels)
+            .set(collation_data.added_accounts_count as f64);
+        metrics::gauge!("tycho_do_collate_removed_accounts_count", &labels)
+            .set(collation_data.removed_accounts_count as f64);
+
         metrics::gauge!("tycho_do_collate_block_diff_tail_len", &labels)
             .set(collation_data.diff_tail_len);
 
@@ -1078,10 +1085,20 @@ impl CollatorStdImpl {
             .set(finalize_wu.build_out_msgs_wu as f64);
         metrics::gauge!("tycho_do_collate_wu_price_on_build_out_msgs", &labels)
             .set(finalize_wu.build_out_msgs_wu_price());
-        metrics::gauge!("tycho_do_collate_wu_on_build_shard_accounts", &labels)
-            .set(finalize_wu.build_shard_accounts_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_on_update_shard_accounts", &labels)
+            .set(finalize_wu.update_shard_accounts_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_update_shard_accounts",
+            &labels
+        )
+        .set(finalize_wu.update_shard_accounts_wu_price());
         metrics::gauge!("tycho_do_collate_wu_on_build_accounts_blocks", &labels)
             .set(finalize_wu.build_accounts_blocks_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_build_accounts_blocks",
+            &labels
+        )
+        .set(finalize_wu.build_accounts_blocks_wu_price());
         metrics::gauge!("tycho_do_collate_wu_on_build_accounts", &labels)
             .set(finalize_wu.build_accounts_wu() as f64);
         metrics::gauge!("tycho_do_collate_wu_price_on_build_accounts", &labels)
@@ -1177,6 +1194,8 @@ impl CollatorStdImpl {
             finalize_block = %format_duration(finalize_metrics.finalize_block_elapsed),
             parallel_build_accounts_and_msgs = %format_duration(finalize_metrics.build_accounts_and_messages_in_parallel_elased),
             only_build_accounts = %format_duration(finalize_metrics.build_accounts_elapsed),
+            incl_update_shard_accounts = %format_duration(finalize_metrics.update_shard_accounts_elapsed),
+            incl_build_accounts_blocks = %format_duration(finalize_metrics.build_accounts_blocks_elapsed),
             only_build_in_msgs = %format_duration(finalize_metrics.build_in_msgs_elapsed),
             only_build_out_msgs = %format_duration(finalize_metrics.build_out_msgs_elapsed),
             build_mc_state_extra = %format_duration(finalize_metrics.build_mc_state_extra_elapsed),
