@@ -146,17 +146,12 @@ pub struct ExecuteWu {
 impl ExecuteWu {
     pub fn append_executed_group(
         &mut self,
-        wu_params_execute: &WorkUnitsParamsExecute,
+        _wu_params_execute: &WorkUnitsParamsExecute,
         executed_group: &ExecutedGroup,
     ) {
         self.execute_groups_vm_only_wu = self
             .execute_groups_vm_only_wu
-            .saturating_add(executed_group.total_exec_wu)
-            .saturating_add(
-                executed_group
-                    .ext_msgs_error_count
-                    .saturating_mul(wu_params_execute.execute_err as u64),
-            );
+            .saturating_add(executed_group.total_exec_wu);
     }
 
     pub fn calculate(
