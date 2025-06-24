@@ -2,33 +2,20 @@ use std::cmp;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
-use ahash::{HashMapExt, HashSetExt};
 use anyhow::{Context, Result};
-use bumpalo::Bump;
 use bytes::Bytes;
-use futures_util::never::Never;
 use itertools::Itertools;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::OverlayId;
-use tycho_storage::StorageContext;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{DBRawIterator, IteratorMode, ReadOptions, WriteBatch};
 
-use crate::effects::{AltFormat, Cancelled, Ctx, RoundCtx, Task};
-use crate::engine::round_watch::{Commit, Consensus, RoundWatch, RoundWatcher, TopKnownAnchor};
-use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
+use crate::effects::AltFormat;
 use crate::models::{
-    Digest, Point, PointInfo, PointRestore, PointRestoreSelect, PointStatus, PointStatusStored,
-    PointStatusStoredRef, PointStatusValidated, Round,
+    Digest, Point, PointInfo, PointRestore, PointRestoreSelect, PointStatusStored,
+    PointStatusStoredRef, Round,
 };
-use crate::storage::MempoolStorage;
-
-#[derive(Clone)]
-pub struct MempoolAdapterStore {
-    storage: MempoolStorage,
-    commit_finished: RoundWatch<Commit>,
-}
+use crate::storage::MempoolDb;
 
 #[derive(Clone)]
 pub struct MempoolStore(Arc<dyn MempoolStoreImpl>);
@@ -43,8 +30,6 @@ trait MempoolStoreImpl: Send + Sync {
         status: PointStatusStoredRef<'_>,
     ) -> Result<()>;
 
-    fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()>;
-
     fn get_point(&self, round: Round, digest: &Digest) -> Result<Option<Point>>;
 
     fn multi_get_info(&self, keys: &[(Round, Digest)]) -> Result<Vec<PointInfo>>;
@@ -55,14 +40,6 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn get_status(&self, round: Round, digest: &Digest) -> Result<Option<PointStatusStored>>;
 
-    fn expand_anchor_history_arena_size(&self, history: &[PointInfo]) -> usize;
-
-    fn expand_anchor_history<'b>(
-        &self,
-        history: &[PointInfo],
-        bump: &'b Bump,
-    ) -> Result<Vec<&'b [u8]>>;
-
     fn last_round(&self) -> Result<Round>;
 
     fn reset_statuses(&self, range: &RangeInclusive<Round>) -> Result<()>;
@@ -72,72 +49,9 @@ trait MempoolStoreImpl: Send + Sync {
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()>;
 }
 
-impl MempoolAdapterStore {
-    // TODO: Should it accept the `MempoolStorage` itself?
-    pub fn new(ctx: StorageContext, commit_finished: RoundWatch<Commit>) -> Result<Self> {
-        let storage = MempoolStorage::open(ctx)?;
-
-        Ok(MempoolAdapterStore {
-            storage,
-            commit_finished,
-        })
-    }
-
-    /// allows to remove no more needed data before sync and store of newly created dag part
-    pub fn report_new_start(&self, next_expected_anchor: u32) {
-        // set as committed because every anchor is repeatable by stored history (if it exists)
-        self.commit_finished.set_max_raw(next_expected_anchor);
-    }
-
-    pub fn expand_anchor_history_arena_size(&self, history: &[PointInfo]) -> usize {
-        self.storage.expand_anchor_history_arena_size(history)
-    }
-
-    pub fn expand_anchor_history<'b>(
-        &self,
-        anchor: &PointInfo,
-        history: &[PointInfo],
-        bump: &'b Bump,
-    ) -> Vec<&'b [u8]> {
-        fn context(anchor: &PointInfo, history: &[PointInfo]) -> String {
-            format!(
-                "anchor {:?} history {} points rounds [{}..{}]",
-                anchor.id().alt(),
-                history.len(),
-                history.first().map(|i| i.round().0).unwrap_or_default(),
-                history.last().map(|i| i.round().0).unwrap_or_default()
-            )
-        }
-
-        let payloads = if history.is_empty() {
-            // history is checked at the end of DAG commit, leave traces in case its broken
-            tracing::warn!(
-                "anchor {:?} has empty history, it's ok only for anchor at DAG bottom round \
-                 immediately after an unrecoverable gap",
-                anchor.id().alt()
-            );
-            Vec::new()
-        } else {
-            self.storage
-                .expand_anchor_history(history, bump)
-                .with_context(|| context(anchor, history))
-                .expect("DB expand anchor history")
-        };
-        // may skip expand part, but never skip set committed - let it write what it should
-        self.storage
-            .set_committed(anchor, history)
-            .with_context(|| context(anchor, history))
-            .expect("DB set committed");
-        // commit is finished when history payloads is read from DB and marked committed,
-        // so that data may be removed consistently with any settings
-        self.commit_finished.set_max(anchor.round());
-        payloads
-    }
-}
-
 impl MempoolStore {
-    pub fn new(mempool_adapter_store: &MempoolAdapterStore) -> Self {
-        Self(Arc::new(mempool_adapter_store.storage.clone()))
+    pub fn new(mempool_db: Arc<MempoolDb>) -> Self {
+        Self(mempool_db)
     }
 
     #[cfg(feature = "test")]
@@ -218,125 +132,11 @@ impl MempoolStore {
     }
 }
 
-pub struct DbCleaner {
-    storage: MempoolStorage,
-    committed_round: RoundWatch<Commit>,
-}
-
-impl DbCleaner {
-    pub fn new(adapter_store: &MempoolAdapterStore) -> Self {
-        Self {
-            storage: adapter_store.storage.clone(),
-            committed_round: adapter_store.commit_finished.clone(),
-        }
-    }
-
-    fn least_to_keep(
-        consensus: Round,
-        committed: Round,
-        top_known_anchor: Round,
-        conf: &MempoolConfig,
-    ) -> Round {
-        // If the node is not scheduled, then it's paused and does not receive broadcasts:
-        // mempool receives fresher TKA (via validator sync)
-        // while BcastFilter has outdated consensus round.
-        // In such case top DAG round follows TKA while Engine round does not advance,
-        // DAG eventually shrinks by advancing its bottom and reports it to MempoolAdapter.
-
-        // So `committed` follows both consensus and TKA, and does not stall while Engine can.
-
-        let least_to_keep = (committed - conf.consensus.reset_rounds()).min(
-            // consensus for general work and sync:  collator may observe a gap if lags too far
-            // TKA for deep sync: consensus round is stalled, history not needed for others
-            consensus.max(top_known_anchor) - conf.consensus.max_total_rounds(),
-        );
-        let remainder = least_to_keep.0 % NodeConfig::get().clean_db_period_rounds.get() as u32;
-        (conf.genesis_round).max(least_to_keep - remainder)
-    }
-
-    pub fn new_task(
-        &self,
-        mut consensus_round: RoundWatcher<Consensus>,
-        mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
-        round_ctx: &RoundCtx,
-    ) -> Task<Never> {
-        let storage = self.storage.clone();
-        let task_ctx = round_ctx.task();
-        let round_ctx = round_ctx.clone();
-        let mut committed_round = self.committed_round.receiver();
-
-        task_ctx.spawn(async move {
-            let mut consensus = consensus_round.get();
-            let mut committed = committed_round.get();
-            let mut top_known = top_known_anchor.get();
-            let mut prev_least_to_keep =
-                Self::least_to_keep(consensus, committed, top_known, round_ctx.conf());
-            loop {
-                tokio::select! {
-                    biased;
-                    new_consensus = consensus_round.next() => consensus = new_consensus?,
-                    new_committed = committed_round.next() => committed = new_committed?,
-                    new_top_known = top_known_anchor.next() => top_known = new_top_known?,
-                }
-
-                metrics::gauge!("tycho_mempool_consensus_current_round").set(consensus.0);
-                metrics::gauge!("tycho_mempool_rounds_consensus_ahead_top_known")
-                    .set(consensus.diff_f64(top_known));
-                metrics::gauge!("tycho_mempool_rounds_consensus_ahead_committed")
-                    .set(consensus.diff_f64(committed));
-                metrics::gauge!("tycho_mempool_rounds_committed_ahead_top_known")
-                    .set(committed.diff_f64(top_known));
-
-                let new_least_to_keep =
-                    Self::least_to_keep(consensus, committed, top_known, round_ctx.conf());
-                metrics::gauge!("tycho_mempool_rounds_consensus_ahead_storage_round")
-                    .set(consensus.diff_f64(new_least_to_keep));
-
-                if prev_least_to_keep < new_least_to_keep {
-                    let storage = storage.clone();
-                    let task = round_ctx.task().spawn_blocking(move || {
-                        let mut up_to_exclusive = [0_u8; MempoolStorage::KEY_LEN];
-                        MempoolStorage::fill_prefix(new_least_to_keep.0, &mut up_to_exclusive);
-
-                        match storage.clean(&up_to_exclusive) {
-                            Ok(Some((first, last))) => {
-                                const CLEANED: &str = "tycho_mempool_rounds_db_cleaned";
-                                metrics::gauge!(CLEANED, "kind" => "lower").set(first);
-                                metrics::gauge!(CLEANED, "kind" => "upper").set(last);
-                                tracing::info!(
-                                    "mempool DB cleaned for rounds [{first}..{last}] before {}",
-                                    new_least_to_keep.0
-                                );
-                            }
-                            Ok(None) => {
-                                tracing::info!(
-                                    "mempool DB is already clean before {}",
-                                    new_least_to_keep.0
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    "delete range of mempool data before round {} failed: {e}",
-                                    new_least_to_keep.0
-                                );
-                            }
-                        }
-                    });
-                    task.await.inspect_err(|Cancelled()| {
-                        tracing::warn!("mempool clean DB task cancelled");
-                    })?;
-                    prev_least_to_keep = new_least_to_keep;
-                }
-            }
-        })
-    }
-}
-
-impl MempoolStoreImpl for MempoolStorage {
+impl MempoolStoreImpl for MempoolDb {
     fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_insert_point_time");
-        let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        MempoolStorage::fill_key(
+        let mut key = [0_u8; super::KEY_LEN];
+        super::fill_key(
             point.info().round().0,
             point.info().digest().inner(),
             &mut key,
@@ -376,8 +176,8 @@ impl MempoolStoreImpl for MempoolStorage {
         status: PointStatusStoredRef<'_>,
     ) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_set_status_time");
-        let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
+        let mut key = [0_u8; super::KEY_LEN];
+        super::fill_key(round.0, digest.inner(), &mut key);
 
         let db = self.db.rocksdb();
         let status_cf = self.db.points_status.cf();
@@ -385,32 +185,11 @@ impl MempoolStoreImpl for MempoolStorage {
         Ok(db.merge_cf(&status_cf, key.as_slice(), status.encode())?)
     }
 
-    fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()> {
-        let _call_duration = HistogramGuard::begin("tycho_mempool_store_set_committed_status_time");
-
-        let mut buf = [0_u8; MempoolStorage::KEY_LEN];
-
-        let db = self.db.rocksdb();
-        let status_cf = self.db.points_status.cf();
-        let mut batch = WriteBatch::default();
-
-        let mut status = PointStatusValidated::default();
-        status.committed_at_round = Some(anchor.round().0);
-        let status_encoded = status.encode();
-
-        for info in history {
-            MempoolStorage::fill_key(info.round().0, info.digest().inner(), &mut buf);
-            batch.merge_cf(&status_cf, buf.as_slice(), &status_encoded);
-        }
-
-        Ok(db.write(batch)?)
-    }
-
     fn get_point(&self, round: Round, digest: &Digest) -> Result<Option<Point>> {
         metrics::counter!("tycho_mempool_store_get_point_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_point_time");
-        let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
+        let mut key = [0_u8; super::KEY_LEN];
+        super::fill_key(round.0, digest.inner(), &mut key);
 
         let points = &self.db.points;
         points
@@ -423,9 +202,9 @@ impl MempoolStoreImpl for MempoolStorage {
     fn multi_get_info(&self, keys: &[(Round, Digest)]) -> Result<Vec<PointInfo>> {
         let key_bytes = {
             let mut b_keys = Vec::with_capacity(keys.len());
-            let mut buf = [0_u8; MempoolStorage::KEY_LEN];
+            let mut buf = [0_u8; super::KEY_LEN];
             for (round, digest) in keys {
-                MempoolStorage::fill_key(round.0, digest.inner(), &mut buf);
+                super::fill_key(round.0, digest.inner(), &mut buf);
                 b_keys.push(buf);
             }
             b_keys
@@ -453,8 +232,8 @@ impl MempoolStoreImpl for MempoolStorage {
     fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<Bytes>> {
         metrics::counter!("tycho_mempool_store_get_point_raw_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_point_raw_time");
-        let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
+        let mut key = [0_u8; super::KEY_LEN];
+        super::fill_key(round.0, digest.inner(), &mut key);
 
         let points = &self.db.points;
         let point = points.get_owned(key.as_slice()).context("db get")?;
@@ -464,8 +243,8 @@ impl MempoolStoreImpl for MempoolStorage {
     fn get_info(&self, round: Round, digest: &Digest) -> Result<Option<PointInfo>> {
         metrics::counter!("tycho_mempool_store_get_info_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_info_time");
-        let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
+        let mut key = [0_u8; super::KEY_LEN];
+        super::fill_key(round.0, digest.inner(), &mut key);
 
         let table = &self.db.points_info;
         table
@@ -478,8 +257,8 @@ impl MempoolStoreImpl for MempoolStorage {
     fn get_status(&self, round: Round, digest: &Digest) -> Result<Option<PointStatusStored>> {
         metrics::counter!("tycho_mempool_store_get_status_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_status_time");
-        let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        MempoolStorage::fill_key(round.0, digest.inner(), &mut key);
+        let mut key = [0_u8; super::KEY_LEN];
+        super::fill_key(round.0, digest.inner(), &mut key);
 
         let table = &self.db.points_status;
         table
@@ -488,94 +267,6 @@ impl MempoolStoreImpl for MempoolStorage {
             .as_deref()
             .map(PointStatusStored::decode)
             .transpose()
-    }
-
-    fn expand_anchor_history_arena_size(&self, history: &[PointInfo]) -> usize {
-        let payload_bytes =
-            (history.iter()).fold(0, |acc, info| acc + info.payload_bytes() as usize);
-        let keys_bytes = history.len() * MempoolStorage::KEY_LEN;
-        payload_bytes + keys_bytes
-    }
-
-    fn expand_anchor_history<'b>(
-        &self,
-        history: &[PointInfo],
-        bump: &'b Bump,
-    ) -> Result<Vec<&'b [u8]>> {
-        let _call_duration =
-            HistogramGuard::begin("tycho_mempool_store_expand_anchor_history_time");
-        let mut buf = [0_u8; MempoolStorage::KEY_LEN];
-        let mut keys = FastHashSet::<&'b [u8]>::with_capacity(history.len());
-        for info in history {
-            MempoolStorage::fill_key(info.round().0, info.digest().inner(), &mut buf);
-            keys.insert(bump.alloc_slice_copy(&buf));
-        }
-        buf.fill(0);
-
-        let mut opt = ReadOptions::default();
-
-        let first = (history.first()).context("anchor history must not be empty")?;
-        MempoolStorage::fill_prefix(first.round().0, &mut buf);
-        opt.set_iterate_lower_bound(buf);
-
-        let last = history.last().context("anchor history must not be empty")?;
-        MempoolStorage::fill_prefix(last.round().next().0, &mut buf);
-        opt.set_iterate_upper_bound(buf);
-
-        let db = self.db.rocksdb();
-        let points_cf = self.db.points.cf();
-
-        let mut found = FastHashMap::with_capacity(history.len());
-        let mut iter = db.raw_iterator_cf_opt(&points_cf, opt);
-        iter.seek_to_first();
-
-        let mut total_payload_items = 0;
-        while iter.valid() {
-            let key = iter.key().context("history iter invalidated on key")?;
-            if let Some(key) = keys.take(key) {
-                let bytes = iter.value().context("history iter invalidated on value")?;
-                let payload =
-                    Point::read_payload_from_tl_bytes(bytes, bump).context("deserialize point")?;
-
-                total_payload_items += payload.len();
-                if found.insert(key, payload).is_some() {
-                    // we panic thus we don't care about performance
-                    let full_point =
-                        Point::from_bytes(bytes.to_vec()).context("deserialize point")?;
-                    panic!("iter read non-unique point {:?}", full_point.info().id())
-                }
-            }
-            if keys.is_empty() {
-                break;
-            }
-            iter.next();
-        }
-        iter.status().context("anchor history iter is not ok")?;
-        drop(iter);
-
-        anyhow::ensure!(
-            keys.is_empty(),
-            "{} history points were not found id db:\n{}",
-            keys.len(),
-            keys.iter()
-                .map(|key| MempoolStorage::format_key(key))
-                .join(",\n")
-        );
-        anyhow::ensure!(found.len() == history.len(), "stored point key collision");
-
-        let mut result = Vec::with_capacity(total_payload_items);
-        for info in history {
-            MempoolStorage::fill_key(info.round().0, info.digest().inner(), &mut buf);
-            let payload = found
-                .remove(buf.as_slice())
-                .with_context(|| MempoolStorage::format_key(&buf))
-                .context("key was searched in db but was not found")?;
-            for msg in payload {
-                result.push(msg);
-            }
-        }
-
-        Ok(result)
     }
 
     fn last_round(&self) -> Result<Round> {
@@ -599,11 +290,11 @@ impl MempoolStoreImpl for MempoolStorage {
         let status_t = &self.db.tables().points_status;
         let db = self.db.rocksdb();
 
-        let mut start = [0_u8; MempoolStorage::KEY_LEN];
-        MempoolStorage::fill_prefix(range.start().0, &mut start);
+        let mut start = [0_u8; super::KEY_LEN];
+        super::fill_prefix(range.start().0, &mut start);
 
-        let mut end_excl = [0_u8; MempoolStorage::KEY_LEN];
-        MempoolStorage::fill_prefix(range.end().next().0, &mut end_excl);
+        let mut end_excl = [0_u8; super::KEY_LEN];
+        super::fill_prefix(range.end().next().0, &mut end_excl);
 
         let mut conf = status_t.new_read_config();
         conf.set_iterate_lower_bound(start);
@@ -628,10 +319,10 @@ impl MempoolStoreImpl for MempoolStorage {
     fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestoreSelect>> {
         fn opts(range: &RangeInclusive<Round>) -> ReadOptions {
             let mut opts = ReadOptions::default();
-            let mut buf = [0; MempoolStorage::KEY_LEN];
-            MempoolStorage::fill_prefix(range.start().0, &mut buf);
+            let mut buf = [0; super::KEY_LEN];
+            super::fill_prefix(range.start().0, &mut buf);
             opts.set_iterate_lower_bound(buf);
-            MempoolStorage::fill_prefix(range.end().next().0, &mut buf);
+            super::fill_prefix(range.end().next().0, &mut buf);
             opts.set_iterate_upper_bound(buf);
             opts
         }
@@ -646,19 +337,13 @@ impl MempoolStoreImpl for MempoolStorage {
             let (f_key, value) = iter.item().context("iter exhausted")?;
             match key.cmp(f_key) {
                 cmp::Ordering::Less => {
-                    anyhow::bail!(
-                        "iter did not seek, found key {}",
-                        MempoolStorage::format_key(f_key),
-                    )
+                    anyhow::bail!("iter did not seek, found key {}", super::format_key(f_key),)
                 }
                 cmp::Ordering::Equal => {
                     Ok(tl_proto::deserialize::<T>(value).context("deserialize")?)
                 }
                 cmp::Ordering::Greater => {
-                    anyhow::bail!(
-                        "no record found, next key {}",
-                        MempoolStorage::format_key(f_key),
-                    )
+                    anyhow::bail!("no record found, next key {}", super::format_key(f_key),)
                 }
             }
         }
@@ -678,7 +363,7 @@ impl MempoolStoreImpl for MempoolStorage {
         for item in status_iter {
             let (key, status_bytes) = item.context("get point status")?;
             anyhow::ensure!(
-                key.len() == MempoolStorage::KEY_LEN,
+                key.len() == super::KEY_LEN,
                 "unexpected key len {}",
                 key.len()
             );
@@ -719,7 +404,7 @@ impl MempoolStoreImpl for MempoolStorage {
 
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()> {
         if !self.has_compatible_data(overlay_id.as_bytes())? {
-            match self.clean(&[u8::MAX; Self::KEY_LEN])? {
+            match self.clean(&[u8::MAX; super::KEY_LEN])? {
                 Some((first, last)) => {
                     tracing::info!("mempool DB cleaned on init, rounds: [{first}..{last}]");
                 }
@@ -743,10 +428,6 @@ impl MempoolStoreImpl for () {
         Ok(())
     }
 
-    fn set_committed(&self, _: &PointInfo, _: &[PointInfo]) -> Result<()> {
-        Ok(())
-    }
-
     fn get_point(&self, _: Round, _: &Digest) -> Result<Option<Point>> {
         anyhow::bail!("should not be used in tests")
     }
@@ -764,14 +445,6 @@ impl MempoolStoreImpl for () {
     }
 
     fn get_status(&self, _: Round, _: &Digest) -> Result<Option<PointStatusStored>> {
-        anyhow::bail!("should not be used in tests")
-    }
-
-    fn expand_anchor_history_arena_size(&self, _: &[PointInfo]) -> usize {
-        0
-    }
-
-    fn expand_anchor_history<'b>(&self, _: &[PointInfo], _: &'b Bump) -> Result<Vec<&'b [u8]>> {
         anyhow::bail!("should not be used in tests")
     }
 

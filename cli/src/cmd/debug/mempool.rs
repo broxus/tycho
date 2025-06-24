@@ -11,8 +11,8 @@ use tokio::signal::unix;
 use tokio::sync::{mpsc, oneshot};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::{
-    EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolAdapterStore,
-    MempoolConfigBuilder, MempoolMergedConfig,
+    EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolConfigBuilder,
+    MempoolDb, MempoolMergedConfig,
 };
 use tycho_consensus::test_utils::{test_logger, AnchorConsumer, LastAnchorFile};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
@@ -307,7 +307,7 @@ impl Mempool {
         anchor_consumer.add(*local_id, committed_rx);
 
         let bind = EngineBinding {
-            mempool_adapter_store: MempoolAdapterStore::new(
+            mempool_db: MempoolDb::open(
                 self.storage.context().clone(),
                 anchor_consumer.commit_round.clone(),
             )?,

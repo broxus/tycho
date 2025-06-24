@@ -11,14 +11,14 @@ use tycho_util::FastHashMap;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
-use crate::effects::{AltFormat, Ctx, MempoolStore, TaskResult, ValidateCtx};
+use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
     AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, Link, PeerCount, PointInfo, Round,
     UnixTime,
 };
-
+use crate::storage::MempoolStore;
 // Note on equivocation.
 // Detected point equivocation does not invalidate the point, it just
 // prevents us (as a reliable peer) from returning our signature to the author.
