@@ -1,8 +1,26 @@
-use tycho_storage::kv::{optimize_for_point_lookup, TableContext, DEFAULT_MIN_BLOB_SIZE};
+use tycho_storage::kv::{
+    optimize_for_point_lookup, NamedTables, TableContext, DEFAULT_MIN_BLOB_SIZE,
+};
 use weedb::rocksdb::{DBCompressionType, Options};
 use weedb::{ColumnFamily, ColumnFamilyOptions};
 
-use super::point_status;
+use super::status_flags;
+
+impl NamedTables for MempoolTables {
+    const NAME: &'static str = "mempool";
+}
+
+weedb::tables! {
+    /// Default column family contains at most single row: overlay id.
+    /// Overlay id defines data version: data will be removed on mismatch during boot.
+    /// - Key: `overlay id: [u8; 32]`
+    /// - Value: None
+    pub struct MempoolTables<TableContext> {
+        pub points: Points,
+        pub points_info: PointsInfo,
+        pub points_status: PointsStatus,
+    }
+}
 
 /// Stores mempool point data
 /// - Key: `round: u32, digest: [u8; 32]`
@@ -58,6 +76,6 @@ impl ColumnFamilyOptions<TableContext> for PointsStatus {
         optimize_for_point_lookup(opts, ctx);
         opts.set_disable_auto_compactions(true);
 
-        opts.set_merge_operator_associative("points_status_merge", point_status::merge);
+        opts.set_merge_operator_associative("points_status_merge", status_flags::merge);
     }
 }

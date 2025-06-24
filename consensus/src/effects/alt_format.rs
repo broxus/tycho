@@ -19,6 +19,17 @@ pub trait AltFormat {
     }
 }
 
+impl AltFormat for &[u8] {}
+impl Display for AltFmt<'_, &[u8]> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        let len = f.precision().unwrap_or(self.0.len());
+        for byte in &self.0[..len] {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 impl AltFormat for PeerId {}
 impl Display for AltFmt<'_, PeerId> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
