@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::sync::OnceLock;
 
 use axum::extract::State;
@@ -19,7 +20,9 @@ use crate::state::{
     CodeHashesIter, LoadedAccountState, RpcState, RpcStateError, TransactionsIterBuilder,
 };
 use crate::util::error_codes::*;
-use crate::util::jrpc_extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
+use crate::util::jrpc_extractor::{
+    declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse, RfcBehaviour,
+};
 
 mod cache;
 
@@ -45,7 +48,7 @@ declare_jrpc_method! {
     }
 }
 
-pub async fn route(State(state): State<RpcState>, req: Jrpc<i64, Method>) -> Response {
+pub async fn route(State(state): State<RpcState>, req: Jrpc<RfcBehaviour, Method>) -> Response {
     let label = [("method", req.method)];
     let _hist = HistogramGuard::begin_with_labels("tycho_jrpc_request_time", &label);
     match req.params {
@@ -75,6 +78,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<i64, Method>) -> Res
                     id: Some(req.id),
                     code: INVALID_BOC_CODE,
                     message: e.to_string().into(),
+                    behaviour: PhantomData::<RfcBehaviour>,
                 }
                 .into_response();
             }
@@ -138,7 +142,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<i64, Method>) -> Res
         }
         MethodParams::GetAccountsByCodeHash(p) => {
             if p.limit == 0 {
-                return JrpcOkResponse::new(req.id, [(); 0]).into_response();
+                return JrpcOkResponse::<_, RfcBehaviour>::new(req.id, [(); 0]).into_response();
             } else if p.limit > GetAccountsByCodeHashResponse::MAX_LIMIT {
                 return too_large_limit_response(req.id);
             }
@@ -152,7 +156,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<i64, Method>) -> Res
         }
         MethodParams::GetTransactionsList(p) => {
             if p.limit == 0 {
-                return JrpcOkResponse::new(req.id, [(); 0]).into_response();
+                return JrpcOkResponse::<_, RfcBehaviour>::new(req.id, [(); 0]).into_response();
             } else if p.limit > GetTransactionsListResponse::MAX_LIMIT {
                 return too_large_limit_response(req.id);
             }
@@ -461,7 +465,7 @@ fn encode_base64<T: AsRef<[u8]>>(value: T) -> String {
 }
 
 fn ok_to_response<T: Serialize>(id: i64, result: T) -> Response {
-    JrpcOkResponse::new(id, result).into_response()
+    JrpcOkResponse::<_, RfcBehaviour>::new(id, result).into_response()
 }
 
 fn error_to_response(id: i64, e: RpcStateError) -> Response {
@@ -476,6 +480,7 @@ fn error_to_response(id: i64, e: RpcStateError) -> Response {
         id: Some(id),
         code,
         message,
+        behaviour: PhantomData::<RfcBehaviour>,
     }
     .into_response()
 }
@@ -485,6 +490,7 @@ fn too_large_limit_response(id: i64) -> Response {
         id: Some(id),
         code: TOO_LARGE_LIMIT_CODE,
         message: Cow::Borrowed("limit is too large"),
+        behaviour: PhantomData::<RfcBehaviour>,
     }
     .into_response()
 }
