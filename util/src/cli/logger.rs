@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::io::IsTerminal;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -190,6 +191,12 @@ pub fn init_logger_simple(default_filter: &str) {
         .init();
 }
 
+/// Initializeds logger once.
+///
+/// All invocations after the successfull initialization will fail.
+///
+/// If `logger_targets` file path is provided, spawns a new thread which
+/// will poll the file metadata and reload logger when file changes.
 pub fn init_logger(config: &LoggerConfig, logger_targets: Option<PathBuf>) -> Result<()> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::reload;
@@ -208,55 +215,75 @@ pub fn init_logger(config: &LoggerConfig, logger_targets: Option<PathBuf>) -> Re
         }
     };
 
-    let (layer, handle) = reload::Layer::new(try_make_filter()?);
+    static ONCE: Once = Once::new();
 
-    let subscriber = tracing_subscriber::registry().with(layer).with(
-        config
-            .outputs
-            .iter()
-            .map(|o| o.as_layer())
-            .collect::<anyhow::Result<Vec<_>>>()?,
-    );
-    tracing::subscriber::set_global_default(subscriber).unwrap();
+    let mut result = None;
+    ONCE.call_once(|| {
+        result = Some((|| {
+            let (layer, handle) = reload::Layer::new(try_make_filter()?);
+
+            let subscriber = tracing_subscriber::registry().with(layer).with(
+                config
+                    .outputs
+                    .iter()
+                    .map(|o| o.as_layer())
+                    .collect::<Result<Vec<_>>>()?,
+            );
+            tracing::subscriber::set_global_default(subscriber)?;
+
+            Ok::<_, anyhow::Error>(handle)
+        })());
+    });
+
+    let handle = match result {
+        Some(res) => res?,
+        None => anyhow::bail!("logger was already initialized"),
+    };
 
     if let Some(logger_config) = logger_targets {
-        tokio::spawn(async move {
-            tracing::info!(
-                logger_config = %logger_config.display(),
-                "started watching for changes in logger config"
-            );
+        const INTERVAL: Duration = Duration::from_secs(10);
 
-            let get_metadata = move || {
-                std::fs::metadata(&logger_config)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-            };
+        // NOTE: We are using a simple thread there instead of tokio
+        // so that there is no surprise when using it during the app start.
+        std::thread::Builder::new()
+            .name("watch_logger_config".to_owned())
+            .spawn(move || {
+                tracing::info!(
+                    logger_config = %logger_config.display(),
+                    "started watching for changes in logger config"
+                );
 
-            let mut last_modified = get_metadata();
+                let get_metadata = move || {
+                    std::fs::metadata(&logger_config)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                };
 
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
-            loop {
-                interval.tick().await;
+                let mut last_modified = get_metadata();
 
-                let modified = get_metadata();
-                if last_modified == modified {
-                    continue;
-                }
-                last_modified = modified;
+                loop {
+                    std::thread::sleep(INTERVAL);
 
-                match try_make_filter() {
-                    Ok(filter) => {
-                        if handle.reload(filter).is_err() {
-                            break;
-                        }
-                        tracing::info!("reloaded logger config");
+                    let modified = get_metadata();
+                    if last_modified == modified {
+                        continue;
                     }
-                    Err(e) => tracing::error!(%e, "failed to reload logger config"),
-                }
-            }
+                    last_modified = modified;
 
-            tracing::info!("stopped watching for changes in logger config");
-        });
+                    match try_make_filter() {
+                        Ok(filter) => {
+                            if handle.reload(filter).is_err() {
+                                break;
+                            }
+                            tracing::info!("reloaded logger config");
+                        }
+                        Err(e) => tracing::error!(%e, "failed to reload logger config"),
+                    }
+                }
+
+                tracing::info!("stopped watching for changes in logger config");
+            })
+            .unwrap();
     }
 
     Ok(())
