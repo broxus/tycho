@@ -4,15 +4,16 @@ use everscale_crypto::ed25519::KeyPair;
 use tokio::sync::mpsc;
 use tycho_network::{Network, OverlayService, PeerResolver, PrivateOverlay};
 
-use crate::effects::{AltFormat, MempoolAdapterStore, TaskTracker};
+use crate::effects::{AltFormat, TaskTracker};
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
 use crate::engine::{InputBuffer, MempoolMergedConfig};
 use crate::intercom::{Dispatcher, InitPeers, PeerSchedule, Responder};
 use crate::models::MempoolOutput;
+use crate::storage::MempoolDb;
 
 #[derive(Clone)]
 pub struct EngineBinding {
-    pub mempool_adapter_store: MempoolAdapterStore,
+    pub mempool_db: Arc<MempoolDb>,
     pub input_buffer: InputBuffer,
     pub top_known_anchor: RoundWatch<TopKnownAnchor>,
     pub output: mpsc::UnboundedSender<MempoolOutput>,

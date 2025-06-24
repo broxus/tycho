@@ -11,7 +11,7 @@ use futures_util::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tycho_consensus::prelude::{
-    EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolAdapterStore,
+    EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolDb,
 };
 use tycho_consensus::test_utils::*;
 use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
@@ -185,8 +185,7 @@ fn make_network(
                             StorageContext::new_temp().await.expect("new storage");
 
                         let bind = EngineBinding {
-                            mempool_adapter_store: MempoolAdapterStore::new(ctx, commit_round)
-                                .unwrap(),
+                            mempool_db: MempoolDb::open(ctx, commit_round).unwrap(),
                             input_buffer: InputBuffer::new_stub(
                                 cli.payload_step,
                                 cli.steps_until_full,

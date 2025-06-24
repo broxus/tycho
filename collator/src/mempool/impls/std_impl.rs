@@ -34,7 +34,7 @@ pub struct MempoolAdapterStdImpl {
 
     config: Mutex<ConfigAdapter>,
 
-    store: MempoolAdapterStore,
+    mempool_db: Arc<MempoolDb>,
     input_buffer: InputBuffer,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
 }
@@ -63,7 +63,7 @@ impl MempoolAdapterStdImpl {
                 state_update_queue: Default::default(),
                 engine_session: None,
             }),
-            store: MempoolAdapterStore::new(storage_context.clone(), RoundWatch::default())
+            mempool_db: MempoolDb::open(storage_context.clone(), RoundWatch::default())
                 .context("failed to create mempool adapter storage")?,
             input_buffer: InputBuffer::default(),
             top_known_anchor: RoundWatch::default(),
@@ -194,7 +194,7 @@ impl MempoolAdapterStdImpl {
             .set_max_raw(ctx.top_processed_to_anchor_id);
 
         let bind = EngineBinding {
-            mempool_adapter_store: self.store.clone(),
+            mempool_db: self.mempool_db.clone(),
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: self.top_known_anchor.clone(),
             output: anchor_tx,
@@ -227,7 +227,7 @@ impl MempoolAdapterStdImpl {
         );
 
         let mut anchor_task = AnchorHandler::new(merged_conf.consensus(), anchor_rx)
-            .run(self.cache.clone(), self.store.clone())
+            .run(self.cache.clone(), self.mempool_db.clone())
             .boxed();
 
         tokio::spawn(async move {

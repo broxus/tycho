@@ -4,7 +4,7 @@ use std::time::Duration;
 use bumpalo::Bump;
 use everscale_types::models::ConsensusConfig;
 use tokio::sync::mpsc;
-use tycho_consensus::prelude::{AnchorData, MempoolAdapterStore, MempoolOutput};
+use tycho_consensus::prelude::{AnchorData, MempoolAdapterStore, MempoolDb, MempoolOutput};
 use tycho_util::time::now_millis;
 
 use crate::mempool::impls::std_impl::cache::Cache;
@@ -35,14 +35,14 @@ impl AnchorHandler {
         }
     }
 
-    pub async fn run(mut self, cache: Arc<Cache>, store: MempoolAdapterStore) {
+    pub async fn run(mut self, cache: Arc<Cache>, mempool_db: Arc<MempoolDb>) {
         scopeguard::defer!(tracing::warn!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             "handle anchors task stopped"
         ));
         let mut shuttle = Shuttle {
             cache,
-            store,
+            store: MempoolAdapterStore::new(mempool_db),
             parser: Parser::new(self.deduplicate_rounds),
             first_after_gap: None,
         };

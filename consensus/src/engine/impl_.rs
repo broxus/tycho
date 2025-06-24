@@ -14,8 +14,7 @@ use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{DagFront, DagRound, KeyGroup, Verifier};
 use crate::effects::{
-    AltFormat, Cancelled, Ctx, DbCleaner, EngineCtx, MempoolStore, RoundCtx, Task, TaskResult,
-    TaskTracker,
+    AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task, TaskResult, TaskTracker,
 };
 use crate::engine::committer_task::CommitterTask;
 use crate::engine::lifecycle::{EngineBinding, EngineError, EngineNetwork, FixHistoryFlag};
@@ -25,6 +24,8 @@ use crate::engine::{ConsensusConfigExt, MempoolMergedConfig};
 use crate::models::{
     DagPoint, MempoolOutput, Point, PointRestore, PointRestoreSelect, PointStatusStoredRef, Round,
 };
+use crate::storage::{DbCleaner, MempoolStore};
+
 pub type EngineResult<T> = std::result::Result<T, EngineError>;
 
 pub struct Engine {
@@ -62,8 +63,8 @@ impl Engine {
         let engine_ctx = EngineCtx::new(consensus_round.get(), conf, task_tracker);
         let round_ctx = RoundCtx::new(&engine_ctx, Round::BOTTOM);
 
-        let store = MempoolStore::new(&bind.mempool_adapter_store);
-        let db_cleaner = DbCleaner::new(&bind.mempool_adapter_store);
+        let store = MempoolStore::new(bind.mempool_db.clone());
+        let db_cleaner = DbCleaner::new(bind.mempool_db.clone());
 
         // Dag, created at genesis, will at first extend up to its greatest length
         // (in case last broadcast is within it) without data,
