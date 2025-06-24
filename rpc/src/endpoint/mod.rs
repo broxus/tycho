@@ -10,6 +10,7 @@ use tokio::net::TcpListener;
 pub use self::jrpc::JrpcEndpointCache;
 pub use self::proto::ProtoEndpointCache;
 use crate::state::RpcState;
+use crate::util::mime::{get_mime_type, APPLICATION_JSON, APPLICATION_PROTOBUF};
 
 pub mod jrpc;
 pub mod proto;
@@ -200,14 +201,5 @@ async fn common_route(state: State<RpcState>, req: Request) -> Response {
         _ => StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
     }
 }
-
-fn get_mime_type(req: &Request) -> Option<&str> {
-    req.headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-}
-
-const APPLICATION_JSON: &str = "application/json";
-const APPLICATION_PROTOBUF: &str = "application/x-protobuf";
 
 const MAX_REQUEST_SIZE: usize = 2 << 17; // 256kb
