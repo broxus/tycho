@@ -1,7 +1,10 @@
+// TODO: Refactor models (crate::state vs crate::models).
+
 pub use self::config::{
     BlackListConfig, RpcConfig, RpcStorageConfig, RunGetMethodConfig, TransactionsGcConfig,
 };
 pub use self::endpoint::{jrpc, proto, RpcEndpoint, RpcEndpointBuilder};
+pub use self::models::{GenTimings, LastTransactionId, StateTimings};
 pub use self::state::{
     BadRequestError, BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor,
     BlockTransactionsIter, BlockTransactionsIterBuilder, BlocksByMcSeqnoIter, BriefBlockInfo,
@@ -20,5 +23,11 @@ mod state;
 pub mod util {
     pub mod error_codes;
     pub mod jrpc_extractor;
+    pub mod mime;
     pub mod serde_helpers;
+}
+
+#[doc(hidden)]
+pub mod __internal {
+    pub use {serde, serde_json};
 }
