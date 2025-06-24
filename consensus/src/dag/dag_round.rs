@@ -10,10 +10,11 @@ use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::threshold::Threshold;
 use crate::dag::IllFormedReason;
-use crate::effects::{AltFmt, AltFormat, Ctx, MempoolStore, RoundCtx, ValidateCtx};
+use crate::effects::{AltFmt, AltFormat, Ctx, RoundCtx, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointRestore, Round};
+use crate::storage::MempoolStore;
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed

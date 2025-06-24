@@ -288,8 +288,9 @@ mod test {
     use super::*;
     use crate::dag::dag_location::DagLocation;
     use crate::dag::DagFront;
-    use crate::effects::{AltFormat, Ctx, MempoolStore, RoundCtx};
+    use crate::effects::{AltFormat, Ctx, RoundCtx};
     use crate::models::{AnchorData, AnchorStageRole, Round};
+    use crate::storage::MempoolStore;
     use crate::test_utils;
 
     const PEER_COUNT: usize = 3;
