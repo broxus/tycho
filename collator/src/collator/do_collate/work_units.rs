@@ -1,13 +1,14 @@
 use std::time::Duration;
 
 use tycho_types::models::{
-    WorkUnitsParamsExecute, WorkUnitsParamsFinalize, WorkUnitsParamsPrepare,
+    ShardIdent, WorkUnitsParamsExecute, WorkUnitsParamsFinalize, WorkUnitsParamsPrepare,
 };
 
 use crate::collator::execution_manager::ExecutedGroup;
 use crate::collator::messages_reader::MessagesReaderMetrics;
 use crate::collator::types::{BlockCollationData, ExecuteMetrics, FinalizeMetrics};
 use crate::tracing_targets;
+use crate::types::McData;
 
 pub struct PrepareMsgGroupsWu {
     pub total_wu: u64,
@@ -524,5 +525,103 @@ impl FinalizeWu {
             return 0.0;
         }
         self.total_elapsed.as_nanos() as f64 / total_wu as f64
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct DoCollateWu {
+    pub resume_collation_wu: u64,
+    pub resume_collation_elapsed: Duration,
+    pub blocks_count_between_masters: u64,
+
+    pub collation_total_elapsed: Duration,
+}
+
+impl DoCollateWu {
+    pub fn calculate_resume_collation_wu(
+        &mut self,
+        wu_params_finalize: &WorkUnitsParamsFinalize,
+        max_threads_count: u64,
+        mc_data: &McData,
+        current_shard: &ShardIdent,
+        shard_accounts_count: u64,
+        updated_accounts_count: u64,
+    ) {
+        let threads_count = max_threads_count.min(updated_accounts_count).max(1);
+
+        let &WorkUnitsParamsFinalize {
+            state_update_msg: state_pow_coeff,
+            serialize_diff: updated_accounts_count_pow_coeff,
+            diff_tail_len: store_state_wu_param,
+            ..
+        } = wu_params_finalize;
+
+        self.blocks_count_between_masters = mc_data.get_blocks_count_between_masters(current_shard);
+
+        let normalized_updated_accounts_count = if updated_accounts_count == 0 {
+            0
+        } else {
+            updated_accounts_count.max(4000)
+        };
+
+        let pow_updated_accounts_count = (normalized_updated_accounts_count as f64)
+            .powf((updated_accounts_count_pow_coeff as f64) / 10000.0)
+            * 100.0;
+        let pow_updated_accounts_count = if pow_updated_accounts_count.is_finite()
+            && pow_updated_accounts_count <= u64::MAX as f64
+        {
+            pow_updated_accounts_count.round() as u64
+        } else {
+            100
+        };
+
+        let pow_shard_accounts_count =
+            (shard_accounts_count as f64).powf((state_pow_coeff as f64) / 10000.0) * 100.0;
+        let pow_shard_accounts_count = if pow_shard_accounts_count.is_finite()
+            && pow_shard_accounts_count <= u64::MAX as f64
+        {
+            pow_shard_accounts_count.round() as u64
+        } else {
+            100
+        };
+
+        let shard_accounts_count_log =
+            shard_accounts_count.checked_ilog2().unwrap_or_default() as u64;
+
+        self.resume_collation_wu = pow_updated_accounts_count
+            .saturating_mul(shard_accounts_count_log)
+            .saturating_mul(pow_shard_accounts_count)
+            .saturating_mul(store_state_wu_param as u64)
+            .saturating_div(threads_count)
+            .saturating_div(100)
+            .saturating_div(100);
+    }
+
+    pub fn resume_collation_wu_per_block(&self) -> u64 {
+        assert!(self.blocks_count_between_masters != 0);
+
+        self.resume_collation_wu
+            .saturating_div(self.blocks_count_between_masters)
+    }
+
+    pub fn resume_collation_elapsed_per_block_ns(&self) -> u128 {
+        assert!(self.blocks_count_between_masters != 0);
+
+        self.resume_collation_elapsed
+            .as_nanos()
+            .saturating_div(self.blocks_count_between_masters as u128)
+    }
+
+    pub fn resume_collation_wu_price(&self) -> f64 {
+        if self.resume_collation_wu == 0 {
+            return 0.0;
+        }
+        self.resume_collation_elapsed.as_nanos() as f64 / self.resume_collation_wu as f64
+    }
+
+    pub fn total_elapsed_ns(&self) -> u128 {
+        self.collation_total_elapsed
+            .as_nanos()
+            .saturating_add(self.resume_collation_elapsed_per_block_ns())
     }
 }
