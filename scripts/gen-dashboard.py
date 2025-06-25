@@ -422,6 +422,11 @@ def core_bc() -> RowPanel:
             title="Mc block processing lag",
         ),
         create_gauge_panel(
+            "tycho_shard_blocks_count_in_last_master_block",
+            "Shard blocks count in master block",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
             "tycho_last_applied_block_seqno",
             "Last applied block seqno",
             labels=['workchain=~"$workchain"'],
@@ -436,14 +441,14 @@ def core_bc() -> RowPanel:
             "tycho_bc_ext_msgs_total", "Number of external messages over time"
         ),
         create_counter_panel("tycho_bc_msgs_total", "Number of all messages over time"),
+        create_heatmap_quantile_panel(
+            "tycho_bc_total_gas_used", "Total gas used per block", quantile="1"
+        ),
         create_counter_panel(
             "tycho_bc_contract_deploy_total", "Number of contract deployments over time"
         ),
         create_counter_panel(
             "tycho_bc_contract_delete_total", "Number of contract deletions over time"
-        ),
-        create_heatmap_quantile_panel(
-            "tycho_bc_total_gas_used", "Total gas used per block", quantile="1"
         ),
         create_heatmap_quantile_panel(
             "tycho_bc_in_msg_count",
@@ -460,14 +465,19 @@ def core_bc() -> RowPanel:
             "Out/In message ratio per block",
             quantile="0.999",
         ),
-        create_gauge_panel(
-            "tycho_shard_accounts_count",
-            "Number of accounts in state",
-            labels=['workchain=~"$workchain"'],
+        create_heatmap_quantile_panel(
+            "tycho_bc_out_msg_acc_ratio",
+            "Out message/Account ratio per block",
+            quantile="0.999",
         ),
         create_gauge_panel(
             "tycho_do_collate_accounts_per_block",
             "Number of accounts per block",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_shard_accounts_count",
+            "Number of accounts in state",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
@@ -479,11 +489,6 @@ def core_bc() -> RowPanel:
             "tycho_do_collate_removed_accounts_count",
             "Number of removed accounts in block",
             labels=['workchain=~"$workchain"'],
-        ),
-        create_heatmap_quantile_panel(
-            "tycho_bc_out_msg_acc_ratio",
-            "Out message/Account ratio per block",
-            quantile="0.999",
         ),
         # todo: pie chart?
         create_heatmap_quantile_panel(
@@ -1828,12 +1833,34 @@ def collator_wu_metrics() -> RowPanel:
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_total",
-            "Wu spent total on prepare, execute and finalize",
+            "Wu spent total on collation",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_wu_price_total",
-            "Wu price total",
+            "Wu price total on collation",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_on_resume_collation",
+            "Wu spent on resume collation",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_on_resume_collation",
+            "Wu price on resume collation",
+            labels=['workchain=~"$workchain"'],
+            unit_format=UNITS.NANO_SECONDS,
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_total_full",
+            "Wu spent total on collation and resume per block",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_price_total_full",
+            "Wu price total on collation and resume",
             labels=['workchain=~"$workchain"'],
             unit_format=UNITS.NANO_SECONDS,
         ),
