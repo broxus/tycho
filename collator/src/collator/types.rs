@@ -30,7 +30,7 @@ use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::{MessagesReaderMetrics, ReaderState};
-use crate::collator::do_collate::work_units::{ExecuteWu, FinalizeWu};
+use crate::collator::do_collate::work_units::{DoCollateWu, ExecuteWu, FinalizeWu};
 use crate::collator::messages_reader::MetricsTimer;
 use crate::internal_queue::types::{
     AccountStatistics, Bound, DiffStatistics, InternalMessageValue, QueueShardBoundedRange,
@@ -49,6 +49,7 @@ pub(super) struct WorkingState {
     pub mc_data: Arc<McData>,
     pub collation_config: Arc<CollationConfig>,
     pub wu_used_from_last_anchor: u64,
+    pub resume_collation_elapsed: Duration,
     pub prev_shard_data: Option<PrevData>,
     pub usage_tree: Option<UsageTree>,
     pub has_unprocessed_messages: Option<bool>,
@@ -1235,6 +1236,7 @@ pub struct FinalizeBlockResult {
     pub new_observable_state: Box<ShardStateUnsplit>,
     pub finalize_wu: FinalizeWu,
     pub finalize_metrics: FinalizeMetrics,
+    pub do_collate_wu: DoCollateWu,
     pub collation_config: Arc<CollationConfig>,
 }
 
