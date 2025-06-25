@@ -216,6 +216,33 @@ impl McData {
     pub fn lt_align(&self) -> u64 {
         1000000
     }
+
+    pub fn get_blocks_count_between_masters(&self, current_shard: &ShardIdent) -> u64 {
+        if current_shard.is_masterchain() {
+            1
+        } else {
+            let seqno_from_last_mc_data = self
+                .shards
+                .iter()
+                .find(|(s, _)| s == current_shard)
+                .map(|(_, descr)| descr.seqno);
+            let seqno_from_prev_mc_data = self.prev_mc_data.as_ref().and_then(|prev| {
+                prev.shards
+                    .iter()
+                    .find(|(s, _)| s == current_shard)
+                    .map(|(_, descr)| descr.seqno)
+            });
+
+            match (seqno_from_last_mc_data, seqno_from_prev_mc_data) {
+                (Some(seqno_from_last_mc_data), Some(seqno_from_prev_mc_data)) => {
+                    seqno_from_last_mc_data
+                        .saturating_sub(seqno_from_prev_mc_data)
+                        .max(1) as u64
+                }
+                _ => 1,
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
