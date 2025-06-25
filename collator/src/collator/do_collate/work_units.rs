@@ -310,13 +310,13 @@ impl FinalizeWu {
             .max(1);
 
         let pow_shard_accounts_count =
-            (shard_accounts_count as f64).powf((state_pow_coeff as f64) / 10000.0);
+            (shard_accounts_count as f64).powf((state_pow_coeff as f64) / 10000.0) * 100.0;
         let pow_shard_accounts_count = if pow_shard_accounts_count.is_finite()
             && pow_shard_accounts_count <= u64::MAX as f64
         {
             pow_shard_accounts_count.round() as u64
         } else {
-            1
+            100
         };
 
         let shard_accounts_count_log =
@@ -335,7 +335,8 @@ impl FinalizeWu {
                 updated_accounts_count
                     .saturating_mul(shard_accounts_count_log)
                     .saturating_div(threads_count)
-                    .saturating_mul(pow_shard_accounts_count),
+                    .saturating_mul(pow_shard_accounts_count)
+                    .saturating_div(100),
             )
             .saturating_mul(build_accounts as u64);
 
@@ -374,6 +375,7 @@ impl FinalizeWu {
                 .saturating_mul(shard_accounts_count_log)
                 .saturating_div(threads_count)
                 .saturating_mul(pow_shard_accounts_count)
+                .saturating_div(100)
                 .saturating_mul(state_update_accounts as u64),
         );
 
