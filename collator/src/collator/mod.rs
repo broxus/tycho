@@ -1,5 +1,6 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -602,7 +603,7 @@ impl CollatorStdImpl {
             }
         }
 
-        let working_state = if !reset {
+        let mut working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
 
             // update mc_data if newer
@@ -745,7 +746,9 @@ impl CollatorStdImpl {
 
             working_state
         };
-        drop(histogram);
+
+        // will use time elapsed to resume collation to calculate wu price
+        working_state.resume_collation_elapsed = histogram.finish();
 
         if self.shard_id.is_masterchain() {
             self.try_collate_next_master_block_impl(working_state).await
@@ -823,6 +826,7 @@ impl CollatorStdImpl {
         has_unprocessed_messages: bool,
         reader_state: ReaderState,
         tracker: MinRefMcStateTracker,
+        resume_collation_elapsed: Duration,
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let _histogram = HistogramGuard::begin_with_labels(
@@ -888,6 +892,7 @@ impl CollatorStdImpl {
                 mc_data: new_mc_data,
                 collation_config,
                 wu_used_from_last_anchor: prev_shard_data.wu_used_from_last_anchor(),
+                resume_collation_elapsed,
                 prev_shard_data: Some(prev_shard_data),
                 usage_tree: Some(usage_tree),
                 has_unprocessed_messages: Some(has_unprocessed_messages),
@@ -976,6 +981,7 @@ impl CollatorStdImpl {
             next_block_id_short,
             mc_data,
             wu_used_from_last_anchor: prev_shard_data.wu_used_from_last_anchor(),
+            resume_collation_elapsed: Duration::ZERO,
             reader_state: ReaderState::new(prev_shard_data.processed_upto()),
             prev_shard_data: Some(prev_shard_data),
             usage_tree: Some(usage_tree),
