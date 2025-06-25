@@ -548,11 +548,44 @@ impl Phase<FinalizeState> {
                 in_msgs_len, out_msgs_len,
             );
 
+            // calculate resume collation wu
+            self.state.do_collate_wu.calculate_resume_collation_wu(
+                &self.state.collation_config.work_units_params.finalize,
+                self.state
+                    .collation_config
+                    .work_units_params
+                    .execute
+                    .subgroup_size as u64,
+                &self.state.mc_data,
+                &shard,
+                shard_accounts_count,
+                updated_accounts_count,
+            );
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "resume_collation_wu: {}, state_accounts_count: {}, \
+                blocks_count_between_masters: {} ",
+                self.state.do_collate_wu.resume_collation_wu,
+                shard_accounts_count,
+                self.state.do_collate_wu.blocks_count_between_masters,
+            );
+
+            // report shard blocks count in last master block
+            if !shard.is_masterchain() && self.state.is_first_block_after_prev_master {
+                metrics::gauge!("tycho_shard_blocks_count_in_last_master_block", labels)
+                    .set(self.state.do_collate_wu.blocks_count_between_masters as f64);
+            }
+
             // compute total wu used from last anchor
             let mut new_wu_used_from_last_anchor = wu_used_from_last_anchor
                 .saturating_add(self.extra.execute_result.prepare_msg_groups_wu.total_wu)
                 .saturating_add(self.extra.execute_result.execute_wu.total_wu())
                 .saturating_add(self.extra.finalize_wu.total_wu());
+            // append resume collation wu only on the first block after master
+            if self.state.is_first_block_after_prev_master {
+                new_wu_used_from_last_anchor = new_wu_used_from_last_anchor
+                    .saturating_add(self.state.do_collate_wu.resume_collation_wu);
+            }
 
             // total wu used should cover max the number of rounds
             // which mempool can be ahead of last applied master block
@@ -867,6 +900,7 @@ impl Phase<FinalizeState> {
                 new_observable_state,
                 finalize_wu: self.extra.finalize_wu,
                 finalize_metrics: self.extra.finalize_metrics,
+                do_collate_wu: self.state.do_collate_wu,
                 old_mc_data: self.state.mc_data,
                 collation_config: self.state.collation_config,
             },
