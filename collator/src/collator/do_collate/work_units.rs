@@ -296,6 +296,7 @@ impl FinalizeWu {
             serialize_msg,
             state_update_min,
             state_update_accounts,
+            state_update_msg: state_pow_coeff,
             ..
         } = wu_params_finalize;
 
@@ -308,6 +309,16 @@ impl FinalizeWu {
             .min(updated_accounts_count)
             .max(1);
 
+        let pow_shard_accounts_count =
+            (shard_accounts_count as f64).powf((state_pow_coeff as f64) / 10000.0) * 100.0;
+        let pow_shard_accounts_count = if pow_shard_accounts_count.is_finite()
+            && pow_shard_accounts_count <= u64::MAX as f64
+        {
+            pow_shard_accounts_count.round() as u64
+        } else {
+            100
+        };
+
         let shard_accounts_count_log =
             shard_accounts_count.checked_ilog2().unwrap_or_default() as u64;
         let updated_accounts_count_log =
@@ -318,11 +329,14 @@ impl FinalizeWu {
         // calc update shard accounts:
         //  * prepare account modifications in (updated_accounts_count)
         //  * then update map of shard accounts in parallel in (updated_accounts_count)*log(shard_accounts_count)/(threads_count)
+        //  * additionally multiply on (shard_accounts_count^0.1504) for better precision on a large state
         self.update_shard_accounts_wu = updated_accounts_count
             .saturating_add(
                 updated_accounts_count
                     .saturating_mul(shard_accounts_count_log)
-                    .saturating_div(threads_count),
+                    .saturating_div(threads_count)
+                    .saturating_mul(pow_shard_accounts_count)
+                    .saturating_div(100),
             )
             .saturating_mul(build_accounts as u64);
 
@@ -353,12 +367,15 @@ impl FinalizeWu {
 
         // calc build state update
         //  * calc update of all updated accounts in parallel in (updated_accounts_count)*log(shard_accounts_count)/(threads_count)
+        //  * additionally multiply on (shard_accounts_count^0.1504) for better precision on a large state
         //  * use min value if calculated is less
         self.build_state_update_wu = std::cmp::max(
             state_update_min as u64,
             updated_accounts_count
                 .saturating_mul(shard_accounts_count_log)
                 .saturating_div(threads_count)
+                .saturating_mul(pow_shard_accounts_count)
+                .saturating_div(100)
                 .saturating_mul(state_update_accounts as u64),
         );
 
