@@ -540,21 +540,40 @@ pub struct DoCollateWu {
 impl DoCollateWu {
     pub fn calculate_resume_collation_wu(
         &mut self,
+        updated_accounts_count_pow_coeff: u64,
         store_state_wu_param: u64,
+        max_threads_count: u64,
         mc_data: &McData,
         current_shard: &ShardIdent,
         shard_accounts_count: u64,
         updated_accounts_count: u64,
     ) {
+        let threads_count = max_threads_count.min(updated_accounts_count).max(1);
+
         self.blocks_count_between_masters = mc_data.get_blocks_count_between_masters(current_shard);
 
-        if updated_accounts_count > 0 {
-            let shard_accounts_count_log =
-                shard_accounts_count.checked_ilog2().unwrap_or_default() as u64;
+        let updated_accounts_count_normalized = updated_accounts_count.max(2000);
+        let pow_updated_accounts_count = (updated_accounts_count_normalized as f64)
+            .powf((updated_accounts_count_pow_coeff as f64) / 10000.0)
+            * 100.0;
+        let pow_updated_accounts_count = if pow_updated_accounts_count.is_finite()
+            && pow_updated_accounts_count <= u64::MAX as f64
+        {
+            pow_updated_accounts_count.round() as u64
+        } else {
+            100
+        };
 
-            self.resume_collation_wu =
-                shard_accounts_count_log.saturating_mul(store_state_wu_param.saturating_mul(10000));
-        }
+        let updated_accounts_count_log =
+            updated_accounts_count.checked_ilog2().unwrap_or_default() as u64;
+        let shard_accounts_count_log =
+            shard_accounts_count.checked_ilog2().unwrap_or_default() as u64;
+
+        self.resume_collation_wu = updated_accounts_count
+            .saturating_mul(pow_updated_accounts_count)
+            .saturating_mul(shard_accounts_count_log)
+            .saturating_mul(store_state_wu_param)
+            .saturating_div(100);
     }
 
     pub fn resume_collation_wu_per_block(&self) -> u64 {

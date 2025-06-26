@@ -547,6 +547,16 @@ impl Phase<FinalizeState> {
                     .work_units_params
                     .finalize
                     .diff_tail_len as u64,
+                self.state
+                    .collation_config
+                    .work_units_params
+                    .finalize
+                    .serialize_diff as u64,
+                self.state
+                    .collation_config
+                    .work_units_params
+                    .execute
+                    .subgroup_size as u64,
                 &self.state.mc_data,
                 &shard,
                 shard_accounts_count,

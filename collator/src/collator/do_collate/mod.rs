@@ -1132,7 +1132,7 @@ impl CollatorStdImpl {
             .set(do_collate_wu.resume_collation_wu_price());
 
         // total
-        let total_wu = collation_total_wu + do_collate_wu.total_wu();
+        let total_wu = collation_total_wu + do_collate_wu.resume_collation_wu_per_block();
         metrics::gauge!("tycho_do_collate_wu_total_full", &labels).set(total_wu as f64);
         metrics::gauge!("tycho_do_collate_wu_price_total_full", &labels)
             .set(do_collate_wu.total_elapsed_ns() as f64 / total_wu as f64);
