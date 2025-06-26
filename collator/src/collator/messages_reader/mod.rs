@@ -1330,16 +1330,22 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         }
 
         // collect externals
+        let mut ext_collected_count = 0;
         if !ext_prev_processed_offsets_reached_on_refill {
             all_read_externals_collected_before = externals_reader.all_read_externals_collected();
 
-            let CollectExternalsResult { metrics } = externals_reader.collect_messages(
+            let CollectExternalsResult {
+                metrics,
+                collected_count,
+            } = externals_reader.collect_messages(
                 par_reader.partition_id,
                 &mut res.msg_group,
+                Some(par_reader),
                 prev_partitions_readers,
                 prev_msg_groups,
             )?;
             res.metrics.append(&metrics);
+            ext_collected_count = collected_count;
         }
 
         // collect new internals
