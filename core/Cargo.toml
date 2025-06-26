@@ -18,9 +18,11 @@ bumpalo = { workspace = true }
 bumpalo-herd = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 bytesize = { workspace = true }
+castaway = { workspace = true }
 crc32c = { workspace = true }
 dashmap = { workspace = true }
-everscale-types = { workspace = true, features = ["blake3", "rayon"] }
+everscale-crypto = { workspace = true }
+everscale-types = { workspace = true, features = ["blake3", "rayon", "rand"] }
 futures-util = { workspace = true }
 humantime = { workspace = true }
 metrics = { workspace = true }
