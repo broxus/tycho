@@ -190,7 +190,7 @@ impl std::fmt::Debug for AltFmt<'_, PeerScheduleStateless> {
         write!(f, "{} }}, ", inner.peer_vecs[2].as_slice().alt())?;
 
         let next_epoch_start = inner.next_epoch_start.map(|a| a.0);
-        write!(f, "next: {{ start: {:?}, ", next_epoch_start)?;
+        write!(f, "next: {{ start: {next_epoch_start:?}, ")?;
         write!(f, "{} }} ", inner.peer_vecs[3].as_slice().alt())?;
 
         f.write_str("}")
