@@ -1389,7 +1389,7 @@ impl CumulativeStatistics {
         for range in ranges {
             let stats_by_partitions = mq_adapter
                 .load_separated_diff_statistics(partitions, &range)
-                .with_context(|| format!("partitions: {:?}; range: {:?}", partitions, range))?;
+                .with_context(|| format!("partitions: {partitions:?}; range: {range:?}"))?;
 
             for (partition, partition_stats) in stats_by_partitions {
                 for (diff_max_message, diff_partition_stats) in partition_stats {

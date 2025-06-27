@@ -30,11 +30,11 @@ impl<Request, Q> RouterBuilder<Request, Q> {
         let index = self.inner.services.len();
         for id in service.query_ids() {
             let prev = self.inner.query_handlers.insert(id, index);
-            assert!(prev.is_none(), "duplicate query id: {:08x}", id);
+            assert!(prev.is_none(), "duplicate query id: {id:08x}");
         }
         for id in service.message_ids() {
             let prev = self.inner.message_handlers.insert(id, index);
-            assert!(prev.is_none(), "duplicate message id: {:08x}", id);
+            assert!(prev.is_none(), "duplicate message id: {id:08x}");
         }
 
         self.inner.services.push(service.boxed());

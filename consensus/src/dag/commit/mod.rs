@@ -486,7 +486,7 @@ mod test {
             println!("anchor {:?}", data.anchor.id().alt());
         }
         if let Some(up_to) = up_to {
-            println!("committed up to {:?}", up_to);
+            println!("committed up to {up_to:?}");
         } else {
             println!("committed");
         };

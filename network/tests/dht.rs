@@ -234,7 +234,7 @@ async fn startup_from_single_bootstrap_node() -> Result<()> {
 
         states.entry(&first_node_info.id).or_default().is_bootstrap = true;
 
-        println!("known: {:#?}", states);
+        println!("known: {states:#?}");
 
         if all_known {
             return Ok(());

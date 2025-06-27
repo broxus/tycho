@@ -454,13 +454,7 @@ impl CmdListArchives {
 
             // Print with calculated padding
             for (id, size) in formatted {
-                println!(
-                    "ID: {:<id_width$}, Size: {:>size_width$}",
-                    id,
-                    size,
-                    id_width = max_id_width,
-                    size_width = max_size_width
-                );
+                println!("ID: {id:<max_id_width$}, Size: {size:>max_size_width$}");
             }
         }
 
