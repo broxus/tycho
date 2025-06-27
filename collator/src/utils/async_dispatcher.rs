@@ -75,8 +75,7 @@ where
                 let task_res = func(queue_worker.clone()).await;
                 if let Err(err) = task_res {
                     panic!(
-                        "async dispatcher: {}: queued task result error! {:?}",
-                        dispatcher_descr, err,
+                        "async dispatcher: {dispatcher_descr}: queued task result error! {err:?}",
                     )
                 }
             }
@@ -94,7 +93,7 @@ where
                             futures.push(join_task);
                         }
                         None => {
-                            panic!("async dispatcher: {}: tasks channel closed!", dispatcher_descr)
+                            panic!("async dispatcher: {dispatcher_descr}: tasks channel closed!")
                         }
                     },
                     task_res = async {
@@ -106,8 +105,7 @@ where
                     } => {
                         if let Err(err) = task_res {
                             panic!(
-                                "async dispatcher: {}: spawned task result error! {:?}",
-                                dispatcher_descr, err,
+                                "async dispatcher: {dispatcher_descr}: spawned task result error! {err:?}",
                             )
                         }
                     }

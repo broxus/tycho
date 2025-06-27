@@ -154,7 +154,7 @@ impl ExternalsReaderState {
         let par_id = par_id.into();
         self.by_partitions
             .get_mut(&par_id)
-            .with_context(|| format!("externals reader state not exists for partition {}", par_id))
+            .with_context(|| format!("externals reader state not exists for partition {par_id}"))
     }
 
     pub fn get_state_by_partition<T: Into<QueuePartitionIdx>>(
@@ -164,7 +164,7 @@ impl ExternalsReaderState {
         let par_id = par_id.into();
         self.by_partitions
             .get(&par_id)
-            .with_context(|| format!("externals reader state not exists for partition {}", par_id))
+            .with_context(|| format!("externals reader state not exists for partition {par_id}"))
     }
 }
 
@@ -192,10 +192,7 @@ impl ExternalsRangeReaderState {
     ) -> Result<&mut ExternalsRangeReaderStateByPartition> {
         let par_id = par_id.into();
         self.by_partitions.get_mut(&par_id).with_context(|| {
-            format!(
-                "externals range reader state not exists for partition {}",
-                par_id
-            )
+            format!("externals range reader state not exists for partition {par_id}")
         })
     }
 
@@ -205,10 +202,7 @@ impl ExternalsRangeReaderState {
     ) -> Result<&ExternalsRangeReaderStateByPartition> {
         let par_id = par_id.into();
         self.by_partitions.get(&par_id).with_context(|| {
-            format!(
-                "externals range reader state not exists for partition {}",
-                par_id
-            )
+            format!("externals range reader state not exists for partition {par_id}")
         })
     }
 }

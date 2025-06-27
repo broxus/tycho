@@ -997,7 +997,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let msg = iterator_manager.next()?;
-    println!("iterator next msg before clean = {:?}", msg);
+    println!("iterator next msg before clean = {msg:?}");
     assert!(msg.is_some());
 
     queue.clear_uncommitted_state(&FastHashSet::from_iter([0, 1].map(QueuePartitionIdx)), &[
@@ -1009,7 +1009,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
     let msg = iterator_manager.next()?;
-    println!("iterator next msg after clean = {:?}", msg);
+    println!("iterator next msg after clean = {msg:?}");
     assert!(msg.is_none());
 
     Ok(())

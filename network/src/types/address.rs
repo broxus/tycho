@@ -395,8 +395,7 @@ mod tests {
         ] {
             assert!(
                 validate_hostname(hostname.as_bytes()).is_some(),
-                "{} is not valid",
-                hostname
+                "{hostname} is not valid"
             );
         }
     }
@@ -418,8 +417,7 @@ mod tests {
         ] {
             assert!(
                 validate_hostname(hostname.as_bytes()).is_none(),
-                "{} should not be valid",
-                hostname
+                "{hostname} should not be valid"
             );
         }
     }

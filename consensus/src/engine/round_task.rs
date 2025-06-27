@@ -298,7 +298,7 @@ impl RoundTaskReady {
         task_ctx.spawn(async move {
             if let Err(error) = Verifier::verify(point.info(), &peer_schedule, round_ctx.conf()) {
                 let _guard = round_ctx.span().enter();
-                panic!("Failed to verify own point: {error}, {:?}", point)
+                panic!("Failed to verify own point: {error}, {point:?}")
             }
             let validate_ctx = ValidateCtx::new(&round_ctx, point.info());
             let validate = Verifier::validate(
