@@ -170,8 +170,7 @@ async fn test_inbound_request_rate_limit() -> Result<()> {
 
     assert!(
         is_rate_limit_error,
-        "Error type indicates rate limit rejection: {:?}",
-        err
+        "Error type indicates rate limit rejection: {err:?}"
     );
 
     tracing::info!("Waiting for the first request to complete successfully...");

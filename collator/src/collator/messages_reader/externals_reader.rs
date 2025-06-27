@@ -317,9 +317,7 @@ impl ExternalsReader {
             .reader_state
             .by_partitions
             .get_mut(par_id)
-            .with_context(|| {
-                format!("externals reader state not exists for partition {}", par_id)
-            })?;
+            .with_context(|| format!("externals reader state not exists for partition {par_id}"))?;
         reader_state_by_partition.curr_processed_offset += 1;
         Ok(())
     }

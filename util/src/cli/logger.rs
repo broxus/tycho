@@ -52,7 +52,7 @@ impl<'de> Deserialize<'de> for LoggerTargets {
                 let mut directives = Vec::new();
 
                 while let Some((target, level)) = map.next_entry::<String, String>()? {
-                    let directive = format!("{}={}", target, level)
+                    let directive = format!("{target}={level}")
                         .parse::<Directive>()
                         .map_err(serde::de::Error::custom)?;
 

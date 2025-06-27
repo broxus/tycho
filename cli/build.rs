@@ -82,6 +82,6 @@ fn command(prog: &str, args: &[&str], cwd: Option<std::path::PathBuf>) -> Result
 }
 
 fn env(key: &str) -> Result<std::ffi::OsString> {
-    println!("cargo:rerun-if-env-changed={}", key);
+    println!("cargo:rerun-if-env-changed={key}");
     std::env::var_os(key).ok_or_else(|| anyhow::anyhow!("missing '{}' environment variable", key))
 }

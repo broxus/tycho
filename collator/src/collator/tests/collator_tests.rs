@@ -557,10 +557,9 @@ fn test_get_anchors_processing_info() {
         .get_min_externals_processed_to()
         .unwrap_or_default();
     assert_eq!(
-        anchors_proc_info.processed_to_anchor_id,
-        min_externals_processed_to.0,
-        "prev_block_id: {:?}, prev_gen_chain_time: {}, prev_processed_upto_externals: {:?}, mc_data: {:?}",
-        prev_block_id, prev_gen_chain_time, prev_processed_upto_externals, mc_data,
+        anchors_proc_info.processed_to_anchor_id, min_externals_processed_to.0,
+        "prev_block_id: {prev_block_id:?}, prev_gen_chain_time: {prev_gen_chain_time},
+        prev_processed_upto_externals: {prev_processed_upto_externals:?}, mc_data: {mc_data:?}",
     );
     assert_eq!(
         anchors_proc_info.processed_to_msgs_offset,

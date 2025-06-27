@@ -169,7 +169,7 @@ impl Debug for DepsLifeCycle {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             DepsLifeCycle::Unset => f.write_str("unset"),
-            DepsLifeCycle::Set(deps) => write!(f, "set {:?}", deps),
+            DepsLifeCycle::Set(deps) => write!(f, "set {deps:?}"),
             DepsLifeCycle::Taken => f.write_str("taken"),
         }
     }

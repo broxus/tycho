@@ -213,10 +213,10 @@ impl std::fmt::Debug for ExternalsProcessedUptoStuff {
             .unwrap_or_default();
 
         let ranges = ExternalsRangesInfo {
-            seqno: format!("{}-{}", first_seqno, last_seqno),
-            processed_offset: format!("{}-{}", first_processed_offset, last_processed_offset),
-            skip_offset: format!("{}-{}", first_skip_offset, last_skip_offset),
-            chain_time: format!("{}-{}", first_ct, last_ct),
+            seqno: format!("{first_seqno}-{last_seqno}"),
+            processed_offset: format!("{first_processed_offset}-{last_processed_offset}"),
+            skip_offset: format!("{first_skip_offset}-{last_skip_offset}"),
+            chain_time: format!("{first_ct}-{last_ct}"),
             from: first_from,
             to: last_to,
         };
@@ -296,9 +296,9 @@ impl std::fmt::Debug for InternalsProcessedUptoStuff {
         }
 
         let ranges = InternalsRangesInfo {
-            seqno: format!("{}-{}", first_seqno, last_seqno),
-            processed_offset: format!("{}-{}", first_processed_offset, last_processed_offset),
-            skip_offset: format!("{}-{}", first_skip_offset, last_skip_offset),
+            seqno: format!("{first_seqno}-{last_seqno}"),
+            processed_offset: format!("{first_processed_offset}-{last_processed_offset}"),
+            skip_offset: format!("{first_skip_offset}-{last_skip_offset}"),
             shards: first_shards,
         };
 

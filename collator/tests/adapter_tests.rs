@@ -211,7 +211,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     consensus_info: Default::default(),
                 });
                 let accept_result = adapter.accept_block(block);
-                assert!(accept_result.is_ok(), "Block {} should be accepted", i);
+                assert!(accept_result.is_ok(), "Block {i} should be accepted");
             }
         })
     };

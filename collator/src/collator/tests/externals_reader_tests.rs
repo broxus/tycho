@@ -916,14 +916,14 @@ fn test_read_externals() {
 
     // read and collect 4 times
     for i in 1..=4 {
-        println!("read messages on refill {}", i);
+        println!("read messages on refill {i}");
         let metrics = externals_reader
             .read_into_buffers(GetNextMessageGroupMode::Refill, &partition_router)
             .unwrap();
         let metrics = metrics.get_total();
         println!("read_ext_msgs_count: {}", metrics.read_ext_msgs_count);
 
-        println!("collect messages on refill {}", i);
+        println!("collect messages on refill {i}");
         let mut msg_groups = BTreeMap::new();
         for par_id in &par_ids {
             externals_reader

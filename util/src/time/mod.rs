@@ -283,7 +283,7 @@ mod tests {
         estimator.append(10);
 
         let value = estimator.exponentially_weighted_average().unwrap();
-        println!("Value: {}", value);
+        println!("Value: {value}");
         assert_eq!(value, 7); // sma of 1, 2, 10 with time decay
 
         let max_value = estimator.max_over_window().unwrap();
@@ -328,7 +328,7 @@ mod tests {
         assert_eq!(estimator.estimators.len(), 2);
 
         let value = estimator.exponentially_weighted_average().unwrap();
-        assert!(value > 5, "value = {}", value);
+        assert!(value > 5, "value = {value}");
         let max_value = estimator.max_over_window().unwrap();
         assert_eq!(max_value, 10);
     }
@@ -365,8 +365,8 @@ mod tests {
 
         // The value will be between 2 and 3 since a window with value 1 was removed
         let value = estimator.exponentially_weighted_average().unwrap();
-        assert!(value >= 2, "Expected value >= 2, got {}", value);
-        assert!(value <= 3, "Expected value <= 3, got {}", value);
+        assert!(value >= 2, "Expected value >= 2, got {value}");
+        assert!(value <= 3, "Expected value <= 3, got {value}");
 
         // Add more values to the latest window to verify it's active
         estimator.append(4);

@@ -764,21 +764,20 @@ async fn download_block_inner(
         Ok(decompressed)
     });
 
-    let mut stream =
-        futures_util::stream::iter((chunk_size..target_size).step_by(chunk_size as usize))
-            .map(|offset| {
-                let neighbour = neighbour.clone();
-                let overlay_client = overlay_client.clone();
+    let stream = futures_util::stream::iter((chunk_size..target_size).step_by(chunk_size as usize))
+        .map(|offset| {
+            let neighbour = neighbour.clone();
+            let overlay_client = overlay_client.clone();
 
-                tracing::debug!(%block_id, offset, "downloading block data chunk");
-                JoinTask::new(download_with_retries(
-                    Request::from_tl(rpc::GetBlockDataChunk { block_id, offset }),
-                    overlay_client,
-                    neighbour,
-                    retries,
-                ))
-            })
-            .buffered(PARALLEL_REQUESTS);
+            tracing::debug!(%block_id, offset, "downloading block data chunk");
+            JoinTask::new(download_with_retries(
+                Request::from_tl(rpc::GetBlockDataChunk { block_id, offset }),
+                overlay_client,
+                neighbour,
+                retries,
+            ))
+        })
+        .buffered(PARALLEL_REQUESTS);
 
     let mut stream = std::pin::pin!(stream);
     while let Some(chunk) = stream.next().await.transpose()? {
@@ -872,7 +871,7 @@ where
         finalize_fn(state)
     });
 
-    let mut stream = futures_util::stream::iter((0..target_size).step_by(chunk_size))
+    let stream = futures_util::stream::iter((0..target_size).step_by(chunk_size))
         .map(|offset| JoinTask::new(download_fn(offset)))
         .buffered(PARALLEL_REQUESTS);
 

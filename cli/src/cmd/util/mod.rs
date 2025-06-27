@@ -30,5 +30,5 @@ fn print_help() {
     let command = crate::App::command();
 
     let markdown = clap_markdown::help_markdown_command(&command);
-    println!("{}", markdown);
+    println!("{markdown}");
 }

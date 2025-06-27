@@ -212,7 +212,7 @@ impl MempoolStore {
     pub fn init_storage(&self, overlay_id: &OverlayId) {
         self.0
             .init_storage(overlay_id)
-            .with_context(|| format!("new overlay id {}", overlay_id))
+            .with_context(|| format!("new overlay id {overlay_id}"))
             .expect("DB drop all data");
     }
 }
