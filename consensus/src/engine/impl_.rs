@@ -4,6 +4,7 @@ use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
+use futures_util::never::Never;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, TryStreamExt};
 use itertools::{Either, Itertools};
@@ -13,18 +14,17 @@ use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{DagFront, DagRound, KeyGroup, Verifier};
 use crate::effects::{
-    AltFormat, Ctx, DbCleaner, EngineCtx, MempoolStore, RoundCtx, Task, TaskResult, TaskTracker,
+    AltFormat, Cancelled, Ctx, DbCleaner, EngineCtx, MempoolStore, RoundCtx, Task, TaskResult,
+    TaskTracker,
 };
 use crate::engine::committer_task::CommitterTask;
-use crate::engine::lifecycle::{EngineError, EngineNetwork, FixHistoryFlag};
+use crate::engine::lifecycle::{EngineBinding, EngineError, EngineNetwork, FixHistoryFlag};
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolMergedConfig};
 use crate::models::{
     DagPoint, MempoolOutput, Point, PointRestore, PointRestoreSelect, PointStatusStoredRef, Round,
 };
-use crate::prelude::EngineBinding;
-
 pub type EngineResult<T> = std::result::Result<T, EngineError>;
 
 pub struct Engine {
@@ -33,7 +33,7 @@ pub struct Engine {
     output: mpsc::UnboundedSender<MempoolOutput>,
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
-    _peer_schedule_updater: Task<()>,
+    peer_schedule_updater: Task<Never>,
     init_task: Option<Task<FixHistoryFlag>>,
     ctx: EngineCtx,
 }
@@ -104,7 +104,7 @@ impl Engine {
 
         let peer_schedule_updater = engine_ctx.task().spawn({
             let peer_schedule = net.peer_schedule.clone();
-            peer_schedule.run_updater()
+            peer_schedule.downgrade().run_updater()
         });
 
         Self {
@@ -113,7 +113,7 @@ impl Engine {
             output: bind.output.clone(),
             db_cleaner,
             round_task,
-            _peer_schedule_updater: peer_schedule_updater,
+            peer_schedule_updater,
             init_task: Some(init_task),
             ctx: engine_ctx,
         }
@@ -152,7 +152,7 @@ impl Engine {
                     ?min_top_known_anchor,
                     "waiting collator to load up to last top known anchor"
                 );
-                top_known_anchor = top_known_anchor_recv.next().await;
+                top_known_anchor = top_known_anchor_recv.next().await?;
             }
             top_known_anchor
         };
@@ -342,14 +342,19 @@ impl Engine {
     }
 
     // this future never completes with Ok result
-    pub async fn run(mut self) -> EngineResult<futures_util::never::Never> {
+    pub async fn run(mut self) -> EngineResult<Never> {
         // Option<Option<_>> to distinguish first round, when dag must not be advanced before run
         let mut start_replay_bcasts = Some(self.pre_run().await?);
-        let _scopeguard = scopeguard::guard(self.ctx.span().clone(), |start_span| {
+        let in_guard = (
+            self.round_task.state.responder.clone(),
+            self.ctx.span().clone(),
+        );
+        let _scopeguard = scopeguard::guard(in_guard, |(responder, start_span)| {
+            responder.dispose();
             start_span.in_scope(|| tracing::warn!("mempool engine run stopped"));
         });
         let mut round_ctx = RoundCtx::new(&self.ctx, self.dag.top().round());
-        let _db_clean_task: Task<()> = self.db_cleaner.new_task(
+        let db_clean_task: Task<Never> = self.db_cleaner.new_task(
             self.round_task.state.consensus_round.receiver(),
             self.round_task.state.top_known_anchor.receiver(),
             &round_ctx,
@@ -361,6 +366,17 @@ impl Engine {
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
             // commit may take longer than a round if it ends with a jump to catch up with consensus
+
+            if self.peer_schedule_updater.is_finished() {
+                match self.peer_schedule_updater.await {
+                    Err(e) => return Err(e.into()), // never Ok
+                }
+            }
+            if db_clean_task.is_finished() {
+                match db_clean_task.await {
+                    Err(e) => return Err(e.into()), // never Ok
+                }
+            }
 
             {
                 let (old_dag_top_round, next_round) = if start_replay_bcasts.is_some() {
@@ -393,7 +409,7 @@ impl Engine {
                 ) {
                     Ok(pause_at) => next_round.min(pause_at),
                     Err(collator_sync) => {
-                        collator_sync.await;
+                        collator_sync.await?;
                         let committer_update = self.committer_run.update_task(
                             full_history_bottom.take(),
                             self.output.clone(),
@@ -452,7 +468,7 @@ impl Engine {
                     round_task = &mut round_task_run => {
                         self.round_task = round_task?;
                         break;
-                    }
+                    },
                 }
             }
         }
@@ -465,7 +481,7 @@ fn collator_feedback(
     is_paused: &mut bool,
     committed_info_tx: &mpsc::UnboundedSender<MempoolOutput>,
     round_ctx: &RoundCtx,
-) -> Result<Round, BoxFuture<'static, ()>> {
+) -> Result<Round, BoxFuture<'static, TaskResult<()>>> {
     let top_known_anchor = top_known_anchor_recv.get();
     // For example in `max_consensus_lag_rounds` comments this results to `217` of `8..=217`
     let pause_at = top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds;
@@ -488,7 +504,7 @@ fn collator_feedback(
         let round_ctx = round_ctx.clone();
         let collator_sync = async move {
             loop {
-                let top_known_anchor = top_known_anchor_recv.next().await;
+                let top_known_anchor = top_known_anchor_recv.next().await?;
                 //  exit if ready to produce point: collator synced enough
                 let pause_at =
                     top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds;
@@ -501,11 +517,16 @@ fn collator_feedback(
                     "collator feedback in pause mode"
                 );
                 if exit {
-                    break;
+                    break TaskResult::Ok(());
                 }
             }
         };
-        Err((tokio::time::timeout(timeout, collator_sync).map(|_| ())).boxed())
+        let timeout_or_sync =
+            tokio::time::timeout(timeout, collator_sync).map(|result| match result {
+                Ok(Ok(())) | Err(_) => Ok(()),
+                Ok(Err(Cancelled())) => Err(Cancelled()),
+            });
+        Err(timeout_or_sync.boxed())
     } else if *is_paused {
         tracing::info!(
             parent: round_ctx.span(),

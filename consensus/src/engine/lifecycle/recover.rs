@@ -3,11 +3,13 @@ use std::sync::Arc;
 use futures_util::never::Never;
 use parking_lot::Mutex;
 
+use crate::dag::HistoryConflict;
 use crate::effects::{AltFormat, Cancelled, Task, TaskTracker};
-use crate::engine::lifecycle::{EngineError, EngineNetwork, FixHistoryFlag};
+use crate::engine::lifecycle::{
+    EngineBinding, EngineError, EngineNetwork, EngineNetworkArgs, FixHistoryFlag,
+};
 use crate::engine::{Engine, MempoolMergedConfig};
-use crate::intercom::{InitPeers, PeerSchedule};
-use crate::prelude::{EngineBinding, EngineNetworkArgs};
+use crate::intercom::{InitPeers, WeakPeerSchedule};
 
 pub struct EngineRecoverLoop {
     // to create new engine run
@@ -29,12 +31,14 @@ impl Drop for EngineRecoverLoop {
 pub struct RunAttributes {
     pub tracker: TaskTracker,
     pub is_stopping: bool,
-    pub peer_schedule: PeerSchedule,
+    pub peer_schedule: WeakPeerSchedule,
     pub last_peers: InitPeers,
+    #[cfg(feature = "mock-feedback")]
+    pub mock_feedback: Task<Never>,
 }
 
 impl EngineRecoverLoop {
-    pub async fn run_loop(self, mut engine_run: Task<Result<Never, EngineError>>) {
+    pub async fn run_loop(self, mut engine_run: Task<Result<Never, HistoryConflict>>) {
         loop {
             tracing::info!(
                 peer_id = %self.net_args.network.peer_id().alt(),
@@ -60,8 +64,8 @@ impl EngineRecoverLoop {
             drop(task_tracker);
 
             let fix_history = match never_ok {
-                Err(Cancelled()) | Ok(Err(EngineError::Cancelled)) => break,
-                Ok(Err(EngineError::HistoryConflict(_))) => FixHistoryFlag(true),
+                Err(Cancelled()) => break,
+                Ok(Err(HistoryConflict(_))) => FixHistoryFlag(true),
             };
 
             let (task_tracker, net) = {
@@ -76,7 +80,23 @@ impl EngineRecoverLoop {
                     &self.merged_conf,
                     &guard.last_peers,
                 );
-                guard.peer_schedule = net.peer_schedule.clone();
+                guard.peer_schedule = net.peer_schedule.downgrade();
+
+                #[cfg(feature = "mock-feedback")]
+                {
+                    use crate::mock_feedback::MockFeedbackSender;
+                    net.responder
+                        .set_top_known_anchor(&self.bind.top_known_anchor);
+                    let sender = MockFeedbackSender::new(
+                        net.dispatcher.clone(),
+                        guard.peer_schedule.clone(),
+                        self.bind.top_known_anchor.clone(),
+                        &guard.last_peers,
+                        self.net_args.network.peer_id(),
+                    );
+                    guard.mock_feedback = guard.tracker.ctx().spawn(sender.run());
+                }
+
                 (guard.tracker.clone(), net)
             };
 
@@ -88,7 +108,12 @@ impl EngineRecoverLoop {
                 fix_history,
             );
 
-            engine_run = task_tracker.ctx().spawn(engine.run());
+            engine_run = task_tracker.ctx().spawn(async move {
+                match engine.run().await {
+                    Err(EngineError::Cancelled) => Err(Cancelled()),
+                    Err(EngineError::HistoryConflict(e)) => Ok(Err(e)),
+                }
+            });
         }
     }
 }

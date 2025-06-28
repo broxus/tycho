@@ -1,42 +1,25 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use crate::config::{PodConfig, SimulatorConfig};
-use crate::helm::HelmRunner;
+use crate::backend::KubeCtl;
+use crate::config::PodConfig;
 
 #[derive(Subcommand)]
 pub enum NodeCommand {
-    Add(AddCommand),
-    Start(StartCommand),
-    Stop,
+    /// Get pod logs
     Logs(NodeLogsCommand),
-    Exec(NodeExecCommand),
-    Status,
+    /// Exec shell in pod
+    Shell(NodeShellCommand),
 }
 
 impl NodeCommand {
-    pub fn run(self, config: &SimulatorConfig) -> Result<()> {
-        // todo: update to actual cluster type
-
+    pub fn run(self) -> Result<()> {
         match self {
-            NodeCommand::Add(_) => {
-                panic!("unimplemented: add node");
-            }
-            NodeCommand::Start(a) => {
-                HelmRunner::upgrade_install(config, a.debug, None)?;
-            }
-            NodeCommand::Stop => {
-                HelmRunner::uninstall(config)?;
-            }
             NodeCommand::Logs(a) => {
-                HelmRunner::logs(&PodConfig::name(a.node_index), a.follow)?;
+                KubeCtl::logs(&PodConfig::name(a.node_index), a.follow)?;
             }
-            NodeCommand::Exec(a) => {
-                let pod_name = PodConfig::name(a.node_index);
-                HelmRunner::exec_command(&pod_name, a.stdin, a.tty, &a.cmd, &a.args)?;
-            }
-            NodeCommand::Status => {
-                HelmRunner::ps()?;
+            NodeCommand::Shell(a) => {
+                KubeCtl::shell(&PodConfig::name(a.node_index))?;
             }
         }
         Ok(())
@@ -44,36 +27,17 @@ impl NodeCommand {
 }
 
 #[derive(Parser)]
-pub struct AddCommand {
-    #[clap(short, long)]
-    pub delay: Option<u16>,
-    #[clap(short, long)]
-    pub loss: Option<u16>,
-}
-
-#[derive(Parser)]
-pub struct StartCommand {
-    #[clap(short, long, action)]
-    pub debug: bool,
-}
-
-#[derive(Parser)]
 pub struct NodeLogsCommand {
     #[clap(short, long)]
-    #[clap(default_value = "0")]
+    #[clap(default_value_t = 0)]
     node_index: usize,
-    #[clap(short, long)]
+    #[clap(short, long, action)]
     follow: bool,
 }
 
 #[derive(Parser)]
-pub struct NodeExecCommand {
+pub struct NodeShellCommand {
     #[clap(short, long)]
+    #[clap(default_value_t = 0)]
     node_index: usize,
-    #[clap(short = 'i', long, action)]
-    stdin: bool,
-    #[clap(short, long, action)]
-    tty: bool,
-    cmd: String,
-    args: Vec<String>,
 }
