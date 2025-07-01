@@ -191,7 +191,7 @@ pub fn init_logger_simple(default_filter: &str) {
         .init();
 }
 
-/// Initializeds logger once.
+/// Initializes logger once.
 ///
 /// All invocations after the successfull initialization will fail.
 ///
