@@ -439,6 +439,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cassadilia"
+version = "0.1.0"
+source = "git+https://github.com/0xdeafbeef/cassadilia.git#65d0c180e49af37a8e4249e09dde9c16d99baa0f"
+dependencies = [
+ "blake3",
+ "bytes",
+ "hex",
+ "parking_lot",
+ "tempfile",
+ "thiserror 2.0.12",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2816,7 +2831,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.9.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3909,6 +3924,7 @@ dependencies = [
  "bumpalo-herd",
  "bytes",
  "bytesize",
+ "cassadilia",
  "castaway",
  "crc32c",
  "dashmap",
@@ -4550,7 +4566,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

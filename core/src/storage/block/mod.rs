@@ -1,4 +1,5 @@
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -71,7 +72,8 @@ impl BlockStorage {
             block_handle_storage.clone(),
             archive_chunk_size,
             config.split_block_tasks,
-        );
+            &config.blobs_root,
+        )?;
 
         blob_storage.finish_block_data().await?;
         blob_storage.preload_archive_ids().await?;
@@ -565,6 +567,7 @@ pub struct BlockStorageConfig {
     pub archive_chunk_size: ByteSize,
     pub blocks_cache: BlocksCacheConfig,
     pub split_block_tasks: usize,
+    pub blobs_root: PathBuf,
 }
 
 type BlocksCache = moka::sync::Cache<BlockId, BlockStuff, FastHasherState>;
@@ -586,10 +589,10 @@ mod tests {
     use std::pin::pin;
 
     use blobs::*;
-    use tycho_types::prelude::*;
     use tycho_block_util::archive::{ArchiveEntryType, WithArchiveData};
     use tycho_storage::StorageContext;
     use tycho_storage::kv::StoredValue;
+    use tycho_types::prelude::*;
     use tycho_util::FastHashMap;
     use tycho_util::futures::JoinTask;
 

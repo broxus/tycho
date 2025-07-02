@@ -65,6 +65,7 @@ impl CoreStorage {
             archive_chunk_size: config.archive_chunk_size,
             blocks_cache: config.blocks_cache,
             split_block_tasks: config.split_block_tasks,
+            blobs_root: ctx.root_dir().path().join("blobs"),
         };
         let block_handle_storage = Arc::new(BlockHandleStorage::new(db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(db.clone()));
