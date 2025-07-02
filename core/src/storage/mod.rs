@@ -68,13 +68,16 @@ impl CoreStorage {
         };
         let block_handle_storage = Arc::new(BlockHandleStorage::new(db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(db.clone()));
-        let block_storage = Arc::new(BlockStorage::new(
-            db.clone(),
-            blocks_storage_config,
-            block_handle_storage.clone(),
-            block_connection_storage.clone(),
-            config.archive_chunk_size,
-        ));
+        let block_storage = Arc::new(
+            BlockStorage::new(
+                db.clone(),
+                blocks_storage_config,
+                block_handle_storage.clone(),
+                block_connection_storage.clone(),
+                config.archive_chunk_size,
+            )
+            .await?,
+        );
         let shard_state_storage = ShardStateStorage::new(
             db.clone(),
             block_handle_storage.clone(),
@@ -93,9 +96,6 @@ impl CoreStorage {
         persistent_state_storage.preload().await?;
 
         let node_state_storage = NodeStateStorage::new(db.clone());
-
-        block_storage.finish_block_data().await?;
-        block_storage.preload_archive_ids().await?;
 
         Ok(Self {
             inner: Arc::new(Inner {
