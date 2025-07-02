@@ -36,6 +36,7 @@ bumpalo-herd = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 bytesize = { workspace = true }
 castaway = { workspace = true }
+cassadilia = { git = "https://github.com/0xdeafbeef/cassadilia.git" }
 crc32c = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
@@ -69,7 +70,7 @@ tycho-util = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["full"] }
 tycho-block-util = { workspace = true, features = ["test"] }
 tycho-crypto = { workspace = true }
 tycho-network = { workspace = true, features = ["test"] }

@@ -1,5 +1,7 @@
+use std::cmp::Ordering;
 use std::hash::Hash;
 
+use cassadilia::KeyEncoderError;
 use tycho_block_util::archive::ArchiveEntryType;
 use tycho_storage::kv::{StoredValue, StoredValueBuffer};
 use tycho_types::cell::HashBytes;
@@ -87,10 +89,62 @@ impl StoredValue for PartialBlockId {
 }
 
 /// Package entry id.
-#[derive(Debug, Hash, Eq, PartialEq)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub struct PackageEntryKey {
     pub block_id: PartialBlockId,
     pub ty: ArchiveEntryType,
+}
+
+impl Ord for PackageEntryKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // NOTE: Can't just derive Ord here.
+        // RocksDB does a lexicographical byte compare, but the default Ord for
+        // `workchain: i32` is wrong. For RocksDB, the bytes for -1 = u32::MAX, and they are > bytes for 0.
+        // Casting to u32 mimics this byte-level compare.
+        let self_wc_ordered = self.block_id.shard.workchain() as u32;
+        let other_wc_ordered = other.block_id.shard.workchain() as u32;
+
+        (
+            self_wc_ordered,
+            self.block_id.shard.prefix(),
+            self.block_id.seqno,
+            self.block_id.root_hash,
+            self.ty as u8,
+        )
+            .cmp(&(
+                other_wc_ordered,
+                other.block_id.shard.prefix(),
+                other.block_id.seqno,
+                other.block_id.root_hash,
+                other.ty as u8,
+            ))
+    }
+}
+
+impl PartialOrd for PackageEntryKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub struct PackageEntryKeyEncoder;
+impl cassadilia::KeyEncoder<PackageEntryKey> for PackageEntryKeyEncoder {
+    fn encode(&self, key: &PackageEntryKey) -> Result<Vec<u8>, KeyEncoderError> {
+        let mut buffer = Vec::with_capacity(PackageEntryKey::SIZE_HINT);
+        key.serialize(&mut buffer);
+
+        Ok(buffer)
+    }
+
+    fn decode(&self, data: &[u8]) -> Result<PackageEntryKey, KeyEncoderError> {
+        let mut reader = data;
+        let key = PackageEntryKey::deserialize(&mut reader);
+        if reader.is_empty() {
+            Ok(key)
+        } else {
+            Err(KeyEncoderError::DecodeError)
+        }
+    }
 }
 
 impl PackageEntryKey {
@@ -209,5 +263,117 @@ impl StoredValue for BlockDataEntryKey {
             },
             chunk_index,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cmp::Ordering;
+
+    use super::*;
+
+    #[test]
+    fn ord_is_sane_and_matches_bytes() {
+        // copied from remove_blocks
+        let to_bytes = |k: &PackageEntryKey| -> Vec<u8> {
+            let mut bytes = Vec::with_capacity(97);
+            bytes.extend_from_slice(&k.block_id.shard.workchain().to_be_bytes());
+            bytes.extend_from_slice(&k.block_id.shard.prefix().to_be_bytes());
+            bytes.extend_from_slice(&k.block_id.seqno.to_be_bytes());
+            bytes.extend_from_slice(&k.block_id.root_hash.0);
+            bytes.push(k.ty as u8);
+            bytes
+        };
+
+        let base = PackageEntryKey {
+            block_id: PartialBlockId {
+                shard: ShardIdent::BASECHAIN, // wc 0, prefix 0x8000...
+                seqno: 100,
+                root_hash: HashBytes([1; 32]),
+            },
+            ty: ArchiveEntryType::Block,
+        };
+
+        let check = |a: PackageEntryKey, b: PackageEntryKey, expected: Ordering| {
+            let rust_ord = a.cmp(&b);
+            let byte_ord = to_bytes(&a).cmp(&to_bytes(&b));
+            // if these don't match, our Ord is fucked
+            assert_eq!(rust_ord, byte_ord, "Rust Ord vs byte Ord mismatch");
+            // check the actual ordering logic
+            assert_eq!(rust_ord, expected, "Unexpected ordering");
+        };
+
+        // --- test cases ---
+
+        // masterchain (-1) > basechain (0)
+        check(
+            PackageEntryKey {
+                block_id: PartialBlockId {
+                    shard: ShardIdent::MASTERCHAIN,
+                    ..base.block_id
+                },
+                ..base
+            },
+            base.clone(),
+            Ordering::Greater,
+        );
+
+        // shard prefix split: left < right
+        let (left_shard, right_shard) = base.block_id.shard.split().unwrap();
+        check(
+            PackageEntryKey {
+                block_id: PartialBlockId {
+                    shard: left_shard,
+                    ..base.block_id
+                },
+                ..base
+            },
+            PackageEntryKey {
+                block_id: PartialBlockId {
+                    shard: right_shard,
+                    ..base.block_id
+                },
+                ..base
+            },
+            Ordering::Less,
+        );
+
+        // seqno
+        check(
+            base.clone(),
+            PackageEntryKey {
+                block_id: PartialBlockId {
+                    seqno: base.block_id.seqno + 1,
+                    ..base.block_id
+                },
+                ..base
+            },
+            Ordering::Less,
+        );
+
+        // root hash
+        let mut bigger_hash = base.block_id.root_hash;
+        bigger_hash.0[31] = 2; // just need a lexicographically larger hash
+        check(
+            base.clone(),
+            PackageEntryKey {
+                block_id: PartialBlockId {
+                    root_hash: bigger_hash,
+                    ..base.block_id
+                },
+                ..base
+            },
+            Ordering::Less,
+        );
+
+        // entry type
+        check(
+            base.clone(),
+            PackageEntryKey {
+                ty: ArchiveEntryType::Proof,
+                ..base
+            },
+            Ordering::Less,
+        );
     }
 }
