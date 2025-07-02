@@ -1,3 +1,8 @@
+mod task;
+mod types;
+mod util;
+mod writer;
+
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -5,30 +10,25 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use bytes::Buf;
 use cassadilia::{Cas, KeyEncoderError};
+use everscale_types::boc::{Boc, BocRepr};
+use everscale_types::cell::HashBytes;
+use everscale_types::models::*;
 use parking_lot::RwLock;
-use tl_proto::TlWrite;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
 use tokio::task::JoinHandle;
-use tycho_block_util::archive::{
-    ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX, ArchiveEntryHeader, ArchiveEntryType,
-};
-use tycho_block_util::block::ShardHeights;
+use tycho_block_util::archive::ArchiveEntryType;
 use tycho_storage::kv::StoredValue;
-use tycho_types::boc::{Boc, BocRepr};
-use tycho_types::cell::HashBytes;
-use tycho_types::models::*;
-use tycho_util::FastHashSet;
-use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::CancellationFlag;
+pub use types::{ArchiveId, BlockGcStats, BlockStorageError, FullBlockDataGuard};
+pub use util::remove_blocks;
 use weedb::{ColumnFamily, OwnedPinnableSlice, rocksdb};
 
-use super::super::{BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage, CoreDb, tables};
+use self::task::CommitArchiveTask;
 use super::package_entry::{
     BlockDataEntryKey, PackageEntryKey, PackageEntryKeyEncoder, PartialBlockId,
 };
+use crate::storage::{BlockHandle, BlockHandleStorage, CoreDb, tables};
 
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 // Reserved key in which the archive size is stored
@@ -397,7 +397,7 @@ impl BlobStorage {
                 return Ok(None);
             };
 
-            let Some(ArchiveEntryType::Block) = extract_entry_type(key) else {
+            let Some(ArchiveEntryType::Block) = util::extract_entry_type(key) else {
                 continue;
             };
 
@@ -793,111 +793,7 @@ impl BlobStorage {
         let block_handle_storage = self.block_handle_storage.clone();
         let chunk_size = self.archive_chunk_size().get() as u64;
 
-        let span = tracing::Span::current();
-        let cancelled = CancellationFlag::new();
-
-        let handle = tokio::task::spawn_blocking({
-            let cancelled = cancelled.clone();
-
-            move || {
-                let _span = span.enter();
-
-                let histogram = HistogramGuard::begin("tycho_storage_commit_archive_time");
-
-                tracing::info!("started");
-                let guard = scopeguard::guard((), |_| {
-                    tracing::warn!("cancelled");
-                });
-
-                let raw_block_ids = db
-                    .archive_block_ids
-                    .get(archive_id.to_be_bytes())?
-                    .ok_or(BlockStorageError::ArchiveNotFound)?;
-                assert_eq!(raw_block_ids.len() % BlockId::SIZE_HINT, 0);
-
-                let mut writer = ArchiveWriter::new(&db, archive_id, chunk_size)?;
-                let mut header_buffer = Vec::with_capacity(ARCHIVE_ENTRY_HEADER_LEN);
-
-                // Write archive prefix
-                writer.write(&ARCHIVE_PREFIX)?;
-
-                // Write all entries. We group them by type to achieve better compression.
-                let mut unique_ids = FastHashSet::default();
-                for ty in [
-                    ArchiveEntryType::Block,
-                    ArchiveEntryType::Proof,
-                    ArchiveEntryType::QueueDiff,
-                ] {
-                    for raw_block_id in raw_block_ids.chunks_exact(BlockId::SIZE_HINT) {
-                        anyhow::ensure!(!cancelled.check(), "task aborted");
-
-                        let block_id = BlockId::from_slice(raw_block_id);
-                        if !unique_ids.insert(block_id) {
-                            tracing::warn!(%block_id, "skipped duplicate block id");
-                            continue;
-                        }
-
-                        // Check handle flags (only for the first type).
-                        if ty == ArchiveEntryType::Block {
-                            let handle = block_handle_storage
-                                .load_handle(&block_id)
-                                .ok_or(BlockStorageError::BlockHandleNotFound)?;
-
-                            let flags = handle.meta().flags();
-                            anyhow::ensure!(
-                                flags.contains(BlockFlags::HAS_ALL_BLOCK_PARTS),
-                                "block does not have all parts: {block_id}, \
-                                has_data={}, has_proof={}, queue_diff={}",
-                                flags.contains(BlockFlags::HAS_DATA),
-                                flags.contains(BlockFlags::HAS_PROOF),
-                                flags.contains(BlockFlags::HAS_QUEUE_DIFF)
-                            );
-                        }
-
-                        let key = PackageEntryKey::from((block_id, ty));
-                        let Some(data) = db.package_entries.get(key.to_vec()).unwrap() else {
-                            return Err(BlockStorageError::BlockDataNotFound.into());
-                        };
-
-                        // Serialize entry header
-                        header_buffer.clear();
-                        ArchiveEntryHeader {
-                            block_id,
-                            ty,
-                            data_len: data.len() as u32,
-                        }
-                        .write_to(&mut header_buffer);
-
-                        // Write entry header and data
-                        writer.write(&header_buffer)?;
-                        writer.write(data.as_ref())?;
-                    }
-
-                    unique_ids.clear();
-                }
-
-                // Drop ids entry just in case (before removing it)
-                drop(raw_block_ids);
-
-                // Finalize the archive
-                writer.finalize()?;
-
-                // Done
-                scopeguard::ScopeGuard::into_inner(guard);
-                tracing::info!(
-                    elapsed = %humantime::format_duration(histogram.finish()),
-                    "finished"
-                );
-
-                Ok(())
-            }
-        });
-
-        CommitArchiveTask {
-            archive_id,
-            cancelled,
-            handle: Some(handle),
-        }
+        CommitArchiveTask::new(db, block_handle_storage, archive_id, chunk_size)
     }
 
     fn spawn_split_block_data(
@@ -910,8 +806,7 @@ impl BlobStorage {
         let chunk_size = self.block_data_chunk_size().get() as usize;
 
         let span = tracing::Span::current();
-
-        tokio::task::spawn_blocking({
+        let handle = tokio::task::spawn_blocking({
             let block_id = *block_id;
             let data = data.to_vec();
 
@@ -944,159 +839,13 @@ impl BlobStorage {
 
                 Ok(())
             }
-        })
+        });
+
+        handle
     }
 
     pub fn db(&self) -> &CoreDb {
         &self.db
-    }
-}
-
-struct CommitArchiveTask {
-    archive_id: u32,
-    cancelled: CancellationFlag,
-    handle: Option<JoinHandle<Result<()>>>,
-}
-
-impl CommitArchiveTask {
-    async fn finish(&mut self) -> Result<()> {
-        // NOTE: Await on reference to make sure that the task is cancel safe
-        if let Some(handle) = &mut self.handle {
-            if let Err(e) = handle
-                .await
-                .map_err(|e| {
-                    if e.is_panic() {
-                        std::panic::resume_unwind(e.into_panic());
-                    }
-                    anyhow::Error::from(e)
-                })
-                .and_then(std::convert::identity)
-            {
-                tracing::error!(
-                    archive_id = self.archive_id,
-                    "failed to commit archive: {e:?}"
-                );
-            }
-
-            self.handle = None;
-        }
-
-        Ok(())
-    }
-}
-
-impl Drop for CommitArchiveTask {
-    fn drop(&mut self) {
-        self.cancelled.cancel();
-        if let Some(handle) = &self.handle {
-            handle.abort();
-        }
-    }
-}
-
-struct ArchiveWriter<'a> {
-    db: &'a CoreDb,
-    archive_id: u32,
-    chunk_len: usize,
-    total_len: u64,
-    chunk_index: u64,
-    chunks_buffer: Vec<u8>,
-    zstd_compressor: ZstdCompressStream<'a>,
-}
-
-impl<'a> ArchiveWriter<'a> {
-    fn new(db: &'a CoreDb, archive_id: u32, chunk_len: u64) -> Result<Self> {
-        let chunk_len = chunk_len as usize;
-
-        let mut zstd_compressor = ZstdCompressStream::new(9, chunk_len)?;
-
-        let workers = (std::thread::available_parallelism()?.get() / 4) as u8;
-        zstd_compressor.multithreaded(workers)?;
-
-        Ok(Self {
-            db,
-            archive_id,
-            chunk_len,
-            total_len: 0,
-            chunk_index: 0,
-            chunks_buffer: Vec::with_capacity(chunk_len),
-            zstd_compressor,
-        })
-    }
-
-    fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.zstd_compressor.write(data, &mut self.chunks_buffer)?;
-        self.flush(false)
-    }
-
-    fn finalize(mut self) -> Result<()> {
-        self.zstd_compressor.finish(&mut self.chunks_buffer)?;
-
-        // Write the last chunk
-        self.flush(true)?;
-        debug_assert!(self.chunks_buffer.is_empty());
-
-        // Write archive size and remove archive block ids atomically
-        let archives_cf = self.db.archives.cf();
-        let block_ids_cf = self.db.archive_block_ids.cf();
-
-        let mut batch = rocksdb::WriteBatch::default();
-
-        // Write a special entry with the total size of the archive
-        let mut key = [0u8; tables::Archives::KEY_LEN];
-        key[..4].copy_from_slice(&self.archive_id.to_be_bytes());
-        key[4..].copy_from_slice(&ARCHIVE_SIZE_MAGIC.to_be_bytes());
-        batch.put_cf(&archives_cf, key.as_slice(), self.total_len.to_le_bytes());
-
-        // Remove related block ids
-        batch.delete_cf(&block_ids_cf, self.archive_id.to_be_bytes());
-
-        self.db.rocksdb().write(batch)?;
-        Ok(())
-    }
-
-    fn flush(&mut self, finalize: bool) -> Result<()> {
-        let buffer_len = self.chunks_buffer.len();
-        if buffer_len == 0 {
-            return Ok(());
-        }
-
-        let mut key = [0u8; tables::Archives::KEY_LEN];
-        key[..4].copy_from_slice(&self.archive_id.to_be_bytes());
-
-        let mut do_flush = |data: &[u8]| {
-            key[4..].copy_from_slice(&self.chunk_index.to_be_bytes());
-
-            self.total_len += data.len() as u64;
-            self.chunk_index += 1;
-
-            self.db.archives.insert(key, data)
-        };
-
-        // Write all full chunks
-        let mut buffer_offset = 0;
-        while buffer_offset + self.chunk_len <= buffer_len {
-            do_flush(&self.chunks_buffer[buffer_offset..buffer_offset + self.chunk_len])?;
-            buffer_offset += self.chunk_len;
-        }
-
-        if finalize {
-            // Just write the remaining data on finalize
-            do_flush(&self.chunks_buffer[buffer_offset..])?;
-            self.chunks_buffer.clear();
-        } else {
-            // Shift the remaining data to the beginning of the buffer and clear the rest
-            let rem = buffer_len % self.chunk_len;
-            if rem == 0 {
-                self.chunks_buffer.clear();
-            } else if buffer_offset > 0 {
-                // TODO: Use memmove since we are copying non-overlapping regions
-                self.chunks_buffer.copy_within(buffer_offset.., 0);
-                self.chunks_buffer.truncate(rem);
-            }
-        }
-
-        Ok(())
     }
 }
 
@@ -1114,207 +863,7 @@ struct ArchiveIds {
     override_next_id: Option<u32>,
 }
 
-pub struct FullBlockDataGuard<'a> {
-    pub _lock: BlockDataGuard<'a>,
-    pub data: rocksdb::DBPinnableSlice<'a>,
-}
-
-impl AsRef<[u8]> for FullBlockDataGuard<'_> {
-    fn as_ref(&self) -> &[u8] {
-        self.data.as_ref()
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum ArchiveId {
-    Found(u32),
-    TooNew,
-    NotFound,
-}
-
-#[derive(thiserror::Error, Debug)]
-enum BlockStorageError {
-    #[error("Archive not found")]
-    ArchiveNotFound,
-    #[error("Block data not found")]
-    BlockDataNotFound,
-    #[error("Block handle not found")]
-    BlockHandleNotFound,
-    #[error("Package entry not found")]
-    PackageEntryNotFound,
-    #[error("Offset is outside of the archive slice")]
-    InvalidOffset,
-}
-
 type ArchiveIdsTx = broadcast::Sender<u32>;
-
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
-pub struct BlockGcStats {
-    pub mc_blocks_removed: usize,
-    pub total_blocks_removed: usize,
-}
-
-pub fn remove_blocks(
-    db: CoreDb,
-    max_blocks_per_batch: Option<usize>,
-    mc_seqno: u32,
-    shard_heights: ShardHeights,
-    cancelled: Option<&CancellationFlag>,
-) -> Result<BlockGcStats> {
-    let mut stats = BlockGcStats::default();
-
-    let raw = db.rocksdb().as_ref();
-    let full_block_ids_cf = db.full_block_ids.cf();
-    let block_connections_cf = db.block_connections.cf();
-    let package_entries_cf = db.package_entries.cf();
-    let block_data_entries_cf = db.block_data_entries.cf();
-    let block_handles_cf = db.block_handles.cf();
-
-    // Create batch
-    let mut batch = rocksdb::WriteBatch::default();
-    let mut batch_len = 0;
-
-    // Iterate all entries and find expired items
-    let mut blocks_iter =
-        raw.raw_iterator_cf_opt(&full_block_ids_cf, db.full_block_ids.new_read_config());
-    blocks_iter.seek_to_first();
-
-    let block_handles_readopts = db.block_handles.new_read_config();
-    let is_persistent = |root_hash: &[u8; 32]| -> Result<bool> {
-        const FLAGS: u64 =
-            ((BlockFlags::IS_KEY_BLOCK.bits() | BlockFlags::IS_PERSISTENT.bits()) as u64) << 32;
-
-        let Some(value) =
-            raw.get_pinned_cf_opt(&block_handles_cf, root_hash, &block_handles_readopts)?
-        else {
-            return Ok(false);
-        };
-        Ok(value.as_ref().get_u64_le() & FLAGS != 0)
-    };
-
-    let mut key_buffer = [0u8; tables::PackageEntries::KEY_LEN];
-    let mut delete_range =
-        |batch: &mut rocksdb::WriteBatch, from: &BlockIdShort, to: &BlockIdShort| {
-            debug_assert_eq!(from.shard, to.shard);
-            debug_assert!(from.seqno <= to.seqno);
-
-            let range_from = &mut key_buffer;
-            range_from[..4].copy_from_slice(&from.shard.workchain().to_be_bytes());
-            range_from[4..12].copy_from_slice(&from.shard.prefix().to_be_bytes());
-            range_from[12..16].copy_from_slice(&from.seqno.to_be_bytes());
-
-            let mut range_to = *range_from;
-            range_to[12..16].copy_from_slice(&to.seqno.saturating_add(1).to_be_bytes());
-
-            // At this point we have two keys:
-            // [workchain, shard, from_seqno, 0...]
-            // [workchain, shard, to_seqno + 1, 0...]
-            //
-            // It will delete all entries in range [from_seqno, to_seqno) for this shard.
-            // Note that package entry keys are the same as block connection keys.
-            batch.delete_range_cf(&full_block_ids_cf, &*range_from, &range_to);
-            batch.delete_range_cf(&package_entries_cf, &*range_from, &range_to);
-            batch.delete_range_cf(&block_data_entries_cf, &*range_from, &range_to);
-            batch.delete_range_cf(&block_connections_cf, &*range_from, &range_to);
-
-            tracing::debug!(%from, %to, "delete_range");
-        };
-
-    let mut cancelled = cancelled.map(|c| c.debounce(100));
-    let mut current_range = None::<(BlockIdShort, BlockIdShort)>;
-    loop {
-        let key = match blocks_iter.key() {
-            Some(key) => key,
-            None => break blocks_iter.status()?,
-        };
-
-        if let Some(cancelled) = &mut cancelled {
-            if cancelled.check() {
-                anyhow::bail!("blocks GC cancelled");
-            }
-        }
-
-        // Key structure:
-        // [workchain id, 4 bytes]  |
-        // [shard id, 8 bytes]      | BlockIdShort
-        // [seqno, 4 bytes]         |
-        // [root hash, 32 bytes] <-
-        // ..
-        let block_id = BlockIdShort::from_slice(key);
-        let root_hash: &[u8; 32] = key[16..48].try_into().unwrap();
-        let is_masterchain = block_id.shard.is_masterchain();
-
-        // Don't gc latest blocks, key blocks or persistent blocks
-        if block_id.seqno == 0
-            || is_masterchain && block_id.seqno >= mc_seqno
-            || !is_masterchain
-                && shard_heights.contains_shard_seqno(&block_id.shard, block_id.seqno)
-            || is_persistent(root_hash)?
-        {
-            // Remove the current range
-            if let Some((from, to)) = current_range.take() {
-                delete_range(&mut batch, &from, &to);
-                batch_len += 1; // Ensure that we flush the batch
-            }
-            blocks_iter.next();
-            continue;
-        }
-
-        match &mut current_range {
-            // Delete the previous range and start a new one
-            Some((from, to)) if from.shard != block_id.shard => {
-                delete_range(&mut batch, from, to);
-                *from = block_id;
-                *to = block_id;
-            }
-            // Update the current range
-            Some((_, to)) => *to = block_id,
-            // Start a new range
-            None => current_range = Some((block_id, block_id)),
-        }
-
-        // Count entry
-        stats.total_blocks_removed += 1;
-        if is_masterchain {
-            stats.mc_blocks_removed += 1;
-        }
-
-        batch.delete_cf(&block_handles_cf, root_hash);
-
-        batch_len += 1;
-        if matches!(
-            max_blocks_per_batch,
-            Some(max_blocks_per_batch) if batch_len >= max_blocks_per_batch
-        ) {
-            tracing::info!(
-                total_blocks_removed = stats.total_blocks_removed,
-                "applying intermediate batch",
-            );
-            let batch = std::mem::take(&mut batch);
-            raw.write(batch)?;
-            batch_len = 0;
-        }
-
-        blocks_iter.next();
-    }
-
-    if let Some((from, to)) = current_range.take() {
-        delete_range(&mut batch, &from, &to);
-        batch_len += 1; // Ensure that we flush the batch
-    }
-
-    if batch_len > 0 {
-        tracing::info!("applying final batch");
-        raw.write(batch)?;
-    }
-
-    // Done
-    Ok(stats)
-}
-
-fn extract_entry_type(key: &[u8]) -> Option<ArchiveEntryType> {
-    key.get(48).copied().and_then(ArchiveEntryType::from_byte)
-}
 
 struct U32Encoder;
 
