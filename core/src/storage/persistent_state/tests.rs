@@ -1,13 +1,17 @@
+use std::collections::BTreeSet;
+
 use anyhow::Result;
 use bytesize::ByteSize;
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, CellBuilder, CellSlice, HashBytes, Lazy};
 use everscale_types::models::{
-    BlockId, CurrencyCollection, IntMsgInfo, IntermediateAddr, Message, MsgEnvelope, MsgInfo,
-    OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, ShardIdent,
+    BlockId, CurrencyCollection, IntAddr, IntMsgInfo, IntermediateAddr, Message, MsgEnvelope,
+    MsgInfo, OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, ShardIdent, StdAddr,
 };
 use everscale_types::num::Tokens;
-use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueueStateHeader};
+use tycho_block_util::queue::{
+    QueueDiffStuff, QueueKey, QueueStateHeader, RouterAddr, RouterPartitions,
+};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_util::compression::zstd_decompress;
@@ -209,6 +213,28 @@ async fn persistent_queue_state_read_write() -> Result<()> {
 
     let mut prev_hash = HashBytes::ZERO;
     let mut target_message_count = 0;
+
+    let mut dst_router = RouterPartitions::default();
+    let mut src_router = RouterPartitions::default();
+
+    dst_router.insert(
+        0.into(),
+        BTreeSet::from([RouterAddr::from_int_addr(&IntAddr::Std(StdAddr::from((
+            0,
+            HashBytes::from([1; 32]),
+        ))))
+        .unwrap()]),
+    );
+
+    src_router.insert(
+        1.into(),
+        BTreeSet::from([RouterAddr::from_int_addr(&IntAddr::Std(StdAddr::from((
+            -1,
+            HashBytes::from([3; 32]),
+        ))))
+        .unwrap()]),
+    );
+
     for seqno in 1..=target_mc_seqno {
         let start_lt = seqno as u64 * 10000;
 
@@ -250,6 +276,7 @@ async fn persistent_queue_state_read_write() -> Result<()> {
                 &QueueKey::max_for_lt(0),
                 messages.iter().map(|(hash, _, _)| hash),
             )
+            .with_router(src_router.clone(), dst_router.clone())
             .serialize();
 
         let block_id = BlockId {
@@ -378,7 +405,8 @@ async fn persistent_queue_state_read_write() -> Result<()> {
     let mut next_diff_index = 0;
     while let Some(mut part) = reader.read_next_queue_diff()? {
         next_diff_index += 1;
-
+        assert_eq!(part.queue_diff().router_partitions_dst, dst_router);
+        assert_eq!(part.queue_diff().router_partitions_src, src_router);
         while let Some(cell) = part.read_next_message()? {
             let exists = read_messages.insert(*cell.repr_hash());
             assert!(exists, "duplicate message");

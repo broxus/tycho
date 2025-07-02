@@ -2411,6 +2411,14 @@ impl TestStateNodeAdapter {
                 &max_message,
                 queue_diff_with_msgs.messages.keys().map(|k| &k.hash),
             )
+            .with_router(
+                queue_diff_with_msgs
+                    .partition_router
+                    .to_router_partitions_src(),
+                queue_diff_with_msgs
+                    .partition_router
+                    .to_router_partitions_dst(),
+            )
             .serialize();
         let queue_diff_hash = *queue_diff_serialized.hash();
 
