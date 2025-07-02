@@ -10,6 +10,7 @@ use tl_proto::TlRead;
 
 use crate::archive::WithArchiveData;
 use crate::queue::proto::{QueueDiff, QueueKey};
+use crate::queue::RouterPartitions;
 
 pub type QueueDiffStuffAug = WithArchiveData<QueueDiffStuff>;
 
@@ -30,6 +31,17 @@ impl QueueDiffStuffBuilder {
 
     pub fn with_processed_to(mut self, processed_to: BTreeMap<ShardIdent, QueueKey>) -> Self {
         self.inner_mut().diff.processed_to = processed_to;
+        self
+    }
+
+    pub fn with_router(
+        mut self,
+        src_router: RouterPartitions,
+        dsc_router: RouterPartitions,
+    ) -> Self {
+        let inner = self.inner_mut();
+        inner.diff.router_partitions_src = src_router;
+        inner.diff.router_partitions_dst = dsc_router;
         self
     }
 
