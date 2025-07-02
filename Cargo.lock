@@ -3784,6 +3784,7 @@ dependencies = [
  "humantime",
  "indexmap",
  "metrics",
+ "num-bigint",
  "parking_lot",
  "rand 0.9.1",
  "rayon",
