@@ -1,10 +1,12 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
 use bytes::Buf;
+use cassadilia::{Cas, KeyEncoderError};
 use parking_lot::RwLock;
 use tl_proto::TlWrite;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
@@ -24,7 +26,9 @@ use tycho_util::sync::CancellationFlag;
 use weedb::{ColumnFamily, OwnedPinnableSlice, rocksdb};
 
 use super::super::{BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage, CoreDb, tables};
-use super::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId};
+use super::package_entry::{
+    BlockDataEntryKey, PackageEntryKey, PackageEntryKeyEncoder, PartialBlockId,
+};
 
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 // Reserved key in which the archive size is stored
@@ -53,6 +57,9 @@ pub struct BlobStorage {
     archive_ids_tx: ArchiveIdsTx,
     archive_chunk_size: NonZeroU32,
     split_block_semaphore: Arc<Semaphore>,
+
+    blocks: Cas<PackageEntryKey>,
+    archives: Cas<u32>,
 }
 
 impl BlobStorage {
@@ -61,11 +68,22 @@ impl BlobStorage {
         block_handle_storage: Arc<BlockHandleStorage>,
         archive_chunk_size: NonZeroU32,
         split_block_tasks: usize,
-    ) -> Self {
+        blobdb_path: &Path,
+    ) -> Result<Self> {
         let (archive_ids_tx, _) = broadcast::channel(4);
         let split_block_semaphore = Arc::new(Semaphore::new(split_block_tasks));
+        let blocks = Cas::open(
+            blobdb_path.join("packages"),
+            PackageEntryKeyEncoder,
+            cassadilia::Config::default(),
+        )?;
+        let archives = Cas::open(
+            blobdb_path.join("archives"),
+            U32Encoder,
+            cassadilia::Config::default(),
+        )?;
 
-        Self {
+        Ok(Self {
             db,
             block_handle_storage,
             archive_ids_tx,
@@ -73,7 +91,10 @@ impl BlobStorage {
             split_block_semaphore,
             archive_ids: Default::default(),
             prev_archive_commit: Default::default(),
-        }
+
+            blocks,
+            archives,
+        })
     }
 
     pub fn archive_chunk_size(&self) -> NonZeroU32 {
@@ -889,7 +910,6 @@ impl BlobStorage {
         let chunk_size = self.block_data_chunk_size().get() as usize;
 
         let span = tracing::Span::current();
-        
 
         tokio::task::spawn_blocking({
             let block_id = *block_id;
@@ -1294,4 +1314,20 @@ pub fn remove_blocks(
 
 fn extract_entry_type(key: &[u8]) -> Option<ArchiveEntryType> {
     key.get(48).copied().and_then(ArchiveEntryType::from_byte)
+}
+
+struct U32Encoder;
+
+impl cassadilia::KeyEncoder<u32> for U32Encoder {
+    fn encode(&self, key: &u32) -> std::result::Result<Vec<u8>, KeyEncoderError> {
+        Ok(key.to_be_bytes().to_vec())
+    }
+
+    fn decode(&self, data: &[u8]) -> std::result::Result<u32, KeyEncoderError> {
+        if data.len() != 4 {
+            return Err(KeyEncoderError::DecodeError);
+        }
+
+        Ok(u32::from_be_bytes(data.try_into().unwrap()))
+    }
 }
