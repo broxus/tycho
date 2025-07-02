@@ -3,6 +3,7 @@ use std::time::Duration;
 use tycho_types::models::{
     ShardIdent, WorkUnitsParamsExecute, WorkUnitsParamsFinalize, WorkUnitsParamsPrepare,
 };
+use num_bigint::BigUint;
 
 use crate::collator::execution_manager::ExecutedGroup;
 use crate::collator::messages_reader::MessagesReaderMetrics;
@@ -310,15 +311,15 @@ impl FinalizeWu {
             .min(updated_accounts_count)
             .max(1);
 
-        let pow_shard_accounts_count =
-            (shard_accounts_count as f64).powf((state_pow_coeff as f64) / 10000.0) * 100.0;
-        let pow_shard_accounts_count = if pow_shard_accounts_count.is_finite()
-            && pow_shard_accounts_count <= u64::MAX as f64
-        {
-            pow_shard_accounts_count.round() as u64
-        } else {
-            100
-        };
+        let scale = 10;
+
+        let (numerator, denominator) = unpack_from_u16(state_pow_coeff);
+        let pow_shard_accounts_count = compute_scaled_pow(
+            shard_accounts_count as u128,
+            numerator as u32,
+            denominator as u32,
+            scale,
+        );
 
         let shard_accounts_count_log =
             shard_accounts_count.checked_ilog2().unwrap_or_default() as u64;
@@ -330,16 +331,17 @@ impl FinalizeWu {
         // calc update shard accounts:
         //  * prepare account modifications in (updated_accounts_count)
         //  * then update map of shard accounts in parallel in (updated_accounts_count)*log(shard_accounts_count)/(threads_count)
-        //  * additionally multiply on (shard_accounts_count^0.1504) for better precision on a large state
-        self.update_shard_accounts_wu = updated_accounts_count
+        //  * additionally multiply on (shard_accounts_count^a) for better precision on a large state
+        self.update_shard_accounts_wu = (updated_accounts_count as u128)
+            .saturating_mul(build_accounts as u128)
             .saturating_add(
-                updated_accounts_count
-                    .saturating_mul(shard_accounts_count_log)
-                    .saturating_div(threads_count)
+                (updated_accounts_count as u128)
+                    .saturating_mul(shard_accounts_count_log as u128)
+                    .saturating_div(threads_count as u128)
                     .saturating_mul(pow_shard_accounts_count)
-                    .saturating_div(100),
-            )
-            .saturating_mul(build_accounts as u64);
+                    .saturating_mul(build_accounts as u128)
+                    .saturating_div(scale),
+            ) as u64;
 
         // calc build account blocks:
         //  * build maps of transactions by accounts in parallel in (txs_count)*log(txs_count/threads_count)/(threads_count)
@@ -372,12 +374,12 @@ impl FinalizeWu {
         //  * use min value if calculated is less
         self.build_state_update_wu = std::cmp::max(
             state_update_min as u64,
-            updated_accounts_count
-                .saturating_mul(shard_accounts_count_log)
-                .saturating_div(threads_count)
+            (updated_accounts_count as u128)
+                .saturating_mul(shard_accounts_count_log as u128)
+                .saturating_div(threads_count as u128)
                 .saturating_mul(pow_shard_accounts_count)
-                .saturating_div(100)
-                .saturating_mul(state_update_accounts as u64),
+                .saturating_mul(state_update_accounts as u128)
+                .saturating_div(scale) as u64,
         );
 
         // calc build block
@@ -564,37 +566,35 @@ impl DoCollateWu {
             updated_accounts_count.max(4000)
         };
 
-        let pow_updated_accounts_count = (normalized_updated_accounts_count as f64)
-            .powf((updated_accounts_count_pow_coeff as f64) / 10000.0)
-            * 100.0;
-        let pow_updated_accounts_count = if pow_updated_accounts_count.is_finite()
-            && pow_updated_accounts_count <= u64::MAX as f64
-        {
-            pow_updated_accounts_count.round() as u64
-        } else {
-            100
-        };
+        let scale = 10;
 
-        let pow_shard_accounts_count =
-            (shard_accounts_count as f64).powf((state_pow_coeff as f64) / 10000.0) * 100.0;
-        let pow_shard_accounts_count = if pow_shard_accounts_count.is_finite()
-            && pow_shard_accounts_count <= u64::MAX as f64
-        {
-            pow_shard_accounts_count.round() as u64
-        } else {
-            100
-        };
+        let (numerator, denominator) = unpack_from_u16(updated_accounts_count_pow_coeff);
+        let pow_updated_accounts_count = compute_scaled_pow(
+            normalized_updated_accounts_count as u128,
+            numerator as u32,
+            denominator as u32,
+            scale,
+        );
+
+        let (numerator, denominator) = unpack_from_u16(state_pow_coeff);
+        let pow_shard_accounts_count = compute_scaled_pow(
+            shard_accounts_count as u128,
+            numerator as u32,
+            denominator as u32,
+            scale,
+        );
 
         let shard_accounts_count_log =
             shard_accounts_count.checked_ilog2().unwrap_or_default() as u64;
 
-        self.resume_collation_wu = pow_updated_accounts_count
-            .saturating_mul(shard_accounts_count_log)
+        self.resume_collation_wu = (updated_accounts_count as u128)
+            .saturating_mul(pow_updated_accounts_count)
+            .saturating_mul(shard_accounts_count_log as u128)
             .saturating_mul(pow_shard_accounts_count)
-            .saturating_mul(store_state_wu_param as u64)
-            .saturating_div(threads_count)
-            .saturating_div(100)
-            .saturating_div(100);
+            .saturating_mul(store_state_wu_param as u128)
+            .saturating_div(threads_count as u128)
+            .saturating_div(scale)
+            .saturating_div(scale) as u64;
     }
 
     pub fn resume_collation_wu_per_block(&self) -> u64 {
@@ -624,4 +624,97 @@ impl DoCollateWu {
             .as_nanos()
             .saturating_add(self.resume_collation_elapsed_per_block_ns())
     }
+}
+
+/// Packs two numbers (0..=99) into a single u16: format "AA BB" -> AA*100 + BB
+fn pack_into_u16(a: u16, b: u16) -> u16 {
+    assert!(a <= 99, "{a} is out of range 0..=99");
+    assert!(b <= 99, "{b} is out of range 0..=99");
+    a * 100 + b
+}
+
+/// Unpacks two numbers from u16.
+/// Numbers should be in range 0..=99
+fn unpack_from_u16(packed: u16) -> (u16, u16) {
+    if packed > 99 * 100 + 99 {
+        return (1, 1);
+    }
+    let a = packed / 100;
+    let b = packed % 100;
+    (a, b)
+}
+
+pub fn compute_scaled_pow(
+    x: u128,
+    pow_coeff_numerator: u32,
+    pow_coeff_denominator: u32,
+    scale: u128,
+) -> u128 {
+    fn compute_root(y: BigUint, denominator: u32) -> BigUint {
+        let one = BigUint::from(1u128);
+        let mut low = BigUint::ZERO;
+        let mut high = &y + &one;
+
+        while &low + &one < high {
+            let mid: BigUint = (&low + &high) >> 1;
+            let power = mid.pow(denominator);
+            if power <= y {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+
+        low
+    }
+
+    let x_pow = BigUint::from(x).pow(pow_coeff_numerator);
+    let scale_pow = BigUint::from(scale).pow(pow_coeff_denominator);
+    let y = x_pow * scale_pow;
+
+    let res = compute_root(y, pow_coeff_denominator);
+    res.try_into().unwrap_or(u128::MAX)
+}
+
+#[test]
+fn test_compute_scaled_pow() {
+    let scale = 100;
+
+    // 20k^1.2
+    let x = 20000;
+    let pow_coeff = 105;
+    let (pow_coeff_numerator, pow_coeff_denominator) = unpack_from_u16(pow_coeff);
+
+    let res = compute_scaled_pow(
+        x,
+        pow_coeff_numerator as u32,
+        pow_coeff_denominator as u32,
+        scale,
+    );
+    println!(
+        "{x}^({pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
+        (res as f64 / scale as f64),
+    );
+
+    let res = x * res;
+    println!(
+        "{x}^(1+{pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
+        (res as f64 / scale as f64),
+    );
+
+    // 10M^0.16
+    let x = 10000000;
+    let pow_coeff = 425;
+    let (pow_coeff_numerator, pow_coeff_denominator) = unpack_from_u16(pow_coeff);
+
+    let res = compute_scaled_pow(
+        x,
+        pow_coeff_numerator as u32,
+        pow_coeff_denominator as u32,
+        scale,
+    );
+    println!(
+        "{x}^({pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
+        (res as f64 / scale as f64),
+    );
 }
