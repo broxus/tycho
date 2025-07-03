@@ -21,6 +21,7 @@ use tycho_types::cell::{Cell, HashBytes};
 use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
+use tycho_util::time::now_millis;
 use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
 
 use self::types::{BlockSerializerCache, CollatorStats, PrevData, WorkingState};
@@ -1096,10 +1097,16 @@ impl CollatorStdImpl {
             return Ok(ImportNextAnchor::Skipped);
         }
 
+        let anchor_requested_at = now_millis();
+
         let get_anchor_result = mpool_adapter.get_next_anchor(prev_anchor_id).await?;
 
         let has_our_externals = match &get_anchor_result {
             GetAnchorResult::Exist(next_anchor) => {
+                // report anchor importing lag to metrics
+                metrics::gauge!("tycho_collator_anchor_importing_lag_ms", &labels)
+                    .set(anchor_requested_at as f64 - next_anchor.chain_time as f64);
+
                 let our_exts_count = next_anchor.count_externals_for(&shard_id, 0);
                 anchors_cache.insert(next_anchor.clone(), our_exts_count);
 
