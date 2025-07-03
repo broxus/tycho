@@ -46,6 +46,7 @@ mod messages_buffer;
 mod messages_reader;
 mod types;
 
+pub use do_collate::work_units::{pack_into_u16, unpack_from_u16};
 pub use error::CollationCancelReason;
 pub use types::{ForceMasterCollation, ShardDescriptionExt};
 

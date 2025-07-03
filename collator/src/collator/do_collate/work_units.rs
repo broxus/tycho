@@ -627,7 +627,7 @@ impl DoCollateWu {
 }
 
 /// Packs two numbers (0..=99) into a single u16: format "AA BB" -> AA*100 + BB
-fn pack_into_u16(a: u16, b: u16) -> u16 {
+pub fn pack_into_u16(a: u16, b: u16) -> u16 {
     assert!(a <= 99, "{a} is out of range 0..=99");
     assert!(b <= 99, "{b} is out of range 0..=99");
     a * 100 + b
@@ -635,7 +635,7 @@ fn pack_into_u16(a: u16, b: u16) -> u16 {
 
 /// Unpacks two numbers from u16.
 /// Numbers should be in range 0..=99
-fn unpack_from_u16(packed: u16) -> (u16, u16) {
+pub fn unpack_from_u16(packed: u16) -> (u16, u16) {
     if packed > 99 * 100 + 99 {
         return (1, 1);
     }
