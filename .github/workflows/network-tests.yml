@@ -36,6 +36,7 @@ env:
   CXX: /usr/bin/clang++
   TYCHO_BUILD_PROFILE: release_check
   TYCHO_ARTIFACT_NAME: tycho-binary-${{ github.run_id }}
+  RUSTFLAGS: --cfg tycho_unstable
 
 jobs:
   # artifact name has postfix with job id so it's unique and always fresh.
@@ -53,7 +54,7 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event.inputs.pr_number && format('refs/pull/{0}/head', github.event.inputs.pr_number) || github.ref }}
-      
+
       - name: Show what we're testing
         shell: bash
         run: |
@@ -61,7 +62,7 @@ jobs:
           echo "Checked out commit: $(git rev-parse HEAD)"
           echo "Current branch/ref: $(git describe --always --dirty)"
           echo "Commit message: $(git log -1 --pretty=format:'%s')"
-      
+
       - name: Initialize Environment (for Build)
         uses: ./.github/actions/init
         with:
@@ -198,29 +199,83 @@ jobs:
           name: network-test-logs-${{ matrix.test_name }}-${{ github.run_id }}
           path: ${{ env.ARCHIVE_PATH }}
           retention-days: 5 # 5 days retention
-          if-no-files-found: warn 
+          if-no-files-found: warn
+  persistent-sync-test:
+    name: Persistent Network Sync Test
+    runs-on: [self-hosted, linux]
+    needs: build-node
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    steps:
+      - name: Install lsof (if missing)
+        shell: bash
+        run: |
+          if command -v lsof >/dev/null 2>&1; then
+            echo "lsof already present"
+          else
+            echo "Installing lsof…"
+            # Debian/Ubuntu-based образа
+            sudo apt-get update -y
+            sudo apt-get install -y lsof
+          fi
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.inputs.pr_number && format('refs/pull/{0}/head', github.event.inputs.pr_number) || github.ref }}
+
+      - name: Initialize Environment
+        uses: ./.github/actions/init
+        with:
+          setup-cache: false
+          fake-procfs: true
+
+      - name: Download Tycho Binary Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.TYCHO_ARTIFACT_NAME }}
+          path: ./downloaded_bin/
+
+      - name: Prepare Binary and Set Path
+        shell: bash
+        run: |
+          downloaded_binary=$(find ./downloaded_bin/ -type f)
+          if [ -z "$downloaded_binary" ]; then
+            echo "ERROR: Downloaded binary not found in ./downloaded_bin/"
+            exit 1
+          fi
+          echo "Found downloaded binary: $downloaded_binary"
+          chmod +x "$downloaded_binary"
+          echo "TYCHO_BIN_PATH=$(readlink -f "$downloaded_binary")" >> $GITHUB_ENV
+
+      - name: Run persistent sync test
+        shell: bash
+        env:
+          HACK_EACH_KEY_BLOCK_IS_PERSISTENT: 1
+        run: |
+          ./scripts/run-persistent-sync-test.sh
   network_tests_status:
-      name: Network Tests Status Check # This is the name to require in branch protection
-      runs-on: ubuntu-latest
-      # Depends on the matrix job, but runs even if it's skipped or fails
-      needs: network-tests
-      if: always() # Ensures this job runs even if 'network-tests' is skipped (on PR) or fails
+    name: Network Tests Status Check # This is the name to require in branch protection
+    runs-on: ubuntu-latest
+    # Depends on the matrix job, but runs even if it's skipped or fails
+    needs:
+      - network-tests
+      - persistent-sync-test
+    if: always()
+    steps:
+      - name: Check network & persistent test outcomes
+        shell: bash
+        run: |
+          echo "Network Tests result: ${{ needs.network-tests.result }}"
+          echo "Persistent Sync Test result: ${{ needs.persistent-sync-test.result }}"
 
-      steps:
-        - name: Check network tests matrix outcome
-          shell: bash
-          run: |
-            echo "Event: ${{ github.event_name }}"
-            echo "Network Tests Matrix Job Result: ${{ needs.network-tests.result }}"
-
-            # If on merge_group and the matrix failed or was cancelled, fail this status check
-            if [[ "${{ github.event_name }}" == "merge_group" && \
-                  ("${{ needs.network-tests.result }}" == "failure" || \
-                   "${{ needs.network-tests.result }}" == "cancelled") ]]; then
-              echo "Network tests failed or were cancelled on merge_group run."
+          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            if [[ "${{ needs.network-tests.result }}" == "failure" || \
+                  "${{ needs.network-tests.result }}" == "cancelled" || \
+                  "${{ needs.persistent-sync-test.result }}" == "failure" || \
+                  "${{ needs.persistent-sync-test.result }}" == "cancelled" ]]; then
+              echo "At least one required test failed on merge_group."
               exit 1
-            else
-              # Otherwise (on PR where matrix is skipped, or on merge_group where matrix succeeded)
-              echo "Network tests status check passed."
-              exit 0
             fi
+          fi
+          echo "All required tests passed."
