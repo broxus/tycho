@@ -1607,6 +1607,11 @@ def collator_time_metrics() -> RowPanel:
             "Import next anchor time",
             labels=['workchain=~"$workchain"'],
         ),
+        create_gauge_panel(
+            "tycho_collator_anchor_importing_lag_ms",
+            "Anchor importing lag (ms)",
+            labels=['workchain=~"$workchain"'],
+        ),
     ]
     return create_row("collator: Time diffs", metrics)
 
