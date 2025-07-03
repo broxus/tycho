@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tycho_collator::collator::work_units::pack_into_u16;
 use tycho_crypto::ed25519;
 use tycho_types::cell::Lazy;
 use tycho_types::models::*;
@@ -738,10 +739,10 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
             buffer_limit: 10_000,
             group_limit: 100,
             group_vert_size: 10,
-            externals_expire_timeout: 60,
-            open_ranges_limit: 100,
+            externals_expire_timeout: 58,
+            open_ranges_limit: 20,
             par_0_int_msgs_count_limit: 50_000,
-            par_0_ext_msgs_count_limit: 5_000,
+            par_0_ext_msgs_count_limit: 50_000,
             group_slots_fractions,
             range_messages_limit: 10_000,
         },
@@ -750,39 +751,39 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
 
         work_units_params: WorkUnitsParams {
             prepare: WorkUnitsParamsPrepare {
-                fixed_part: 500_000, // 500 ns
+                fixed_part: 1_000_000,
                 msgs_stats: 0,
                 remaning_msgs_stats: 0,
-                read_ext_msgs: 200,     // 200 ns
-                read_int_msgs: 5_000,   // 5 mcs
-                read_new_msgs: 500,     // 500 ns
-                add_to_msg_groups: 150, // 150 ns
+                read_ext_msgs: 400,
+                read_int_msgs: 2_300,
+                read_new_msgs: 750,
+                add_to_msg_groups: 130,
             },
             execute: WorkUnitsParamsExecute {
-                prepare: 114_000,          // 114 mcs
-                execute_err: 6_000,        // 6 mcs
-                execute: 25_000,           // 25 mcs
-                execute_delimiter: 10_000, //
-                serialize_enqueue: 3_000,  // 3 mcs
-                serialize_dequeue: 3_000,  // 3 mcs
-                insert_new_msgs: 3_000,    // 3 mcs
+                prepare: 57_000,
+                execute_err: 0,
+                execute: 8_000,
+                execute_delimiter: 1_000,
+                serialize_enqueue: 80,
+                serialize_dequeue: 80,
+                insert_new_msgs: 80,
                 subgroup_size: 16,
             },
             finalize: WorkUnitsParamsFinalize {
-                build_transactions: 1_000,    // 1 mcs
-                build_accounts: 500,          // 0.5 mcs
-                build_in_msg: 500,            // 0.5 mcs
-                build_out_msg: 500,           // 0.5 mcs
-                serialize_min: 15_000_000,    // 15 ms
-                serialize_accounts: 1_000,    // 1 mcs
-                serialize_msg: 2_000,         // 2 mcs
-                state_update_min: 15_000_000, // 15 ms
-                state_update_accounts: 500,   // 0.5 mcs
-                state_update_msg: 2_000,      // 2 mcs
-                create_diff: 0,
-                serialize_diff: 0,
-                apply_diff: 0,
-                diff_tail_len: 0,
+                build_transactions: 160,
+                build_accounts: 400,
+                build_in_msg: 130,
+                build_out_msg: 130,
+                serialize_min: 2_500_000,
+                serialize_accounts: 2_600,
+                serialize_msg: 2_600,
+                state_update_min: 1_000_000,
+                state_update_accounts: 700,
+                state_update_msg: pack_into_u16(4, 25), // 4/25 = 16/100 = 0.16
+                create_diff: 900,
+                serialize_diff: pack_into_u16(1, 5), // 1/5 = 2/10 = 0.2
+                apply_diff: 2000,
+                diff_tail_len: 1300,
             },
         },
     })?;
