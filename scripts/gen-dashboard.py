@@ -793,6 +793,10 @@ def core_block_strider() -> RowPanel:
         create_heatmap_panel(
             "tycho_core_check_block_proof_time", "Check block proof time"
         ),
+        create_counter_panel(
+            "tycho_core_ps_subscriber_saved_persistent_states_count",
+            "Saved persistent states",
+        ),
     ]
     return create_row("block strider: Core Metrics", metrics)
 

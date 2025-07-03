@@ -120,6 +120,13 @@ impl Node {
     pub async fn run(self, last_block_id: &BlockId) -> Result<()> {
         let base = &self.base;
 
+
+        let unstable = cfg!(tycho_unstable);
+        let hack = std::env::var("HACK_EACH_KEY_BLOCK_IS_PERSISTENT");
+
+        tracing::info!("run node param: {unstable:?} {hack:?}");
+
+
         // Force load last applied state
         let mc_state = base
             .core_storage

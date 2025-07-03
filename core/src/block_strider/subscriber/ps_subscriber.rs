@@ -91,7 +91,11 @@ impl Inner {
         self.storage
             .persistent_state_storage()
             .rotate_persistent_states(&mc_block_handle)
-            .await
+            .await?;
+
+        metrics::counter!("tycho_core_ps_subscriber_saved_persistent_states_count").increment(1);
+
+        Ok(())
     }
 
     async fn save_persistent_shard_states(
