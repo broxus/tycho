@@ -29,7 +29,7 @@ pub struct PrepareMsgGroupsWu {
 }
 
 impl PrepareMsgGroupsWu {
-    pub fn calculate(
+    pub(super) fn calculate(
         wu_params_prepare: &WorkUnitsParamsPrepare,
         msgs_reader_metrics: &MessagesReaderMetrics,
         prepare_msg_groups_total_elapsed: Duration,
@@ -146,7 +146,7 @@ pub struct ExecuteWu {
     pub process_txs_elapsed: Duration,
 }
 impl ExecuteWu {
-    pub fn append_executed_group(
+    pub(super) fn append_executed_group(
         &mut self,
         _wu_params_execute: &WorkUnitsParamsExecute,
         executed_group: &ExecutedGroup,
@@ -156,7 +156,7 @@ impl ExecuteWu {
             .saturating_add(executed_group.total_exec_wu);
     }
 
-    pub fn calculate(
+    pub(super) fn calculate(
         &mut self,
         wu_params_execute: &WorkUnitsParamsExecute,
         execute_metrics: &ExecuteMetrics,
@@ -392,7 +392,7 @@ impl FinalizeWu {
         .saturating_add((in_msgs_len + out_msgs_len).saturating_mul(serialize_msg as u64));
     }
 
-    pub fn append_elapsed_timings(&mut self, finalize_metrics: &FinalizeMetrics) {
+    pub(super) fn append_elapsed_timings(&mut self, finalize_metrics: &FinalizeMetrics) {
         self.create_queue_diff_elapsed = finalize_metrics.create_queue_diff_elapsed;
         self.apply_queue_diff_elapsed = finalize_metrics.apply_queue_diff_elapsed;
 
@@ -627,7 +627,7 @@ impl DoCollateWu {
 }
 
 /// Packs two numbers (0..=99) into a single u16: format "AA BB" -> AA*100 + BB
-fn pack_into_u16(a: u16, b: u16) -> u16 {
+pub fn pack_into_u16(a: u16, b: u16) -> u16 {
     assert!(a <= 99, "{a} is out of range 0..=99");
     assert!(b <= 99, "{b} is out of range 0..=99");
     a * 100 + b
@@ -635,7 +635,7 @@ fn pack_into_u16(a: u16, b: u16) -> u16 {
 
 /// Unpacks two numbers from u16.
 /// Numbers should be in range 0..=99
-fn unpack_from_u16(packed: u16) -> (u16, u16) {
+pub fn unpack_from_u16(packed: u16) -> (u16, u16) {
     if packed > 99 * 100 + 99 {
         return (1, 1);
     }
