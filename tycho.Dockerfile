@@ -1,5 +1,7 @@
+ARG BASE="localhost/tycho-rocksdb"
+
 # syntax=docker/dockerfile:1.2
-FROM fedora-rocksdb as builder
+FROM $BASE as builder
 WORKDIR /build
 
 # Install dependencies

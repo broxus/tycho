@@ -73,7 +73,7 @@ rustc_version = { workspace = true }
 default = ["jemalloc"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 deadlock-detection = ["parking_lot/deadlock_detection"]
-debug = ["tycho-consensus/test"]
+debug = ["tycho-consensus/test", "tycho-consensus/mock-feedback"]
 lto = ["weedb/lto"]
 
 [lints]

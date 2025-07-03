@@ -34,13 +34,21 @@ spec:
         - name: {{ .Chart.Name }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.tychoImage.repository }}:{{ .Values.tychoImage.tag }}"
           command:
             - bash
             - -c
             - >
               export INDEX=$((${HOSTNAME##*-}));
               export KEY="$(</keys/$INDEX)";
+              if {{ .Values.onlyNetwork }}; then
+              /app/network-node run
+              0.0.0.0:{{ .Values.service.port }}
+              $TYCHO_POD_IP:{{ .Values.service.port }}
+              --key $KEY
+              --config "/app/config.json"
+              --global-config "/app/global-config.json";
+              else
               /app/tycho debug mempool
               --key $KEY
               --config "/app/config.json"
@@ -48,7 +56,8 @@ spec:
               --import-zerostate "/app/zerostate.boc"
               --logger-config "/app/logger.json"
               --payload-step 50
-              --steps-until-full 8
+              --steps-until-full 8;
+              fi;
           env:
             - name: RUST_LOG
               value: {{ .Values.sharedConfigs.rustLog | quote }}
@@ -60,7 +69,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
           ports:
             - name: udp
               containerPort: {{ .Values.service.port }}
@@ -93,10 +102,10 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 {{- if .Values.persistence }}
-  {{- if not .Values.persistence.isLocal }}
+  {{- if not .Values.persistence.hostPath }}
   volumeClaimTemplates:
     - metadata:
-        name: data
+        name: data-volume
         labels:
           {{- include "tycho.labels" . | nindent 10 }}
       {{- with .Values.persistence.annotations }}
@@ -109,6 +118,6 @@ spec:
           - {{ .Values.persistence.accessMode }}
         resources:
           requests:
-            storage: {{ .Values.persistence.size }}{{ .Values.persistence.sizeType }}
+            storage: {{ .Values.persistence.sizePerPod }}{{ .Values.persistence.sizeType }}
   {{- end }}
 {{- end }}

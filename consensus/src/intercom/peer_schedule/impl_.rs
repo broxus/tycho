@@ -4,6 +4,7 @@ use std::sync::{Arc, Weak};
 
 use arc_swap::{ArcSwap, Guard};
 use everscale_crypto::ed25519::KeyPair;
+use futures_util::never::Never;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use parking_lot::lock_api::{RwLockReadGuard, RwLockWriteGuard};
@@ -15,7 +16,7 @@ use tycho_network::{
     PrivateOverlayEntriesReadGuard,
 };
 
-use crate::effects::{AltFmt, AltFormat, Task, TaskTracker};
+use crate::effects::{AltFmt, AltFormat, Cancelled, Task, TaskResult, TaskTracker};
 use crate::engine::MempoolMergedConfig;
 use crate::intercom::peer_schedule::locked::PeerScheduleLocked;
 use crate::intercom::peer_schedule::stateless::PeerScheduleStateless;
@@ -31,7 +32,8 @@ use crate::models::Round;
 
 #[derive(Clone)]
 pub struct PeerSchedule(Arc<PeerScheduleInner>);
-pub(super) struct WeakPeerSchedule(Weak<PeerScheduleInner>);
+#[derive(Clone)]
+pub struct WeakPeerSchedule(Weak<PeerScheduleInner>);
 
 struct PeerScheduleInner {
     locked: RwLock<PeerScheduleLocked>,
@@ -265,28 +267,49 @@ impl PeerSchedule {
         self.0.atomic.store(Arc::new(inner));
     }
 
-    pub async fn run_updater(self) {
+    pub fn downgrade(&self) -> WeakPeerSchedule {
+        WeakPeerSchedule(Arc::downgrade(&self.0))
+    }
+}
+
+impl WeakPeerSchedule {
+    pub fn upgrade(&self) -> Option<PeerSchedule> {
+        self.0.upgrade().map(PeerSchedule)
+    }
+
+    pub async fn run_updater(self) -> TaskResult<Never> {
         tracing::info!("starting peer schedule updates");
         scopeguard::defer!(tracing::warn!("peer schedule updater stopped"));
-        let (local_id, mut rx) = {
-            let mut guard = self.write();
 
-            guard.resolve_peers_task = None;
-            let local_id = guard.local_id;
-            let (rx, resolved_waiters) = {
-                let entries = guard.overlay.read_entries();
-                let rx = entries.subscribe();
-                (rx, Self::resolved_waiters(&local_id, &entries))
-            };
-            guard.resolve_peers_task = self.downgrade().new_resolve_task(resolved_waiters);
+        let (local_id, mut rx) = match self.upgrade() {
+            Some(strong) => {
+                let mut guard = strong.write();
 
-            (local_id, rx)
+                guard.resolve_peers_task = None;
+                let local_id = guard.local_id;
+                let (rx, resolved_waiters) = {
+                    let entries = guard.overlay.read_entries();
+                    let rx = entries.subscribe();
+                    (rx, Self::resolved_waiters(&local_id, &entries))
+                };
+                guard.resolve_peers_task = self.clone().new_resolve_task(resolved_waiters);
+
+                (local_id, rx)
+            }
+            None => {
+                tracing::warn!("peer schedule dropped, cannot create updater");
+                return Err(Cancelled());
+            }
         };
 
         loop {
             match rx.recv().await {
                 Ok(ref event @ PrivateOverlayEntriesEvent::Removed(peer)) if peer != local_id => {
-                    let mut guard = self.write();
+                    let Some(strong) = self.upgrade() else {
+                        tracing::warn!("peer schedule dropped, stopping updater");
+                        break Err(Cancelled());
+                    };
+                    let mut guard = strong.write();
                     let restart = guard.set_state(&peer, PeerState::Unknown);
                     if restart {
                         guard.resolve_peers_task = None;
@@ -294,8 +317,7 @@ impl PeerSchedule {
                             let entries = guard.overlay.read_entries();
                             Self::resolved_waiters(&local_id, &entries)
                         };
-                        guard.resolve_peers_task =
-                            self.downgrade().new_resolve_task(resolved_waiters);
+                        guard.resolve_peers_task = self.clone().new_resolve_task(resolved_waiters);
                     }
                     drop(guard);
                     tracing::info!(
@@ -319,7 +341,7 @@ impl PeerSchedule {
                     tracing::error!(
                         "peer info updates channel closed, cannot maintain node connectivity"
                     );
-                    break;
+                    break Err(Cancelled());
                 }
                 Err(broadcast::error::RecvError::Lagged(amount)) => {
                     tracing::error!(
@@ -347,16 +369,6 @@ impl PeerSchedule {
         fut
     }
 
-    fn downgrade(&self) -> WeakPeerSchedule {
-        WeakPeerSchedule(Arc::downgrade(&self.0))
-    }
-}
-
-impl WeakPeerSchedule {
-    fn upgrade(&self) -> Option<PeerSchedule> {
-        self.0.upgrade().map(PeerSchedule)
-    }
-
     pub fn new_resolve_task(
         self,
         mut resolved_waiters: FuturesUnordered<
@@ -380,13 +392,14 @@ impl WeakPeerSchedule {
             while let Some(known_peer_handle) = resolved_waiters.next().await {
                 let Some(peer_schedule) = self.upgrade() else {
                     tracing::warn!("peer schedule is dropped, cannot apply resolve update");
-                    break;
+                    return Err(Cancelled());
                 };
                 _ = peer_schedule
                     .write()
                     .set_state(&known_peer_handle.peer_info().id, PeerState::Resolved);
                 gauge.decrement(1);
             }
+            Ok(())
         }))
     }
 }
