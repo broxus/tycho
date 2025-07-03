@@ -117,6 +117,10 @@ jobs:
         run: |
           # The script will use the TYCHO_BIN_PATH env
           ./scripts/run-network-tests.sh ${{ matrix.test_image }}
+      - name: Run persistent network sync test
+        shell: bash
+        run: |
+          ./scripts/run-persistent-sync-test.sh
       - name: Archive Logs and Configs
         if: always()
         id: archive

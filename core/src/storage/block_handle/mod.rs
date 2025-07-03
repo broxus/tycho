@@ -249,8 +249,11 @@ impl BlockHandleStorage {
 
         // Load previous key blocks and check if the `key_block` is for persistent state
         while let Some(prev_key_block) = get_key_block() {
-            if BlockStuff::compute_is_persistent(key_block.gen_utime(), prev_key_block.gen_utime())
-            {
+            if BlockStuff::compute_is_persistent(
+                key_block.gen_utime(),
+                prev_key_block.gen_utime(),
+                false,
+            ) {
                 // Found
                 return Some(key_block);
             }
