@@ -1,3 +1,6 @@
+use std::future::Future;
+
+use anyhow::Result;
 use tokio::signal::unix;
 
 pub const TERMINATION_SIGNALS: [libc::c_int; 5] = [
@@ -7,6 +10,24 @@ pub const TERMINATION_SIGNALS: [libc::c_int; 5] = [
     libc::SIGABRT,
     20, // SIGTSTP
 ];
+
+pub async fn run_or_terminate<F>(f: F) -> Result<()>
+where
+    F: Future<Output = Result<()>> + Send + 'static,
+{
+    let run_fut = tokio::spawn(f);
+    let stop_fut = any_signal(TERMINATION_SIGNALS);
+    tokio::select! {
+        res = run_fut => res.unwrap(),
+        signal = stop_fut => match signal {
+            Ok(signal) => {
+                tracing::info!(?signal, "received termination signal");
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+}
 
 pub fn any_signal<I, T>(signals: I) -> tokio::sync::oneshot::Receiver<unix::SignalKind>
 where
