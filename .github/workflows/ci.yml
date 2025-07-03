@@ -9,6 +9,9 @@ on:
     branches:
       - "**"
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -28,8 +31,10 @@ jobs:
       shell: ${{ steps.filter.outputs.shell }}
       proto: ${{ steps.filter.outputs.proto }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
         id: filter
         with:
           filters: |
@@ -47,7 +52,9 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: [self-hosted, linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/init
         with:
           toolchain: nightly
@@ -63,7 +70,9 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }} # we duplicate it so gh actions will skip the job and mark it as success
     runs-on: [self-hosted, linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/init
         with:
           components: "clippy,rustfmt"
@@ -75,20 +84,22 @@ jobs:
     needs: [rustfmt, changes]
     if: ${{ needs.changes.outputs.rust == 'true' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/init
         with:
           components: llvm-tools-preview
           fake-procfs: true
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@9185c192a96ba09167ad8663015b3fbbf007ec79 # v2.56.2
+      - uses: taiki-e/install-action@9185c192a96ba09167ad8663015b3fbbf007ec79 # v2.56.2
       - name: Run tests
         env:
           RUSTC_WRAPPER: scripts/coverage.py
           RUST_LOG: warn
         run: just test_cov
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@ab904c41d6ece82784817410c45d8b8c02684457 # v3
         if: github.repository == 'broxus/tycho'
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -101,7 +112,9 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }}
     needs: [rustfmt, changes]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/init
         with:
           fake-procfs: true
@@ -114,11 +127,13 @@ jobs:
     name: Metrics
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
       - name: Check dashboard
         run: just check_dashboard
 
@@ -128,11 +143,13 @@ jobs:
     runs-on: self-hosted
     needs: [changes]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/init
         with:
           install-clang: false
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@9185c192a96ba09167ad8663015b3fbbf007ec79 # v2.56.2
         with:
           tool: cargo-msrv
       - name: Check semver
@@ -144,7 +161,9 @@ jobs:
     if: ${{ needs.changes.outputs.proto == 'true' }}
     runs-on: [self-hosted, linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/init
         with:
           install-clang: false
@@ -162,7 +181,9 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: [self-hosted, linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/init
       - name: Update CLI reference
         run: just update_cli_reference

@@ -4,6 +4,27 @@ on:
   merge_group:
     branches: [master]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to test (optional, will use current branch if not provided)'
+        required: false
+        type: string
+      test_selection:
+        description: 'Which tests to run'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - destroyable
+          - ping-pong
+          - one-to-many-internal-messages
+          - fq-deploy
+          - nft-index
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -23,12 +44,25 @@ jobs:
   build-node:
     name: Build Tycho Binary
     runs-on: [self-hosted, linux]
-    if: github.event_name == 'merge_group'
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     outputs:
       binary_path: ${{ steps.get_path.outputs.path }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+        with:
+          ref: ${{ github.event.inputs.pr_number && format('refs/pull/{0}/head', github.event.inputs.pr_number) || github.ref }}
+      
+      - name: Show what we're testing
+        shell: bash
+        run: |
+          echo "Testing PR: ${{ github.event.inputs.pr_number || 'current branch' }}"
+          echo "Checked out commit: $(git rev-parse HEAD)"
+          echo "Current branch/ref: $(git describe --always --dirty)"
+          echo "Commit message: $(git log -1 --pretty=format:'%s')"
+      
       - name: Initialize Environment (for Build)
         uses: ./.github/actions/init
         with:
@@ -50,7 +84,7 @@ jobs:
           echo "path=${binary_path#${GITHUB_WORKSPACE}/}" >> $GITHUB_OUTPUT
 
       - name: Upload Tycho Binary Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ env.TYCHO_ARTIFACT_NAME }}
           path: ${{ steps.get_path.outputs.path }}
@@ -59,7 +93,7 @@ jobs:
     name: Network Integration Tests - ${{ matrix.test_name }}
     runs-on: [self-hosted, linux]
     needs: build-node
-    if: github.event_name == 'merge_group'
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 30
     strategy:
       fail-fast: false # Allow other tests to run even if one fails
@@ -78,7 +112,19 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+        with:
+          ref: ${{ github.event.inputs.pr_number && format('refs/pull/{0}/head', github.event.inputs.pr_number) || github.ref }}
+
+      - name: Show what we're testing
+        shell: bash
+        run: |
+          echo "Testing PR: ${{ github.event.inputs.pr_number || 'current branch' }}"
+          echo "Checked out commit: $(git rev-parse HEAD)"
+          echo "Current branch/ref: $(git describe --always --dirty)"
+          echo "Commit message: $(git log -1 --pretty=format:'%s')"
 
       - name: Initialize Environment
         uses: ./.github/actions/init
@@ -87,7 +133,7 @@ jobs:
           fake-procfs: true
 
       - name: Download Tycho Binary Artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
         with:
           name: ${{ env.TYCHO_ARTIFACT_NAME }}
           path: ./downloaded_bin/
@@ -113,6 +159,7 @@ jobs:
           echo "${{ secrets.GHCR_TOKEN }}" | podman login ghcr.io -u ${{ secrets.GHCR_USER }} --password-stdin
 
       - name: Run network tests
+        if: ${{ !github.event.inputs.test_selection || github.event.inputs.test_selection == 'all' || github.event.inputs.test_selection == matrix.test_name }}
         shell: bash
         run: |
           # The script will use the TYCHO_BIN_PATH env
@@ -148,7 +195,7 @@ jobs:
       - name: Upload Logs and Configs Artifact
         #  run if prior steps failed, but only if the archive was actually created
         if: always() && steps.archive.outputs.ARCHIVE_CREATED == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: network-test-logs-${{ matrix.test_name }}-${{ github.run_id }}
           path: ${{ env.ARCHIVE_PATH }}

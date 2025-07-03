@@ -24,3 +24,5 @@ logger.json
 
 /db/
 /.temp/
+
+__pycache__/
