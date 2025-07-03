@@ -348,7 +348,9 @@ async fn test_refill_messages() -> Result<()> {
     //--------------
     tracing::trace!("TEST CASE 005: RUN SWAPS");
 
-    for _ in 0..10 {
+    for i in 0..10 {
+        tracing::trace!("TEST CASE 005: STEP {}", i + 1);
+
         let messages = test_adapter
             .msgs_factory
             .create_swap_messages(&dex_wallets, 10)?;
@@ -938,13 +940,12 @@ impl<V: InternalMessageValue> TestCollator<V> {
             groups_count += 1;
 
             // read message group in primary
-            let msg_group_opt =
-                Self::collect_message_group(&mut primary_messages_reader, self.curr_lt)?;
+            let msg_group_opt = Self::collect_primary(&mut primary_messages_reader, self.curr_lt)?;
 
             if groups_count == 1 {
                 // read message group in secondary after refill
                 let secondary_msg_group_opt =
-                    Self::collect_message_group(&mut secondary_messages_reader, self.curr_lt)?;
+                    Self::collect_secondary(&mut secondary_messages_reader, self.curr_lt)?;
 
                 // compare messages groups
                 self.assert_message_group_opt_eq(
@@ -1147,6 +1148,21 @@ impl<V: InternalMessageValue> TestCollator<V> {
     }
 
     #[tracing::instrument(skip_all)]
+    fn collect_primary(
+        messages_reader: &mut MessagesReader<V>,
+        curr_lt: Lt,
+    ) -> Result<Option<MessageGroup>> {
+        Self::collect_message_group(messages_reader, curr_lt)
+    }
+
+    #[tracing::instrument(skip_all)]
+    fn collect_secondary(
+        messages_reader: &mut MessagesReader<V>,
+        curr_lt: Lt,
+    ) -> Result<Option<MessageGroup>> {
+        Self::collect_message_group(messages_reader, curr_lt)
+    }
+
     fn collect_message_group(
         messages_reader: &mut MessagesReader<V>,
         curr_lt: Lt,
