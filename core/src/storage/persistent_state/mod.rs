@@ -138,7 +138,7 @@ impl PersistentStateStorage {
                 .context("key block handle not found")?;
 
             let gen_utime = block_handle.gen_utime();
-            if BlockStuff::compute_is_persistent(gen_utime, prev_utime) {
+            if BlockStuff::compute_is_persistent(gen_utime, prev_utime, false) {
                 prev_utime = gen_utime;
 
                 let mut queue = this.handles_queue.lock();

@@ -15,7 +15,7 @@ pub struct PsSubscriber {
 }
 
 impl PsSubscriber {
-    pub fn new(storage: CoreStorage) -> Self {
+    pub fn new(storage: CoreStorage, each_key_block_is_persistent: bool) -> Self {
         let last_key_block_utime = storage
             .block_handle_storage()
             .find_last_key_block()
@@ -25,6 +25,7 @@ impl PsSubscriber {
             inner: Arc::new(Inner {
                 last_key_block_utime: AtomicU32::new(last_key_block_utime),
                 storage,
+                each_key_block_is_persistent,
             }),
         }
     }
@@ -41,7 +42,11 @@ impl StateSubscriber for PsSubscriber {
                 .inner
                 .last_key_block_utime
                 .swap(block_info.gen_utime, Ordering::Relaxed);
-            let is_persistent = BlockStuff::compute_is_persistent(block_info.gen_utime, prev_utime);
+            let is_persistent = BlockStuff::compute_is_persistent(
+                block_info.gen_utime,
+                prev_utime,
+                self.inner.each_key_block_is_persistent,
+            );
 
             if is_persistent && cx.block.id().seqno != 0 {
                 let block = cx.block.clone();
@@ -62,6 +67,7 @@ impl StateSubscriber for PsSubscriber {
 struct Inner {
     last_key_block_utime: AtomicU32,
     storage: CoreStorage,
+    each_key_block_is_persistent: bool,
 }
 
 impl Inner {
@@ -91,7 +97,11 @@ impl Inner {
         self.storage
             .persistent_state_storage()
             .rotate_persistent_states(&mc_block_handle)
-            .await
+            .await?;
+
+        metrics::counter!("tycho_core_ps_subscriber_saved_persistent_states_count").increment(1);
+
+        Ok(())
     }
 
     async fn save_persistent_shard_states(

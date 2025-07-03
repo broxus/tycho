@@ -370,7 +370,10 @@ impl Node {
         tracing::info!("collator started");
 
         let gc_subscriber = GcSubscriber::new(self.storage.clone());
-        let ps_subscriber = PsSubscriber::new(self.storage.clone());
+        let ps_subscriber = PsSubscriber::new(
+            self.storage.clone(),
+            self.starter_config.each_key_block_is_persistent,
+        );
 
         // Create control server
         let control_server = {

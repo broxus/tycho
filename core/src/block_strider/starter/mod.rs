@@ -24,6 +24,9 @@ pub struct StarterConfig {
     /// Default: None
     #[serde(with = "serde_helpers::humantime")]
     pub custom_boot_offset: Option<Duration>,
+
+    /// Each key block created will be persistent if `true`
+    pub each_key_block_is_persistent: bool,
 }
 
 pub struct StarterBuilder<

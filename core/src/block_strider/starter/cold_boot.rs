@@ -218,7 +218,11 @@ impl StarterInner {
                         let prev_utime = prev_key_block.handle().gen_utime();
 
                         // Update init_mc_block_id
-                        if BlockStuff::compute_is_persistent(block_utime, prev_utime) {
+                        if BlockStuff::compute_is_persistent(
+                            block_utime,
+                            prev_utime,
+                            self.config.each_key_block_is_persistent,
+                        ) {
                             self.storage
                                 .node_state()
                                 .store_init_mc_block_id(handle.id());
@@ -304,7 +308,11 @@ impl StarterInner {
             };
 
             // Skip not persistent
-            let is_persistent = BlockStuff::compute_is_persistent(handle_utime, prev_utime);
+            let is_persistent = BlockStuff::compute_is_persistent(
+                handle_utime,
+                prev_utime,
+                self.config.each_key_block_is_persistent,
+            );
             if !is_persistent {
                 tracing::debug!(seq_no = handle.id().seqno, "skipping key block");
                 continue;
