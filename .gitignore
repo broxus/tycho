@@ -23,6 +23,7 @@ logger.json
 
 /db/
 /.temp/
+/.scratch
 
 simulator/**/values.yaml
 

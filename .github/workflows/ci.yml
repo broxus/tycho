@@ -92,7 +92,8 @@ jobs:
           components: llvm-tools-preview
           fake-procfs: true
       - uses: taiki-e/install-action@9185c192a96ba09167ad8663015b3fbbf007ec79 # v2.56.2
-      - uses: taiki-e/install-action@9185c192a96ba09167ad8663015b3fbbf007ec79 # v2.56.2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
       - name: Run tests
         env:
           RUSTC_WRAPPER: scripts/coverage.py
