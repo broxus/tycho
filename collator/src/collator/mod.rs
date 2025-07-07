@@ -150,7 +150,9 @@ pub trait Collator: Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-pub struct CollatorStdImplFactory;
+pub struct CollatorStdImplFactory {
+    pub wu_tuner_event_sender: Option<tokio::sync::mpsc::Sender<work_units::WuEvent>>,
+}
 
 #[async_trait]
 impl CollatorFactory for CollatorStdImplFactory {
@@ -169,6 +171,7 @@ impl CollatorFactory for CollatorStdImplFactory {
             cx.mc_data,
             cx.mempool_config_override,
             cx.cancel_collation,
+            self.wu_tuner_event_sender.clone(),
         )
         .await
     }
@@ -246,6 +249,9 @@ pub struct CollatorStdImpl {
 
     /// For graceful collation cancellation
     cancel_collation: Arc<Notify>,
+
+    /// Events sender for Work Units tuner service
+    wu_tuner_event_sender: Option<tokio::sync::mpsc::Sender<work_units::WuEvent>>,
 }
 
 impl CollatorStdImpl {
@@ -262,6 +268,7 @@ impl CollatorStdImpl {
         mc_data: Arc<McData>,
         mempool_config_override: Option<MempoolGlobalConfig>,
         cancel_collation: Arc<Notify>,
+        wu_tuner_event_sender: Option<tokio::sync::mpsc::Sender<work_units::WuEvent>>,
     ) -> Result<AsyncQueuedDispatcher<Self>> {
         const BLOCK_CELL_COUNT_BASELINE: usize = 100_000;
 
@@ -297,6 +304,7 @@ impl CollatorStdImpl {
             shard_blocks_count_from_last_anchor: 0,
             mempool_config_override,
             cancel_collation,
+            wu_tuner_event_sender,
         };
 
         // create dispatcher for own async tasks queue
@@ -1097,16 +1105,12 @@ impl CollatorStdImpl {
             return Ok(ImportNextAnchor::Skipped);
         }
 
-        let anchor_requested_at = now_millis();
+        let requested_at = now_millis();
 
         let get_anchor_result = mpool_adapter.get_next_anchor(prev_anchor_id).await?;
 
         let has_our_externals = match &get_anchor_result {
             GetAnchorResult::Exist(next_anchor) => {
-                // report anchor importing lag to metrics
-                metrics::gauge!("tycho_collator_anchor_importing_lag_ms", &labels)
-                    .set(anchor_requested_at as f64 - next_anchor.chain_time as f64);
-
                 let our_exts_count = next_anchor.count_externals_for(&shard_id, 0);
                 anchors_cache.insert(next_anchor.clone(), our_exts_count);
 
@@ -1138,6 +1142,7 @@ impl CollatorStdImpl {
             prev_anchor_id,
             get_anchor_result,
             has_our_externals,
+            requested_at,
         })
     }
 
@@ -1641,6 +1646,7 @@ impl CollatorStdImpl {
                 prev_anchor_id,
                 get_anchor_result,
                 has_our_externals,
+                ..
             } => match get_anchor_result {
                 GetAnchorResult::NotExist => {
                     tracing::warn!(target: tracing_targets::COLLATOR,
@@ -1890,6 +1896,7 @@ impl CollatorStdImpl {
                             prev_anchor_id,
                             get_anchor_result,
                             has_our_externals,
+                            requested_at,
                         } => match get_anchor_result {
                             GetAnchorResult::NotExist => {
                                 // cancel collation attempts if mempool cannot return required anchor
@@ -1909,7 +1916,7 @@ impl CollatorStdImpl {
                                 self.delayed_working_state.delay(working_state);
                                 return Ok(());
                             }
-                            GetAnchorResult::Exist(_) => {
+                            GetAnchorResult::Exist(anchor) => {
                                 imported_anchors_count += 1;
 
                                 // time elapsed from prev anchor
@@ -1924,6 +1931,33 @@ impl CollatorStdImpl {
                                 metrics::gauge!("tycho_collator_shard_blocks_count_btw_anchors")
                                     .set(self.shard_blocks_count_from_last_anchor);
                                 self.shard_blocks_count_from_last_anchor = 0;
+
+                                // report anchor lag
+                                let lag = work_units::MempoolAnchorLag {
+                                    requested_at,
+                                    chain_time: anchor.chain_time,
+                                };
+                                let prev_block_seqno = working_state.next_block_id_short.seqno - 1;
+                                if let Some(sender) = &self.wu_tuner_event_sender {
+                                    if let Err(err) = sender
+                                        .send(work_units::WuEvent {
+                                            shard: self.shard_id,
+                                            seqno: prev_block_seqno,
+                                            data: work_units::WuEventData::AnchorLag(lag),
+                                        })
+                                        .await
+                                    {
+                                        tracing::warn!(target: tracing_targets::COLLATOR,
+                                            ?err,
+                                            "error sending anchor lag to the tuner service",
+                                        );
+                                    }
+                                } else {
+                                    work_units::report_anchor_lag_to_metrics(
+                                        &self.shard_id,
+                                        lag.lag(),
+                                    );
+                                }
 
                                 imported_anchors_has_externals |= has_our_externals;
 
@@ -2151,6 +2185,7 @@ enum ImportNextAnchor {
         prev_anchor_id: MempoolAnchorId,
         get_anchor_result: GetAnchorResult,
         has_our_externals: bool,
+        requested_at: u64,
     },
     Skipped,
 }
