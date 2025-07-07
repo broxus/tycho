@@ -5,14 +5,14 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::*;
-use everscale_types::prelude::*;
 use tycho_block_util::message::validate_external_message;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::*;
+use tycho_types::prelude::*;
 use tycho_util::metrics::HistogramGuard;
 
 pub use self::cache::ProtoEndpointCache;
-use self::protos::rpc::{self, request, response, Request};
+use self::protos::rpc::{self, Request, request, response};
 use crate::endpoint::proto::extractor::{
     ProtoErrorResponse, ProtoOkResponse, Protobuf, ProtobufRef,
 };
@@ -180,7 +180,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                             let account = match serialize_account(&loaded) {
                                 Ok(account) => account,
                                 Err(e) => {
-                                    return error_to_response(RpcStateError::Internal(e.into()))
+                                    return error_to_response(RpcStateError::Internal(e.into()));
                                 }
                             };
                             let last_transaction_id =
@@ -487,7 +487,7 @@ fn make_response_block_id(id: BlockId) -> response::BlockId {
     }
 }
 
-fn serialize_account(account: &Account) -> Result<Bytes, everscale_types::error::Error> {
+fn serialize_account(account: &Account) -> Result<Bytes, tycho_types::error::Error> {
     let cell = crate::models::serialize_account(account)?;
     Ok(Boc::encode(cell).into())
 }

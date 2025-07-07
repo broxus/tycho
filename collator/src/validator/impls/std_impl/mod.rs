@@ -3,12 +3,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::*;
 use indexmap::{self, IndexMap};
 use serde::{Deserialize, Serialize};
 use session::DebugLogValidatorSesssion;
-use tycho_util::{serde_helpers, FastHashMap};
+use tycho_crypto::ed25519::KeyPair;
+use tycho_types::models::*;
+use tycho_util::{FastHashMap, serde_helpers};
 
 use self::session::ValidatorSession;
 use crate::tracing_targets;

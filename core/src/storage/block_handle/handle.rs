@@ -1,7 +1,7 @@
 use std::sync::{Arc, Weak};
 
-use everscale_types::models::*;
 use tokio::sync::{Semaphore, SemaphorePermit};
+use tycho_types::models::*;
 
 use super::{BlockFlags, BlockHandleCache, BlockMeta};
 
@@ -156,7 +156,7 @@ unsafe impl arc_swap::RefCnt for BlockHandle {
 
     unsafe fn from_ptr(ptr: *const Self::Base) -> Self {
         Self {
-            inner: arc_swap::RefCnt::from_ptr(ptr),
+            inner: unsafe { arc_swap::RefCnt::from_ptr(ptr) },
         }
     }
 }

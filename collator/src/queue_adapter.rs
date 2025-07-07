@@ -1,8 +1,8 @@
 use anyhow::Result;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_types::cell::HashBytes;
+use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 

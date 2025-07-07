@@ -1,32 +1,32 @@
 use std::fmt;
 use std::future::IntoFuture;
-use std::pin::{pin, Pin};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::pin::{Pin, pin};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use anyhow::Result;
 use arc_swap::ArcSwapOption;
 use backon::BackoffBuilder;
-use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::*;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
 use scc::TreeIndex;
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
+use tycho_types::models::*;
+use tycho_util::FastHashMap;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastHashMap;
 
 use super::ValidatorStdImplConfig;
 use crate::tracing_targets;
 use crate::validator::rpc::{ExchangeSignatures, ValidatorClient, ValidatorService};
 use crate::validator::{
-    proto, AddSession, BriefValidatorDescr, CompositeValidationSessionId, ValidationComplete,
-    ValidationSessionId, ValidationStatus, ValidatorNetworkContext,
+    AddSession, BriefValidatorDescr, CompositeValidationSessionId, ValidationComplete,
+    ValidationSessionId, ValidationStatus, ValidatorNetworkContext, proto,
 };
 
 // Histograms

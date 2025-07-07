@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Ensure that the runtime does not spend too much time without yielding.
 pub async fn yield_on_complex(complex: bool) {

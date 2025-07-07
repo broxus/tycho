@@ -21,8 +21,6 @@ bytesize = { workspace = true }
 castaway = { workspace = true }
 crc32c = { workspace = true }
 dashmap = { workspace = true }
-everscale-crypto = { workspace = true }
-everscale-types = { workspace = true, features = ["blake3", "rayon", "rand"] }
 futures-util = { workspace = true }
 humantime = { workspace = true }
 metrics = { workspace = true }
@@ -42,6 +40,8 @@ tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["rt", "fs"] }
 tracing = { workspace = true }
 triomphe = { workspace = true }
+tycho-crypto = { workspace = true }
+tycho-types = { workspace = true, features = ["blake3", "rayon", "rand9"] }
 weedb = { workspace = true }
 
 # local deps
@@ -51,11 +51,13 @@ tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 
 [dev-dependencies]
-everscale-crypto = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 tycho-block-util = { workspace = true, features = ["test"] }
 tycho-core = { workspace = true, features = ["test"] }
+tycho-crypto = { workspace = true }
 tycho-network = { workspace = true, features = ["test"] }
+tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
 
 [features]

@@ -1,7 +1,7 @@
 use anyhow::Result;
-use everscale_types::models::*;
 use futures_util::future::{BoxFuture, FutureExt};
 use tycho_block_util::block::BlockStuff;
+use tycho_types::models::*;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 

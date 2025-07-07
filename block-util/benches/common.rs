@@ -1,6 +1,6 @@
-use everscale_types::cell::{Cell, CellBuilder};
-use everscale_types::models::{MsgInfo, OwnedMessage};
 use tycho_block_util::message::ExtMsgRepr;
+use tycho_types::cell::{Cell, CellBuilder};
+use tycho_types::models::{MsgInfo, OwnedMessage};
 
 pub fn create_big_message() -> anyhow::Result<Cell> {
     let mut count = 0;

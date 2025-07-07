@@ -1,14 +1,14 @@
 use std::sync::{Arc, Weak};
 
-use everscale_types::models::ShardIdent;
 use tracing::Instrument;
-use tycho_network::{try_handle_prefix, PeerId, Response, Service, ServiceRequest};
+use tycho_network::{PeerId, Response, Service, ServiceRequest, try_handle_prefix};
+use tycho_types::models::ShardIdent;
 use tycho_util::futures::BoxFutureOrNoop;
 
 use crate::tracing_targets;
+use crate::validator::ValidationSessionId;
 use crate::validator::proto::rpc;
 use crate::validator::rpc::ExchangeSignatures;
-use crate::validator::ValidationSessionId;
 
 pub struct ValidatorService<E> {
     pub shard_ident: ShardIdent,

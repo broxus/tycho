@@ -141,7 +141,7 @@ where
                                 method,
                                 params,
                                 behaviour: PhantomData,
-                            })
+                            });
                         }
                         Err(e) => (Some(req.id), INVALID_PARAMS_CODE, e.to_string().into()),
                     }

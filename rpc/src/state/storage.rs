@@ -1,15 +1,15 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use arc_swap::{ArcSwap, ArcSwapOption};
-use everscale_types::cell::Lazy;
-use everscale_types::models::*;
-use everscale_types::prelude::*;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::kv::InstanceId;
+use tycho_types::cell::Lazy;
+use tycho_types::models::*;
+use tycho_types::prelude::*;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::{FastHashMap, FastHashSet};
@@ -1303,7 +1303,7 @@ impl RpcStorage {
                     if let Some(msg_hash) = msg_hash {
                         buffer.extend_from_slice(msg_hash.as_slice());
                     }
-                    everscale_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(
+                    tycho_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(
                         tx_cell.inner().as_ref(),
                     )
                     .encode(&mut buffer);
@@ -1655,7 +1655,7 @@ impl BriefBlockInfo {
         info: &BlockInfo,
         extra: &BlockExtra,
         tx_count: usize,
-    ) -> Result<Self, everscale_types::error::Error> {
+    ) -> Result<Self, tycho_types::error::Error> {
         let shard_ident = info.shard;
         let prev_blocks = match info.load_prev_ref()? {
             PrevBlockRef::Single(block_ref) => vec![block_ref.as_block_id(shard_ident)],

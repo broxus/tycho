@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use tycho_block_util::block::{BlockIdExt, BlockStuff};
 use tycho_core::block_strider::{
     BlockProvider, BlockProviderExt, BlockchainBlockProvider, RetryConfig, StorageBlockProvider,

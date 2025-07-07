@@ -1,6 +1,6 @@
 use std::borrow::Borrow;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -15,9 +15,9 @@ use tycho_util::{FastDashSet, FastHasherState};
 
 use crate::dht::{PeerResolver, PeerResolverHandle};
 use crate::network::Network;
-use crate::overlay::metrics::Metrics;
 use crate::overlay::OverlayId;
-use crate::proto::overlay::{rpc, PublicEntry, PublicEntryToSign};
+use crate::overlay::metrics::Metrics;
+use crate::proto::overlay::{PublicEntry, PublicEntryToSign, rpc};
 use crate::types::{BoxService, PeerId, Request, Response, Service, ServiceExt, ServiceRequest};
 use crate::util::NetworkExt;
 
@@ -311,7 +311,7 @@ impl PublicOverlay {
                 continue;
             };
 
-            if !pubkey.verify(
+            if !pubkey.verify_tl(
                 PublicEntryToSign {
                     overlay_id: this.overlay_id.as_bytes(),
                     peer_id: &entry.peer_id,
@@ -457,7 +457,7 @@ impl PublicOverlayEntries {
     where
         R: Rng + ?Sized,
     {
-        let index = rng.gen_range(0..self.items.len());
+        let index = rng.random_range(0..self.items.len());
         let (_, value) = self.items.get_index(index)?;
         Some(value)
     }
@@ -613,11 +613,7 @@ impl UnknownPeersQueue {
         let mut peer_ids = self.peer_ids.lock();
         self.peer_id_count.store(0, Ordering::Release);
         let res = std::mem::take(&mut *peer_ids);
-        if res.is_empty() {
-            None
-        } else {
-            Some(res)
-        }
+        if res.is_empty() { None } else { Some(res) }
     }
 }
 
@@ -668,15 +664,15 @@ type OverlayItems = IndexMap<PeerId, PublicOverlayEntryData, FastHasherState>;
 
 #[cfg(test)]
 mod tests {
-    use everscale_crypto::ed25519;
+    use tycho_crypto::ed25519;
     use tycho_util::time::now_sec;
 
     use super::*;
 
     fn generate_public_entry(overlay: &PublicOverlay, now: u32) -> Arc<PublicEntry> {
-        let keypair = ed25519::KeyPair::generate(&mut rand::thread_rng());
+        let keypair = rand::random::<ed25519::KeyPair>();
         let peer_id: PeerId = keypair.public_key.into();
-        let signature = keypair.sign(crate::proto::overlay::PublicEntryToSign {
+        let signature = keypair.sign_tl(crate::proto::overlay::PublicEntryToSign {
             overlay_id: overlay.overlay_id().as_bytes(),
             peer_id: &peer_id,
             created_at: now,
@@ -689,7 +685,7 @@ mod tests {
     }
 
     fn generate_invalid_public_entry(now: u32) -> Arc<PublicEntry> {
-        let keypair = ed25519::KeyPair::generate(&mut rand::thread_rng());
+        let keypair = rand::random::<ed25519::KeyPair>();
         let peer_id: PeerId = keypair.public_key.into();
         Arc::new(PublicEntry {
             peer_id,

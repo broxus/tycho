@@ -2,15 +2,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use everscale_crypto::ed25519;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, ShardIdent, ValidatorDescription};
 use futures_util::StreamExt;
 use tycho_collator::validator::{
     AddSession, BriefValidatorDescr, ValidationStatus, Validator, ValidatorStdImpl,
     ValidatorStdImplConfig,
 };
+use tycho_crypto::ed25519;
 use tycho_network::{DhtClient, PeerInfo};
+use tycho_types::cell::HashBytes;
+use tycho_types::models::{BlockId, ShardIdent, ValidatorDescription};
 use tycho_util::futures::JoinTask;
 
 mod common;
@@ -24,7 +24,7 @@ struct ValidatorNode {
 
 impl ValidatorNode {
     fn generate(zerostate_id: &BlockId, rng: &mut impl rand::Rng) -> Self {
-        let secret_key = ed25519::SecretKey::generate(rng);
+        let secret_key = rng.random::<ed25519::SecretKey>();
         let keypair = Arc::new(ed25519::KeyPair::from(&secret_key));
 
         let validator_network = common::make_validator_network(&secret_key, zerostate_id);
@@ -114,7 +114,7 @@ async fn validator_signatures_match() -> Result<()> {
         root_hash: HashBytes::ZERO,
         file_hash: HashBytes::ZERO,
     };
-    let nodes = generate_network(&zerostate_id, NODE_COUNT, &mut rand::thread_rng());
+    let nodes = generate_network(&zerostate_id, NODE_COUNT, &mut rand::rng());
 
     let mut block_id = BlockId {
         seqno: 1,
@@ -190,7 +190,7 @@ async fn malicious_validators_are_ignored() -> Result<()> {
         root_hash: HashBytes::ZERO,
         file_hash: HashBytes::ZERO,
     };
-    let nodes = generate_network(&zerostate_id, NODE_COUNT, &mut rand::thread_rng());
+    let nodes = generate_network(&zerostate_id, NODE_COUNT, &mut rand::rng());
 
     let mut block_id = BlockId {
         seqno: 1,
@@ -291,7 +291,7 @@ async fn network_gets_stuck_without_signatures() -> Result<()> {
         root_hash: HashBytes::ZERO,
         file_hash: HashBytes::ZERO,
     };
-    let nodes = generate_network(&zerostate_id, NODE_COUNT, &mut rand::thread_rng());
+    let nodes = generate_network(&zerostate_id, NODE_COUNT, &mut rand::rng());
 
     let block_id = BlockId {
         seqno: 1,

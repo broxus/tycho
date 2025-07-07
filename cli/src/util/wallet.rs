@@ -1,9 +1,9 @@
 use std::sync::OnceLock;
 
-use everscale_crypto::ed25519;
-use everscale_types::abi::{AbiHeaderType, AbiVersion, Function, IntoAbi, WithAbiType};
-use everscale_types::models::{StateInit, StdAddr};
-use everscale_types::prelude::*;
+use tycho_crypto::ed25519;
+use tycho_types::abi::{AbiHeaderType, AbiVersion, Function, IntoAbi, WithAbiType};
+use tycho_types::models::{StateInit, StdAddr};
+use tycho_types::prelude::*;
 
 pub const MSG_FLAGS_SIMPLE_SEND: u8 = 3;
 pub const MSG_FLAGS_SEPARATE_SEND: u8 = 2;

@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
-use everscale_crypto::ed25519;
 use rand::Rng;
 use tl_proto::{TlRead, TlWrite};
+use tycho_crypto::ed25519;
 
 #[derive(Clone, Copy, TlRead, TlWrite, Hash, PartialEq, Eq, PartialOrd, Ord)]
 #[tl(boxed, id = "transport.peerId", scheme = "proto.tl")]
@@ -99,10 +99,10 @@ impl<'de> serde::Deserialize<'de> for PeerId {
     }
 }
 
-impl rand::distributions::Distribution<PeerId> for rand::distributions::Standard {
+impl rand::distr::Distribution<PeerId> for rand::distr::StandardUniform {
     #[inline]
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> PeerId {
-        PeerId(rand::distributions::Standard.sample(rng))
+        PeerId(rand::distr::StandardUniform.sample(rng))
     }
 }
 

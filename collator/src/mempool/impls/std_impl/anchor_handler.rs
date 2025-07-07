@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bumpalo::Bump;
-use everscale_types::models::ConsensusConfig;
 use tokio::sync::mpsc;
 use tycho_consensus::prelude::{AnchorData, MempoolAdapterStore, MempoolDb, MempoolOutput};
+use tycho_types::models::ConsensusConfig;
 use tycho_util::time::now_millis;
 
 use crate::mempool::impls::std_impl::cache::Cache;

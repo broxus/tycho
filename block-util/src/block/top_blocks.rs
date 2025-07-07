@@ -1,5 +1,5 @@
 use anyhow::Result;
-use everscale_types::models::*;
+use tycho_types::models::*;
 use tycho_util::FastHashMap;
 
 use crate::block::BlockStuff;

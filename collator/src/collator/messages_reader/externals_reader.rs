@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::{Context, Result};
-use everscale_types::models::{IntAddr, MsgInfo, ShardIdent};
 use tycho_block_util::queue::QueuePartitionIdx;
+use tycho_types::models::{IntAddr, MsgInfo, ShardIdent};
 
 use super::{
     DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState,
@@ -19,8 +19,8 @@ use crate::collator::types::{
 };
 use crate::internal_queue::types::{InternalMessageValue, PartitionRouter};
 use crate::tracing_targets;
-use crate::types::processed_upto::BlockSeqno;
 use crate::types::DebugIter;
+use crate::types::processed_upto::BlockSeqno;
 
 #[cfg(test)]
 #[path = "../tests/externals_reader_tests.rs"]

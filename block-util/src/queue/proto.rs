@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
 use bytes::Bytes;
-use everscale_types::models::*;
-use everscale_types::prelude::*;
 use tl_proto::{TlError, TlRead, TlWrite};
+use tycho_types::models::*;
+use tycho_types::prelude::*;
 
 use crate::tl;
 
@@ -783,7 +783,7 @@ mod state_messages_list {
 }
 
 mod state_messages_list_ref {
-    use super::state_messages_list::{MAX_CHUNKS, MAX_CHUNK_SIZE};
+    use super::state_messages_list::{MAX_CHUNK_SIZE, MAX_CHUNKS};
     use super::*;
 
     type BigBytesRef = tycho_util::tl::BigBytesRef<MAX_CHUNK_SIZE>;
@@ -976,7 +976,7 @@ mod tests {
         // and increments the next byte
         let mut expected_hash_partial = [0u8; 32];
         expected_hash_partial[29] = 0x01; // incremented by carry
-                                          // bytes 30, 31 become 0x00
+        // bytes 30, 31 become 0x00
         assert_eq!(
             next_partial_ff.lt, 10,
             "LT must remain the same with partial 0xFF"

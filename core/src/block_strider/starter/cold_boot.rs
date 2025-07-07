@@ -4,8 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use everscale_types::models::*;
-use everscale_types::prelude::*;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tycho_block_util::archive::{ArchiveData, WithArchiveData};
@@ -13,10 +11,12 @@ use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::fs::FileBuilder;
+use tycho_types::models::*;
+use tycho_types::prelude::*;
+use tycho_util::FastHashMap;
 use tycho_util::futures::JoinTask;
 use tycho_util::sync::rayon_run;
 use tycho_util::time::now_sec;
-use tycho_util::FastHashMap;
 
 use super::{ColdBootType, StarterInner, ZerostateProvider};
 use crate::block_strider::{CheckProof, ProofChecker};
@@ -538,7 +538,7 @@ impl StarterInner {
                 {
                     Ok(res) => match res.data {
                         Some(data) if &data.block_id == block_id => {
-                            break 'res (data, res.neighbour)
+                            break 'res (data, res.neighbour);
                         }
                         Some(_) => {
                             res.neighbour.punish(PunishReason::Malicious);

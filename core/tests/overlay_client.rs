@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use rand::distributions::{Distribution, WeightedIndex};
-use rand::thread_rng;
+use rand::distr::Distribution;
+use rand::distr::weighted::WeightedIndex;
 use tl_proto::{TlRead, TlWrite};
 use tycho_core::overlay_client::{Neighbour, Neighbours};
 use tycho_network::PeerId;
@@ -46,7 +46,7 @@ pub async fn test() {
     ];
 
     let mut i = 0;
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
     let slice = initial_peers.as_slice();
     while i < 1000 {
         // let start = Instant::now();

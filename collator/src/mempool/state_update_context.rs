@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{
+use tycho_network::PeerId;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::{
     BlockId, ConsensusConfig, ConsensusInfo, ValidatorDescription, ValidatorSet,
 };
-use tycho_network::PeerId;
 
 use super::MempoolAnchorId;
 

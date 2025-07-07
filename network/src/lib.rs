@@ -1,8 +1,8 @@
 pub use dht::{
-    xor_distance, DhtClient, DhtConfig, DhtQueryBuilder, DhtQueryMode, DhtQueryWithDataBuilder,
-    DhtService, DhtServiceBackgroundTasks, DhtServiceBuilder, DhtValueMerger, DhtValueSource,
-    FindValueError, PeerResolver, PeerResolverBuilder, PeerResolverConfig, PeerResolverHandle,
-    StorageError,
+    DhtClient, DhtConfig, DhtQueryBuilder, DhtQueryMode, DhtQueryWithDataBuilder, DhtService,
+    DhtServiceBackgroundTasks, DhtServiceBuilder, DhtValueMerger, DhtValueSource, FindValueError,
+    PeerResolver, PeerResolverBuilder, PeerResolverConfig, PeerResolverHandle, StorageError,
+    xor_distance,
 };
 pub use network::{
     BindError, Connection, ConnectionError, KnownPeerHandle, KnownPeers, KnownPeersError, Network,
@@ -11,10 +11,10 @@ pub use network::{
 };
 pub use quinn;
 pub use types::{
-    service_message_fn, service_query_fn, Address, BoxCloneService, BoxService, Direction,
-    DisconnectReason, InboundRequestMeta, PeerAffinity, PeerEvent, PeerEventData, PeerId, PeerInfo,
-    Request, Response, RpcQuery, Service, ServiceExt, ServiceMessageFn, ServiceQueryFn,
-    ServiceRequest, Version,
+    Address, BoxCloneService, BoxService, Direction, DisconnectReason, InboundRequestMeta,
+    PeerAffinity, PeerEvent, PeerEventData, PeerId, PeerInfo, Request, Response, RpcQuery, Service,
+    ServiceExt, ServiceMessageFn, ServiceQueryFn, ServiceRequest, Version, service_message_fn,
+    service_query_fn,
 };
 
 pub use self::overlay::{
@@ -26,8 +26,8 @@ pub use self::overlay::{
     PublicOverlayEntryData, UnknownPeersQueue,
 };
 pub use self::util::{
-    check_peer_signature, try_handle_prefix, try_handle_prefix_with_offset, NetworkExt, Routable,
-    Router, RouterBuilder, UnknownPeerError,
+    NetworkExt, Routable, Router, RouterBuilder, UnknownPeerError, check_peer_signature,
+    try_handle_prefix, try_handle_prefix_with_offset,
 };
 
 mod dht;
@@ -54,7 +54,7 @@ mod tests {
 
     #[tokio::test]
     async fn init_works() {
-        let keypair = everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng());
+        let keypair = rand::random::<tycho_crypto::ed25519::KeyPair>();
         let peer_id: PeerId = keypair.public_key.into();
 
         let (dht_tasks, dht_service) = DhtService::builder(peer_id).build();

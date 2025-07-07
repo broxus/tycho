@@ -1,4 +1,4 @@
-use std::collections::{hash_map, VecDeque};
+use std::collections::{VecDeque, hash_map};
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::{cmp, mem};

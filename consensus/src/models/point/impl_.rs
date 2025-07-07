@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use bumpalo::Bump;
 use bytes::Bytes;
-use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::ConsensusConfig;
 use tl_proto::{TlError, TlRead, TlWrite};
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
+use tycho_types::models::ConsensusConfig;
 
 use crate::engine::MempoolConfig;
 use crate::models::point::serde_helpers::{PointBodyWrite, PointRawRead, PointRead, PointWrite};
@@ -187,8 +187,8 @@ pub mod test_point {
     use std::collections::BTreeMap;
 
     use bytes::Bytes;
-    use everscale_crypto::ed25519::SecretKey;
-    use rand::{thread_rng, Rng, RngCore};
+    use rand::RngCore;
+    use tycho_crypto::ed25519::SecretKey;
 
     use super::*;
     use crate::models::{Link, PointId, Round, Through, UnixTime};
@@ -199,7 +199,7 @@ pub mod test_point {
 
     pub fn new_key_pair() -> KeyPair {
         let mut secret_bytes: [u8; 32] = [0; 32];
-        thread_rng().fill_bytes(&mut secret_bytes);
+        rand::rng().fill_bytes(&mut secret_bytes);
         KeyPair::from(&SecretKey::from_bytes(secret_bytes))
     }
 
@@ -208,7 +208,7 @@ pub mod test_point {
         let mut payload = Vec::with_capacity(msg_count);
         let mut bytes = vec![0; MSG_BYTES];
         for _ in 0..msg_count {
-            thread_rng().fill_bytes(bytes.as_mut_slice());
+            rand::rng().fill_bytes(bytes.as_mut_slice());
             payload.push(Bytes::copy_from_slice(&bytes));
         }
         payload
@@ -216,7 +216,7 @@ pub mod test_point {
 
     pub fn prev_point_data() -> (Digest, Vec<(PeerId, Signature)>) {
         let mut buf = [0; Digest::MAX_TL_BYTES];
-        thread_rng().fill_bytes(&mut buf);
+        rand::rng().fill_bytes(&mut buf);
         let digest = Digest::wrap(buf);
         let mut evidence = Vec::with_capacity(PEERS);
         for _ in 0..PEERS {
@@ -238,13 +238,13 @@ pub mod test_point {
             let key_pair = new_key_pair();
             let peer_id = PeerId::from(key_pair.public_key);
             if i > 0 {
-                thread_rng().fill_bytes(&mut buf);
+                rand::rng().fill_bytes(&mut buf);
                 includes.insert(peer_id, Digest::wrap(buf));
             }
             evidence.insert(peer_id, Signature::new(&key_pair, &prev_digest));
         }
         let author = PeerId::from(key_pair.public_key);
-        let round = Round(thread_rng().gen_range(10..u32::MAX - 10));
+        let round = Round(rand::random_range(10..u32::MAX - 10));
         let anchor_time = UnixTime::now();
         let data = PointData {
             time: anchor_time.next(),
@@ -273,9 +273,9 @@ pub mod test_point {
 mod tests {
     use std::time::Instant;
 
-    use anyhow::{ensure, Context, Result};
+    use anyhow::{Context, Result, ensure};
     use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-    use test_point::{new_key_pair, payload, point, prev_point_data, PEERS};
+    use test_point::{PEERS, new_key_pair, payload, point, prev_point_data};
     use tycho_util::sync::rayon_run;
 
     use super::*;

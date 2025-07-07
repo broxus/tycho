@@ -5,19 +5,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use ahash::HashMapExt;
-use anyhow::{anyhow, bail, Context, Result};
-use everscale_types::boc;
-use everscale_types::cell::{Cell, CellFamily, HashBytes, Lazy, UsageTree, UsageTreeMode};
-use everscale_types::dict::{self, Dict};
-use everscale_types::models::{
-    AccountBlocks, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
-    BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg,
-    InMsgDescr, IntAddr, LibDescr, MsgInfo, MsgsExecutionParams, OptionalAccount, OutMsg,
-    OutMsgDescr, OwnedMessage, PrevBlockRef, ShardAccount, ShardAccounts, ShardDescription,
-    ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit, SpecialFlags,
-    StateInit, StdAddr, Transaction, ValueFlow,
-};
-use everscale_types::num::Tokens;
+use anyhow::{Context, Result, anyhow, bail};
 use parking_lot::lock_api::RwLockReadGuard;
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock};
 use tl_proto::TlWrite;
@@ -26,6 +14,18 @@ use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::{AccountMeta, PublicLibraryChange, TransactionMeta};
 use tycho_network::PeerId;
+use tycho_types::boc;
+use tycho_types::cell::{Cell, CellFamily, HashBytes, Lazy, UsageTree, UsageTreeMode};
+use tycho_types::dict::{self, Dict};
+use tycho_types::models::{
+    AccountBlocks, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
+    BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg,
+    InMsgDescr, IntAddr, LibDescr, MsgInfo, MsgsExecutionParams, OptionalAccount, OutMsg,
+    OutMsgDescr, OwnedMessage, PrevBlockRef, ShardAccount, ShardAccounts, ShardDescription,
+    ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit, SpecialFlags,
+    StateInit, StdAddr, Transaction, ValueFlow,
+};
+use tycho_types::num::Tokens;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
@@ -40,7 +40,7 @@ use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{
-    find_min_processed_to_by_shards, BlockSeqno, Lt, ProcessedUptoInfoStuff,
+    BlockSeqno, Lt, ProcessedUptoInfoStuff, find_min_processed_to_by_shards,
 };
 use crate::types::{BlockCandidate, McData, ProcessedToByPartitions, TopShardBlockInfo};
 
@@ -958,7 +958,7 @@ pub struct PublicLibrariesDiffItem {
 }
 
 impl PublicLibrariesDiffItem {
-    pub fn finalize(mut self) -> Result<Option<LibDescr>, everscale_types::error::Error> {
+    pub fn finalize(mut self) -> Result<Option<LibDescr>, tycho_types::error::Error> {
         match self.origin {
             // New `LibDescr` can be simply built from a list of publishers.
             PublicLibraryOrigin::New(lib) => {
@@ -1415,7 +1415,7 @@ impl CumulativeStatistics {
         if self.all_shards_processed_to_by_partitions == new_pt {
             return;
         }
-        for (&dst_shard, (_, ref processed_to)) in &new_pt {
+        for (&dst_shard, (_, processed_to)) in &new_pt {
             let changed = match self.all_shards_processed_to_by_partitions.get(&dst_shard) {
                 Some((_, old_pt)) => old_pt != processed_to,
                 None => true,

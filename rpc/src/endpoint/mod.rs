@@ -1,16 +1,16 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use axum::RequestExt;
 use axum::extract::{DefaultBodyLimit, FromRef, Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::RequestExt;
 use tokio::net::TcpListener;
 
 pub use self::jrpc::JrpcEndpointCache;
 pub use self::proto::ProtoEndpointCache;
 use crate::state::RpcState;
-use crate::util::mime::{get_mime_type, APPLICATION_JSON, APPLICATION_PROTOBUF};
+use crate::util::mime::{APPLICATION_JSON, APPLICATION_PROTOBUF, get_mime_type};
 
 pub mod jrpc;
 pub mod proto;

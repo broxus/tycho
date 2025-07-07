@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
-use rand::distributions::uniform::{UniformInt, UniformSampler};
 use rand::Rng;
+use rand::distr::uniform::{UniformInt, UniformSampler};
 use tokio::sync::Notify;
 use tycho_util::FastHashSet;
 
@@ -47,12 +47,12 @@ impl Neighbours {
 
     pub fn choose(&self) -> Option<Neighbour> {
         let selection_index = self.inner.selection_index.lock();
-        selection_index.choose(&mut rand::thread_rng())
+        selection_index.choose(&mut rand::rng())
     }
 
     pub fn choose_multiple(&self, n: usize, neighbour_type: NeighbourType) -> Vec<Neighbour> {
         let selection_index = self.inner.selection_index.lock();
-        selection_index.choose_multiple(&mut rand::thread_rng(), n, neighbour_type)
+        selection_index.choose_multiple(&mut rand::rng(), n, neighbour_type)
     }
 
     /// Tries to apply neighbours score to selection index.
@@ -200,11 +200,7 @@ impl SelectionIndex {
             }
         }
 
-        self.distribution = if total_weight != 0 {
-            Some(UniformInt::new(0, total_weight))
-        } else {
-            None
-        };
+        self.distribution = UniformInt::new(0, total_weight).ok();
 
         // TODO: fallback to uniform sample from any neighbour
     }
@@ -274,7 +270,7 @@ impl SelectionIndex {
 
             debug_assert!(weight > 0);
 
-            let key = rng.gen::<f64>().powf(1.0 / weight as f64);
+            let key = rng.random::<f64>().powf(1.0 / weight as f64);
             candidates.push(Element { key, neighbour });
         }
 

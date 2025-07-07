@@ -1,14 +1,14 @@
-use std::collections::{btree_map, BTreeMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque, btree_map};
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{bail, Result};
-use everscale_types::cell::Lazy;
-use everscale_types::models::{
-    BlockId, BlockIdShort, ConsensusInfo, OutMsgDescr, ShardFeeCreated, ShardIdent, ValueFlow,
-};
+use anyhow::{Result, bail};
 use parking_lot::Mutex;
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_types::cell::Lazy;
+use tycho_types::models::{
+    BlockId, BlockIdShort, ConsensusInfo, OutMsgDescr, ShardFeeCreated, ShardIdent, ValueFlow,
+};
 use tycho_util::{FastDashMap, FastHashMap};
 
 use super::types::{
@@ -1034,7 +1034,7 @@ struct ShardBlocksCacheData {
     value_flow: ValueFlow,
     proof_funds: ShardFeeCreated,
     #[cfg(feature = "block-creator-stats")]
-    creators: Vec<everscale_types::cell::HashBytes>,
+    creators: Vec<tycho_types::cell::HashBytes>,
 }
 
 impl ShardBlocksCacheData {

@@ -3,17 +3,17 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
-use rand::{thread_rng, RngCore};
+use rand::RngCore;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tracing::Instrument;
 use tycho_network::{PeerId, Request};
-use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
+use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, TaskResult};
@@ -275,7 +275,7 @@ impl<T: DownloadType> DownloadTask<T> {
                         // try mandatory peers before others each loop
                         u8::from(!status.is_depender),
                         // randomise within group
-                        thread_rng().next_u32(),
+                        rand::rng().next_u32(),
                     ),
                 )
             })

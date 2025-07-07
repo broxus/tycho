@@ -1,4 +1,4 @@
-use everscale_types::models::{BlockId, ShardIdent};
+use tycho_types::models::{BlockId, ShardIdent};
 
 /// Writes `BlockIdExt` in little-endian format
 pub fn write_block_id_le(block_id: &BlockId) -> [u8; 80] {

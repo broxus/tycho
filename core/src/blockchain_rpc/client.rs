@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use bytes::Bytes;
 use bytesize::ByteSize;
-use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use parking_lot::Mutex;
 use scopeguard::ScopeGuard;
@@ -15,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tycho_block_util::archive::ArchiveVerifier;
 use tycho_network::{PublicOverlay, Request};
+use tycho_types::models::BlockId;
 use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
 use tycho_util::serde_helpers;
@@ -519,7 +519,7 @@ impl BlockchainRpcClient {
                             size,
                             chunk_size,
                             neighbour: handle.accept(),
-                        }
+                        };
                     }
                     ArchiveInfo::TooNew => {
                         new_archive_count += 1;
@@ -936,7 +936,7 @@ mod tests {
         let neighbour = Neighbour::new(PeerId([0; 32]), u32::MAX, &Duration::from_millis(100));
 
         let mut original_data = vec![0u8; 1 << 20]; // 1 MB of garbage
-        rand::thread_rng().fill_bytes(&mut original_data);
+        rand::rng().fill_bytes(&mut original_data);
 
         let mut compressed_data = Vec::new();
         zstd_compress(&original_data, &mut compressed_data, 9);

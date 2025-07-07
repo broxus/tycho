@@ -2,27 +2,27 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Store};
-use everscale_types::dict::Dict;
-use everscale_types::models::{
-    BlockId, BlockIdShort, ExtInMsgInfo, IntAddr, IntMsgInfo, Message, MsgInfo,
-    MsgsExecutionParams, ShardIdent, StdAddr,
-};
 use indexmap::IndexMap;
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
+use rand::seq::{IndexedRandom, SliceRandom};
 use rand::{Rng, SeedableRng};
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
 use tycho_network::PeerId;
+use tycho_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Store};
+use tycho_types::dict::Dict;
+use tycho_types::models::{
+    BlockId, BlockIdShort, ExtInMsgInfo, IntAddr, IntMsgInfo, Message, MsgInfo,
+    MsgsExecutionParams, ShardIdent, StdAddr,
+};
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::{
     CumulativeStatsCalcParams, FinalizedMessagesReader, GetNextMessageGroupMode, MessagesReader,
     MessagesReaderContext, ReaderState,
 };
+use crate::collator::MsgsExecutionParamsStuff;
 use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::types::{AnchorsCache, CumulativeStatistics, ParsedMessage};
-use crate::collator::MsgsExecutionParamsStuff;
 use crate::internal_queue::types::{
     Bound, DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, QueueShardBoundedRange,
 };
@@ -381,9 +381,10 @@ async fn test_refill_messages() -> Result<()> {
         test_adapter.import_anchor_with_messages(messages);
         test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT, &TestAssertsParams {
             expired_ext_msgs_count: match i + 1 {
-                16 => Some(53),
-                17 => Some(37),
-                19 => Some(85),
+                // 16 => Some(0),
+                17 => Some(138),
+                18 => Some(36),
+                20 => Some(47),
                 _ => Some(0),
             },
         })?;
@@ -505,7 +506,7 @@ async fn test_refill_messages() -> Result<()> {
         test_adapter.import_anchor_with_messages(vec![]);
     }
     test_adapter.test_collate_shards(DEFAULT_BLOCK_EXEC_COUNT_LIMIT, &TestAssertsParams {
-        expired_ext_msgs_count: Some(10),
+        expired_ext_msgs_count: Some(9),
     })?;
 
     // process all remaining messages in queue
@@ -1599,7 +1600,7 @@ where
     ) -> Result<Vec<TestInternalMessage<V>>> {
         let mut res = vec![];
 
-        let count = count - self.rng.gen_range(0..=(count * DEVIATION_PERCENT / 100));
+        let count = count - self.rng.random_range(0..=(count * DEVIATION_PERCENT / 100));
         for _ in 0..count {
             let (src, dst) = self.get_random_src_and_dst_addrs(transfers_wallets);
 
@@ -1692,7 +1693,7 @@ where
         messages.shuffle(&mut self.rng);
 
         let anchor_id = self.last_anchor_id + 4;
-        let anchor_ct = self.last_anchor_ct + self.rng.gen_range(1000..=1200);
+        let anchor_ct = self.last_anchor_ct + self.rng.random_range(1000..=1200);
 
         let mut externals = vec![];
         for msg in messages {
@@ -1819,7 +1820,7 @@ where
     ) -> Result<Vec<TestExternalMessage>> {
         let mut res = vec![];
 
-        let count = count - self.rng.gen_range(0..=(count * DEVIATION_PERCENT / 100));
+        let count = count - self.rng.random_range(0..=(count * DEVIATION_PERCENT / 100));
         for _ in 0..count {
             let idx = self.next_ext_idx;
             self.next_ext_idx += 1;
@@ -1830,7 +1831,7 @@ where
             let dex_wallet = dex_wallets.get(dex_wallet_key).unwrap().clone();
 
             // get random swap route
-            let route_u32: u32 = self.rng.gen_range(1..13);
+            let route_u32: u32 = self.rng.random_range(1..13);
             let route: SwapRoute = unsafe { std::mem::transmute(route_u32) };
 
             let msg_type = TestExternalMessageType::Swap { route };
@@ -1951,7 +1952,7 @@ where
     ) -> Result<Vec<TestExternalMessage>> {
         let mut res = vec![];
 
-        let count = count - self.rng.gen_range(0..=(count * DEVIATION_PERCENT / 100));
+        let count = count - self.rng.random_range(0..=(count * DEVIATION_PERCENT / 100));
         for _ in 0..count {
             let idx = self.next_ext_idx;
             self.next_ext_idx += 1;
@@ -2006,7 +2007,7 @@ where
     ) -> Result<Vec<TestExternalMessage>> {
         let mut res = vec![];
 
-        let count = count - self.rng.gen_range(0..=(count * DEVIATION_PERCENT / 100));
+        let count = count - self.rng.random_range(0..=(count * DEVIATION_PERCENT / 100));
         for _ in 0..count {
             let idx = self.next_ext_idx;
             self.next_ext_idx += 1;
@@ -2040,7 +2041,7 @@ where
     ) -> Result<Vec<TestExternalMessage>> {
         let mut res = vec![];
 
-        let count = count - self.rng.gen_range(0..=(count * DEVIATION_PERCENT / 100));
+        let count = count - self.rng.random_range(0..=(count * DEVIATION_PERCENT / 100));
         for _ in 0..count {
             let idx = self.next_ext_idx;
             self.next_ext_idx += 1;

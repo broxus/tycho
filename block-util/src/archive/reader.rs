@@ -1,8 +1,8 @@
-use everscale_types::models::BlockId;
 use tl_proto::TlRead;
+use tycho_types::models::BlockId;
 
 use super::ArchiveEntryType;
-use crate::archive::proto::{ArchiveEntryHeader, ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX};
+use crate::archive::proto::{ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX, ArchiveEntryHeader};
 
 /// Stateful archive package reader.
 pub struct ArchiveReader<'a> {

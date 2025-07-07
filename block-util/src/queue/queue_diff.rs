@@ -2,15 +2,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::cell::Lazy;
-use everscale_types::error::Error;
-use everscale_types::models::*;
-use everscale_types::prelude::*;
 use tl_proto::TlRead;
+use tycho_types::cell::Lazy;
+use tycho_types::error::Error;
+use tycho_types::models::*;
+use tycho_types::prelude::*;
 
 use crate::archive::WithArchiveData;
-use crate::queue::proto::{QueueDiff, QueueKey};
 use crate::queue::RouterPartitions;
+use crate::queue::proto::{QueueDiff, QueueKey};
 
 pub type QueueDiffStuffAug = WithArchiveData<QueueDiffStuff>;
 
@@ -218,7 +218,7 @@ unsafe impl arc_swap::RefCnt for QueueDiffStuff {
 
     unsafe fn from_ptr(ptr: *const Self::Base) -> Self {
         Self {
-            inner: arc_swap::RefCnt::from_ptr(ptr),
+            inner: unsafe { arc_swap::RefCnt::from_ptr(ptr) },
         }
     }
 }
@@ -287,7 +287,7 @@ impl ExactSizeIterator for QueueDiffMessagesIter {
 
 #[cfg(test)]
 mod tests {
-    use everscale_types::num::Tokens;
+    use tycho_types::num::Tokens;
 
     use super::*;
 

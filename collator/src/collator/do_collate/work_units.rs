@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use everscale_types::models::{
+use tycho_types::models::{
     WorkUnitsParamsExecute, WorkUnitsParamsFinalize, WorkUnitsParamsPrepare,
 };
 

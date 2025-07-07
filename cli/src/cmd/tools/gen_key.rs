@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use anyhow::Result;
-use everscale_crypto::ed25519;
+use tycho_crypto::ed25519;
 
 use crate::util::{parse_secret_key, print_json};
 
@@ -32,7 +32,7 @@ impl Cmd {
                 };
                 parse_secret_key(&key, self.raw_key)?
             }
-            None => ed25519::SecretKey::generate(&mut rand::thread_rng()),
+            None => rand::random::<ed25519::SecretKey>(),
         };
 
         let public = ed25519::PublicKey::from(&secret);

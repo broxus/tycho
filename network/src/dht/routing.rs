@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use tycho_util::time::now_sec;
 
-use crate::dht::{xor_distance, MAX_XOR_DISTANCE};
+use crate::dht::{MAX_XOR_DISTANCE, xor_distance};
 use crate::network::KnownPeerHandle;
 use crate::types::{PeerId, PeerInfo};
 
@@ -656,7 +656,7 @@ mod tests {
                 random_ids.push(crate::dht::random_key_at_distance(
                     peer_id,
                     distance,
-                    &mut rand::thread_rng(),
+                    &mut rand::rng(),
                 ));
             }
 

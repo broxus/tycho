@@ -3,12 +3,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use everscale_crypto::ed25519;
-use everscale_types::models::{BlockId, ValidatorSet};
+use tycho_crypto::ed25519;
 use tycho_network::{
     DhtClient, DhtService, Network, OverlayService, PeerInfo, PeerResolver, PublicOverlay, Router,
 };
 use tycho_storage::{StorageConfig, StorageContext};
+use tycho_types::models::{BlockId, ValidatorSet};
 
 pub use self::config::NodeBaseConfig;
 pub use self::keys::NodeKeys;

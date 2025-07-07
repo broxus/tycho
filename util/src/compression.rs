@@ -2,7 +2,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::io::Write;
 use std::mem::ManuallyDrop;
 
-use zstd_safe::{get_error_name, CCtx, CParameter, DCtx, InBuffer, OutBuffer, ResetDirective};
+use zstd_safe::{CCtx, CParameter, DCtx, InBuffer, OutBuffer, ResetDirective, get_error_name};
 
 type Result<T> = std::result::Result<T, ZstdError>;
 
@@ -335,7 +335,9 @@ pub enum ZstdError {
     #[error("Zstd error: {0}")]
     Raw(#[from] RawCompressorError),
 
-    #[error("Suspicious compression ratio detected: compressed size: {compressed_size}, decompressed size: {decompressed_size}")]
+    #[error(
+        "Suspicious compression ratio detected: compressed size: {compressed_size}, decompressed size: {decompressed_size}"
+    )]
     SuspiciousCompressionRatio {
         compressed_size: usize,
         decompressed_size: u64,

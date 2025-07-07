@@ -3,11 +3,11 @@ use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 use tracing_flame::FlameLayer;
-use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::Layer;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 pub fn spans(test_name: &str, filter: &str) {
     tracing_subscriber::fmt()

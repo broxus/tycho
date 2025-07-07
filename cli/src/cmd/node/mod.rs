@@ -10,8 +10,8 @@ use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
 
 pub use self::control::CmdControl;
-use crate::node::{Node, NodeConfig};
 use crate::BaseArgs;
+use crate::node::{Node, NodeConfig};
 
 mod control;
 

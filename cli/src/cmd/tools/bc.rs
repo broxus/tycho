@@ -3,15 +3,15 @@ use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use everscale_crypto::ed25519;
-use everscale_types::abi::extend_signature_with_id;
-use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, CellBuilder};
-use everscale_types::models::{
+use reqwest::Url;
+use tycho_crypto::ed25519;
+use tycho_types::abi::extend_signature_with_id;
+use tycho_types::boc::Boc;
+use tycho_types::cell::{Cell, CellBuilder};
+use tycho_types::models::{
     AccountState, BlockchainConfigParams, ExtInMsgInfo, GlobalCapability, MsgInfo, OwnedMessage,
     StdAddr,
 };
-use reqwest::Url;
 use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;

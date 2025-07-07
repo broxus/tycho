@@ -1,18 +1,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Lazy};
-use everscale_types::merkle::MerkleUpdate;
-use everscale_types::models::{
-    Block, BlockExtra, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig, ConsensusInfo,
-    IntAddr, IntMsgInfo, IntermediateAddr, McBlockExtra, McStateExtra, MsgEnvelope, MsgInfo,
-    OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, OwnedMessage, PrevBlockRef,
-    ShardDescription, ShardHashes, ShardIdent, ShardStateUnsplit, StdAddr, ValidatorInfo,
-    ValueFlow,
-};
 use parking_lot::Mutex;
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
@@ -20,6 +10,16 @@ use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::storage::{BlockHandle, NewBlockMeta, StoreStateHint};
+use tycho_types::boc::Boc;
+use tycho_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Lazy};
+use tycho_types::merkle::MerkleUpdate;
+use tycho_types::models::{
+    Block, BlockExtra, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig, ConsensusInfo,
+    IntAddr, IntMsgInfo, IntermediateAddr, McBlockExtra, McStateExtra, MsgEnvelope, MsgInfo,
+    OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, OwnedMessage, PrevBlockRef,
+    ShardDescription, ShardHashes, ShardIdent, ShardStateUnsplit, StdAddr, ValidatorInfo,
+    ValueFlow,
+};
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
 use super::{BlockCacheStoreResult, BlockSeqno, CollationManager};
@@ -31,15 +31,15 @@ use crate::internal_queue::types::{
     DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, PartitionRouter,
     QueueDiffWithMessages,
 };
+use crate::manager::McBlockSubgraphExtract;
 use crate::manager::blocks_cache::BlocksCache;
 use crate::manager::types::{CollationSyncState, NextCollationStep};
-use crate::manager::McBlockSubgraphExtract;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{CollatorSyncContext, StateNodeAdapter};
 use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
 use crate::types::processed_upto::{
-    find_min_processed_to_by_shards, InternalsProcessedUptoStuff, Lt, ProcessedUptoInfoStuff,
-    ProcessedUptoPartitionStuff,
+    InternalsProcessedUptoStuff, Lt, ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
+    find_min_processed_to_by_shards,
 };
 use crate::types::{
     BlockCandidate, BlockStuffForSync, ProcessedTo, ShardDescriptionShort,
@@ -913,30 +913,46 @@ async fn test_queue_restore_on_sync() {
     .await
     .unwrap();
 
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&2).unwrap().id()));
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&3).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&4).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&5).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&6).unwrap().id()));
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&3).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&4).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&5).unwrap().id()));
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&2).unwrap().id())
+    );
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&3).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&4).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&5).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&6).unwrap().id())
+    );
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&3).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&4).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&5).unwrap().id())
+    );
 
     test_adapter
         .blocks_cache
@@ -1266,36 +1282,56 @@ async fn test_queue_restore_on_sync() {
     .await
     .unwrap();
 
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&7).unwrap().id()));
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&8).unwrap().id()));
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&9).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&10).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&11).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&12).unwrap().id()));
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&6).unwrap().id()));
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&7).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&8).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&9).unwrap().id()));
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&7).unwrap().id())
+    );
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&8).unwrap().id())
+    );
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&9).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&10).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&11).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&12).unwrap().id())
+    );
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&6).unwrap().id())
+    );
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&7).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&8).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&9).unwrap().id())
+    );
 
     test_adapter
         .blocks_cache
@@ -1561,33 +1597,51 @@ async fn test_queue_restore_on_sync() {
     .await
     .unwrap();
 
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&12).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&13).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&14).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&15).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&16).unwrap().id()));
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&9).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&10).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&11).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&12).unwrap().id()));
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&12).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&13).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&14).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&15).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&16).unwrap().id())
+    );
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&9).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&10).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&11).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&12).unwrap().id())
+    );
 
     test_adapter
         .blocks_cache
@@ -1872,36 +1926,56 @@ async fn test_queue_restore_on_sync() {
     .await
     .unwrap();
 
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&16).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&17).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&18).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&19).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&20).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_sc_blocks.get(&21).unwrap().id()));
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&12).unwrap().id()));
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&13).unwrap().id()));
-    assert!(!queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&14).unwrap().id()));
-    assert!(queue_restore_res
-        .applied_diffs_ids
-        .contains(test_adapter.last_mc_blocks.get(&15).unwrap().id()));
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&16).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&17).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&18).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&19).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&20).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_sc_blocks.get(&21).unwrap().id())
+    );
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&12).unwrap().id())
+    );
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&13).unwrap().id())
+    );
+    assert!(
+        !queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&14).unwrap().id())
+    );
+    assert!(
+        queue_restore_res
+            .applied_diffs_ids
+            .contains(test_adapter.last_mc_blocks.get(&15).unwrap().id())
+    );
 
     test_adapter
         .blocks_cache

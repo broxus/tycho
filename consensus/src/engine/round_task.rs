@@ -2,7 +2,7 @@ use std::cmp;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures_util::{future, FutureExt};
+use futures_util::{FutureExt, future};
 use tokio::sync::{oneshot, watch};
 
 use crate::dag::{

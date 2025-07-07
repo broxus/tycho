@@ -1,6 +1,6 @@
 use tycho_storage::kv::{
-    default_block_based_table_factory, optimize_for_point_lookup, with_blob_db,
-    zstd_block_based_table_factory, TableContext, DEFAULT_MIN_BLOB_SIZE,
+    DEFAULT_MIN_BLOB_SIZE, TableContext, default_block_based_table_factory,
+    optimize_for_point_lookup, with_blob_db, zstd_block_based_table_factory,
 };
 use weedb::rocksdb::{DBCompressionType, Options};
 use weedb::{ColumnFamily, ColumnFamilyOptions};

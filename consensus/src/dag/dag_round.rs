@@ -1,15 +1,15 @@
 use std::cmp;
 use std::sync::{Arc, Weak};
 
-use everscale_crypto::ed25519::KeyPair;
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
+use crate::dag::IllFormedReason;
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::threshold::Threshold;
-use crate::dag::IllFormedReason;
 use crate::effects::{AltFmt, AltFormat, Ctx, RoundCtx, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};

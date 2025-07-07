@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use everscale_crypto::ed25519;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::{fmt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, fmt};
+use tycho_crypto::ed25519;
 use tycho_network::{
     Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, PeerId, PeerInfo, Router,
 };
@@ -135,7 +135,7 @@ struct CmdGenKey {}
 impl CmdGenKey {
     #[allow(clippy::unused_self)]
     fn run(self) -> Result<()> {
-        let secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());
+        let secret_key = rand::random::<ed25519::SecretKey>();
         let public_key = ed25519::PublicKey::from(&secret_key);
         let peer_id = PeerId::from(public_key);
 
@@ -230,7 +230,7 @@ impl Node {
         remote_addr: Address,
         config: NodeConfig,
     ) -> Result<Self> {
-        let keypair = everscale_crypto::ed25519::KeyPair::from(&key);
+        let keypair = tycho_crypto::ed25519::KeyPair::from(&key);
 
         let (dht_tasks, dht_service) = DhtService::builder(keypair.public_key.into())
             .with_config(config.dht)
@@ -266,7 +266,7 @@ impl Node {
             expires_at: ttl.unwrap_or(u32::MAX),
             signature: Box::new([0; 64]),
         };
-        *node_info.signature = keypair.sign(&node_info);
+        *node_info.signature = keypair.sign_tl(&node_info);
         node_info
     }
 }

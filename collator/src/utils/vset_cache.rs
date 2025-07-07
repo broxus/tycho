@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockchainConfig, ValidatorSet};
 use tycho_block_util::config::BlockchainConfigExt;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::{BlockchainConfig, ValidatorSet};
 use tycho_util::FastDashMap;
 
 #[derive(Default)]

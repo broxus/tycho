@@ -4,7 +4,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::Result;
-use base64::prelude::{Engine as _, BASE64_STANDARD};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use bytes::Bytes;
 use serde::de::{Error, Expected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -497,7 +497,7 @@ impl<'de, const M: usize> Visitor<'de> for BytesVisitor<M> {
             ) {
                 arr[..num]
                     .iter_mut()
-                    .for_each(|item| item.assume_init_drop());
+                    .for_each(|item| unsafe { item.assume_init_drop() });
             }
 
             // SAFETY: It is safe to assume that array of uninitialized values is initialized itself.

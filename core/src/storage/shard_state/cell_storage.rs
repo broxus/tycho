@@ -11,14 +11,14 @@ use bumpalo::Bump;
 use bumpalo_herd::{Herd, Member};
 use bytesize::ByteSize;
 use dashmap::Map;
-use everscale_types::cell::*;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
 use tycho_storage::kv::refcount;
-use tycho_util::metrics::{spawn_metrics_loop, HistogramGuard};
+use tycho_types::cell::*;
+use tycho_util::metrics::{HistogramGuard, spawn_metrics_loop};
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet, FastHasherState};
 use weedb::rocksdb::WriteBatch;
-use weedb::{rocksdb, BoundedCfHandle};
+use weedb::{BoundedCfHandle, rocksdb};
 
 use crate::storage::CoreDb;
 
@@ -1368,11 +1368,11 @@ pub union StorageCellReferenceData {
 
 impl StorageCellReferenceData {
     unsafe fn take_storage_cell(&mut self) -> Cell {
-        Cell::from(ManuallyDrop::take(&mut self.storage_cell) as Arc<_>)
+        Cell::from(unsafe { ManuallyDrop::take(&mut self.storage_cell) } as Arc<_>)
     }
 
     unsafe fn take_replaced_cell(&mut self) -> Cell {
-        ManuallyDrop::take(&mut self.replaced_cell)
+        unsafe { ManuallyDrop::take(&mut self.replaced_cell) }
     }
 }
 

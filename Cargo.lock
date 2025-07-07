@@ -34,7 +34,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e89da841a80418a9b391ebaea17f5c112ffaaa96f621d2c285b5174da76b9011"
 dependencies = [
  "cfg-if",
- "getrandom",
+ "getrandom 0.2.15",
  "once_cell",
  "version_check",
  "zerocopy",
@@ -948,72 +948,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "everscale-crypto"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0da807f69d3d795921a2aaf4bd9b449e3d280d28b104e4909890a50c40a33950"
-dependencies = [
- "curve25519-dalek",
- "generic-array",
- "hex",
- "rand",
- "serde",
- "sha2",
- "tl-proto",
-]
-
-[[package]]
-name = "everscale-types"
-version = "0.1.2"
-source = "git+https://github.com/broxus/everscale-types.git?rev=77458d0b94c5dca09366acd84a904ff7e87d1b3b#77458d0b94c5dca09366acd84a904ff7e87d1b3b"
-dependencies = [
- "ahash",
- "anyhow",
- "base64",
- "bitflags",
- "blake3",
- "bytes",
- "crc32c",
- "ed25519-dalek",
- "everscale-crypto",
- "everscale-types-abi-proc",
- "everscale-types-proc",
- "hex",
- "num-bigint",
- "num-traits",
- "rand",
- "rayon",
- "scc",
- "serde",
- "sha2",
- "smallvec",
- "thiserror 2.0.11",
- "tl-proto",
- "typeid",
-]
-
-[[package]]
-name = "everscale-types-abi-proc"
-version = "0.1.0"
-source = "git+https://github.com/broxus/everscale-types.git?rev=77458d0b94c5dca09366acd84a904ff7e87d1b3b#77458d0b94c5dca09366acd84a904ff7e87d1b3b"
-dependencies = [
- "anyhow",
- "proc-macro2",
- "quote",
- "syn 2.0.96",
-]
-
-[[package]]
-name = "everscale-types-proc"
-version = "0.1.5"
-source = "git+https://github.com/broxus/everscale-types.git?rev=77458d0b94c5dca09366acd84a904ff7e87d1b3b#77458d0b94c5dca09366acd84a904ff7e87d1b3b"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.96",
-]
-
-[[package]]
 name = "exponential-backoff"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1200,7 +1134,19 @@ checksum = "c4567c8db10ae91089c99af84c68c38da3ec2f087c3f82960bcdbf3656b6f4d7"
 dependencies = [
  "cfg-if",
  "libc",
- "wasi",
+ "wasi 0.11.0+wasi-snapshot-preview1",
+]
+
+[[package]]
+name = "getrandom"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26145e563e54f2cadc477553f1ec5ee650b00862f0a58bcd12cbdc5f0ea2d2f4"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi",
+ "wasi 0.14.2+wasi-0.2.4",
 ]
 
 [[package]]
@@ -1302,7 +1248,7 @@ dependencies = [
  "hickory-proto",
  "once_cell",
  "radix_trie",
- "rand",
+ "rand 0.8.5",
  "thiserror 1.0.66",
  "tokio",
  "tracing",
@@ -1324,7 +1270,7 @@ dependencies = [
  "idna 0.4.0",
  "ipnet",
  "once_cell",
- "rand",
+ "rand 0.8.5",
  "thiserror 1.0.66",
  "tinyvec",
  "tokio",
@@ -1766,7 +1712,7 @@ checksum = "80e04d1dcff3aae0704555fe5fee3bcfaf3d1fdf8a7e521d5b9d2b42acb52cec"
 dependencies = [
  "hermit-abi 0.3.9",
  "libc",
- "wasi",
+ "wasi 0.11.0+wasi-snapshot-preview1",
  "windows-sys 0.52.0",
 ]
 
@@ -1950,7 +1896,7 @@ dependencies = [
  "once_cell",
  "opentelemetry_api",
  "percent-encoding",
- "rand",
+ "rand 0.8.5",
  "thiserror 1.0.66",
 ]
 
@@ -2249,7 +2195,7 @@ dependencies = [
  "libc",
  "once_cell",
  "raw-cpuid",
- "wasi",
+ "wasi 0.11.0+wasi-snapshot-preview1",
  "web-sys",
  "winapi",
 ]
@@ -2291,7 +2237,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fadfaed2cd7f389d0161bb73eeb07b7b78f8691047a6f3e73caaeae55310a4a6"
 dependencies = [
  "bytes",
- "rand",
+ "rand 0.8.5",
  "ring",
  "rustc-hash 2.1.0",
  "rustls",
@@ -2324,6 +2270,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "r-efi"
+version = "5.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
+
+[[package]]
 name = "radix_trie"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2340,8 +2292,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
 dependencies = [
  "libc",
- "rand_chacha",
- "rand_core",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fbfd9d094a40bf3ae768db9361049ace4c0e04a4fd6b359518bd7b73a73dd97"
+dependencies = [
+ "rand_chacha 0.9.0",
+ "rand_core 0.9.3",
 ]
 
 [[package]]
@@ -2351,7 +2313,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
 dependencies = [
  "ppv-lite86",
- "rand_core",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.9.3",
 ]
 
 [[package]]
@@ -2360,16 +2332,25 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
- "getrandom",
+ "getrandom 0.2.15",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
+dependencies = [
+ "getrandom 0.3.3",
 ]
 
 [[package]]
 name = "rand_pcg"
-version = "0.3.1"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59cad018caf63deb318e5a4586d99a24424a364f40f1e5778c29aca23f4fc73e"
+checksum = "b48ac3f7ffaab7fac4d2376632268aa5f89abdb55f7ebf8f4d11fffccb2320f7"
 dependencies = [
- "rand_core",
+ "rand_core 0.9.3",
 ]
 
 [[package]]
@@ -2416,7 +2397,7 @@ version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
 dependencies = [
- "getrandom",
+ "getrandom 0.2.15",
  "libredox",
  "thiserror 1.0.66",
 ]
@@ -2516,7 +2497,7 @@ checksum = "c17fa4cb658e3583423e915b9f3acc01cceaee1860e33d59ebae66adc3a2dc0d"
 dependencies = [
  "cc",
  "cfg-if",
- "getrandom",
+ "getrandom 0.2.15",
  "libc",
  "spin",
  "untrusted",
@@ -2814,7 +2795,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
- "rand_core",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -2967,7 +2948,7 @@ dependencies = [
  "humantime",
  "opentelemetry",
  "pin-project",
- "rand",
+ "rand 0.8.5",
  "serde",
  "static_assertions",
  "tarpc-plugins",
@@ -3480,13 +3461,13 @@ dependencies = [
  "base64",
  "bytes",
  "criterion",
- "everscale-types",
  "hex",
  "parking_lot",
  "rayon",
  "thiserror 2.0.11",
  "tl-proto",
  "tycho-storage-traits",
+ "tycho-types",
  "tycho-util",
 ]
 
@@ -3503,14 +3484,12 @@ dependencies = [
  "clap-markdown",
  "dirs",
  "ed25519-dalek",
- "everscale-crypto",
- "everscale-types",
  "futures-util",
  "hex",
  "humantime",
  "num-bigint",
  "parking_lot",
- "rand",
+ "rand 0.9.1",
  "rayon",
  "reqwest",
  "rustc_version",
@@ -3530,9 +3509,11 @@ dependencies = [
  "tycho-consensus",
  "tycho-control",
  "tycho-core",
+ "tycho-crypto",
  "tycho-network",
  "tycho-rpc",
  "tycho-storage",
+ "tycho-types",
  "tycho-util",
  "weedb",
 ]
@@ -3550,14 +3531,12 @@ dependencies = [
  "bumpalo",
  "bytes",
  "bytesize",
- "everscale-crypto",
- "everscale-types",
  "futures-util",
  "humantime",
  "indexmap 2.6.0",
  "metrics",
  "parking_lot",
- "rand",
+ "rand 0.9.1",
  "rayon",
  "scc",
  "scopeguard",
@@ -3573,9 +3552,11 @@ dependencies = [
  "tycho-collator",
  "tycho-consensus",
  "tycho-core",
+ "tycho-crypto",
  "tycho-executor",
  "tycho-network",
  "tycho-storage",
+ "tycho-types",
  "tycho-util",
  "tycho-vm",
  "weedb",
@@ -3594,15 +3575,13 @@ dependencies = [
  "bytes",
  "clap",
  "dashmap",
- "everscale-crypto",
- "everscale-types",
  "futures-util",
  "hex",
  "humantime",
  "itertools 0.12.1",
  "metrics",
  "parking_lot",
- "rand",
+ "rand 0.9.1",
  "rand_pcg",
  "rayon",
  "scopeguard",
@@ -3618,8 +3597,10 @@ dependencies = [
  "tracing-flame",
  "tracing-subscriber",
  "tycho-consensus",
+ "tycho-crypto",
  "tycho-network",
  "tycho-storage",
+ "tycho-types",
  "tycho-util",
  "weedb",
 ]
@@ -3632,8 +3613,6 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "bytes",
- "everscale-crypto",
- "everscale-types",
  "futures-util",
  "parking_lot",
  "scopeguard",
@@ -3644,7 +3623,9 @@ dependencies = [
  "tracing",
  "tycho-block-util",
  "tycho-core",
+ "tycho-crypto",
  "tycho-network",
+ "tycho-types",
  "tycho-util",
 ]
 
@@ -3663,8 +3644,6 @@ dependencies = [
  "castaway",
  "crc32c",
  "dashmap",
- "everscale-crypto",
- "everscale-types",
  "futures-util",
  "humantime",
  "metrics",
@@ -3673,7 +3652,7 @@ dependencies = [
  "parking_lot_core",
  "pin-project-lite",
  "quick_cache",
- "rand",
+ "rand 0.9.1",
  "scopeguard",
  "serde",
  "sha2",
@@ -3686,22 +3665,40 @@ dependencies = [
  "triomphe",
  "tycho-block-util",
  "tycho-core",
+ "tycho-crypto",
  "tycho-network",
  "tycho-storage",
+ "tycho-types",
  "tycho-util",
  "weedb",
 ]
 
 [[package]]
+name = "tycho-crypto"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dc575bf266a635aed302ac1f42c405693b06eb2750648b195c762bc01546530"
+dependencies = [
+ "curve25519-dalek",
+ "generic-array",
+ "hex",
+ "rand 0.9.1",
+ "serde",
+ "sha2",
+ "tl-proto",
+]
+
+[[package]]
 name = "tycho-executor"
-version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git?rev=60b5db42f650654e09d1a703b1ce2cdc60d9379b#60b5db42f650654e09d1a703b1ce2cdc60d9379b"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a03ba8feb66f00bad7954ec9f3007a7872c473284a181ad44fe5d08610f956b"
 dependencies = [
  "ahash",
  "anyhow",
- "everscale-types",
  "num-bigint",
  "thiserror 2.0.11",
+ "tycho-types",
  "tycho-vm",
 ]
 
@@ -3719,18 +3716,18 @@ version = "0.2.10"
 dependencies = [
  "anyhow",
  "clap",
- "everscale-crypto",
- "everscale-types",
- "rand",
+ "rand 0.9.1",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tycho-block-util",
  "tycho-core",
+ "tycho-crypto",
  "tycho-network",
  "tycho-rpc",
  "tycho-storage",
+ "tycho-types",
  "tycho-util",
 ]
 
@@ -3748,7 +3745,6 @@ dependencies = [
  "clap",
  "dashmap",
  "ed25519",
- "everscale-crypto",
  "exponential-backoff",
  "futures-util",
  "hex",
@@ -3759,7 +3755,7 @@ dependencies = [
  "pin-project-lite",
  "pkcs8",
  "quinn",
- "rand",
+ "rand 0.9.1",
  "ring",
  "rustls",
  "rustls-webpki",
@@ -3774,6 +3770,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "tycho-crypto",
  "tycho-util",
 ]
 
@@ -3788,14 +3785,13 @@ dependencies = [
  "base64",
  "bitflags",
  "bytes",
- "everscale-types",
  "futures-util",
  "humantime",
  "metrics",
  "moka",
  "parking_lot",
  "prost",
- "rand",
+ "rand 0.9.1",
  "scopeguard",
  "serde",
  "serde_json",
@@ -3808,6 +3804,7 @@ dependencies = [
  "tycho-core",
  "tycho-network",
  "tycho-storage",
+ "tycho-types",
  "tycho-util",
  "tycho-vm",
  "weedb",
@@ -3836,7 +3833,7 @@ dependencies = [
  "fdlimit",
  "libc",
  "metrics",
- "rand",
+ "rand 0.9.1",
  "rlimit",
  "scopeguard",
  "serde",
@@ -3853,8 +3850,62 @@ name = "tycho-storage-traits"
 version = "0.2.10"
 dependencies = [
  "bytes",
- "everscale-types",
  "smallvec",
+ "tycho-types",
+]
+
+[[package]]
+name = "tycho-types"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c31822bf64a85083499da15b4ad8f3df85e1155e256dc010911433b647763d7b"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "base64",
+ "bitflags",
+ "blake3",
+ "bytes",
+ "crc32c",
+ "ed25519-dalek",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "rand 0.9.1",
+ "rayon",
+ "scc",
+ "serde",
+ "sha2",
+ "smallvec",
+ "thiserror 2.0.11",
+ "tl-proto",
+ "tycho-crypto",
+ "tycho-types-abi-proc",
+ "tycho-types-proc",
+ "typeid",
+]
+
+[[package]]
+name = "tycho-types-abi-proc"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97ef3008d7786bcca8e4de0481f1812c364b9669164f542ee1b4b80f57c0a6e0"
+dependencies = [
+ "anyhow",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.96",
+]
+
+[[package]]
+name = "tycho-types-proc"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80d303e410fed076d6ff43c930598e8c4fcff75bfed2f197c130cc314aa9123b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.96",
 ]
 
 [[package]]
@@ -3875,7 +3926,7 @@ dependencies = [
  "libc",
  "metrics",
  "metrics-exporter-prometheus",
- "rand",
+ "rand 0.9.1",
  "rayon",
  "serde",
  "serde_json",
@@ -3896,29 +3947,31 @@ dependencies = [
 
 [[package]]
 name = "tycho-vm"
-version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git?rev=60b5db42f650654e09d1a703b1ce2cdc60d9379b#60b5db42f650654e09d1a703b1ce2cdc60d9379b"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00d0a2334ef0fef1c75f1330922c81cc4a95b0a9f2c8add179e653a930ebd52b"
 dependencies = [
  "ahash",
  "anyhow",
  "bitflags",
  "blake2",
  "dyn-clone",
- "everscale-crypto",
- "everscale-types",
  "num-bigint",
  "num-integer",
  "num-traits",
  "sha2",
  "thiserror 2.0.11",
  "tl-proto",
+ "tycho-crypto",
+ "tycho-types",
  "tycho-vm-proc",
 ]
 
 [[package]]
 name = "tycho-vm-proc"
-version = "0.1.0"
-source = "git+https://github.com/broxus/tycho-vm.git?rev=60b5db42f650654e09d1a703b1ce2cdc60d9379b#60b5db42f650654e09d1a703b1ce2cdc60d9379b"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21c820f439a12251e8a5aa15f49f4fd18c73edb6694546dfce4c0aa250fbd71a"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -4000,7 +4053,7 @@ version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81dfa00651efa65069b0b6b651f4aaa31ba9e3c3ce0137aaad053604ee7e0314"
 dependencies = [
- "getrandom",
+ "getrandom 0.2.15",
 ]
 
 [[package]]
@@ -4045,6 +4098,15 @@ name = "wasi"
 version = "0.11.0+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
+
+[[package]]
+name = "wasi"
+version = "0.14.2+wasi-0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9683f9a5a998d873c0d21fcbe3c083009670149a8fab228644b8bd36b2c48cb3"
+dependencies = [
+ "wit-bindgen-rt",
+]
 
 [[package]]
 name = "wasm-bindgen"
@@ -4384,6 +4446,15 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "wit-bindgen-rt"
+version = "0.39.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f42320e61fe2cfd34354ecb597f86f413484a798ba44a8ca1165c58d42da6c1"
+dependencies = [
+ "bitflags",
+]
 
 [[package]]
 name = "zerocopy"

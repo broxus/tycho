@@ -1,20 +1,20 @@
 use std::future::Future;
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arc_swap::{ArcSwapAny, ArcSwapOption};
-use everscale_types::models::BlockId;
 use futures_util::future::{self, BoxFuture};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{
-    check_with_master_state, check_with_prev_key_block_proof, BlockIdRelation, BlockProofStuff,
-    BlockProofStuffAug, BlockStuff, BlockStuffAug,
+    BlockIdRelation, BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug,
+    check_with_master_state, check_with_prev_key_block_proof,
 };
 use tycho_block_util::queue::QueueDiffStuffAug;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_types::models::BlockId;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers;
 
@@ -574,12 +574,12 @@ impl Default for RetryConfig {
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use everscale_types::boc::Boc;
-    use everscale_types::models::Block;
     use tycho_block_util::block::{BlockIdExt, BlockStuff};
+    use tycho_types::boc::Boc;
+    use tycho_types::models::Block;
 
     use super::*;
 
@@ -649,10 +649,12 @@ mod test {
         left_provider.has_block.store(false, Ordering::Release);
         right_provider.has_block.store(false, Ordering::Release);
 
-        assert!(chain_provider
-            .get_next_block(&get_default_block_id())
-            .await
-            .is_none());
+        assert!(
+            chain_provider
+                .get_next_block(&get_default_block_id())
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]

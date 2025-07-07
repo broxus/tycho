@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use everscale_types::models::{MsgInfo, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_types::models::{MsgInfo, ShardIdent};
 
 use super::internals_reader::{
     InternalsPartitionReader, InternalsRangeReader, InternalsRangeReaderKind,

@@ -1,11 +1,11 @@
-use std::num::{NonZeroU16, NonZeroU8};
+use std::num::{NonZeroU8, NonZeroU16};
 use std::sync::OnceLock;
 
-use anyhow::{ensure, Context, Result};
-use everscale_crypto::ed25519::{KeyPair, SecretKey};
-use everscale_types::models::{ConsensusConfig, GenesisInfo};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+use tycho_crypto::ed25519::{KeyPair, SecretKey};
 use tycho_network::{OverlayId, PeerId};
+use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
 use crate::dag::align_genesis;
 use crate::models::{Link, Point, PointData, Round, UnixTime};
@@ -149,7 +149,7 @@ impl MempoolConfigBuilder {
         hasher.update(&(consensus.commit_history_rounds as u128).to_be_bytes());
         hasher.update(&(consensus.deduplicate_rounds as u128).to_be_bytes());
         hasher.update(&(consensus.max_consensus_lag_rounds as u128).to_be_bytes());
-        // TODO add comment in everscale-types
+        // TODO add comment in tycho-types
         hasher.update(&(consensus.sync_support_rounds as u128).to_be_bytes());
 
         let overlay_id = OverlayId(hasher.finalize().into());

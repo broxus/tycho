@@ -5,19 +5,19 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use do_collate::is_first_block_after_prev_master;
 use error::CollatorError;
-use everscale_types::cell::{Cell, HashBytes};
-use everscale_types::models::*;
 use futures_util::future::Future;
 use messages_reader::{
     FinalizedMessagesReader, MessagesReader, MessagesReaderContext, ReaderState,
 };
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
+use tycho_types::cell::{Cell, HashBytes};
+use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
 use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};

@@ -2,14 +2,14 @@ use std::io::Write;
 use std::path::Path;
 
 use bytes::Bytes;
-use everscale_types::boc::{Boc, BocRepr};
-use everscale_types::cell::DynCell;
-use everscale_types::models::{BlockId, BlockIdShort, OwnedMessage, StdAddr};
 use futures_util::StreamExt;
 use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
 use tokio::sync::mpsc;
 use tracing::Instrument;
+use tycho_types::boc::{Boc, BocRepr};
+use tycho_types::cell::DynCell;
+use tycho_types::models::{BlockId, BlockIdShort, OwnedMessage, StdAddr};
 use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
 

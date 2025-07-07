@@ -1,8 +1,8 @@
 use std::io::{BufReader, Read};
 
 use crc32c::crc32c_append;
-use everscale_types::boc::BocTag;
-use everscale_types::cell::CellDescriptor;
+use tycho_types::boc::BocTag;
+use tycho_types::cell::CellDescriptor;
 use tycho_util::io::ByteOrderRead;
 
 pub struct ShardStateReader<R> {

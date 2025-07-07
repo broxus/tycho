@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use everscale_types::models::{IntAddr, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_types::models::{IntAddr, ShardIdent};
 
 use super::super::messages_buffer::MessagesBuffer;
 use crate::collator::messages_buffer::{

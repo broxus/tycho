@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use tycho_util::time::P2;
 
 fn bench_p2_operations(c: &mut Criterion) {

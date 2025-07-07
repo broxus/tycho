@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_crypto::ed25519;
-use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
 use tycho_collator::collator::CollatorStdImplFactory;
@@ -13,12 +11,14 @@ use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
-use tycho_collator::types::{supported_capabilities, CollatorConfig};
+use tycho_collator::types::{CollatorConfig, supported_capabilities};
 use tycho_collator::validator::ValidatorStdImpl;
 use tycho_core::block_strider::{
     BlockProvider, BlockStrider, EmptyBlockProvider, OptionalBlockStuff,
     PersistentBlockStriderState, PrintSubscriber, StateSubscriber, StateSubscriberContext,
 };
+use tycho_crypto::ed25519;
+use tycho_types::models::BlockId;
 
 mod common;
 
@@ -77,7 +77,7 @@ async fn test_collation_process_on_stubs() {
 
     block_strider.run().await.unwrap();
 
-    let node_1_secret = ed25519::SecretKey::generate(&mut rand::thread_rng());
+    let node_1_secret = rand::random::<ed25519::SecretKey>();
     let node_1_keypair = Arc::new(ed25519::KeyPair::from(&node_1_secret));
 
     let validator_network = common::make_validator_network(&node_1_secret, &zerostate_id);

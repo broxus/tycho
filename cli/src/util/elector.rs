@@ -2,11 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
-use everscale_types::abi::{
-    AbiType, AbiValue, AbiVersion, FromAbi, Function, IntoAbi, WithAbiType,
-};
-use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
+use tycho_types::abi::{AbiType, AbiValue, AbiVersion, FromAbi, Function, IntoAbi, WithAbiType};
+use tycho_types::prelude::*;
 
 use crate::util::FpTokens;
 
@@ -88,7 +86,7 @@ pub mod data {
         pub unfreeze_at: u32,
     }
 
-    // TODO: Move into `everscale-types`?
+    // TODO: Move into `tycho-types`?
     #[repr(transparent)]
     pub struct Ref<T>(pub T);
 
@@ -117,7 +115,7 @@ pub mod data {
             match value {
                 AbiValue::Ref(value) => T::from_abi(*value).map(Self),
                 value => {
-                    anyhow::bail!(everscale_types::abi::error::AbiError::TypeMismatch {
+                    anyhow::bail!(tycho_types::abi::error::AbiError::TypeMismatch {
                         expected: Box::from("ref"),
                         ty: value.display_type().to_string().into(),
                     })
@@ -148,17 +146,17 @@ pub mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use everscale_types::abi::{
-        AbiType, AbiValue, FromAbi, IntoAbi, PlainAbiType, PlainAbiValue, WithAbiType,
-    };
-    use everscale_types::cell::HashBytes;
-    use everscale_types::num::Tokens;
     use num_bigint::BigUint;
     use serde::{Deserialize, Serialize};
+    use tycho_types::abi::{
+        AbiType, AbiValue, FromAbi, IntoAbi, PlainAbiType, PlainAbiValue, WithAbiType,
+    };
+    use tycho_types::cell::HashBytes;
+    use tycho_types::num::Tokens;
 
+    use crate::util::FpTokens;
     use crate::util::elector::data::{CurrentElectionData, ElectionMember, Ref};
     use crate::util::elector::methods::ParticiateInElectionsInput;
-    use crate::util::FpTokens;
 
     #[test]
     fn test_participate_in_elections_input() {
@@ -302,11 +300,10 @@ pub mod tests {
 
         let first_value = AbiValue::Ref(Box::new(AbiValue::Tuple(first_value_inner)));
 
-        let abi_value_manual = AbiValue::Tuple(vec![AbiValue::Optional(
-            Arc::new(first_type),
-            Some(Box::new(first_value)),
-        )
-        .named("current_election")]);
+        let abi_value_manual = AbiValue::Tuple(vec![
+            AbiValue::Optional(Arc::new(first_type), Some(Box::new(first_value)))
+                .named("current_election"),
+        ]);
 
         let new = PartialElectorDataShort::from_abi(abi_value_manual).unwrap();
         assert!(new.current_election.is_some());

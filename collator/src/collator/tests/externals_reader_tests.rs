@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use everscale_types::models::{BlockIdShort, IntAddr, MsgsExecutionParams, ShardIdent};
 use tycho_block_util::queue::QueuePartitionIdx;
+use tycho_types::models::{BlockIdShort, IntAddr, MsgsExecutionParams, ShardIdent};
 
+use crate::collator::MsgsExecutionParamsStuff;
 use crate::collator::messages_buffer::{MessageGroup, MessagesBufferLimits};
 use crate::collator::messages_reader::{
     CollectExternalsResult, DebugExternalsRangeReaderState, DisplayMessageGroup, ExternalKey,
@@ -11,7 +12,6 @@ use crate::collator::messages_reader::{
     InternalsPartitionReaderState, ReaderState,
 };
 use crate::collator::types::AnchorsCache;
-use crate::collator::MsgsExecutionParamsStuff;
 use crate::internal_queue::types::{EnqueuedMessage, PartitionRouter};
 use crate::mempool::make_stub_anchor;
 use crate::test_utils::try_init_test_tracing;

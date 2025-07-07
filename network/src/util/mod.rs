@@ -50,7 +50,7 @@ where
     let Some(public_key) = peed_id.as_public_key() else {
         return false;
     };
-    public_key.verify(data, signature)
+    public_key.verify_tl(data, signature)
 }
 
 pub fn try_handle_prefix<T>(req: &T) -> Result<(u32, &[u8]), tl_proto::TlError>

@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use everscale_types::models::*;
 use futures_util::future;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
@@ -31,6 +30,7 @@ use tycho_core::node::{NodeBase, NodeKeys};
 use tycho_core::storage::NodeSyncState;
 use tycho_network::InboundRequestMeta;
 use tycho_rpc::{RpcConfig, RpcState};
+use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 
 pub use self::config::{ElectionsConfig, NodeConfig, SimpleElectionsConfig};

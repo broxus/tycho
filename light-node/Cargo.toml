@@ -1,6 +1,6 @@
 [package]
 name = "tycho-light-node"
-edition = "2021"
+edition.workspace = true
 version.workspace = true
 authors.workspace = true
 rust-version.workspace = true
@@ -11,13 +11,13 @@ license.workspace = true
 # crates.io deps
 anyhow = { workspace = true }
 clap = { workspace = true }
-everscale-crypto = { workspace = true }
-everscale-types = { workspace = true, features = ["rand"] }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing = { workspace = true }
+tycho-crypto = { workspace = true }
+tycho-types = { workspace = true, features = ["rand9"] }
 
 # local deps
 tycho-block-util = { workspace = true }

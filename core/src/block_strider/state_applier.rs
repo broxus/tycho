@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use everscale_types::cell::Cell;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
+use tycho_types::cell::Cell;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 

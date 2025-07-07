@@ -177,10 +177,6 @@ impl CollectorTask {
             round = consensus_round.0,
             "from bcast filter",
         );
-        if should_fail {
-            Err(())
-        } else {
-            Ok(())
-        }
+        if should_fail { Err(()) } else { Ok(()) }
     }
 }

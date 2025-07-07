@@ -1,5 +1,5 @@
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, ShardIdent};
+use tycho_types::cell::HashBytes;
+use tycho_types::models::{BlockId, ShardIdent};
 
 use super::MasterBlocksCacheData;
 

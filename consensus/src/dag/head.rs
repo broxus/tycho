@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use everscale_crypto::ed25519::KeyPair;
+use tycho_crypto::ed25519::KeyPair;
 
 use crate::dag::DagRound;
 use crate::intercom::PeerSchedule;

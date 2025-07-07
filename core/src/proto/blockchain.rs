@@ -22,7 +22,7 @@ pub struct Data {
 #[tl(boxed, id = "blockchain.keyBlockIds", scheme = "proto.tl")]
 pub struct KeyBlockIds {
     #[tl(with = "tl_block_id_vec")]
-    pub block_ids: Vec<everscale_types::models::BlockId>,
+    pub block_ids: Vec<tycho_types::models::BlockId>,
     pub incomplete: bool,
 }
 
@@ -32,7 +32,7 @@ pub enum BlockFull {
     #[tl(id = "blockchain.blockFull.found")]
     Found {
         #[tl(with = "tl_block_id")]
-        block_id: everscale_types::models::BlockId,
+        block_id: tycho_types::models::BlockId,
         block: BlockData,
         proof: Bytes,
         queue_diff: Bytes,
@@ -99,7 +99,7 @@ pub mod rpc {
     #[tl(boxed, id = "blockchain.getNextKeyBlockIds", scheme = "proto.tl")]
     pub struct GetNextKeyBlockIds {
         #[tl(with = "tl_block_id")]
-        pub block_id: everscale_types::models::BlockId,
+        pub block_id: tycho_types::models::BlockId,
         pub max_size: u32,
     }
 
@@ -107,21 +107,21 @@ pub mod rpc {
     #[tl(boxed, id = "blockchain.getBlockFull", scheme = "proto.tl")]
     pub struct GetBlockFull {
         #[tl(with = "tl_block_id")]
-        pub block_id: everscale_types::models::BlockId,
+        pub block_id: tycho_types::models::BlockId,
     }
 
     #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "blockchain.getNextBlockFull", scheme = "proto.tl")]
     pub struct GetNextBlockFull {
         #[tl(with = "tl_block_id")]
-        pub prev_block_id: everscale_types::models::BlockId,
+        pub prev_block_id: tycho_types::models::BlockId,
     }
 
     #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "blockchain.getBlockDataChunk", scheme = "proto.tl")]
     pub struct GetBlockDataChunk {
         #[tl(with = "tl_block_id")]
-        pub block_id: everscale_types::models::BlockId,
+        pub block_id: tycho_types::models::BlockId,
         pub offset: u32,
     }
 
@@ -129,7 +129,7 @@ pub mod rpc {
     #[tl(boxed, id = "blockchain.getKeyBlockProof", scheme = "proto.tl")]
     pub struct GetKeyBlockProof {
         #[tl(with = "tl_block_id")]
-        pub block_id: everscale_types::models::BlockId,
+        pub block_id: tycho_types::models::BlockId,
     }
 
     #[derive(Debug, Clone, TlRead, TlWrite)]
@@ -163,7 +163,7 @@ pub mod rpc {
     )]
     pub struct GetPersistentShardStateInfo {
         #[tl(with = "tl_block_id")]
-        pub block_id: everscale_types::models::BlockId,
+        pub block_id: tycho_types::models::BlockId,
     }
 
     #[derive(Debug, Clone, TlRead, TlWrite)]
@@ -174,7 +174,7 @@ pub mod rpc {
     )]
     pub struct GetPersistentShardStateChunk {
         #[tl(with = "tl_block_id")]
-        pub block_id: everscale_types::models::BlockId,
+        pub block_id: tycho_types::models::BlockId,
         pub offset: u64,
     }
 
@@ -186,7 +186,7 @@ pub mod rpc {
     )]
     pub struct GetPersistentQueueStateInfo {
         #[tl(with = "tl_block_id")]
-        pub block_id: everscale_types::models::BlockId,
+        pub block_id: tycho_types::models::BlockId,
     }
 
     #[derive(Debug, Clone, TlRead, TlWrite)]
@@ -197,7 +197,7 @@ pub mod rpc {
     )]
     pub struct GetPersistentQueueStateChunk {
         #[tl(with = "tl_block_id")]
-        pub block_id: everscale_types::models::BlockId,
+        pub block_id: tycho_types::models::BlockId,
         pub offset: u64,
     }
 }

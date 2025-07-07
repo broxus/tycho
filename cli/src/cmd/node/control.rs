@@ -4,17 +4,17 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use base64::prelude::{Engine as _, BASE64_STANDARD};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use clap::{Args, Parser, Subcommand};
-use everscale_types::models::{BlockId, StdAddr};
 use serde::Serialize;
 use tycho_control::ControlClient;
+use tycho_types::models::{BlockId, StdAddr};
 use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 
-use crate::util::print_json;
 use crate::BaseArgs;
+use crate::util::print_json;
 
 #[derive(Subcommand)]
 pub enum CmdControl {

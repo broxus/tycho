@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use anyhow::Result;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, ConsensusConfig, GenesisInfo, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tycho_network::{OverlayId, PeerInfo};
+use tycho_types::cell::HashBytes;
+use tycho_types::models::{BlockId, ConsensusConfig, GenesisInfo, ShardIdent};
 
 use crate::proto::blockchain::OverlayIdData;
 
@@ -54,7 +54,7 @@ impl ZerostateId {
 }
 
 /// Default zeros for start round and genesis time are the same in
-/// [`ConsensusInfo`](everscale_types::models::ConsensusInfo).
+/// [`ConsensusInfo`](tycho_types::models::ConsensusInfo).
 ///
 /// This will replace genesis from master chain data only if this has time greater than in mc.
 /// Also, this genesis must have round not less than in last applied mc block.

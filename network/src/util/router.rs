@@ -1,8 +1,8 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::FastHashMap;
+use tycho_util::futures::BoxFutureOrNoop;
 
 use crate::types::{BoxService, Service, ServiceExt};
 

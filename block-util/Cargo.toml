@@ -22,12 +22,12 @@ harness = false
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 bytes = { workspace = true }
-everscale-types = { workspace = true, features = ["blake3", "rayon"] }
 hex = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
 tl-proto = { workspace = true }
+tycho-types = { workspace = true, features = ["blake3", "rayon"] }
 
 # local deps
 tycho-storage-traits = { workspace = true, optional = true }

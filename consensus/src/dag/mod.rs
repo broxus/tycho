@@ -1,6 +1,6 @@
-pub use anchor_stage::align_genesis;
 #[cfg(feature = "test")]
 pub use anchor_stage::AnchorStage;
+pub use anchor_stage::align_genesis;
 pub use commit::*;
 pub use dag_round::*;
 pub use front::*;

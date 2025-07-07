@@ -2,11 +2,11 @@ use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroU64};
 
 use bytes::Bytes;
-use everscale_types::models::{
+use serde::{Deserialize, Serialize};
+use tycho_types::models::{
     BlockId, BlockIdShort, BlockchainConfig, GlobalVersion, ShardAccount, StdAddr,
 };
-use everscale_types::prelude::*;
-use serde::{Deserialize, Serialize};
+use tycho_types::prelude::*;
 use tycho_util::serde_helpers;
 
 use crate::error::ServerResult;
@@ -131,7 +131,7 @@ pub struct TriggerCompactionRequest {
 pub struct BroadcastExtMsgRequest {
     /// A BOC with a [`Message`].
     ///
-    /// [`Message`]: everscale_types::models::Message
+    /// [`Message`]: tycho_types::models::Message
     pub message: Bytes,
 }
 
@@ -154,7 +154,7 @@ pub struct AccountStateResponse {
 }
 
 impl AccountStateResponse {
-    pub fn parse(&self) -> Result<ParsedAccountState, everscale_types::boc::BocReprError> {
+    pub fn parse(&self) -> Result<ParsedAccountState, tycho_types::boc::BocReprError> {
         Ok(ParsedAccountState {
             mc_seqno: self.mc_seqno,
             gen_utime: self.gen_utime,
@@ -182,9 +182,7 @@ pub struct BlockchainConfigResponse {
 }
 
 impl BlockchainConfigResponse {
-    pub fn parse(
-        &self,
-    ) -> Result<ParsedBlockchainConfigResponse, everscale_types::boc::BocReprError> {
+    pub fn parse(&self) -> Result<ParsedBlockchainConfigResponse, tycho_types::boc::BocReprError> {
         Ok(ParsedBlockchainConfigResponse {
             global_id: self.global_id,
             mc_seqno: self.mc_seqno,

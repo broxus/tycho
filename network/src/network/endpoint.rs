@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::network::config::{ConnectionMetricsLevel, EndpointConfig};
-use crate::network::connection::{extract_peer_id, parse_peer_identity, Connection};
+use crate::network::connection::{Connection, extract_peer_id, parse_peer_identity};
 use crate::types::{Direction, PeerId};
 
 pub(crate) struct Endpoint {

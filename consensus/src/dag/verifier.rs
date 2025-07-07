@@ -1,12 +1,12 @@
 use std::cmp;
 
 use ahash::HashMapExt;
-use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use tracing::Instrument;
 use tycho_network::PeerId;
-use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
+use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
@@ -637,7 +637,8 @@ impl Verifier {
             .prev_digest()
             .expect("Coding error: passed point doesn't contain proof for a given vertex");
         assert_eq!(
-            prev_digest, proven.digest(),
+            prev_digest,
+            proven.digest(),
             "Coding error: mismatched previous point of the same author, must have been checked before"
         );
         if info.time() <= proven.time() {

@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::AtomicBool;
-use std::sync::{atomic, Arc, Weak};
+use std::sync::{Arc, Weak, atomic};
 
 use ahash::HashMapExt;
 use parking_lot::Mutex;

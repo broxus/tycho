@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use everscale_types::models::GenesisInfo;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 use tokio_util::task::AbortOnDropHandle;
+use tycho_types::models::GenesisInfo;
 
 use crate::effects::{Cancelled, TaskTracker};
 use crate::engine::lifecycle::recover::{EngineRecoverLoop, RunAttributes};
@@ -123,8 +123,8 @@ mod isolated {
     use tycho_network::{OverlayId, PeerId};
 
     use crate::effects::AltFormat;
-    use crate::engine::lifecycle::EngineNetworkArgs;
     use crate::engine::MempoolMergedConfig;
+    use crate::engine::lifecycle::EngineNetworkArgs;
     use crate::models::Round;
 
     pub struct SpanFields {

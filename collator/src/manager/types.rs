@@ -1,16 +1,16 @@
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Result};
-use everscale_types::cell::Lazy;
-use everscale_types::models::{
-    BlockId, BlockIdShort, BlockInfo, OutMsgDescr, ProcessedUptoInfo, ShardIdent,
-};
+use anyhow::{Result, anyhow, bail};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tycho_block_util::queue::{QueueDiffStuff, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
+use tycho_types::cell::Lazy;
+use tycho_types::models::{
+    BlockId, BlockIdShort, BlockInfo, OutMsgDescr, ProcessedUptoInfo, ShardIdent,
+};
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::mempool::MempoolAnchorId;

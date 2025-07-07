@@ -1,7 +1,7 @@
 use bytes::Buf;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use smallvec::SmallVec;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 
 /// A trait for writing or reading data from a stack-allocated buffer
 pub trait StoredValue {

@@ -6,32 +6,32 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use bytes::Buf;
 use bytesize::ByteSize;
-use everscale_types::boc::{Boc, BocRepr};
-use everscale_types::cell::HashBytes;
-use everscale_types::models::*;
 use parking_lot::RwLock;
 use tl_proto::TlWrite;
-use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
 use tokio::task::JoinHandle;
 use tycho_block_util::archive::{
-    ArchiveData, ArchiveEntryHeader, ArchiveEntryType, ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX,
+    ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX, ArchiveData, ArchiveEntryHeader, ArchiveEntryType,
 };
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, ShardHeights,
 };
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_storage::kv::StoredValue;
+use tycho_types::boc::{Boc, BocRepr};
+use tycho_types::cell::HashBytes;
+use tycho_types::models::*;
 use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::{rayon_run, CancellationFlag};
+use tycho_util::sync::{CancellationFlag, rayon_run};
 use tycho_util::{FastHashSet, FastHasherState};
-use weedb::{rocksdb, ColumnFamily, OwnedPinnableSlice};
+use weedb::{ColumnFamily, OwnedPinnableSlice, rocksdb};
 
 pub use self::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId};
 use super::util::SlotSubscriptions;
 use super::{
-    tables, BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage,
-    BlocksCacheConfig, CoreDb, HandleCreationStatus, NewBlockMeta,
+    BlockConnectionStorage, BlockDataGuard, BlockFlags, BlockHandle, BlockHandleStorage,
+    BlocksCacheConfig, CoreDb, HandleCreationStatus, NewBlockMeta, tables,
 };
 
 mod package_entry;
@@ -904,7 +904,7 @@ impl BlockStorage {
                 .shards
                 .latest_blocks()
                 .map(|id| id.map(|id| (id.shard, id.seqno)))
-                .collect::<Result<_, everscale_types::error::Error>>()?
+                .collect::<Result<_, tycho_types::error::Error>>()?
         };
 
         // Remove all expired entries
@@ -1269,7 +1269,7 @@ impl BlockStorage {
         let chunk_size = self.block_data_chunk_size().get() as usize;
 
         let span = tracing::Span::current();
-        let handle = tokio::task::spawn_blocking({
+        tokio::task::spawn_blocking({
             let block_id = *block_id;
             let data = data.to_vec();
 
@@ -1302,9 +1302,7 @@ impl BlockStorage {
 
                 Ok(())
             }
-        });
-
-        handle
+        })
     }
 }
 
@@ -1734,8 +1732,8 @@ mod tests {
 
     use tycho_block_util::archive::WithArchiveData;
     use tycho_storage::StorageContext;
-    use tycho_util::futures::JoinTask;
     use tycho_util::FastHashMap;
+    use tycho_util::futures::JoinTask;
 
     use super::*;
     use crate::storage::{BlockConnection, CoreStorage, CoreStorageConfig};

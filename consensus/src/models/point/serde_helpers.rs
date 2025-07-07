@@ -1,8 +1,8 @@
 use tl_proto::{RawBytes, TlRead, TlResult, TlWrite};
 use tycho_network::PeerId;
 
-use crate::models::point::{Digest, PointData, Signature};
 use crate::models::Round;
+use crate::models::point::{Digest, PointData, Signature};
 
 #[derive(TlWrite)]
 #[tl(boxed, id = "consensus.point", scheme = "proto.tl")]

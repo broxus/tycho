@@ -1,5 +1,5 @@
-use everscale_types::models::BlockId;
 use tl_proto::{TlRead, TlWrite};
+use tycho_types::models::BlockId;
 
 use crate::tl;
 

@@ -1,6 +1,6 @@
 use bytesize::ByteSize;
-use weedb::rocksdb::{BlockBasedOptions, DBCompressionType, DataBlockIndexType, Options};
 use weedb::Caches;
+use weedb::rocksdb::{BlockBasedOptions, DBCompressionType, DataBlockIndexType, Options};
 
 use super::TableContext;
 

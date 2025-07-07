@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use everscale_types::models::BlockId;
 use tycho_block_util::block::{BlockStuff, ShardHeights};
 use tycho_storage::kv::StoredValue;
+use tycho_types::models::BlockId;
 use tycho_util::FastDashMap;
 
 pub(crate) use self::handle::BlockDataGuard;
@@ -369,8 +369,8 @@ impl Iterator for KeyBlocksIterator<'_> {
 
 #[cfg(test)]
 mod tests {
-    use everscale_types::models::ShardIdent;
     use tycho_storage::StorageContext;
+    use tycho_types::models::ShardIdent;
 
     use super::*;
     use crate::storage::{CoreStorage, CoreStorageConfig};

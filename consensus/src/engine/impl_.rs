@@ -452,10 +452,11 @@ impl Engine {
             let head = self.dag.head(&self.round_task.state.peer_schedule);
             metrics::gauge!("tycho_mempool_engine_current_round").set(head.current().round().0);
 
-            let mut round_task_run = std::pin::pin!(self
-                .round_task
-                .run(start_replay_bcasts.take().flatten(), &head, &round_ctx)
-                .until_ready());
+            let mut round_task_run = std::pin::pin!(
+                self.round_task
+                    .run(start_replay_bcasts.take().flatten(), &head, &round_ctx)
+                    .until_ready()
+            );
 
             loop {
                 tokio::select! {

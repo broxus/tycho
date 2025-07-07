@@ -3,12 +3,12 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
-use everscale_crypto::ed25519;
-use everscale_types::cell::Lazy;
-use everscale_types::models::*;
-use everscale_types::num::Tokens;
-use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
+use tycho_crypto::ed25519;
+use tycho_types::cell::Lazy;
+use tycho_types::models::*;
+use tycho_types::num::Tokens;
+use tycho_types::prelude::*;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::util::{compute_storage_used, print_json};
@@ -437,7 +437,8 @@ impl ZerostateConfig {
         else {
             anyhow::bail!(
                 "Failed to compute a validator subset for zerostate (shard_id = {}, session_seqno = {})",
-                ShardIdent::MASTERCHAIN, session_seqno,
+                ShardIdent::MASTERCHAIN,
+                session_seqno,
             );
         };
 

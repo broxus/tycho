@@ -14,7 +14,7 @@ use crate::network::{KnownPeerHandle, Network, WeakNetwork};
 use crate::overlay::tasks_stream::TasksStream;
 use crate::overlay::{OverlayId, OverlayServiceInner, PublicEntry, PublicOverlayEntries};
 use crate::proto::dht::{MergedValueKeyName, MergedValueKeyRef, Value};
-use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntryResponse, PublicEntryToSign};
+use crate::proto::overlay::{PublicEntriesResponse, PublicEntryResponse, PublicEntryToSign, rpc};
 use crate::types::Request;
 use crate::util::NetworkExt;
 
@@ -300,7 +300,7 @@ impl OverlayServiceInner {
         let target_peer_handle;
         let target_peer_id;
         {
-            let rng = &mut rand::thread_rng();
+            let rng = &mut rand::rng();
 
             let all_entries = overlay.read_entries();
 
@@ -525,7 +525,7 @@ impl OverlayServiceInner {
         let mut n = std::cmp::max(self.config.public_overlay_peer_store_max_entries, 1);
 
         let data = {
-            let rng = &mut rand::thread_rng();
+            let rng = &mut rand::rng();
 
             let mut entries = Vec::<Arc<PublicEntry>>::with_capacity(n);
 

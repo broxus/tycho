@@ -2,18 +2,18 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::boc::{Boc, BocRepr};
-use everscale_types::cell::CellBuilder;
-use everscale_types::models::{Block, BlockId, ShardStateUnsplit};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
 use tycho_storage::StorageContext;
+use tycho_types::boc::{Boc, BocRepr};
+use tycho_types::cell::CellBuilder;
+use tycho_types::models::{Block, BlockId, ShardStateUnsplit};
 
 use crate::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
 use crate::internal_queue::state::storage::QueueStateImplFactory;
@@ -78,7 +78,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(CoreStorage, tempfile::Te
 
     // first master block
     let root = CellBuilder::build_from(&master_block)?;
-    let data = everscale_types::boc::Boc::encode_rayon(&root);
+    let data = tycho_types::boc::Boc::encode_rayon(&root);
     let block_stuff =
         BlockStuff::from_block_and_root(&master_block_id, master_block, root, data.len());
     let handle = storage
@@ -153,8 +153,8 @@ pub async fn prepare_test_storage() -> anyhow::Result<(CoreStorage, tempfile::Te
     Ok((storage, tmp_dir))
 }
 
-pub async fn create_test_queue_adapter<V: InternalMessageValue>(
-) -> Result<(Arc<dyn MessageQueueAdapter<V>>, tempfile::TempDir)> {
+pub async fn create_test_queue_adapter<V: InternalMessageValue>()
+-> Result<(Arc<dyn MessageQueueAdapter<V>>, tempfile::TempDir)> {
     let (ctx, tmp_dir) = StorageContext::new_temp().await?;
     let queue_state_factory = QueueStateImplFactory::new(ctx)?;
     let queue_factory = QueueFactoryStdImpl {

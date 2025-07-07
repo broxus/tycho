@@ -21,7 +21,7 @@ pub use self::public_overlay::{
 };
 use crate::dht::DhtService;
 use crate::network::Network;
-use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntry, PublicEntryResponse};
+use crate::proto::overlay::{PublicEntriesResponse, PublicEntry, PublicEntryResponse, rpc};
 use crate::types::{PeerId, Response, Service, ServiceRequest};
 use crate::util::Routable;
 
@@ -342,7 +342,7 @@ impl OverlayServiceInner {
             // Choose additional random entries to ensure we have enough new entries to send back
             let n = self.config.exchange_public_entries_batch;
             entries
-                .choose_multiple(&mut rand::thread_rng(), n + requested_ids.len())
+                .choose_multiple(&mut rand::rng(), n + requested_ids.len())
                 .filter_map(|item| {
                     let is_new = !requested_ids.contains(&item.entry.peer_id);
                     is_new.then(|| item.entry.clone())

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::models::TickTock;
+use tycho_types::models::TickTock;
 use tycho_util::metrics::HistogramGuard;
 
 use super::execution_wrapper::ExecutorWrapper;

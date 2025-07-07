@@ -7,9 +7,9 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use tokio::sync::Notify;
 use tokio::task::AbortHandle;
-use tycho_util::metrics::spawn_metrics_loop;
 use tycho_util::FastHashMap;
-use weedb::{rocksdb, WeakWeeDbRaw};
+use tycho_util::metrics::spawn_metrics_loop;
+use weedb::{WeakWeeDbRaw, rocksdb};
 
 use crate::config::StorageConfig;
 use crate::fs::{Dir, TempFileStorage};

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
-use everscale_types::models::ConsensusConfig;
 use parking_lot::{Mutex, MutexGuard};
+use tycho_types::models::ConsensusConfig;
 
 trait InputBufferInner: Send {
     fn push(&mut self, ext_in_msg: Bytes);
@@ -183,7 +183,7 @@ impl InputBufferData {
 mod stub {
     use std::num::NonZeroUsize;
 
-    use rand::{thread_rng, RngCore};
+    use rand::RngCore;
 
     use super::*;
 
@@ -227,7 +227,7 @@ mod stub {
             let mut result = Vec::with_capacity(msg_count);
             for _ in 0..msg_count {
                 let mut data = vec![0; EXTERNAL_MSG_MAX_BYTES];
-                thread_rng().fill_bytes(data.as_mut_slice());
+                rand::rng().fill_bytes(data.as_mut_slice());
                 result.push(Bytes::from(data));
             }
             self.fetch_count = self.fetch_count.saturating_add(1);

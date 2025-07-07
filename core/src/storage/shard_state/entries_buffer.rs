@@ -1,4 +1,4 @@
-use everscale_types::cell::{CellType, LevelMask};
+use tycho_types::cell::{CellType, LevelMask};
 
 pub struct EntriesBuffer(Box<[[u8; HashesEntry::LEN]; 5]>);
 

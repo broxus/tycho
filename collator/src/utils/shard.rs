@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
-use anyhow::{anyhow, Result};
-use everscale_types::models::ShardIdent;
+use anyhow::{Result, anyhow};
+use tycho_types::models::ShardIdent;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SplitMergeAction {
@@ -114,7 +114,7 @@ pub fn calc_split_merge_actions(
 
 #[cfg(test)]
 mod tests {
-    use everscale_types::models::ShardIdent;
+    use tycho_types::models::ShardIdent;
 
     use super::calc_split_merge_actions;
 

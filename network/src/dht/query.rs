@@ -15,7 +15,7 @@ use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
 use crate::dht::routing::{HandlesRoutingTable, SimpleRoutingTable};
 use crate::network::Network;
-use crate::proto::dht::{rpc, NodeResponse, Value, ValueRef, ValueResponse};
+use crate::proto::dht::{NodeResponse, Value, ValueRef, ValueResponse, rpc};
 use crate::types::{PeerId, PeerInfo, Request};
 use crate::util::NetworkExt;
 
@@ -403,7 +403,7 @@ impl StoreValue<()> {
         value: &ValueRef<'_>,
         max_k: usize,
         local_peer_info: Option<&PeerInfo>,
-    ) -> StoreValue<impl Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send> {
+    ) -> StoreValue<impl Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send + use<>> {
         let key_hash = match value {
             ValueRef::Peer(value) => tl_proto::hash(&value.key),
             ValueRef::Merged(value) => tl_proto::hash(&value.key),

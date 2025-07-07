@@ -5,12 +5,12 @@ use std::sync::OnceLock;
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
-use base64::prelude::{Engine as _, BASE64_STANDARD};
-use everscale_types::models::*;
-use everscale_types::prelude::*;
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use tycho_block_util::message::{validate_external_message, ExtMsgRepr};
+use tycho_block_util::message::{ExtMsgRepr, validate_external_message};
+use tycho_types::models::*;
+use tycho_types::prelude::*;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
@@ -21,7 +21,7 @@ use crate::state::{
 };
 use crate::util::error_codes::*;
 use crate::util::jrpc_extractor::{
-    declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse, RfcBehaviour,
+    Jrpc, JrpcErrorResponse, JrpcOkResponse, RfcBehaviour, declare_jrpc_method,
 };
 
 mod cache;
@@ -134,7 +134,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<RfcBehaviour, Method
                         }
                         Ok(None) => GetContractStateResponse::NotExists { timings },
                         Err(e) => {
-                            return error_to_response(req.id, RpcStateError::Internal(e.into()))
+                            return error_to_response(req.id, RpcStateError::Internal(e.into()));
                         }
                     }
                 }

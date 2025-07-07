@@ -7,9 +7,9 @@ disallowed-methods = [
     { path = "std::fs::File::create_new", reason = "use tycho_storage::fs::Dir instead" },
     { path = "std::fs::File::open", reason = "use tycho_storage::fs::Dir instead" },
     { path = "std::fs::File::options", reason = "use tycho_storage::fs::Dir instead" },
-    { path = "everscale_types::models::Block::load_info", reason = "use `BlockStuff::load_info` to avoid unnecessary deserialization" },
-    { path = "everscale_types::models::Block::load_extra", reason = "use `BlockStuff::load_extra` to avoid unnecessary deserialization" },
-    { path = "everscale_types::models::BlockExtra::load_custom", reason = "use `BlockStuff::load_custom` to avoid unnecessary deserialization" },
+    { path = "tycho_types::models::Block::load_info", reason = "use `BlockStuff::load_info` to avoid unnecessary deserialization" },
+    { path = "tycho_types::models::Block::load_extra", reason = "use `BlockStuff::load_extra` to avoid unnecessary deserialization" },
+    { path = "tycho_types::models::BlockExtra::load_custom", reason = "use `BlockStuff::load_custom` to avoid unnecessary deserialization" },
 ]
 
 disallowed-types = [

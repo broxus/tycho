@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use tycho_network::{DhtClient, Network, OverlayId, PeerId, PrivateOverlay, Request};
 
 use self::common::{NodeBase, Ping, PingPongService, Pong};

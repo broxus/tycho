@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use everscale_types::boc::Boc;
-use everscale_types::models::{BlockId, OutMsgQueueUpdates, ShardStateUnsplit};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_types::boc::Boc;
+use tycho_types::models::{BlockId, OutMsgQueueUpdates, ShardStateUnsplit};
 use tycho_util::serde_helpers;
 
 use crate::blockchain_rpc::BlockchainRpcClient;

@@ -1,9 +1,9 @@
 use std::cell::RefCell;
 
-use everscale_types::cell::CellTreeStats;
-use everscale_types::error::Error;
-use everscale_types::models::{ExtInMsgInfo, IntAddr, MsgType, StateInit};
-use everscale_types::prelude::*;
+use tycho_types::cell::CellTreeStats;
+use tycho_types::error::Error;
+use tycho_types::models::{ExtInMsgInfo, IntAddr, MsgType, StateInit};
+use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
 
 pub async fn validate_external_message(body: &bytes::Bytes) -> Result<(), InvalidExtMsg> {
@@ -178,9 +178,9 @@ impl ExtMsgRepr {
     }
 
     fn boc_decode_with_limit(data: &[u8], max_cells: u64) -> Result<Cell, InvalidExtMsg> {
-        use everscale_types::boc::de::{self, Options};
+        use tycho_types::boc::de::{self, Options};
 
-        let header = everscale_types::boc::de::BocHeader::decode(data, &Options {
+        let header = tycho_types::boc::de::BocHeader::decode(data, &Options {
             max_roots: Some(1),
             min_roots: Some(1),
         })?;
@@ -206,7 +206,7 @@ pub enum InvalidExtMsg {
     #[error("BOC size exceeds maximum allowed size")]
     BocSizeExceeded,
     #[error("invalid message BOC")]
-    BocError(#[from] everscale_types::boc::de::Error),
+    BocError(#[from] tycho_types::boc::de::Error),
     #[error("too big root cell level")]
     TooBigLevel,
     #[error("max cell repr depth exceeded")]
@@ -269,7 +269,7 @@ impl<'a> MsgStorageStat<'a> {
         };
 
         for cell in cs.references() {
-            if state.add_cell(cell).is_none() {
+            if unsafe { state.add_cell(cell) }.is_none() {
                 return false;
             }
         }
@@ -291,13 +291,13 @@ impl<'a> MsgStorageStat<'a> {
 
         let mut max_merkle_depth = 0u8;
         for cell in cell.references() {
-            max_merkle_depth = std::cmp::max(self.add_cell(cell)?, max_merkle_depth);
+            max_merkle_depth = std::cmp::max(unsafe { self.add_cell(cell)? }, max_merkle_depth);
         }
         max_merkle_depth = max_merkle_depth.saturating_add(cell.cell_type().is_merkle() as u8);
 
         // SAFETY: `visited` must be cleared before dropping the original cell.
         self.visited.insert(
-            std::mem::transmute::<&HashBytes, &'static HashBytes>(cell.repr_hash()),
+            unsafe { std::mem::transmute::<&HashBytes, &'static HashBytes>(cell.repr_hash()) },
             max_merkle_depth,
         );
 
@@ -307,11 +307,9 @@ impl<'a> MsgStorageStat<'a> {
 
 #[cfg(test)]
 mod test {
-    use everscale_types::error::Error;
-    use everscale_types::merkle::MerkleProof;
-    use everscale_types::models::{
-        ExtOutMsgInfo, IntMsgInfo, MessageLayout, MsgInfo, OwnedMessage,
-    };
+    use tycho_types::error::Error;
+    use tycho_types::merkle::MerkleProof;
+    use tycho_types::models::{ExtOutMsgInfo, IntMsgInfo, MessageLayout, MsgInfo, OwnedMessage};
 
     use super::*;
     use crate::block::AlwaysInclude;

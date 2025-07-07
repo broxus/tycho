@@ -1,21 +1,21 @@
-use std::collections::{hash_map, BTreeMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque, hash_map};
 use std::sync::Arc;
 
 use ahash::HashMapExt;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::{
-    BlockId, BlockIdShort, CollationConfig, ProcessedUptoInfo, ShardIdent, ValidatorDescription,
-};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
+use tycho_block_util::block::{ValidatorSubsetInfo, calc_next_block_id_short};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_core::storage::ShardStateStorageError;
+use tycho_crypto::ed25519::KeyPair;
+use tycho_types::models::{
+    BlockId, BlockIdShort, CollationConfig, ProcessedUptoInfo, ShardIdent, ValidatorDescription,
+};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 use types::{
@@ -41,7 +41,7 @@ use crate::mempool::{
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::processed_upto::{
-    find_min_processed_to_by_shards, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff,
+    ProcessedUptoInfoExtension, ProcessedUptoInfoStuff, find_min_processed_to_by_shards,
 };
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,

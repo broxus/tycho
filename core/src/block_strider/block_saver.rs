@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
+use tycho_types::models::BlockId;
 
 use crate::block_strider::{BlockSubscriber, BlockSubscriberContext};
 use crate::storage::{BlockConnection, BlockHandle, CoreStorage, NewBlockMeta};

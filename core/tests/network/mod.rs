@@ -3,11 +3,11 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use everscale_crypto::ed25519;
-use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use tycho_core::blockchain_rpc::BlockchainRpcService;
 use tycho_core::storage::CoreStorage;
+use tycho_crypto::ed25519;
 use tycho_network::{
     DhtClient, DhtConfig, DhtService, Network, OverlayConfig, OverlayId, OverlayService, PeerId,
     PeerResolver, PublicOverlay, Router,
@@ -22,7 +22,7 @@ pub struct NodeBase {
 
 impl NodeBase {
     pub fn with_random_key() -> Self {
-        let key = ed25519::SecretKey::generate(&mut rand::thread_rng());
+        let key = rand::random::<ed25519::SecretKey>();
         let local_id = ed25519::PublicKey::from(&key).into();
 
         let (dht_tasks, dht_service) = DhtService::builder(local_id)

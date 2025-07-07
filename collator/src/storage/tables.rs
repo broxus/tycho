@@ -1,5 +1,5 @@
 use bytesize::ByteSize;
-use tycho_storage::kv::{with_blob_db, TableContext, DEFAULT_MIN_BLOB_SIZE};
+use tycho_storage::kv::{DEFAULT_MIN_BLOB_SIZE, TableContext, with_blob_db};
 use weedb::rocksdb::{BlockBasedOptions, DBCompressionType, Options, ReadOptions};
 use weedb::{ColumnFamily, ColumnFamilyOptions};
 

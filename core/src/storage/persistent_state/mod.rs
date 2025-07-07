@@ -8,7 +8,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use arc_swap::ArcSwapAny;
 use dashmap::DashMap;
-use everscale_types::models::{BlockId, PrevBlockRef};
 use parking_lot::Mutex;
 use tokio::sync::{Notify, Semaphore};
 use tokio::time::Instant;
@@ -16,8 +15,9 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::RefMcStateHandle;
 use tycho_storage::fs::{Dir, MappedFile};
-use tycho_util::sync::CancellationFlag;
+use tycho_types::models::{BlockId, PrevBlockRef};
 use tycho_util::FastHashSet;
+use tycho_util::sync::CancellationFlag;
 
 pub use self::queue_state::reader::{QueueDiffReader, QueueStateReader};
 pub use self::queue_state::writer::QueueStateWriter;

@@ -1,6 +1,6 @@
 [workspace.package]
 version = "0.2.10"
-edition = "2021"
+edition = "2024"
 authors = ["Broxus Team"]
 rust-version = "1.85.0"
 repository = "https://github.com/broxus/tycho"
@@ -49,8 +49,6 @@ dashmap = "5.5.3"
 dirs = "5.0.1"
 ed25519 = "2.0"
 ed25519-dalek = "2.1"
-everscale-crypto = { version = "0.3", features = ["tl-proto", "serde"] }
-everscale-types = { version = "0.1.2", features = ["tycho", "stats"] }
 exponential-backoff = "1"
 fdlimit = "0.3.0"
 futures-util = "0.3"
@@ -72,8 +70,8 @@ prost = "0.13"
 prost-build = "0.13"
 quick_cache = "0.6.0"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls"] }
-rand = "0.8"
-rand_pcg = { version = "0.3" }
+rand = "0.9"
+rand_pcg = { version = "0.9" }
 rayon = "1.10"
 reqwest = { version = "0.12", default-features = false }
 ring = "0.17.8"
@@ -117,12 +115,13 @@ tracing-flame = "0.2"
 tracing-stackdriver = "0.10.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 triomphe = "0.1.11"
+tycho-crypto = { version = "0.4", features = ["tl-proto", "serde", "rand9"] }
+tycho-executor = "0.2.0"
+tycho-types = { version = "0.2.0", features = ["tycho", "stats"] }
+tycho-vm = "0.2.0"
 weedb = "0.4.5"
 zstd-safe = "7.2"
 zstd-sys = "2.0"
-
-tycho-executor = { git = "https://github.com/broxus/tycho-vm.git", rev = "60b5db42f650654e09d1a703b1ce2cdc60d9379b" }
-tycho-vm = { git = "https://github.com/broxus/tycho-vm.git", rev = "60b5db42f650654e09d1a703b1ce2cdc60d9379b" }
 
 # local deps
 tycho-block-util = { path = "./block-util", version = "0.2.10" }
@@ -137,7 +136,7 @@ tycho-storage-traits = { path = "./storage-traits", version = "0.2.10" }
 tycho-util = { path = "./util", version = "0.2.10" }
 
 [patch.crates-io]
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", rev = "77458d0b94c5dca09366acd84a904ff7e87d1b3b" }
+# add patches here
 
 [workspace.lints.rust]
 future_incompatible = "warn"
@@ -235,7 +234,9 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.sha2]
 opt-level = 3
-[profile.dev.package.everscale-crypto]
+[profile.dev.package.tycho-crypto]
+opt-level = 3
+[profile.dev.package.tycho-types]
 opt-level = 3
 [profile.dev.package.curve25519-dalek]
 opt-level = 3

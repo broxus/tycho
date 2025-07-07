@@ -4,13 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::*;
 use humantime::format_duration;
 use rayon::prelude::*;
 use tycho_executor::{Executor, ExecutorInspector, ExecutorParams, ParsedConfig, TxError};
-use tycho_util::metrics::HistogramGuard;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::*;
 use tycho_util::FastHashMap;
+use tycho_util::metrics::HistogramGuard;
 
 use super::messages_buffer::MessageGroup;
 use super::types::{
@@ -490,7 +490,7 @@ fn execute_ordinary_transaction_impl(
                     gas_used: inspector.total_gas_used,
                 }),
                 in_message,
-            })
+            });
         }
         Err(e) => return Err(e.into()),
     };
@@ -546,7 +546,7 @@ fn execute_ticktock_transaction(
         Err(TxError::Skipped) => {
             return Ok(TransactionResult::Skipped(SkippedTransaction {
                 gas_used: inspector.total_gas_used,
-            }))
+            }));
         }
         Err(TxError::Fatal(e)) => return Err(e),
     };

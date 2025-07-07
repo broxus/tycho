@@ -2,13 +2,13 @@ use std::collections::hash_map;
 use std::sync::Arc;
 
 use anyhow::Result;
-use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tokio::sync::{broadcast, Semaphore};
+use futures_util::stream::FuturesUnordered;
+use tokio::sync::{Semaphore, broadcast};
 use tokio::task::JoinHandle;
 use tycho_util::time::{now_sec, shifted_interval};
 
-use crate::dht::{random_key_at_distance, DhtInner, DhtQueryMode, Query};
+use crate::dht::{DhtInner, DhtQueryMode, Query, random_key_at_distance};
 use crate::network::{Network, WeakNetwork};
 use crate::proto::dht::{PeerValueKeyName, ValueRef};
 use crate::types::PeerInfo;
@@ -145,7 +145,7 @@ impl DhtInner {
         let semaphore = Semaphore::new(PARALLEL_QUERIES);
         let mut futures = FuturesUnordered::new();
         {
-            let rng = &mut rand::thread_rng();
+            let rng = &mut rand::rng();
 
             let mut routing_table = self.routing_table.lock().unwrap();
 
@@ -159,7 +159,7 @@ impl DhtInner {
             for (&distance, _) in routing_table
                 .buckets
                 .iter()
-                .filter(|(&distance, bucket)| distance > 0 && !bucket.is_empty())
+                .filter(|(distance, bucket)| **distance > 0 && !bucket.is_empty())
                 .take(MAX_BUCKETS)
             {
                 // Query the K closest nodes for a random ID at the specified distance from the local ID.

@@ -1,4 +1,4 @@
-use everscale_types::models::ConsensusConfig;
+use tycho_types::models::ConsensusConfig;
 
 /// ```text
 ///    RESET_ROUNDS      DagFront.top() == DagHead.next()

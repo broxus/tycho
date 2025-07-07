@@ -1,11 +1,11 @@
-use everscale_types::models::*;
 use parking_lot::RwLock;
 use tycho_storage::kv::StoredValue;
+use tycho_types::models::*;
 
 use super::block_handle::{BlockFlags, BlockHandle};
 use super::db::CoreDb;
 use super::tables;
-use super::util::{read_block_id_le, write_block_id_le, SlotSubscriptions};
+use super::util::{SlotSubscriptions, read_block_id_le, write_block_id_le};
 
 /// Stores relations between blocks
 pub struct BlockConnectionStorage {

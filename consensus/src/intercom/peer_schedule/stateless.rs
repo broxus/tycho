@@ -1,7 +1,7 @@
 use std::array;
 use std::sync::Arc;
 
-use everscale_crypto::ed25519::KeyPair;
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastHashSet;
 

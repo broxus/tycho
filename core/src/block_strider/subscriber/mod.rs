@@ -2,11 +2,11 @@ use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::models::*;
 use futures_util::future::{self, BoxFuture};
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_types::models::*;
 
 pub use self::futures::{
     DelayedTasks, DelayedTasksJoinHandle, DelayedTasksSpawner, OptionHandleFut, OptionPrepareFut,

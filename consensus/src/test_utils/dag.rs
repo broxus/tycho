@@ -4,17 +4,17 @@ use std::convert::identity;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use everscale_crypto::ed25519::KeyPair;
 use futures_util::FutureExt;
+use rand::RngCore;
 use rand::prelude::SliceRandom;
-use rand::{thread_rng, RngCore};
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
 use crate::dag::{AnchorStage, DagRound, ValidateResult, Verifier};
 use crate::effects::{Ctx, EngineCtx, RoundCtx, TaskTracker, ValidateCtx};
-use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::MempoolConfig;
+use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
 use crate::models::{
     AnchorStageRole, Cert, Digest, Link, PeerCount, Point, PointData, PointId, Round, Signature,
@@ -191,7 +191,7 @@ fn point<const PEER_COUNT: usize>(
     let mut payload = Vec::with_capacity(msg_count);
     for _ in 0..msg_count {
         let mut data = vec![0; msg_bytes];
-        thread_rng().fill_bytes(data.as_mut_slice());
+        rand::rng().fill_bytes(data.as_mut_slice());
         payload.push(Bytes::from(data));
     }
 
@@ -259,6 +259,6 @@ fn point_anchor_link(
 
 fn rand_arr<const N: usize>() -> [usize; N] {
     let mut arr: [usize; N] = array::from_fn(identity);
-    arr.shuffle(&mut thread_rng());
+    arr.shuffle(&mut rand::rng());
     arr
 }

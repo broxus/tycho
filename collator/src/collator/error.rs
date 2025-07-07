@@ -1,4 +1,4 @@
-use everscale_types::models::BlockIdShort;
+use tycho_types::models::BlockIdShort;
 
 use crate::mempool::MempoolAnchorId;
 
@@ -18,8 +18,8 @@ pub enum CollatorError {
     Anyhow(#[from] anyhow::Error),
 }
 
-impl From<everscale_types::error::Error> for CollatorError {
-    fn from(value: everscale_types::error::Error) -> Self {
+impl From<tycho_types::error::Error> for CollatorError {
+    fn from(value: tycho_types::error::Error) -> Self {
         Self::Anyhow(value.into())
     }
 }

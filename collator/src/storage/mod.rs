@@ -1,12 +1,12 @@
 use std::fs::File;
 
 use anyhow::Result;
-use everscale_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
 use tycho_core::storage::QueueStateReader;
+use tycho_storage::StorageContext;
 use tycho_storage::fs::MappedFile;
 use tycho_storage::kv::StoredValue;
-use tycho_storage::StorageContext;
+use tycho_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_util::FastHashMap;
 
 use self::db::InternalQueueDB;
@@ -80,7 +80,7 @@ impl InternalQueueStorage {
         block_id: BlockId,
     ) -> Result<()> {
         tracing::info!("Importing internal queue from file for block {block_id}");
-        use everscale_types::boc::ser::BocHeader;
+        use tycho_types::boc::ser::BocHeader;
 
         let top_update = top_update.clone();
         let this = self.clone();

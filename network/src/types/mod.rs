@@ -7,8 +7,8 @@ pub use self::request::{
 };
 pub use self::rpc::RpcQuery;
 pub use self::service::{
-    service_message_fn, service_query_fn, BoxCloneService, BoxService, Service, ServiceExt,
-    ServiceMessageFn, ServiceQueryFn,
+    BoxCloneService, BoxService, Service, ServiceExt, ServiceMessageFn, ServiceQueryFn,
+    service_message_fn, service_query_fn,
 };
 
 mod address;

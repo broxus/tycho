@@ -4,9 +4,9 @@ use std::collections::{BinaryHeap, HashSet};
 use std::sync::Arc;
 
 use ahash::HashMapExt;
-use anyhow::{bail, Context, Result};
-use everscale_types::models::ShardIdent;
+use anyhow::{Context, Result, bail};
 use tycho_block_util::queue::QueueKey;
+use tycho_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::shard_iterator::{IterResult, ShardIterator};

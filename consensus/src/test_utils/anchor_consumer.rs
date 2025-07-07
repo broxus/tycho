@@ -1,6 +1,6 @@
 use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use itertools::Itertools;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -10,8 +10,8 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::effects::AltFormat;
-use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
 use crate::engine::MempoolMergedConfig;
+use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
 use crate::models::{MempoolOutput, PointId, Round};
 use crate::test_utils::last_anchor_file::LastAnchorFile;
 
