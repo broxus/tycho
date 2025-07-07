@@ -1,11 +1,10 @@
 use std::sync::Arc;
-
+pub(crate) use handle::BlockDataGuard;
 use tycho_block_util::block::{BlockStuff, ShardHeights};
 use tycho_storage::kv::StoredValue;
 use tycho_types::models::BlockId;
 use tycho_util::FastDashMap;
 
-pub(crate) use self::handle::BlockDataGuard;
 pub use self::handle::{BlockHandle, WeakBlockHandle};
 pub use self::meta::{BlockFlags, BlockMeta, LoadedBlockMeta, NewBlockMeta};
 use super::{CoreDb, PartialBlockId};

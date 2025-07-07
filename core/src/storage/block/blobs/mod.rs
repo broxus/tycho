@@ -10,25 +10,25 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
+use bytes::Bytes;
 use cassadilia::{Cas, KeyEncoderError};
-use everscale_types::boc::{Boc, BocRepr};
-use everscale_types::cell::HashBytes;
-use everscale_types::models::*;
+use tycho_types::boc::BocRepr;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::*;
 use parking_lot::RwLock;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
-use tokio::task::JoinHandle;
+use tokio::sync::broadcast;
 use tycho_block_util::archive::ArchiveEntryType;
 use tycho_storage::kv::StoredValue;
 use tycho_util::metrics::HistogramGuard;
-pub use types::{ArchiveId, BlockGcStats, BlockStorageError, FullBlockDataGuard};
+pub use types::{ArchiveId, BlockGcStats, BlockStorageError};
 pub use util::remove_blocks;
-use weedb::{ColumnFamily, OwnedPinnableSlice, rocksdb};
-
+use weedb::{rocksdb, OwnedPinnableSlice};
 use self::task::CommitArchiveTask;
 use super::package_entry::{
-    BlockDataEntryKey, PackageEntryKey, PackageEntryKeyEncoder, PartialBlockId,
+    PackageEntryKey, PackageEntryKeyEncoder, PartialBlockId,
 };
 use crate::storage::{BlockHandle, BlockHandleStorage, CoreDb, tables};
+use crate::storage::block_handle::BlockDataGuard;
 
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 // Reserved key in which the archive size is stored
@@ -42,13 +42,6 @@ const ARCHIVE_STARTED_MAGIC: u64 = u64::MAX - 3;
 
 const ARCHIVE_MAGIC_MIN: u64 = u64::MAX & !0xff;
 
-const BLOCK_DATA_CHUNK_SIZE: u32 = 1024 * 1024; // 1MB
-
-// Reserved key in which the compressed block size is stored
-const BLOCK_DATA_SIZE_MAGIC: u32 = u32::MAX;
-// Reserved key in which we store the fact that compressed block was started
-const BLOCK_DATA_STARTED_MAGIC: u32 = u32::MAX - 2;
-
 pub struct BlobStorage {
     db: CoreDb,
     block_handle_storage: Arc<BlockHandleStorage>,
@@ -56,10 +49,10 @@ pub struct BlobStorage {
     prev_archive_commit: tokio::sync::Mutex<Option<CommitArchiveTask>>,
     archive_ids_tx: ArchiveIdsTx,
     archive_chunk_size: NonZeroU32,
-    split_block_semaphore: Arc<Semaphore>,
 
-    blocks: Cas<PackageEntryKey>,
-    archives: Cas<u32>,
+    blocks: Arc<Cas<PackageEntryKey>>,
+    #[allow(dead_code)] // TODO: Will be used in later migration phases
+    archives: Arc<Cas<u32>>,
 }
 
 impl BlobStorage {
@@ -67,11 +60,9 @@ impl BlobStorage {
         db: CoreDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         archive_chunk_size: NonZeroU32,
-        split_block_tasks: usize,
         blobdb_path: &Path,
     ) -> Result<Self> {
         let (archive_ids_tx, _) = broadcast::channel(4);
-        let split_block_semaphore = Arc::new(Semaphore::new(split_block_tasks));
         let blocks = Cas::open(
             blobdb_path.join("packages"),
             PackageEntryKeyEncoder,
@@ -88,93 +79,16 @@ impl BlobStorage {
             block_handle_storage,
             archive_ids_tx,
             archive_chunk_size,
-            split_block_semaphore,
             archive_ids: Default::default(),
             prev_archive_commit: Default::default(),
 
-            blocks,
-            archives,
+            blocks: Arc::new(blocks),
+            archives: Arc::new(archives),
         })
     }
 
     pub fn archive_chunk_size(&self) -> NonZeroU32 {
         self.archive_chunk_size
-    }
-
-    #[expect(clippy::unused_self)]
-    pub fn block_data_chunk_size(&self) -> NonZeroU32 {
-        NonZeroU32::new(BLOCK_DATA_CHUNK_SIZE).unwrap()
-    }
-
-    pub async fn finish_block_data(&self) -> Result<()> {
-        let started_at = Instant::now();
-
-        tracing::info!("started finishing compressed block data");
-
-        let mut iter = self.db.block_data_entries.raw_iterator();
-        iter.seek_to_first();
-
-        let mut blocks_to_finish = Vec::new();
-
-        loop {
-            let Some(key) = iter.key() else {
-                if let Err(e) = iter.status() {
-                    tracing::error!("failed to iterate through compressed block data: {e:?}");
-                }
-                break;
-            };
-
-            let key = BlockDataEntryKey::from_slice(key);
-
-            const _: () = const {
-                // Rely on the specific order of these constants
-                assert!(BLOCK_DATA_STARTED_MAGIC < BLOCK_DATA_SIZE_MAGIC);
-            };
-
-            // Chunk keys are sorted by offset.
-            match key.chunk_index {
-                // "Started" magic comes first, and indicates that the block exists.
-                BLOCK_DATA_STARTED_MAGIC => {
-                    blocks_to_finish.push(key.block_id);
-                }
-                // "Size" magic comes last, and indicates that the block data is finished.
-                BLOCK_DATA_SIZE_MAGIC => {
-                    // Last block id is already finished
-                    let last = blocks_to_finish.pop();
-                    anyhow::ensure!(last == Some(key.block_id), "invalid block data SIZE entry");
-                }
-                _ => {}
-            }
-
-            iter.next();
-        }
-
-        drop(iter);
-
-        for block_id in blocks_to_finish {
-            tracing::info!(?block_id, "found unfinished block");
-
-            let key = PackageEntryKey {
-                block_id,
-                ty: ArchiveEntryType::Block,
-            };
-
-            let data = match self.db.package_entries.get(key.to_vec())? {
-                Some(data) => data,
-                None => return Err(BlockStorageError::BlockDataNotFound.into()),
-            };
-
-            let permit = self.split_block_semaphore.clone().acquire_owned().await?;
-            self.spawn_split_block_data(&block_id, &data, permit)
-                .await??;
-        }
-
-        tracing::info!(
-            elapsed = %humantime::format_duration(started_at.elapsed()),
-            "finished handling unfinished blocks"
-        );
-
-        Ok(())
     }
 
     pub async fn preload_archive_ids(&self) -> Result<()> {
@@ -300,68 +214,45 @@ impl BlobStorage {
         continuation: Option<BlockIdShort>,
     ) -> Result<(Vec<BlockId>, Option<BlockIdShort>)> {
         const LIMIT: usize = 1000; // Max blocks per response
-        const MAX_BYTES: usize = 1 << 20; // 1 MB processed per response
 
-        let continuation = continuation.map(|block_id| {
+        let continuation_key = continuation.map(|block_id| {
             PackageEntryKey::block(&BlockId {
                 shard: block_id.shard,
                 seqno: block_id.seqno,
                 root_hash: HashBytes::ZERO,
                 file_hash: HashBytes::ZERO,
             })
-            .to_vec()
         });
 
-        let mut iter = {
-            let mut readopts = rocksdb::ReadOptions::default();
-            tables::PackageEntries::read_options(&mut readopts);
-            if let Some(key) = &continuation {
-                readopts.set_iterate_lower_bound(key.as_slice());
-            }
-            self.db
-                .rocksdb()
-                .raw_iterator_cf_opt(&self.db.package_entries.cf(), readopts)
+        let index = self.blocks.index_snapshot();
+
+        let iter = match &continuation_key {
+            Some(key) => index.range(key..),
+            None => index.range(..),
         };
 
-        // NOTE: Despite setting the lower bound we must still seek to the exact key.
-        match continuation {
-            None => iter.seek_to_first(),
-            Some(key) => iter.seek(key),
-        }
-
-        let mut bytes = 0;
         let mut blocks = Vec::new();
+        let mut last_key = None;
 
-        let continuation = loop {
-            let (key, value) = match iter.item() {
-                Some(item) => item,
-                None => {
-                    iter.status()?;
-                    break None;
-                }
-            };
-
-            let id = PackageEntryKey::from_slice(key);
-            if id.ty != ArchiveEntryType::Block {
+        for (key, blob_hash) in iter {
+            if key.ty != ArchiveEntryType::Block {
                 // Ignore non-block entries
-                iter.next();
                 continue;
             }
 
-            if blocks.len() >= LIMIT || bytes >= MAX_BYTES {
-                break Some(id.block_id.as_short_id());
+            if blocks.len() >= LIMIT {
+                last_key = Some(key.block_id.as_short_id());
+                break;
             }
 
-            let file_hash = Boc::file_hash_blake(value);
-            let block_id = id.block_id.make_full(file_hash);
+            // Cassadilia hash is also blake3, so we can use it directly
+            let file_hash = HashBytes::from_slice(blob_hash.as_ref());
+            let block_id = key.block_id.make_full(file_hash);
 
-            bytes += value.len();
             blocks.push(block_id);
+        }
 
-            iter.next();
-        };
-
-        Ok((blocks, continuation))
+        Ok((blocks, last_key))
     }
 
     pub fn list_archive_ids(&self) -> Vec<u32> {
@@ -369,40 +260,40 @@ impl BlobStorage {
     }
 
     pub fn find_mc_block_data(&self, mc_seqno: u32) -> Result<Option<Block>> {
-        let package_entries = &self.db.package_entries;
-
-        let bound = BlockId {
+        let lower_bound = BlockId {
             shard: ShardIdent::MASTERCHAIN,
             seqno: mc_seqno,
             root_hash: HashBytes::ZERO,
             file_hash: HashBytes::ZERO,
         };
 
-        let mut bound = PackageEntryKey::block(&bound);
+        let upper_bound = BlockId {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno: mc_seqno + 1,
+            root_hash: HashBytes::ZERO,
+            file_hash: HashBytes::ZERO,
+        };
 
-        let mut readopts = package_entries.new_read_config();
-        readopts.set_iterate_lower_bound(bound.to_vec().into_vec());
-        bound.block_id.seqno += 1;
-        readopts.set_iterate_upper_bound(bound.to_vec().into_vec());
+        let lower_key = PackageEntryKey::block(&lower_bound);
+        let upper_key = PackageEntryKey::block(&upper_bound);
 
-        let mut iter = self
-            .db
-            .rocksdb()
-            .raw_iterator_cf_opt(&package_entries.cf(), readopts);
+        let index = self.blocks.index_snapshot();
 
-        iter.seek_to_first();
-        loop {
-            let Some((key, value)) = iter.item() else {
-                iter.status()?;
-                return Ok(None);
-            };
-
-            let Some(ArchiveEntryType::Block) = util::extract_entry_type(key) else {
+        for (key, _blob_hash) in index.range(lower_key..upper_key) {
+            if key.ty != ArchiveEntryType::Block {
                 continue;
-            };
+            }
 
-            return Ok(Some(BocRepr::decode::<Block, _>(value)?));
+            // Found a masterchain block with the requested seqno
+            // Now we need to fetch the actual block data
+            if let Some(compressed_data) = self.blocks.get(key)? {
+                let mut decompressed = Vec::new();
+                tycho_util::compression::zstd_decompress(&compressed_data, &mut decompressed)?;
+                return Ok(Some(BocRepr::decode::<Block, _>(&decompressed)?));
+            }
         }
+
+        Ok(None)
     }
 
     pub async fn move_into_archive(
@@ -540,41 +431,6 @@ impl BlobStorage {
         Ok(unsafe { OwnedPinnableSlice::new(self.db.rocksdb().clone(), chunk) })
     }
 
-    pub fn get_block_data_size(&self, block_id: &BlockId) -> Result<Option<u32>> {
-        let key = BlockDataEntryKey {
-            block_id: block_id.into(),
-            chunk_index: BLOCK_DATA_SIZE_MAGIC,
-        };
-        let size = self
-            .db
-            .block_data_entries
-            .get(key.to_vec())?
-            .map(|slice| u32::from_le_bytes(slice.as_ref().try_into().unwrap()));
-
-        Ok(size)
-    }
-
-    pub fn get_block_data_chunk(
-        &self,
-        block_id: &BlockId,
-        offset: u32,
-    ) -> Result<Option<OwnedPinnableSlice>> {
-        let chunk_size = self.block_data_chunk_size().get();
-        if offset % chunk_size != 0 {
-            return Err(BlockStorageError::InvalidOffset.into());
-        }
-
-        let key = BlockDataEntryKey {
-            block_id: block_id.into(),
-            chunk_index: offset / chunk_size,
-        };
-
-        Ok(self.db.block_data_entries.get(key.to_vec())?.map(|value| {
-            // SAFETY: A value was received from the same RocksDB instance.
-            unsafe { OwnedPinnableSlice::new(self.db.rocksdb().clone(), value) }
-        }))
-    }
-
     pub fn subscribe_to_archive_ids(&self) -> broadcast::Receiver<u32> {
         self.archive_ids_tx.subscribe()
     }
@@ -656,36 +512,41 @@ impl BlobStorage {
         Ok(())
     }
 
-    pub fn add_data(&self, id: &PackageEntryKey, data: &[u8]) -> Result<(), rocksdb::Error> {
-        self.db.package_entries.insert(id.to_vec(), data)
-    }
+    pub async fn add_data(
+        &self,
+        id: &PackageEntryKey,
+        data: &[u8],
+        // guard is used to ensure that the caller holds a lock on the block. It's passed so we don't
+        //  accidentally take recursive locks on the same block.
+        _guard: &BlockDataGuard<'_>,
+    ) -> Result<()> {
+        let mut compressed = vec![];
+        tycho_util::compression::zstd_compress(data, &mut compressed, 3);
 
-    pub async fn add_block_data_and_split(&self, id: &PackageEntryKey, data: &[u8]) -> Result<()> {
-        let mut batch = rocksdb::WriteBatch::default();
-
-        batch.put_cf(&self.db.package_entries.cf(), id.to_vec(), data);
-
-        // Store info that new block was started
-        let key = BlockDataEntryKey {
-            block_id: id.block_id,
-            chunk_index: BLOCK_DATA_STARTED_MAGIC,
-        };
-        batch.put_cf(&self.db.block_data_entries.cf(), key.to_vec(), []);
-
-        self.db.rocksdb().write(batch)?;
-
-        // Start splitting block data
-        let permit = self.split_block_semaphore.clone().acquire_owned().await?;
-        let _handle = self.spawn_split_block_data(&id.block_id, data, permit);
-
+        let mut tx = self.blocks.put(id.clone())?;
+        tx.write(&compressed)?;
+        tx.finish()?;
         Ok(())
     }
 
-    pub async fn get_data(
+    pub async fn get_block_data_decompressed(
         &self,
         handle: &BlockHandle,
         id: &PackageEntryKey,
-    ) -> Result<OwnedPinnableSlice> {
+    ) -> Result<Bytes> {
+        let compressed = self.get_block_data(handle, id).await?;
+
+        let mut decompressed = Vec::new();
+        tycho_util::compression::zstd_decompress(&compressed, &mut decompressed)?;
+
+        Ok(Bytes::from(decompressed))
+    }
+
+    pub async fn get_block_data(
+        &self,
+        handle: &BlockHandle,
+        id: &PackageEntryKey,
+    ) -> Result<Bytes> {
         let _lock = match id.ty {
             ArchiveEntryType::Block => handle.block_data_lock(),
             ArchiveEntryType::Proof => handle.proof_data_lock(),
@@ -694,30 +555,31 @@ impl BlobStorage {
         .read()
         .await;
 
-        match self.db.package_entries.get(id.to_vec())? {
-            // SAFETY: A value was received from the same RocksDB instance.
-            Some(value) => Ok(unsafe { OwnedPinnableSlice::new(self.db.rocksdb().clone(), value) }),
+        match self.blocks.get(id)? {
+            Some(compressed_data) => Ok(compressed_data),
             None => Err(BlockStorageError::PackageEntryNotFound.into()),
         }
     }
 
-    pub async fn get_data_ref<'a, 'b: 'a>(
-        &'a self,
-        handle: &'b BlockHandle,
-        id: &PackageEntryKey,
-    ) -> Result<FullBlockDataGuard<'a>> {
-        let lock = match id.ty {
-            ArchiveEntryType::Block => handle.block_data_lock(),
-            ArchiveEntryType::Proof => handle.proof_data_lock(),
-            ArchiveEntryType::QueueDiff => handle.queue_diff_data_lock(),
-        }
-        .read()
-        .await;
+    pub async fn get_block_data_range(
+        &self,
+        handle: &BlockHandle,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<Bytes>> {
+        let id = PackageEntryKey {
+            block_id: PartialBlockId::from(handle.id()),
+            ty: ArchiveEntryType::Block,
+        };
 
-        match self.db.package_entries.get(id.to_vec())? {
-            Some(data) => Ok(FullBlockDataGuard { _lock: lock, data }),
-            None => Err(BlockStorageError::PackageEntryNotFound.into()),
+        match self.blocks.get_range(&id, offset, offset + length)? {
+            Some(data) => Ok(Some(data)),
+            None => Ok(None),
         }
+    }
+
+    pub(super) fn blocks(&self) -> &Cas<PackageEntryKey> {
+        &self.blocks
     }
 
     fn prepare_archive_id(&self, mc_seqno: u32, force_split_archive: bool) -> PreparedArchiveId {
@@ -792,56 +654,9 @@ impl BlobStorage {
         let db = self.db.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let chunk_size = self.archive_chunk_size().get() as u64;
+        let blocks = self.blocks.clone();
 
-        CommitArchiveTask::new(db, block_handle_storage, archive_id, chunk_size)
-    }
-
-    fn spawn_split_block_data(
-        &self,
-        block_id: &PartialBlockId,
-        data: &[u8],
-        permit: OwnedSemaphorePermit,
-    ) -> JoinHandle<Result<()>> {
-        let db = self.db.clone();
-        let chunk_size = self.block_data_chunk_size().get() as usize;
-
-        let span = tracing::Span::current();
-        let handle = tokio::task::spawn_blocking({
-            let block_id = *block_id;
-            let data = data.to_vec();
-
-            move || {
-                let _span = span.enter();
-
-                let _histogram = HistogramGuard::begin("tycho_storage_split_block_data_time");
-
-                let mut compressed = Vec::new();
-                tycho_util::compression::zstd_compress(&data, &mut compressed, 3);
-
-                let chunks = compressed.chunks(chunk_size);
-                for (index, chunk) in chunks.enumerate() {
-                    let key = BlockDataEntryKey {
-                        block_id,
-                        chunk_index: index as u32,
-                    };
-
-                    db.block_data_entries.insert(key.to_vec(), chunk)?;
-                }
-
-                let key = BlockDataEntryKey {
-                    block_id,
-                    chunk_index: BLOCK_DATA_SIZE_MAGIC,
-                };
-                db.block_data_entries
-                    .insert(key.to_vec(), (compressed.len() as u32).to_le_bytes())?;
-
-                drop(permit);
-
-                Ok(())
-            }
-        });
-
-        handle
+        CommitArchiveTask::new(db, block_handle_storage, archive_id, chunk_size, blocks)
     }
 
     pub fn db(&self) -> &CoreDb {

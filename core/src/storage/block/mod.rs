@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use bytesize::ByteSize;
 use tokio::sync::broadcast;
 use tycho_block_util::archive::ArchiveData;
@@ -14,19 +15,17 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::{CancellationFlag, rayon_run};
 use weedb::{OwnedPinnableSlice, rocksdb};
 
-pub use self::package_entry::{BlockDataEntryKey, PackageEntryKey, PartialBlockId};
+pub use self::package_entry::{PackageEntryKey, PartialBlockId};
 use super::util::SlotSubscriptions;
 use super::{
     BlockConnectionStorage, BlockFlags, BlockHandle, BlockHandleStorage, BlocksCacheConfig, CoreDb,
     HandleCreationStatus, NewBlockMeta,
 };
 
-mod blobs;
+pub(crate) mod blobs;
 mod package_entry;
 
 pub use blobs::{ArchiveId, BlockGcStats};
-
-use crate::storage::block::blobs::FullBlockDataGuard;
 
 const METRIC_LOAD_BLOCK_TOTAL: &str = "tycho_storage_load_block_total";
 const METRIC_BLOCK_CACHE_HIT_TOTAL: &str = "tycho_storage_block_cache_hit_total";
@@ -71,11 +70,9 @@ impl BlockStorage {
             db,
             block_handle_storage.clone(),
             archive_chunk_size,
-            config.split_block_tasks,
             &config.blobs_root,
         )?;
 
-        blob_storage.finish_block_data().await?;
         blob_storage.preload_archive_ids().await?;
 
         Ok(Self {
@@ -92,14 +89,6 @@ impl BlockStorage {
     // it might be useful to allow configure it during the first run.
     pub fn archive_chunk_size(&self) -> NonZeroU32 {
         self.blob_storage.archive_chunk_size()
-    }
-
-    pub fn block_data_chunk_size(&self) -> NonZeroU32 {
-        self.blob_storage.block_data_chunk_size()
-    }
-
-    pub async fn finish_block_data(&self) -> Result<()> {
-        self.blob_storage.finish_block_data().await
     }
 
     /// Iterates over all archives and preloads their ids into memory.
@@ -167,11 +156,9 @@ impl BlockStorage {
             let data = archive_data.as_new_archive_data()?;
             metrics::histogram!("tycho_storage_store_block_data_size").record(data.len() as f64);
 
-            let _lock = handle.block_data_lock().write().await;
+            let lock = handle.block_data_lock().write().await;
             if !handle.has_data() {
-                self.blob_storage
-                    .add_block_data_and_split(&archive_id, data)
-                    .await?;
+                self.blob_storage.add_data(&archive_id, data, &lock).await?;
                 if handle.meta().add_flags(BlockFlags::HAS_DATA) {
                     self.block_handle_storage.store_handle(&handle, false);
                     updated = true;
@@ -211,29 +198,26 @@ impl BlockStorage {
             return Ok(block.clone());
         }
 
-        let FullBlockDataGuard { _lock, data } = self
+        let data = self
             .blob_storage
-            .get_data_ref(handle, &PackageEntryKey::block(handle.id()))
+            .get_block_data_decompressed(handle, &PackageEntryKey::block(handle.id()))
             .await?;
 
         if data.len() > BIG_DATA_THRESHOLD {
             BlockStuff::deserialize(handle.id(), data.as_ref())
         } else {
             let handle = handle.clone();
-
-            // SAFETY: `data` was created by the `self.db` RocksDB instance.
-            let owned_data =
-                unsafe { OwnedPinnableSlice::new(self.blob_storage.db().rocksdb().clone(), data) };
-            rayon_run(move || BlockStuff::deserialize(handle.id(), owned_data.as_ref())).await
+            rayon_run(move || BlockStuff::deserialize(handle.id(), data.as_ref())).await
         }
     }
 
-    pub async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<OwnedPinnableSlice> {
+    pub async fn load_block_data_decompressed(&self, handle: &BlockHandle) -> Result<Bytes> {
         if !handle.has_data() {
             return Err(BlockStorageError::BlockDataNotFound.into());
         }
+
         self.blob_storage
-            .get_data(handle, &PackageEntryKey::block(handle.id()))
+            .get_block_data_decompressed(handle, &PackageEntryKey::block(handle.id()))
             .await
     }
 
@@ -248,15 +232,17 @@ impl BlockStorage {
         self.blob_storage.list_archive_ids()
     }
 
-    pub async fn load_block_data_raw_ref<'a>(
-        &'a self,
-        handle: &'a BlockHandle,
-    ) -> Result<impl AsRef<[u8]> + 'a> {
+    pub async fn load_block_data_range(
+        &self,
+        handle: &BlockHandle,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<Bytes>> {
         if !handle.has_data() {
             return Err(BlockStorageError::BlockDataNotFound.into());
         }
         self.blob_storage
-            .get_data_ref(handle, &PackageEntryKey::block(handle.id()))
+            .get_block_data_range(handle, offset, length)
             .await
     }
 
@@ -288,9 +274,9 @@ impl BlockStorage {
         if !handle.has_proof() {
             let data = proof.as_new_archive_data()?;
 
-            let _lock = handle.proof_data_lock().write().await;
+            let lock = handle.proof_data_lock().write().await;
             if !handle.has_proof() {
-                self.blob_storage.add_data(&archive_id, data)?;
+                self.blob_storage.add_data(&archive_id, data, &lock).await?;
                 if handle.meta().add_flags(BlockFlags::HAS_PROOF) {
                     self.block_handle_storage.store_handle(&handle, false);
                     updated = true;
@@ -306,30 +292,17 @@ impl BlockStorage {
     }
 
     pub async fn load_block_proof(&self, handle: &BlockHandle) -> Result<BlockProofStuff> {
-        let raw_proof = self.load_block_proof_raw_ref(handle).await?;
-        BlockProofStuff::deserialize(handle.id(), raw_proof.as_ref())
+        let raw_proof = self.load_block_proof_raw(handle).await?;
+        BlockProofStuff::deserialize(handle.id(), &raw_proof)
     }
 
-    pub async fn load_block_proof_raw(&self, handle: &BlockHandle) -> Result<OwnedPinnableSlice> {
+    pub async fn load_block_proof_raw(&self, handle: &BlockHandle) -> Result<Bytes> {
         if !handle.has_proof() {
             return Err(BlockStorageError::BlockProofNotFound.into());
         }
 
         self.blob_storage
-            .get_data(handle, &PackageEntryKey::proof(handle.id()))
-            .await
-    }
-
-    pub async fn load_block_proof_raw_ref<'a>(
-        &'a self,
-        handle: &'a BlockHandle,
-    ) -> Result<impl AsRef<[u8]> + 'a> {
-        if !handle.has_proof() {
-            return Err(BlockStorageError::BlockProofNotFound.into());
-        }
-
-        self.blob_storage
-            .get_data_ref(handle, &PackageEntryKey::proof(handle.id()))
+            .get_block_data_decompressed(handle, &PackageEntryKey::proof(handle.id()))
             .await
     }
 
@@ -357,9 +330,9 @@ impl BlockStorage {
         if !handle.has_queue_diff() {
             let data = queue_diff.as_new_archive_data()?;
 
-            let _lock = handle.queue_diff_data_lock().write().await;
+            let lock = handle.queue_diff_data_lock().write().await;
             if !handle.has_queue_diff() {
-                self.blob_storage.add_data(&archive_id, data)?;
+                self.blob_storage.add_data(&archive_id, data, &lock).await?;
                 if handle.meta().add_flags(BlockFlags::HAS_QUEUE_DIFF) {
                     self.block_handle_storage.store_handle(&handle, false);
                     updated = true;
@@ -375,29 +348,17 @@ impl BlockStorage {
     }
 
     pub async fn load_queue_diff(&self, handle: &BlockHandle) -> Result<QueueDiffStuff> {
-        let raw_diff = self.load_queue_diff_raw_ref(handle).await?;
-        QueueDiffStuff::deserialize(handle.id(), raw_diff.as_ref())
+        let raw_diff = self.load_queue_diff_raw(handle).await?;
+        QueueDiffStuff::deserialize(handle.id(), &raw_diff)
     }
 
-    pub async fn load_queue_diff_raw(&self, handle: &BlockHandle) -> Result<OwnedPinnableSlice> {
+    pub async fn load_queue_diff_raw(&self, handle: &BlockHandle) -> Result<Bytes> {
         if !handle.has_queue_diff() {
             return Err(BlockStorageError::QueueDiffNotFound.into());
         }
 
         self.blob_storage
-            .get_data(handle, &PackageEntryKey::queue_diff(handle.id()))
-            .await
-    }
-
-    pub async fn load_queue_diff_raw_ref<'a>(
-        &'a self,
-        handle: &'a BlockHandle,
-    ) -> Result<impl AsRef<[u8]> + 'a> {
-        if !handle.has_queue_diff() {
-            return Err(BlockStorageError::QueueDiffNotFound.into());
-        }
-        self.blob_storage
-            .get_data_ref(handle, &PackageEntryKey::queue_diff(handle.id()))
+            .get_block_data_decompressed(handle, &PackageEntryKey::queue_diff(handle.id()))
             .await
     }
 
@@ -429,18 +390,6 @@ impl BlockStorage {
     /// Loads an archive chunk.
     pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<OwnedPinnableSlice> {
         self.blob_storage.get_archive_chunk(id, offset).await
-    }
-
-    pub fn get_block_data_size(&self, block_id: &BlockId) -> Result<Option<u32>> {
-        self.blob_storage.get_block_data_size(block_id)
-    }
-
-    pub fn get_block_data_chunk(
-        &self,
-        block_id: &BlockId,
-        offset: u32,
-    ) -> Result<Option<OwnedPinnableSlice>> {
-        self.blob_storage.get_block_data_chunk(block_id, offset)
     }
 
     pub fn subscribe_to_archive_ids(&self) -> broadcast::Receiver<u32> {
@@ -495,32 +444,19 @@ impl BlockStorage {
             cancelled.cancel();
         }
 
-        let span = tracing::Span::current();
-        let cancelled = cancelled.clone();
-        let db = self.blob_storage.db().clone();
-
+        // Since remove_blocks needs blob_storage but we can't move self into the closure,
+        // we'll call it directly without rayon_run for now
         let BlockGcStats {
             mc_blocks_removed,
             total_blocks_removed,
-        } = rayon_run(move || {
-            let _span = span.enter();
-
-            let guard = scopeguard::guard((), |_| {
-                tracing::warn!("cancelled");
-            });
-
-            let stats = blobs::remove_blocks(
-                db,
-                max_blocks_per_batch,
-                mc_seqno,
-                shard_heights,
-                Some(&cancelled),
-            )?;
-
-            scopeguard::ScopeGuard::into_inner(guard);
-            Ok::<_, anyhow::Error>(stats)
-        })
-        .await?;
+        } = blobs::remove_blocks(
+            self.blob_storage.db().clone(),
+            &self.blob_storage,
+            max_blocks_per_batch,
+            mc_seqno,
+            shard_heights,
+            Some(&cancelled),
+        )?;
 
         tracing::info!(
             total_cached_handles_removed,
@@ -536,6 +472,11 @@ impl BlockStorage {
     #[cfg(test)]
     pub fn db(&self) -> &CoreDb {
         self.blob_storage.db()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn blob_storage(&self) -> &blobs::BlobStorage {
+        &self.blob_storage
     }
 }
 
@@ -566,7 +507,6 @@ pub struct StoreBlockResult {
 pub struct BlockStorageConfig {
     pub archive_chunk_size: ByteSize,
     pub blocks_cache: BlocksCacheConfig,
-    pub split_block_tasks: usize,
     pub blobs_root: PathBuf,
 }
 
@@ -591,7 +531,6 @@ mod tests {
     use blobs::*;
     use tycho_block_util::archive::{ArchiveEntryType, WithArchiveData};
     use tycho_storage::StorageContext;
-    use tycho_storage::kv::StoredValue;
     use tycho_types::prelude::*;
     use tycho_util::FastHashMap;
     use tycho_util::futures::JoinTask;
@@ -734,11 +673,13 @@ mod tests {
                     gen_utime: 0,
                     ref_by_mc_seqno: seqno,
                 });
+                let lock = handle.block_data_lock().write().await;
 
                 for ty in ENTRY_TYPES {
                     blocks
                         .blob_storage
-                        .add_data(&(block_id, ty).into(), GARBAGE)?;
+                        .add_data(&(block_id, ty).into(), GARBAGE, &lock)
+                        .await?;
                 }
                 for direction in CONNECTION_TYPES {
                     block_connections.store_connection(&handle, direction, &block_id);
@@ -752,6 +693,7 @@ mod tests {
         // Remove some blocks
         let stats = blobs::remove_blocks(
             blocks.db().clone(),
+            &blocks.blob_storage,
             None,
             70,
             [(ShardIdent::BASECHAIN, 50)].into(),
@@ -784,8 +726,9 @@ mod tests {
 
                 for ty in ENTRY_TYPES {
                     let key = PackageEntryKey::from((block_id, ty));
-                    let stored = blocks.db().package_entries.get(key.to_vec())?;
-                    assert_eq!(stored.is_none(), must_be_removed);
+                    // Check if the entry exists in Cassadilia
+                    let exists_in_cas = blocks.blob_storage().blocks().contains_key(&key);
+                    assert_eq!(!exists_in_cas, must_be_removed);
                 }
 
                 for direction in CONNECTION_TYPES {
@@ -798,6 +741,7 @@ mod tests {
         // Remove single block
         let stats = blobs::remove_blocks(
             blocks.db().clone(),
+            &blocks.blob_storage,
             None,
             71,
             [(ShardIdent::BASECHAIN, 51)].into(),
@@ -811,6 +755,7 @@ mod tests {
         // Remove no blocks
         let stats = blobs::remove_blocks(
             blocks.db().clone(),
+            &blocks.blob_storage,
             None,
             71,
             [(ShardIdent::BASECHAIN, 51)].into(),

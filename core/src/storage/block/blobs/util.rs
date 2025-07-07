@@ -1,29 +1,32 @@
 use anyhow::Result;
 use bytes::Buf;
-use everscale_types::models::*;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::*;
 use tycho_block_util::archive::ArchiveEntryType;
 use tycho_block_util::block::ShardHeights;
 use tycho_storage::kv::StoredValue;
 use tycho_util::sync::CancellationFlag;
 use weedb::rocksdb;
 
+use super::super::package_entry::{PackageEntryKey, PartialBlockId};
 use super::types::BlockGcStats;
-use crate::storage::{BlockFlags, CoreDb, tables};
+use super::BlobStorage;
+use crate::storage::{BlockFlags, CoreDb};
 
 pub fn remove_blocks(
     db: CoreDb,
+    blob_storage: &BlobStorage,
     max_blocks_per_batch: Option<usize>,
     mc_seqno: u32,
     shard_heights: ShardHeights,
     cancelled: Option<&CancellationFlag>,
 ) -> Result<BlockGcStats> {
+    let blocks = blob_storage.blocks().clone();
     let mut stats = BlockGcStats::default();
 
     let raw = db.rocksdb().as_ref();
     let full_block_ids_cf = db.full_block_ids.cf();
     let block_connections_cf = db.block_connections.cf();
-    let package_entries_cf = db.package_entries.cf();
-    let block_data_entries_cf = db.block_data_entries.cf();
     let block_handles_cf = db.block_handles.cf();
 
     // Create batch
@@ -48,33 +51,69 @@ pub fn remove_blocks(
         Ok(value.as_ref().get_u64_le() & FLAGS != 0)
     };
 
-    let mut key_buffer = [0u8; tables::PackageEntries::KEY_LEN];
-    let mut delete_range =
-        |batch: &mut rocksdb::WriteBatch, from: &BlockIdShort, to: &BlockIdShort| {
-            debug_assert_eq!(from.shard, to.shard);
-            debug_assert!(from.seqno <= to.seqno);
+    let mut key_buffer = [0u8; PackageEntryKey::SIZE_HINT];
+    let mut delete_range = |batch: &mut rocksdb::WriteBatch,
+                            from: &BlockIdShort,
+                            to: &BlockIdShort|
+     -> Result<()> {
+        debug_assert_eq!(from.shard, to.shard);
+        debug_assert!(from.seqno <= to.seqno);
 
-            let range_from = &mut key_buffer;
-            range_from[..4].copy_from_slice(&from.shard.workchain().to_be_bytes());
-            range_from[4..12].copy_from_slice(&from.shard.prefix().to_be_bytes());
-            range_from[12..16].copy_from_slice(&from.seqno.to_be_bytes());
+        let range_from = &mut key_buffer;
+        range_from[..4].copy_from_slice(&from.shard.workchain().to_be_bytes());
+        range_from[4..12].copy_from_slice(&from.shard.prefix().to_be_bytes());
+        range_from[12..16].copy_from_slice(&from.seqno.to_be_bytes());
 
-            let mut range_to = *range_from;
-            range_to[12..16].copy_from_slice(&to.seqno.saturating_add(1).to_be_bytes());
+        let mut range_to = *range_from;
+        range_to[12..16].copy_from_slice(&to.seqno.saturating_add(1).to_be_bytes());
 
-            // At this point we have two keys:
-            // [workchain, shard, from_seqno, 0...]
-            // [workchain, shard, to_seqno + 1, 0...]
-            //
-            // It will delete all entries in range [from_seqno, to_seqno) for this shard.
-            // Note that package entry keys are the same as block connection keys.
-            batch.delete_range_cf(&full_block_ids_cf, &*range_from, &range_to);
-            batch.delete_range_cf(&package_entries_cf, &*range_from, &range_to);
-            batch.delete_range_cf(&block_data_entries_cf, &*range_from, &range_to);
-            batch.delete_range_cf(&block_connections_cf, &*range_from, &range_to);
+        // At this point we have two keys:
+        // [workchain, shard, from_seqno, 0...]
+        // [workchain, shard, to_seqno + 1, 0...]
+        //
+        // It will delete all entries in range [from_seqno, to_seqno) for this shard.
+        // Keep only metadata cleanup in RocksDB
+        batch.delete_range_cf(&full_block_ids_cf, &*range_from, &range_to);
+        batch.delete_range_cf(&block_connections_cf, &*range_from, &range_to);
 
-            tracing::debug!(%from, %to, "delete_range");
-        };
+        for ty in [
+            ArchiveEntryType::Block,
+            ArchiveEntryType::Proof,
+            ArchiveEntryType::QueueDiff,
+        ] {
+            let from_key = PackageEntryKey {
+                block_id: PartialBlockId {
+                    shard: from.shard,
+                    seqno: from.seqno,
+                    root_hash: HashBytes::ZERO,
+                },
+                ty,
+            };
+
+            let to_key = PackageEntryKey {
+                block_id: PartialBlockId {
+                    shard: to.shard,
+                    seqno: to.seqno + 1,
+                    root_hash: HashBytes::ZERO,
+                },
+                ty,
+            };
+
+            match blocks.remove_range(from_key..to_key) {
+                Ok(deleted_count) => {
+                    if deleted_count > 0 {
+                        tracing::debug!(%from, %to, ?ty, deleted_count, "deleted from Cassadilia");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(%from, %to, ?ty, error = ?e, "failed to delete from Cassadilia");
+                }
+            }
+        }
+
+        tracing::debug!(%from, %to, "delete_range");
+        Ok(())
+    };
 
     let mut cancelled = cancelled.map(|c| c.debounce(100));
     let mut current_range = None::<(BlockIdShort, BlockIdShort)>;
@@ -109,7 +148,7 @@ pub fn remove_blocks(
         {
             // Remove the current range
             if let Some((from, to)) = current_range.take() {
-                delete_range(&mut batch, &from, &to);
+                delete_range(&mut batch, &from, &to)?;
                 batch_len += 1; // Ensure that we flush the batch
             }
             blocks_iter.next();
@@ -119,7 +158,7 @@ pub fn remove_blocks(
         match &mut current_range {
             // Delete the previous range and start a new one
             Some((from, to)) if from.shard != block_id.shard => {
-                delete_range(&mut batch, from, to);
+                delete_range(&mut batch, from, to)?;
                 *from = block_id;
                 *to = block_id;
             }
@@ -155,7 +194,7 @@ pub fn remove_blocks(
     }
 
     if let Some((from, to)) = current_range.take() {
-        delete_range(&mut batch, &from, &to);
+        delete_range(&mut batch, &from, &to)?;
         batch_len += 1; // Ensure that we flush the batch
     }
 
@@ -166,8 +205,4 @@ pub fn remove_blocks(
 
     // Done
     Ok(stats)
-}
-
-pub fn extract_entry_type(key: &[u8]) -> Option<ArchiveEntryType> {
-    key.get(48).copied().and_then(ArchiveEntryType::from_byte)
 }

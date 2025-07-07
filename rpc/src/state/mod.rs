@@ -541,7 +541,7 @@ impl RpcState {
         let handles = self.inner.core_storage.block_handle_storage();
 
         let handle = handles.load_handle(block_id)?;
-        blocks.load_block_data_raw(&handle).await.ok()
+        blocks.load_block_data_decompressed(&handle).await.ok()
     }
 }
 
