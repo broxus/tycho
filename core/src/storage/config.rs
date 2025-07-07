@@ -19,10 +19,6 @@ pub struct CoreStorageConfig {
     /// Default: 1 MB.
     pub archive_chunk_size: ByteSize,
 
-    /// Number of concurrent running split block tasks.
-    ///
-    /// Default: 100.
-    pub split_block_tasks: usize,
 
     /// Archives storage config.
     ///
@@ -57,7 +53,6 @@ impl Default for CoreStorageConfig {
     fn default() -> Self {
         Self {
             cells_cache_size: ByteSize::mb(256),
-            split_block_tasks: 100,
             archive_chunk_size: ByteSize::kb(1024),
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),

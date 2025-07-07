@@ -600,10 +600,7 @@ impl proto::ControlServer for ControlServer {
             return Ok(proto::BlockResponse::NotFound);
         };
 
-        let data = {
-            let data = blocks.load_block_data_raw_ref(&handle).await?;
-            Bytes::copy_from_slice(data.as_ref())
-        };
+        let data = blocks.load_block_data_decompressed(&handle).await?;
         Ok(proto::BlockResponse::Found { data })
     }
 
@@ -619,10 +616,7 @@ impl proto::ControlServer for ControlServer {
             return Ok(proto::BlockResponse::NotFound);
         };
 
-        let data = {
-            let data = blocks.load_block_proof_raw_ref(&handle).await?;
-            Bytes::copy_from_slice(data.as_ref())
-        };
+        let data = blocks.load_block_proof_raw(&handle).await?;
         Ok(proto::BlockResponse::Found { data })
     }
 
@@ -638,10 +632,7 @@ impl proto::ControlServer for ControlServer {
             return Ok(proto::BlockResponse::NotFound);
         };
 
-        let data = {
-            let data = blocks.load_queue_diff_raw_ref(&handle).await?;
-            Bytes::copy_from_slice(data.as_ref())
-        };
+        let data = blocks.load_queue_diff_raw(&handle).await?;
         Ok(proto::BlockResponse::Found { data })
     }
 

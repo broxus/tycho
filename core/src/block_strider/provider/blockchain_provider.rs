@@ -226,6 +226,10 @@ impl BlockchainBlockProvider {
         }
     }
 
+    #[tracing::instrument(
+        skip(self,mc_block_id, block_full, neighbour),
+        fields(mc_block_id = %mc_block_id.as_short_id())
+    )]
     async fn process_received_block(
         &self,
         mc_block_id: &BlockId,

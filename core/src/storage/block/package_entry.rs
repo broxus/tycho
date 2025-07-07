@@ -168,6 +168,11 @@ impl PackageEntryKey {
             ty: ArchiveEntryType::QueueDiff,
         }
     }
+
+    pub fn from_slice(data: &[u8]) -> Self {
+        let mut reader = data;
+        Self::deserialize(&mut reader)
+    }
 }
 
 impl From<(BlockId, ArchiveEntryType)> for PackageEntryKey {
@@ -215,53 +220,6 @@ impl StoredValue for PackageEntryKey {
                 root_hash,
             },
             ty,
-        }
-    }
-}
-
-/// Block data entry id.
-#[derive(Debug, Hash, Eq, PartialEq)]
-pub struct BlockDataEntryKey {
-    pub block_id: PartialBlockId,
-    pub chunk_index: u32,
-}
-
-impl StoredValue for BlockDataEntryKey {
-    const SIZE_HINT: usize = 4 + 8 + 4 + 32 + 4;
-
-    type OnStackSlice = [u8; Self::SIZE_HINT];
-
-    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
-        let mut result = [0; Self::SIZE_HINT];
-        result[..4].copy_from_slice(&self.block_id.shard.workchain().to_be_bytes());
-        result[4..12].copy_from_slice(&self.block_id.shard.prefix().to_be_bytes());
-        result[12..16].copy_from_slice(&self.block_id.seqno.to_be_bytes());
-        result[16..48].copy_from_slice(self.block_id.root_hash.as_slice());
-        result[48..52].copy_from_slice(&self.chunk_index.to_be_bytes());
-        buffer.write_raw_slice(&result);
-    }
-
-    fn deserialize(reader: &mut &[u8]) -> Self
-    where
-        Self: Sized,
-    {
-        assert_eq!(reader.len(), Self::SIZE_HINT, "invalid block data entry");
-
-        let workchain = i32::from_be_bytes(reader[..4].try_into().unwrap());
-        let prefix = u64::from_be_bytes(reader[4..12].try_into().unwrap());
-        let seqno = u32::from_be_bytes(reader[12..16].try_into().unwrap());
-        let root_hash = HashBytes::from_slice(&reader[16..48]);
-        let chunk_index = u32::from_be_bytes(reader[48..52].try_into().unwrap());
-
-        *reader = &reader[Self::SIZE_HINT..];
-
-        Self {
-            block_id: PartialBlockId {
-                shard: ShardIdent::new(workchain, prefix).expect("invalid shard ident"),
-                seqno,
-                root_hash,
-            },
-            chunk_index,
         }
     }
 }

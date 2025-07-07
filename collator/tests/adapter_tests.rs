@@ -19,6 +19,7 @@ use tycho_storage::StorageContext;
 use tycho_types::boc::Boc;
 use tycho_types::cell::Cell;
 use tycho_types::models::{Block, BlockId, ShardIdent, ShardStateUnsplit};
+use tycho_util::test::init_logger;
 
 struct MockEventListener {
     accepted_count: Arc<AtomicUsize>,
@@ -37,6 +38,7 @@ impl StateNodeEventListener for MockEventListener {
 
 #[tokio::test]
 async fn test_add_and_get_block() {
+    init_logger("test_add_and_get_block", "debug");
     let (ctx, _tmp_dir) = StorageContext::new_temp().await.unwrap();
     let mock_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato())
         .await
@@ -67,6 +69,7 @@ async fn test_add_and_get_block() {
     });
     adapter.accept_block(block).unwrap();
 
+    tracing::info!(id = ?block_id, "Waiting for block");
     // Test getting the next block (which should be the one just added)
     let next_block = adapter.wait_for_block(&block_id).await;
     assert!(

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::models::*;
+use cassadilia::Cas;
+use tycho_types::models::*;
 use tl_proto::TlWrite;
 use tokio::task::JoinHandle;
 use tycho_block_util::archive::{
@@ -29,12 +30,14 @@ impl CommitArchiveTask {
         block_handle_storage: Arc<BlockHandleStorage>,
         archive_id: u32,
         chunk_size: u64,
+        blocks: Arc<Cas<PackageEntryKey>>,
     ) -> Self {
         let span = tracing::Span::current();
         let cancelled = CancellationFlag::new();
 
         let handle = tokio::task::spawn_blocking({
             let cancelled = cancelled.clone();
+            let blocks = blocks.clone();
 
             move || {
                 let _span = span.enter();
@@ -54,6 +57,7 @@ impl CommitArchiveTask {
 
                 let mut writer = ArchiveWriter::new(&db, archive_id, chunk_size)?;
                 let mut header_buffer = Vec::with_capacity(ARCHIVE_ENTRY_HEADER_LEN);
+                let mut decompressed_buffer = vec![0; 1024 * 1024 * 100]; // Max block size is around 100MB
 
                 // Write archive prefix
                 writer.write(&ARCHIVE_PREFIX)?;
@@ -92,9 +96,12 @@ impl CommitArchiveTask {
                         }
 
                         let key = PackageEntryKey::from((block_id, ty));
-                        let Some(data) = db.package_entries.get(key.to_vec()).unwrap() else {
+                        let Some(data) = blocks.get(&key).unwrap() else {
                             return Err(BlockStorageError::BlockDataNotFound.into());
                         };
+
+                        tycho_util::compression::zstd_decompress(&data, &mut decompressed_buffer)?;
+                        let data = &decompressed_buffer;
 
                         // Serialize entry header
                         header_buffer.clear();
