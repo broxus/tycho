@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::cell::Lazy;
-use everscale_types::models::*;
-use everscale_types::prelude::*;
+use tycho_types::cell::Lazy;
+use tycho_types::models::*;
+use tycho_types::prelude::*;
 
 use crate::state::{MinRefMcStateTracker, RefMcStateHandle};
 
@@ -169,7 +169,7 @@ unsafe impl arc_swap::RefCnt for ShardStateStuff {
 
     unsafe fn from_ptr(ptr: *const Self::Base) -> Self {
         Self {
-            inner: arc_swap::RefCnt::from_ptr(ptr),
+            inner: unsafe { arc_swap::RefCnt::from_ptr(ptr) },
         }
     }
 }

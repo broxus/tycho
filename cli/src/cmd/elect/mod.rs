@@ -5,15 +5,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use everscale_crypto::ed25519;
-use everscale_types::abi::{
-    extend_signature_with_id, AbiType, AbiValue, AbiVersion, FromAbi, IntoAbi, WithAbiType,
-};
-use everscale_types::models::{
-    Account, AccountState, BlockchainConfig, ExtInMsgInfo, GlobalCapability, MsgInfo, OwnedMessage,
-    StateInit, StdAddr, ValidatorStakeParams,
-};
-use everscale_types::prelude::*;
 use rand::Rng;
 use reqwest::Url;
 use serde::Serialize;
@@ -22,18 +13,27 @@ use tycho_block_util::config::{
 };
 use tycho_control::ControlClient;
 use tycho_core::node::NodeKeys;
+use tycho_crypto::ed25519;
 use tycho_network::PeerId;
+use tycho_types::abi::{
+    AbiType, AbiValue, AbiVersion, FromAbi, IntoAbi, WithAbiType, extend_signature_with_id,
+};
+use tycho_types::models::{
+    Account, AccountState, BlockchainConfig, ExtInMsgInfo, GlobalCapability, MsgInfo, OwnedMessage,
+    StateInit, StdAddr, ValidatorStakeParams,
+};
+use tycho_types::prelude::*;
 use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 use tycho_util::time::{now_millis, now_sec};
 
+use crate::BaseArgs;
 use crate::node::ElectionsConfig;
 use crate::util::elector::data::Ref;
 use crate::util::elector::methods::ParticiateInElectionsInput;
 use crate::util::jrpc_client::{self, JrpcClient};
-use crate::util::{elector, print_json, wallet, FpTokens};
-use crate::BaseArgs;
+use crate::util::{FpTokens, elector, print_json, wallet};
 
 /// Participate in validator elections.
 #[derive(Parser)]
@@ -243,7 +243,7 @@ impl CmdRun {
                                 .saturating_sub(elections_end_offset)
                                 .saturating_sub(elections_start_offset)
                                 / 4;
-                            *random_shift.insert(rand::thread_rng().gen_range(0..range))
+                            *random_shift.insert(rand::rng().random_range(0..range))
                         }
                     };
 
@@ -942,7 +942,7 @@ impl Wallet {
                             (to_send, init)
                         }
                         AccountState::Frozen(_) => anyhow::bail!("wallet account is frozen"),
-                    }
+                    };
                 }
             }
         };

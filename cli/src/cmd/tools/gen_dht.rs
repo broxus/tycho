@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use anyhow::Result;
-use everscale_crypto::ed25519;
+use tycho_crypto::ed25519;
 use tycho_network::{Address, PeerId, PeerInfo};
 use tycho_util::time::now_sec;
 
@@ -57,6 +57,6 @@ fn make_peer_info(key: &ed25519::SecretKey, addresses: Vec<Address>, ttl: Option
         expires_at: ttl.unwrap_or(u32::MAX),
         signature: Box::new([0; 64]),
     };
-    *node_info.signature = keypair.sign(&node_info);
+    *node_info.signature = keypair.sign_tl(&node_info);
     node_info
 }

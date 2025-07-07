@@ -29,11 +29,13 @@ impl MappedFileMut {
     /// # Safety
     /// The caller must take care that the buffer is not out of the mapped memory!
     pub unsafe fn read_exact_at(&self, offset: usize, buffer: &mut [u8]) {
-        std::ptr::copy_nonoverlapping(
-            self.inner.ptr.cast::<u8>().add(offset),
-            buffer.as_mut_ptr(),
-            buffer.len(),
-        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.inner.ptr.cast::<u8>().add(offset),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+            );
+        }
     }
 
     /// Copies buffer to the mapped memory
@@ -41,11 +43,13 @@ impl MappedFileMut {
     /// # Safety
     /// The caller must take care that the buffer is not out of the mapped memory!
     pub unsafe fn write_all_at(&mut self, offset: usize, buffer: &[u8]) {
-        std::ptr::copy_nonoverlapping(
-            buffer.as_ptr(),
-            self.inner.ptr.cast::<u8>().add(offset),
-            buffer.len(),
-        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                buffer.as_ptr(),
+                self.inner.ptr.cast::<u8>().add(offset),
+                buffer.len(),
+            );
+        }
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -144,11 +148,13 @@ impl MappedFile {
     /// # Safety
     /// The caller must take care that the buffer is not out of the mapped memory!
     pub unsafe fn read_exact_at(&self, offset: usize, buffer: &mut [u8]) {
-        std::ptr::copy_nonoverlapping(
-            self.ptr.cast::<u8>().add(offset),
-            buffer.as_mut_ptr(),
-            buffer.len(),
-        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.ptr.cast::<u8>().add(offset),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+            );
+        }
     }
 
     pub fn as_slice(&self) -> &[u8] {

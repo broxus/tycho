@@ -1,9 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use everscale_crypto::ed25519;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::StdAddr;
 use serde::{Deserialize, Serialize};
 use tycho_collator::internal_queue::queue::QueueConfig;
 use tycho_collator::types::CollatorConfig;
@@ -11,7 +8,10 @@ use tycho_collator::validator::ValidatorStdImplConfig;
 use tycho_consensus::prelude::MempoolNodeConfig;
 use tycho_control::ControlServerConfig;
 use tycho_core::node::NodeBaseConfig;
+use tycho_crypto::ed25519;
 use tycho_rpc::RpcConfig;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::StdAddr;
 use tycho_util::cli::config::ThreadPoolConfig;
 use tycho_util::cli::logger::{LoggerConfig, LoggerOutput};
 use tycho_util::cli::metrics::MetricsConfig;

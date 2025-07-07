@@ -1,19 +1,19 @@
 use std::net::Ipv4Addr;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle as StdJoinHandle;
 use std::time::Duration;
 
 use clap::Parser;
-use everscale_crypto::ed25519::{KeyPair, SecretKey};
 use futures_util::FutureExt;
 use parking_lot::deadlock;
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tycho_consensus::prelude::{
     EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolDb,
 };
 use tycho_consensus::test_utils::*;
+use tycho_crypto::ed25519::{KeyPair, SecretKey};
 use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
 use tycho_storage::StorageContext;
 
@@ -85,7 +85,7 @@ fn make_network(
     run_guard: RunGuard,
 ) -> anyhow::Result<Vec<StdJoinHandle<()>>> {
     let keys = (0..cli.nodes.get())
-        .map(|_| SecretKey::generate(&mut rand::thread_rng()))
+        .map(|_| rand::random::<SecretKey>())
         .map(|secret| (secret, Arc::new(KeyPair::from(&secret))))
         .collect::<Vec<_>>();
 
@@ -243,18 +243,20 @@ fn make_network(
 
 fn check_parking_lot() {
     // Create a background thread which checks for deadlocks every 3s
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(3));
-        let deadlocks = deadlock::check_deadlock();
-        if deadlocks.is_empty() {
-            continue;
-        }
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(3));
+            let deadlocks = deadlock::check_deadlock();
+            if deadlocks.is_empty() {
+                continue;
+            }
 
-        tracing::error!("{} deadlocks detected", deadlocks.len());
-        for (i, threads) in deadlocks.iter().enumerate() {
-            tracing::error!("Deadlock #{}", i);
-            for t in threads {
-                tracing::error!("Thread Id {:#?}: {:#?}", t.thread_id(), t.backtrace());
+            tracing::error!("{} deadlocks detected", deadlocks.len());
+            for (i, threads) in deadlocks.iter().enumerate() {
+                tracing::error!("Deadlock #{}", i);
+                for t in threads {
+                    tracing::error!("Thread Id {:#?}: {:#?}", t.thread_id(), t.backtrace());
+                }
             }
         }
     });

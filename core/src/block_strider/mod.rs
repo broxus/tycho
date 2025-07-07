@@ -1,17 +1,17 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use everscale_types::models::{BlockId, PrevBlockRef};
-use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::Future;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::time::Instant;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{
     BlockIdExt, BlockIdRelation, BlockStuff, BlockStuffAug, ShardHeights,
 };
+use tycho_types::models::{BlockId, PrevBlockRef};
+use tycho_util::FastHashMap;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastHashMap;
 
 pub use self::archive_handler::ArchiveHandler;
 pub use self::block_saver::BlockSaver;

@@ -3,14 +3,14 @@ use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
 
 use ahash::HashMapExt;
-use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::{BoxFuture, Either};
-use futures_util::{future, FutureExt};
+use futures_util::{FutureExt, future};
 use tokio::sync::{mpsc, oneshot};
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
+use tycho_util::FastHashMap;
 use tycho_util::futures::Shared;
 use tycho_util::sync::OnceTake;
-use tycho_util::FastHashMap;
 
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, IllFormedReason, ValidateResult, Verifier};

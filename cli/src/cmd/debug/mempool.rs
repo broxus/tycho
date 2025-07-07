@@ -3,10 +3,8 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
-use everscale_crypto::ed25519;
-use everscale_types::cell::HashBytes;
 use tokio::signal::unix;
 use tokio::sync::{mpsc, oneshot};
 use tycho_block_util::state::ShardStateStuff;
@@ -14,14 +12,16 @@ use tycho_consensus::prelude::{
     EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolConfigBuilder,
     MempoolDb, MempoolMergedConfig,
 };
-use tycho_consensus::test_utils::{test_logger, AnchorConsumer, LastAnchorFile};
+use tycho_consensus::test_utils::{AnchorConsumer, LastAnchorFile, test_logger};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::node::NodeKeys;
 use tycho_core::storage::{CoreStorage, NewBlockMeta};
+use tycho_crypto::ed25519;
 use tycho_network::PeerId;
-use tycho_storage::fs::Dir;
 use tycho_storage::StorageContext;
+use tycho_storage::fs::Dir;
+use tycho_types::cell::HashBytes;
 use tycho_util::cli::logger::init_logger;
 use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};

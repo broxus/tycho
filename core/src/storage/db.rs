@@ -91,9 +91,9 @@ weedb::tables! {
 mod core_migrations {
     use std::time::Instant;
 
-    use everscale_types::boc::Boc;
     use tycho_block_util::archive::ArchiveEntryType;
     use tycho_storage::kv::StoredValue;
+    use tycho_types::boc::Boc;
     use weedb::rocksdb::CompactOptions;
 
     use super::*;

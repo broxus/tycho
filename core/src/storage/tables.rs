@@ -1,7 +1,7 @@
 use bytesize::ByteSize;
 use tycho_storage::kv::{
-    default_block_based_table_factory, optimize_for_level_compaction, optimize_for_point_lookup,
-    refcount, with_blob_db, TableContext, DEFAULT_MIN_BLOB_SIZE,
+    DEFAULT_MIN_BLOB_SIZE, TableContext, default_block_based_table_factory,
+    optimize_for_level_compaction, optimize_for_point_lookup, refcount, with_blob_db,
 };
 use weedb::rocksdb::{
     self, BlockBasedIndexType, BlockBasedOptions, CompactionPri, DBCompressionType,

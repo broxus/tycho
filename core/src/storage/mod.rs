@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tycho_storage::kv::ApplyMigrations;
 use tycho_storage::StorageContext;
+use tycho_storage::kv::ApplyMigrations;
 
 pub use self::block::{
     ArchiveId, BlockDataEntryKey, BlockGcStats, BlockStorage, BlockStorageConfig,

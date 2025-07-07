@@ -4,14 +4,14 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use everscale_types::cell::{CellDescriptor, HashBytes};
-use everscale_types::models::*;
 use smallvec::SmallVec;
 use tycho_storage::fs::Dir;
 use tycho_storage::kv::refcount;
+use tycho_types::cell::{CellDescriptor, HashBytes};
+use tycho_types::models::*;
+use tycho_util::FastHashMap;
 use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::sync::CancellationFlag;
-use tycho_util::FastHashMap;
 
 use crate::storage::CoreDb;
 

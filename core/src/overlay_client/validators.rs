@@ -2,15 +2,15 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use everscale_types::models::ValidatorSet;
-use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 use tycho_network::{KnownPeerHandle, Network, PeerId, PeerResolver, PublicOverlay, Request};
+use tycho_types::models::ValidatorSet;
+use tycho_util::FastHashSet;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastHashSet;
 
 use crate::block_strider::{BlockSubscriber, BlockSubscriberContext};
 use crate::overlay_client::config::ValidatorsConfig;
@@ -120,7 +120,7 @@ impl BlockSubscriber for ValidatorsResolver {
             Err(e) => {
                 return futures_util::future::ready(Err(anyhow::anyhow!(
                     "failed to load mc block extra: {e:?}"
-                )))
+                )));
             }
         };
 
@@ -373,7 +373,7 @@ impl Validators {
             resolved.retain(|validator| !validator.is_expired(now));
 
             // Shuffle the list of possibly alive validators
-            resolved.shuffle(&mut rand::thread_rng());
+            resolved.shuffle(&mut rand::rng());
 
             let spawn_ping = |validator: Validator| {
                 let network = self.network.clone();

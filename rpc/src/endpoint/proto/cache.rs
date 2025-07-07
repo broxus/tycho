@@ -2,10 +2,10 @@ use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
-use everscale_types::boc::{Boc, BocRepr};
-use everscale_types::cell::Cell;
-use everscale_types::models::{Block, BlockId, BlockchainConfig};
-use everscale_types::prelude::HashBytes;
+use tycho_types::boc::{Boc, BocRepr};
+use tycho_types::cell::Cell;
+use tycho_types::models::{Block, BlockId, BlockchainConfig};
+use tycho_types::prelude::HashBytes;
 use tycho_util::FastHasherState;
 
 use super::extractor::{ProtoOkResponse, RawProtoOkResponse};

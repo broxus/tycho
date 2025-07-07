@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use futures_util::never::Never;
 use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
 use itertools::Itertools;
 use tl_proto::{TlRead, TlWrite};
 use tokio::time::MissedTickBehavior;

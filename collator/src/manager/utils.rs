@@ -1,5 +1,5 @@
-use everscale_crypto::ed25519::{KeyPair, PublicKey};
-use everscale_types::models::ValidatorDescription;
+use tycho_crypto::ed25519::{KeyPair, PublicKey};
+use tycho_types::models::ValidatorDescription;
 use tycho_util::FastHashMap;
 
 pub fn find_us_in_collators_set(

@@ -8,7 +8,7 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use prost::Message;
 
-use crate::endpoint::{proto, APPLICATION_PROTOBUF};
+use crate::endpoint::{APPLICATION_PROTOBUF, proto};
 use crate::util::error_codes::PARSE_ERROR_CODE;
 
 // Counters

@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use everscale_crypto::ed25519;
-use everscale_types::models::*;
 use tycho_core::block_strider::{
     BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt, ColdBootType,
     FileZerostateProvider, GcSubscriber, MetricsSubscriber, PersistentBlockStriderState, Starter,
@@ -17,11 +15,13 @@ use tycho_core::blockchain_rpc::{
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::storage::CoreStorage;
+use tycho_crypto::ed25519;
 use tycho_network::{
     DhtClient, DhtService, Network, OverlayService, PeerResolver, PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::StorageContext;
+use tycho_types::models::*;
 use tycho_util::cli::resolve_public_ip;
 
 use crate::config::{NodeConfig, NodeKeys};

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use tycho_storage::kv::NamedTables;
 use tycho_storage::StorageContext;
+use tycho_storage::kv::NamedTables;
 use tycho_util::metrics::HistogramGuard;
-use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
 use weedb::WeeDb;
+use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
 
 use crate::engine::round_watch::{Commit, RoundWatch};
 use crate::storage::tables::MempoolTables;

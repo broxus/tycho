@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use everscale_types::error::Error;
-use everscale_types::models::{
+use tycho_types::error::Error;
+use tycho_types::models::{
     BlockchainConfig, ConfigParam0, ConfigParam32, ConfigParam33, ConfigParam34, ConfigParam35,
     ConfigParam36, ConfigParam37, KnownConfigParam,
 };
-use everscale_types::prelude::*;
+use tycho_types::prelude::*;
 
 pub fn compute_gas_price_factor(is_masterchain: bool, gas_price: u64) -> Result<u64> {
     const fn base_gas_price(is_masterchain: bool) -> u64 {

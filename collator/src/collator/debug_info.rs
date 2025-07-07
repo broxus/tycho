@@ -1,12 +1,12 @@
-use everscale_types::merkle::MerkleUpdate;
-use everscale_types::models::{
+use tycho_types::merkle::MerkleUpdate;
+use tycho_types::models::{
     BlockExtra, BlockId, BlockInfo, BlockRef, BlockchainConfig, GlobalVersion, McBlockExtra,
     McStateExtra, PrevBlockRef, ShardDescription, ShardFeeCreated, ShardIdent, ShardStateUnsplit,
 };
 use tycho_util::FastHashMap;
 
-use crate::types::processed_upto::ProcessedUptoInfoStuff;
 use crate::types::DebugDisplay;
+use crate::types::processed_upto::ProcessedUptoInfoStuff;
 
 pub struct BlockDebugInfo<'a> {
     pub block_id: &'a BlockId,

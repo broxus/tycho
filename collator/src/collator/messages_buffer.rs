@@ -1,9 +1,9 @@
-use std::collections::{btree_map, BTreeMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque, btree_map};
 
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{ExtInMsgInfo, IntMsgInfo, MsgInfo};
 use rayon::iter::IntoParallelIterator;
 use tycho_block_util::queue::QueueKey;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::{ExtInMsgInfo, IntMsgInfo, MsgInfo};
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::types::ParsedMessage;

@@ -9,10 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_crypto::ed25519;
 use tl_proto::{TlRead, TlWrite};
+use tycho_crypto::ed25519;
 use tycho_network::{
-    proto, DhtClient, DhtConfig, DhtService, FindValueError, Network, PeerInfo, Router,
+    DhtClient, DhtConfig, DhtService, FindValueError, Network, PeerInfo, Router, proto,
 };
 use tycho_util::time::now_sec;
 
@@ -23,7 +23,7 @@ struct Node {
 
 impl Node {
     fn with_random_key(spawn_dht_tasks: bool) -> Self {
-        let key = ed25519::SecretKey::generate(&mut rand::thread_rng());
+        let key = rand::random::<ed25519::SecretKey>();
         let local_id = ed25519::PublicKey::from(&key).into();
 
         let (dht_tasks, dht_service) = DhtService::builder(local_id)

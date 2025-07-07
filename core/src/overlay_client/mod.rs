@@ -35,7 +35,7 @@ impl PublicOverlayClient {
 
         let entries = overlay
             .read_entries()
-            .choose_multiple(&mut rand::thread_rng(), neighbors_config.keep)
+            .choose_multiple(&mut rand::rng(), neighbors_config.keep)
             .map(|entry_data| {
                 Neighbour::new(
                     entry_data.entry.peer_id,
@@ -265,7 +265,7 @@ impl Inner {
             let neighbours = {
                 self.overlay
                     .read_entries()
-                    .choose_multiple(&mut rand::thread_rng(), neighbours_to_get)
+                    .choose_multiple(&mut rand::rng(), neighbours_to_get)
                     .map(|x| Neighbour::new(x.entry.peer_id, x.expires_at(ttl), &default_roundtrip))
                     .collect::<Vec<_>>()
             };

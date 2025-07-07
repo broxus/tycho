@@ -1,24 +1,24 @@
 use std::future::Future;
-use std::pin::{pin, Pin};
+use std::pin::{Pin, pin};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::models::*;
-use futures_util::future::{BoxFuture, Either};
 use futures_util::FutureExt;
+use futures_util::future::{BoxFuture, Either};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::{BlockIdRelation, BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
+use tycho_types::models::*;
 use tycho_util::serde_helpers;
 use tycho_util::sync::rayon_run;
 
+use crate::block_strider::BlockProvider;
 use crate::block_strider::provider::{
     BoxBlockProvider, CheckProof, OptionalBlockStuff, ProofChecker,
 };
-use crate::block_strider::BlockProvider;
 use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::{Neighbour, PunishReason};
 use crate::storage::CoreStorage;

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use everscale_types::boc::Boc;
-use everscale_types::models::{BlockId, ShardStateUnsplit};
 use tycho_block_util::archive::Archive;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_types::boc::Boc;
+use tycho_types::models::{BlockId, ShardStateUnsplit};
 use tycho_util::compression::ZstdDecompressStream;
 
 const DATA_PATH: &str = "tests/data";

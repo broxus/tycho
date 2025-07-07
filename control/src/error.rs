@@ -30,8 +30,8 @@ impl From<anyhow::Error> for ServerError {
     }
 }
 
-impl From<everscale_types::error::Error> for ServerError {
-    fn from(value: everscale_types::error::Error) -> Self {
+impl From<tycho_types::error::Error> for ServerError {
+    fn from(value: tycho_types::error::Error) -> Self {
         Self(value.to_string())
     }
 }

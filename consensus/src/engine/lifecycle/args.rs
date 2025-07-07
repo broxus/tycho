@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use everscale_crypto::ed25519::KeyPair;
 use tokio::sync::mpsc;
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver, PrivateOverlay};
 
 use crate::effects::{AltFormat, TaskTracker};

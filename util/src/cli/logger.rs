@@ -12,7 +12,7 @@ use tracing::Subscriber;
 use tracing_appender::rolling::Rotation;
 use tracing_subscriber::filter::Directive;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{fmt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 pub struct LoggerTargets {
     directives: Vec<Directive>,

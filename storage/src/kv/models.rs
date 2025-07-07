@@ -15,10 +15,10 @@ impl InstanceId {
     }
 }
 
-impl rand::distributions::Distribution<InstanceId> for rand::distributions::Standard {
+impl rand::distr::Distribution<InstanceId> for rand::distr::StandardUniform {
     #[inline]
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> InstanceId {
-        InstanceId(rng.gen())
+        InstanceId(rng.random())
     }
 }
 

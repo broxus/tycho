@@ -1,16 +1,16 @@
 use std::pin::pin;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use everscale_types::models::BlockId;
 use rand::Rng;
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
+use tycho_types::models::BlockId;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::block_strider::subscriber::find_longest_diffs_tail;
@@ -355,7 +355,7 @@ impl GcSubscriber {
 
         let mut random_offset = config
             .random_offset
-            .then(|| rand::thread_rng().gen_range(Duration::ZERO..config.interval));
+            .then(|| rand::rng().random_range(Duration::ZERO..config.interval));
         let mut last_triggered_at = None::<Instant>;
         let mut sleep_until = None::<Instant>;
 

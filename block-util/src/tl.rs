@@ -1,7 +1,7 @@
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 
 pub mod hash_bytes {
-    use everscale_types::cell::HashBytes;
+    use tycho_types::cell::HashBytes;
 
     use super::*;
 
@@ -23,7 +23,7 @@ pub mod hash_bytes {
 }
 
 pub mod shard_ident {
-    use everscale_types::models::ShardIdent;
+    use tycho_types::models::ShardIdent;
 
     use super::*;
 
@@ -48,9 +48,9 @@ pub mod shard_ident {
 }
 
 pub mod block_id {
-    use everscale_types::models::{BlockId, ShardIdent};
-    use everscale_types::prelude::HashBytes;
     use tl_proto::{TlPacket, TlRead, TlResult, TlWrite};
+    use tycho_types::models::{BlockId, ShardIdent};
+    use tycho_types::prelude::HashBytes;
 
     pub const SIZE_HINT: usize = 80;
 
@@ -91,8 +91,8 @@ pub mod block_id {
 }
 
 pub mod block_id_vec {
-    use everscale_types::models::BlockId;
     use tl_proto::{TlError, TlPacket, TlRead, TlResult};
+    use tycho_types::models::BlockId;
 
     use super::*;
 

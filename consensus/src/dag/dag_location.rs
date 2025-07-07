@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, OnceLock};
 
-use everscale_crypto::ed25519::KeyPair;
 use futures_util::FutureExt;
+use tycho_crypto::ed25519::KeyPair;
 
-use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::WeakDagRound;
+use crate::dag::dag_point_future::DagPointFuture;
 use crate::dyn_event;
 use crate::effects::{AltFmt, AltFormat, ValidateCtx};
 use crate::engine::MempoolConfig;

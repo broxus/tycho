@@ -27,7 +27,7 @@ impl TasksStream {
     }
 
     pub async fn next(&mut self) -> Option<OverlayId> {
-        use futures_util::future::{select, Either};
+        use futures_util::future::{Either, select};
 
         loop {
             // Wait until the next interval or completed task

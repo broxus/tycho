@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use everscale_crypto::ed25519;
-use everscale_types::cell::HashBytes;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use tycho_crypto::ed25519;
+use tycho_types::cell::HashBytes;
 
 #[derive(Debug)]
 pub struct NodeKeys {
@@ -13,7 +13,7 @@ pub struct NodeKeys {
 
 impl NodeKeys {
     pub fn generate() -> Self {
-        rand::thread_rng().gen()
+        rand::random()
     }
 
     /// Tries to load keys from the specified path.
@@ -109,11 +109,11 @@ impl Serialize for NodeKeys {
     }
 }
 
-impl rand::distributions::Distribution<NodeKeys> for rand::distributions::Standard {
+impl rand::distr::Distribution<NodeKeys> for rand::distr::StandardUniform {
     #[inline]
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> NodeKeys {
         NodeKeys {
-            secret: rand::distributions::Standard.sample(rng),
+            secret: rand::distr::StandardUniform.sample(rng),
         }
     }
 }

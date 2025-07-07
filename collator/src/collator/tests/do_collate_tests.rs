@@ -1,5 +1,5 @@
-use everscale_types::models::*;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_types::models::*;
 use tycho_util::FastHashMap;
 
 use crate::collator::do_collate::calculate_min_internals_processed_to_for_shard;

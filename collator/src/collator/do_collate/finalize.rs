@@ -2,27 +2,27 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
-use everscale_types::boc;
-use everscale_types::cell::Lazy;
-use everscale_types::merkle::*;
-use everscale_types::models::{ShardIdent, *};
-use everscale_types::prelude::*;
+use anyhow::{Context, Result, anyhow};
 use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use tycho_block_util::archive::WithArchiveData;
-use tycho_block_util::block::{shard_ident_at_depth, BlockStuff};
+use tycho_block_util::block::{BlockStuff, shard_ident_at_depth};
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::{
-    merge_relaxed_aug_dicts, split_aug_dict, split_aug_dict_raw, RelaxedAugDict,
+    RelaxedAugDict, merge_relaxed_aug_dicts, split_aug_dict, split_aug_dict_raw,
 };
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::ConsensusConfigExt;
-use tycho_util::metrics::HistogramGuard;
+use tycho_types::boc;
+use tycho_types::cell::Lazy;
+use tycho_types::merkle::*;
+use tycho_types::models::{ShardIdent, *};
+use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
+use tycho_util::metrics::HistogramGuard;
 
-use super::phase::{Phase, PhaseState};
 use super::PrevData;
+use super::phase::{Phase, PhaseState};
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::do_collate::work_units::FinalizeWu;
 use crate::collator::error::{CollationCancelReason, CollatorError};
@@ -70,7 +70,7 @@ impl Phase<FinalizeState> {
     ) -> Result<
         (
             FinalizeMessagesReaderResult,
-            impl FnOnce() -> Result<Duration>,
+            impl FnOnce() -> Result<Duration> + use<>,
         ),
         CollatorError,
     > {

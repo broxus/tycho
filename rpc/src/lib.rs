@@ -3,7 +3,7 @@
 pub use self::config::{
     BlackListConfig, RpcConfig, RpcStorageConfig, RunGetMethodConfig, TransactionsGcConfig,
 };
-pub use self::endpoint::{jrpc, proto, RpcEndpoint, RpcEndpointBuilder};
+pub use self::endpoint::{RpcEndpoint, RpcEndpointBuilder, jrpc, proto};
 pub use self::models::{GenTimings, LastTransactionId, StateTimings};
 pub use self::state::{
     BadRequestError, BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor,

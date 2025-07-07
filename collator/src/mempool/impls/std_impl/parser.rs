@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use everscale_types::boc::Boc;
-use everscale_types::models::MsgInfo;
-use everscale_types::prelude::Load;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use tycho_block_util::message::ExtMsgRepr;
+use tycho_types::boc::Boc;
+use tycho_types::models::MsgInfo;
+use tycho_types::prelude::Load;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::mempool::impls::std_impl::deduplicator::Deduplicator;

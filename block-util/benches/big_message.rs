@@ -1,7 +1,7 @@
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion};
-use everscale_types::prelude::Boc;
+use criterion::{Criterion, criterion_group, criterion_main};
 use tycho_block_util::message::ExtMsgRepr;
+use tycho_types::prelude::Boc;
 
 use self::common::create_big_message;
 

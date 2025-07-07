@@ -1,4 +1,4 @@
-use everscale_types::models::GlobalVersion;
+use tycho_types::models::GlobalVersion;
 
 #[async_trait::async_trait]
 pub trait Collator: Send + Sync + 'static {

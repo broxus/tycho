@@ -1,14 +1,14 @@
 use std::cmp::{Ordering, Reverse};
-use std::collections::{hash_map, BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, hash_map};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, HashBytes, Load};
-use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr, ShardIdent};
 use tycho_block_util::queue::{
     QueueDiff, QueueDiffStuff, QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions,
 };
+use tycho_types::boc::Boc;
+use tycho_types::cell::{Cell, HashBytes, Load};
+use tycho_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr, ShardIdent};
 use tycho_util::FastHashMap;
 
 use super::state::state_iterator::MessageExt;
@@ -210,7 +210,7 @@ pub struct EnqueuedMessage {
 impl Default for EnqueuedMessage {
     fn default() -> Self {
         let info = IntMsgInfo::default();
-        let cell = everscale_types::cell::CellBuilder::build_from(&info).unwrap();
+        let cell = tycho_types::cell::CellBuilder::build_from(&info).unwrap();
 
         Self { info, cell }
     }
@@ -300,7 +300,7 @@ impl InternalMessageValue for EnqueuedMessage {
     where
         Self: Sized,
     {
-        everscale_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(self.cell.as_ref())
+        tycho_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(self.cell.as_ref())
             .encode(buffer);
     }
 

@@ -1,10 +1,10 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use anyhow::Result;
-use everscale_types::models::BlockId;
-use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
+use tycho_types::models::BlockId;
 
 use crate::block_strider::provider::{BlockProvider, OptionalBlockStuff};
 
@@ -94,8 +94,8 @@ type ClenaupFut<'a> = BoxFuture<'a, Result<()>>;
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     use anyhow::Result;
     use tycho_block_util::block::BlockIdExt;

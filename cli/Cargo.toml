@@ -24,12 +24,9 @@ clap = { workspace = true }
 clap-markdown = { workspace = true }
 dirs = { workspace = true }
 ed25519-dalek = { workspace = true }
-everscale-crypto = { workspace = true }
-everscale-types = { workspace = true, features = ["abi"] }
 futures-util = { workspace = true }
 hex = { workspace = true }
 humantime = { workspace = true }
-tabled = { workspace = true, default-features = false, features = ["std"] }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
@@ -38,16 +35,19 @@ scopeguard = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde_path_to_error = { workspace = true }
+tabled = { workspace = true, default-features = false, features = ["std"] }
 tempfile = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true, optional = true }
 tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
     "profiling",
 ], optional = true }
-tikv-jemalloc-ctl = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tycho-crypto = { workspace = true }
+tycho-types = { workspace = true, features = ["abi"] }
 weedb = { workspace = true }
 
 # local deps

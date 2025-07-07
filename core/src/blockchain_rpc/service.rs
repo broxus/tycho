@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes};
-use everscale_types::models::BlockId;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::validate_external_message;
-use tycho_network::{try_handle_prefix, Response, Service, ServiceRequest};
+use tycho_network::{Response, Service, ServiceRequest, try_handle_prefix};
+use tycho_types::models::BlockId;
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 

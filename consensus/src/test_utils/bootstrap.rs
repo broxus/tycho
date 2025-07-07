@@ -1,11 +1,11 @@
 use std::num::NonZeroU16;
 
-use everscale_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
-use everscale_types::models::{ConsensusConfig, GenesisInfo};
+use tycho_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
 use tycho_network::{
     Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayConfig,
     OverlayService, PeerId, PeerInfo, PeerResolver, PeerResolverConfig, Router, ToSocket,
 };
+use tycho_types::models::{ConsensusConfig, GenesisInfo};
 use tycho_util::time::now_sec;
 
 use crate::engine::{MempoolConfigBuilder, MempoolMergedConfig, MempoolNodeConfig};
@@ -50,7 +50,7 @@ pub fn make_peer_info(keypair: &KeyPair, address_list: Vec<Address>, ttl: Option
         expires_at: ttl.unwrap_or(u32::MAX),
         signature: Box::new([0; 64]),
     };
-    *peer_info.signature = keypair.sign(&peer_info);
+    *peer_info.signature = keypair.sign_tl(&peer_info);
     peer_info
 }
 

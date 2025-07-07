@@ -1,18 +1,18 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use everscale_types::models::*;
-use everscale_types::prelude::*;
 use humantime::format_duration;
 use parking_lot::RwLock;
 use rand::Rng;
 use scopeguard::defer;
 use tycho_network::PeerId;
+use tycho_types::models::*;
+use tycho_types::prelude::*;
 
 use crate::mempool::{
     DebugStateUpdateContext, ExternalMessage, GetAnchorResult, MempoolAdapter, MempoolAnchor,
@@ -454,7 +454,7 @@ pub(crate) fn make_anchor_from_file(
 }
 
 fn make_round_interval() -> Duration {
-    Duration::from_millis(rand::thread_rng().gen_range(240..340))
+    Duration::from_millis(rand::rng().random_range(240..340))
 }
 
 #[cfg(test)]

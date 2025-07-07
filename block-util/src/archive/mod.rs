@@ -10,11 +10,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bytes::Bytes;
-use everscale_types::models::BlockId;
+use tycho_types::models::BlockId;
 use tycho_util::FastHashMap;
 
 pub use self::proto::{
-    ArchiveEntryHeader, ArchiveEntryType, ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX,
+    ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX, ArchiveEntryHeader, ArchiveEntryType,
 };
 pub use self::reader::{ArchiveEntry, ArchiveReader, ArchiveReaderError, ArchiveVerifier};
 use crate::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};

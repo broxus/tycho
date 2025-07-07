@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::merkle::*;
-use everscale_types::models::*;
-use everscale_types::prelude::*;
+use tycho_types::merkle::*;
+use tycho_types::models::*;
+use tycho_types::prelude::*;
 
 use crate::archive::WithArchiveData;
 use crate::state::ShardStateStuff;
@@ -20,7 +20,7 @@ pub struct BlockProofStuff {
 impl BlockProofStuff {
     #[cfg(any(test, feature = "test"))]
     pub fn new_empty(block_id: &BlockId) -> Self {
-        use everscale_types::cell::Lazy;
+        use tycho_types::cell::Lazy;
 
         let block_info = BlockInfo {
             shard: block_id.shard,
@@ -233,7 +233,8 @@ impl BlockProofStuff {
         anyhow::ensure!(
             &signatures.consensus_info == mc_consensus_info,
             "block consensus info does not match master state consensus info (found: {:?}, expected: {:?}",
-            signatures.consensus_info, mc_consensus_info,
+            signatures.consensus_info,
+            mc_consensus_info,
         );
 
         Ok(())
@@ -419,7 +420,7 @@ unsafe impl arc_swap::RefCnt for BlockProofStuff {
 
     unsafe fn from_ptr(ptr: *const Self::Base) -> Self {
         Self {
-            inner: arc_swap::RefCnt::from_ptr(ptr),
+            inner: unsafe { arc_swap::RefCnt::from_ptr(ptr) },
         }
     }
 }

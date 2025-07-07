@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 use std::sync::atomic::AtomicBool;
-use std::sync::{atomic, Arc};
+use std::sync::{Arc, atomic};
 
 use tycho_network::PeerId;
 

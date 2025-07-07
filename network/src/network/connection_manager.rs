@@ -1,4 +1,4 @@
-use std::collections::{hash_map, VecDeque};
+use std::collections::{VecDeque, hash_map};
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -8,15 +8,15 @@ use anyhow::Result;
 use arc_swap::{ArcSwap, AsRaw};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinSet};
-use tokio_util::time::{delay_queue, DelayQueue};
+use tokio_util::time::{DelayQueue, delay_queue};
 use tycho_util::{FastDashMap, FastHashMap};
 
+use crate::network::ConnectionError;
 use crate::network::config::NetworkConfig;
 use crate::network::connection::Connection;
 use crate::network::endpoint::{Connecting, ConnectionInitError, Endpoint, Into0RttResult};
 use crate::network::request_handler::InboundRequestHandler;
-use crate::network::wire::{handshake, HandshakeError};
-use crate::network::ConnectionError;
+use crate::network::wire::{HandshakeError, handshake};
 use crate::types::{
     Address, BoxCloneService, Direction, DisconnectReason, PeerAffinity, PeerEvent, PeerId,
     PeerInfo, Response, ServiceRequest,

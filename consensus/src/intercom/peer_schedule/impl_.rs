@@ -3,14 +3,14 @@ use std::ops::Deref;
 use std::sync::{Arc, Weak};
 
 use arc_swap::{ArcSwap, Guard};
-use everscale_crypto::ed25519::KeyPair;
+use futures_util::StreamExt;
 use futures_util::never::Never;
 use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
 use parking_lot::lock_api::{RwLockReadGuard, RwLockWriteGuard};
 use parking_lot::{RawRwLock, RwLock};
-use rand::thread_rng;
+use rand::rng;
 use tokio::sync::broadcast;
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{
     KnownPeerHandle, PeerId, PrivateOverlay, PrivateOverlayEntriesEvent,
     PrivateOverlayEntriesReadGuard,
@@ -359,7 +359,7 @@ impl WeakPeerSchedule {
         entries: &PrivateOverlayEntriesReadGuard<'_>,
     ) -> FuturesUnordered<impl Future<Output = KnownPeerHandle> + Sized + Send + 'static> {
         let fut = FuturesUnordered::new();
-        for entry in entries.choose_multiple(&mut thread_rng(), entries.len()) {
+        for entry in entries.choose_multiple(&mut rng(), entries.len()) {
             // skip updates on self
             if !(entry.peer_id == local_id || entry.resolver_handle.is_resolved()) {
                 let handle = entry.resolver_handle.clone();

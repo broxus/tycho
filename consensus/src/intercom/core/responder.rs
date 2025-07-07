@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use futures_util::future::BoxFuture;
-use futures_util::{future, FutureExt};
+use futures_util::{FutureExt, future};
 use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::dag::DagHead;

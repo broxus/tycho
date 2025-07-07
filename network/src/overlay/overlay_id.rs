@@ -41,10 +41,10 @@ impl<'a> TlRead<'a> for &'a OverlayId {
     }
 }
 
-impl rand::distributions::Distribution<OverlayId> for rand::distributions::Standard {
+impl rand::distr::Distribution<OverlayId> for rand::distr::StandardUniform {
     #[inline]
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> OverlayId {
-        OverlayId(rand::distributions::Standard.sample(rng))
+        OverlayId(rand::distr::StandardUniform.sample(rng))
     }
 }
 

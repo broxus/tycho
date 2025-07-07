@@ -522,8 +522,8 @@ impl Waiter {
 
     unsafe fn addr_of_pointers(target: NonNull<Waiter>) -> NonNull<Pointers<Self>> {
         let target = target.as_ptr();
-        let field = std::ptr::addr_of_mut!((*target).pointers);
-        NonNull::new_unchecked(field)
+        let field = unsafe { std::ptr::addr_of_mut!((*target).pointers) };
+        unsafe { NonNull::new_unchecked(field) }
     }
 }
 
@@ -543,14 +543,14 @@ unsafe impl Link for Waiter {
 
     #[inline]
     unsafe fn pointers(target: NonNull<Self::Target>) -> NonNull<Pointers<Self::Target>> {
-        Self::addr_of_pointers(target)
+        unsafe { Self::addr_of_pointers(target) }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use super::*;

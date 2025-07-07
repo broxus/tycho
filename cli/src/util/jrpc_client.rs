@@ -1,10 +1,10 @@
 use std::marker::PhantomData;
 
 use anyhow::{Context, Result};
-use everscale_types::models::{Account, BlockchainConfig, StdAddr};
-use everscale_types::prelude::*;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use tycho_types::models::{Account, BlockchainConfig, StdAddr};
+use tycho_types::prelude::*;
 use tycho_util::serde_helpers;
 
 pub struct JrpcClient {
@@ -112,10 +112,10 @@ fn deserialize_account<'de, D>(deserializer: D) -> Result<Box<Account>, D::Error
 where
     D: serde::Deserializer<'de>,
 {
-    use everscale_types::cell::Load;
     use serde::de::Error;
+    use tycho_types::cell::Load;
 
-    fn read_account(cell: Cell) -> Result<Box<Account>, everscale_types::error::Error> {
+    fn read_account(cell: Cell) -> Result<Box<Account>, tycho_types::error::Error> {
         let s = &mut cell.as_slice()?;
         Ok(Box::new(Account {
             address: <_>::load_from(s)?,

@@ -216,7 +216,7 @@ where
                 FutureOrOutput::Output(item) => (item, true),
                 FutureOrOutput::Future(_) => unreachable!(),
             },
-            Err(inner) => match &*inner.future_or_output.get() {
+            Err(inner) => match unsafe { &*inner.future_or_output.get() } {
                 FutureOrOutput::Output(item) => (item.clone(), false),
                 FutureOrOutput::Future(_) => unreachable!(),
             },

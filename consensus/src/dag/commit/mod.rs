@@ -6,9 +6,9 @@ use std::sync::atomic::Ordering;
 
 use tycho_util::metrics::HistogramGuard;
 
+use crate::dag::DagRound;
 use crate::dag::commit::anchor_chain::{AnchorChain, EnqueuedAnchor};
 use crate::dag::commit::back::DagBack;
-use crate::dag::DagRound;
 use crate::effects::{AltFmt, AltFormat};
 use crate::engine::MempoolConfig;
 use crate::models::{AnchorData, AnchorStageRole, Round};
@@ -281,13 +281,13 @@ mod test {
     use std::io::Write;
     use std::sync::Arc;
 
-    use everscale_crypto::ed25519::{KeyPair, SecretKey};
+    use tycho_crypto::ed25519::{KeyPair, SecretKey};
     use tycho_network::PeerId;
     use tycho_util::FastDashMap;
 
     use super::*;
-    use crate::dag::dag_location::DagLocation;
     use crate::dag::DagFront;
+    use crate::dag::dag_location::DagLocation;
     use crate::effects::{AltFormat, Ctx, RoundCtx};
     use crate::models::{AnchorData, AnchorStageRole, Round};
     use crate::storage::MempoolStore;
@@ -372,7 +372,7 @@ mod test {
         let mut r_points = vec![];
 
         for i in 50..55 {
-            r_points.push(remove_point(&mut committer.dag, Round(i), &peers[1].0));
+            r_points.push(remove_point(&mut committer.dag, Round(i), &peers[2].0));
         }
 
         let r_leader = remove_leader(&mut committer.dag, Round(62));

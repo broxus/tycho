@@ -4,15 +4,15 @@ use std::fmt;
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::*;
-use everscale_types::prelude::*;
 use processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::queue::{QueueDiffStuffAug, QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
+use tycho_types::models::*;
+use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
 
 use crate::collator::ForceMasterCollation;
@@ -561,7 +561,7 @@ impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display
     for DisplayTupleRef<'_, T1, T2>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({}, {})", self.0 .0, self.0 .1)
+        write!(f, "({}, {})", self.0.0, self.0.1)
     }
 }
 

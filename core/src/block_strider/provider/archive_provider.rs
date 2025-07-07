@@ -1,4 +1,4 @@
-use std::collections::{btree_map, BTreeMap};
+use std::collections::{BTreeMap, btree_map};
 use std::io::Seek;
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,7 +6,6 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::{BufMut, Bytes, BytesMut};
 use bytesize::ByteSize;
-use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -14,6 +13,7 @@ use tokio::task::AbortHandle;
 use tycho_block_util::archive::Archive;
 use tycho_block_util::block::{BlockIdRelation, BlockStuffAug};
 use tycho_storage::fs::MappedFile;
+use tycho_types::models::BlockId;
 
 use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive, PendingArchiveResponse};

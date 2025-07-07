@@ -2,8 +2,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use everscale_types::models::StdAddr;
 use serde::{Deserialize, Serialize};
+use tycho_types::models::StdAddr;
 use tycho_util::serde_helpers;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]

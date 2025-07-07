@@ -3,15 +3,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use rustls::SupportedCipherSuite;
 use rustls::crypto::CryptoProvider;
 use rustls::sign::CertifiedKey;
-use rustls::SupportedCipherSuite;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
 
 use crate::network::crypto::{
-    generate_cert, peer_id_from_certificate, CertVerifier, CertVerifierWithPeerId,
-    SUPPORTED_SIG_ALGS,
+    CertVerifier, CertVerifierWithPeerId, SUPPORTED_SIG_ALGS, generate_cert,
+    peer_id_from_certificate,
 };
 use crate::types::PeerId;
 

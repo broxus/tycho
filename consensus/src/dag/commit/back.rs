@@ -5,12 +5,12 @@ use std::{array, mem};
 
 use futures_util::FutureExt;
 use itertools::Itertools;
-use rand::prelude::SliceRandom;
 use rand::SeedableRng;
+use rand::prelude::SliceRandom;
 use tycho_network::PeerId;
 
-use crate::dag::commit::anchor_chain::EnqueuedAnchor;
 use crate::dag::commit::SyncError;
+use crate::dag::commit::anchor_chain::EnqueuedAnchor;
 use crate::dag::{DagRound, HistoryConflict};
 use crate::effects::{AltFmt, AltFormat, Cancelled};
 use crate::engine::MempoolConfig;

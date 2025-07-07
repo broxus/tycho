@@ -1,8 +1,8 @@
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::{Add, Sub};
 
-use everscale_crypto::ed25519::KeyPair;
 use tl_proto::{TlRead, TlWrite};
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 
 #[derive(Clone, Copy, TlWrite, TlRead, PartialEq, Eq, PartialOrd, Ord, Hash)]

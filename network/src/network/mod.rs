@@ -4,8 +4,8 @@ use std::sync::{Arc, Weak};
 #[cfg(target_os = "linux")]
 use anyhow::Context;
 use anyhow::Result;
-use everscale_crypto::ed25519;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tycho_crypto::ed25519;
 
 use self::config::EndpointConfig;
 pub use self::config::{NetworkConfig, QuicConfig};
@@ -244,7 +244,7 @@ impl Network {
     }
 
     pub fn sign_tl<T: tl_proto::TlWrite>(&self, data: T) -> [u8; 64] {
-        self.0.keypair.sign(data)
+        self.0.keypair.sign_tl(data)
     }
 
     pub fn sign_raw(&self, data: &[u8]) -> [u8; 64] {
@@ -503,11 +503,11 @@ pub enum ConnectionError {
 
 #[cfg(test)]
 mod tests {
-    use futures_util::stream::FuturesUnordered;
     use futures_util::StreamExt;
+    use futures_util::stream::FuturesUnordered;
 
     use super::*;
-    use crate::types::{service_message_fn, service_query_fn, BoxCloneService, PeerInfo, Request};
+    use crate::types::{BoxCloneService, PeerInfo, Request, service_message_fn, service_query_fn};
     use crate::util::{NetworkExt, UnknownPeerError};
 
     fn echo_service() -> BoxCloneService<ServiceRequest, Response> {
@@ -715,7 +715,7 @@ mod tests {
         } else {
             // github doesn't expose /proc and macos exists
             let procfs = tempfile::tempdir().unwrap();
-            std::env::set_var("MOCK_PROC_PATH", procfs.path());
+            unsafe { std::env::set_var("MOCK_PROC_PATH", procfs.path()) };
 
             std::fs::create_dir_all(procfs.path().join("sys/net/core")).unwrap();
             std::fs::write(procfs.path().join("sys/net/core/wmem_max"), "100000\n").unwrap();

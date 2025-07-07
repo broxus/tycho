@@ -1,10 +1,8 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::boc::{Boc, BocRepr};
-use everscale_types::models::{BlockId, ExtInMsgInfo, OwnedMessage, ShardIdent};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
@@ -15,8 +13,10 @@ use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::proto::blockchain::{KeyBlockIds, PersistentStateInfo};
 use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta, PersistentStateKind};
 use tycho_network::{DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay};
-use tycho_storage::fs::MappedFile;
 use tycho_storage::StorageContext;
+use tycho_storage::fs::MappedFile;
+use tycho_types::boc::{Boc, BocRepr};
+use tycho_types::models::{BlockId, ExtInMsgInfo, OwnedMessage, ShardIdent};
 
 use crate::network::TestNode;
 

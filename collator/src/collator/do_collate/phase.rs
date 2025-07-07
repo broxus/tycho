@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use everscale_types::models::{CollationConfig, ShardIdent};
+use tycho_types::models::{CollationConfig, ShardIdent};
 use tycho_util::sync::CancellationFlag;
 
 use super::{BlockCollationData, PrevData};

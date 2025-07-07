@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use futures_util::future::{ready, Ready};
+use futures_util::future::{Ready, ready};
 use tokio::time::sleep;
 use tycho_network::{
     Connection, Network, NetworkConfig, NetworkExt, Request, Response, Routable, Router, Service,

@@ -5,11 +5,11 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use bytesize::ByteSize;
-use moka::sync::{Cache, CacheBuilder};
 use moka::Expiry;
+use moka::sync::{Cache, CacheBuilder};
 use tl_proto::TlWrite;
-use tycho_util::time::now_sec;
 use tycho_util::FastDashMap;
+use tycho_util::time::now_sec;
 
 use crate::proto::dht::{MergedValue, MergedValueRef, PeerValueRef, ValueRef};
 
@@ -137,7 +137,7 @@ impl Storage {
         match value.expires_at().checked_sub(now_sec()) {
             Some(0) | None => return Err(StorageError::ValueExpired),
             Some(remaining_ttl) if remaining_ttl > self.max_ttl_sec => {
-                return Err(StorageError::UnsupportedTtl)
+                return Err(StorageError::UnsupportedTtl);
             }
             _ => {}
         }
@@ -153,7 +153,7 @@ impl Storage {
             return Err(StorageError::InvalidSignature);
         };
 
-        if !public_key.verify(value, value.signature) {
+        if !public_key.verify_tl(value, value.signature) {
             return Err(StorageError::InvalidSignature);
         }
 

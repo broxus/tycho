@@ -1,12 +1,10 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
-use everscale_types::models::*;
-use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
 use parking_lot::RwLock;
 use tokio::net::TcpListener;
@@ -21,9 +19,11 @@ use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::global_config::ZerostateId;
 use tycho_core::node::NodeBase;
 use tycho_core::storage::{CoreStorage, KeyBlocksDirection};
+use tycho_types::models::*;
+use tycho_types::prelude::*;
+use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
-use tycho_util::FastHashMap;
 
 pub use self::storage::*;
 use crate::config::{BlackListConfig, RpcConfig, RpcStorageConfig, TransactionsGcConfig};
@@ -935,7 +935,7 @@ impl Inner {
                         // Compute parent shard of the B' or B"
                         let parent = shard
                             .merge()
-                            .ok_or(everscale_types::error::Error::InvalidData)?;
+                            .ok_or(tycho_types::error::Error::InvalidData)?;
 
                         let opposite = shard.opposite().expect("after split");
 
@@ -954,7 +954,7 @@ impl Inner {
                         // Compute parent shard of the B' or B"
                         let (left, right) = shard
                             .split()
-                            .ok_or(everscale_types::error::Error::InvalidData)?;
+                            .ok_or(tycho_types::error::Error::InvalidData)?;
 
                         // Find and remove all parent shards
                         cache.remove(&left);
@@ -1223,8 +1223,8 @@ mod test {
     use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
     use tycho_core::storage::CoreStorageConfig;
     use tycho_network::{
-        service_query_fn, BoxCloneService, Network, NetworkConfig, OverlayId, PublicOverlay,
-        Response, ServiceExt, ServiceRequest,
+        BoxCloneService, Network, NetworkConfig, OverlayId, PublicOverlay, Response, ServiceExt,
+        ServiceRequest, service_query_fn,
     };
     use tycho_storage::StorageContext;
 

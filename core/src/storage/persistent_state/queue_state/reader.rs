@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
-use everscale_types::boc::de::ProcessedCells;
-use everscale_types::cell::{Cell, CellFamily};
-use everscale_types::models::OutMsgQueueUpdates;
 use tl_proto::TlRead;
 use tycho_block_util::queue::{QueueDiff, QueueStateHeader, QueueStateRef};
+use tycho_types::boc::de::ProcessedCells;
+use tycho_types::cell::{Cell, CellFamily};
+use tycho_types::models::OutMsgQueueUpdates;
 
 pub struct QueueStateReader<'a> {
     state: QueueStateRef<'a>,
@@ -100,7 +100,7 @@ impl<'a> QueueDiffReader<'a> {
     }
 
     pub fn read_next_message(&mut self) -> Result<Option<Cell>> {
-        use everscale_types::boc::de;
+        use tycho_types::boc::de;
 
         const MAX_ALLOWED_ROOTS_PER_CHUNK: usize = 10000;
 

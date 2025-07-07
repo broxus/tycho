@@ -1,12 +1,12 @@
 use std::sync::{Arc, Mutex};
 
 use ahash::HashMapExt;
-use everscale_types::models::{BlockId, ShardIdent};
 use tokio::task::AbortHandle;
 use tokio::time::Duration;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
-use tycho_util::metrics::HistogramGuard;
+use tycho_types::models::{BlockId, ShardIdent};
 use tycho_util::FastHashMap;
+use tycho_util::metrics::HistogramGuard;
 
 use crate::internal_queue::state::storage::QueueState;
 use crate::internal_queue::types::{InternalMessageValue, QueueShardRange};

@@ -1,4 +1,4 @@
-use everscale_types::models::{BlockId, BlockIdShort};
+use tycho_types::models::{BlockId, BlockIdShort};
 
 pub trait BlockIdExt {
     fn relative_to(self, mc_block_id: BlockId) -> BlockIdRelation;

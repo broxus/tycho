@@ -1,4 +1,4 @@
-use std::ffi::{c_char, CString};
+use std::ffi::{CString, c_char};
 use std::os::unix::prelude::OsStrExt;
 use std::sync::Arc;
 

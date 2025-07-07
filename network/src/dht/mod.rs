@@ -4,7 +4,7 @@ use anyhow::Result;
 use bytes::{Buf, Bytes};
 use rand::RngCore;
 use tl_proto::TlRead;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{Notify, broadcast};
 use tycho_util::realloc_box_enum;
 use tycho_util::time::now_sec;
 
@@ -19,8 +19,8 @@ use self::storage::Storage;
 pub use self::storage::{DhtValueMerger, DhtValueSource, StorageError};
 use crate::network::Network;
 use crate::proto::dht::{
-    rpc, NodeInfoResponse, NodeResponse, PeerValue, PeerValueKey, PeerValueKeyName,
-    PeerValueKeyRef, PeerValueRef, Value, ValueRef, ValueResponseRaw,
+    NodeInfoResponse, NodeResponse, PeerValue, PeerValueKey, PeerValueKeyName, PeerValueKeyRef,
+    PeerValueRef, Value, ValueRef, ValueResponseRaw, rpc,
 };
 use crate::types::{PeerId, PeerInfo, Request, Response, Service, ServiceRequest};
 use crate::util::{NetworkExt, Routable};
@@ -719,7 +719,7 @@ mod tests {
     #[test]
     fn proper_random_keys() {
         let peer_id = rand::random();
-        let random_id = random_key_at_distance(&peer_id, 20, &mut rand::thread_rng());
+        let random_id = random_key_at_distance(&peer_id, 20, &mut rand::rng());
         println!("{peer_id}");
         println!("{random_id}");
 

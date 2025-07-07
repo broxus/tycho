@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use everscale_types::cell::HashBytes;
-use everscale_types::dict::Dict;
-use everscale_types::models::{
-    BlockId, BlockchainConfig, CurrencyCollection, ShardIdent, ValidatorInfo,
-};
 use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_block_util::state::MinRefMcStateTracker;
+use tycho_types::cell::HashBytes;
+use tycho_types::dict::Dict;
+use tycho_types::models::{
+    BlockId, BlockchainConfig, CurrencyCollection, ShardIdent, ValidatorInfo,
+};
 
 use crate::collator::types::AnchorsCache;
 use crate::collator::{CollatorStdImpl, ImportInitAnchorsResult, InitAnchorSource};

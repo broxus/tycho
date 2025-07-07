@@ -36,7 +36,7 @@ impl AnchorStage {
         assert!(!ordered_peers.is_empty(), "leader from empty validator set");
         // reproducible global coin
         let leader_index = rand_pcg::Pcg32::seed_from_u64(anchor_candidate_round as u64)
-            .gen_range(0..ordered_peers.len());
+            .random_range(0..ordered_peers.len());
         let leader = ordered_peers[leader_index];
         // the leader cannot produce three points in a row, so we have an undefined leader,
         // rather than an intentional leaderless support round - all represented by `None`
@@ -71,7 +71,7 @@ pub fn align_genesis(start_round: u32) -> Round {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::{ensure, Result};
+    use anyhow::{Result, ensure};
 
     use super::*;
 

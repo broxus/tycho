@@ -1,10 +1,10 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use everscale_crypto::ed25519;
-use everscale_types::models::BlockId;
 use tycho_collator::validator::ValidatorNetworkContext;
+use tycho_crypto::ed25519;
 use tycho_network::{DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
+use tycho_types::models::BlockId;
 
 pub fn make_validator_network(
     secret_key: &ed25519::SecretKey,

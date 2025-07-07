@@ -1,10 +1,10 @@
 use std::future::Future;
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use bytes::Bytes;
-use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
 use tycho_network::InboundRequestMeta;
 
 use super::SelfBroadcastListener;
@@ -190,8 +190,8 @@ type HandleMessageFut<'a> = BoxFuture<'a, ()>;
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     use anyhow::Result;
     use tycho_network::PeerId;

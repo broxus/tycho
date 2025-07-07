@@ -1,6 +1,6 @@
-use everscale_types::models::*;
-use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
+use tycho_types::models::*;
+use tycho_types::prelude::*;
 use tycho_util::serde_helpers;
 
 // NOTE: All fields must be serialized in `camelCase`.
@@ -61,7 +61,7 @@ pub struct StateTimings {
     pub smallest_known_lt: Option<u64>,
 }
 
-pub fn serialize_account(account: &Account) -> Result<Cell, everscale_types::error::Error> {
+pub fn serialize_account(account: &Account) -> Result<Cell, tycho_types::error::Error> {
     let cx = Cell::empty_context();
     let mut builder = CellBuilder::new();
     account.address.store_into(&mut builder, cx)?;

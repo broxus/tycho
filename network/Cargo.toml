@@ -24,7 +24,6 @@ bytesize = { workspace = true }
 castaway = { workspace = true }
 dashmap = { workspace = true }
 ed25519 = { workspace = true, features = ["alloc", "pkcs8"] }
-everscale-crypto = { workspace = true }
 exponential-backoff = { workspace = true }
 futures-util = { workspace = true, features = ["sink"] }
 hex = { workspace = true }
@@ -46,6 +45,7 @@ tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "io-util", "macros"] }
 tokio-util = { workspace = true, features = ["time"] }
 tracing = { workspace = true }
+tycho-crypto = { workspace = true }
 
 # local deps
 tycho-util = { workspace = true }

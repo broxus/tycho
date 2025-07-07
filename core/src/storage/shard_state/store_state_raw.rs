@@ -3,16 +3,16 @@ use std::io::{BufWriter, Read, Seek, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use everscale_types::cell::*;
-use everscale_types::models::BlockId;
-use everscale_types::util::ArrayVec;
 use tycho_block_util::state::*;
 use tycho_storage::fs::{MappedFile, TempFileStorage};
 use tycho_storage::kv::StoredValue;
+use tycho_types::cell::*;
+use tycho_types::models::BlockId;
+use tycho_types::util::ArrayVec;
+use tycho_util::FastHashMap;
 use tycho_util::io::ByteOrderRead;
 use tycho_util::progress_bar::*;
-use tycho_util::FastHashMap;
-use weedb::{rocksdb, BoundedCfHandle};
+use weedb::{BoundedCfHandle, rocksdb};
 
 use super::cell_storage::*;
 use super::entries_buffer::*;
@@ -264,7 +264,7 @@ impl<'a> FinalizationContext<'a> {
         db.rocksdb().delete_range_cf(&self.temp_cells_cf, from, to)
     }
 
-    // TODO: Somehow reuse `everscale_types::cell::CellParts`.
+    // TODO: Somehow reuse `tycho_types::cell::CellParts`.
     fn finalize_cell(&mut self, cell_index: u32, cell: RawCell<'_>) -> Result<()> {
         use sha2::{Digest, Sha256};
 
@@ -547,11 +547,11 @@ mod test {
     use std::collections::BTreeSet;
 
     use bytesize::ByteSize;
-    use everscale_types::models::ShardIdent;
-    use everscale_types::prelude::Dict;
-    use rand::prelude::SliceRandom;
+    use rand::seq::IndexedRandom;
     use rand::{Rng, SeedableRng};
     use tycho_storage::{StorageConfig, StorageContext};
+    use tycho_types::models::ShardIdent;
+    use tycho_types::prelude::Dict;
     use tycho_util::project_root;
     use weedb::rocksdb::{IteratorMode, WriteBatch};
 
@@ -672,7 +672,7 @@ mod test {
         const INITIAL_SIZE: usize = 100_000;
 
         let mut keys: BTreeSet<HashBytes> =
-            (0..INITIAL_SIZE).map(|_| HashBytes(rng.gen())).collect();
+            (0..INITIAL_SIZE).map(|_| HashBytes(rng.random())).collect();
 
         let value = new_cell(4); // 4 is a random number, trust me
 
@@ -702,13 +702,13 @@ mod test {
 
             // Update
             for key in keys_to_update {
-                let value = new_cell(rng.gen());
+                let value = new_cell(rng.random());
                 dict.set(key, value)?;
             }
 
             // Insert
             for val in 0..MODIFY_COUNT {
-                let key = HashBytes(rng.gen());
+                let key = HashBytes(rng.random());
                 let value = new_cell(val as u32);
                 keys.insert(key);
                 dict.set(key, value.clone())?;

@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
 use tycho_storage::StorageContext;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -14,12 +14,12 @@ use crate::internal_queue::types::{
     AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter,
     QueueDiffWithMessages, QueueShardRange, SeparatedStatisticsByPartitions,
 };
+use crate::storage::InternalQueueStorage;
 use crate::storage::models::{
     CommitPointerValue, DiffInfo, DiffInfoKey, DiffTailKey, ShardsInternalMessagesKey, StatKey,
 };
 use crate::storage::snapshot::InternalQueueSnapshot;
 use crate::storage::transaction::InternalQueueTransaction;
-use crate::storage::InternalQueueStorage;
 use crate::types::ProcessedTo;
 
 // FACTORY

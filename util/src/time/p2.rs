@@ -166,7 +166,7 @@ mod test {
         assert_percentile(&repeated_data, 0.75, 0);
 
         let mut rand_data = StdRng::seed_from_u64(42)
-            .sample_iter(rand::distributions::Uniform::new(0, 100))
+            .sample_iter(rand::distr::Uniform::new(0, 100).unwrap())
             .take(1000)
             .collect::<Vec<_>>();
 

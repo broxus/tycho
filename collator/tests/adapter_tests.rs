@@ -1,11 +1,8 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use everscale_types::boc::Boc;
-use everscale_types::cell::Cell;
-use everscale_types::models::{Block, BlockId, ShardIdent, ShardStateUnsplit};
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
@@ -19,6 +16,9 @@ use tycho_core::block_strider::{
 };
 use tycho_core::storage::{CoreStorage, CoreStorageConfig};
 use tycho_storage::StorageContext;
+use tycho_types::boc::Boc;
+use tycho_types::cell::Cell;
+use tycho_types::models::{Block, BlockId, ShardIdent, ShardStateUnsplit};
 
 struct MockEventListener {
     accepted_count: Arc<AtomicUsize>,

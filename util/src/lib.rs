@@ -26,7 +26,7 @@ pub mod sync {
     pub use self::once_take::*;
     pub use self::priority_semaphore::{AcquireError, PrioritySemaphore, TryAcquireError};
     pub use self::rayon::{rayon_run, rayon_run_fifo};
-    pub use self::task::{yield_on_complex, CancellationFlag, DebounceCancellationFlag};
+    pub use self::task::{CancellationFlag, DebounceCancellationFlag, yield_on_complex};
 
     mod once_take;
     mod priority_semaphore;
@@ -120,26 +120,28 @@ pub mod __internal {
     where
         F: FnOnce(T) -> R,
     {
-        assert!(std::mem::align_of::<T>() == std::mem::align_of::<R>());
+        unsafe {
+            assert!(std::mem::align_of::<T>() == std::mem::align_of::<R>());
 
-        let ptr = Box::into_raw(value);
-        let value = std::ptr::read(ptr);
+            let ptr = Box::into_raw(value);
+            let value = std::ptr::read(ptr);
 
-        let ptr = std::alloc::realloc(
-            ptr.cast::<u8>(),
-            std::alloc::Layout::new::<T>(),
-            std::mem::size_of::<R>(),
-        )
-        .cast::<R>();
+            let ptr = std::alloc::realloc(
+                ptr.cast::<u8>(),
+                std::alloc::Layout::new::<T>(),
+                std::mem::size_of::<R>(),
+            )
+            .cast::<R>();
 
-        if ptr.is_null() {
-            std::alloc::handle_alloc_error(std::alloc::Layout::new::<R>());
+            if ptr.is_null() {
+                std::alloc::handle_alloc_error(std::alloc::Layout::new::<R>());
+            }
+
+            // NOTE: in case of panic, the memory will be leaked
+            std::ptr::write(ptr, f(value));
+
+            Box::from_raw(ptr)
         }
-
-        // NOTE: in case of panic, the memory will be leaked
-        std::ptr::write(ptr, f(value));
-
-        Box::from_raw(ptr)
     }
 }
 

@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use everscale_crypto::ed25519;
-use everscale_types::models::{Account, AccountState, OptionalAccount, StateInit, StdAddr};
-use everscale_types::num::Tokens;
-use everscale_types::prelude::*;
+use tycho_crypto::ed25519;
+use tycho_types::models::{Account, AccountState, OptionalAccount, StateInit, StdAddr};
+use tycho_types::num::Tokens;
+use tycho_types::prelude::*;
 
-use crate::util::{compute_storage_used, parse_public_key, print_json, FpTokens};
+use crate::util::{FpTokens, compute_storage_used, parse_public_key, print_json};
 
 /// Generate an account state
 #[derive(clap::Parser)]

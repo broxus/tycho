@@ -12,8 +12,8 @@ use tycho_util::{FastHashSet, FastHasherState};
 
 use crate::dht::{PeerResolver, PeerResolverHandle};
 use crate::network::Network;
-use crate::overlay::metrics::Metrics;
 use crate::overlay::OverlayId;
+use crate::overlay::metrics::Metrics;
 use crate::proto::overlay::rpc;
 use crate::types::{BoxService, PeerId, Request, Response, Service, ServiceExt, ServiceRequest};
 use crate::util::NetworkExt;
@@ -216,7 +216,7 @@ impl PrivateOverlayEntries {
     where
         R: Rng + ?Sized,
     {
-        let index = rng.gen_range(0..self.items.len());
+        let index = rng.random_range(0..self.items.len());
         let (_, value) = self.items.get_index(index)?;
         Some(value)
     }

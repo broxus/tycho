@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use everscale_types::models::*;
 use tl_proto::{TlRead, TlWrite};
+use tycho_types::models::*;
 
 /// Data for computing a private overlay id.
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]

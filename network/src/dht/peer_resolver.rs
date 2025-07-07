@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, Semaphore};
 use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;
-use tycho_util::{serde_helpers, FastDashMap};
+use tycho_util::{FastDashMap, serde_helpers};
 
 use crate::dht::DhtService;
 use crate::network::{KnownPeerHandle, KnownPeersError, Network, PeerBannedError, WeakNetwork};

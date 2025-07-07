@@ -2,13 +2,13 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_types::cell::HashBytes;
+use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
+use tycho_util::{FastDashMap, FastHashMap, FastHashSet, serde_helpers};
 
 use super::gc::GcEndKey;
 use super::types::SeparatedStatisticsByPartitions;
@@ -206,7 +206,9 @@ where
             if shard_diff.hash != *hash {
                 bail!(
                     "Duplicate diff with different hash: block_id={}, existing diff_hash={}, new diff_hash={}",
-                    block_id_short, shard_diff.hash,  hash,
+                    block_id_short,
+                    shard_diff.hash,
+                    hash,
                 )
             }
             return Ok(());

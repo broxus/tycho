@@ -1,13 +1,13 @@
 use std::time::Instant;
 
-use everscale_types::cell::{CellBuilder, HashBytes};
-use everscale_types::models::{IntAddr, IntMsgInfo, MsgInfo, ShardIdent, StdAddr};
+use tycho_types::cell::{CellBuilder, HashBytes};
+use tycho_types::models::{IntAddr, IntMsgInfo, MsgInfo, ShardIdent, StdAddr};
 
 use super::{DebugMessageGroupDetailed, DebugMessagesBuffer, MessageGroup, MessagesBuffer};
 use crate::collator::messages_buffer::IncludeAllMessages;
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::types::EnqueuedMessage;
-use crate::mempool::{make_stub_external, MempoolAnchorId};
+use crate::mempool::{MempoolAnchorId, make_stub_external};
 
 pub(crate) fn make_stub_internal_parsed_message(
     src_shard: ShardIdent,

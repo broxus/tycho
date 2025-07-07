@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use everscale_crypto::ed25519::PublicKey;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, ValidatorDescription};
+use tycho_crypto::ed25519::PublicKey;
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
+use tycho_types::models::{BlockId, BlockIdShort, ShardIdent, ValidatorDescription};
 use tycho_util::FastHashMap;
 
 pub use self::impls::*;

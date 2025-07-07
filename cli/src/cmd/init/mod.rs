@@ -3,18 +3,17 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use everscale_crypto::ed25519;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::StdAddr;
-use rand::Rng;
 use serde::Serialize;
 use tycho_core::global_config::GlobalConfig;
 use tycho_core::node::NodeKeys;
+use tycho_crypto::ed25519;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::StdAddr;
 use tycho_util::FastHashMap;
 
-use crate::node::{ElectionsConfig, NodeConfig, SimpleElectionsConfig};
-use crate::util::{create_dir_all, print_json, FpTokens};
 use crate::BaseArgs;
+use crate::node::{ElectionsConfig, NodeConfig, SimpleElectionsConfig};
+use crate::util::{FpTokens, create_dir_all, print_json};
 
 const TYCHO_SERVICE: &str = "tycho";
 macro_rules! node_service {
@@ -363,7 +362,7 @@ fn prepare_elections_config<P: AsRef<Path>>(
         }
     } else {
         updated = true;
-        SimpleElectionsConfig::from_key(&generate_key(), Some(stake), None)
+        SimpleElectionsConfig::from_key(&rand::random::<ed25519::SecretKey>(), Some(stake), None)
     };
 
     updated |= simple.stake != Some(stake);
@@ -373,10 +372,6 @@ fn prepare_elections_config<P: AsRef<Path>>(
     std::fs::write(path, data)?;
 
     Ok((updated, simple))
-}
-
-fn generate_key() -> ed25519::SecretKey {
-    ed25519::SecretKey::from_bytes(rand::thread_rng().gen())
 }
 
 fn default_binary_path() -> &'static Path {

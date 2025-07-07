@@ -1,12 +1,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use everscale_types::boc::BocRepr;
-use everscale_types::merkle::MerkleProof;
-use everscale_types::models::*;
-use everscale_types::prelude::*;
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, watch};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
@@ -16,6 +12,10 @@ use tycho_core::storage::{
     BlockHandle, CoreStorage, MaybeExistingHandle, NewBlockMeta, StoreStateHint,
 };
 use tycho_network::PeerId;
+use tycho_types::boc::BocRepr;
+use tycho_types::merkle::MerkleProof;
+use tycho_types::models::*;
+use tycho_types::prelude::*;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use tycho_util::{FastDashMap, FastHashMap};
@@ -647,8 +647,8 @@ fn process_signatures(
     total_weight: u64,
     consensus_info: &ConsensusInfo,
     block_signatures: &FastHashMap<PeerId, ArcSignature>,
-) -> Result<everscale_types::models::block::BlockSignatures> {
-    use everscale_types::dict;
+) -> Result<tycho_types::models::block::BlockSignatures> {
+    use tycho_types::dict;
 
     // TODO: Add helper for owned iter
     let signatures = Dict::from_raw(dict::build_dict_from_sorted_iter(
@@ -656,7 +656,7 @@ fn process_signatures(
             .iter()
             .enumerate()
             .map(|(i, (key, value))| {
-                let key_hash = tl_proto::hash(everscale_crypto::tl::PublicKey::Ed25519 {
+                let key_hash = tl_proto::hash(tycho_crypto::tl::PublicKey::Ed25519 {
                     key: key.as_bytes(),
                 });
 
@@ -668,7 +668,7 @@ fn process_signatures(
         Cell::empty_context(),
     )?);
 
-    Ok(everscale_types::models::block::BlockSignatures {
+    Ok(tycho_types::models::block::BlockSignatures {
         validator_info: ValidatorBaseInfo {
             validator_list_hash_short: gen_validator_list_hash_short,
             catchain_seqno: gen_session_seqno,

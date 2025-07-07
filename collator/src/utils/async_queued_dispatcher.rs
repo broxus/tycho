@@ -1,9 +1,9 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use metrics::atomics::AtomicU64;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;

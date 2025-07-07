@@ -118,10 +118,10 @@ mod tests {
 
     use anyhow::Result;
     use futures_util::stream::FuturesUnordered;
-    use futures_util::{future, TryStreamExt};
+    use futures_util::{TryStreamExt, future};
     use itertools::Itertools;
     use rand::RngCore;
-    use tokio::sync::{mpsc, Barrier};
+    use tokio::sync::{Barrier, mpsc};
     use tokio_stream::StreamExt;
 
     use super::*;
@@ -163,7 +163,7 @@ mod tests {
 
         let values: Vec<u32> = (0..ITEMS)
             .map(|i| i as u32)
-            .sorted_by_cached_key(|_| rand::thread_rng().next_u64())
+            .sorted_by_cached_key(|_| rand::rng().next_u64())
             .collect();
 
         let spawned = FuturesUnordered::new();
@@ -237,7 +237,7 @@ mod tests {
         let mut futs = Vec::new();
 
         let values = (0..conf.consensus.download_tasks as u32 + extra)
-            .sorted_by_cached_key(|_| rand::thread_rng().next_u32())
+            .sorted_by_cached_key(|_| rand::rng().next_u32())
             .collect::<Vec<_>>();
 
         let timer = Instant::now();

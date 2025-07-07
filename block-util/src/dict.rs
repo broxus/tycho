@@ -1,12 +1,12 @@
-use everscale_types::cell::Lazy;
-use everscale_types::dict::{
-    aug_dict_insert, aug_dict_merge_siblings, aug_dict_modify_from_sorted_iter,
-    aug_dict_remove_owned, build_aug_dict_from_sorted_iter, dict_split_raw, AugDictExtra, DictKey,
-    PartialSplitDict, SetMode,
+use tycho_types::cell::Lazy;
+use tycho_types::dict::{
+    AugDictExtra, DictKey, PartialSplitDict, SetMode, aug_dict_insert, aug_dict_merge_siblings,
+    aug_dict_modify_from_sorted_iter, aug_dict_remove_owned, build_aug_dict_from_sorted_iter,
+    dict_split_raw,
 };
-use everscale_types::error::Error;
-use everscale_types::models::ShardIdent;
-use everscale_types::prelude::*;
+use tycho_types::error::Error;
+use tycho_types::models::ShardIdent;
+use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
 
 pub struct RelaxedAugDict<K, A, V> {
@@ -303,7 +303,7 @@ where
 mod tests {
     use std::marker::PhantomData;
 
-    use everscale_types::models::DepthBalanceInfo;
+    use tycho_types::models::DepthBalanceInfo;
 
     use super::*;
 

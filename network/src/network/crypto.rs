@@ -43,7 +43,7 @@ pub(crate) fn peer_id_from_certificate(cert: &CertificateDer<'_>) -> Result<Peer
 
     fn parse_pubkey(pubkey: &[u8]) -> Option<PeerId> {
         let pubkey: [u8; 32] = pubkey.strip_prefix(PUBKEY_PREFIX)?.try_into().ok()?;
-        everscale_crypto::ed25519::PublicKey::from_bytes(pubkey).map(PeerId::from)
+        tycho_crypto::ed25519::PublicKey::from_bytes(pubkey).map(PeerId::from)
     }
 
     parse_pubkey(cert.as_ref())
@@ -206,8 +206,8 @@ mod tests {
 
     #[test]
     fn gen_cert_works() {
-        let secret = everscale_crypto::ed25519::SecretKey::generate(&mut rand::thread_rng());
-        let public = everscale_crypto::ed25519::PublicKey::from(&secret);
+        let secret = rand::random::<tycho_crypto::ed25519::SecretKey>();
+        let public = tycho_crypto::ed25519::PublicKey::from(&secret);
 
         let crypto = rustls::crypto::ring::default_provider();
         let cert = generate_cert(

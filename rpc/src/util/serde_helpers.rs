@@ -1,7 +1,7 @@
-use base64::prelude::{Engine as _, BASE64_STANDARD};
-use everscale_types::models::StdAddr;
-use everscale_types::prelude::*;
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
+use tycho_types::models::StdAddr;
+use tycho_types::prelude::*;
 pub use tycho_util::serde_helpers::*;
 
 pub fn should_normalize_base64(text: &str) -> bool {
@@ -69,7 +69,7 @@ pub mod method_id {
                 if bytes.len() > MAX_METHOD_NAME_LEN {
                     return Err(Error::custom("method name is too long"));
                 }
-                everscale_types::crc::crc_16(bytes) as i64 | 0x10000
+                tycho_types::crc::crc_16(bytes) as i64 | 0x10000
             }
         })
     }
@@ -125,7 +125,7 @@ pub mod option_tonlib_address {
 }
 
 pub mod tonlib_address {
-    use everscale_types::models::{StdAddr, StdAddrBase64Repr};
+    use tycho_types::models::{StdAddr, StdAddrBase64Repr};
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<StdAddr, D::Error>
     where

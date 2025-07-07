@@ -10,11 +10,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use everscale_crypto::ed25519::KeyPair;
 use futures_util::FutureExt;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::Instrument;
 use tycho_consensus::prelude::*;
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver};
 use tycho_storage::StorageContext;
 

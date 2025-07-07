@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use everscale_types::cell::Lazy;
-use everscale_types::models::{
+use tycho_block_util::queue::QueuePartitionIdx;
+use tycho_types::cell::Lazy;
+use tycho_types::models::{
     BlockIdShort, ExternalsRange, InternalsRange, MsgsExecutionParams, ProcessedUptoInfo,
     ProcessedUptoPartition, ShardIdent, ShardIdentFull, ShardRange,
 };
-use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::{ProcessedTo, ProcessedToByPartitions, ShardDescriptionShort};
@@ -63,7 +63,7 @@ impl ProcessedUptoInfoStuff {
 }
 
 impl TryFrom<ProcessedUptoInfo> for ProcessedUptoInfoStuff {
-    type Error = everscale_types::error::Error;
+    type Error = tycho_types::error::Error;
 
     fn try_from(value: ProcessedUptoInfo) -> std::result::Result<Self, Self::Error> {
         let mut res = ProcessedUptoInfoStuff::default();
@@ -113,7 +113,7 @@ impl TryFrom<ProcessedUptoInfo> for ProcessedUptoInfoStuff {
 }
 
 impl TryFrom<ProcessedUptoInfoStuff> for ProcessedUptoInfo {
-    type Error = everscale_types::error::Error;
+    type Error = tycho_types::error::Error;
 
     fn try_from(value: ProcessedUptoInfoStuff) -> std::result::Result<Self, Self::Error> {
         let mut res = ProcessedUptoInfo::default();
@@ -237,8 +237,8 @@ pub struct ExternalsRangeInfo {
     pub processed_offset: u32,
 }
 
-impl From<everscale_types::models::shard::ExternalsRange> for ExternalsRangeInfo {
-    fn from(value: everscale_types::models::shard::ExternalsRange) -> Self {
+impl From<tycho_types::models::shard::ExternalsRange> for ExternalsRangeInfo {
+    fn from(value: tycho_types::models::shard::ExternalsRange) -> Self {
         Self {
             from: value.from,
             to: value.to,
@@ -248,7 +248,7 @@ impl From<everscale_types::models::shard::ExternalsRange> for ExternalsRangeInfo
         }
     }
 }
-impl From<ExternalsRangeInfo> for everscale_types::models::shard::ExternalsRange {
+impl From<ExternalsRangeInfo> for tycho_types::models::shard::ExternalsRange {
     fn from(value: ExternalsRangeInfo) -> Self {
         Self {
             from: value.from,
@@ -322,15 +322,15 @@ pub struct ShardRangeInfo {
     pub to: Lt,
 }
 
-impl From<everscale_types::models::shard::ShardRange> for ShardRangeInfo {
-    fn from(value: everscale_types::models::shard::ShardRange) -> Self {
+impl From<tycho_types::models::shard::ShardRange> for ShardRangeInfo {
+    fn from(value: tycho_types::models::shard::ShardRange) -> Self {
         Self {
             from: value.from,
             to: value.to,
         }
     }
 }
-impl From<ShardRangeInfo> for everscale_types::models::shard::ShardRange {
+impl From<ShardRangeInfo> for tycho_types::models::shard::ShardRange {
     fn from(value: ShardRangeInfo) -> Self {
         Self {
             from: value.from,

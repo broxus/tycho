@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
-use everscale_types::models::BlockId;
 use tycho_block_util::block::ShardHeights;
+use tycho_types::models::BlockId;
 
 use crate::storage::CoreStorage;
 

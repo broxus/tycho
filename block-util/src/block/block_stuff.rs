@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
-use everscale_types::models::*;
-use everscale_types::prelude::*;
+use tycho_types::models::*;
+use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
 
 use crate::archive::WithArchiveData;
@@ -38,8 +38,8 @@ impl BlockStuff {
 
     #[cfg(any(test, feature = "test"))]
     pub fn new_empty(shard: ShardIdent, seqno: u32) -> Self {
-        use everscale_types::cell::Lazy;
-        use everscale_types::merkle::MerkleUpdate;
+        use tycho_types::cell::Lazy;
+        use tycho_types::merkle::MerkleUpdate;
 
         const DATA_SIZE: usize = 1024; // ~1 KB of data for an empty block.
 
@@ -195,7 +195,7 @@ impl BlockStuff {
         }
     }
 
-    pub fn load_info(&self) -> Result<&BlockInfo, everscale_types::error::Error> {
+    pub fn load_info(&self) -> Result<&BlockInfo, tycho_types::error::Error> {
         #[expect(
             clippy::disallowed_methods,
             reason = "We are implementing that load_info getter here"
@@ -207,7 +207,7 @@ impl BlockStuff {
             .map_err(|e| e.clone())
     }
 
-    pub fn load_extra(&self) -> Result<&BlockExtra, everscale_types::error::Error> {
+    pub fn load_extra(&self) -> Result<&BlockExtra, tycho_types::error::Error> {
         #[expect(
             clippy::disallowed_methods,
             reason = "We are implementing that load_extra getter here"
@@ -219,7 +219,7 @@ impl BlockStuff {
             .map_err(|e| e.clone())
     }
 
-    pub fn load_custom(&self) -> Result<&McBlockExtra, everscale_types::error::Error> {
+    pub fn load_custom(&self) -> Result<&McBlockExtra, tycho_types::error::Error> {
         let extra = self.load_extra()?;
 
         #[expect(
@@ -231,7 +231,7 @@ impl BlockStuff {
             .get_or_init(|| {
                 extra
                     .load_custom()
-                    .and_then(|c| c.ok_or(everscale_types::error::Error::InvalidData))
+                    .and_then(|c| c.ok_or(tycho_types::error::Error::InvalidData))
             })
             .as_ref()
             .map_err(|e| e.clone())
@@ -274,7 +274,7 @@ unsafe impl arc_swap::RefCnt for BlockStuff {
 
     unsafe fn from_ptr(ptr: *const Self::Base) -> Self {
         Self {
-            inner: arc_swap::RefCnt::from_ptr(ptr),
+            inner: unsafe { arc_swap::RefCnt::from_ptr(ptr) },
         }
     }
 }
@@ -284,8 +284,8 @@ pub struct Inner {
     id: BlockId,
     block: Block,
     root: Cell,
-    block_info: OnceLock<Result<BlockInfo, everscale_types::error::Error>>,
-    block_extra: OnceLock<Result<BlockExtra, everscale_types::error::Error>>,
-    block_mc_extra: OnceLock<Result<McBlockExtra, everscale_types::error::Error>>,
+    block_info: OnceLock<Result<BlockInfo, tycho_types::error::Error>>,
+    block_extra: OnceLock<Result<BlockExtra, tycho_types::error::Error>>,
+    block_mc_extra: OnceLock<Result<McBlockExtra, tycho_types::error::Error>>,
     data_size: usize,
 }
