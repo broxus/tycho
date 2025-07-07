@@ -1,7 +1,3 @@
-use weedb::rocksdb;
-
-use crate::storage::BlockDataGuard;
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ArchiveId {
     Found(u32),
@@ -21,17 +17,6 @@ pub enum BlockStorageError {
     PackageEntryNotFound,
     #[error("Offset is outside of the archive slice")]
     InvalidOffset,
-}
-
-pub struct FullBlockDataGuard<'a> {
-    pub _lock: BlockDataGuard<'a>,
-    pub data: rocksdb::DBPinnableSlice<'a>,
-}
-
-impl AsRef<[u8]> for FullBlockDataGuard<'_> {
-    fn as_ref(&self) -> &[u8] {
-        self.data.as_ref()
-    }
 }
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]

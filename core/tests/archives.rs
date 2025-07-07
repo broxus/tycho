@@ -351,6 +351,67 @@ async fn archives() -> Result<()> {
     }
     assert_eq!(first_archive_data, expected_archive_data);
 
+    test_pagination(storage).await?;
+
+    Ok(())
+}
+
+async fn test_pagination(storage: CoreStorage) -> Result<()> {
+    use std::collections::HashSet;
+
+    let mut all_blocks: Vec<BlockId> = Vec::new();
+    let mut seen_blocks = HashSet::new();
+    let mut continuation = None;
+    let mut page_count = 0;
+
+    loop {
+        let (blocks, next_continuation) = storage.block_storage().list_blocks(continuation).await?;
+
+        if blocks.is_empty() {
+            break;
+        }
+
+        page_count += 1;
+        tracing::debug!("Page {} has {} blocks", page_count, blocks.len());
+
+        // Check for duplicates within this page and against all previous pages
+        for block in &blocks {
+            assert!(
+                seen_blocks.insert(*block),
+                "Duplicate block found: {block:}",
+            );
+        }
+
+        for window in blocks.windows(2) {
+            let (prev, curr) = (&window[0], &window[1]);
+            if prev.shard == curr.shard {
+                assert!(
+                    prev.seqno <= curr.seqno,
+                    "Blocks not ordered by seqno within shard"
+                );
+            }
+        }
+
+        if let Some(last_prev) = all_blocks.last()
+            && let Some(first_curr) = blocks.first()
+            && last_prev.shard == first_curr.shard
+        {
+            assert!(
+                last_prev.seqno <= first_curr.seqno,
+                "Blocks not ordered between pages"
+            );
+        }
+
+        all_blocks.extend(blocks);
+
+        match next_continuation {
+            Some(token) => continuation = Some(token),
+            None => break,
+        }
+    }
+
+    assert!(page_count > 0, "Should have at least one page");
+
     Ok(())
 }
 

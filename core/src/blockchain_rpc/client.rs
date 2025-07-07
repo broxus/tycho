@@ -260,6 +260,10 @@ impl BlockchainRpcClient {
         Ok(data)
     }
 
+    #[tracing::instrument(skip_all, fields(
+        block_id = %block.as_short_id(),
+        requirement = ?requirement,
+    ))]
     pub async fn get_block_full(
         &self,
         block: &BlockId,
