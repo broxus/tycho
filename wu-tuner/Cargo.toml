@@ -1,0 +1,47 @@
+[package]
+name = "tycho-wu-tuner"
+description = "A Work Units tuner component."
+include = ["src/**/*.rs", "src/**/*.tl", "./LICENSE-*", "./README.md"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# crates.io deps
+anyhow = { workspace = true }
+bytes = { workspace = true }
+tycho-types = { workspace = true, features = ["blake3", "rayon"] }
+futures-util = { workspace = true }
+metrics = { workspace = true }
+num-bigint = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+rayon = { workspace = true }
+scopeguard = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# local deps
+tycho-block-util = { workspace = true }
+tycho-collator = { workspace = true }
+tycho-core = { workspace = true }
+tycho-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tycho-block-util = { workspace = true, features = ["test"] }
+tycho-collator = { workspace = true, features = ["test"] }
+tycho-core = { workspace = true, features = ["test"] }
+tycho-util = { workspace = true, features = ["test"] }
+
+[features]
+default = []
+
+[lints]
+workspace = true

@@ -23,6 +23,7 @@ members = [
     "storage-traits",
     "util",
     "light-node",
+    "wu-tuner",
 ]
 
 [workspace.dependencies]
@@ -135,6 +136,7 @@ tycho-rpc = { path = "./rpc", version = "0.2.11" }
 tycho-storage = { path = "./storage", version = "0.2.11" }
 tycho-storage-traits = { path = "./storage-traits", version = "0.2.11" }
 tycho-util = { path = "./util", version = "0.2.11" }
+tycho-wu-tuner = { path = "./wu-tuner", version = "0.2.11" }
 
 [patch.crates-io]
 # add patches here
