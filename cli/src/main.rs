@@ -135,6 +135,12 @@ impl BaseArgs {
             },
         }
     }
+
+    pub fn wu_tuner_config_path(&self, overwrite: Option<&PathBuf>) -> PathBuf {
+        overwrite
+            .cloned()
+            .unwrap_or_else(|| self.home.join("wu-tuner-config.json"))
+    }
 }
 
 fn version_string() -> &'static str {

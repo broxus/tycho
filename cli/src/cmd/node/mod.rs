@@ -64,6 +64,10 @@ struct CmdRun {
     /// List of zerostate files to import.
     #[clap(long)]
     import_zerostate: Option<Vec<PathBuf>>,
+
+    /// Path to the work units tuner config.
+    #[clap(long)]
+    wu_tuner_config: Option<PathBuf>,
 }
 
 impl CmdRun {
@@ -120,12 +124,15 @@ impl CmdRun {
 
             let control_socket = args.control_socket_path(self.control_socket.as_ref());
 
+            let wu_tuner_config_path = args.wu_tuner_config_path(self.wu_tuner_config.as_ref());
+
             Node::new(
                 socket_addr,
                 node_keys,
                 node_config,
                 global_config,
                 control_socket,
+                wu_tuner_config_path,
             )
             .await?
         };
