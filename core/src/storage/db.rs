@@ -24,10 +24,10 @@ impl CoreDbExt for CoreDb {
 
         // Check if the DB is NOT EMPTY
         {
-            let mut package_entires_iter = self.package_entries.raw_iterator();
-            package_entires_iter.seek_to_first();
-            package_entires_iter.status()?;
-            if package_entires_iter.item().is_none() {
+            let mut block_handles_iter = self.block_handles.raw_iterator();
+            block_handles_iter.seek_to_first();
+            block_handles_iter.status()?;
+            if block_handles_iter.item().is_none() {
                 return Ok(());
             }
         }
@@ -54,11 +54,8 @@ impl WithMigrations for CoreTables {
 
     fn register_migrations(
         migrations: &mut Migrations<Self::VersionProvider, Self>,
-        cancelled: CancellationFlag,
+        _cancelled: CancellationFlag,
     ) -> Result<(), MigrationError> {
-        migrations.register([0, 0, 1], [0, 0, 2], move |db| {
-            core_migrations::v0_0_1_to_0_0_2(db, cancelled.clone())
-        })?;
         migrations.register([0, 0, 2], [0, 0, 3], core_migrations::v_0_0_2_to_v_0_0_3)?;
 
         Ok(())
@@ -73,8 +70,6 @@ weedb::tables! {
         pub block_handles: tables::BlockHandles,
         pub key_blocks: tables::KeyBlocks,
         pub full_block_ids: tables::FullBlockIds,
-        pub package_entries: tables::PackageEntries,
-        pub block_data_entries: tables::BlockDataEntries,
         pub shard_states: tables::ShardStates,
         pub cells: tables::Cells,
         pub temp_cells: tables::TempCells,
@@ -90,65 +85,12 @@ weedb::tables! {
 
 mod core_migrations {
     use std::time::Instant;
-
-    use tycho_block_util::archive::ArchiveEntryType;
-    use tycho_storage::kv::StoredValue;
-    use tycho_types::boc::Boc;
+    
     use weedb::rocksdb::CompactOptions;
 
     use super::*;
-    use crate::storage::PackageEntryKey;
 
-    pub fn v0_0_1_to_0_0_2(db: &CoreDb, cancelled: CancellationFlag) -> Result<(), MigrationError> {
-        let mut block_data_iter = db.package_entries.raw_iterator();
-        block_data_iter.seek_to_first();
-
-        tracing::info!("stated migrating package entries");
-
-        let started_at = Instant::now();
-        let mut total_processed = 0usize;
-        let mut block_ids_created = 0usize;
-
-        let full_block_ids_cf = &db.full_block_ids.cf();
-        let mut batch = weedb::rocksdb::WriteBatch::default();
-        let mut cancelled = cancelled.debounce(10);
-        loop {
-            let (key, value) = match block_data_iter.item() {
-                Some(item) if !cancelled.check() => item,
-                Some(_) => return Err(MigrationError::Custom(anyhow::anyhow!("cancelled").into())),
-                None => {
-                    block_data_iter.status()?;
-                    break;
-                }
-            };
-
-            'item: {
-                let key = PackageEntryKey::from_slice(key);
-                if key.ty != ArchiveEntryType::Block {
-                    break 'item;
-                }
-
-                let file_hash = Boc::file_hash_blake(value);
-                batch.put_cf(full_block_ids_cf, key.block_id.to_vec(), file_hash);
-                block_ids_created += 1;
-            }
-
-            block_data_iter.next();
-            total_processed += 1;
-        }
-
-        db.rocksdb()
-            .write_opt(batch, db.full_block_ids.write_config())?;
-
-        tracing::info!(
-            elapsed = %humantime::format_duration(started_at.elapsed()),
-            total_processed,
-            block_ids_created,
-            "finished migrating package entries"
-        );
-        Ok(())
-    }
-
+    // todo: should we also drop it cause we are migrating via resync
     pub fn v_0_0_2_to_v_0_0_3(db: &CoreDb) -> Result<(), MigrationError> {
         let mut opts = CompactOptions::default();
         opts.set_exclusive_manual_compaction(true);

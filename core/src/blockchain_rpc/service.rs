@@ -192,7 +192,7 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
 
                 let inner = self.inner.clone();
                 BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_block_data_chunk(&req);
+                    let res = inner.handle_get_block_data_chunk(&req).await;
                     Some(Response::from_tl(res))
                 })
             },
@@ -438,16 +438,39 @@ impl<B> Inner<B> {
         }
     }
 
-    fn handle_get_block_data_chunk(&self, req: &rpc::GetBlockDataChunk) -> overlay::Response<Data> {
+    async fn handle_get_block_data_chunk(
+        &self,
+        req: &rpc::GetBlockDataChunk,
+    ) -> overlay::Response<Data> {
         let label = [("method", "getBlockDataChunk")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
-        let block_storage = self.storage.block_storage();
-        match block_storage.get_block_data_chunk(&req.block_id, req.offset) {
+        const BLOCK_DATA_CHUNK_SIZE: u64 = 1024 * 1024; // 1MB
+
+        let block_handle_storage = self.storage().block_handle_storage();
+        let block_storage = self.storage().block_storage();
+
+        let handle = match block_handle_storage.load_handle(&req.block_id) {
+            Some(handle) if handle.has_data() => handle,
+            _ => {
+                tracing::debug!("block data not found for chunked read");
+                return overlay::Response::Err(NOT_FOUND_ERROR_CODE);
+            }
+        };
+
+        let offset = req.offset as u64;
+
+        match block_storage
+            .load_block_data_range(&handle, offset, BLOCK_DATA_CHUNK_SIZE)
+            .await
+        {
             Ok(Some(data)) => overlay::Response::Ok(Data {
-                data: Bytes::from_owner(data),
+                data: Bytes::from(data),
             }),
-            Ok(None) => overlay::Response::Err(NOT_FOUND_ERROR_CODE),
+            Ok(None) => {
+                tracing::debug!("block data chunk not found at offset {}", offset);
+                overlay::Response::Err(NOT_FOUND_ERROR_CODE)
+            }
             Err(e) => {
                 tracing::warn!("get_block_data_chunk failed: {e:?}");
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
@@ -606,26 +629,13 @@ impl<B> Inner<B> {
             _ => return Ok(BlockFull::NotFound),
         };
 
-        let Some(data) = block_storage.get_block_data_chunk(block_id, 0)? else {
-            return Ok(BlockFull::NotFound);
-        };
-
-        let data_chunk_size = block_storage.block_data_chunk_size();
-        let data_size = if data.len() < data_chunk_size.get() as usize {
-            // NOTE: Skip one RocksDB read for relatively small blocks
-            //       Average block size is 4KB, while the chunk size is 1MB.
-            data.len() as u32
-        } else {
-            match block_storage.get_block_data_size(block_id)? {
-                Some(size) => size,
-                None => return Ok(BlockFull::NotFound),
-            }
-        };
+        let data = block_storage.load_block_data_uncompressed(&handle).await?;
+        let data_size = data.len() as u32;
 
         let block = BlockData {
-            data: Bytes::from_owner(data),
+            data,
             size: NonZeroU32::new(data_size).expect("shouldn't happen"),
-            chunk_size: data_chunk_size,
+            chunk_size: NonZeroU32::new(data_size).expect("shouldn't happen"), /* No chunking, chunk size equals data size */
         };
 
         let (proof, queue_diff) = tokio::join!(
