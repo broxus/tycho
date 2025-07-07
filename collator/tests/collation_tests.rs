@@ -119,7 +119,9 @@ async fn test_collation_process_on_stubs() {
             node_1_keypair.clone(),
             Default::default(),
         ),
-        CollatorStdImplFactory,
+        CollatorStdImplFactory {
+            wu_tuner_event_sender: None,
+        },
         None,
     );
 

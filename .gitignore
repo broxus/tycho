@@ -20,6 +20,7 @@ config.json
 global-config.json
 keys.json
 logger.json
+wu-tuner-config.json
 
 /db/
 /.temp/
