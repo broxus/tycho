@@ -562,18 +562,21 @@ impl Phase<FinalizeState> {
                 updated_accounts_count,
             );
 
+            let blocks_count_between_masters =
+                self.state.mc_data.get_blocks_count_between_masters(&shard);
+
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "resume_collation_wu: {}, state_accounts_count: {}, \
                 blocks_count_between_masters: {} ",
                 self.state.do_collate_wu.resume_collation_wu,
                 shard_accounts_count,
-                self.state.do_collate_wu.blocks_count_between_masters,
+                blocks_count_between_masters,
             );
 
             // report shard blocks count in last master block
             if !shard.is_masterchain() && self.state.is_first_block_after_prev_master {
                 metrics::gauge!("tycho_shard_blocks_count_in_last_master_block", labels)
-                    .set(self.state.do_collate_wu.blocks_count_between_masters as f64);
+                    .set(blocks_count_between_masters as f64);
             }
 
             // compute total wu used from last anchor

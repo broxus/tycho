@@ -28,7 +28,7 @@ use super::types::{
 use super::{CollatorStdImpl, ForceMasterCollation, ShardDescriptionExt};
 use crate::collator::do_collate::finalize::FinalizeBlockContext;
 use crate::collator::do_collate::work_units::{
-    DoCollateWu, ExecuteWu, FinalizeWu, PrepareMsgGroupsWu,
+    DoCollateWu, ExecuteWu, FinalizeWu, PrepareMsgGroupsWu, WuEvent, WuEventData,
 };
 use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::types::{FinalizeMetrics, PartialValueFlow, RandSeed};
@@ -251,12 +251,31 @@ impl CollatorStdImpl {
 
         do_collate_wu.collation_total_elapsed = collation_total_elapsed;
 
-        self.report_wu_metrics(
-            &execute_result.prepare_msg_groups_wu,
-            &execute_result.execute_wu,
-            &finalize_wu,
-            &do_collate_wu,
-        );
+        // send wu metrics to the tuner or just report them
+        let wu_metrics = work_units::WuMetrics {
+            wu_on_prepare_msg_groups: execute_result.prepare_msg_groups_wu,
+            wu_on_execute: execute_result.execute_wu,
+            wu_on_finalize: finalize_wu,
+            wu_on_do_collate: do_collate_wu,
+            has_pending_messages: final_result.has_unprocessed_messages,
+        };
+        if let Some(wu_tuner_event_sender) = &self.wu_tuner_event_sender {
+            if let Err(err) = wu_tuner_event_sender
+                .send(WuEvent {
+                    shard: block_id.shard,
+                    seqno: block_id.seqno,
+                    data: WuEventData::Metrics(Box::new(wu_metrics)),
+                })
+                .await
+            {
+                tracing::warn!(target: tracing_targets::COLLATOR,
+                    ?err,
+                    "error sending wu metrics to the tuner service",
+                );
+            }
+        } else {
+            wu_metrics.report_metrics(&block_id.shard);
+        }
 
         // final metrics and logs
         metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
@@ -1128,7 +1147,7 @@ impl CollatorStdImpl {
             .set(do_collate_wu.resume_collation_wu_price());
 
         // total
-        let total_wu = collation_total_wu + do_collate_wu.resume_collation_wu_per_block();
+        let total_wu = collation_total_wu + do_collate_wu.resume_collation_wu_per_block;
         metrics::gauge!("tycho_do_collate_wu_total_full", &labels).set(total_wu as f64);
         metrics::gauge!("tycho_do_collate_wu_price_total_full", &labels)
             .set(do_collate_wu.total_elapsed_ns() as f64 / total_wu as f64);

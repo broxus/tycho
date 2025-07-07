@@ -65,6 +65,7 @@ tycho-network = { workspace = true }
 tycho-rpc = { workspace = true, features = ["http2"] }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true, features = ["cli"] }
+tycho-wu-tuner = { workspace = true }
 tycho-consensus = { workspace = true }
 
 [dev-dependencies]

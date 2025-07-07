@@ -1,16 +1,18 @@
 use std::time::Duration;
 
+use num_bigint::BigUint;
 use tycho_types::models::{
     ShardIdent, WorkUnitsParamsExecute, WorkUnitsParamsFinalize, WorkUnitsParamsPrepare,
 };
-use num_bigint::BigUint;
 
 use crate::collator::execution_manager::ExecutedGroup;
 use crate::collator::messages_reader::MessagesReaderMetrics;
 use crate::collator::types::{BlockCollationData, ExecuteMetrics, FinalizeMetrics};
 use crate::tracing_targets;
 use crate::types::McData;
+use crate::types::processed_upto::BlockSeqno;
 
+#[derive(Default)]
 pub struct PrepareMsgGroupsWu {
     pub total_wu: u64,
     pub total_elapsed: Duration,
@@ -534,7 +536,9 @@ impl FinalizeWu {
 pub struct DoCollateWu {
     pub resume_collation_wu: u64,
     pub resume_collation_elapsed: Duration,
-    pub blocks_count_between_masters: u64,
+
+    pub resume_collation_wu_per_block: u64,
+    pub resume_collation_elapsed_per_block_ns: u128,
 
     pub collation_total_elapsed: Duration,
 }
@@ -557,8 +561,6 @@ impl DoCollateWu {
             diff_tail_len: store_state_wu_param,
             ..
         } = wu_params_finalize;
-
-        self.blocks_count_between_masters = mc_data.get_blocks_count_between_masters(current_shard);
 
         let normalized_updated_accounts_count = if updated_accounts_count == 0 {
             0
@@ -595,21 +597,16 @@ impl DoCollateWu {
             .saturating_div(threads_count as u128)
             .saturating_div(scale)
             .saturating_div(scale) as u64;
-    }
 
-    pub fn resume_collation_wu_per_block(&self) -> u64 {
-        assert!(self.blocks_count_between_masters != 0);
-
-        self.resume_collation_wu
-            .saturating_div(self.blocks_count_between_masters)
-    }
-
-    pub fn resume_collation_elapsed_per_block_ns(&self) -> u128 {
-        assert!(self.blocks_count_between_masters != 0);
-
-        self.resume_collation_elapsed
+        let blocks_count_between_masters = mc_data.get_blocks_count_between_masters(current_shard);
+        assert!(blocks_count_between_masters != 0);
+        self.resume_collation_wu_per_block = self
+            .resume_collation_wu
+            .saturating_div(blocks_count_between_masters);
+        self.resume_collation_elapsed_per_block_ns = self
+            .resume_collation_elapsed
             .as_nanos()
-            .saturating_div(self.blocks_count_between_masters as u128)
+            .saturating_div(blocks_count_between_masters as u128);
     }
 
     pub fn resume_collation_wu_price(&self) -> f64 {
@@ -622,8 +619,202 @@ impl DoCollateWu {
     pub fn total_elapsed_ns(&self) -> u128 {
         self.collation_total_elapsed
             .as_nanos()
-            .saturating_add(self.resume_collation_elapsed_per_block_ns())
+            .saturating_add(self.resume_collation_elapsed_per_block_ns)
     }
+}
+
+pub struct WuEvent {
+    pub shard: ShardIdent,
+    pub seqno: BlockSeqno,
+    pub data: WuEventData,
+}
+pub enum WuEventData {
+    Metrics(Box<WuMetrics>),
+    AnchorLag(MempoolAnchorLag),
+}
+
+#[derive(Debug, Clone)]
+pub struct MempoolAnchorLag {
+    pub requested_at: u64,
+    pub chain_time: u64,
+}
+
+impl MempoolAnchorLag {
+    pub fn lag(&self) -> i64 {
+        (self.requested_at as i64).saturating_sub(self.chain_time as i64)
+    }
+}
+
+#[derive(Default)]
+pub struct WuMetrics {
+    pub wu_on_prepare_msg_groups: PrepareMsgGroupsWu,
+    pub wu_on_execute: ExecuteWu,
+    pub wu_on_finalize: FinalizeWu,
+    pub wu_on_do_collate: DoCollateWu,
+    pub has_pending_messages: bool,
+}
+
+impl WuMetrics {
+    pub fn report_metrics(&self, shard: &ShardIdent) {
+        let labels = [("workchain", shard.workchain().to_string())];
+
+        // prepare
+        metrics::gauge!("tycho_do_collate_wu_on_prepare", &labels)
+            .set(self.wu_on_prepare_msg_groups.total_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_prepare", &labels)
+            .set(self.wu_on_prepare_msg_groups.total_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_prepare_read_ext_msgs", &labels)
+            .set(self.wu_on_prepare_msg_groups.read_ext_msgs_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_read_ext_msgs",
+            &labels
+        )
+        .set(self.wu_on_prepare_msg_groups.read_ext_msgs_wu_price());
+        metrics::gauge!(
+            "tycho_do_collate_wu_on_prepare_read_existing_int_msgs",
+            &labels
+        )
+        .set(self.wu_on_prepare_msg_groups.read_existing_int_msgs_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_read_existing_int_msgs",
+            &labels
+        )
+        .set(
+            self.wu_on_prepare_msg_groups
+                .read_existing_int_msgs_wu_price(),
+        );
+        metrics::gauge!("tycho_do_collate_wu_on_prepare_read_new_int_msgs", &labels)
+            .set(self.wu_on_prepare_msg_groups.read_new_int_msgs_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_read_new_int_msgs",
+            &labels
+        )
+        .set(self.wu_on_prepare_msg_groups.read_new_int_msgs_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_prepare_add_msgs_to_groups", &labels)
+            .set(self.wu_on_prepare_msg_groups.add_msgs_to_groups_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_add_msgs_to_groups",
+            &labels
+        )
+        .set(self.wu_on_prepare_msg_groups.add_msgs_to_groups_wu_price());
+
+        // execute
+        metrics::gauge!("tycho_do_collate_wu_on_execute", &labels)
+            .set(self.wu_on_execute.total_wu() as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_execute", &labels)
+            .set(self.wu_on_execute.total_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_execute_txs", &labels)
+            .set(self.wu_on_execute.execute_groups_vm_only_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_execute_txs", &labels)
+            .set(self.wu_on_execute.execute_groups_vm_only_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_process_txs", &labels)
+            .set(self.wu_on_execute.process_txs_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_process_txs", &labels)
+            .set(self.wu_on_execute.process_txs_wu_price());
+
+        // create queue diff
+        metrics::gauge!("tycho_do_collate_wu_on_create_queue_diff", &labels)
+            .set(self.wu_on_finalize.create_queue_diff_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_create_queue_diff", &labels)
+            .set(self.wu_on_finalize.create_queue_diff_wu_price());
+
+        // apply queue diff
+        metrics::gauge!("tycho_do_collate_wu_on_apply_queue_diff", &labels)
+            .set(self.wu_on_finalize.apply_queue_diff_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_apply_queue_diff", &labels)
+            .set(self.wu_on_finalize.apply_queue_diff_wu_price());
+
+        // finalize block
+        metrics::gauge!("tycho_do_collate_wu_on_finalize_total", &labels)
+            .set(self.wu_on_finalize.total_wu() as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_finalize_total", &labels)
+            .set(self.wu_on_finalize.total_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_finalize_block", &labels)
+            .set(self.wu_on_finalize.finalize_block_wu() as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_finalize_block", &labels)
+            .set(self.wu_on_finalize.finalize_block_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_block", &labels)
+            .set(self.wu_on_finalize.build_block_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_block", &labels)
+            .set(self.wu_on_finalize.build_block_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_state_update", &labels)
+            .set(self.wu_on_finalize.build_state_update_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_state_update", &labels)
+            .set(self.wu_on_finalize.build_state_update_wu_price());
+        metrics::gauge!(
+            "tycho_do_collate_wu_on_build_accounts_and_messages",
+            &labels
+        )
+        .set(self.wu_on_finalize.max_accounts_in_out_msgs_wu() as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_build_accounts_and_messages",
+            &labels
+        )
+        .set(
+            self.wu_on_finalize
+                .build_accounts_and_messages_in_parallel_wu_price(),
+        );
+        metrics::gauge!("tycho_do_collate_wu_on_build_in_msgs", &labels)
+            .set(self.wu_on_finalize.build_in_msgs_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_in_msgs", &labels)
+            .set(self.wu_on_finalize.build_in_msgs_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_out_msgs", &labels)
+            .set(self.wu_on_finalize.build_out_msgs_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_out_msgs", &labels)
+            .set(self.wu_on_finalize.build_out_msgs_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_update_shard_accounts", &labels)
+            .set(self.wu_on_finalize.update_shard_accounts_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_update_shard_accounts",
+            &labels
+        )
+        .set(self.wu_on_finalize.update_shard_accounts_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_accounts_blocks", &labels)
+            .set(self.wu_on_finalize.build_accounts_blocks_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_build_accounts_blocks",
+            &labels
+        )
+        .set(self.wu_on_finalize.build_accounts_blocks_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_accounts", &labels)
+            .set(self.wu_on_finalize.build_accounts_wu() as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_accounts", &labels)
+            .set(self.wu_on_finalize.build_accounts_wu_price());
+
+        // total on collation
+        let collation_total_wu = self.wu_on_prepare_msg_groups.total_wu
+            + self.wu_on_execute.total_wu()
+            + self.wu_on_finalize.total_wu();
+        let collation_total_wu_price = if collation_total_wu == 0 {
+            0.0
+        } else {
+            self.wu_on_do_collate.collation_total_elapsed.as_nanos() as f64
+                / collation_total_wu as f64
+        };
+        metrics::gauge!("tycho_do_collate_wu_total", &labels).set(collation_total_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_total", &labels).set(collation_total_wu_price);
+
+        // resume collation
+        metrics::gauge!("tycho_do_collate_wu_on_resume_collation", &labels)
+            .set(self.wu_on_do_collate.resume_collation_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_resume_collation", &labels)
+            .set(self.wu_on_do_collate.resume_collation_wu_price());
+
+        // total
+        let total_wu = collation_total_wu + self.wu_on_do_collate.resume_collation_wu_per_block;
+        let total_wu_price = if total_wu == 0 {
+            0.0
+        } else {
+            self.wu_on_do_collate.total_elapsed_ns() as f64 / total_wu as f64
+        };
+        metrics::gauge!("tycho_do_collate_wu_total_full", &labels).set(total_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_total_full", &labels).set(total_wu_price);
+    }
+}
+
+pub fn report_anchor_lag_to_metrics(shard: &ShardIdent, lag: i64) {
+    let labels = [("workchain", shard.workchain().to_string())];
+    metrics::gauge!("tycho_collator_anchor_importing_lag_ms", &labels).set(lag as f64);
 }
 
 /// Packs two numbers (0..=99) into a single u16: format "AA BB" -> AA*100 + BB
