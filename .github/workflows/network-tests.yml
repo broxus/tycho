@@ -180,14 +180,14 @@ jobs:
             tar --ignore-failed-read -cf - "$archive_dir" | zstd -T0 -o "$archive_name"
             if [ $? -eq 0 ]; then
               echo "Archive created successfully."
-              echo "ARCHIVE_CREATED=true" >> $GITHUB_ENV
+              echo "ARCHIVE_CREATED=true" >> $GITHUB_OUTPUT
             else
               echo "Archiving failed."
-              echo "ARCHIVE_CREATED=false" >> $GITHUB_ENV
+              echo "ARCHIVE_CREATED=false" >> $GITHUB_OUTPUT
             fi
           else
             echo "Directory $archive_dir not found, skipping archiving."
-            echo "ARCHIVE_CREATED=false" >> $GITHUB_ENV
+            echo "ARCHIVE_CREATED=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Upload Logs and Configs Artifact
