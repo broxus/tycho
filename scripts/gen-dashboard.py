@@ -785,8 +785,12 @@ def core_block_strider() -> RowPanel:
             "Total time to handle archive by all subscribers",
         ),
         create_heatmap_panel(
-            "tycho_core_apply_block_time",
+            "tycho_core_apply_block_time_high",
             "Time to apply and save block state",
+        ),
+        create_heatmap_panel(
+            "tycho_core_apply_block_in_mem_time_high",
+            "Time to apply block state",
         ),
         create_heatmap_panel(
             "tycho_core_metrics_subscriber_handle_block_time",
