@@ -161,7 +161,7 @@ where
         handle: &BlockHandle,
         prev_root: Cell,
     ) -> Result<ShardStateStuff> {
-        let _histogram = HistogramGuard::begin("tycho_core_apply_block_time");
+        let _histogram = HistogramGuard::begin("tycho_core_apply_block_time_high");
 
         let update = block
             .as_ref()
