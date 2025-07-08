@@ -51,6 +51,7 @@ tycho-util = { workspace = true }
 tycho-storage = { workspace = true }
 
 [dev-dependencies]
+hex = { workspace = true }
 humantime = { workspace = true }
 parking_lot = { workspace = true, features = ["deadlock_detection"] }
 tempfile = { workspace = true }
@@ -59,11 +60,13 @@ tikv-jemallocator = { workspace = true, features = [
     "background_threads",
 ] }
 tokio = { workspace = true, default-features = false, features = ["rt-multi-thread", "macros"] }
+tokio-stream = { workspace = true }
+tracing-flame = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # examples' dependencies
 clap = { workspace = true, features = ["wrap_help"] }
 
-tycho-consensus = { workspace = true, features = ["test"] }
 tycho-network = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test", "cli"] }
@@ -72,5 +75,5 @@ tycho-util = { workspace = true, features = ["test", "cli"] }
 workspace = true
 
 [features]
-test = ["dep:tokio-stream", "dep:hex", "dep:tracing-flame", "dep:tracing-subscriber"]
+test = ["dep:tokio-stream", "dep:tracing-flame", "dep:tracing-subscriber"]
 mock-feedback = []

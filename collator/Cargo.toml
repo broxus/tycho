@@ -9,6 +9,14 @@ rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
 
+[[test]]
+name = "adapter_tests"
+required-features = ["test"]
+
+[[test]]
+name = "collation_tests"
+required-features = ["test"]
+
 [dependencies]
 # crates.io deps
 ahash = { workspace = true }
@@ -54,7 +62,6 @@ tycho-vm = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tycho-block-util = { workspace = true, features = ["test"] }
-tycho-collator = { workspace = true, features = ["test"] }
 tycho-core = { workspace = true, features = ["test"] }
 tycho-network = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
@@ -62,7 +69,7 @@ tycho-util = { workspace = true, features = ["test"] }
 
 [features]
 default = []
-test = ["tycho-block-util/test"]
+test = ["tycho-block-util/test", "tycho-storage/test", "tycho-core/test"]
 block-creator-stats = []
 
 [lints]

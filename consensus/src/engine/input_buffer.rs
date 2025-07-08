@@ -179,7 +179,7 @@ impl InputBufferData {
     }
 }
 
-#[cfg(feature = "test")]
+#[cfg(any(feature = "test", test))]
 mod stub {
     use std::num::NonZeroUsize;
 

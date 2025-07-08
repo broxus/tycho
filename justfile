@@ -42,8 +42,7 @@ check_format: install_fmt
 
 # Clippy go brr.
 lint:
-    #cargo clippy --all-targets --all-features --workspace # update when clippy is fixed
-    cargo clippy --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control -p tycho-light-node  -p tycho-cli -- -D warnings
+    cargo clippy --all-targets --all-features --workspace -- -D warnings
 
 # Generates cargo docs.
 docs:
@@ -52,7 +51,7 @@ docs:
 
 # Runs all tests.
 test:
-    cargo nextest run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util  -p tycho-collator -p tycho-control
+    cargo nextest run --workspace --features test
 
 test_cov:
     #!/usr/bin/env bash

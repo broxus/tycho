@@ -9,6 +9,22 @@ rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
 
+[[test]]
+name = "archives"
+required-features = ["test"]
+
+[[test]]
+name = "block_strider"
+required-features = ["test"]
+
+[[test]]
+name = "overlay_client"
+required-features = ["test"]
+
+[[test]]
+name = "overlay_server"
+required-features = ["test"]
+
 [dependencies]
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
@@ -54,7 +70,6 @@ tycho-util = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tycho-block-util = { workspace = true, features = ["test"] }
-tycho-core = { workspace = true, features = ["test"] }
 tycho-crypto = { workspace = true }
 tycho-network = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }

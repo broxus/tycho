@@ -54,7 +54,7 @@ impl MempoolStore {
         Self(mempool_db)
     }
 
-    #[cfg(feature = "test")]
+    #[cfg(any(feature = "test", test))]
     pub fn no_read_stub() -> Self {
         Self(Arc::new(()))
     }
@@ -418,7 +418,7 @@ impl MempoolStoreImpl for MempoolDb {
     }
 }
 
-#[cfg(feature = "test")]
+#[cfg(any(feature = "test", test))]
 impl MempoolStoreImpl for () {
     fn insert_point(&self, _: &Point, _: PointStatusStoredRef<'_>) -> Result<()> {
         Ok(())

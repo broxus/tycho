@@ -7,7 +7,7 @@ pub mod mock_feedback;
 mod models;
 // TODO: Move into submodules, e.g. merge with `MempoolAdapterStore`.
 mod storage;
-#[cfg(feature = "test")]
+#[cfg(any(feature = "test", test))]
 pub mod test_utils;
 
 pub mod prelude {

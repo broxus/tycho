@@ -101,7 +101,7 @@ impl DagRound {
         &self.0.threshold
     }
 
-    #[cfg(feature = "test")]
+    #[cfg(any(feature = "test", test))]
     pub fn locations(&self) -> &FastDashMap<PeerId, DagLocation> {
         &self.0.locations
     }

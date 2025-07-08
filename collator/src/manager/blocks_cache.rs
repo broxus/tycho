@@ -222,7 +222,7 @@ impl BlocksCache {
     }
 
     /// If we have
-    /// ```
+    /// ```text
     /// SB1-SB2-SB3-SB4-SB5
     ///        \          \
     ///         MB1--------MB2

@@ -666,9 +666,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-channel"
-version = "0.5.13"
+version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33480d6946193aa8033910124896ca395333cae7e2d1113d1fef6c3272217df2"
+checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -3454,7 +3454,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tycho-block-util"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3473,7 +3473,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-cli"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3520,7 +3520,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-collator"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3549,7 +3549,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tycho-block-util",
- "tycho-collator",
  "tycho-consensus",
  "tycho-core",
  "tycho-crypto",
@@ -3564,7 +3563,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-consensus"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3596,7 +3595,6 @@ dependencies = [
  "tracing",
  "tracing-flame",
  "tracing-subscriber",
- "tycho-consensus",
  "tycho-crypto",
  "tycho-network",
  "tycho-storage",
@@ -3607,7 +3605,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-control"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3631,7 +3629,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-core"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3664,7 +3662,6 @@ dependencies = [
  "tracing",
  "triomphe",
  "tycho-block-util",
- "tycho-core",
  "tycho-crypto",
  "tycho-network",
  "tycho-storage",
@@ -3704,7 +3701,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-gen-protos"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "prost-build",
@@ -3712,7 +3709,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-light-node"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "clap",
@@ -3733,7 +3730,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-network"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3776,7 +3773,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-rpc"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3812,7 +3809,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulator"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "base64",
@@ -3825,7 +3822,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3847,7 +3844,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage-traits"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "bytes",
  "smallvec",
@@ -3910,7 +3907,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-util"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "ahash",
  "anyhow",

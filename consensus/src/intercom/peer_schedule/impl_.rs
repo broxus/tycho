@@ -49,7 +49,7 @@ pub enum PeerState {
     Resolved,
 }
 
-#[cfg_attr(feature = "test", derive(Clone))]
+#[cfg_attr(any(feature = "test", test), derive(Clone))]
 pub struct InitPeers {
     pub prev_start_round: u32,
     pub prev_v_set: Vec<PeerId>,
@@ -61,7 +61,7 @@ pub struct InitPeers {
 }
 
 impl InitPeers {
-    #[cfg(feature = "test")]
+    #[cfg(any(feature = "test", test))]
     pub fn new(curr_v_subset: Vec<PeerId>) -> Self {
         Self {
             prev_start_round: 0,

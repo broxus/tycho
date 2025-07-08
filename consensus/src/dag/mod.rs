@@ -1,4 +1,4 @@
-#[cfg(feature = "test")]
+#[cfg(any(feature = "test", test))]
 pub use anchor_stage::AnchorStage;
 pub use anchor_stage::align_genesis;
 pub use commit::*;

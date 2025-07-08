@@ -14,7 +14,7 @@ use crate::models::{
     DagPoint, Digest, PointId, PointStatus, Round, Signature, UnixTime, ValidPoint,
 };
 
-#[cfg_attr(feature = "test", derive(Clone))]
+#[cfg_attr(any(feature = "test", test), derive(Clone))]
 pub struct DagLocation {
     // one of the points at current location
     // was proven by the next point of a node;
