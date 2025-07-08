@@ -26,6 +26,7 @@ name = "overlay_server"
 required-features = ["test"]
 
 [dependencies]
+ahash = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
