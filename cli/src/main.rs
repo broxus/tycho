@@ -80,7 +80,7 @@ impl Cmd {
         match self {
             Cmd::Init(cmd) => cmd.run(args),
             Cmd::Node(cmd) => cmd.run(args),
-            Cmd::Tool(cmd) => cmd.run(),
+            Cmd::Tool(cmd) => cmd.run(args),
             Cmd::Elect(cmd) => cmd.run(args),
             #[cfg(feature = "debug")]
             Cmd::Debug(cmd) => cmd.run(),

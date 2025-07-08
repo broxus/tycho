@@ -1,11 +1,14 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use crate::BaseArgs;
+
 mod bc;
 mod gen_account;
 mod gen_dht;
 mod gen_key;
 mod gen_zerostate;
+mod netcat;
 
 /// Work with blockchain stuff.
 #[derive(Parser)]
@@ -15,13 +18,14 @@ pub struct Cmd {
 }
 
 impl Cmd {
-    pub fn run(self) -> Result<()> {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
         match self.cmd {
             SubCmd::GenDht(cmd) => cmd.run(),
             SubCmd::GenKey(cmd) => cmd.run(),
             SubCmd::GenZerostate(cmd) => cmd.run(),
             SubCmd::GenAccount(cmd) => cmd.run(),
             SubCmd::Bc(cmd) => cmd.run(),
+            SubCmd::Netcat(cmd) => cmd.run(args),
         }
     }
 }
@@ -33,4 +37,5 @@ enum SubCmd {
     GenZerostate(gen_zerostate::Cmd),
     GenAccount(gen_account::Cmd),
     Bc(bc::Cmd),
+    Netcat(netcat::Cmd),
 }
