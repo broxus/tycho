@@ -77,6 +77,10 @@ enum Cmd {
 
 impl Cmd {
     fn run(self, args: BaseArgs) -> Result<()> {
+        if cfg!(tycho_unstable) {
+            println!("Running with tycho_unstable enabled");
+        }
+
         match self {
             Cmd::Init(cmd) => cmd.run(args),
             Cmd::Node(cmd) => cmd.run(args),
