@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use metrics::Label;
 use quinn::{ConnectionError, VarInt};
-use webpki::types::CertificateDer;
+use rustls_pki_types::CertificateDer;
 
 use crate::network::config::ConnectionMetricsLevel;
 use crate::network::crypto::peer_id_from_certificate;

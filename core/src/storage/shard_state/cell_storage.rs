@@ -483,7 +483,10 @@ impl CellStorage {
                         let cache = self.raw_cache;
                         s.spawn(move || {
                             for shard in shards {
-                                for (key, value) in shard {
+                                // SAFETY: `RawIter` will not outlibe the `RawTable`.
+                                for value in unsafe { shard.iter() } {
+                                    // SAFETY: `Bucket` is a valid item, received from a valid iterator.
+                                    let (key, value) = unsafe { value.as_ref() };
                                     let item = value.get();
                                     let new_rc = item.old_rc + item.additions as i64;
                                     cache.on_insert_cell(key, new_rc, item.data);
@@ -870,7 +873,10 @@ impl CellStorage {
                         let cache = self.raw_cache;
                         s.spawn(move || {
                             for shard in shards {
-                                for (key, value) in shard {
+                                // SAFETY: `RawIter` will not outlibe the `RawTable`.
+                                for value in unsafe { shard.iter() } {
+                                    // SAFETY: `Bucket` is a valid item, received from a valid iterator.
+                                    let (key, value) = unsafe { value.as_ref() };
                                     let item = value.get();
 
                                     let new_rc = item.old_rc - item.removes as i64;

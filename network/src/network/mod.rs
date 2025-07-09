@@ -110,11 +110,14 @@ impl NetworkBuilder {
         let active_peers = ActivePeers::new(config.active_peers_event_channel_capacity);
         let known_peers = KnownPeers::new();
 
-        let remote_addr = self.optional_fields.remote_addr.unwrap_or_else(|| {
+        let mut remote_addr = self.optional_fields.remote_addr.unwrap_or_else(|| {
             let addr = endpoint.local_addr();
             tracing::debug!(%addr, "using local address as remote address");
             addr.into()
         });
+        if remote_addr.port() == 0 {
+            remote_addr.set_port(endpoint.local_addr().port());
+        }
 
         let service = service.boxed_clone();
 
