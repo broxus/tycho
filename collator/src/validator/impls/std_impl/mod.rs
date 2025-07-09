@@ -33,6 +33,7 @@ pub struct ValidatorStdImplConfig {
     /// Interval for failed exchange retries.
     ///
     /// Default: 10 seconds.
+    #[serde(with = "serde_helpers::humantime")]
     pub failed_exchange_interval: Duration,
 
     /// Maximum number of parallel requests for exchanging signatures.

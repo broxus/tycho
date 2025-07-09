@@ -463,6 +463,7 @@ impl BlockchainRpcClient {
                     self.overlay_client().clone(),
                     state.neighbour.clone(),
                     max_retries,
+                    "persistent state chunk",
                 )
             },
             |output, chunk| {
@@ -587,6 +588,7 @@ impl BlockchainRpcClient {
                     overlay_client,
                     neighbour,
                     retries,
+                    "archive chunk",
                 )
                 .map(move |res| {
                     tracing::info!(
@@ -775,6 +777,7 @@ async fn download_block_inner(
                 overlay_client,
                 neighbour,
                 retries,
+                "block data chunk",
             ))
         })
         .buffered(PARALLEL_REQUESTS);
@@ -897,6 +900,7 @@ async fn download_with_retries(
     overlay_client: PublicOverlayClient,
     neighbour: Neighbour,
     max_retries: usize,
+    name: &'static str,
 ) -> DownloadedChunkResult {
     let mut retries = 0;
     loop {
@@ -909,7 +913,7 @@ async fn download_with_retries(
                 return Ok((h, res.data));
             }
             Err(e) => {
-                tracing::error!("Failed to download archive slice: {e}");
+                tracing::error!("failed to download {name}: {e}");
                 retries += 1;
                 if retries >= max_retries || !neighbour.is_reliable() {
                     return Err(e);
