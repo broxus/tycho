@@ -274,9 +274,9 @@ impl ControlClient {
 
 // sets a 10-minute deadline on the context instead of default 10 seconds
 fn current_context() -> context::Context {
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, Instant};
 
     let mut context = context::current();
-    context.deadline = SystemTime::now() + Duration::from_secs(600);
+    context.deadline = Instant::now() + Duration::from_secs(600);
     context
 }

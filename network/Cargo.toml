@@ -37,6 +37,7 @@ quinn = { workspace = true }
 rand = { workspace = true }
 ring = { workspace = true }
 rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 rustls-webpki = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 socket2 = { workspace = true }

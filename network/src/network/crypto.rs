@@ -7,7 +7,7 @@ use rustls::crypto::{KeyProvider, WebPkiSupportedAlgorithms};
 use rustls::pki_types::CertificateDer;
 use rustls::sign::CertifiedKey;
 use rustls::{DigitallySignedStruct, DistinguishedName, InconsistentKeys, SignatureScheme};
-use webpki::types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, SubjectPublicKeyInfoDer};
+use rustls_pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, SubjectPublicKeyInfoDer};
 
 use crate::types::PeerId;
 

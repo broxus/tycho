@@ -45,31 +45,31 @@ clap = { version = "4.5.3", features = ["derive"] }
 clap-markdown = "0.1.4"
 crc32c = "0.6"
 criterion = "0.5.1"
-dashmap = "5.5.3"
-dirs = "5.0.1"
+dashmap = "6.1.0"
+dirs = "6.0.0"
 ed25519 = "2.0"
 ed25519-dalek = "2.1"
 exponential-backoff = "1"
 fdlimit = "0.3.0"
 futures-util = "0.3"
-getip = "0.1"
+getip = "0.2.0"
 hex = "0.4"
 humantime = "2"
 indexmap = "2.2"
 itertools = "0.12"
 libc = "0.2"
-metrics = "0.23"
-metrics-exporter-prometheus = "0.15"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.17"
 moka = { version = "0.12", features = ["sync"] }
 num-bigint = "0.4.6"
 parking_lot = { version = "0.12.1" }
 parking_lot_core = "0.9.9"
 pin-project-lite = "0.2"
 pkcs8 = "0.10"
-prost = "0.13"
-prost-build = "0.13"
+prost = "0.14.1"
+prost-build = "0.14.1"
 quick_cache = "0.6.0"
-quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls"] }
+quinn = { version = "0.11.8", default-features = false, features = ["runtime-tokio", "rustls"] }
 rand = "0.9"
 rand_pcg = { version = "0.9" }
 rayon = "1.10"
@@ -77,8 +77,9 @@ reqwest = { version = "0.12", default-features = false }
 ring = "0.17.8"
 rlimit = "0.10.1"
 rustc_version = "0.4"
-rustls = "0.23.16"
-rustls-webpki = "0.102"
+rustls = "0.23.28"
+rustls-pki-types = "1.12"
+rustls-webpki = "0.103.3"
 scc = "2.3.3"
 scopeguard = "1.2"
 serde = "1.0"
@@ -86,10 +87,10 @@ serde_json = "1.0.114"
 serde_path_to_error = "0.1"
 sha2 = "0.10.8"
 smallvec = "1.13.1"
-socket2 = "0.5"
-sysinfo = "0.30.5"
-tabled = { version = "0.17.0", default-features = false }
-tarpc = { version = "0.34", features = [
+socket2 = "0.5.7"
+sysinfo = "0.35"
+tabled = { version = "0.20.0", default-features = false }
+tarpc = { version = "0.36", features = [
     "tokio1",
     "serde1",
     "serde-transport",
@@ -119,7 +120,7 @@ tycho-crypto = { version = "0.4", features = ["tl-proto", "serde", "rand9"] }
 tycho-executor = "0.2.0"
 tycho-types = { version = "0.2.0", features = ["tycho", "stats"] }
 tycho-vm = "0.2.0"
-weedb = "0.4.5"
+weedb = "0.5.0"
 zstd-safe = "7.2"
 zstd-sys = "2.0"
 
