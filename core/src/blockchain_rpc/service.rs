@@ -559,7 +559,7 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetPersistentShardStateInfo,
     ) -> overlay::Response<PersistentStateInfo> {
-        let label = [("method", "getPersistentStateInfo")];
+        let label = [("method", "getPersistentShardStateInfo")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
         let res = self.read_persistent_state_info(&req.block_id, PersistentStateKind::Shard);
         overlay::Response::Ok(res)

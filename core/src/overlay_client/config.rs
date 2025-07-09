@@ -53,11 +53,13 @@ pub struct NeighborsConfig {
     /// Send timeout (unidirectional).
     ///
     /// Default: 500ms.
+    #[serde(with = "serde_helpers::humantime")]
     pub send_timeout: Duration,
 
     /// Query timeout (bidirectional).
     ///
     /// Default: 1s.
+    #[serde(with = "serde_helpers::humantime")]
     pub query_timeout: Duration,
 }
 
@@ -104,6 +106,7 @@ pub struct ValidatorsConfig {
     /// Send timeout (unidirectional).
     ///
     /// Default: 500ms.
+    #[serde(with = "serde_helpers::humantime")]
     pub send_timeout: Duration,
 }
 

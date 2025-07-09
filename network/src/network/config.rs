@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use quinn::congestion::{self, ControllerFactory};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::SupportedCipherSuite;
 use rustls::crypto::CryptoProvider;
@@ -109,6 +110,23 @@ impl ConnectionMetricsLevel {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum CongestionAlgorithm {
+    Cubic,
+    Bbr,
+    NewReno,
+}
+
+impl CongestionAlgorithm {
+    pub fn build(self) -> Arc<dyn ControllerFactory + Send + Sync + 'static> {
+        match self {
+            CongestionAlgorithm::Cubic => Arc::new(congestion::CubicConfig::default()),
+            CongestionAlgorithm::Bbr => Arc::new(congestion::BbrConfig::default()),
+            CongestionAlgorithm::NewReno => Arc::new(congestion::NewRenoConfig::default()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QuicConfig {
@@ -123,6 +141,17 @@ pub struct QuicConfig {
     /// Default: auto.
     pub send_window: Option<u64>,
 
+    /// Whether to implement fair queuing for send streams having the same priority.
+    ///
+    /// Default: true.
+    pub send_fairness: bool,
+
+    /// Whether to use "Generic Segmentation Offload" to accelerate transmits,
+    /// when supported by the environment.
+    ///
+    /// Default: true.
+    pub enable_segmentation_offload: bool,
+
     // TODO: add all other fields from quin::TransportConfig
     /// Default: auto.
     pub socket_send_buffer_size: Option<usize>,
@@ -130,6 +159,12 @@ pub struct QuicConfig {
     pub socket_recv_buffer_size: Option<usize>,
     /// Default: true.
     pub use_pmtu: bool,
+
+    /// Default: auto.
+    pub initial_mtu: Option<u16>,
+
+    /// Default: auto.
+    pub congestion_algorithm: Option<CongestionAlgorithm>,
 }
 
 impl Default for QuicConfig {
@@ -140,9 +175,13 @@ impl Default for QuicConfig {
             stream_receive_window: None,
             receive_window: None,
             send_window: None,
+            send_fairness: true,
+            enable_segmentation_offload: true,
             socket_send_buffer_size: None,
             socket_recv_buffer_size: None,
             use_pmtu: true,
+            initial_mtu: None,
+            congestion_algorithm: None,
         }
     }
 }
@@ -159,6 +198,9 @@ impl QuicConfig {
 
         config.datagram_receive_buffer_size(None);
 
+        config.enable_segmentation_offload(self.enable_segmentation_offload);
+        config.send_fairness(self.send_fairness);
+
         if let Some(stream_receive_window) = self.stream_receive_window {
             config.stream_receive_window(make_varint(stream_receive_window));
         }
@@ -166,11 +208,19 @@ impl QuicConfig {
             config.receive_window(make_varint(receive_window));
         }
         if let Some(send_window) = self.send_window {
-            config.receive_window(make_varint(send_window));
+            config.send_window(send_window);
         }
         if self.use_pmtu {
             let mtu = quinn::MtuDiscoveryConfig::default();
             config.mtu_discovery_config(Some(mtu));
+        }
+
+        if let Some(mtu) = self.initial_mtu {
+            config.initial_mtu(mtu);
+        }
+
+        if let Some(algorithm) = self.congestion_algorithm {
+            config.congestion_controller_factory(algorithm.build());
         }
 
         config
