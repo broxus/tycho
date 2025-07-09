@@ -168,7 +168,7 @@ where
             .load_state_update()
             .context("Failed to load state update")?;
 
-        let new_state = rayon_run(move || update.apply(&prev_root))
+        let new_state = rayon_run(move || update.par_apply(&prev_root))
             .await
             .context("Failed to apply state update")?;
 
