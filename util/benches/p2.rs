@@ -1,4 +1,6 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
 use tycho_util::time::P2;
 
 fn bench_p2_operations(c: &mut Criterion) {

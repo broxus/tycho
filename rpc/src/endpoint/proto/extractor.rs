@@ -16,7 +16,6 @@ const METRIC_IN_REQ_FAIL_TOTAL: &str = "tycho_rpc_in_req_fail_total";
 
 pub struct Protobuf<T>(pub T);
 
-#[axum::async_trait]
 impl<S, T> FromRequest<S> for Protobuf<T>
 where
     T: Message + Default,
