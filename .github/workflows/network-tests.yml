@@ -7,13 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: 'PR number to test (optional, will use current branch if not provided)'
+        description: "PR number to test (optional, will use current branch if not provided)"
         required: false
         type: string
       test_selection:
-        description: 'Which tests to run'
+        description: "Which tests to run"
         required: false
-        default: 'all'
+        default: "all"
         type: choice
         options:
           - all
@@ -22,6 +22,7 @@ on:
           - one-to-many-internal-messages
           - fq-deploy
           - nft-index
+          - persistent-sync
 
 permissions:
   contents: read
@@ -49,6 +50,20 @@ jobs:
     outputs:
       binary_path: ${{ steps.get_path.outputs.path }}
     steps:
+      - name: Check user permissions
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.pr_number
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Get user's permission level
+          PERMISSION=$(gh api repos/${{ github.repository }}/collaborators/${{ github.actor }}/permission --jq '.permission')
+
+          echo "User ${{ github.actor }} has $PERMISSION permission"
+
+          if [[ "$PERMISSION" != "write" && "$PERMISSION" != "admin" ]]; then
+            echo "::error::User ${{ github.actor }} does not have write permission"
+            exit 1
+          fi
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -89,6 +104,7 @@ jobs:
           name: ${{ env.TYCHO_ARTIFACT_NAME }}
           path: ${{ steps.get_path.outputs.path }}
           retention-days: 1 # Keep artifact only for 1 day
+
   network-tests:
     name: Network Integration Tests - ${{ matrix.test_name }}
     runs-on: [self-hosted, linux]
@@ -101,14 +117,29 @@ jobs:
         include:
           - test_name: destroyable
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-destroyable:latest
+            test_type: container
+            test_env: {}
           - test_name: ping-pong
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-ping-pong:latest
+            test_type: container
+            test_env: {}
           - test_name: one-to-many-internal-messages
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-one-to-many-internal-messages:latest
+            test_type: container
+            test_env: {}
           - test_name: fq-deploy
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-fq:latest
+            test_type: container
+            test_env: {}
           - test_name: nft-index
             test_image: ghcr.io/broxus/tycho-tests/tycho-tests-nft-index:latest
+            test_type: container
+            test_env: {}
+          - test_name: persistent-sync
+            test_type: script
+            test_script: ./scripts/run-persistent-sync-test.sh
+            test_env:
+              HACK_EACH_KEY_BLOCK_IS_PERSISTENT: "1"
 
     steps:
       - name: Checkout code
@@ -157,12 +188,30 @@ jobs:
           set -e
           echo "${{ secrets.GHCR_TOKEN }}" | podman login ghcr.io -u ${{ secrets.GHCR_USER }} --password-stdin
 
-      - name: Run network tests
-        if: ${{ !github.event.inputs.test_selection || github.event.inputs.test_selection == 'all' || github.event.inputs.test_selection == matrix.test_name }}
+      - name: Run container-based network tests
+        if: matrix.test_type == 'container' && (!github.event.inputs.test_selection || github.event.inputs.test_selection == 'all' || github.event.inputs.test_selection == matrix.test_name)
         shell: bash
         run: |
           # The script will use the TYCHO_BIN_PATH env
           ./scripts/run-network-tests.sh ${{ matrix.test_image }}
+
+      # GitHub Actions sucks at handling conditional env directives, 
+      # so we need two separate steps - one with env and one without
+      - name: Run script-based tests (with env)
+        if: matrix.test_type == 'script' && toJSON(matrix.test_env) != '{}' && (!github.event.inputs.test_selection || github.event.inputs.test_selection == 'all' || github.event.inputs.test_selection == matrix.test_name)
+        shell: bash
+        env: ${{ matrix.test_env }}
+        run: |
+          # Run the test script
+          ${{ matrix.test_script }}
+
+      - name: Run script-based tests (no env)
+        if: matrix.test_type == 'script' && toJSON(matrix.test_env) == '{}' && (!github.event.inputs.test_selection || github.event.inputs.test_selection == 'all' || github.event.inputs.test_selection == matrix.test_name)
+        shell: bash
+        run: |
+          # Run the test script
+          ${{ matrix.test_script }}
+
       - name: Archive Logs and Configs
         if: always()
         id: archive
@@ -200,80 +249,23 @@ jobs:
           path: ${{ env.ARCHIVE_PATH }}
           retention-days: 5 # 5 days retention
           if-no-files-found: warn
-  persistent-sync-test:
-    name: Persistent Network Sync Test
-    runs-on: [self-hosted, linux]
-    needs: build-node
-    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
-    timeout-minutes: 30
-    steps:
-      - name: Install lsof (if missing)
-        shell: bash
-        run: |
-          if command -v lsof >/dev/null 2>&1; then
-            echo "lsof already present"
-          else
-            echo "Installing lsof…"
-            # Debian/Ubuntu-based образа
-            sudo apt-get update -y
-            sudo apt-get install -y lsof
-          fi
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          ref: ${{ github.event.inputs.pr_number && format('refs/pull/{0}/head', github.event.inputs.pr_number) || github.ref }}
 
-      - name: Initialize Environment
-        uses: ./.github/actions/init
-        with:
-          setup-cache: false
-          fake-procfs: true
-
-      - name: Download Tycho Binary Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.TYCHO_ARTIFACT_NAME }}
-          path: ./downloaded_bin/
-
-      - name: Prepare Binary and Set Path
-        shell: bash
-        run: |
-          downloaded_binary=$(find ./downloaded_bin/ -type f)
-          if [ -z "$downloaded_binary" ]; then
-            echo "ERROR: Downloaded binary not found in ./downloaded_bin/"
-            exit 1
-          fi
-          echo "Found downloaded binary: $downloaded_binary"
-          chmod +x "$downloaded_binary"
-          echo "TYCHO_BIN_PATH=$(readlink -f "$downloaded_binary")" >> $GITHUB_ENV
-
-      - name: Run persistent sync test
-        shell: bash
-        env:
-          HACK_EACH_KEY_BLOCK_IS_PERSISTENT: 1
-        run: |
-          ./scripts/run-persistent-sync-test.sh
   network_tests_status:
     name: Network Tests Status Check # This is the name to require in branch protection
     runs-on: ubuntu-latest
     # Depends on the matrix job, but runs even if it's skipped or fails
     needs:
       - network-tests
-      - persistent-sync-test
     if: always()
     steps:
-      - name: Check network & persistent test outcomes
+      - name: Check network test outcomes
         shell: bash
         run: |
           echo "Network Tests result: ${{ needs.network-tests.result }}"
-          echo "Persistent Sync Test result: ${{ needs.persistent-sync-test.result }}"
 
           if [[ "${{ github.event_name }}" == "merge_group" ]]; then
             if [[ "${{ needs.network-tests.result }}" == "failure" || \
-                  "${{ needs.network-tests.result }}" == "cancelled" || \
-                  "${{ needs.persistent-sync-test.result }}" == "failure" || \
-                  "${{ needs.persistent-sync-test.result }}" == "cancelled" ]]; then
+                  "${{ needs.network-tests.result }}" == "cancelled" ]]; then
               echo "At least one required test failed on merge_group."
               exit 1
             fi

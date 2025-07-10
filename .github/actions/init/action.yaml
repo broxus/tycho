@@ -35,6 +35,10 @@ runs:
       run: sudo apt-get update && sudo apt-get install -y clang
       shell: bash
 
+    - name: Install lsof
+      run: sudo apt-get install lsof -y
+      shell: bash
+
     - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # stable
       with:
         toolchain: ${{ inputs.toolchain }}
