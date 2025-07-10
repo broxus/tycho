@@ -163,7 +163,7 @@ done
 
 # Execute tests
 "${docker_bin}" pull "$test_image"
-"${docker_bin}" run --network host \
+"${docker_bin}" run --rm --network host \
     -e CI_JRPC_ENDPOINT \
     -e CI_GIVER_ADDRESS \
     -e CI_GIVER_KEY \
