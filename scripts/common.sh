@@ -19,6 +19,13 @@ function is_number {
     fi
 }
 
+function rustc_llvm_version {
+    local full_version=$(rustc --version --verbose | grep LLVM | cut -d ' ' -f 3)
+    local major_version=$(echo "$full_version" | cut -d '.' -f 1)
+    echo "$major_version"
+    return 0
+}
+
 function set_clang_env {
     local clang_versions=()
     local require=""
@@ -27,6 +34,10 @@ function set_clang_env {
         case $key in
           require)
             require="true"
+            shift # past argument
+          ;;
+          auto)
+            clang_versions+=("$key")
             shift # past argument
           ;;
           ''|*[!0-9]*) # unknown option
@@ -42,6 +53,11 @@ function set_clang_env {
 
     local prev_version=""
     for clang_version in "${clang_versions[@]}"; do
+        if [ "$clang_version" == "auto" ]; then
+            clang_version=$(rustc_llvm_version)
+            # echo "INFO: \`rustc\` will use LLVM ${clang_version}"
+        fi
+
         if [ ! -z "$prev_version" ]; then
             echo "WARN: Clang $prev_version not found, fallback to Clang $clang_version." >&2
         fi
