@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 use std::marker::PhantomData;
 
-use axum::async_trait;
 use axum::extract::{FromRequest, Request};
 use axum::http::{self, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -84,7 +83,6 @@ pub struct Jrpc<B: JrpcBehaviour, T: ParseParams> {
     pub behaviour: PhantomData<B>,
 }
 
-#[async_trait]
 impl<S, T, B> FromRequest<S> for Jrpc<B, T>
 where
     B: JrpcBehaviour,
