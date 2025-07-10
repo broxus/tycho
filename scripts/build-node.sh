@@ -26,7 +26,7 @@ else
     profile="${TYCHO_BUILD_PROFILE}"
 fi
 
-if set_clang_env 19; then
+if set_clang_env auto; then
     : # dont exit
 fi
 

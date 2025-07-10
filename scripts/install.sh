@@ -42,7 +42,7 @@ fi
 features=""
 base_rustflags="-Ctarget_cpu=native -Cforce-frame-pointers=true"
 
-if set_clang_env 19; then
+if set_clang_env auto; then
   features="$features --features lto"
   echo "INFO: Building node with lto"
   export RUSTFLAGS="$base_rustflags -Clinker-plugin-lto -Clinker=clang -Clink-arg=-fuse-ld=$LD"
