@@ -168,9 +168,13 @@ where
             .load_state_update()
             .context("Failed to load state update")?;
 
+        let apply_in_mem = HistogramGuard::begin("tycho_core_apply_block_in_mem_time_high");
+
         let new_state = rayon_run(move || update.par_apply(&prev_root))
             .await
             .context("Failed to apply state update")?;
+
+        apply_in_mem.finish();
 
         let state_storage = self.inner.storage.shard_state_storage();
 
