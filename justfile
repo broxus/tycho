@@ -96,6 +96,11 @@ prepare_integration_tests:
         --dir {{ integration_test_dir }} \
         --base-url {{ integration_test_base_url }}
 
+# Repacks files for integration tests.
+repack_heavy_archives:
+    ./scripts/repack-heavy-archives.sh \
+        --dir {{ integration_test_dir }}
+
 # Removes all files for integration tests.
 clean_integration_tests:
     rm -rf {{ integration_test_dir }}
