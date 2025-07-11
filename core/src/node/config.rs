@@ -4,6 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tycho_network::{DhtConfig, NetworkConfig, OverlayConfig, PeerResolverConfig};
 use tycho_storage::StorageConfig;
+use tycho_util::config::PartialConfig;
 
 use crate::block_strider::{
     ArchiveBlockProviderConfig, BlockchainBlockProviderConfig, StarterConfig,
@@ -12,20 +13,23 @@ use crate::blockchain_rpc::{BlockchainRpcClientConfig, BlockchainRpcServiceConfi
 use crate::overlay_client::PublicOverlayClientConfig;
 use crate::storage::CoreStorageConfig;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
 #[serde(default)]
 pub struct NodeBaseConfig {
     /// Public IP address of the node.
     ///
     /// Default: resolved automatically.
+    #[important]
     pub public_ip: Option<IpAddr>,
 
     /// Ip address to listen on.
     ///
     /// Default: 0.0.0.0
+    #[important]
     pub local_ip: IpAddr,
 
     /// Default: 30000.
+    #[important]
     pub port: u16,
 
     pub network: NetworkConfig,
@@ -38,8 +42,10 @@ pub struct NodeBaseConfig {
 
     pub public_overlay_client: PublicOverlayClientConfig,
 
+    #[partial]
     pub storage: StorageConfig,
 
+    #[partial]
     pub core_storage: CoreStorageConfig,
 
     pub starter: StarterConfig,

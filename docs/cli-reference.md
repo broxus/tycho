@@ -113,6 +113,7 @@ Generate a default node config
 ###### **Options:**
 
 * `-f`, `--force` — Overwrite the existing config
+* `-a`, `--all` — Generate all config fields
 
 
 

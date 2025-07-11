@@ -14,6 +14,7 @@ use tycho_network::PeerId;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
+use tycho_util::config::PartialConfig;
 
 use crate::collator::ForceMasterCollation;
 use crate::mempool::MempoolAnchorId;
@@ -22,7 +23,7 @@ use crate::validator::ValidationSessionId;
 
 pub mod processed_upto;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
 #[serde(default)]
 pub struct CollatorConfig {
     /// Supported (and produced) block version.
@@ -46,14 +47,17 @@ pub struct CollatorConfig {
     /// Run additional value flow check on collated blocks.
     ///
     /// Default: `false`.
+    #[important]
     pub check_value_flow: bool,
     /// Run additional blockchain config check on collated blocks.
     ///
     /// Default: `true`.
+    #[important]
     pub validate_config: bool,
     /// Skip some parts of collator logic during sync.
     ///
     /// Default: `true`.
+    #[important]
     pub fast_sync: bool,
     /// Which "virtual shards depth" to use when processing [`ShardAccounts`].
     ///

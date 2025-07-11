@@ -2,13 +2,15 @@ use std::path::{Path, PathBuf};
 
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
+use tycho_util::config::PartialConfig;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
 #[serde(deny_unknown_fields, default)]
 pub struct StorageConfig {
     /// Path to the root directory of the storage.
     ///
     /// Default: `./db`.
+    #[important]
     pub root_dir: PathBuf,
 
     /// Whether to enable `RocksDB` metrics.
@@ -19,6 +21,7 @@ pub struct StorageConfig {
     /// `RocksDB` LRU cache capacity.
     ///
     /// Default: calculated based on the available memory.
+    #[important]
     pub rocksdb_lru_capacity: ByteSize,
 }
 

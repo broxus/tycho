@@ -41,6 +41,8 @@ tracing-subscriber = { workspace = true, optional = true }
 zstd-safe = { workspace = true, features = ["std", "zstdmt"] }
 zstd-sys = { workspace = true }
 
+tycho-util-proc = { workspace = true }
+
 [dev-dependencies]
 criterion = { workspace = true }
 tempfile = { workspace = true }
@@ -65,7 +67,6 @@ cli = [
 name = "p2"
 harness = false
 path = "benches/p2.rs"
-
 
 [lints]
 workspace = true

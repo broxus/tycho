@@ -10,6 +10,7 @@ use tycho_crypto::ed25519;
 use tycho_types::cell::HashBytes;
 use tycho_types::models::StdAddr;
 use tycho_util::FastHashMap;
+use tycho_util::config::PartialConfig;
 
 use crate::BaseArgs;
 use crate::node::{ElectionsConfig, NodeConfig, SimpleElectionsConfig};
@@ -132,9 +133,11 @@ impl Cmd {
         if config_path.exists() {
             NodeConfig::from_file(&config_path).context("invalid node config")?;
         } else {
-            NodeConfig::default()
-                .save_to_file(&config_path)
-                .context("failed to save node config")?;
+            tycho_util::serde_helpers::save_json_to_file(
+                NodeConfig::default().into_partial(),
+                &config_path,
+            )
+            .context("failed to save partial node config")?;
         }
 
         // Download global config
@@ -204,6 +207,10 @@ struct CmdInitConfig {
     /// Overwrite the existing config.
     #[clap(short, long)]
     force: bool,
+
+    /// Generate all config fields.
+    #[clap(short, long)]
+    all: bool,
 }
 
 impl CmdInitConfig {
@@ -217,9 +224,17 @@ impl CmdInitConfig {
             args.create_home_dir()?;
         }
 
-        NodeConfig::default()
-            .save_to_file(&config_path)
-            .context("failed to save node config")?;
+        if self.all {
+            NodeConfig::default()
+                .save_to_file(&config_path)
+                .context("failed to save node config")?;
+        } else {
+            tycho_util::serde_helpers::save_json_to_file(
+                NodeConfig::default().into_partial(),
+                &config_path,
+            )
+            .context("failed to save partial node config")?;
+        }
 
         // Print
         print_json(serde_json::json!({
