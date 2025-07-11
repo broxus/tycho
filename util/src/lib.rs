@@ -28,8 +28,10 @@ pub mod futures {
 }
 
 pub mod num {
+    pub use self::median::{StreamingUnsignedMedian, VecOfStreamingUnsignedMedian};
     pub use self::safe_avg::{SafeSignedAvg, SafeUnsignedAvg, SafeUnsignedVecAvg};
 
+    mod median;
     mod safe_avg;
 }
 

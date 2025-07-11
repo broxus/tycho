@@ -1872,6 +1872,220 @@ def collator_wu_metrics() -> RowPanel:
     ]
     return create_row("collator: Work units calculation", metrics)
 
+def collator_wu_params() -> RowPanel:
+    metrics = [
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_prepare_fixed_part_curr",
+            "prepare.fixed_part (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_prepare_fixed_part_target",
+            "prepare.fixed_part (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_prepare_read_ext_msgs_curr",
+            "prepare.read_ext_msgs (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_prepare_read_ext_msgs_target",
+            "prepare.read_ext_msgs (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_prepare_read_int_msgs_curr",
+            "prepare.read_int_msgs (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_prepare_read_int_msgs_target",
+            "prepare.read_int_msgs (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_prepare_read_new_msgs_curr",
+            "prepare.read_new_msgs (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_prepare_read_new_msgs_target",
+            "prepare.read_new_msgs (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_prepare_add_to_msg_groups_curr",
+            "prepare.add_to_msg_groups (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_prepare_add_to_msg_groups_target",
+            "prepare.add_to_msg_groups (target)",
+        ),
+
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_prepare_curr",
+            "execute.prepare (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_prepare_target",
+            "execute.prepare (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_execute_curr",
+            "execute.execute (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_execute_target",
+            "execute.execute (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_execute_delimiter_curr",
+            "execute.execute_delimiter (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_execute_delimiter_target",
+            "execute.execute_delimiter (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_insert_in_msg_curr",
+            "execute.insert_in_msg (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_insert_in_msg_target",
+            "execute.insert_in_msg (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_insert_out_msg_curr",
+            "execute.insert_out_msg (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_insert_out_msg_target",
+            "execute.insert_out_msg (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_insert_new_msg_curr",
+            "execute.insert_new_msg (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_insert_new_msg_target",
+            "execute.insert_new_msg (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_max_threads_curr",
+            "execute.max_threads (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_execute_max_threads_target",
+            "execute.max_threads (target)",
+        ),
+
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_build_transactions_curr",
+            "finalize.build_transactions (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_build_transactions_target",
+            "finalize.build_transactions (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_build_accounts_curr",
+            "finalize.build_accounts (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_build_accounts_target",
+            "finalize.build_accounts (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_build_in_msg_curr",
+            "finalize.build_in_msg (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_build_in_msg_target",
+            "finalize.build_in_msg (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_build_out_msg_curr",
+            "finalize.build_out_msg (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_build_out_msg_target",
+            "finalize.build_out_msg (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_serialize_min_curr",
+            "finalize.serialize_min (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_serialize_min_target",
+            "finalize.serialize_min (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_serialize_accounts_curr",
+            "finalize.serialize_accounts (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_serialize_accounts_target",
+            "finalize.serialize_accounts (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_serialize_msg_curr",
+            "finalize.serialize_msg (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_serialize_msg_target",
+            "finalize.serialize_msg (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_state_update_min_curr",
+            "finalize.state_update_min (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_state_update_min_target",
+            "finalize.state_update_min (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_state_update_accounts_curr",
+            "finalize.state_update_accounts (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_state_update_accounts_target",
+            "finalize.state_update_accounts (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_state_pow_coeff_curr",
+            "finalize.state_pow_coeff (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_state_pow_coeff_target",
+            "finalize.state_pow_coeff (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_updated_accounts_pow_coeff_curr",
+            "finalize.updated_accounts_pow_coeff (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_updated_accounts_pow_coeff_target",
+            "finalize.updated_accounts_pow_coeff (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_create_diff_curr",
+            "finalize.create_diff (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_create_diff_target",
+            "finalize.create_diff (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_apply_diff_curr",
+            "finalize.apply_diff (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_apply_diff_target",
+            "finalize.apply_diff (target)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_resume_collation_curr",
+            "finalize.resume_collation (current)",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_wu_param_finalize_resume_collation_target",
+            "finalize.resume_collation (target)",
+        ),
+    ]
+    return create_row("collator: Work units params", metrics)
 
 def collator_core_operations_metrics() -> RowPanel:
     metrics = [
@@ -2868,6 +3082,7 @@ dashboard = Dashboard(
         collator_special_transactions_metrics(),
         collator_time_metrics(),
         collator_wu_metrics(),
+        collator_wu_params(),
         collator_core_operations_metrics(),
         collator_finalize_block(),
         collator_execution_manager(),
