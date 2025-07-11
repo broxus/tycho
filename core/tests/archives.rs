@@ -23,7 +23,7 @@ use tycho_network::PeerId;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::models::{BlockId, ShardStateUnsplit};
 use tycho_types::prelude::*;
-use tycho_util::compression::{ZstdDecompressStream, zstd_decompress};
+use tycho_util::compression::{ZstdCompressStream, ZstdDecompressStream, zstd_decompress};
 use tycho_util::project_root;
 
 use crate::network::TestNode;
@@ -351,6 +351,40 @@ async fn archives() -> Result<()> {
     }
     assert_eq!(first_archive_data, expected_archive_data);
 
+    Ok(())
+}
+
+#[test]
+#[ignore = "must only be executed explicitly when `zstd-sys` version changes"]
+fn repack_heavy_archives() -> Result<()> {
+    let project_root = project_root()?.join(".scratch");
+    let integration_test_path = project_root.join("integration_tests");
+
+    for path in ["archive_1.bin", "archive_2.bin", "archive_3.bin"] {
+        let path = integration_test_path.join(path);
+        let data = std::fs::read(&path)?;
+
+        // Decompress
+        let mut decompressed = Vec::new();
+        zstd_decompress(&data, &mut decompressed)?;
+        drop(data);
+
+        // Compress
+        let chunk_size = ByteSize::kb(1024).as_u64() as usize;
+        let mut stream = ZstdCompressStream::new(9, chunk_size)?;
+        let workers = (std::thread::available_parallelism()?.get() / 4) as u8;
+        stream.multithreaded(workers)?;
+
+        let mut compressed = Vec::new();
+        for chunk in decompressed.chunks(chunk_size) {
+            stream.write(chunk, &mut compressed)?;
+        }
+        stream.finish(&mut compressed)?;
+        drop(decompressed);
+
+        // Write compressed data
+        std::fs::write(path, compressed)?;
+    }
     Ok(())
 }
 

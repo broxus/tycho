@@ -93,6 +93,6 @@ function ensure_exists() {
 ensure_exists "states.tar.zst" "states.tar.zst"
 ensure_exists "2025-01-24_zerostate.boc" "zerostate.boc"
 
-ensure_exists "2025-01-24_archive_1.bin" "archive_1.bin"
-ensure_exists "2025-01-24_archive_2.bin" "archive_2.bin"
-ensure_exists "2025-01-24_archive_3.bin" "archive_3.bin"
+ensure_exists "2025-07-11_archive_1.bin" "archive_1.bin"
+ensure_exists "2025-07-11_archive_2.bin" "archive_2.bin"
+ensure_exists "2025-07-11_archive_3.bin" "archive_3.bin"
