@@ -1,3 +1,39 @@
+//! # Archive Storage System
+//!
+//! This module implements a hybrid storage system for archives:
+//!
+//! ## Storage Architecture
+//!
+//! 1. **Cassadilia Storage** (Primary):
+//!    - `blocks`: Individual block components (block data, proofs, queue diffs)
+//!    - `archives`: Complete compressed archive packages
+//!
+//! 2. **`RocksDB` Metadata** (Temporary):
+//!    - `archive_block_ids`: Accumulates block IDs during archive creation
+//!    - Cleaned up after archive commit
+//!
+//! ## Archive Lifecycle
+//!
+//! ```
+//! [Building]    -> [Committing] -> [Committed] -> [GC Eligible]
+//!     |                  |              |              |
+//!     v                  v              v              v
+//! archive_block_ids -> Cassadilia -> ArchiveIds -> Removed
+//! ```
+//!
+//! ## State Recovery
+//!
+//! On startup, the system recovers archive state by:
+//! 1. Scanning Cassadilia index for committed archives
+//! 2. Scanning `RocksDB` for building archives
+//! 3. Resuming archive build. Incomplete archives can't be commited.
+//!
+//! ## Integration Points
+//!
+//! - **GC Subscriber**: Coordinates archive cleanup based on persistent state
+//! - **Block Strider**: Calls `move_into_archive()` for each processed block
+//! - **RPC Layer**: Serves archive data through `get_archive()` and related APIs
+
 mod task;
 mod types;
 mod util;
@@ -12,35 +48,27 @@ use std::time::Instant;
 use anyhow::Result;
 use bytes::Bytes;
 use cassadilia::{Cas, KeyEncoderError};
-use tycho_types::boc::BocRepr;
-use tycho_types::cell::HashBytes;
-use tycho_types::models::*;
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tycho_block_util::archive::ArchiveEntryType;
 use tycho_storage::kv::StoredValue;
+use tycho_types::boc::BocRepr;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::*;
 use tycho_util::metrics::HistogramGuard;
-pub use types::{ArchiveId, BlockGcStats, BlockStorageError};
+pub use types::{ArchiveId, ArchiveState, BlockGcStats, BlockStorageError};
 pub use util::remove_blocks;
-use weedb::{rocksdb, OwnedPinnableSlice};
+use weedb::rocksdb;
+
 use self::task::CommitArchiveTask;
-use super::package_entry::{
-    PackageEntryKey, PackageEntryKeyEncoder, PartialBlockId,
-};
-use crate::storage::{BlockHandle, BlockHandleStorage, CoreDb, tables};
+use super::package_entry::{PackageEntryKey, PackageEntryKeyEncoder, PartialBlockId};
 use crate::storage::block_handle::BlockDataGuard;
+use crate::storage::{BlockHandle, BlockHandleStorage, CoreDb};
 
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
-// Reserved key in which the archive size is stored
-const ARCHIVE_SIZE_MAGIC: u64 = u64::MAX;
-// Reserved key in which we store the fact that the archive must be committed
-const ARCHIVE_TO_COMMIT_MAGIC: u64 = u64::MAX - 1;
-// Reserved key in which we store the next archive id to override.
-const ARCHIVE_OVERRIDE_NEXT_MAGIC: u64 = u64::MAX - 2;
-// Reserved key in which we store the fact that archive was started
-const ARCHIVE_STARTED_MAGIC: u64 = u64::MAX - 3;
 
-const ARCHIVE_MAGIC_MIN: u64 = u64::MAX & !0xff;
+// Default archive chunk size (no longer used for actual chunking, kept for protocol compatibility)
+const DEFAULT_ARCHIVE_CHUNK_SIZE: u32 = 1024 * 1024; // 1 MB
 
 pub struct BlobStorage {
     db: CoreDb,
@@ -48,164 +76,150 @@ pub struct BlobStorage {
     archive_ids: RwLock<ArchiveIds>,
     prev_archive_commit: tokio::sync::Mutex<Option<CommitArchiveTask>>,
     archive_ids_tx: ArchiveIdsTx,
-    archive_chunk_size: NonZeroU32,
 
-    blocks: Arc<Cas<PackageEntryKey>>,
-    #[allow(dead_code)] // TODO: Will be used in later migration phases
-    archives: Arc<Cas<u32>>,
+    blocks: Cas<PackageEntryKey>,
+    archives: Cas<u32>,
 }
 
 impl BlobStorage {
     pub fn new(
         db: CoreDb,
         block_handle_storage: Arc<BlockHandleStorage>,
-        archive_chunk_size: NonZeroU32,
         blobdb_path: &Path,
     ) -> Result<Self> {
         let (archive_ids_tx, _) = broadcast::channel(4);
+        let config = cassadilia::Config {
+            sync_mode: cassadilia::SyncMode::Sync,
+            num_ops_per_wal: 100_000,
+            pre_create_cas_dirs: true, // we can pay 300ms on the first start :)
+            scan_orphans_on_startup: true, // Clean-up your deads
+            verify_blob_integrity: true, // Better safe than sorry
+            fail_on_integrity_errors: false, // But not to safe
+        };
         let blocks = Cas::open(
             blobdb_path.join("packages"),
             PackageEntryKeyEncoder,
-            cassadilia::Config::default(),
+            config.clone(),
         )?;
-        let archives = Cas::open(
-            blobdb_path.join("archives"),
-            U32Encoder,
-            cassadilia::Config::default(),
-        )?;
+        let archives = Cas::open(blobdb_path.join("archives"), ArchiveKeyEncoder, config)?;
 
         Ok(Self {
             db,
             block_handle_storage,
             archive_ids_tx,
-            archive_chunk_size,
             archive_ids: Default::default(),
             prev_archive_commit: Default::default(),
 
-            blocks: Arc::new(blocks),
-            archives: Arc::new(archives),
+            blocks,
+            archives,
         })
     }
 
-    pub fn archive_chunk_size(&self) -> NonZeroU32 {
-        self.archive_chunk_size
+    pub fn archive_chunk_size() -> NonZeroU32 {
+        NonZeroU32::new(DEFAULT_ARCHIVE_CHUNK_SIZE).unwrap()
     }
 
+    /// Recover archive state from Cassadilia index and `archive_block_ids`
+    fn recover_archive_state(&self) -> Result<ArchiveState> {
+        let committed_archives = self
+            .archives
+            .index_snapshot()
+            .keys()
+            .copied()
+            .collect::<BTreeSet<u32>>();
+
+        let mut building_archives = Vec::new();
+        let mut iter = self.db.archive_block_ids.raw_iterator();
+        iter.seek_to_first();
+
+        while let Some((key, _)) = iter.item() {
+            if key.len() >= 4 {
+                let archive_id = u32::from_be_bytes(key[..4].try_into()?);
+                if !committed_archives.contains(&archive_id) {
+                    building_archives.push(archive_id);
+                }
+            }
+            iter.next();
+        }
+
+        if let Err(e) = iter.status() {
+            return Err(anyhow::anyhow!(
+                "Failed to iterate archive_block_ids: {e:?}"
+            ));
+        }
+
+        building_archives.sort();
+        building_archives.dedup();
+
+        let current_archive_id = building_archives.last().copied();
+        let last_committed_id = committed_archives.iter().max().copied().unwrap_or(0);
+
+        Ok(ArchiveState {
+            committed_archives,
+            building_archives,
+            current_archive_id,
+            last_committed_id,
+        })
+    }
+
+    /// Preloads archive IDs from Cassadilia and handles incomplete archives.
+    ///
+    /// This method uses the new recovery function to:
+    /// 1. Load all committed archives from Cassadilia
+    /// 2. Detect incomplete archives in `archive_block_ids`
+    /// 3. Resume or cleanup incomplete archives
     pub async fn preload_archive_ids(&self) -> Result<()> {
         let started_at = Instant::now();
 
         tracing::info!("started preloading archive ids");
 
-        let db = self.db.clone();
+        let state = self.recover_archive_state()?;
+        let archive_count = state.committed_archives.len();
 
-        let (archive_ids, override_next_id, to_commit) = tokio::task::spawn_blocking(move || {
-            let mut iter = db.archives.raw_iterator();
-            iter.seek_to_first();
-
-            let mut archive_ids = BTreeSet::new();
-            let mut archives_to_commit = Vec::new();
-            let mut override_next_id = None;
-            loop {
-                let Some((key, value)) = iter.item() else {
-                    if let Err(e) = iter.status() {
-                        tracing::error!("failed to iterate through archives: {e:?}");
-                    }
-                    break;
-                };
-
-                let archive_id = u32::from_be_bytes(key[..4].try_into().unwrap());
-                let chunk_index = u64::from_be_bytes(key[4..].try_into().unwrap());
-
-                const _: () = const {
-                    // Rely on the specific order of these constants
-                    assert!(ARCHIVE_STARTED_MAGIC < ARCHIVE_OVERRIDE_NEXT_MAGIC);
-                    assert!(ARCHIVE_OVERRIDE_NEXT_MAGIC < ARCHIVE_TO_COMMIT_MAGIC);
-                    assert!(ARCHIVE_TO_COMMIT_MAGIC < ARCHIVE_SIZE_MAGIC);
-                };
-
-                let mut skip = None;
-
-                if let Some(next_id) = override_next_id {
-                    // Reset override when it is not needed.
-                    if archive_id > next_id {
-                        override_next_id = None;
-                    }
-                }
-
-                // Chunk keys are sorted by offset.
-                match chunk_index {
-                    // "Started" magic comes first, and indicates that the archive exists.
-                    ARCHIVE_STARTED_MAGIC => {
-                        archive_ids.insert(archive_id);
-                    }
-                    // "Override" marig comes next, and sets the next archive id if was finished earlier.
-                    ARCHIVE_OVERRIDE_NEXT_MAGIC => {
-                        override_next_id = Some(u32::from_le_bytes(value[..4].try_into().unwrap()));
-                    }
-                    // "To commit" magic comes next, commit should have been started.
-                    ARCHIVE_TO_COMMIT_MAGIC => {
-                        anyhow::ensure!(
-                            archive_ids.contains(&archive_id),
-                            "invalid archive TO_COMMIT entry"
-                        );
-                        archives_to_commit.push(archive_id);
-                    }
-                    // "Size" magic comes last, and indicates that the archive is fully committed.
-                    ARCHIVE_SIZE_MAGIC => {
-                        // Last archive is already committed
-                        let last = archives_to_commit.pop();
-                        anyhow::ensure!(last == Some(archive_id), "invalid archive SIZE entry");
-
-                        // Require only contiguous uncommited archives list
-                        anyhow::ensure!(archives_to_commit.is_empty(), "skipped archive commit");
-                    }
-                    _ => {
-                        // Skip all chunks until the magic
-                        if chunk_index < ARCHIVE_STARTED_MAGIC {
-                            let mut next_key = [0; tables::Archives::KEY_LEN];
-                            next_key[..4].copy_from_slice(&archive_id.to_be_bytes());
-                            next_key[4..].copy_from_slice(&ARCHIVE_STARTED_MAGIC.to_be_bytes());
-                            skip = Some(next_key);
-                        }
-                    }
-                }
-
-                match skip {
-                    None => iter.next(),
-                    Some(key) => iter.seek(key),
-                }
-            }
-
-            Ok::<_, anyhow::Error>((archive_ids, override_next_id, archives_to_commit))
-        })
-        .await??;
-
+        // Update in-memory structures
         {
             let mut ids = self.archive_ids.write();
-            ids.items.extend(archive_ids);
-            ids.override_next_id = override_next_id;
+            ids.items = state.committed_archives.clone();
         }
 
         tracing::info!(
             elapsed = %humantime::format_duration(started_at.elapsed()),
-            ?override_next_id,
+            archive_count,
+            building_count = state.building_archives.len(),
             "finished preloading archive ids"
         );
 
-        for archive_id in to_commit {
-            tracing::info!(archive_id, "clear partially committed archive");
-            // Solves the problem of non-deterministic compression when commit archive
-            // was interrupted and should be rewritten
-            self.clear_archive(archive_id)?;
-
-            tracing::info!(archive_id, "rewrite partially committed archive");
-            let mut task = self.spawn_commit_archive(archive_id);
-            task.finish().await?;
-
-            // Notify archive subscribers
-            self.archive_ids_tx.send(task.archive_id).ok();
+        // Handle any incomplete archives
+        for archive_id in state.building_archives {
+            if self.should_resume_archive(archive_id)? {
+                tracing::info!(archive_id, "resuming incomplete archive");
+                let mut task = self.spawn_commit_archive(archive_id);
+                task.finish().await?;
+                self.archive_ids_tx.send(task.archive_id).ok();
+            } else {
+                tracing::info!(archive_id, "cleaning up stale building archive");
+                self.cleanup_archive_block_ids(archive_id)?;
+            }
         }
 
+        Ok(())
+    }
+
+    /// Determine if an archive should be resumed based on its state
+    fn should_resume_archive(&self, archive_id: u32) -> Result<bool> {
+        // Check if there are actually block IDs for this archive
+        match self.db.archive_block_ids.get(archive_id.to_be_bytes())? {
+            Some(block_ids) => Ok(!block_ids.is_empty()),
+            None => Ok(false),
+        }
+    }
+
+    /// Clean up `archive_block_ids` for a specific archive
+    fn cleanup_archive_block_ids(&self, archive_id: u32) -> Result<()> {
+        let mut batch = rocksdb::WriteBatch::default();
+        let archive_block_ids_cf = self.db.archive_block_ids.cf();
+        batch.delete_cf(&archive_block_ids_cf, archive_id.to_be_bytes());
+        self.db.rocksdb().write(batch)?;
         Ok(())
     }
 
@@ -296,6 +310,36 @@ impl BlobStorage {
         Ok(None)
     }
 
+    /// This function is the primary way we add a block to a long-term storage archive. It's a three-step process:
+    ///
+    /// **Step 1: Decide which archive to use**
+    /// First, we determine the correct archive for this block. This logic is based on the block's sequence number
+    /// and whether it's a key block, which forces a new archive to start.
+    ///
+    /// **Step 2: Add the block's ID to the archive list**
+    /// We record that this block belongs to its designated archive. This is done efficiently in `RocksDB`.
+    /// The presence of this record marks the archive as "in progress."
+    ///
+    /// **Step 3: Finalize the *previous* archive (if it's ready)**
+    /// When a new archive is started, it signals that the previous one is full and ready to be finalized.
+    /// We then kick off an asynchronous background task to build and commit that completed archive.
+    ///
+    /// ## Important Guarantees
+    ///
+    /// **Sequential Calls are Required:** You *must* call this function sequentially. The calculation for archive IDs
+    /// is stateful and relies on the previous call's state. This is currently handled by `BlockStrider`,
+    /// so be cautious if calling this from anywhere else.
+    ///
+    /// **Atomic & Safe:**
+    /// - A block's ID is safely stored in `RocksDB` *before* we attempt to build the archive file.
+    /// - The final archive file is committed atomically (it's all-or-nothing).
+    /// - If a commit fails, the block IDs remain in `RocksDB`, allowing us to recover and retry later.
+    ///
+    /// ## Error Recovery
+    ///
+    /// If the node crashes or something goes wrong, the block IDs will still be in `RocksDB`.
+    /// On restart, a recovery process will find these incomplete archives and automatically resume
+    /// the commit process.
     pub async fn move_into_archive(
         &self,
         handle: &BlockHandle,
@@ -308,7 +352,6 @@ impl BlobStorage {
 
         // Prepare cf
         let archive_block_ids_cf = self.db.archive_block_ids.cf();
-        let chunks_cf = self.db.archives.cf();
 
         // Prepare archive
         let archive_id = self.prepare_archive_id(
@@ -317,34 +360,13 @@ impl BlobStorage {
         );
         let archive_id_bytes = archive_id.id.to_be_bytes();
 
-        // 0. Create transaction
+        // Create transaction
         let mut batch = rocksdb::WriteBatch::default();
 
-        // 1. Append archive block id
+        // Append archive block id (this implicitly marks archive as "building")
         batch.merge_cf(&archive_block_ids_cf, archive_id_bytes, &block_id_bytes);
 
-        // 2. Store info that new archive was started
-        if archive_id.is_new {
-            let mut key = [0u8; tables::Archives::KEY_LEN];
-            key[..4].copy_from_slice(&archive_id_bytes);
-            key[4..].copy_from_slice(&ARCHIVE_STARTED_MAGIC.to_be_bytes());
-            batch.put_cf(&chunks_cf, key, []);
-        }
-        // 3. Store info about overriding next archive id
-        if let Some(next_id) = archive_id.override_next_id {
-            let mut key = [0u8; tables::Archives::KEY_LEN];
-            key[..4].copy_from_slice(&archive_id_bytes);
-            key[4..].copy_from_slice(&ARCHIVE_OVERRIDE_NEXT_MAGIC.to_be_bytes());
-            batch.put_cf(&chunks_cf, key, next_id.to_le_bytes());
-        }
-        // 4. Store info that archive commit is in progress
-        if let Some(to_commit) = archive_id.to_commit {
-            let mut key = [0u8; tables::Archives::KEY_LEN];
-            key[..4].copy_from_slice(&to_commit.to_be_bytes());
-            key[4..].copy_from_slice(&ARCHIVE_TO_COMMIT_MAGIC.to_be_bytes());
-            batch.put_cf(&chunks_cf, key, []);
-        }
-        // 4. Execute transaction
+        // Execute transaction
         self.db.rocksdb().write(batch)?;
 
         tracing::debug!(block_id = %handle.id(), "saved block id into archive");
@@ -397,62 +419,35 @@ impl BlobStorage {
     }
 
     pub fn get_archive_size(&self, id: u32) -> Result<Option<usize>> {
-        let mut key = [0u8; tables::Archives::KEY_LEN];
-        key[..4].copy_from_slice(&id.to_be_bytes());
-        key[4..].copy_from_slice(&ARCHIVE_SIZE_MAGIC.to_be_bytes());
-
-        match self.db.archives.get(key.as_slice())? {
-            Some(slice) => Ok(Some(
-                u64::from_le_bytes(slice.as_ref().try_into().unwrap()) as usize
-            )),
-            None => Ok(None),
+        if let Some(size) = self.archives.size(&id)? {
+            return Ok(Some(size as usize));
         }
+
+        Ok(None)
     }
 
-    pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<OwnedPinnableSlice> {
-        let chunk_size = self.archive_chunk_size().get() as u64;
+    /// Get the complete archive (compressed).
+    pub async fn get_archive(&self, id: u32) -> Result<Option<Bytes>> {
+        if let Some(compressed_data) = self.archives.get(&id)? {
+            return Ok(Some(compressed_data));
+        }
+        Ok(None)
+    }
+
+    /// Get a chunk of the archive at the specified offset.
+    pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<Bytes> {
+        let chunk_size = Self::archive_chunk_size().get() as u64;
         if offset % chunk_size != 0 {
             return Err(BlockStorageError::InvalidOffset.into());
         }
 
-        let chunk_index = offset / chunk_size;
-
-        let mut key = [0u8; tables::Archives::KEY_LEN];
-        key[..4].copy_from_slice(&id.to_be_bytes());
-        key[4..].copy_from_slice(&chunk_index.to_be_bytes());
-
-        let chunk = self
-            .db
-            .archives
-            .get(key.as_slice())?
-            .ok_or(BlockStorageError::ArchiveNotFound)?;
-
-        // SAFETY: A value was received from the same RocksDB instance.
-        Ok(unsafe { OwnedPinnableSlice::new(self.db.rocksdb().clone(), chunk) })
+        self.archives
+            .get_range(&id, offset, offset + chunk_size)?
+            .ok_or(BlockStorageError::ArchiveNotFound.into())
     }
 
     pub fn subscribe_to_archive_ids(&self) -> broadcast::Receiver<u32> {
         self.archive_ids_tx.subscribe()
-    }
-
-    pub fn archive_chunks_iterator(&self, archive_id: u32) -> rocksdb::DBRawIterator<'_> {
-        let mut from = [0u8; tables::Archives::KEY_LEN];
-        from[..4].copy_from_slice(&archive_id.to_be_bytes());
-
-        let mut to = [0u8; tables::Archives::KEY_LEN];
-        to[..4].copy_from_slice(&archive_id.to_be_bytes());
-        to[4..].copy_from_slice(&ARCHIVE_MAGIC_MIN.to_be_bytes());
-
-        let mut read_opts = self.db.archives.new_read_config();
-        read_opts.set_iterate_upper_bound(to.as_slice());
-
-        let rocksdb = self.db.rocksdb();
-        let archives_cf = self.db.archives.cf();
-
-        let mut raw_iterator = rocksdb.raw_iterator_cf_opt(&archives_cf, read_opts);
-        raw_iterator.seek(from);
-
-        raw_iterator
     }
 
     pub fn remove_outdated_archives(&self, until_id: u32) -> Result<()> {
@@ -492,21 +487,22 @@ impl BlobStorage {
 
         drop(archive_ids);
 
-        // Remove all archives in range `[0, until_id)`
-        let archives_cf = self.db.archives.cf();
-        let write_options = self.db.archives.write_config();
+        self.archives.remove_range(0..until_id)?;
 
-        let start_key = [0u8; tables::Archives::KEY_LEN];
+        // Clean up archive_block_ids entries for deleted archives
+        let archive_block_ids_cf = self.db.archive_block_ids.cf();
+        let write_options = self.db.archive_block_ids.write_config();
 
-        // NOTE: End key points to the first entry of the `until_id` archive,
-        // because `delete_range` removes all entries in range ["from", "to").
-        let mut end_key = [0u8; tables::Archives::KEY_LEN];
-        end_key[..4].copy_from_slice(&until_id.to_be_bytes());
-        end_key[4..].copy_from_slice(&[0; 8]);
+        // Remove all archive_block_ids entries for archives in range [0, until_id)
+        let start_key = 0u32.to_be_bytes();
+        let end_key = until_id.to_be_bytes();
 
-        self.db
-            .rocksdb()
-            .delete_range_cf_opt(&archives_cf, start_key, end_key, write_options)?;
+        self.db.rocksdb().delete_range_cf_opt(
+            &archive_block_ids_cf,
+            start_key,
+            end_key,
+            write_options,
+        )?;
 
         tracing::info!(archive_count = len, first, last, "finished archives GC");
         Ok(())
@@ -585,33 +581,38 @@ impl BlobStorage {
     fn prepare_archive_id(&self, mc_seqno: u32, force_split_archive: bool) -> PreparedArchiveId {
         let mut archive_ids = self.archive_ids.write();
 
-        // Get the closest archive id
-        let prev_id = archive_ids.items.range(..=mc_seqno).next_back().cloned();
-
+        // Handle force split by setting override for next block
         if force_split_archive {
             archive_ids.override_next_id = Some(mc_seqno + 1);
         } else if let Some(next_id) = archive_ids.override_next_id {
+            // Check if we've reached the override point
             match mc_seqno.cmp(&next_id) {
-                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Less => {
+                    // Not yet at override point, continue with current logic
+                }
                 std::cmp::Ordering::Equal => {
+                    // Start new archive at override point
                     let is_new = archive_ids.items.insert(mc_seqno);
+                    archive_ids.override_next_id = None;
+                    let prev_id = archive_ids.items.range(..mc_seqno).next_back().cloned();
                     return PreparedArchiveId {
                         id: mc_seqno,
-                        is_new,
-                        override_next_id: None,
                         to_commit: if is_new { prev_id } else { None },
                     };
                 }
                 std::cmp::Ordering::Greater => {
+                    // Passed override point, clear it
                     archive_ids.override_next_id = None;
                 }
             }
         }
 
+        // Get the closest archive id
+        let prev_id = archive_ids.items.range(..=mc_seqno).next_back().cloned();
+
         let mut archive_id = PreparedArchiveId {
             id: prev_id.unwrap_or_default(),
-            override_next_id: archive_ids.override_next_id,
-            ..Default::default()
+            to_commit: None,
         };
 
         let is_first_archive = prev_id.is_none();
@@ -619,8 +620,6 @@ impl BlobStorage {
             let is_new = archive_ids.items.insert(mc_seqno);
             archive_id = PreparedArchiveId {
                 id: mc_seqno,
-                is_new,
-                override_next_id: None,
                 to_commit: if is_new { prev_id } else { None },
             };
         }
@@ -631,32 +630,13 @@ impl BlobStorage {
         archive_id
     }
 
-    fn clear_archive(&self, archive_id: u32) -> Result<()> {
-        let archives_cf = self.db.archives.cf();
-        let write_options = self.db.archives.write_config();
-
-        let mut start_key = [0u8; tables::Archives::KEY_LEN];
-        start_key[..4].copy_from_slice(&archive_id.to_be_bytes());
-        start_key[4..].fill(0x00);
-
-        let mut end_key = [0u8; tables::Archives::KEY_LEN];
-        end_key[..4].copy_from_slice(&archive_id.to_be_bytes());
-        end_key[4..].fill(0xFF);
-
-        self.db
-            .rocksdb()
-            .delete_range_cf_opt(&archives_cf, start_key, end_key, write_options)?;
-
-        Ok(())
-    }
-
     fn spawn_commit_archive(&self, archive_id: u32) -> CommitArchiveTask {
         let db = self.db.clone();
         let block_handle_storage = self.block_handle_storage.clone();
-        let chunk_size = self.archive_chunk_size().get() as u64;
         let blocks = self.blocks.clone();
+        let archives = self.archives.clone();
 
-        CommitArchiveTask::new(db, block_handle_storage, archive_id, chunk_size, blocks)
+        CommitArchiveTask::new(db, block_handle_storage, archive_id, blocks, archives)
     }
 
     pub fn db(&self) -> &CoreDb {
@@ -667,8 +647,6 @@ impl BlobStorage {
 #[derive(Default)]
 struct PreparedArchiveId {
     id: u32,
-    is_new: bool,
-    override_next_id: Option<u32>,
     to_commit: Option<u32>,
 }
 
@@ -680,9 +658,9 @@ struct ArchiveIds {
 
 type ArchiveIdsTx = broadcast::Sender<u32>;
 
-struct U32Encoder;
+struct ArchiveKeyEncoder;
 
-impl cassadilia::KeyEncoder<u32> for U32Encoder {
+impl cassadilia::KeyEncoder<u32> for ArchiveKeyEncoder {
     fn encode(&self, key: &u32) -> std::result::Result<Vec<u8>, KeyEncoderError> {
         Ok(key.to_be_bytes().to_vec())
     }

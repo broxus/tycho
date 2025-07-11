@@ -50,32 +50,6 @@ impl ColumnFamilyOptions<TableContext> for ArchiveBlockIds {
     }
 }
 
-/// Stores split archives
-/// - Key: `u32 (BE)` (archive id) + `u64 (BE)` (chunk index)
-/// - Value: `Vec<u8>` (archive data chunk)
-pub struct Archives;
-
-impl Archives {
-    pub const KEY_LEN: usize = 4 + 8;
-}
-
-impl ColumnFamily for Archives {
-    const NAME: &'static str = "archives";
-}
-
-impl ColumnFamilyOptions<TableContext> for Archives {
-    fn options(opts: &mut Options, ctx: &mut TableContext) {
-        default_block_based_table_factory(opts, ctx);
-
-        // Uses 512 * 8 = 4 GB
-        optimize_for_level_compaction(opts, ctx, ByteSize::mib(512), 8);
-
-        // data is already compressed
-        opts.set_compression_type(DBCompressionType::None);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
-    }
-}
-
 /// Maps block root hash to block meta
 /// - Key: `[u8; 32]`
 /// - Value: `BlockMeta`

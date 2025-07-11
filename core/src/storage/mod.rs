@@ -61,7 +61,6 @@ impl CoreStorage {
         db.apply_migrations().await?;
 
         let blocks_storage_config = BlockStorageConfig {
-            archive_chunk_size: config.archive_chunk_size,
             blocks_cache: config.blocks_cache,
             blobs_root: ctx.root_dir().path().join("blobs"),
         };
@@ -73,7 +72,6 @@ impl CoreStorage {
                 blocks_storage_config,
                 block_handle_storage.clone(),
                 block_connection_storage.clone(),
-                config.archive_chunk_size,
             )
             .await?,
         );

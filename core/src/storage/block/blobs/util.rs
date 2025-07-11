@@ -1,16 +1,16 @@
 use anyhow::Result;
 use bytes::Buf;
-use tycho_types::cell::HashBytes;
-use tycho_types::models::*;
 use tycho_block_util::archive::ArchiveEntryType;
 use tycho_block_util::block::ShardHeights;
 use tycho_storage::kv::StoredValue;
+use tycho_types::cell::HashBytes;
+use tycho_types::models::*;
 use tycho_util::sync::CancellationFlag;
 use weedb::rocksdb;
 
 use super::super::package_entry::{PackageEntryKey, PartialBlockId};
-use super::types::BlockGcStats;
 use super::BlobStorage;
+use super::types::BlockGcStats;
 use crate::storage::{BlockFlags, CoreDb};
 
 pub fn remove_blocks(
