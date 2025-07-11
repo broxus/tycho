@@ -2,14 +2,16 @@ use std::time::Duration;
 
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
+use tycho_util::config::PartialConfig;
 use tycho_util::serde_helpers;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
 #[serde(deny_unknown_fields, default)]
 pub struct CoreStorageConfig {
     /// Runtime cells cache size.
     ///
     /// Default: 256 MB.
+    #[important]
     pub cells_cache_size: ByteSize,
 
     /// Archive chunk size.
