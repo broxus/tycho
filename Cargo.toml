@@ -16,13 +16,14 @@ members = [
     "control",
     "core",
     "gen-protos",
+    "light-node",
     "network",
     "rpc",
     "simulator",
-    "storage",
     "storage-traits",
+    "storage",
+    "util-proc",
     "util",
-    "light-node",
 ]
 
 [workspace.dependencies]
@@ -66,10 +67,12 @@ parking_lot = { version = "0.12.1" }
 parking_lot_core = "0.9.9"
 pin-project-lite = "0.2"
 pkcs8 = "0.10"
+proc-macro2 = "1.0"
 prost = "0.14.1"
 prost-build = "0.14.1"
 quick_cache = "0.6.0"
 quinn = { version = "0.11.8", default-features = false, features = ["runtime-tokio", "rustls"] }
+quote = "1.0"
 rand = "0.9"
 rand_pcg = { version = "0.9" }
 rayon = "1.10"
@@ -88,6 +91,7 @@ serde_path_to_error = "0.1"
 sha2 = "0.10.8"
 smallvec = "1.13.1"
 socket2 = "0.5.7"
+syn = "2.0.104"
 sysinfo = "0.35"
 tabled = { version = "0.20.0", default-features = false }
 tarpc = { version = "0.36", features = [
@@ -135,6 +139,7 @@ tycho-rpc = { path = "./rpc", version = "0.2.11" }
 tycho-storage = { path = "./storage", version = "0.2.11" }
 tycho-storage-traits = { path = "./storage-traits", version = "0.2.11" }
 tycho-util = { path = "./util", version = "0.2.11" }
+tycho-util-proc = { path = "./util-proc", version = "0.2.11" }
 
 [patch.crates-io]
 # add patches here

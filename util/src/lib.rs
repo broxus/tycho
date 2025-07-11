@@ -1,8 +1,13 @@
+// NOTE: Required for using `PartialConfig` macros.
+#[allow(unused_extern_crates)]
+extern crate self as tycho_util;
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 
 pub mod compression;
+pub mod config;
 pub mod io;
 #[cfg(feature = "mem")]
 pub mod mem;
@@ -112,6 +117,8 @@ macro_rules! realloc_box_enum {
 
 #[doc(hidden)]
 pub mod __internal {
+    pub use serde;
+
     /// # Safety
     /// The following must be true:
     /// - `T` must have the same layout as `R`

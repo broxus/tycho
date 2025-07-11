@@ -4188,8 +4188,18 @@ dependencies = [
  "tracing-appender",
  "tracing-stackdriver",
  "tracing-subscriber",
+ "tycho-util-proc",
  "zstd-safe",
  "zstd-sys",
+]
+
+[[package]]
+name = "tycho-util-proc"
+version = "0.2.11"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
