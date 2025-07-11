@@ -13,15 +13,17 @@ pub struct WuTunerConfig {
     pub tune_interval: u16,
     pub tune: WuTuneType,
     pub max_lag_ms: u16,
+    pub target_wu_price: u16,
 }
 
 impl Default for WuTunerConfig {
     fn default() -> Self {
         Self {
-            ma_interval: 20,
-            tune_interval: 100,
+            ma_interval: 1000,
+            tune_interval: 2000,
             tune: Default::default(),
-            max_lag_ms: 200,
+            max_lag_ms: 300,
+            target_wu_price: 70,
         }
     }
 }
