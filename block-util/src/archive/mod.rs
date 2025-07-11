@@ -6,6 +6,7 @@
 //!  * Archive entry data
 
 use std::collections::BTreeMap;
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use anyhow::Result;

@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use bytesize::ByteSize;
 use tokio::sync::broadcast;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};
@@ -13,7 +12,6 @@ use tycho_types::models::*;
 use tycho_util::FastHasherState;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::{CancellationFlag, rayon_run};
-use weedb::{OwnedPinnableSlice, rocksdb};
 
 pub use self::package_entry::{PackageEntryKey, PartialBlockId};
 use super::util::SlotSubscriptions;
@@ -47,7 +45,6 @@ impl BlockStorage {
         config: BlockStorageConfig,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_connection_storage: Arc<BlockConnectionStorage>,
-        archive_chunk_size: ByteSize,
     ) -> Result<Self> {
         fn weigher(_key: &BlockId, value: &BlockStuff) -> u32 {
             const BLOCK_STUFF_OVERHEAD: u32 = 1024; // 1 KB
@@ -63,15 +60,8 @@ impl BlockStorage {
             .weigher(weigher)
             .build_with_hasher(Default::default());
 
-        let archive_chunk_size =
-            NonZeroU32::new(archive_chunk_size.as_u64().clamp(1, u32::MAX as _) as _).unwrap();
-
-        let blob_storage = blobs::BlobStorage::new(
-            db,
-            block_handle_storage.clone(),
-            archive_chunk_size,
-            &config.blobs_root,
-        )?;
+        let blob_storage =
+            blobs::BlobStorage::new(db, block_handle_storage.clone(), &config.blobs_root)?;
 
         blob_storage.preload_archive_ids().await?;
 
@@ -85,10 +75,8 @@ impl BlockStorage {
         })
     }
 
-    // NOTE: This is intentionally a method, not a constant because
-    // it might be useful to allow configure it during the first run.
     pub fn archive_chunk_size(&self) -> NonZeroU32 {
-        self.blob_storage.archive_chunk_size()
+        blobs::BlobStorage::archive_chunk_size()
     }
 
     /// Iterates over all archives and preloads their ids into memory.
@@ -387,17 +375,17 @@ impl BlockStorage {
         self.blob_storage.get_archive_size(id)
     }
 
-    /// Loads an archive chunk.
-    pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<OwnedPinnableSlice> {
+    pub async fn get_archive_compressed(&self, id: u32) -> Result<Option<Bytes>> {
+        self.blob_storage.get_archive(id).await
+    }
+
+    /// Get a chunk of the archive at the specified offset.
+    pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<Bytes> {
         self.blob_storage.get_archive_chunk(id, offset).await
     }
 
     pub fn subscribe_to_archive_ids(&self) -> broadcast::Receiver<u32> {
         self.blob_storage.subscribe_to_archive_ids()
-    }
-
-    pub fn archive_chunks_iterator(&self, archive_id: u32) -> rocksdb::DBRawIterator<'_> {
-        self.blob_storage.archive_chunks_iterator(archive_id)
     }
 
     pub fn remove_outdated_archives(&self, until_id: u32) -> Result<()> {
@@ -505,7 +493,6 @@ pub struct StoreBlockResult {
 }
 
 pub struct BlockStorageConfig {
-    pub archive_chunk_size: ByteSize,
     pub blocks_cache: BlocksCacheConfig,
     pub blobs_root: PathBuf,
 }

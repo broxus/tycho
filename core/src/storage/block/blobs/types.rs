@@ -24,3 +24,10 @@ pub struct BlockGcStats {
     pub mc_blocks_removed: usize,
     pub total_blocks_removed: usize,
 }
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArchiveState {
+    pub committed_archives: std::collections::BTreeSet<u32>,
+    pub building_archives: Vec<u32>,
+    pub current_archive_id: Option<u32>,
+    pub last_committed_id: u32,
+}
