@@ -1,14 +1,19 @@
 use std::time::Duration;
 
+use num_bigint::BigUint;
 use tycho_types::models::{
-    WorkUnitsParamsExecute, WorkUnitsParamsFinalize, WorkUnitsParamsPrepare,
+    ShardIdent, WorkUnitsParams, WorkUnitsParamsExecute, WorkUnitsParamsFinalize,
+    WorkUnitsParamsPrepare,
 };
 
 use crate::collator::execution_manager::ExecutedGroup;
 use crate::collator::messages_reader::MessagesReaderMetrics;
 use crate::collator::types::{BlockCollationData, ExecuteMetrics, FinalizeMetrics};
 use crate::tracing_targets;
+use crate::types::McData;
+use crate::types::processed_upto::BlockSeqno;
 
+#[derive(Default)]
 pub struct PrepareMsgGroupsWu {
     pub total_wu: u64,
     pub total_elapsed: Duration,
@@ -27,7 +32,7 @@ pub struct PrepareMsgGroupsWu {
 }
 
 impl PrepareMsgGroupsWu {
-    pub fn calculate(
+    pub(super) fn calculate(
         wu_params_prepare: &WorkUnitsParamsPrepare,
         msgs_reader_metrics: &MessagesReaderMetrics,
         prepare_msg_groups_total_elapsed: Duration,
@@ -144,7 +149,7 @@ pub struct ExecuteWu {
     pub process_txs_elapsed: Duration,
 }
 impl ExecuteWu {
-    pub fn append_executed_group(
+    pub(super) fn append_executed_group(
         &mut self,
         _wu_params_execute: &WorkUnitsParamsExecute,
         executed_group: &ExecutedGroup,
@@ -154,7 +159,7 @@ impl ExecuteWu {
             .saturating_add(executed_group.total_exec_wu);
     }
 
-    pub fn calculate(
+    pub(super) fn calculate(
         &mut self,
         wu_params_execute: &WorkUnitsParamsExecute,
         execute_metrics: &ExecuteMetrics,
@@ -229,11 +234,18 @@ impl ExecuteWu {
 
 #[derive(Default, Clone)]
 pub struct FinalizeWu {
+    pub diff_msgs_count: u64,
+
     pub create_queue_diff_wu: u64,
     pub create_queue_diff_elapsed: Duration,
 
     pub apply_queue_diff_wu: u64,
     pub apply_queue_diff_elapsed: Duration,
+
+    pub shard_accounts_count: u64,
+    pub updated_accounts_count: u64,
+    pub in_msgs_len: u64,
+    pub out_msgs_len: u64,
 
     pub update_shard_accounts_wu: u64,
     pub update_shard_accounts_elapsed: Duration,
@@ -273,6 +285,8 @@ impl FinalizeWu {
             ..
         } = wu_params_finalize;
 
+        self.diff_msgs_count = diff_msgs_count;
+
         self.create_queue_diff_wu = diff_msgs_count.saturating_mul(create_diff as u64);
         self.apply_queue_diff_wu = diff_msgs_count.saturating_mul(apply_diff as u64);
     }
@@ -296,6 +310,7 @@ impl FinalizeWu {
             serialize_msg,
             state_update_min,
             state_update_accounts,
+            state_update_msg: state_pow_coeff,
             ..
         } = wu_params_finalize;
 
@@ -304,75 +319,61 @@ impl FinalizeWu {
             ..
         } = wu_params_execute;
 
-        let threads_count = (max_threads_count as u64)
-            .min(updated_accounts_count)
-            .max(1);
+        let threads_count = calc_threads_count(max_threads_count as u64, updated_accounts_count);
 
-        let shard_accounts_count_log =
-            shard_accounts_count.checked_ilog2().unwrap_or_default() as u64;
-        let updated_accounts_count_log =
-            updated_accounts_count.checked_ilog2().unwrap_or_default() as u64;
-        let in_msgs_len_log = in_msgs_len.checked_ilog2().unwrap_or_default() as u64;
-        let out_msgs_len_log = out_msgs_len.checked_ilog2().unwrap_or_default() as u64;
+        self.shard_accounts_count = shard_accounts_count;
+        let shard_accounts_count_log = self.shard_accounts_count_log();
+        self.updated_accounts_count = updated_accounts_count;
+        let updated_accounts_count_log = self.updated_accounts_count_log();
+        self.in_msgs_len = in_msgs_len;
+        let in_msgs_len_log = self.in_msgs_len_log();
+        self.out_msgs_len = out_msgs_len;
+        let out_msgs_len_log = self.out_msgs_len_log();
 
-        // calc update shard accounts:
-        //  * prepare account modifications in (updated_accounts_count)
-        //  * then update map of shard accounts in parallel in (updated_accounts_count)*log(shard_accounts_count)/(threads_count)
-        self.update_shard_accounts_wu = updated_accounts_count
-            .saturating_add(
-                updated_accounts_count
-                    .saturating_mul(shard_accounts_count_log)
-                    .saturating_div(threads_count),
-            )
-            .saturating_mul(build_accounts as u64);
+        let scale = 10;
+        let pow_shard_accounts_count = self.pow_shard_accounts_count(state_pow_coeff, scale);
 
-        // calc build account blocks:
-        //  * build maps of transactions by accounts in parallel in (txs_count)*log(txs_count/threads_count)/(threads_count)
-        //  * then build AugDict of accounts blocks in (updated_accounts_count)*log(updated_accounts_count)
-        let in_msgs_len_div_threads_count_log = in_msgs_len
-            .saturating_div(threads_count)
-            .checked_ilog2()
-            .unwrap_or_default() as u64;
-        self.build_accounts_blocks_wu = in_msgs_len
-            .saturating_mul(in_msgs_len_div_threads_count_log)
-            .saturating_div(threads_count)
-            .saturating_add(updated_accounts_count.saturating_mul(updated_accounts_count_log))
-            .saturating_mul(build_transactions as u64);
+        // calc update shard accounts
+        self.calc_update_shard_accounts_wu(
+            threads_count as u128,
+            shard_accounts_count_log as u128,
+            pow_shard_accounts_count,
+            scale,
+            build_accounts as u128,
+        );
 
-        // calc build in msgs:
-        //  * build AugDict of in msgs in (in_msgs_len)*log(in_msgs_len)
-        self.build_in_msgs_wu = in_msgs_len
-            .saturating_mul(in_msgs_len_log)
-            .saturating_mul(build_in_msg as u64);
+        // calc build account blocks
+        self.calc_build_accounts_blocks_wu(
+            threads_count,
+            updated_accounts_count_log,
+            build_transactions as u64,
+        );
 
-        // calc build out msgs:
-        //  * build AugDict of out msgs in (out_msgs_len)*log(out_msgs_len)
-        self.build_out_msgs_wu = out_msgs_len
-            .saturating_mul(out_msgs_len_log)
-            .saturating_mul(build_out_msg as u64);
+        // calc build in msgs
+        self.calc_build_in_msgs_wu(in_msgs_len_log, build_in_msg as u64);
+
+        // calc build out msgs
+        self.calc_build_out_msgs_wu(out_msgs_len_log, build_out_msg as u64);
 
         // calc build state update
-        //  * calc update of all updated accounts in parallel in (updated_accounts_count)*log(shard_accounts_count)/(threads_count)
-        //  * use min value if calculated is less
-        self.build_state_update_wu = std::cmp::max(
-            state_update_min as u64,
-            updated_accounts_count
-                .saturating_mul(shard_accounts_count_log)
-                .saturating_div(threads_count)
-                .saturating_mul(state_update_accounts as u64),
+        self.calc_build_state_update_wu(
+            threads_count as u128,
+            shard_accounts_count_log as u128,
+            pow_shard_accounts_count,
+            scale,
+            state_update_min as u128,
+            state_update_accounts as u128,
         );
 
         // calc build block
-        //  * serialize each account block in (updated_accounts_count) and use min value if calculated is less
-        //  * serialize in msgs and out msgs in (in_msgs_len + out_msgs_len)
-        self.build_block_wu = std::cmp::max(
+        self.calc_build_block_wu(
             serialize_min as u64,
-            updated_accounts_count.saturating_mul(serialize_accounts as u64),
-        )
-        .saturating_add((in_msgs_len + out_msgs_len).saturating_mul(serialize_msg as u64));
+            serialize_accounts as u64,
+            serialize_msg as u64,
+        );
     }
 
-    pub fn append_elapsed_timings(&mut self, finalize_metrics: &FinalizeMetrics) {
+    pub(super) fn append_elapsed_timings(&mut self, finalize_metrics: &FinalizeMetrics) {
         self.create_queue_diff_elapsed = finalize_metrics.create_queue_diff_elapsed;
         self.apply_queue_diff_elapsed = finalize_metrics.apply_queue_diff_elapsed;
 
@@ -395,11 +396,151 @@ impl FinalizeWu {
         self.total_elapsed = finalize_metrics.total_timer.total_elapsed;
     }
 
+    pub fn shard_accounts_count_log(&self) -> u64 {
+        self.shard_accounts_count
+            .checked_ilog2()
+            .unwrap_or_default() as u64
+    }
+
+    pub fn pow_shard_accounts_count(&self, state_pow_coeff: u16, scale: u128) -> u128 {
+        let (numerator, denominator) = unpack_from_u16(state_pow_coeff);
+        compute_scaled_pow(
+            self.shard_accounts_count as u128,
+            numerator as u32,
+            denominator as u32,
+            scale,
+        )
+    }
+
+    pub fn updated_accounts_count_log(&self) -> u64 {
+        self.updated_accounts_count
+            .checked_ilog2()
+            .unwrap_or_default() as u64
+    }
+
+    fn calc_update_shard_accounts_wu(
+        &mut self,
+        threads_count: u128,
+        shard_accounts_count_log: u128,
+        pow_shard_accounts_count: u128,
+        scale: u128,
+        update_shard_accounts_wu_param: u128,
+    ) {
+        self.update_shard_accounts_wu = self
+            .calc_update_shard_accounts_wu_base(
+                threads_count,
+                shard_accounts_count_log,
+                pow_shard_accounts_count,
+                scale,
+            )
+            .saturating_mul(update_shard_accounts_wu_param)
+            .saturating_div(scale) as u64;
+    }
+
+    fn calc_update_shard_accounts_wu_base(
+        &self,
+        threads_count: u128,
+        shard_accounts_count_log: u128,
+        pow_shard_accounts_count: u128,
+        scale: u128,
+    ) -> u128 {
+        //  * prepare account modifications in (updated_accounts_count)
+        //  * then update map of shard accounts in parallel in (updated_accounts_count)*log(shard_accounts_count)/(threads_count)
+        //  * additionally multiply on (shard_accounts_count^a) for better precision on a large state
+        (self.updated_accounts_count as u128)
+            .saturating_mul(scale)
+            .saturating_add(
+                (self.updated_accounts_count as u128)
+                    .saturating_mul(shard_accounts_count_log)
+                    .saturating_div(threads_count)
+                    .saturating_mul(pow_shard_accounts_count),
+            )
+    }
+
+    pub fn calc_target_update_shard_accounts_wu_param(
+        &self,
+        target_wu: u128,
+        threads_count: u128,
+        shard_accounts_count_log: u128,
+        pow_shard_accounts_count: u128,
+        scale: u128,
+    ) -> Option<u64> {
+        // A * C + A * L / T * P * C / S = (A * S + A * L / T * P) * C / S = WU
+        // C = WU * S / (A * S + A * L / T * P)
+        let base = self.calc_update_shard_accounts_wu_base(
+            threads_count,
+            shard_accounts_count_log,
+            pow_shard_accounts_count,
+            scale,
+        );
+        if base == 0 {
+            return None;
+        }
+        Some(target_wu.saturating_mul(scale).saturating_div(base) as u64)
+    }
+
+    pub fn calc_target_update_shard_accounts_wu(&self, target_build_in_msgs_wu: u64) -> u64 {
+        self.calc_target_wu_from_build_in_msgs_wu(
+            self.update_shard_accounts_elapsed.as_nanos(),
+            target_build_in_msgs_wu,
+        )
+    }
+
     pub fn update_shard_accounts_wu_price(&self) -> f64 {
         if self.update_shard_accounts_wu == 0 {
             return 0.0;
         }
         self.update_shard_accounts_elapsed.as_nanos() as f64 / self.update_shard_accounts_wu as f64
+    }
+
+    fn calc_build_accounts_blocks_wu(
+        &mut self,
+        threads_count: u64,
+        updated_accounts_count_log: u64,
+        build_accounts_blocks_wu_param: u64,
+    ) {
+        self.build_accounts_blocks_wu = self
+            .calc_build_accounts_blocks_wu_base(threads_count, updated_accounts_count_log)
+            .saturating_mul(build_accounts_blocks_wu_param);
+    }
+
+    fn calc_build_accounts_blocks_wu_base(
+        &self,
+        threads_count: u64,
+        updated_accounts_count_log: u64,
+    ) -> u64 {
+        //  * build maps of transactions by accounts in parallel in (txs_count)*log(txs_count/threads_count)/(threads_count)
+        //  * then build AugDict of accounts blocks in (updated_accounts_count)*log(updated_accounts_count)
+        let in_msgs_len_div_threads_count_log =
+            self.in_msgs_len_div_threads_count_log(threads_count);
+        self.in_msgs_len
+            .saturating_mul(in_msgs_len_div_threads_count_log)
+            .saturating_div(threads_count)
+            .saturating_add(
+                self.updated_accounts_count
+                    .saturating_mul(updated_accounts_count_log),
+            )
+    }
+
+    pub fn calc_target_build_accounts_blocks_wu_param(
+        &self,
+        target_wu: u64,
+        threads_count: u64,
+        updated_accounts_count_log: u64,
+    ) -> Option<u64> {
+        let base =
+            self.calc_build_accounts_blocks_wu_base(threads_count, updated_accounts_count_log);
+        if base == 0 {
+            return None;
+        }
+        Some(target_wu.saturating_div(base))
+    }
+
+    pub fn calc_target_build_accounts_blocks_wu(&self, target_build_in_msgs_wu: u64) -> u64 {
+        self.calc_target_wu_from_build_in_msgs_wu(
+            self.build_accounts_blocks_elapsed.as_nanos(),
+            target_build_in_msgs_wu,
+        )
     }
 
     pub fn build_accounts_blocks_wu_price(&self) -> f64 {
@@ -421,11 +562,95 @@ impl FinalizeWu {
         self.build_accounts_elapsed.as_nanos() as f64 / build_accounts_wu as f64
     }
 
+    pub fn in_msgs_len_log(&self) -> u64 {
+        self.in_msgs_len.checked_ilog2().unwrap_or_default() as u64
+    }
+
+    pub fn in_msgs_len_div_threads_count_log(&self, threads_count: u64) -> u64 {
+        self.in_msgs_len
+            .saturating_div(threads_count)
+            .checked_ilog2()
+            .unwrap_or_default() as u64
+    }
+
+    fn calc_build_in_msgs_wu(&mut self, in_msgs_len_log: u64, build_in_msg_wu_param: u64) {
+        //  * build AugDict of in msgs in (in_msgs_len)*log(in_msgs_len)
+        self.build_in_msgs_wu = self
+            .calc_build_in_msgs_wu_base(in_msgs_len_log)
+            .saturating_mul(build_in_msg_wu_param);
+    }
+
+    fn calc_build_in_msgs_wu_base(&self, in_msgs_len_log: u64) -> u64 {
+        //  * build AugDict of in msgs in (in_msgs_len)*log(in_msgs_len)
+        self.in_msgs_len.saturating_mul(in_msgs_len_log)
+    }
+
+    pub fn calc_target_build_in_msg_wu_param(
+        &self,
+        target_wu: u64,
+        in_msgs_len_log: u64,
+    ) -> Option<u64> {
+        let base = self.calc_build_in_msgs_wu_base(in_msgs_len_log);
+        if base == 0 {
+            return None;
+        }
+        Some(target_wu.saturating_div(base))
+    }
+
+    pub fn calc_target_build_in_msgs_wu(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.build_in_msgs_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
+    }
+
     pub fn build_in_msgs_wu_price(&self) -> f64 {
         if self.build_in_msgs_wu == 0 {
             return 0.0;
         }
         self.build_in_msgs_elapsed.as_nanos() as f64 / self.build_in_msgs_wu as f64
+    }
+
+    pub fn out_msgs_len_log(&self) -> u64 {
+        self.out_msgs_len.checked_ilog2().unwrap_or_default() as u64
+    }
+
+    fn calc_build_out_msgs_wu(&mut self, out_msgs_len_log: u64, build_out_msg_wu_param: u64) {
+        self.build_out_msgs_wu = self
+            .calc_build_out_msgs_wu_base(out_msgs_len_log)
+            .saturating_mul(build_out_msg_wu_param);
+    }
+
+    fn calc_build_out_msgs_wu_base(&self, out_msgs_len_log: u64) -> u64 {
+        //  * build AugDict of out msgs in (out_msgs_len)*log(out_msgs_len)
+        self.out_msgs_len.saturating_mul(out_msgs_len_log)
+    }
+
+    pub fn calc_target_build_out_msg_wu_param(
+        &self,
+        target_wu: u64,
+        out_msgs_len_log: u64,
+    ) -> Option<u64> {
+        let base = self.calc_build_out_msgs_wu_base(out_msgs_len_log);
+        if base == 0 {
+            return None;
+        }
+        Some(target_wu.saturating_div(base))
+    }
+
+    pub fn calc_target_build_out_msgs_wu(&self, target_build_in_msgs_wu: u64) -> u64 {
+        self.calc_target_wu_from_build_in_msgs_wu(
+            self.build_out_msgs_elapsed.as_nanos(),
+            target_build_in_msgs_wu,
+        )
+    }
+
+    fn calc_target_wu_from_build_in_msgs_wu(
+        &self,
+        target_elapsed_nanos: u128,
+        target_build_in_msgs_wu: u64,
+    ) -> u64 {
+        let target_wu = target_elapsed_nanos as f64 / self.build_in_msgs_elapsed.as_nanos() as f64
+            * target_build_in_msgs_wu as f64;
+        target_wu.saturating_to_u64()
     }
 
     pub fn build_out_msgs_wu_price(&self) -> f64 {
@@ -451,11 +676,123 @@ impl FinalizeWu {
             / max_wu as f64
     }
 
+    fn calc_build_state_update_wu(
+        &mut self,
+        threads_count: u128,
+        shard_accounts_count_log: u128,
+        pow_shard_accounts_count: u128,
+        scale: u128,
+        build_state_update_wu_min: u128,
+        build_state_update_wu_param: u128,
+    ) {
+        //  * use min value if calculated is less
+        self.build_state_update_wu = std::cmp::max(
+            build_state_update_wu_min,
+            self.calc_build_state_update_wu_base(
+                threads_count,
+                shard_accounts_count_log,
+                pow_shard_accounts_count,
+            )
+            .saturating_mul(build_state_update_wu_param)
+            .saturating_div(scale),
+        ) as u64;
+    }
+
+    fn calc_build_state_update_wu_base(
+        &self,
+        threads_count: u128,
+        shard_accounts_count_log: u128,
+        pow_shard_accounts_count: u128,
+    ) -> u128 {
+        //  * calc update of all updated accounts in parallel in (updated_accounts_count)*log(shard_accounts_count)/(threads_count)
+        //  * additionally multiply on (shard_accounts_count^0.1504) for better precision on a large state
+        (self.updated_accounts_count as u128)
+            .saturating_mul(shard_accounts_count_log)
+            .saturating_div(threads_count)
+            .saturating_mul(pow_shard_accounts_count)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn calc_target_build_state_update_wu_param(
+        &self,
+        target_wu: u128,
+        threads_count: u128,
+        shard_accounts_count_log: u128,
+        pow_shard_accounts_count: u128,
+        scale: u128,
+        build_state_update_wu_min: u128,
+        curr_build_state_update_wu_param: u128,
+    ) -> Option<u64> {
+        if target_wu < build_state_update_wu_min {
+            Some(curr_build_state_update_wu_param as u64)
+        } else {
+            let base = self.calc_build_state_update_wu_base(
+                threads_count,
+                shard_accounts_count_log,
+                pow_shard_accounts_count,
+            );
+            if base == 0 {
+                return None;
+            }
+            Some(target_wu.saturating_mul(scale).saturating_div(base) as u64)
+        }
+    }
+
+    pub fn calc_target_build_state_update_wu(&self, target_build_in_msgs_wu: u64) -> u64 {
+        self.calc_target_wu_from_build_in_msgs_wu(
+            self.build_state_update_elapsed.as_nanos(),
+            target_build_in_msgs_wu,
+        )
+    }
+
     pub fn build_state_update_wu_price(&self) -> f64 {
         if self.build_state_update_wu == 0 {
             return 0.0;
         }
         self.build_state_update_elapsed.as_nanos() as f64 / self.build_state_update_wu as f64
+    }
+
+    fn calc_build_block_wu(
+        &mut self,
+        serialize_min_wu: u64,
+        serialize_account_wu_param: u64,
+        serialize_msg_wu_param: u64,
+    ) {
+        //  * serialize each account block in (updated_accounts_count)
+        //  * serialize in msgs and out msgs in (in_msgs_len + out_msgs_len)
+        //  * use min value if calculated is less
+        self.build_block_wu = std::cmp::max(
+            serialize_min_wu,
+            self.updated_accounts_count
+                .saturating_mul(serialize_account_wu_param)
+                .saturating_add(
+                    (self.in_msgs_len + self.out_msgs_len).saturating_mul(serialize_msg_wu_param),
+                ),
+        );
+    }
+
+    pub fn calc_target_build_block_wu_param(
+        &self,
+        target_wu: u64,
+        serialize_min_wu: u64,
+        curr_serialize_wu_param: u64,
+    ) -> Option<u64> {
+        if target_wu < serialize_min_wu {
+            Some(curr_serialize_wu_param)
+        } else {
+            let base = self.updated_accounts_count + self.in_msgs_len + self.out_msgs_len;
+            if base == 0 {
+                return None;
+            }
+            Some(target_wu.saturating_div(base))
+        }
+    }
+
+    pub fn calc_target_build_block_wu(&self, target_build_in_msgs_wu: u64) -> u64 {
+        self.calc_target_wu_from_build_in_msgs_wu(
+            self.build_block_elapsed.as_nanos(),
+            target_build_in_msgs_wu,
+        )
     }
 
     pub fn build_block_wu_price(&self) -> f64 {
@@ -508,4 +845,403 @@ impl FinalizeWu {
         }
         self.total_elapsed.as_nanos() as f64 / total_wu as f64
     }
+}
+
+#[derive(Default, Clone)]
+pub struct DoCollateWu {
+    pub resume_collation_wu: u64,
+    pub resume_collation_elapsed: Duration,
+
+    pub resume_collation_wu_per_block: u64,
+    pub resume_collation_elapsed_per_block_ns: u128,
+
+    pub collation_total_elapsed: Duration,
+}
+
+impl DoCollateWu {
+    pub fn calculate_resume_collation_wu(
+        &mut self,
+        wu_params_finalize: &WorkUnitsParamsFinalize,
+        max_threads_count: u64,
+        mc_data: &McData,
+        current_shard: &ShardIdent,
+        shard_accounts_count: u64,
+        updated_accounts_count: u64,
+    ) {
+        let threads_count = calc_threads_count(max_threads_count, updated_accounts_count);
+
+        let &WorkUnitsParamsFinalize {
+            state_update_msg: state_pow_coeff,
+            serialize_diff: updated_accounts_count_pow_coeff,
+            diff_tail_len: store_state_wu_param,
+            ..
+        } = wu_params_finalize;
+
+        let normalized_updated_accounts_count = if updated_accounts_count == 0 {
+            0
+        } else {
+            updated_accounts_count.max(4000)
+        };
+
+        let scale = 10;
+
+        let (numerator, denominator) = unpack_from_u16(updated_accounts_count_pow_coeff);
+        let pow_updated_accounts_count = compute_scaled_pow(
+            normalized_updated_accounts_count as u128,
+            numerator as u32,
+            denominator as u32,
+            scale,
+        );
+
+        let (numerator, denominator) = unpack_from_u16(state_pow_coeff);
+        let pow_shard_accounts_count = compute_scaled_pow(
+            shard_accounts_count as u128,
+            numerator as u32,
+            denominator as u32,
+            scale,
+        );
+
+        let shard_accounts_count_log =
+            shard_accounts_count.checked_ilog2().unwrap_or_default() as u64;
+
+        self.resume_collation_wu = (updated_accounts_count as u128)
+            .saturating_mul(pow_updated_accounts_count)
+            .saturating_mul(shard_accounts_count_log as u128)
+            .saturating_mul(pow_shard_accounts_count)
+            .saturating_mul(store_state_wu_param as u128)
+            .saturating_div(threads_count as u128)
+            .saturating_div(scale)
+            .saturating_div(scale) as u64;
+
+        let blocks_count_between_masters = mc_data.get_blocks_count_between_masters(current_shard);
+        assert!(blocks_count_between_masters != 0);
+        self.resume_collation_wu_per_block = self
+            .resume_collation_wu
+            .saturating_div(blocks_count_between_masters);
+        self.resume_collation_elapsed_per_block_ns = self
+            .resume_collation_elapsed
+            .as_nanos()
+            .saturating_div(blocks_count_between_masters as u128);
+    }
+
+    pub fn resume_collation_wu_price(&self) -> f64 {
+        if self.resume_collation_wu == 0 {
+            return 0.0;
+        }
+        self.resume_collation_elapsed.as_nanos() as f64 / self.resume_collation_wu as f64
+    }
+
+    pub fn total_elapsed_ns(&self) -> u128 {
+        self.collation_total_elapsed
+            .as_nanos()
+            .saturating_add(self.resume_collation_elapsed_per_block_ns)
+    }
+}
+
+pub fn calc_threads_count(max_threads_count: u64, updated_accounts_count: u64) -> u64 {
+    (max_threads_count).min(updated_accounts_count).max(1)
+}
+
+pub struct WuEvent {
+    pub shard: ShardIdent,
+    pub seqno: BlockSeqno,
+    pub data: WuEventData,
+}
+pub enum WuEventData {
+    Metrics(Box<WuMetrics>),
+    AnchorLag(MempoolAnchorLag),
+}
+
+#[derive(Debug, Clone)]
+pub struct MempoolAnchorLag {
+    pub requested_at: u64,
+    pub chain_time: u64,
+}
+
+impl MempoolAnchorLag {
+    pub fn lag(&self) -> i64 {
+        (self.requested_at as i64).saturating_sub(self.chain_time as i64)
+    }
+}
+
+#[derive(Default)]
+pub struct WuMetrics {
+    pub wu_params: WorkUnitsParams,
+    pub wu_on_prepare_msg_groups: PrepareMsgGroupsWu,
+    pub wu_on_execute: ExecuteWu,
+    pub wu_on_finalize: FinalizeWu,
+    pub wu_on_do_collate: DoCollateWu,
+    pub has_pending_messages: bool,
+}
+
+impl WuMetrics {
+    pub fn report_metrics(&self, shard: &ShardIdent) {
+        let labels = [("workchain", shard.workchain().to_string())];
+
+        // prepare
+        metrics::gauge!("tycho_do_collate_wu_on_prepare", &labels)
+            .set(self.wu_on_prepare_msg_groups.total_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_prepare", &labels)
+            .set(self.wu_on_prepare_msg_groups.total_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_prepare_read_ext_msgs", &labels)
+            .set(self.wu_on_prepare_msg_groups.read_ext_msgs_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_read_ext_msgs",
+            &labels
+        )
+        .set(self.wu_on_prepare_msg_groups.read_ext_msgs_wu_price());
+        metrics::gauge!(
+            "tycho_do_collate_wu_on_prepare_read_existing_int_msgs",
+            &labels
+        )
+        .set(self.wu_on_prepare_msg_groups.read_existing_int_msgs_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_read_existing_int_msgs",
+            &labels
+        )
+        .set(
+            self.wu_on_prepare_msg_groups
+                .read_existing_int_msgs_wu_price(),
+        );
+        metrics::gauge!("tycho_do_collate_wu_on_prepare_read_new_int_msgs", &labels)
+            .set(self.wu_on_prepare_msg_groups.read_new_int_msgs_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_read_new_int_msgs",
+            &labels
+        )
+        .set(self.wu_on_prepare_msg_groups.read_new_int_msgs_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_prepare_add_msgs_to_groups", &labels)
+            .set(self.wu_on_prepare_msg_groups.add_msgs_to_groups_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_prepare_add_msgs_to_groups",
+            &labels
+        )
+        .set(self.wu_on_prepare_msg_groups.add_msgs_to_groups_wu_price());
+
+        // execute
+        metrics::gauge!("tycho_do_collate_wu_on_execute", &labels)
+            .set(self.wu_on_execute.total_wu() as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_execute", &labels)
+            .set(self.wu_on_execute.total_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_execute_txs", &labels)
+            .set(self.wu_on_execute.execute_groups_vm_only_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_execute_txs", &labels)
+            .set(self.wu_on_execute.execute_groups_vm_only_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_process_txs", &labels)
+            .set(self.wu_on_execute.process_txs_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_process_txs", &labels)
+            .set(self.wu_on_execute.process_txs_wu_price());
+
+        // create queue diff
+        metrics::gauge!("tycho_do_collate_wu_on_create_queue_diff", &labels)
+            .set(self.wu_on_finalize.create_queue_diff_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_create_queue_diff", &labels)
+            .set(self.wu_on_finalize.create_queue_diff_wu_price());
+
+        // apply queue diff
+        metrics::gauge!("tycho_do_collate_wu_on_apply_queue_diff", &labels)
+            .set(self.wu_on_finalize.apply_queue_diff_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_apply_queue_diff", &labels)
+            .set(self.wu_on_finalize.apply_queue_diff_wu_price());
+
+        // finalize block
+        metrics::gauge!("tycho_do_collate_wu_on_finalize_total", &labels)
+            .set(self.wu_on_finalize.total_wu() as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_finalize_total", &labels)
+            .set(self.wu_on_finalize.total_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_finalize_block", &labels)
+            .set(self.wu_on_finalize.finalize_block_wu() as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_finalize_block", &labels)
+            .set(self.wu_on_finalize.finalize_block_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_block", &labels)
+            .set(self.wu_on_finalize.build_block_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_block", &labels)
+            .set(self.wu_on_finalize.build_block_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_state_update", &labels)
+            .set(self.wu_on_finalize.build_state_update_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_state_update", &labels)
+            .set(self.wu_on_finalize.build_state_update_wu_price());
+        metrics::gauge!(
+            "tycho_do_collate_wu_on_build_accounts_and_messages",
+            &labels
+        )
+        .set(self.wu_on_finalize.max_accounts_in_out_msgs_wu() as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_build_accounts_and_messages",
+            &labels
+        )
+        .set(
+            self.wu_on_finalize
+                .build_accounts_and_messages_in_parallel_wu_price(),
+        );
+        metrics::gauge!("tycho_do_collate_wu_on_build_in_msgs", &labels)
+            .set(self.wu_on_finalize.build_in_msgs_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_in_msgs", &labels)
+            .set(self.wu_on_finalize.build_in_msgs_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_out_msgs", &labels)
+            .set(self.wu_on_finalize.build_out_msgs_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_out_msgs", &labels)
+            .set(self.wu_on_finalize.build_out_msgs_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_update_shard_accounts", &labels)
+            .set(self.wu_on_finalize.update_shard_accounts_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_update_shard_accounts",
+            &labels
+        )
+        .set(self.wu_on_finalize.update_shard_accounts_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_accounts_blocks", &labels)
+            .set(self.wu_on_finalize.build_accounts_blocks_wu as f64);
+        metrics::gauge!(
+            "tycho_do_collate_wu_price_on_build_accounts_blocks",
+            &labels
+        )
+        .set(self.wu_on_finalize.build_accounts_blocks_wu_price());
+        metrics::gauge!("tycho_do_collate_wu_on_build_accounts", &labels)
+            .set(self.wu_on_finalize.build_accounts_wu() as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_build_accounts", &labels)
+            .set(self.wu_on_finalize.build_accounts_wu_price());
+
+        // total on collation
+        let collation_total_wu = self.wu_on_prepare_msg_groups.total_wu
+            + self.wu_on_execute.total_wu()
+            + self.wu_on_finalize.total_wu();
+        let collation_total_wu_price = if collation_total_wu == 0 {
+            0.0
+        } else {
+            self.wu_on_do_collate.collation_total_elapsed.as_nanos() as f64
+                / collation_total_wu as f64
+        };
+        metrics::gauge!("tycho_do_collate_wu_total", &labels).set(collation_total_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_total", &labels).set(collation_total_wu_price);
+
+        // resume collation
+        metrics::gauge!("tycho_do_collate_wu_on_resume_collation", &labels)
+            .set(self.wu_on_do_collate.resume_collation_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_on_resume_collation", &labels)
+            .set(self.wu_on_do_collate.resume_collation_wu_price());
+
+        // total
+        let total_wu = collation_total_wu + self.wu_on_do_collate.resume_collation_wu_per_block;
+        let total_wu_price = if total_wu == 0 {
+            0.0
+        } else {
+            self.wu_on_do_collate.total_elapsed_ns() as f64 / total_wu as f64
+        };
+        metrics::gauge!("tycho_do_collate_wu_total_full", &labels).set(total_wu as f64);
+        metrics::gauge!("tycho_do_collate_wu_price_total_full", &labels).set(total_wu_price);
+    }
+}
+
+pub fn report_anchor_lag_to_metrics(shard: &ShardIdent, lag: i64) {
+    let labels = [("workchain", shard.workchain().to_string())];
+    metrics::gauge!("tycho_collator_anchor_importing_lag_ms", &labels).set(lag as f64);
+}
+
+pub trait F64Ext {
+    fn saturating_to_u64(self) -> u64;
+}
+
+impl F64Ext for f64 {
+    fn saturating_to_u64(self) -> u64 {
+        if self >= u64::MAX as f64 {
+            u64::MAX
+        } else if self < 0.0 {
+            u64::MIN
+        } else {
+            self.trunc() as u64
+        }
+    }
+}
+
+/// Packs two numbers (0..=99) into a single u16: format "AA BB" -> AA*100 + BB
+pub fn pack_into_u16(a: u16, b: u16) -> u16 {
+    assert!(a <= 99, "{a} is out of range 0..=99");
+    assert!(b <= 99, "{b} is out of range 0..=99");
+    a * 100 + b
+}
+
+/// Unpacks two numbers from u16.
+/// Numbers should be in range 0..=99
+pub fn unpack_from_u16(packed: u16) -> (u16, u16) {
+    if packed > 99 * 100 + 99 {
+        return (1, 1);
+    }
+    let a = packed / 100;
+    let b = packed % 100;
+    (a, b)
+}
+
+pub fn compute_scaled_pow(
+    x: u128,
+    pow_coeff_numerator: u32,
+    pow_coeff_denominator: u32,
+    scale: u128,
+) -> u128 {
+    fn compute_root(y: BigUint, denominator: u32) -> BigUint {
+        let one = BigUint::from(1u128);
+        let mut low = BigUint::ZERO;
+        let mut high = &y + &one;
+
+        while &low + &one < high {
+            let mid: BigUint = (&low + &high) >> 1;
+            let power = mid.pow(denominator);
+            if power <= y {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+
+        low
+    }
+
+    let x_pow = BigUint::from(x).pow(pow_coeff_numerator);
+    let scale_pow = BigUint::from(scale).pow(pow_coeff_denominator);
+    let y = x_pow * scale_pow;
+
+    let res = compute_root(y, pow_coeff_denominator);
+    res.try_into().unwrap_or(u128::MAX)
+}
+
+#[test]
+fn test_compute_scaled_pow() {
+    let scale = 100;
+
+    // 20k^1.2
+    let x = 20000;
+    let pow_coeff = 105;
+    let (pow_coeff_numerator, pow_coeff_denominator) = unpack_from_u16(pow_coeff);
+
+    let res = compute_scaled_pow(
+        x,
+        pow_coeff_numerator as u32,
+        pow_coeff_denominator as u32,
+        scale,
+    );
+    println!(
+        "{x}^({pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
+        (res as f64 / scale as f64),
+    );
+
+    let res = x * res;
+    println!(
+        "{x}^(1+{pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
+        (res as f64 / scale as f64),
+    );
+
+    // 10M^0.16
+    let x = 10000000;
+    let pow_coeff = 425;
+    let (pow_coeff_numerator, pow_coeff_denominator) = unpack_from_u16(pow_coeff);
+
+    let res = compute_scaled_pow(
+        x,
+        pow_coeff_numerator as u32,
+        pow_coeff_denominator as u32,
+        scale,
+    );
+    println!(
+        "{x}^({pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
+        (res as f64 / scale as f64),
+    );
 }

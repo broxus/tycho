@@ -32,6 +32,7 @@ use tycho_network::InboundRequestMeta;
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
+use tycho_wu_tuner::service::WuTunerServiceBuilder;
 
 pub use self::config::{ElectionsConfig, NodeConfig, SimpleElectionsConfig};
 #[cfg(feature = "jemalloc")]
@@ -52,6 +53,9 @@ pub struct Node {
     validator_config: ValidatorStdImplConfig,
     internal_queue_config: QueueConfig,
     mempool_config_override: Option<MempoolGlobalConfig>,
+
+    /// Path to the work units tuner config.
+    wu_tuner_config_path: PathBuf,
 }
 
 impl Node {
@@ -61,6 +65,7 @@ impl Node {
         node_config: NodeConfig,
         global_config: GlobalConfig,
         control_socket: PathBuf,
+        wu_tuner_config_path: PathBuf,
     ) -> Result<Self> {
         let base = NodeBase::builder(&node_config.base, &global_config)
             .init_network(public_addr, &keys.as_secret())?
@@ -96,6 +101,7 @@ impl Node {
             validator_config: node_config.validator,
             internal_queue_config: node_config.internal_queue,
             mempool_config_override: global_config.mempool,
+            wu_tuner_config_path,
         })
     }
 
@@ -157,6 +163,11 @@ impl Node {
         }
         .unzip();
 
+        // start work units tuner
+        let wu_tuner = WuTunerServiceBuilder::with_config_path(self.wu_tuner_config_path.clone())
+            .build()
+            .start();
+
         // Create collator
         tracing::info!("starting collator");
 
@@ -199,7 +210,9 @@ impl Node {
             },
             mempool_adapter,
             validator.clone(),
-            CollatorStdImplFactory,
+            CollatorStdImplFactory {
+                wu_tuner_event_sender: Some(wu_tuner.event_sender.clone()),
+            },
             self.mempool_config_override.clone(),
         );
         let collator = CollatorStateSubscriber {
