@@ -146,12 +146,16 @@ impl Inner {
             }
 
             if let Some(committed) = committed {
+                let last_committed = committed.last().map(|a| a.anchor.round());
                 round_ctx.log_committed(&committed);
                 for data in committed {
                     round_ctx.commit_metrics(&data.anchor);
                     committed_info_tx
                         .send(MempoolOutput::NextAnchor(data))
                         .map_err(|_closed| Cancelled())?;
+                }
+                if let Some(last_committed) = last_committed {
+                    committer.remove_committed(last_committed, round_ctx.conf())?;
                 }
             }
 
@@ -199,12 +203,16 @@ impl Inner {
                     .map_err(|_closed| EngineError::Cancelled)?;
             }
 
+            let last_committed = committed.last().map(|a| a.anchor.round());
             round_ctx.log_committed(&committed);
             for data in committed {
                 round_ctx.commit_metrics(&data.anchor);
                 committed_info_tx
                     .send(MempoolOutput::NextAnchor(data))
                     .map_err(|_closed| EngineError::Cancelled)?;
+            }
+            if let Some(last_committed) = last_committed {
+                committer.remove_committed(last_committed, round_ctx.conf())?;
             }
 
             EngineCtx::meter_dag_len(committer.dag_len());
