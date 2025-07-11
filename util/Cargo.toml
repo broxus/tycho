@@ -41,11 +41,14 @@ tracing-subscriber = { workspace = true, optional = true }
 zstd-safe = { workspace = true, features = ["std", "zstdmt"] }
 zstd-sys = { workspace = true }
 
+tycho-util-proc = { workspace = true }
+
 [dev-dependencies]
 criterion = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "rt-multi-thread", "macros"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
 
 [features]
 test = ["dep:tracing-subscriber"]
@@ -65,7 +68,6 @@ cli = [
 name = "p2"
 harness = false
 path = "benches/p2.rs"
-
 
 [lints]
 workspace = true

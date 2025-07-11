@@ -15,6 +15,7 @@ use tycho_types::models::StdAddr;
 use tycho_util::cli::config::ThreadPoolConfig;
 use tycho_util::cli::logger::{LoggerConfig, LoggerOutput};
 use tycho_util::cli::metrics::MetricsConfig;
+use tycho_util::config::PartialConfig;
 
 use crate::util::FpTokens;
 
@@ -148,12 +149,14 @@ impl serde::Serialize for SimpleElectionsConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialConfig)]
 #[serde(default)]
 pub struct NodeConfig {
+    #[partial]
     #[serde(flatten)]
     pub base: NodeBaseConfig,
 
+    #[partial]
     pub collator: CollatorConfig,
 
     pub mempool: MempoolNodeConfig,
@@ -162,16 +165,20 @@ pub struct NodeConfig {
 
     pub validator: ValidatorStdImplConfig,
 
+    #[partial]
     pub rpc: Option<RpcConfig>,
 
     pub control: ControlServerConfig,
 
+    #[important]
     pub metrics: Option<MetricsConfig>,
 
+    #[important]
     pub threads: ThreadPoolConfig,
 
     pub profiling: MemoryProfilingConfig,
 
+    #[important]
     pub logger: LoggerConfig,
 }
 

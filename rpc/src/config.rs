@@ -4,14 +4,16 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tycho_types::models::StdAddr;
+use tycho_util::config::PartialConfig;
 use tycho_util::serde_helpers;
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, PartialConfig)]
 #[serde(default)]
 pub struct RpcConfig {
     /// TCP socket address to listen for incoming RPC connections.
     ///
     /// Default: `0.0.0.0:8000`
+    #[important]
     pub listen_addr: SocketAddr,
 
     /// Whether to generate a stub keyblock from zerostate.
@@ -38,6 +40,7 @@ pub struct RpcConfig {
     /// Configuration of getter requests.
     pub run_get_method: RunGetMethodConfig,
 
+    #[important]
     pub storage: RpcStorageConfig,
 }
 
