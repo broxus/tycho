@@ -137,7 +137,7 @@ impl CollatorStdImpl {
         let block_serializer_cache = self.block_serializer_cache.clone();
 
         let state = Box::new(ActualState {
-            collation_config,
+            collation_config: collation_config.clone(),
             collation_data,
             mc_data,
             prev_shard_data,
@@ -250,6 +250,7 @@ impl CollatorStdImpl {
 
         // send wu metrics to the tuner or just report them
         let wu_metrics = work_units::WuMetrics {
+            wu_params: collation_config.work_units_params.clone(),
             wu_on_prepare_msg_groups: execute_result.prepare_msg_groups_wu,
             wu_on_execute: execute_result.execute_wu,
             wu_on_finalize: finalize_wu,
