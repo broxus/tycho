@@ -5,7 +5,8 @@
 //!  * Archive entry header ([`ArchiveEntryHeader`] as TL)
 //!  * Archive entry data
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -158,6 +159,34 @@ impl Archive {
                 let diff = QueueDiffStuff::deserialize(id, data)?;
                 Ok(WithArchiveData::new::<Bytes>(diff, data.clone()))
             })
+    }
+}
+
+impl Eq for Archive {}
+impl PartialEq for Archive {
+    fn eq(&self, other: &Self) -> bool {
+        self.mc_block_ids == other.mc_block_ids
+            && self.blocks.keys().collect::<BTreeSet<_>>()
+                == other.blocks.keys().collect::<BTreeSet<_>>()
+    }
+}
+
+impl Debug for Archive {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Archive")
+            .field(
+                "mc_block_ids",
+                &self.mc_block_ids.keys().collect::<BTreeSet<_>>(),
+            )
+            .field(
+                "blocks",
+                &self
+                    .blocks
+                    .keys()
+                    .map(|x| x.as_short_id())
+                    .collect::<BTreeSet<_>>(),
+            )
+            .finish()
     }
 }
 
