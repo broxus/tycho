@@ -551,15 +551,11 @@ impl Phase<FinalizeState> {
             // calculate resume collation wu
             self.state.do_collate_wu.calculate_resume_collation_wu(
                 &self.state.collation_config.work_units_params.finalize,
-                self.state
-                    .collation_config
-                    .work_units_params
-                    .execute
-                    .subgroup_size as u64,
-                &self.state.mc_data,
-                &shard,
+                &self.state.collation_config.work_units_params.execute,
                 shard_accounts_count,
                 updated_accounts_count,
+                &self.state.mc_data,
+                &shard,
             );
 
             let blocks_count_between_masters =
@@ -581,7 +577,7 @@ impl Phase<FinalizeState> {
 
             // compute total wu used from last anchor
             let mut new_wu_used_from_last_anchor = wu_used_from_last_anchor
-                .saturating_add(self.extra.execute_result.prepare_msg_groups_wu.total_wu)
+                .saturating_add(self.extra.execute_result.prepare_msg_groups_wu.total_wu())
                 .saturating_add(self.extra.execute_result.execute_wu.total_wu())
                 .saturating_add(self.extra.finalize_wu.total_wu());
             // append resume collation wu only on the first block after master
@@ -611,7 +607,7 @@ impl Phase<FinalizeState> {
                 wu_used_from_last_anchor,
                 new_wu_used_from_last_anchor,
                 max_wu_used_limit,
-                self.extra.execute_result.prepare_msg_groups_wu.total_wu,
+                self.extra.execute_result.prepare_msg_groups_wu.total_wu(),
                 self.extra.execute_result.execute_wu.total_wu(),
                 self.extra.finalize_wu.total_wu(),
             );
