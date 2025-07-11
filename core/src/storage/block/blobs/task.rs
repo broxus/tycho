@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use cassadilia::Cas;
-use tycho_types::models::*;
 use tl_proto::TlWrite;
 use tokio::task::JoinHandle;
 use tycho_block_util::archive::{
     ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX, ArchiveEntryHeader, ArchiveEntryType,
 };
 use tycho_storage::kv::StoredValue;
+use tycho_types::models::*;
 use tycho_util::FastHashSet;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
@@ -29,8 +29,8 @@ impl CommitArchiveTask {
         db: CoreDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         archive_id: u32,
-        chunk_size: u64,
-        blocks: Arc<Cas<PackageEntryKey>>,
+        blocks: Cas<PackageEntryKey>,
+        archives: Cas<u32>,
     ) -> Self {
         let span = tracing::Span::current();
         let cancelled = CancellationFlag::new();
@@ -53,9 +53,15 @@ impl CommitArchiveTask {
                     .archive_block_ids
                     .get(archive_id.to_be_bytes())?
                     .ok_or(BlockStorageError::ArchiveNotFound)?;
+
+                if raw_block_ids.is_empty() {
+                    tracing::info!("no blocks to commit for archive {}", archive_id);
+                    return Ok(());
+                }
+
                 assert_eq!(raw_block_ids.len() % BlockId::SIZE_HINT, 0);
 
-                let mut writer = ArchiveWriter::new(&db, archive_id, chunk_size)?;
+                let mut writer = ArchiveWriter::new(&db, &archives, archive_id)?;
                 let mut header_buffer = Vec::with_capacity(ARCHIVE_ENTRY_HEADER_LEN);
                 let mut decompressed_buffer = vec![0; 1024 * 1024 * 100]; // Max block size is around 100MB
 
@@ -129,8 +135,10 @@ impl CommitArchiveTask {
                 // Done
                 scopeguard::ScopeGuard::into_inner(guard);
                 tracing::info!(
+                    archive_id,
+                    blocks = unique_ids.len(),
                     elapsed = %humantime::format_duration(histogram.finish()),
-                    "finished"
+                    "Archive committed"
                 );
 
                 Ok(())

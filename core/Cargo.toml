@@ -75,6 +75,7 @@ tycho-crypto = { workspace = true }
 tycho-network = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
+similar-asserts = { workspace = true }
 
 [features]
 test = []

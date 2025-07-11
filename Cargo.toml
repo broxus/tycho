@@ -83,6 +83,7 @@ rustc_version = "0.4"
 rustls = "0.23.28"
 rustls-pki-types = "1.12"
 rustls-webpki = "0.103.3"
+similar-asserts = "1.7.0" # looks better than pretty_assertions(compresses output)
 scc = "2.3.3"
 scopeguard = "1.2"
 serde = "1.0"
