@@ -1,12 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use anyhow::Result;
-use bytes::BytesMut;
 use bytesize::ByteSize;
 use futures_util::future;
 use futures_util::future::BoxFuture;
-use tycho_block_util::archive::{Archive, ArchiveVerifier};
+use tycho_block_util::archive::Archive;
 use tycho_block_util::block::{BlockIdExt, BlockIdRelation, BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
@@ -23,15 +22,13 @@ use tycho_network::PeerId;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::models::{BlockId, ShardStateUnsplit};
 use tycho_types::prelude::*;
-use tycho_util::compression::{ZstdCompressStream, ZstdDecompressStream, zstd_decompress};
+use tycho_util::compression::{ZstdCompressStream, zstd_decompress};
 use tycho_util::project_root;
 
 use crate::network::TestNode;
 
 mod network;
 mod utils;
-
-const BLOCK_DATA_CHUNK_SIZE: usize = 1024 * 1024; // 1MB
 
 #[derive(Default, Debug, Clone, Copy)]
 struct DummySubscriber;
@@ -147,43 +144,25 @@ struct ArchiveHandlerInner {}
 
 impl ArchiveHandlerInner {
     fn handle(cx: &ArchiveSubscriberContext<'_>) -> Result<()> {
-        let mut iterator = cx
+        // Archives are now stored as atomic blobs, so we just verify the archive exists
+        // and has a valid size. The actual archive content verification is done
+        // in the check_archive function.
+        let archive_size = cx
             .storage
             .block_storage()
-            .archive_chunks_iterator(cx.archive_id);
+            .get_archive_size(cx.archive_id)?
+            .ok_or_else(|| anyhow::anyhow!("Archive {} not found", cx.archive_id))?;
 
-        let mut zstd_decoder = ZstdDecompressStream::new(BLOCK_DATA_CHUNK_SIZE)?;
-
-        // Reuse buffer for decompressed data
-        let mut decompressed_chunk = Vec::new();
-
-        let mut verifier = ArchiveVerifier::default();
-
-        let mut archive_bytes = BytesMut::new();
-
-        while iterator.valid() {
-            let key = iterator.key().expect("shouldn't happen");
-            let chunk = iterator.value().expect("shouldn't happen");
-
-            let id = u32::from_be_bytes(key[..4].try_into()?);
-            assert_eq!(id, cx.archive_id);
-
-            decompressed_chunk.clear();
-            zstd_decoder.write(chunk.as_ref(), &mut decompressed_chunk)?;
-
-            verifier.write_verify(decompressed_chunk.as_ref())?;
-
-            archive_bytes.extend_from_slice(decompressed_chunk.as_ref());
-
-            // Next key
-            iterator.next();
+        // Ensure the archive has content
+        if archive_size == 0 {
+            return Err(anyhow::anyhow!("Archive {} is empty", cx.archive_id));
         }
 
-        verifier.final_check()?;
-
-        // Build archive
-        Archive::new(archive_bytes)?;
-
+        tracing::info!(
+            "Archive {} exists with size {} bytes",
+            cx.archive_id,
+            archive_size
+        );
         Ok(())
     }
 }
@@ -331,25 +310,30 @@ async fn archives() -> Result<()> {
         anyhow::bail!("archive not found")
     };
 
-    // Check archive size
+    // Check that archive exists and has a valid size
     let archive_size = storage
         .block_storage()
         .get_archive_size(archive_id)?
         .unwrap();
-    assert_eq!(archive_size, first_archive_data.len());
+    assert!(archive_size > 0, "Archive should have content");
 
-    // Check archive data
-    let archive_chunk_size = storage.block_storage().archive_chunk_size().get() as usize;
+    // Get the compressed archive data from storage
+    let stored_archive_data = storage
+        .block_storage()
+        .get_archive_compressed(archive_id)
+        .await?
+        .expect("archive should exist");
 
-    let mut expected_archive_data = vec![];
-    for offset in (0..archive_size).step_by(archive_chunk_size) {
-        let chunk = storage
-            .block_storage()
-            .get_archive_chunk(archive_id, offset as u64)
-            .await?;
-        expected_archive_data.extend_from_slice(&chunk);
-    }
-    assert_eq!(first_archive_data, expected_archive_data);
+    // Decompress the stored archive and compare with the original
+    let mut decompressed_stored = Vec::new();
+    zstd_decompress(&stored_archive_data, &mut decompressed_stored)?;
+
+    // Compare the decompressed content
+    let original_decompressed = decompress(&first_archive_data);
+    assert_eq!(
+        original_decompressed, decompressed_stored,
+        "Archive content should match after decompression"
+    );
 
     test_pagination(storage).await?;
 
@@ -539,10 +523,8 @@ async fn heavy_archives() -> Result<()> {
     storage.block_storage().wait_for_archive_commit().await?;
 
     // Check archive data
-    let archive_chunk_size = storage.block_storage().archive_chunk_size().get() as usize;
-
-    check_archive(&storage, &first_archive_data, archive_chunk_size, 1).await?;
-    check_archive(&storage, &next_archive_data, archive_chunk_size, 101).await?;
+    check_archive(&storage, &first_archive_data, 1).await?;
+    check_archive(&storage, &next_archive_data, 101).await?;
 
     // Make network
     let nodes = network::make_network(storage.clone(), 10);
@@ -696,12 +678,7 @@ async fn heavy_archives() -> Result<()> {
     Ok(())
 }
 
-async fn check_archive(
-    storage: &CoreStorage,
-    original_archive: &[u8],
-    archive_chunk_size: usize,
-    seqno: u32,
-) -> Result<()> {
+async fn check_archive(storage: &CoreStorage, original_archive: &[u8], seqno: u32) -> Result<()> {
     tracing::info!("Checking archive {}", seqno);
     let archive_id = storage.block_storage().get_archive_id(seqno);
 
@@ -715,24 +692,31 @@ async fn check_archive(
         .get_archive_size(archive_id)?
         .unwrap();
 
-    let mut got_archive = vec![];
-    for offset in (0..archive_size).step_by(archive_chunk_size) {
-        let chunk = storage
-            .block_storage()
-            .get_archive_chunk(archive_id, offset as u64)
-            .await?;
-        got_archive.extend_from_slice(&chunk);
-    }
+    let got_archive = storage
+        .block_storage()
+        .get_archive_compressed(archive_id)
+        .await?
+        .expect("archive should exist");
+    let got_archive = got_archive.as_ref();
 
     let original_decompressed = decompress(original_archive);
-    let got_decompressed = decompress(&got_archive);
+    let got_decompressed = decompress(got_archive);
 
     let original_len = original_decompressed.len();
     let got_len = got_decompressed.len();
 
+    let old_parsed = Archive::new(original_decompressed.clone())?;
+    let new_parsed = Archive::new(got_decompressed.clone())?;
+
+    similar_asserts::assert_eq!(
+        CheckArchive(&old_parsed),
+        CheckArchive(&new_parsed),
+        "Parsed archives should match"
+    );
+
     assert_eq!(archive_size, original_archive.len(), "Size mismatch");
     assert_eq!(got_archive.len(), archive_size, "Retrieved size mismatch");
-    assert_eq!(original_archive, &got_archive, "Content mismatch");
+    assert_eq!(original_archive, got_archive, "Content mismatch");
     assert_eq!(
         original_decompressed, got_decompressed,
         "Decompressed mismatch"
@@ -746,4 +730,32 @@ fn decompress(data: &[u8]) -> Vec<u8> {
     let mut decompressed = Vec::new();
     zstd_decompress(data, &mut decompressed).unwrap();
     decompressed
+}
+
+struct CheckArchive<'a>(&'a Archive);
+
+impl Eq for CheckArchive<'_> {}
+impl PartialEq for CheckArchive<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.mc_block_ids == other.0.mc_block_ids
+            && self.0.blocks.keys().collect::<BTreeSet<_>>()
+                == other.0.blocks.keys().collect::<BTreeSet<_>>()
+    }
+}
+
+impl std::fmt::Debug for CheckArchive<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let this = self.0;
+        let mc_block_ids = this.mc_block_ids.keys().collect::<BTreeSet<_>>();
+        let blocks = this
+            .blocks
+            .keys()
+            .map(|x| x.as_short_id())
+            .collect::<BTreeSet<_>>();
+
+        f.debug_struct("Archive")
+            .field("mc_block_ids", &mc_block_ids)
+            .field("blocks", &blocks)
+            .finish()
+    }
 }

@@ -14,12 +14,6 @@ pub struct CoreStorageConfig {
     #[important]
     pub cells_cache_size: ByteSize,
 
-    /// Archive chunk size.
-    ///
-    /// Default: 1 MB.
-    pub archive_chunk_size: ByteSize,
-
-
     /// Archives storage config.
     ///
     /// Archives are disabled if this field is `None`.
@@ -53,7 +47,6 @@ impl Default for CoreStorageConfig {
     fn default() -> Self {
         Self {
             cells_cache_size: ByteSize::mb(256),
-            archive_chunk_size: ByteSize::kb(1024),
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),

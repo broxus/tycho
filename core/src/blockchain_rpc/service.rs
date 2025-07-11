@@ -546,14 +546,11 @@ impl<B> Inner<B> {
             let archive_slice = block_storage
                 .get_archive_chunk(req.archive_id as u32, req.offset)
                 .await?;
-
             Ok::<_, anyhow::Error>(archive_slice)
         };
 
         match get_archive_chunk().await {
-            Ok(data) => overlay::Response::Ok(Data {
-                data: Bytes::from_owner(data),
-            }),
+            Ok(data) => overlay::Response::Ok(Data { data }),
             Err(e) => {
                 tracing::warn!("get_archive_chunk failed: {e:?}");
                 overlay::Response::Err(INTERNAL_ERROR_CODE)

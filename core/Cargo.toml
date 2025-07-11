@@ -36,7 +36,7 @@ bumpalo-herd = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 bytesize = { workspace = true }
 castaway = { workspace = true }
-cassadilia = { git = "https://github.com/0xdeafbeef/cassadilia.git" }
+cassadilia = { workspace = true }
 crc32c = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
@@ -76,6 +76,7 @@ tycho-crypto = { workspace = true }
 tycho-network = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
+similar-asserts = { workspace = true }
 
 [features]
 test = []
