@@ -16,6 +16,7 @@ use super::messages_buffer::MessageGroup;
 use super::types::{
     AccountId, ExecutedTransaction, ParsedMessage, ShardAccountStuff, SkippedTransaction,
 };
+use crate::collator::work_units::ExecuteWu;
 use crate::tracing_targets;
 
 pub(super) struct MessagesExecutor {
@@ -94,7 +95,11 @@ impl MessagesExecutor {
     }
 
     /// Run one execution group of messages by accounts
-    pub fn execute_group(&mut self, msg_group: MessageGroup) -> Result<ExecutedGroup> {
+    pub fn execute_group(
+        &mut self,
+        msg_group: MessageGroup,
+        execute_wu: &mut ExecuteWu,
+    ) -> Result<ExecutedGroup> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute messages group");
 
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
@@ -114,7 +119,7 @@ impl MessagesExecutor {
         let mut max_account_msgs_exec_time = Duration::ZERO;
         let mut total_exec_time = Duration::ZERO;
 
-        let mut total_exec_wu = 0u128;
+        let mut group_gas = 0u128;
 
         let min_next_lt = self.min_next_lt;
         let config = self.config.clone();
@@ -143,17 +148,18 @@ impl MessagesExecutor {
                     &mut total_exec_time,
                     &mut ext_msgs_error_count,
                     &mut group_max_vert_size,
-                    &mut total_exec_wu,
+                    &mut group_gas,
                     &mut items,
                     executed?,
                 )?;
             }
         }
 
-        // adjust total execute wu by threads count
-        let max_threads_count = self.wu_params_execute.subgroup_size.max(1) as usize;
-        let threads_count = max_threads_count.min(group_accounts_count).max(1);
-        let total_exec_wu = total_exec_wu.saturating_div(threads_count as u128) as u64;
+        let group_exec_wu = execute_wu.append_group_exec_wu(
+            &self.wu_params_execute,
+            group_accounts_count as u64,
+            group_gas,
+        );
 
         let mean_account_msgs_exec_time = total_exec_time
             .checked_div(group_horizontal_size as u32)
@@ -164,7 +170,7 @@ impl MessagesExecutor {
             total_exec_time = %format_duration(total_exec_time),
             mean_account_msgs_exec_time = %format_duration(mean_account_msgs_exec_time),
             max_account_msgs_exec_time = %format_duration(max_account_msgs_exec_time),
-            total_exec_wu, group_messages_count,
+            group_messages_count, group_gas, group_exec_wu,
             "execute_group",
         );
 
@@ -191,7 +197,6 @@ impl MessagesExecutor {
             items,
             ext_msgs_error_count,
             ext_msgs_skipped,
-            total_exec_wu,
         })
     }
 
@@ -216,22 +221,11 @@ impl MessagesExecutor {
         total_exec_time: &mut Duration,
         ext_msgs_error_count: &mut u64,
         group_max_vert_size: &mut usize,
-        total_exec_wu: &mut u128,
+        group_gas: &mut u128,
         items: &mut Vec<ExecutedTickItem>,
         executed: ExecutedTransactions,
     ) -> Result<()> {
         *ext_msgs_skipped += executed.ext_msgs_skipped;
-
-        let mut current_wu = 0u64;
-        let mut consume_gas_wu = |total_gas: u64| {
-            current_wu = current_wu
-                .saturating_add(self.wu_params_execute.prepare as u64)
-                .saturating_add(
-                    total_gas
-                        .saturating_mul(self.wu_params_execute.execute as u64)
-                        .saturating_div(self.wu_params_execute.execute_delimiter as u64),
-                );
-        };
 
         *max_account_msgs_exec_time = (*max_account_msgs_exec_time).max(executed.exec_time);
         *total_exec_time += executed.exec_time;
@@ -241,7 +235,7 @@ impl MessagesExecutor {
             match tx.result {
                 TransactionResult::Executed(executed) => {
                     self.min_next_lt = cmp::max(self.min_next_lt, executed.next_lt);
-                    consume_gas_wu(executed.gas_used);
+                    *group_gas = group_gas.saturating_add(executed.gas_used as u128);
 
                     items.push(ExecutedTickItem {
                         in_message: tx.in_message,
@@ -256,7 +250,7 @@ impl MessagesExecutor {
                         "skipped external message",
                     );
 
-                    consume_gas_wu(skipped.gas_used);
+                    *group_gas = group_gas.saturating_add(skipped.gas_used as u128);
                     *ext_msgs_error_count += 1;
                 }
             }
@@ -264,8 +258,6 @@ impl MessagesExecutor {
 
         self.accounts_cache
             .add_account_stuff(executed.account_state);
-
-        *total_exec_wu = total_exec_wu.saturating_add(current_wu as _);
 
         Ok(())
     }
@@ -426,7 +418,6 @@ pub struct ExecutedGroup {
     pub items: Vec<ExecutedTickItem>,
     pub ext_msgs_error_count: u64,
     pub ext_msgs_skipped: u64,
-    pub total_exec_wu: u64,
 }
 
 pub struct ExecutedTickItem {
