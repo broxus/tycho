@@ -27,6 +27,12 @@ pub mod futures {
     mod shared;
 }
 
+pub mod num {
+    pub use self::safe_avg::{SafeSignedAvg, SafeUnsignedAvg, SafeUnsignedVecAvg};
+
+    mod safe_avg;
+}
+
 pub mod sync {
     pub use self::once_take::*;
     pub use self::priority_semaphore::{AcquireError, PrioritySemaphore, TryAcquireError};
