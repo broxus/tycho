@@ -8,7 +8,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tycho_crypto::ed25519;
 
 use self::config::EndpointConfig;
-pub use self::config::{NetworkConfig, QuicConfig};
+pub use self::config::{CongestionAlgorithm, ConnectionMetricsLevel, NetworkConfig, QuicConfig};
 pub use self::connection::{Connection, RecvStream, SendStream};
 use self::connection_manager::{ActivePeers, ConnectionManager, ConnectionManagerRequest};
 pub use self::connection_manager::{

@@ -5,9 +5,10 @@ pub use dht::{
     xor_distance,
 };
 pub use network::{
-    BindError, Connection, ConnectionError, KnownPeerHandle, KnownPeers, KnownPeersError, Network,
-    NetworkBuilder, NetworkConfig, Peer, PeerBannedError, QuicConfig, RecvStream, SendStream,
-    ToSocket, WeakKnownPeerHandle, WeakNetwork,
+    BindError, CongestionAlgorithm, Connection, ConnectionError, ConnectionMetricsLevel,
+    KnownPeerHandle, KnownPeers, KnownPeersError, Network, NetworkBuilder, NetworkConfig, Peer,
+    PeerBannedError, QuicConfig, RecvStream, SendStream, ToSocket, WeakKnownPeerHandle,
+    WeakNetwork,
 };
 pub use quinn;
 pub use types::{
