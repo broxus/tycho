@@ -163,8 +163,8 @@ pub struct QuicConfig {
     /// Default: auto.
     pub initial_mtu: Option<u16>,
 
-    /// Default: auto.
-    pub congestion_algorithm: Option<CongestionAlgorithm>,
+    /// Default: `Bbr`.
+    pub congestion_algorithm: CongestionAlgorithm,
 }
 
 impl Default for QuicConfig {
@@ -181,7 +181,7 @@ impl Default for QuicConfig {
             socket_recv_buffer_size: None,
             use_pmtu: true,
             initial_mtu: None,
-            congestion_algorithm: None,
+            congestion_algorithm: CongestionAlgorithm::Bbr,
         }
     }
 }
@@ -219,9 +219,7 @@ impl QuicConfig {
             config.initial_mtu(mtu);
         }
 
-        if let Some(algorithm) = self.congestion_algorithm {
-            config.congestion_controller_factory(algorithm.build());
-        }
+        config.congestion_controller_factory(self.congestion_algorithm.build());
 
         config
     }
