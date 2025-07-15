@@ -47,7 +47,8 @@ tycho-network = { workspace = true }
 tycho-util = { workspace = true, features = ["test"] }
 
 [features]
-default = []
+default = ["http2"]
+http2 = ["axum/http2"]
 compression = ["tower-http/compression-gzip"]
 
 [lints]
