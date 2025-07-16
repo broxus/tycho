@@ -25,6 +25,8 @@ mod package_entry;
 
 pub use blobs::{ArchiveId, BlockGcStats};
 
+use crate::storage::config::BlobDbConfig;
+
 const METRIC_LOAD_BLOCK_TOTAL: &str = "tycho_storage_load_block_total";
 const METRIC_BLOCK_CACHE_HIT_TOTAL: &str = "tycho_storage_block_cache_hit_total";
 
@@ -60,8 +62,12 @@ impl BlockStorage {
             .weigher(weigher)
             .build_with_hasher(Default::default());
 
-        let blob_storage =
-            blobs::BlobStorage::new(db, block_handle_storage.clone(), &config.blobs_root)?;
+        let blob_storage = blobs::BlobStorage::new(
+            db,
+            block_handle_storage.clone(),
+            &config.blobs_root,
+            config.blob_db_config.pre_create_cas_tree,
+        )?;
 
         blob_storage.preload_archive_ids().await?;
 
@@ -232,6 +238,11 @@ impl BlockStorage {
         self.blob_storage
             .get_block_data_range(handle, offset, length)
             .await
+    }
+
+    pub fn get_compressed_block_data_size(&self, handle: &BlockHandle) -> Result<Option<u64>> {
+        let key = PackageEntryKey::block(handle.id());
+        Ok(self.blob_storage.blocks().size(&key)?)
     }
 
     pub fn find_mc_block_data(&self, mc_seqno: u32) -> Result<Option<Block>> {
@@ -495,6 +506,7 @@ pub struct StoreBlockResult {
 pub struct BlockStorageConfig {
     pub blocks_cache: BlocksCacheConfig,
     pub blobs_root: PathBuf,
+    pub blob_db_config: BlobDbConfig,
 }
 
 type BlocksCache = moka::sync::Cache<BlockId, BlockStuff, FastHasherState>;

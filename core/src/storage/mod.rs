@@ -63,6 +63,7 @@ impl CoreStorage {
         let blocks_storage_config = BlockStorageConfig {
             blocks_cache: config.blocks_cache,
             blobs_root: ctx.root_dir().path().join("blobs"),
+            blob_db_config: config.blob_db.clone(),
         };
         let block_handle_storage = Arc::new(BlockHandleStorage::new(db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(db.clone()));
