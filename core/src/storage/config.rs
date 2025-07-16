@@ -31,6 +31,9 @@ pub struct CoreStorageConfig {
 
     /// Blocks cache config.
     pub blocks_cache: BlocksCacheConfig,
+
+    /// Blob DB config.
+    pub blob_db: BlobDbConfig,
 }
 
 impl CoreStorageConfig {
@@ -38,6 +41,9 @@ impl CoreStorageConfig {
     pub fn new_potato() -> Self {
         Self {
             cells_cache_size: ByteSize::kb(1024),
+            blob_db: BlobDbConfig {
+                pre_create_cas_tree: false,
+            },
             ..Default::default()
         }
     }
@@ -51,6 +57,7 @@ impl Default for CoreStorageConfig {
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),
             blocks_cache: BlocksCacheConfig::default(),
+            blob_db: BlobDbConfig::default(),
         }
     }
 }
@@ -161,6 +168,20 @@ impl Default for BlocksCacheConfig {
         Self {
             ttl: Duration::from_secs(300),
             size: ByteSize::mb(500),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BlobDbConfig {
+    pub pre_create_cas_tree: bool,
+}
+
+impl Default for BlobDbConfig {
+    fn default() -> Self {
+        Self {
+            pre_create_cas_tree: true,
         }
     }
 }
