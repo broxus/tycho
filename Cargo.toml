@@ -143,7 +143,7 @@ tycho-util-proc = { path = "./util-proc", version = "0.2.12" }
 
 [patch.crates-io]
 # add patches here
-tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "d691235e8c7fca8a112c656ac190432009dd6dc2" }
+tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "b04c4ab7583b858a5d2edb3aab6a82a244507ef2" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
