@@ -67,6 +67,14 @@ pub fn zstd_compress(input: &[u8], output: &mut Vec<u8>, compression_level: i32)
     zstd_safe::compress(output, input, compression_level).expect("buffer size is set correctly");
 }
 
+/// Test utility for compression operations
+#[cfg(any(test, feature = "test"))]
+pub fn compress(data: &[u8]) -> Vec<u8> {
+    let mut compressed = Vec::new();
+    zstd_compress(data, &mut compressed, 3);
+    compressed
+}
+
 pub struct ZstdCompressedFile<W: Write> {
     writer: W,
     compressor: ZstdCompressStream<'static>,

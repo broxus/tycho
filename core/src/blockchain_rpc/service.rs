@@ -20,6 +20,11 @@ use crate::storage::{
 
 const RPC_METHOD_TIMINGS_METRIC: &str = "tycho_blockchain_rpc_method_time";
 
+#[cfg(not(test))]
+const BLOCK_DATA_CHUNK_SIZE: u32 = 1024 * 1024; // 1 MB
+#[cfg(test)]
+const BLOCK_DATA_CHUNK_SIZE: u32 = 10; // 10 bytes so we have zillions of chunks in tests
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]
@@ -456,9 +461,7 @@ impl<B> Inner<B> {
             .load_block_data_range(&handle, offset, BLOCK_DATA_CHUNK_SIZE as u64)
             .await
         {
-            Ok(Some(data)) => overlay::Response::Ok(Data {
-                data: Bytes::from(data),
-            }),
+            Ok(Some(data)) => overlay::Response::Ok(Data { data }),
             Ok(None) => {
                 tracing::debug!("block data chunk not found at offset {}", offset);
                 overlay::Response::Err(NOT_FOUND_ERROR_CODE)

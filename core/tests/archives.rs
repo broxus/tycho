@@ -366,6 +366,25 @@ async fn test_pagination(storage: CoreStorage) -> Result<()> {
             );
         }
 
+        // Verify file hash calculation
+        for block in &blocks {
+            let block_handle = storage.block_handle_storage().load_handle(block).unwrap();
+
+            let block_data = storage
+                .block_storage()
+                .load_block_data(&block_handle)
+                .await?;
+
+            let encoded_data = Boc::encode(block_data.root_cell());
+            let expected_file_hash = Boc::file_hash(&encoded_data);
+
+            assert_eq!(
+                block.file_hash, expected_file_hash,
+                "File hash mismatch for block {:?}: expected {:?}, got {:?}",
+                block, expected_file_hash, block.file_hash
+            );
+        }
+
         for window in blocks.windows(2) {
             let (prev, curr) = (&window[0], &window[1]);
             if prev.shard == curr.shard {
