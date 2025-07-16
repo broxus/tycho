@@ -234,6 +234,11 @@ impl BlockStorage {
             .await
     }
 
+    pub fn get_compressed_block_data_size(&self, handle: &BlockHandle) -> Result<Option<u64>> {
+        let key = PackageEntryKey::block(handle.id());
+        Ok(self.blob_storage.blocks().size(&key)?)
+    }
+
     pub fn find_mc_block_data(&self, mc_seqno: u32) -> Result<Option<Block>> {
         self.blob_storage.find_mc_block_data(mc_seqno)
     }
