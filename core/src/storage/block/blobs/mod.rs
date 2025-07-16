@@ -52,7 +52,7 @@ use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tycho_block_util::archive::ArchiveEntryType;
 use tycho_storage::kv::StoredValue;
-use tycho_types::boc::BocRepr;
+use tycho_types::boc::{Boc, BocRepr};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::*;
 use tycho_util::metrics::HistogramGuard;
@@ -86,14 +86,15 @@ impl BlobStorage {
         db: CoreDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         blobdb_path: &Path,
+        pre_create_cas_dirs: bool,
     ) -> Result<Self> {
         let (archive_ids_tx, _) = broadcast::channel(4);
         let config = cassadilia::Config {
             sync_mode: cassadilia::SyncMode::Sync,
             num_ops_per_wal: 100_000,
-            pre_create_cas_dirs: true, // we can pay 300ms on the first start :)
-            scan_orphans_on_startup: true, // Clean-up your deads
-            verify_blob_integrity: true, // Better safe than sorry
+            pre_create_cas_dirs,
+            scan_orphans_on_startup: true,   // Clean-up your deads
+            verify_blob_integrity: true,     // Better safe than sorry
             fail_on_integrity_errors: false, // But not to safe
         };
         let blocks = Cas::open(
@@ -248,7 +249,7 @@ impl BlobStorage {
         let mut blocks = Vec::new();
         let mut last_key = None;
 
-        for (key, blob_hash) in iter {
+        for (key, _) in iter {
             if key.ty != ArchiveEntryType::Block {
                 // Ignore non-block entries
                 continue;
@@ -259,11 +260,17 @@ impl BlobStorage {
                 break;
             }
 
-            // Cassadilia hash is also blake3, so we can use it directly
-            let file_hash = HashBytes::from_slice(blob_hash.as_ref());
-            let block_id = key.block_id.make_full(file_hash);
+            // Get the compressed block data to calculate the actual file hash
+            if let Some(compressed_data) = self.blocks.get(key)? {
+                let mut decompressed = Vec::new();
+                tycho_util::compression::zstd_decompress(&compressed_data, &mut decompressed)?;
 
-            blocks.push(block_id);
+                // Calculate hash of the decompressed BOC data
+                let file_hash = Boc::file_hash(&decompressed);
+                let block_id = key.block_id.make_full(file_hash);
+
+                blocks.push(block_id);
+            }
         }
 
         Ok((blocks, last_key))
@@ -293,7 +300,7 @@ impl BlobStorage {
 
         let index = self.blocks.index_snapshot();
 
-        for (key, _blob_hash) in index.range(lower_key..upper_key) {
+        for (key, _) in index.range(lower_key..upper_key) {
             if key.ty != ArchiveEntryType::Block {
                 continue;
             }
@@ -382,6 +389,7 @@ impl BlobStorage {
                 task.finish().await?;
 
                 // Notify archive subscribers
+                tracing::debug!(archive_id = task.archive_id, "committed archive");
                 self.archive_ids_tx.send(task.archive_id).ok();
             }
             *prev_archive_commit = Some(self.spawn_commit_archive(to_commit));
@@ -671,5 +679,250 @@ impl cassadilia::KeyEncoder<u32> for ArchiveKeyEncoder {
         }
 
         Ok(u32::from_be_bytes(data.try_into().unwrap()))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashSet;
+
+    use tempfile::TempDir;
+    use tycho_block_util::archive::ArchiveReader;
+    use tycho_types::models::ShardIdent;
+    use tycho_types::prelude::HashBytes;
+
+    use super::*;
+    use crate::storage::block::package_entry::PackageEntryKeyEncoder;
+    use crate::storage::{BlockFlags, BlockHandle, NewBlockMeta};
+
+    const TEST_BLOCK_DATA: &[u8] = b"test block data";
+    const TEST_PROOF_DATA: &[u8] = b"test proof data";
+    const TEST_QUEUE_DIFF_DATA: &[u8] = b"test queue diff data";
+
+    pub fn create_test_block_id(seqno: u32) -> BlockId {
+        BlockId {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno,
+            root_hash: HashBytes::ZERO,
+            file_hash: HashBytes::ZERO,
+        }
+    }
+
+    async fn create_temp_db_and_handles() -> Result<(CoreDb, Arc<BlockHandleStorage>, TempDir)> {
+        use tycho_storage::StorageContext;
+
+        let (ctx, temp_dir) = StorageContext::new_temp().await?;
+        let db: CoreDb = ctx.open_preconfigured("db")?;
+        let handles = Arc::new(BlockHandleStorage::new(db.clone()));
+        Ok((db, handles, temp_dir))
+    }
+
+    pub async fn create_test_storage() -> Result<(BlobStorage, TempDir)> {
+        let (db, handles, temp_dir) = create_temp_db_and_handles().await?;
+        let storage = BlobStorage::new(db, handles, temp_dir.path(), false)?;
+        Ok((storage, temp_dir))
+    }
+
+    pub async fn create_test_storage_components() -> Result<(
+        CoreDb,
+        Arc<BlockHandleStorage>,
+        Cas<PackageEntryKey>,
+        Cas<u32>,
+        TempDir,
+    )> {
+        let (db, handles, temp_dir) = create_temp_db_and_handles().await?;
+        let blocks = Cas::<PackageEntryKey>::open(
+            temp_dir.path().join("packages"),
+            PackageEntryKeyEncoder,
+            cassadilia::Config::default(),
+        )?;
+        let archives = Cas::<u32>::open(
+            temp_dir.path().join("archives"),
+            ArchiveKeyEncoder,
+            cassadilia::Config::default(),
+        )?;
+        Ok((db, handles, blocks, archives, temp_dir))
+    }
+
+    pub async fn store_block_data(
+        blocks: &Cas<PackageEntryKey>,
+        key: PackageEntryKey,
+        data: &[u8],
+    ) -> Result<()> {
+        let compressed = tycho_util::compression::compress(data);
+        let mut tx = blocks.put(key)?;
+        tx.write(&compressed)?;
+        tx.finish()?;
+        Ok(())
+    }
+
+    pub fn create_handle_with_flags(
+        block_id: BlockId,
+        flags: BlockFlags,
+        handles: &BlockHandleStorage,
+    ) -> BlockHandle {
+        let (handle, _) = handles.create_or_load_handle(&block_id, NewBlockMeta {
+            is_key_block: false,
+            gen_utime: 1000000,
+            ref_by_mc_seqno: block_id.seqno,
+        });
+        handle.meta().add_flags(flags);
+        handle
+    }
+
+    async fn store_all_block_parts(storage: &BlobStorage, block_id: &BlockId) -> Result<()> {
+        for (entry_type, data) in [
+            (ArchiveEntryType::Block, TEST_BLOCK_DATA),
+            (ArchiveEntryType::Proof, TEST_PROOF_DATA),
+            (ArchiveEntryType::QueueDiff, TEST_QUEUE_DIFF_DATA),
+        ] {
+            store_block_data(
+                &storage.blocks,
+                PackageEntryKey::from((*block_id, entry_type)),
+                data,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_archive_override_mechanism() -> Result<()> {
+        let (storage, _temp_dir) = create_test_storage().await?;
+
+        let check = |id: u32, force_split: bool, expected_id: u32, expected_commit: Option<u32>| {
+            let result = storage.prepare_archive_id(id, force_split);
+            assert_eq!(
+                (result.id, result.to_commit),
+                (expected_id, expected_commit)
+            );
+        };
+
+        check(10, true, 10, None);
+        check(5, false, 5, None);
+        check(8, false, 5, None);
+        check(10, false, 10, None);
+        check(11, false, 11, Some(10));
+        check(12, false, 11, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_should_resume() -> Result<()> {
+        let (storage, _temp_dir) = create_test_storage().await?;
+
+        storage
+            .db
+            .archive_block_ids
+            .insert(1u32.to_be_bytes(), create_test_block_id(100).to_vec())?;
+        storage
+            .db
+            .archive_block_ids
+            .insert(2u32.to_be_bytes(), vec![])?;
+
+        assert!(storage.should_resume_archive(1)?);
+        assert!(!storage.should_resume_archive(2)?);
+        assert!(!storage.should_resume_archive(999)?);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn out_of_order() -> Result<()> {
+        let (storage, _temp_dir) = create_test_storage().await?;
+        tycho_util::test::init_logger("ordered_archive_saving", "debug,cassadilia=info");
+        let storage = Arc::new(storage);
+
+        let mut ids = HashSet::new();
+
+        #[derive(Debug, Clone, Copy)]
+        enum BlockDestination {
+            Archive1,
+            Archive2,
+            TriggerSplit, // This block goes to Archive1 but triggers creation of Archive2
+        }
+
+        async fn save_block(
+            id: u32,
+            storage: &BlobStorage,
+            set: &mut HashSet<(ArchiveEntryType, BlockId)>,
+            destination: BlockDestination,
+        ) -> Result<()> {
+            let block_id = create_test_block_id(id);
+            let handle = create_handle_with_flags(
+                block_id,
+                BlockFlags::empty(),
+                &storage.block_handle_storage,
+            );
+
+            // Store all parts for block
+            store_all_block_parts(storage, &block_id).await?;
+
+            handle.meta().add_flags(BlockFlags::HAS_ALL_BLOCK_PARTS);
+            storage.block_handle_storage.store_handle(&handle, true);
+
+            let force_split = matches!(destination, BlockDestination::TriggerSplit);
+            storage.move_into_archive(&handle, force_split).await?;
+
+            // Add to expected set based on which archive this block actually goes into
+            if matches!(
+                destination,
+                BlockDestination::Archive1 | BlockDestination::TriggerSplit
+            ) {
+                set.insert((ArchiveEntryType::Block, block_id));
+                set.insert((ArchiveEntryType::Proof, block_id));
+                set.insert((ArchiveEntryType::QueueDiff, block_id));
+            }
+
+            Ok(())
+        }
+
+        save_block(1, &storage, &mut ids, BlockDestination::Archive1).await?;
+
+        // --- archive blocks 9, 8, 7, ..., 2
+        for i in (2..10).rev() {
+            save_block(i, &storage, &mut ids, BlockDestination::Archive1).await?;
+        }
+
+        save_block(11, &storage, &mut ids, BlockDestination::TriggerSplit).await?;
+
+        // Block 11 sets up the next block to start a new archive
+        // So we need block 12 to actually trigger the commit of archive 1
+        save_block(12, &storage, &mut ids, BlockDestination::Archive2).await?;
+
+        storage.wait_for_archive_commit().await?;
+
+        let r = storage.db.archive_block_ids.get(1u32.to_be_bytes())?;
+        assert!(r.is_none(), "Should be removed after archive commit");
+
+        let archive = storage
+            .get_archive(1)
+            .await?
+            .expect("Archive 1 should exist");
+
+        let mut decompressed = Vec::new();
+        tycho_util::compression::zstd_decompress(&archive, &mut decompressed)?;
+        let archive = ArchiveReader::new(&decompressed)?;
+
+        for entry in archive {
+            let entry = entry?;
+            assert!(
+                ids.remove(&(entry.ty, entry.block_id)),
+                "duplicate or something"
+            );
+        }
+
+        assert!(ids.is_empty(), "Not all entries were found in the archive");
+
+        // Check that archive 2 was started
+        storage
+            .db
+            .archive_block_ids
+            .get(12u32.to_be_bytes())?
+            .expect("Ids should exist");
+
+        Ok(())
     }
 }

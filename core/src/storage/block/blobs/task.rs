@@ -155,7 +155,7 @@ impl CommitArchiveTask {
     pub(super) async fn finish(&mut self) -> Result<()> {
         // NOTE: Await on reference to make sure that the task is cancel safe
         if let Some(handle) = &mut self.handle {
-            if let Err(e) = handle
+            let result = handle
                 .await
                 .map_err(|e| {
                     if e.is_panic() {
@@ -163,15 +163,18 @@ impl CommitArchiveTask {
                     }
                     anyhow::Error::from(e)
                 })
-                .and_then(std::convert::identity)
-            {
+                .and_then(std::convert::identity);
+
+            self.handle = None;
+
+            if let Err(e) = &result {
                 tracing::error!(
                     archive_id = self.archive_id,
                     "failed to commit archive: {e:?}"
                 );
             }
 
-            self.handle = None;
+            return result;
         }
 
         Ok(())
@@ -184,5 +187,76 @@ impl Drop for CommitArchiveTask {
         if let Some(handle) = &self.handle {
             handle.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::block::blobs::test::{
+        create_handle_with_flags, create_test_block_id, create_test_storage_components,
+        store_block_data,
+    };
+
+    #[tokio::test]
+    async fn test_commit_task_block_completeness_validation() -> Result<()> {
+        let (db, handles, blocks, archives, _temp_dir) = create_test_storage_components().await?;
+        let archive_id = 1u32;
+        let block_id = create_test_block_id(100);
+
+        handles.store_handle(
+            &create_handle_with_flags(
+                block_id,
+                BlockFlags::HAS_DATA | BlockFlags::HAS_QUEUE_DIFF, // missing HAS_PROOF
+                &handles,
+            ),
+            true,
+        );
+
+        db.archive_block_ids
+            .insert(archive_id.to_be_bytes(), block_id.to_vec())?;
+        store_block_data(
+            &blocks,
+            PackageEntryKey::from((block_id, ArchiveEntryType::Block)),
+            b"test",
+        )
+        .await?;
+
+        let mut task = CommitArchiveTask::new(db, handles, archive_id, blocks, archives);
+        let err = task.finish().await.unwrap_err().to_string();
+
+        assert!(err.contains("does not have all parts"));
+        assert!(err.contains("has_proof=false"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_commit_task_empty_archive() -> Result<()> {
+        let (db, handles, blocks, archives, _temp_dir) = create_test_storage_components().await?;
+        let archive_id = 3u32;
+
+        db.archive_block_ids
+            .insert(archive_id.to_be_bytes(), vec![])?;
+        CommitArchiveTask::new(db, handles, archive_id, blocks, archives)
+            .finish()
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_commit_task_missing_archive() -> Result<()> {
+        let (db, handles, blocks, archives, _temp_dir) = create_test_storage_components().await?;
+
+        let err = CommitArchiveTask::new(db, handles, 4, blocks, archives)
+            .finish()
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.downcast_ref::<BlockStorageError>()
+                .is_some_and(|e| matches!(e, BlockStorageError::ArchiveNotFound))
+        );
+        Ok(())
     }
 }
