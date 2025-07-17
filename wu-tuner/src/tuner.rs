@@ -320,7 +320,7 @@ impl WuTuner {
         // calculate target build_in_msgs_wu and target wu param for it
         let target_build_in_msgs_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_build_in_msgs_wu(target_wu_price);
+            .calc_target_build_in_msgs_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics
             .wu_on_finalize
             .calc_target_build_in_msg_wu_param(target_build_in_msgs_wu)
@@ -331,7 +331,7 @@ impl WuTuner {
         // calculate target build_out_msgs_wu and param
         let target_build_out_msgs_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_build_out_msgs_wu(target_build_in_msgs_wu);
+            .calc_target_build_out_msgs_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics
             .wu_on_finalize
             .calc_target_build_out_msg_wu_param(target_build_out_msgs_wu)
@@ -346,7 +346,7 @@ impl WuTuner {
         );
         let target_build_accounts_blocks_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_build_accounts_blocks_wu(target_build_in_msgs_wu);
+            .calc_target_build_accounts_blocks_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics
             .wu_on_finalize
             .calc_target_build_accounts_blocks_wu_param(
@@ -365,7 +365,7 @@ impl WuTuner {
             .pow_shard_accounts_count(wu_metrics.wu_params.finalize.state_update_msg, scale);
         let target_update_shard_accounts_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_update_shard_accounts_wu(target_build_in_msgs_wu);
+            .calc_target_update_shard_accounts_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics
             .wu_on_finalize
             .calc_target_update_shard_accounts_wu_param(
@@ -382,7 +382,7 @@ impl WuTuner {
         // calculate target build_state_update_wu and param
         let target_build_state_update_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_build_state_update_wu(target_build_in_msgs_wu);
+            .calc_target_build_state_update_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics
             .wu_on_finalize
             .calc_target_build_state_update_wu_param(
@@ -401,7 +401,7 @@ impl WuTuner {
         // calculate target build_block_wu and param
         let target_build_block_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_build_block_wu(target_build_in_msgs_wu);
+            .calc_target_build_block_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics.wu_on_finalize.calc_target_build_block_wu_param(
             target_build_block_wu,
             target_wu_params.finalize.serialize_min as u64,
@@ -414,7 +414,7 @@ impl WuTuner {
         // calculate target create_queue_diff_wu and param
         let target_create_queue_diff_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_create_queue_diff_wu(target_build_in_msgs_wu);
+            .calc_target_create_queue_diff_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics
             .wu_on_finalize
             .calc_target_create_queue_diff_wu_param(target_create_queue_diff_wu)
@@ -425,7 +425,7 @@ impl WuTuner {
         // calculate target apply_queue_diff_wu and param
         let target_apply_queue_diff_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_apply_queue_diff_wu(target_build_in_msgs_wu);
+            .calc_target_apply_queue_diff_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics
             .wu_on_finalize
             .calc_target_apply_queue_diff_wu_param(target_apply_queue_diff_wu)
@@ -438,10 +438,7 @@ impl WuTuner {
         // calulate target read_ext_msgs_wu and param
         let target_read_ext_msgs_wu = wu_metrics
             .wu_on_prepare_msg_groups
-            .calc_target_read_ext_msgs_wu(
-                target_build_in_msgs_wu,
-                wu_metrics.wu_on_finalize.build_in_msgs_elapsed.as_nanos(),
-            );
+            .calc_target_read_ext_msgs_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics
             .wu_on_prepare_msg_groups
             .calc_target_read_ext_msgs_wu_param(target_read_ext_msgs_wu)
@@ -452,10 +449,7 @@ impl WuTuner {
         // calulate target read_existing_int_msgs_wu and param
         let target_read_existing_int_msgs_wu = wu_metrics
             .wu_on_prepare_msg_groups
-            .calc_target_read_existing_int_msgs_wu(
-                target_build_in_msgs_wu,
-                wu_metrics.wu_on_finalize.build_in_msgs_elapsed.as_nanos(),
-            );
+            .calc_target_read_existing_int_msgs_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics
             .wu_on_prepare_msg_groups
             .calc_target_read_existing_int_msgs_wu_param(target_read_existing_int_msgs_wu)
@@ -466,10 +460,7 @@ impl WuTuner {
         // calulate target read_new_int_msgs_wu and param
         let target_read_new_int_msgs_wu = wu_metrics
             .wu_on_prepare_msg_groups
-            .calc_target_read_new_int_msgs_wu(
-                target_build_in_msgs_wu,
-                wu_metrics.wu_on_finalize.build_in_msgs_elapsed.as_nanos(),
-            );
+            .calc_target_read_new_int_msgs_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics
             .wu_on_prepare_msg_groups
             .calc_target_read_new_int_msgs_wu_param(target_read_new_int_msgs_wu)
@@ -480,10 +471,7 @@ impl WuTuner {
         // calulate target add_msgs_to_groups_wu and param
         let target_add_msgs_to_groups_wu = wu_metrics
             .wu_on_prepare_msg_groups
-            .calc_target_add_msgs_to_groups_wu(
-                target_build_in_msgs_wu,
-                wu_metrics.wu_on_finalize.build_in_msgs_elapsed.as_nanos(),
-            );
+            .calc_target_add_msgs_to_groups_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics
             .wu_on_prepare_msg_groups
             .calc_target_add_msgs_to_groups_wu_param(target_add_msgs_to_groups_wu)
@@ -496,10 +484,7 @@ impl WuTuner {
         // calulate target execute_groups_vm_only_wu and param
         let target_execute_groups_vm_only_wu = wu_metrics
             .wu_on_execute
-            .calc_target_execute_groups_vm_only_wu(
-                target_build_in_msgs_wu,
-                wu_metrics.wu_on_finalize.build_in_msgs_elapsed.as_nanos(),
-            );
+            .calc_target_execute_groups_vm_only_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics.wu_on_execute.calc_target_execute_wu_param(
             target_execute_groups_vm_only_wu,
             target_wu_params.execute.prepare as u64,
@@ -509,10 +494,9 @@ impl WuTuner {
         }
 
         // calulate target target_process_txs_wu and param
-        let target_process_txs_wu = wu_metrics.wu_on_execute.calc_target_process_txs_wu(
-            target_build_in_msgs_wu,
-            wu_metrics.wu_on_finalize.build_in_msgs_elapsed.as_nanos(),
-        );
+        let target_process_txs_wu = wu_metrics
+            .wu_on_execute
+            .calc_target_process_txs_wu_by_price(target_wu_price);
         if let Some(target_wu_param) = wu_metrics
             .wu_on_execute
             .calc_target_process_txs_wu_param(target_process_txs_wu)
@@ -526,11 +510,9 @@ impl WuTuner {
         // DO COLLATE WU PARAMS
 
         // calculate target resume_collation_wu and param
-        let target_resume_collation_wu =
-            wu_metrics.wu_on_do_collate.calc_target_resume_collation_wu(
-                target_build_in_msgs_wu,
-                wu_metrics.wu_on_finalize.build_in_msgs_elapsed.as_nanos(),
-            );
+        let target_resume_collation_wu = wu_metrics
+            .wu_on_do_collate
+            .calc_target_resume_collation_wu_by_price(target_wu_price);
         let pow_updated_accounts_count = wu_metrics
             .wu_on_do_collate
             .pow_updated_accounts_count(wu_metrics.wu_params.finalize.serialize_diff, scale);

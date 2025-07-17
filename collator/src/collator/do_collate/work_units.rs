@@ -157,6 +157,11 @@ impl PrepareMsgGroupsWu {
         )
     }
 
+    pub fn calc_target_read_ext_msgs_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.read_ext_msgs_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
+    }
+
     pub fn read_ext_msgs_wu_price(&self) -> f64 {
         if self.read_ext_msgs_wu == 0 {
             return 0.0;
@@ -182,6 +187,11 @@ impl PrepareMsgGroupsWu {
             target_build_in_msgs_wu,
             build_in_msgs_elapsed_ns,
         )
+    }
+
+    pub fn calc_target_read_existing_int_msgs_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.read_existing_int_msgs_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
     }
 
     pub fn read_existing_int_msgs_wu_price(&self) -> f64 {
@@ -212,6 +222,11 @@ impl PrepareMsgGroupsWu {
         )
     }
 
+    pub fn calc_target_read_new_int_msgs_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.read_new_int_msgs_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
+    }
+
     pub fn read_new_int_msgs_wu_price(&self) -> f64 {
         if self.read_new_int_msgs_wu == 0 {
             return 0.0;
@@ -237,6 +252,11 @@ impl PrepareMsgGroupsWu {
             target_build_in_msgs_wu,
             build_in_msgs_elapsed_ns,
         )
+    }
+
+    pub fn calc_target_add_msgs_to_groups_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.add_msgs_to_groups_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
     }
 
     pub fn add_msgs_to_groups_wu_price(&self) -> f64 {
@@ -425,6 +445,11 @@ impl ExecuteWu {
         )
     }
 
+    pub fn calc_target_execute_groups_vm_only_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.execute_groups_vm_only_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
+    }
+
     pub fn execute_groups_vm_only_wu_price(&self) -> f64 {
         if self.execute_groups_vm_only_wu == 0 {
             return 0.0;
@@ -458,6 +483,11 @@ impl ExecuteWu {
             target_build_in_msgs_wu,
             build_in_msgs_elapsed_ns,
         )
+    }
+
+    pub fn calc_target_process_txs_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.process_txs_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
     }
 
     pub fn process_txs_wu_price(&self) -> f64 {
@@ -720,6 +750,11 @@ impl FinalizeWu {
         )
     }
 
+    pub fn calc_target_update_shard_accounts_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.update_shard_accounts_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
+    }
+
     pub fn update_shard_accounts_wu_price(&self) -> f64 {
         if self.update_shard_accounts_wu == 0 {
             return 0.0;
@@ -777,6 +812,11 @@ impl FinalizeWu {
         )
     }
 
+    pub fn calc_target_build_accounts_blocks_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.build_accounts_blocks_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
+    }
+
     pub fn build_accounts_blocks_wu_price(&self) -> f64 {
         if self.build_accounts_blocks_wu == 0 {
             return 0.0;
@@ -828,7 +868,7 @@ impl FinalizeWu {
         Some(target_wu.saturating_div(base))
     }
 
-    pub fn calc_target_build_in_msgs_wu(&self, target_wu_price: f64) -> u64 {
+    pub fn calc_target_build_in_msgs_wu_by_price(&self, target_wu_price: f64) -> u64 {
         let target_wu = self.build_in_msgs_elapsed.as_nanos() as f64 / target_wu_price;
         target_wu.saturating_to_u64()
     }
@@ -870,6 +910,11 @@ impl FinalizeWu {
             self.build_out_msgs_elapsed.as_nanos(),
             target_build_in_msgs_wu,
         )
+    }
+
+    pub fn calc_target_build_out_msgs_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.build_out_msgs_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
     }
 
     fn calc_target_wu_from_build_in_msgs_wu(
@@ -990,6 +1035,11 @@ impl FinalizeWu {
         )
     }
 
+    pub fn calc_target_build_state_update_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.build_state_update_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
+    }
+
     pub fn build_state_update_wu_price(&self) -> f64 {
         if self.build_state_update_wu == 0 {
             return 0.0;
@@ -1045,6 +1095,11 @@ impl FinalizeWu {
         )
     }
 
+    pub fn calc_target_build_block_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.build_block_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
+    }
+
     pub fn build_block_wu_price(&self) -> f64 {
         if self.build_block_wu == 0 {
             return 0.0;
@@ -1081,6 +1136,11 @@ impl FinalizeWu {
         )
     }
 
+    pub fn calc_target_create_queue_diff_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.create_queue_diff_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
+    }
+
     pub fn create_queue_diff_wu_price(&self) -> f64 {
         if self.create_queue_diff_wu == 0 {
             return 0.0;
@@ -1101,6 +1161,11 @@ impl FinalizeWu {
             self.apply_queue_diff_elapsed.as_nanos(),
             target_build_in_msgs_wu,
         )
+    }
+
+    pub fn calc_target_apply_queue_diff_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.apply_queue_diff_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
     }
 
     pub fn apply_queue_diff_wu_price(&self) -> f64 {
@@ -1298,6 +1363,11 @@ impl DoCollateWu {
             target_build_in_msgs_wu,
             build_in_msgs_elapsed_ns,
         )
+    }
+
+    pub fn calc_target_resume_collation_wu_by_price(&self, target_wu_price: f64) -> u64 {
+        let target_wu = self.resume_collation_elapsed.as_nanos() as f64 / target_wu_price;
+        target_wu.saturating_to_u64()
     }
 
     pub fn resume_collation_wu_price(&self) -> f64 {
