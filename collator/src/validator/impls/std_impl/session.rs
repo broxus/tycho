@@ -23,6 +23,7 @@ use tycho_util::metrics::HistogramGuard;
 
 use super::ValidatorStdImplConfig;
 use crate::tracing_targets;
+use crate::validator::event::{SessionCtx, SigStatus, SignatureEvent, ValidationEvents};
 use crate::validator::rpc::{ExchangeSignatures, ValidatorClient, ValidatorService};
 use crate::validator::{
     AddSession, BriefValidatorDescr, CompositeValidationSessionId, ValidationComplete,
@@ -60,6 +61,7 @@ impl ValidatorSession {
         key_pair: Arc<KeyPair>,
         config: &ValidatorStdImplConfig,
         info: AddSession<'_>,
+        listeners: Arc<dyn ValidationEvents>,
     ) -> Result<Self> {
         // Prepare a map with other validators
         let mut validators = FastHashMap::default();
@@ -91,6 +93,8 @@ impl ValidatorSession {
             cached_signatures: TreeIndex::new(),
             cancelled: AtomicBool::new(false),
             cancelled_signal: Notify::new(),
+            listeners: listeners.clone(),
+            session_id: info.session_id,
         });
 
         // Create the private overlay
@@ -126,6 +130,7 @@ impl ValidatorSession {
                 own_weight,
                 state,
                 min_seqno: AtomicU32::new(info.start_block_seqno),
+                listeners,
             }),
         };
 
@@ -231,6 +236,17 @@ impl ValidatorSession {
             *self.inner.client.peer_id(),
             block_signatures.own_signature.clone(),
         );
+
+        // Notify listeners about the own signature
+        self.inner.listeners.on_signature_event(&SignatureEvent {
+            ctx: SessionCtx {
+                session_id: self.id(),
+            },
+            block_id: *block_id,
+            peer_id: *self.inner.client.peer_id(),
+            status: SigStatus::Valid,
+        })?;
+
         let mut total_weight = self.inner.own_weight;
 
         let semaphore = Arc::new(Semaphore::new(self.inner.config.max_parallel_requests));
@@ -356,8 +372,9 @@ impl ValidatorSession {
         let my_peer_id = self.inner.peer_id;
         let validators = self.inner.state.validators.clone();
         let mut total_weight = self.inner.own_weight;
-
+        let session_id = self.id();
         let span = tracing::Span::current();
+        let listeners = self.inner.listeners.clone();
         tycho_util::sync::rayon_run(move || {
             let _span = span.enter();
 
@@ -386,6 +403,14 @@ impl ValidatorSession {
                     };
 
                     let validator_info = validators.get(peer_id).expect("peer info out of sync");
+
+                    let mut signature_event = SignatureEvent {
+                        ctx: SessionCtx { session_id },
+                        block_id,
+                        peer_id: *peer_id,
+                        status: SigStatus::Valid,
+                    };
+
                     if !validator_info.public_key.verify_raw(&data, &signature) {
                         tracing::warn!(
                             target: tracing_targets::VALIDATOR,
@@ -401,9 +426,18 @@ impl ValidatorSession {
 
                         metrics::counter!(METRIC_INVALID_SIGNATURES_CACHED_TOTAL).increment(1);
 
+                        signature_event.status = SigStatus::Invalid;
+                        listeners
+                            .on_signature_event(&signature_event)
+                            .expect("failed to dispatch event");
+
                         // TODO: Somehow mark that this validator sent an invalid signature?
                         break 'stored Default::default();
                     }
+
+                    listeners
+                        .on_signature_event(&signature_event)
+                        .expect("failed to dispatch event");
 
                     total_weight += validator_info.weight;
                     Some(signature)
@@ -465,6 +499,7 @@ struct Inner {
     own_weight: u64,
     state: Arc<SessionState>,
     min_seqno: AtomicU32,
+    listeners: Arc<dyn ValidationEvents>,
 }
 
 impl Inner {
@@ -602,6 +637,12 @@ impl Drop for Inner {
             session_id = ?self.session_id,
             "validator session dropped"
         );
+
+        self.listeners
+            .on_session_drop(&SessionCtx {
+                session_id: self.session_id,
+            })
+            .expect("failed to dispatch session drop event");
     }
 }
 
@@ -613,6 +654,8 @@ struct SessionState {
     cached_signatures: TreeIndex<u32, Arc<CachedSignatures>>,
     cancelled: AtomicBool,
     cancelled_signal: Notify,
+    listeners: Arc<dyn ValidationEvents>,
+    session_id: ValidationSessionId,
 }
 
 impl SessionState {
@@ -633,6 +676,15 @@ impl SessionState {
         let data = Block::build_data_for_sign(&block.block_id);
 
         let validator_info = self.validators.get(peer_id).expect("peer info out of sync");
+        let mut signature_event = SignatureEvent {
+            ctx: SessionCtx {
+                session_id: self.session_id,
+            },
+            block_id: block.block_id,
+            peer_id: *peer_id,
+            status: SigStatus::Valid,
+        };
+
         if !validator_info
             .public_key
             .verify_raw(&data, signature.as_ref())
@@ -650,8 +702,19 @@ impl SessionState {
             // TODO: Store that the signature is invalid to avoid further checks on retries
             // TODO: Collect statistics on invalid signatures to slash the malicious validator
             metrics::counter!(METRIC_INVALID_SIGNATURES_IN_TOTAL).increment(1);
+
+            signature_event.status = SigStatus::Invalid;
+            self.listeners
+                .on_signature_event(&signature_event)
+                .map_err(ValidationError::EventDispatchFailed)?;
+
             return Err(ValidationError::InvalidSignature);
         }
+
+        // convert error to anyhow
+        self.listeners
+            .on_signature_event(&signature_event)
+            .map_err(ValidationError::EventDispatchFailed)?;
 
         let mut can_notify = false;
         match &*slot.compare_and_swap(&None::<Arc<[u8; 64]>>, Some(signature.clone())) {
@@ -914,4 +977,6 @@ enum ValidationError {
     InvalidSignature,
     #[error("signature has changed since the last exchange")]
     SignatureChanged,
+    #[error("failed to dispatch event")]
+    EventDispatchFailed(#[from] anyhow::Error),
 }
