@@ -12,6 +12,7 @@ use tycho_util::{FastHashMap, serde_helpers};
 
 use self::session::ValidatorSession;
 use crate::tracing_targets;
+use crate::validator::event::{SessionCtx, ValidationEvents};
 use crate::validator::rpc::ExchangeSignaturesBackoff;
 use crate::validator::{
     AddSession, ValidationSessionId, ValidationStatus, Validator, ValidatorNetworkContext,
@@ -76,6 +77,7 @@ impl ValidatorStdImpl {
         net_context: ValidatorNetworkContext,
         keypair: Arc<KeyPair>,
         config: ValidatorStdImplConfig,
+        listener: Arc<dyn ValidationEvents>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -83,6 +85,7 @@ impl ValidatorStdImpl {
                 keypair,
                 sessions: Default::default(),
                 config,
+                listener,
             }),
         }
     }
@@ -96,6 +99,7 @@ impl Validator for ValidatorStdImpl {
             self.inner.keypair.clone(),
             &self.inner.config,
             info,
+            self.inner.listener.clone(),
         )?;
 
         let mut sessions = self.inner.sessions.lock();
@@ -108,7 +112,12 @@ impl Validator for ValidatorStdImpl {
                     session = ?DebugLogValidatorSesssion(&session),
                     "new validator session added",
                 );
+                let session_id = session.id();
                 entry.insert(session);
+                self.inner
+                    .listener
+                    .on_session_open(&SessionCtx { session_id })?;
+
                 Ok(())
             }
             indexmap::map::Entry::Occupied(_) => {
@@ -140,7 +149,27 @@ impl Validator for ValidatorStdImpl {
             );
         };
 
-        session.validate_block(block_id).await
+        let validation_result = session.validate_block(block_id).await?;
+        match validation_result {
+            ValidationStatus::Skipped => {
+                self.inner.listener.on_validation_skipped(
+                    &SessionCtx {
+                        session_id: session.id(),
+                    },
+                    block_id,
+                )?;
+            }
+            ValidationStatus::Complete(_) => {
+                self.inner.listener.on_validation_complete(
+                    &SessionCtx {
+                        session_id: session.id(),
+                    },
+                    block_id,
+                )?;
+            }
+        }
+
+        Ok(validation_result)
     }
 
     fn cancel_validation(
@@ -217,6 +246,7 @@ struct Inner {
     keypair: Arc<KeyPair>,
     sessions: parking_lot::Mutex<Sessions>,
     config: ValidatorStdImplConfig,
+    listener: Arc<dyn ValidationEvents>,
 }
 
 type Sessions = FastHashMap<ShardIdent, ShardSessions>;
