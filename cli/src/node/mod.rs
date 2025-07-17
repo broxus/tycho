@@ -218,6 +218,9 @@ impl Node {
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
         message_queue_adapter.recover_after_restart(&mc_state)?;
 
+        // NOTE: Stub
+        let slasher = tycho_slasher::Slasher::new(base.keypair.clone());
+
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {
                 network: base.network.clone(),
@@ -227,6 +230,7 @@ impl Node {
             },
             base.keypair.clone(),
             self.validator_config,
+            slasher.validator_events_listener(),
         );
 
         // Explicitly handle the initial state
