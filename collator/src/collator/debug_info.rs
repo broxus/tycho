@@ -1,7 +1,9 @@
+use tycho_types::cell::HashBytes;
 use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::{
     BlockExtra, BlockId, BlockInfo, BlockRef, BlockchainConfig, GlobalVersion, McBlockExtra,
-    McStateExtra, PrevBlockRef, ShardDescription, ShardFeeCreated, ShardIdent, ShardStateUnsplit,
+    McStateExtra, OutMsgQueueUpdates, PrevBlockRef, ShardDescription, ShardFeeCreated, ShardIdent,
+    ShardStateUnsplit, ValueFlow,
 };
 use tycho_util::FastHashMap;
 
@@ -14,8 +16,11 @@ pub struct BlockDebugInfo<'a> {
     pub prev_ref: &'a PrevBlockRef,
     pub state: &'a ShardStateUnsplit,
     pub processed_upto: &'a ProcessedUptoInfoStuff,
+    pub out_msg_queue_updates: &'a OutMsgQueueUpdates,
+    pub value_flow: &'a ValueFlow,
     pub mc_state_extra: Option<&'a McStateExtra>,
     pub mc_top_shards: Option<&'a FastHashMap<ShardIdent, Box<ShardDescription>>>,
+    pub merkle_update_hash: &'a HashBytes,
     pub merkle_update: &'a MerkleUpdate,
     pub block_extra: &'a BlockExtra,
     pub mc_block_extra: Option<&'a McBlockExtra>,
@@ -38,7 +43,10 @@ impl std::fmt::Debug for BlockDebugInfo<'_> {
             s.field("mc_top_shards", &DebugTopShards(mc_top_shards));
         }
 
-        s.field("processed_upto", self.processed_upto)
+        s.field("value_flow", &DebugValueFlow(self.value_flow))
+            .field("processed_upto", self.processed_upto)
+            .field("out_msg_queue_updates", self.out_msg_queue_updates)
+            .field("merkle_update.hash", self.merkle_update_hash)
             .field("merkle_update", &DebugMerkleUpdate(self.merkle_update))
             .field("block_extra", &DebugBlockExtra(self.block_extra));
 
@@ -129,6 +137,7 @@ impl std::fmt::Debug for DebugShardStateUnslit<'_> {
             )
             .field("accounts.hash", self.0.accounts.inner().repr_hash())
             .field("wu_used_from_last_anchor", &self.0.overload_history)
+            .field("shard_accounts_count", &self.0.underload_history)
             .field(
                 "total_balance.tokens",
                 &DebugDisplay(self.0.total_balance.tokens),
@@ -158,7 +167,6 @@ pub struct DebugMcStateExtra<'a>(pub &'a McStateExtra);
 impl std::fmt::Debug for DebugMcStateExtra<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McStateExtra")
-            //.field("shards", &self.0.shards)
             .field("config", &DebugBlockchainConfig(&self.0.config))
             .field(
                 "prev_blocks.hash",
@@ -292,6 +300,57 @@ impl std::fmt::Debug for DebugShardDescription<'_> {
             .field("gen_utime", &self.0.gen_utime)
             .field("fees_collected", &self.0.fees_collected.tokens)
             .field("funds_created", &self.0.funds_created.tokens)
+            .finish()
+    }
+}
+
+pub struct DebugValueFlow<'a>(pub &'a ValueFlow);
+
+impl std::fmt::Debug for DebugValueFlow<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn get_hash(
+            extra_currency: &tycho_types::models::ExtraCurrencyCollection,
+        ) -> Option<&HashBytes> {
+            extra_currency
+                .as_dict()
+                .root()
+                .as_ref()
+                .map(|c| c.repr_hash())
+        }
+
+        f.debug_struct("ValueFlow")
+            .field("from_prev_block.tokens", &self.0.from_prev_block.tokens)
+            .field(
+                "from_prev_block.other.hash",
+                &get_hash(&self.0.from_prev_block.other),
+            )
+            .field("to_next_block.tokens", &self.0.to_next_block.tokens)
+            .field(
+                "to_next_block.other.hash",
+                &get_hash(&self.0.to_next_block.other),
+            )
+            .field("imported.tokens", &self.0.imported.tokens)
+            .field("imported.other.hash", &get_hash(&self.0.imported.other))
+            .field("exported.tokens", &self.0.exported.tokens)
+            .field("exported.other.hash", &get_hash(&self.0.exported.other))
+            .field("fees_collected.tokens", &self.0.fees_collected.tokens)
+            .field(
+                "fees_collected.other.hash",
+                &get_hash(&self.0.fees_collected.other),
+            )
+            .field("burned.tokens", &self.0.burned.tokens)
+            .field("burned.other.hash", &get_hash(&self.0.burned.other))
+            .field("fees_imported.tokens", &self.0.fees_imported.tokens)
+            .field(
+                "fees_imported.other.hash",
+                &get_hash(&self.0.fees_imported.other),
+            )
+            .field("recovered.tokens", &self.0.recovered.tokens)
+            .field("recovered.other.hash", &get_hash(&self.0.recovered.other))
+            .field("created.tokens", &self.0.created.tokens)
+            .field("created.other.hash", &get_hash(&self.0.created.other))
+            .field("minted.tokens", &self.0.minted.tokens)
+            .field("minted.other.hash", &get_hash(&self.0.minted.other))
             .finish()
     }
 }
