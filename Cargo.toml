@@ -19,14 +19,16 @@ members = [
     "gen-protos",
     "network",
     "rpc",
+    "rpc-subscriptions",
     "simulator",
+    "slasher",
+    "slasher-traits",
     "storage",
     "storage-traits",
     "tycho-build-info",
     "util",
     "util-proc",
     "wu-tuner",
-    "rpc-subscriptions",
 ]
 
 [workspace.dependencies]
@@ -167,6 +169,8 @@ tycho-core = { path = "./core", version = "0.3.10" }
 tycho-network = { path = "./network", version = "0.3.10" }
 tycho-rpc-subscriptions = { path = "./rpc-subscriptions", version = "0.3.10" }
 tycho-rpc = { path = "./rpc", version = "0.3.10" }
+tycho-slasher = { path = "./slasher", version = "0.3.10" }
+tycho-slasher-traits = { path = "./slasher-traits", version = "0.3.10" }
 tycho-storage = { path = "./storage", version = "0.3.10" }
 tycho-storage-traits = { path = "./storage-traits", version = "0.3.10" }
 tycho-util = { path = "./util", version = "0.3.10" }
