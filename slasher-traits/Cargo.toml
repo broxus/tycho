@@ -1,0 +1,19 @@
+[package]
+name = "tycho-slasher-traits"
+description = "Tycho slasher traits."
+include = ["src/**/*.rs", "src/**/*.tl", "./LICENSE-*", "./README.md"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# crates.io deps
+
+# local deps
+tycho-types = { workspace = true }
+
+[lints]
+workspace = true
