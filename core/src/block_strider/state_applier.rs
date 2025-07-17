@@ -3,8 +3,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockStuff;
+use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
-use tycho_types::cell::Cell;
+use tycho_types::cell::{Cell, HashBytes};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
@@ -64,11 +65,15 @@ where
                 .construct_prev_id()
                 .context("failed to construct prev id")?;
 
-            let (prev_root_cell, handles) = {
+            let (prev_root_cell, handles, old_split_at) = {
                 let prev_state = state_storage
                     .load_state(&prev_id)
                     .await
                     .context("failed to load prev shard state")?;
+
+                let old_split_at = split_aug_dict_raw(prev_state.state().load_accounts()?, 5)?
+                    .into_keys()
+                    .collect::<ahash::HashSet<_>>();
 
                 match &prev_id_alt {
                     Some(prev_id) => {
@@ -83,19 +88,23 @@ where
                         )?;
                         let left_handle = prev_state.ref_mc_state_handle().clone();
                         let right_handle = prev_state_alt.ref_mc_state_handle().clone();
-                        (cell, RefMcStateHandles::Split(left_handle, right_handle))
+                        (
+                            cell,
+                            RefMcStateHandles::Split(left_handle, right_handle),
+                            old_split_at,
+                        )
                     }
                     None => {
                         let cell = prev_state.root_cell().clone();
                         let handle = prev_state.ref_mc_state_handle().clone();
-                        (cell, RefMcStateHandles::Single(handle))
+                        (cell, RefMcStateHandles::Single(handle), old_split_at)
                     }
                 }
             };
 
             // Apply state
             let state = self
-                .compute_and_store_state_update(&cx.block, &handle, prev_root_cell)
+                .compute_and_store_state_update(&cx.block, &handle, prev_root_cell, old_split_at)
                 .await?;
 
             (state, handles)
@@ -160,6 +169,7 @@ where
         block: &BlockStuff,
         handle: &BlockHandle,
         prev_root: Cell,
+        split_at: ahash::HashSet<HashBytes>,
     ) -> Result<ShardStateStuff> {
         let _histogram = HistogramGuard::begin("tycho_core_apply_block_time_high");
 
@@ -170,7 +180,7 @@ where
 
         let apply_in_mem = HistogramGuard::begin("tycho_core_apply_block_in_mem_time_high");
 
-        let new_state = rayon_run(move || update.par_apply(&prev_root))
+        let new_state = rayon_run(move || update.par_apply(&prev_root, &split_at))
             .await
             .context("Failed to apply state update")?;
 
