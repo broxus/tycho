@@ -9,6 +9,7 @@ use tycho_util::FastHashMap;
 
 pub use self::impls::*;
 
+pub mod event;
 pub mod proto;
 pub mod rpc;
 
