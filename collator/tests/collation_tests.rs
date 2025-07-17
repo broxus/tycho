@@ -118,6 +118,7 @@ async fn test_collation_process_on_stubs() {
             validator_network,
             node_1_keypair.clone(),
             Default::default(),
+            Default::default(),
         ),
         CollatorStdImplFactory,
         None,
