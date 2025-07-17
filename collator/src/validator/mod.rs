@@ -92,12 +92,11 @@ pub struct BriefValidatorDescr {
     pub peer_id: PeerId,
     pub public_key: PublicKey,
     pub weight: u64,
+    pub validator_idx: u16,
 }
 
-impl TryFrom<&ValidatorDescription> for BriefValidatorDescr {
-    type Error = anyhow::Error;
-
-    fn try_from(descr: &ValidatorDescription) -> Result<Self> {
+impl BriefValidatorDescr {
+    pub fn from_descr(validator_idx: u16, descr: &ValidatorDescription) -> Result<Self> {
         let Some(public_key) = PublicKey::from_bytes(descr.public_key.0) else {
             anyhow::bail!("invalid validator public key");
         };
@@ -106,6 +105,7 @@ impl TryFrom<&ValidatorDescription> for BriefValidatorDescr {
             peer_id: PeerId(descr.public_key.0),
             public_key,
             weight: descr.weight,
+            validator_idx,
         })
     }
 }
