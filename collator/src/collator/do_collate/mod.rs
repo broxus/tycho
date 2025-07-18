@@ -381,8 +381,11 @@ impl CollatorStdImpl {
             ));
         }
 
+        let min_processed_to = &min_processed_to.unwrap_or_default();
         let diff_tail_len =
-            mq_adapter.get_diffs_tail_len(&shard_id, &min_processed_to.unwrap_or_default()) + 1;
+            mq_adapter.get_diffs_tail_len(&shard_id, min_processed_to) + 1;
+
+        tracing::debug!(target: tracing_targets::COLLATOR, "diff tail len calculated = {diff_tail_len:?}. shard_id {shard_id:?}. min processed to");
 
         // finalize block
         let span = tracing::Span::current();

@@ -397,6 +397,8 @@ impl ValidatorSession {
 
                         metrics::counter!(METRIC_INVALID_SIGNATURES_CACHED_TOTAL).increment(1);
 
+                        panic!("invalid signature 1");
+
                         // TODO: Somehow mark that this validator sent an invalid signature?
                         break 'stored Default::default();
                     }
@@ -643,6 +645,9 @@ impl SessionState {
                 "signature is invalid from peer {}",
                 ValidationError::InvalidSignature
             );
+
+            panic!("invalid signature 2");
+
             // TODO: Store that the signature is invalid to avoid further checks on retries
             // TODO: Collect statistics on invalid signatures to slash the malicious validator
             metrics::counter!(METRIC_INVALID_SIGNATURES_IN_TOTAL).increment(1);
