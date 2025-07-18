@@ -131,36 +131,26 @@ impl Verifier {
             cmp::Ordering::Greater => {} // peer usage is already verified
         }
 
-        let Some(r_0_pre) = r_0.upgrade() else {
+        let Some(r_0) = r_0.upgrade() else {
             tracing::info!("cannot validate point, no round in local DAG");
             return ctx.validated(&cert, ValidateResult::Invalid);
         };
         assert_eq!(
-            r_0_pre.round(),
+            r_0.round(),
             info.round(),
             "Coding error: dag round mismatches point round"
         );
 
-        if !Self::is_self_links_ok(&info, &r_0_pre) {
+        if !Self::is_self_links_ok(&info, &r_0) {
             return ctx.validated(&cert, ValidateResult::IllFormed(IllFormedReason::SelfLink));
         }
 
         if ![AnchorStageRole::Proof, AnchorStageRole::Trigger]
             .into_iter()
-            .all(|role| Self::is_anchor_link_ok(role, &info, &r_0_pre, ctx.conf()))
+            .all(|role| Self::is_anchor_link_ok(role, &info, &r_0, ctx.conf()))
         {
             let reason = IllFormedReason::AnchorLink;
             return ctx.validated(&cert, ValidateResult::IllFormed(reason));
-        };
-
-        drop(r_0_pre);
-        drop(span_guard);
-
-        let span_guard = ctx.span().enter();
-
-        let Some(r_0) = r_0.upgrade() else {
-            tracing::info!("cannot validate point, no round in local DAG after proof check");
-            return ctx.validated(&cert, ValidateResult::Invalid);
         };
 
         let Some(r_1) = r_0.prev().upgrade() else {
@@ -170,11 +160,11 @@ impl Verifier {
 
         let r_2_opt = r_1.prev().upgrade();
         if r_2_opt.is_none() && !info.witness().is_empty() {
-            tracing::debug!("cannot validate point's 'witness', no round in local DAG");
+            tracing::info!("cannot validate point's 'witness', no round in local DAG");
             return ctx.validated(&cert, ValidateResult::Invalid);
         }
 
-        let (direct_deps, cert_deps) =
+        let (deps_and_prev, cert_deps) =
             Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &ctx);
 
         if let Some(prev_digest) = info.prev_digest() {
@@ -187,23 +177,19 @@ impl Verifier {
         }
         cert.set_deps(cert_deps);
 
-        let prev_other_versions = r_1
+        for other_prev_version in r_1
             .view(&info.author(), |loc| {
+                // do not add same prev_digest twice - it is added as one of 'includes'
                 Self::other_versions(loc, info.prev_digest())
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+        {
+            // peer has to jump over a round if it could not produce valid point in prev loc
+            deps_and_prev.push(other_prev_version);
+        }
 
-        let is_valid_fut = {
-            let deps_and_prev = direct_deps
-                .iter()
-                .cloned()
-                // peer has to jump over a round if it could not produce valid point in prev loc;
-                // do not add same prev_digest twice - it is added as one of 'includes';
-                // do not extend listed dependencies as they may become certified by majority
-                .chain(prev_other_versions.into_iter());
-            Self::is_valid(info.clone(), deps_and_prev.collect(), ctx.conf())
-                .instrument(ctx.span().clone())
-        };
+        let is_valid_fut =
+            Self::is_valid(info.clone(), deps_and_prev, ctx.conf()).instrument(ctx.span().clone());
 
         // drop strong links before await
         drop(r_0);
@@ -299,8 +285,8 @@ impl Verifier {
         downloader: &Downloader,
         store: &MempoolStore,
         ctx: &ValidateCtx,
-    ) -> (Vec<DagPointFuture>, CertDirectDeps) {
-        let mut dependencies = Vec::with_capacity(info.includes().len() + info.witness().len());
+    ) -> (FuturesUnordered<DagPointFuture>, CertDirectDeps) {
+        let direct_deps = FuturesUnordered::new();
 
         // allocate a bit more so it's unlikely to grow during certify procedure
         let mut cert_deps = CertDirectDeps {
@@ -326,10 +312,10 @@ impl Verifier {
                 cert_deps.witness.insert(*digest, shared.weak_cert());
             }
 
-            dependencies.push(shared);
+            direct_deps.push(shared);
         }
 
-        (dependencies, cert_deps)
+        (direct_deps, cert_deps)
     }
 
     /// check only direct dependencies and location for previous point (let it jump over round)
