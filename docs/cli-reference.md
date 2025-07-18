@@ -187,6 +187,7 @@ Run a Tycho node
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
 * `--logger-config <LOGGER_CONFIG>` — Path to the logger config
 * `--import-zerostate <IMPORT_ZEROSTATE>` — List of zerostate files to import
+* `--wu-tuner-config <WU_TUNER_CONFIG>` — Path to the work units tuner config
 
 
 
