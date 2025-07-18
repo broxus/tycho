@@ -15,6 +15,7 @@ use tycho_types::prelude::*;
 pub mod alloc;
 pub mod elector;
 pub mod jrpc_client;
+pub mod rpc_wu_updater;
 pub mod wallet;
 
 pub fn create_dir_all<P: AsRef<Path>>(path: P) -> Result<()> {
