@@ -251,7 +251,15 @@ impl KeyArgs {
 
 async fn send_config_action(client: &JrpcClient, action: Action, sign: &KeyArgs) -> Result<()> {
     let keypair = sign.get_keypair()?;
+    send_config_action_ext(client, action, &keypair, sign.ttl).await
+}
 
+pub(crate) async fn send_config_action_ext(
+    client: &JrpcClient,
+    action: Action,
+    keypair: &ed25519::KeyPair,
+    ttl: u32,
+) -> Result<()> {
     let res = client.get_config().await?;
     let config_addr = StdAddr::new(-1, res.config.address);
 
@@ -262,14 +270,8 @@ async fn send_config_action(client: &JrpcClient, action: Action, sign: &KeyArgs)
         .then_some(res.global_id);
 
     let seqno = prepare_action(client, &config_addr, &keypair.public_key).await?;
-    let (message, expire_at) = create_message(
-        seqno,
-        &config_addr,
-        action,
-        &keypair,
-        signature_id,
-        sign.ttl,
-    )?;
+    let (message, expire_at) =
+        create_message(seqno, &config_addr, action, keypair, signature_id, ttl)?;
 
     let message_cell = CellBuilder::build_from(message)?;
     client.send_message(message_cell.as_ref()).await?;
@@ -355,7 +357,7 @@ fn create_message(
 }
 
 #[derive(Debug, Clone)]
-enum Action {
+pub(crate) enum Action {
     /// Param index and param value
     SubmitParam { index: u32, value: Cell },
 
