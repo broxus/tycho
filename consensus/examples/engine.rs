@@ -141,8 +141,9 @@ fn make_network(
         let top_known_anchor = anchor_consumer.top_known_anchor.clone();
         let commit_round = anchor_consumer.commit_round.clone();
 
-        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        anchor_consumer.add(peer_id, committed_rx);
+        let (anchors_tx, anchors_rx) = mpsc::unbounded_channel();
+        let (stats_tx, stats_rx) = mpsc::unbounded_channel();
+        anchor_consumer.add(peer_id, anchors_rx, stats_rx);
 
         let handle = std::thread::Builder::new()
             .name(format!("engine-{peer_id:.4}"))
@@ -191,7 +192,8 @@ fn make_network(
                                 cli.steps_until_full,
                                 merged_conf.consensus(),
                             ),
-                            output: committed_tx,
+                            anchors_tx,
+                            stats_tx,
                             top_known_anchor,
                         };
 

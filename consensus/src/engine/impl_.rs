@@ -22,7 +22,8 @@ use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolMergedConfig};
 use crate::models::{
-    DagPoint, MempoolOutput, Point, PointRestore, PointRestoreSelect, PointStatusStoredRef, Round,
+    DagPoint, MempoolOutput, MempoolStatsOutput, Point, PointRestore, PointRestoreSelect,
+    PointStatusStoredRef, Round,
 };
 use crate::storage::{DbCleaner, MempoolStore};
 
@@ -31,7 +32,8 @@ pub type EngineResult<T> = std::result::Result<T, EngineError>;
 pub struct Engine {
     dag: DagFront,
     committer_run: CommitterTask,
-    output: mpsc::UnboundedSender<MempoolOutput>,
+    anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+    stats_tx: mpsc::UnboundedSender<MempoolStatsOutput>,
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
     peer_schedule_updater: Task<Never>,
@@ -111,7 +113,8 @@ impl Engine {
         Self {
             dag,
             committer_run,
-            output: bind.output.clone(),
+            anchors_tx: bind.anchors_tx.clone(),
+            stats_tx: bind.stats_tx.clone(),
             db_cleaner,
             round_task,
             peer_schedule_updater,
@@ -405,7 +408,7 @@ impl Engine {
                     self.round_task.state.top_known_anchor.receiver(),
                     old_dag_top_round,
                     &mut is_paused,
-                    &self.output,
+                    &self.anchors_tx,
                     &round_ctx,
                 ) {
                     Ok(pause_at) => next_round.min(pause_at),
@@ -413,7 +416,8 @@ impl Engine {
                         collator_sync.await?;
                         let committer_update = self.committer_run.update_task(
                             full_history_bottom.take(),
-                            self.output.clone(),
+                            self.anchors_tx.clone(),
+                            self.stats_tx.clone(),
                             &round_ctx,
                         );
                         committer_update.await?;
@@ -463,7 +467,8 @@ impl Engine {
                     _ = self.committer_run.interval.tick() => {
                         self.committer_run.update_task(
                             full_history_bottom.take(),
-                            self.output.clone(),
+                            self.anchors_tx.clone(),
+                            self.stats_tx.clone(),
                             &round_ctx,
                         ).await?;
                     },
