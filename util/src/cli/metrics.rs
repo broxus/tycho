@@ -89,43 +89,51 @@ pub fn init_metrics(config: &MetricsConfig) -> anyhow::Result<()> {
         None => anyhow::bail!("metrics exporter was already initialized"),
     };
 
-    const INTERVAL: Duration = Duration::from_secs(5);
-
-    // NOTE: We are using a simple thread there instead of tokio
-    // so that there is no surprise when using it during the app start.
-    std::thread::Builder::new()
-        .name("export_metrics".to_owned())
-        .spawn(move || {
-            let mut deadline = Instant::now();
-            loop {
-                let s = match fetch_stats() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!("failed to fetch jemalloc stats: {e}");
-                        return;
-                    }
-                };
-
-                set_metrics!(
-                    "jemalloc_allocated_bytes" => s.allocated,
-                    "jemalloc_active_bytes" => s.active,
-                    "jemalloc_metadata_bytes" => s.metadata,
-                    "jemalloc_resident_bytes" => s.resident,
-                    "jemalloc_mapped_bytes" => s.mapped,
-                    "jemalloc_retained_bytes" => s.retained,
-                    "jemalloc_dirty_bytes" => s.dirty,
-                    "jemalloc_fragmentation_bytes" => s.fragmentation,
-                );
-
-                deadline += INTERVAL;
-                if let Some(delay) = deadline.checked_duration_since(Instant::now()) {
-                    std::thread::sleep(delay);
-                }
-            }
-        })
-        .unwrap();
+    spawn_allocator_metrics_loop();
 
     Ok(())
+}
+
+pub fn spawn_allocator_metrics_loop() {
+    static ONCE: Once = Once::new();
+
+    ONCE.call_once(|| {
+        const INTERVAL: Duration = Duration::from_secs(5);
+
+        // NOTE: We are using a simple thread there instead of tokio
+        // so that there is no surprise when using it during the app start.
+        std::thread::Builder::new()
+            .name("export_metrics".to_owned())
+            .spawn(move || {
+                let mut deadline = Instant::now();
+                loop {
+                    let s = match fetch_stats() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("failed to fetch jemalloc stats: {e}");
+                            return;
+                        }
+                    };
+
+                    set_metrics!(
+                        "jemalloc_allocated_bytes" => s.allocated,
+                        "jemalloc_active_bytes" => s.active,
+                        "jemalloc_metadata_bytes" => s.metadata,
+                        "jemalloc_resident_bytes" => s.resident,
+                        "jemalloc_mapped_bytes" => s.mapped,
+                        "jemalloc_retained_bytes" => s.retained,
+                        "jemalloc_dirty_bytes" => s.dirty,
+                        "jemalloc_fragmentation_bytes" => s.fragmentation,
+                    );
+
+                    deadline += INTERVAL;
+                    if let Some(delay) = deadline.checked_duration_since(Instant::now()) {
+                        std::thread::sleep(delay);
+                    }
+                }
+            })
+            .unwrap();
+    });
 }
 
 fn fetch_stats() -> Result<JemallocStats, Error> {
@@ -146,7 +154,7 @@ fn fetch_stats() -> Result<JemallocStats, Error> {
     })
 }
 
-struct JemallocStats {
+pub struct JemallocStats {
     pub allocated: u64,
     pub active: u64,
     pub metadata: u64,
