@@ -32,7 +32,7 @@ impl Default for WuTunerConfig {
 #[serde(tag = "type")]
 pub enum WuTuneType {
     No,
-    Control { interval: u16, secret: HashBytes },
+    Rpc { secret: HashBytes, rpc: String },
 }
 
 impl Default for WuTuneType {

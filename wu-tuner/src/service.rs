@@ -6,17 +6,26 @@ use tokio_util::sync::CancellationToken;
 use crate::WuEvent;
 use crate::config::WuTunerConfig;
 use crate::tuner::WuTuner;
+use crate::updater::WuParamsUpdater;
 
-pub struct WuTunerServiceBuilder {
+pub struct WuTunerServiceBuilder<U>
+where
+    U: WuParamsUpdater,
+{
     config: Arc<WuTunerConfig>,
     config_path: Option<PathBuf>,
+    updater: Option<U>,
 }
 
-impl WuTunerServiceBuilder {
+impl<U> WuTunerServiceBuilder<U>
+where
+    U: WuParamsUpdater,
+{
     pub fn with_config(config: Arc<WuTunerConfig>) -> Self {
         Self {
             config,
             config_path: None,
+            updater: None,
         }
     }
 
@@ -25,10 +34,16 @@ impl WuTunerServiceBuilder {
         Self {
             config: Arc::new(config),
             config_path: Some(path),
+            updater: None,
         }
     }
 
-    pub fn build(self) -> WuTunerService {
+    pub fn with_updater(mut self, updater: U) -> Self {
+        self.updater = Some(updater);
+        self
+    }
+
+    pub fn build(self) -> WuTunerService<U> {
         let (config_sender, mut config_receiver) = tokio::sync::watch::channel(self.config.clone());
         let _ = *config_receiver.borrow_and_update();
 
@@ -39,22 +54,28 @@ impl WuTunerServiceBuilder {
             config_receiver,
             event_sender,
             event_receiver,
-            tuner: WuTuner::with_config(self.config),
+            tuner: WuTuner::new(self.config, self.updater.unwrap()),
             config_path: self.config_path,
         }
     }
 }
 
-pub struct WuTunerService {
+pub struct WuTunerService<U>
+where
+    U: WuParamsUpdater,
+{
     config_receiver: tokio::sync::watch::Receiver<Arc<WuTunerConfig>>,
     config_sender: tokio::sync::watch::Sender<Arc<WuTunerConfig>>,
     event_receiver: tokio::sync::mpsc::Receiver<WuEvent>,
     event_sender: tokio::sync::mpsc::Sender<WuEvent>,
-    tuner: WuTuner,
+    tuner: WuTuner<U>,
     config_path: Option<PathBuf>,
 }
 
-impl WuTunerService {
+impl<U> WuTunerService<U>
+where
+    U: WuParamsUpdater + Send + 'static,
+{
     pub fn start(self) -> RunningWuTunerService {
         let event_sender = self.event_sender.clone();
         let cancel_token = CancellationToken::new();

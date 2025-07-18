@@ -15,7 +15,8 @@ use tycho_types::models::{
 };
 use tycho_util::num::{SafeSignedAvg, SafeUnsignedAvg, VecOfStreamingUnsignedMedian};
 
-use crate::config::WuTunerConfig;
+use crate::config::{WuTuneType, WuTunerConfig};
+use crate::updater::WuParamsUpdater;
 use crate::{MempoolAnchorLag, WuEvent, WuEventData, WuMetrics};
 
 #[derive(Default)]
@@ -42,20 +43,30 @@ impl WuHistory {
     }
 }
 
-#[derive(Default)]
-pub struct WuTuner {
+pub struct WuTuner<U>
+where
+    U: WuParamsUpdater,
+{
     config: Arc<WuTunerConfig>,
+    updater: U,
     history: BTreeMap<ShardIdent, WuHistory>,
     target_wu_params_history: BTreeMap<BlockSeqno, WorkUnitsParams>,
     avg_target_wu_params_history: BTreeMap<BlockSeqno, WorkUnitsParams>,
     wu_params_once_reported: bool,
 }
 
-impl WuTuner {
-    pub fn with_config(config: Arc<WuTunerConfig>) -> Self {
+impl<U> WuTuner<U>
+where
+    U: WuParamsUpdater,
+{
+    pub fn new(config: Arc<WuTunerConfig>, updater: U) -> Self {
         Self {
             config,
-            ..Default::default()
+            updater,
+            history: Default::default(),
+            target_wu_params_history: Default::default(),
+            avg_target_wu_params_history: Default::default(),
+            wu_params_once_reported: false,
         }
     }
 
@@ -103,6 +114,14 @@ impl WuTuner {
                 if let Some(prev_metrics) = history.metrics.get(&seqno.saturating_sub(1))
                     && metrics.wu_params != prev_metrics.wu_params
                 {
+                    tracing::info!(
+                        %shard,
+                        seqno,
+                        prev_params = ?prev_metrics.wu_params,
+                        curr_params = ?metrics.wu_params,
+                        "wu params updated",
+                    );
+
                     history.clear();
                     self.target_wu_params_history.clear();
                     self.avg_target_wu_params_history.clear();
@@ -114,7 +133,7 @@ impl WuTuner {
                 // append history
                 history.metrics.insert(seqno, metrics);
 
-                tracing::debug!(
+                tracing::trace!(
                     %shard,
                     seqno,
                     has_pending_messages,
@@ -132,7 +151,7 @@ impl WuTuner {
                 // report avg wu metrics
                 avg.report_metrics(&shard);
 
-                tracing::debug!(
+                tracing::trace!(
                     %shard,
                     seqno,
                     "avg wu metrics calculated",
@@ -163,7 +182,7 @@ impl WuTuner {
                 // }
                 history.anchors_lag.insert(seqno, anchor_lag.clone());
 
-                tracing::debug!(
+                tracing::trace!(
                     %shard,
                     seqno,
                     ?anchor_lag,
@@ -176,21 +195,21 @@ impl WuTuner {
                     Bound::Excluded(seqno.saturating_sub(ma_interval)),
                     Bound::Included(seqno),
                 ));
-                let avg = safe_anchors_lag_avg(avg_range);
+                let avg_lag = safe_anchors_lag_avg(avg_range);
 
                 // report avg anchor importing lag to metrics
-                report_anchor_lag_to_metrics(&shard, avg);
+                report_anchor_lag_to_metrics(&shard, avg_lag);
 
-                tracing::debug!(
+                tracing::trace!(
                     %shard,
                     seqno,
-                    avg,
+                    avg_lag,
                     max_lag_ms = self.config.max_lag_ms,
                     "avg anchor lag calculated",
                 );
 
                 // store avg lag
-                history.avg_anchors_lag.insert(seqno, avg);
+                history.avg_anchors_lag.insert(seqno, avg_lag);
 
                 // check lag and calculate target wu params
                 // NOTE: ONLY by shard blocks
@@ -203,9 +222,9 @@ impl WuTuner {
                     let mut target_wu_params = None;
 
                     // when lag is negative but we do not have pending messages, it is okay
-                    let lag_abs = avg.unsigned_abs();
-                    if lag_abs > self.config.max_lag_ms as u64
-                        && (avg > 0 || (avg < 0 && avg_wu_metrics.has_pending_messages))
+                    let avg_lag_abs = avg_lag.unsigned_abs();
+                    if avg_lag_abs > self.config.max_lag_ms as u64
+                        && (avg_lag > 0 || (avg_lag < 0 && avg_wu_metrics.has_pending_messages))
                     {
                         // calculate target wu params
                         let target_wu_price = self.config.target_wu_price as f64 / 100.0;
@@ -215,6 +234,8 @@ impl WuTuner {
                         tracing::debug!(
                             %shard,
                             seqno,
+                            avg_lag,
+                            max_lag_ms = self.config.max_lag_ms,
                             current_build_in_msgs_wu_price = avg_wu_metrics.wu_on_finalize.build_in_msgs_wu_price(),
                             target_wu_price,
                             current_build_in_msg_wu_param = avg_wu_metrics.wu_params.finalize.build_in_msg,
@@ -259,19 +280,44 @@ impl WuTuner {
                     ));
                     let avg_target_wu_params = safe_wu_params_avg(avg_range);
 
-                    tracing::debug!(
-                        %shard,
-                        seqno,
-                        current_build_in_msg_wu_param = avg_wu_metrics.wu_params.finalize.build_in_msg,
-                        avg_target_build_in_msg_wu_param = avg_target_wu_params.finalize.build_in_msg,
-                        "calculated avg target wu params",
-                    );
+                    if target_wu_params_calculated {
+                        tracing::debug!(
+                            %shard,
+                            seqno,
+                            current_build_in_msg_wu_param = avg_wu_metrics.wu_params.finalize.build_in_msg,
+                            avg_target_build_in_msg_wu_param = avg_target_wu_params.finalize.build_in_msg,
+                            "calculated avg target wu params",
+                        );
+                    }
 
                     // report wu params to metrics
                     // report on the start to avoid empty graphs
                     if target_wu_params_calculated || !self.wu_params_once_reported {
                         report_wu_params(&avg_wu_metrics.wu_params, &avg_target_wu_params);
                         self.wu_params_once_reported = true;
+                    }
+
+                    // update wu params if tune interval elapsed
+                    let tune_seqno = seqno / tune_interval * tune_interval;
+                    if target_wu_params_calculated && seqno == tune_seqno {
+                        match &self.config.tune {
+                            WuTuneType::Rpc { rpc, .. } => {
+                                tracing::info!(
+                                    %shard,
+                                    seqno,
+                                    rpc,
+                                    ?avg_target_wu_params,
+                                    "updating target wu params in blockchain config via rpc",
+                                );
+
+                                self.updater
+                                    .update_wu_params(self.config.clone(), avg_target_wu_params)
+                                    .await?;
+                            }
+                            WuTuneType::No => {
+                                // do nothing
+                            }
+                        }
                     }
 
                     // clear outdated target wu params history
