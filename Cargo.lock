@@ -3764,6 +3764,7 @@ dependencies = [
  "tycho-storage",
  "tycho-types",
  "tycho-util",
+ "tycho-wu-tuner",
  "weedb",
 ]
 
@@ -3784,6 +3785,7 @@ dependencies = [
  "humantime",
  "indexmap",
  "metrics",
+ "num-bigint",
  "parking_lot",
  "rand 0.9.1",
  "rayon",
@@ -4234,6 +4236,28 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tycho-wu-tuner"
+version = "0.2.12"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "metrics",
+ "num-bigint",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "tycho-collator",
+ "tycho-core",
+ "tycho-crypto",
+ "tycho-types",
+ "tycho-util",
 ]
 
 [[package]]
