@@ -1,10 +1,12 @@
 mod anchor_handler;
-mod cache;
+mod anchors_cache;
 mod config;
 mod deduplicator;
 mod parser;
 mod state_update_queue;
+mod stats_cache;
 
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -15,12 +17,14 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::Instrument;
 use tycho_consensus::prelude::*;
 use tycho_crypto::ed25519::KeyPair;
-use tycho_network::{Network, OverlayService, PeerResolver};
+use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
 use tycho_storage::StorageContext;
+use tycho_util::FastHashMap;
 
 use crate::mempool::impls::std_impl::anchor_handler::AnchorHandler;
-use crate::mempool::impls::std_impl::cache::Cache;
+use crate::mempool::impls::std_impl::anchors_cache::AnchorsCache;
 use crate::mempool::impls::std_impl::config::ConfigAdapter;
+use crate::mempool::impls::std_impl::stats_cache::StatsCache;
 use crate::mempool::{
     DebugStateUpdateContext, GetAnchorResult, MempoolAdapter, MempoolAdapterFactory,
     MempoolAnchorId, MempoolEventListener, StateUpdateContext,
@@ -29,7 +33,8 @@ use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
 
 pub struct MempoolAdapterStdImpl {
-    cache: Arc<Cache>,
+    anchors_cache: Arc<AnchorsCache>,
+    stats_cache: Arc<StatsCache>,
     net_args: EngineNetworkArgs,
 
     config: Mutex<ConfigAdapter>,
@@ -51,7 +56,8 @@ impl MempoolAdapterStdImpl {
         let config_builder = MempoolConfigBuilder::new(mempool_node_config);
 
         Ok(Self {
-            cache: Default::default(),
+            anchors_cache: Default::default(),
+            stats_cache: Default::default(),
             net_args: EngineNetworkArgs {
                 key_pair,
                 network: network.clone(),
@@ -108,7 +114,7 @@ impl MempoolAdapterStdImpl {
 
             let session = (config_guard.engine_session.take())
                 .context("cannot happen: engine must be started")?;
-            self.cache.reset();
+            self.anchors_cache.reset();
 
             drop(_guard);
             session.stop().instrument(span.clone()).await;
@@ -185,7 +191,8 @@ impl MempoolAdapterStdImpl {
     ) -> Result<EngineSession> {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Starting mempool engine...");
 
-        let (anchor_tx, anchor_rx) = mpsc::unbounded_channel();
+        let (anchors_tx, anchors_rx) = mpsc::unbounded_channel();
+        let (stats_tx, stats_rx) = mpsc::unbounded_channel();
 
         self.input_buffer.apply_config(merged_conf.consensus());
 
@@ -197,7 +204,8 @@ impl MempoolAdapterStdImpl {
             mempool_db: self.mempool_db.clone(),
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: self.top_known_anchor.clone(),
-            output: anchor_tx,
+            anchors_tx,
+            stats_tx,
         };
 
         // actual oldest sync round will be not less than this
@@ -226,13 +234,16 @@ impl MempoolAdapterStdImpl {
             engine_stop_tx,
         );
 
-        let mut anchor_task = AnchorHandler::new(merged_conf.consensus(), anchor_rx)
-            .run(self.cache.clone(), self.mempool_db.clone())
+        let mut anchors_task = AnchorHandler::new(merged_conf.consensus(), anchors_rx)
+            .run(self.anchors_cache.clone(), self.mempool_db.clone())
             .boxed();
 
+        let stats_cache = self.stats_cache.clone();
         tokio::spawn(async move {
+            let mut stats_task = std::pin::pin!(stats_cache.run_updates(stats_rx));
             tokio::select! {
-                () = &mut anchor_task => {}, // just poll
+                () = &mut anchors_task => {}, // just poll
+                () = &mut stats_task => {},
                 engine_result = &mut engine_stop_rx => match engine_result {
                     Ok(()) => tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
@@ -306,7 +317,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             "get_anchor_by_id"
         );
 
-        let result = match self.cache.get_anchor_by_id(anchor_id).await {
+        let result = match self.anchors_cache.get_anchor_by_id(anchor_id).await {
             Some(anchor) => GetAnchorResult::Exist(anchor),
             None => GetAnchorResult::NotExist,
         };
@@ -321,7 +332,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             "get_next_anchor"
         );
 
-        let result = match self.cache.get_next_anchor(prev_anchor_id).await? {
+        let result = match self.anchors_cache.get_next_anchor(prev_anchor_id).await? {
             Some(anchor) => GetAnchorResult::Exist(anchor),
             None => GetAnchorResult::NotExist,
         };
@@ -330,7 +341,14 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     }
 
     fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
-        self.cache.clear(before_anchor_id);
+        self.anchors_cache.clear(before_anchor_id);
         Ok(())
+    }
+
+    async fn get_stats(
+        &self,
+        range: RangeInclusive<MempoolAnchorId>,
+    ) -> FastHashMap<PeerId, PeerStats> {
+        self.stats_cache.get(range).await
     }
 }

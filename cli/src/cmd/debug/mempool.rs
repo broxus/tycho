@@ -303,9 +303,10 @@ impl Mempool {
     ) -> Result<(EngineSession, AnchorConsumer)> {
         let local_id = self.net_args.network.peer_id();
 
-        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
+        let (anchors_tx, anchors_rx) = mpsc::unbounded_channel();
+        let (stats_tx, stats_rx) = mpsc::unbounded_channel();
         let mut anchor_consumer = AnchorConsumer::default();
-        anchor_consumer.add(*local_id, committed_rx);
+        anchor_consumer.add(*local_id, anchors_rx, stats_rx);
 
         let bind = EngineBinding {
             mempool_db: MempoolDb::open(
@@ -314,7 +315,8 @@ impl Mempool {
             )?,
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: anchor_consumer.top_known_anchor.clone(),
-            output: committed_tx,
+            anchors_tx,
+            stats_tx,
         };
 
         let session = EngineSession::new(

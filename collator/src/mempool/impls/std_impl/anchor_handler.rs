@@ -7,7 +7,7 @@ use tycho_consensus::prelude::{AnchorData, MempoolAdapterStore, MempoolDb, Mempo
 use tycho_types::models::ConsensusConfig;
 use tycho_util::time::now_millis;
 
-use crate::mempool::impls::std_impl::cache::Cache;
+use crate::mempool::impls::std_impl::anchors_cache::AnchorsCache;
 use crate::mempool::impls::std_impl::parser::{Parser, ParserOutput};
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
@@ -18,7 +18,7 @@ pub struct AnchorHandler {
 }
 
 struct Shuttle {
-    cache: Arc<Cache>,
+    cache: Arc<AnchorsCache>,
     store: MempoolAdapterStore,
     parser: Parser,
     first_after_gap: Option<MempoolAnchorId>,
@@ -35,7 +35,7 @@ impl AnchorHandler {
         }
     }
 
-    pub async fn run(mut self, cache: Arc<Cache>, mempool_db: Arc<MempoolDb>) {
+    pub async fn run(mut self, cache: Arc<AnchorsCache>, mempool_db: Arc<MempoolDb>) {
         scopeguard::defer!(tracing::warn!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             "handle anchors task stopped"

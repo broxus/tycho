@@ -9,7 +9,7 @@ use crate::dag::{Committer, HistoryConflict};
 use crate::effects::{AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task};
 use crate::engine::lifecycle::EngineError;
 use crate::engine::{ConsensusConfigExt, EngineResult, MempoolConfig};
-use crate::models::{AnchorData, MempoolOutput, PointInfo, Round};
+use crate::models::{AnchorData, MempoolOutput, MempoolStatsOutput, PointInfo, Round};
 
 pub struct CommitterTask {
     inner: Inner,
@@ -49,7 +49,8 @@ impl CommitterTask {
     pub async fn update_task(
         &mut self,
         full_history_bottom: Option<Round>,
-        committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
+        anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+        stats_tx: mpsc::UnboundedSender<MempoolStatsOutput>,
         round_ctx: &RoundCtx,
     ) -> EngineResult<()> {
         let Some(committer) = self.inner.take_ready().await? else {
@@ -57,9 +58,21 @@ impl CommitterTask {
         };
         let is_dropping = committer.dag_len() > round_ctx.conf().consensus.min_front_rounds() as _;
         self.inner = if is_dropping {
-            Inner::dropping(committer, full_history_bottom, committed_info_tx, round_ctx)
+            Inner::dropping(
+                committer,
+                full_history_bottom,
+                anchors_tx,
+                stats_tx,
+                round_ctx,
+            )
         } else {
-            Inner::fallible(committer, full_history_bottom, committed_info_tx, round_ctx)
+            Inner::fallible(
+                committer,
+                full_history_bottom,
+                anchors_tx,
+                stats_tx,
+                round_ctx,
+            )
         };
         Ok(())
     }
@@ -93,7 +106,8 @@ impl Inner {
     fn dropping(
         mut committer: Committer,
         full_history_bottom: Option<Round>,
-        committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
+        anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+        stats_tx: mpsc::UnboundedSender<MempoolStatsOutput>,
         round_ctx: &RoundCtx,
     ) -> Self {
         let task_ctx = round_ctx.task();
@@ -140,18 +154,24 @@ impl Inner {
             }
 
             if let Some(new_bottom) = new_full_history_bottom.or(full_history_bottom) {
-                committed_info_tx
+                anchors_tx
                     .send(MempoolOutput::NewStartAfterGap(new_bottom))
                     .map_err(|_closed| Cancelled())?;
             }
 
             if let Some(committed) = committed {
                 round_ctx.log_committed(&committed);
+                let anchor_rounds =
+                    (committed.iter().map(|a| a.anchor.round())).collect::<Vec<_>>();
                 for data in committed {
                     round_ctx.commit_metrics(&data.anchor);
-                    committed_info_tx
+                    anchors_tx
                         .send(MempoolOutput::NextAnchor(data))
                         .map_err(|_closed| Cancelled())?;
+                }
+                for anchor_round in anchor_rounds {
+                    let stats = committer.remove_committed(anchor_round, round_ctx.conf())?;
+                    stats_tx.send(stats).map_err(|_closed| Cancelled())?;
                 }
             }
 
@@ -166,7 +186,8 @@ impl Inner {
     fn fallible(
         mut committer: Committer,
         full_history_bottom: Option<Round>,
-        committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
+        anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+        stats_tx: mpsc::UnboundedSender<MempoolStatsOutput>,
         round_ctx: &RoundCtx,
     ) -> Self {
         let task_ctx = round_ctx.task();
@@ -194,17 +215,22 @@ impl Inner {
             };
 
             if let Some(new_bottom) = full_history_bottom {
-                committed_info_tx
+                anchors_tx
                     .send(MempoolOutput::NewStartAfterGap(new_bottom))
                     .map_err(|_closed| EngineError::Cancelled)?;
             }
 
             round_ctx.log_committed(&committed);
+            let anchor_rounds = (committed.iter().map(|a| a.anchor.round())).collect::<Vec<_>>();
             for data in committed {
                 round_ctx.commit_metrics(&data.anchor);
-                committed_info_tx
+                anchors_tx
                     .send(MempoolOutput::NextAnchor(data))
                     .map_err(|_closed| EngineError::Cancelled)?;
+            }
+            for anchor_round in anchor_rounds {
+                let stats = committer.remove_committed(anchor_round, round_ctx.conf())?;
+                stats_tx.send(stats).map_err(|_closed| Cancelled())?;
             }
 
             EngineCtx::meter_dag_len(committer.dag_len());

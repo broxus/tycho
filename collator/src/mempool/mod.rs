@@ -1,12 +1,15 @@
 mod state_update_context;
 
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tycho_consensus::prelude::PeerStats;
 use tycho_network::PeerId;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
+use tycho_util::FastHashMap;
 
 pub use self::impls::*;
 pub use self::state_update_context::*;
@@ -80,6 +83,11 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// We can do this for anchors that processed in blocks
     /// which included in signed master - we do not need them anymore
     fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()>;
+
+    async fn get_stats(
+        &self,
+        range: RangeInclusive<MempoolAnchorId>,
+    ) -> FastHashMap<PeerId, PeerStats>;
 }
 
 // === Types ===

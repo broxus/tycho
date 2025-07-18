@@ -8,7 +8,7 @@ use crate::effects::{AltFormat, TaskTracker};
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
 use crate::engine::{InputBuffer, MempoolMergedConfig};
 use crate::intercom::{Dispatcher, InitPeers, PeerSchedule, Responder};
-use crate::models::MempoolOutput;
+use crate::models::{MempoolOutput, MempoolStatsOutput};
 use crate::storage::MempoolDb;
 
 #[derive(Clone)]
@@ -16,7 +16,8 @@ pub struct EngineBinding {
     pub mempool_db: Arc<MempoolDb>,
     pub input_buffer: InputBuffer,
     pub top_known_anchor: RoundWatch<TopKnownAnchor>,
-    pub output: mpsc::UnboundedSender<MempoolOutput>,
+    pub anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+    pub stats_tx: mpsc::UnboundedSender<MempoolStatsOutput>,
 }
 
 #[derive(Clone)]

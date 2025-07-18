@@ -45,12 +45,12 @@ struct CacheData {
 }
 
 #[derive(Default)]
-pub struct Cache {
+pub struct AnchorsCache {
     data: RwLock<CacheData>,
     anchor_added: Notify,
 }
 
-impl Cache {
+impl AnchorsCache {
     pub fn reset(&self) {
         let mut data = self.data.write();
         data.anchors = Default::default();

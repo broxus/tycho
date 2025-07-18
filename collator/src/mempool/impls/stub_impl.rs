@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,9 +11,11 @@ use humantime::format_duration;
 use parking_lot::RwLock;
 use rand::Rng;
 use scopeguard::defer;
+use tycho_consensus::prelude::PeerStats;
 use tycho_network::PeerId;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
+use tycho_util::FastHashMap;
 
 use crate::mempool::{
     DebugStateUpdateContext, ExternalMessage, GetAnchorResult, MempoolAdapter, MempoolAnchor,
@@ -349,6 +352,13 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         let mut anchors_cache = self.anchors_cache.write();
         anchors_cache.retain(|anchor_id, _| anchor_id >= &before_anchor_id);
         Ok(())
+    }
+
+    async fn get_stats(
+        &self,
+        _range: RangeInclusive<MempoolAnchorId>,
+    ) -> FastHashMap<PeerId, PeerStats> {
+        Default::default() // TODO
     }
 }
 
