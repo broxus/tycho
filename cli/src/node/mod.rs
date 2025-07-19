@@ -181,6 +181,7 @@ impl Node {
             },
             base.keypair.clone(),
             self.validator_config,
+            Arc::new(vec![]),
         );
 
         // Explicitly handle the initial state

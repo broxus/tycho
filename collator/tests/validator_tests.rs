@@ -1,8 +1,10 @@
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use tycho_collator::validator::event::collector::ValidationEventCollector;
 use tycho_collator::validator::{
     AddSession, BriefValidatorDescr, ValidationStatus, Validator, ValidatorStdImpl,
     ValidatorStdImplConfig,
@@ -20,6 +22,7 @@ struct ValidatorNode {
     peer_info: Arc<PeerInfo>,
     validator: ValidatorStdImpl,
     descr: BriefValidatorDescr,
+    event_collector: Arc<ValidationEventCollector>,
 }
 
 impl ValidatorNode {
@@ -41,10 +44,13 @@ impl ValidatorNode {
             .make_client(network);
         let peer_info = Arc::new(network.sign_peer_info(0, u32::MAX));
 
+        let event_collector = Arc::new(ValidationEventCollector::default());
+
         let validator = ValidatorStdImpl::new(
             validator_network,
             keypair.clone(),
             ValidatorStdImplConfig::default(),
+            event_collector.clone(),
         );
 
         Self {
@@ -52,6 +58,7 @@ impl ValidatorNode {
             peer_info,
             validator,
             descr: validator_descr,
+            event_collector,
         }
     }
 }
@@ -159,6 +166,18 @@ async fn validator_signatures_match() -> Result<()> {
                 assert!(signature_count > (NODE_COUNT * 2) / 3);
 
                 tracing::info!(%peer_id, ?status, "validation completed");
+            }
+
+            let range = RangeInclusive::new(zerostate_id.as_short_id(), block_id.as_short_id());
+
+            // check event collector in each node
+            for node in &nodes {
+                let events = node.event_collector.stats_for_blocks(range.clone());
+
+                let current_node_valid_signatures = events.get(&node.descr.peer_id);
+
+                assert!(current_node_valid_signatures.unwrap().valid > 0);
+                assert_eq!(current_node_valid_signatures.unwrap().invalid, 0);
             }
 
             for node in &nodes {
@@ -335,6 +354,7 @@ async fn network_gets_stuck_without_signatures() -> Result<()> {
         }
     }
 
+    let range = RangeInclusive::new(zerostate_id.as_short_id(), block_id.as_short_id());
     tokio::select! {
         _ = good_validators.next() => {
             panic!("good validator completed block");
@@ -344,6 +364,17 @@ async fn network_gets_stuck_without_signatures() -> Result<()> {
         }
         _ = tokio::time::sleep(STUCK_DURATION) => {
             tracing::info!("network got stuck as expected");
+
+            // check event collector in each node
+            for node in &nodes {
+                let events = node.event_collector.stats_for_blocks(range.clone());
+                let peer_stat = events.get(&node.peer_info.id);
+
+                // should be None because validators did not complete validation
+                assert!(peer_stat.is_none());
+
+            }
+
         }
     }
 
