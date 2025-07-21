@@ -26,6 +26,7 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho node gc-blocks`↴](#tycho-node-gc-blocks)
 * [`tycho node gc-states`↴](#tycho-node-gc-states)
 * [`tycho node compact`↴](#tycho-node-compact)
+* [`tycho node wait-sync`↴](#tycho-node-wait-sync)
 * [`tycho node mem-profiler`↴](#tycho-node-mem-profiler)
 * [`tycho node mem-profiler start`↴](#tycho-node-mem-profiler-start)
 * [`tycho node mem-profiler stop`↴](#tycho-node-mem-profiler-stop)
@@ -167,6 +168,7 @@ Manage the node
 * `gc-blocks` — Trigger a garbage collection of blocks
 * `gc-states` — Trigger a garbage collection of states
 * `compact` — Trigger a compaction in database
+* `wait-sync` — Wait until node synced
 * `mem-profiler` — Manage memory profiler
 
 
@@ -414,6 +416,27 @@ Trigger a compaction in database
 
   Possible values: `base`, `mempool`, `rpc`
 
+
+
+
+## `tycho node wait-sync`
+
+Wait until node synced
+
+**Usage:** `tycho node wait-sync [OPTIONS]`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-t`, `--timediff <TIMEDIFF>` — Threshold node time diff
+
+  Default value: `10s`
+* `--sample-window-size <SAMPLE_WINDOW_SIZE>` — Size of the sliding window used to track recent sync statuses
+
+  Default value: `10`
+* `--min-required-samples <MIN_REQUIRED_SAMPLES>` — Minimum number of successful samples required to consider the system as totally synced
+
+  Default value: `7`
 
 
 
