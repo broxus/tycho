@@ -1,7 +1,9 @@
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
@@ -33,6 +35,7 @@ pub enum CmdControl {
     GcBlocks(CmdGcBlocks),
     GcStates(CmdGcStates),
     Compact(CmdCompact),
+    WaitSync(CmdWaitSync),
     #[clap(subcommand)]
     MemProfiler(CmdMemProfiler),
 }
@@ -55,6 +58,7 @@ impl CmdControl {
             Self::GcBlocks(cmd) => cmd.run(args),
             Self::GcStates(cmd) => cmd.run(args),
             Self::Compact(cmd) => cmd.run(args),
+            Self::WaitSync(cmd) => cmd.run(args),
             Self::MemProfiler(cmd) => cmd.run(args),
         }
     }
@@ -301,6 +305,72 @@ impl CmdCompact {
                     database: self.database,
                 })
                 .await?;
+            print_json(Empty {})
+        })
+    }
+}
+
+/// Wait until node synced.
+#[derive(Parser)]
+pub struct CmdWaitSync {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// Threshold node time diff.
+    #[clap(short, long, value_parser = humantime::parse_duration, default_value = "10s")]
+    timediff: Duration,
+
+    /// Size of the sliding window used to track recent sync statuses.
+    #[clap(long, default_value_t = 10)]
+    sample_window_size: usize,
+
+    /// Minimum number of successful samples required to consider
+    /// the system as totally synced.
+    #[clap(long, default_value_t = 7)]
+    min_required_samples: usize,
+}
+
+impl CmdWaitSync {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        let timediff = self.timediff.as_secs() as u32;
+        let window_size = self.sample_window_size;
+        let required_samples = self.min_required_samples;
+
+        if required_samples > window_size {
+            anyhow::bail!(
+                "invalid argument: min_required_samples ({required_samples}) cannot be greater than sample_window_size ({window_size})",
+            );
+        }
+
+        self.args.rt(args, move |client| async move {
+            let mut history = VecDeque::with_capacity(window_size);
+
+            loop {
+                let status = client.get_status().await?;
+
+                let is_synced = match status.last_applied_block {
+                    None => false,
+                    Some(b) => {
+                        let diff = status.status_at.saturating_sub(b.gen_utime);
+                        diff <= timediff
+                    }
+                };
+
+                // Update the sliding window
+                if history.len() == window_size {
+                    history.pop_front();
+                }
+                history.push_back(is_synced);
+
+                let synced_count = history.iter().filter(|&&s| s).count();
+                if synced_count >= required_samples {
+                    // Node totally synced
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+
             print_json(Empty {})
         })
     }
