@@ -1398,7 +1398,7 @@ pub enum WuEventData {
     AnchorLag(MempoolAnchorLag),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct MempoolAnchorLag {
     pub requested_at: u64,
     pub chain_time: u64,
@@ -1421,6 +1421,22 @@ pub struct WuMetrics {
 }
 
 impl WuMetrics {
+    pub fn collation_total_wu(&self) -> u64 {
+        self.wu_on_prepare_msg_groups.total_wu()
+            + self.wu_on_execute.total_wu()
+            + self.wu_on_finalize.total_wu()
+    }
+
+    pub fn collation_total_wu_price(&self) -> f64 {
+        let collation_total_wu = self.collation_total_wu();
+        if collation_total_wu == 0 {
+            0.0
+        } else {
+            self.wu_on_do_collate.collation_total_elapsed.as_nanos() as f64
+                / collation_total_wu as f64
+        }
+    }
+
     pub fn report_metrics(&self, shard: &ShardIdent) {
         let labels = [("workchain", shard.workchain().to_string())];
 
@@ -1548,17 +1564,10 @@ impl WuMetrics {
             .set(self.wu_on_finalize.build_accounts_wu_price());
 
         // total on collation
-        let collation_total_wu = self.wu_on_prepare_msg_groups.total_wu()
-            + self.wu_on_execute.total_wu()
-            + self.wu_on_finalize.total_wu();
-        let collation_total_wu_price = if collation_total_wu == 0 {
-            0.0
-        } else {
-            self.wu_on_do_collate.collation_total_elapsed.as_nanos() as f64
-                / collation_total_wu as f64
-        };
+        let collation_total_wu = self.collation_total_wu();
         metrics::gauge!("tycho_do_collate_wu_total", &labels).set(collation_total_wu as f64);
-        metrics::gauge!("tycho_do_collate_wu_price_total", &labels).set(collation_total_wu_price);
+        metrics::gauge!("tycho_do_collate_wu_price_total", &labels)
+            .set(self.collation_total_wu_price());
 
         // resume collation
         metrics::gauge!("tycho_do_collate_wu_on_resume_collation", &labels)
