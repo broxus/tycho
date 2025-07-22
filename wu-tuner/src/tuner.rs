@@ -43,6 +43,10 @@ impl WuHistory {
     }
 }
 
+pub struct WuAdjustment {
+    pub target_wu_price: f64,
+}
+
 pub struct WuTuner<U>
 where
     U: WuParamsUpdater,
@@ -53,6 +57,7 @@ where
     target_wu_params_history: BTreeMap<BlockSeqno, WorkUnitsParams>,
     avg_target_wu_params_history: BTreeMap<BlockSeqno, WorkUnitsParams>,
     wu_params_once_reported: bool,
+    adjustments: BTreeMap<BlockSeqno, WuAdjustment>,
 }
 
 impl<U> WuTuner<U>
@@ -67,6 +72,7 @@ where
             target_wu_params_history: Default::default(),
             avg_target_wu_params_history: Default::default(),
             wu_params_once_reported: false,
+            adjustments: Default::default(),
         }
     }
 
@@ -100,6 +106,8 @@ where
                 if let Some((&last_key, _)) = history.metrics.last_key_value() {
                     if last_key + 1 < seqno {
                         history.clear();
+                        self.target_wu_params_history.clear();
+                        self.avg_target_wu_params_history.clear();
 
                         tracing::debug!(
                             %shard,
@@ -221,13 +229,27 @@ where
                 if let Some(avg_wu_metrics) = history.avg_metrics.get(&seqno) {
                     let mut target_wu_params = None;
 
+                    let mut target_wu_price = self.config.target_wu_price as f64 / 100.0;
+
                     // when lag is negative but we do not have pending messages, it is okay
                     let avg_lag_abs = avg_lag.unsigned_abs();
                     if avg_lag_abs > self.config.max_lag_ms as u64
                         && (avg_lag > 0 || (avg_lag < 0 && avg_wu_metrics.has_pending_messages))
                     {
+                        // define target wu price
+                        // get prev adjustment if exists
+                        if let Some((_, prev_adjustment)) = self.adjustments.last_key_value() {
+                            // if current lag is > 0 then we should reduce target wu price
+                            if avg_lag > 0 {
+                                target_wu_price = (prev_adjustment.target_wu_price - 0.1).max(0.1);
+                            }
+                            // if current lag is < 0 then we should increase target wu price
+                            else {
+                                target_wu_price = prev_adjustment.target_wu_price + 0.1;
+                            }
+                        }
+
                         // calculate target wu params
-                        let target_wu_price = self.config.target_wu_price as f64 / 100.0;
                         let target_params =
                             Self::calculate_target_wu_params(target_wu_price, avg_wu_metrics);
 
@@ -245,77 +267,95 @@ where
 
                         target_wu_params = Some(target_params);
                     }
-                    let target_wu_params_calculated = target_wu_params.is_some();
 
-                    // store target wu params, use existing if lag is moderated
-                    let target_wu_params = match target_wu_params {
-                        Some(target_wu_params) => target_wu_params,
+                    match target_wu_params {
                         None => {
                             // do not store long history of unchanged existing wu params
                             // to calculate new params faster when lag appears
                             self.target_wu_params_history.clear();
                             self.avg_target_wu_params_history.clear();
 
-                            avg_wu_metrics.wu_params.clone()
-                        }
-                    };
-                    self.target_wu_params_history
-                        .insert(seqno, target_wu_params);
-
-                    // calculate MA target wu params
-                    let avg_range = self.target_wu_params_history.range((
-                        Bound::Excluded(seqno.saturating_sub(ma_interval)),
-                        Bound::Included(seqno),
-                    ));
-                    let avg_target_wu_params = safe_wu_params_avg(avg_range);
-
-                    // store MA target wu params
-                    self.avg_target_wu_params_history
-                        .insert(seqno, avg_target_wu_params.clone());
-
-                    // calculate MA from MA target wu params
-                    let avg_range = self.avg_target_wu_params_history.range((
-                        Bound::Excluded(seqno.saturating_sub(tune_interval)),
-                        Bound::Included(seqno),
-                    ));
-                    let avg_target_wu_params = safe_wu_params_avg(avg_range);
-
-                    if target_wu_params_calculated {
-                        tracing::debug!(
-                            %shard,
-                            seqno,
-                            current_build_in_msg_wu_param = avg_wu_metrics.wu_params.finalize.build_in_msg,
-                            avg_target_build_in_msg_wu_param = avg_target_wu_params.finalize.build_in_msg,
-                            "calculated avg target wu params",
-                        );
-                    }
-
-                    // report wu params to metrics
-                    // report on the start to avoid empty graphs
-                    if target_wu_params_calculated || !self.wu_params_once_reported {
-                        report_wu_params(&avg_wu_metrics.wu_params, &avg_target_wu_params);
-                        self.wu_params_once_reported = true;
-                    }
-
-                    // update wu params if tune interval elapsed
-                    let tune_seqno = seqno / tune_interval * tune_interval;
-                    if target_wu_params_calculated && seqno == tune_seqno {
-                        match &self.config.tune {
-                            WuTuneType::Rpc { rpc, .. } => {
-                                tracing::info!(
-                                    %shard,
-                                    seqno,
-                                    rpc,
-                                    ?avg_target_wu_params,
-                                    "updating target wu params in blockchain config via rpc",
+                            // report wu params on the start anyway to avoid empty graphs
+                            if !self.wu_params_once_reported {
+                                report_wu_params(
+                                    &avg_wu_metrics.wu_params,
+                                    &avg_wu_metrics.wu_params,
                                 );
-
-                                self.updater
-                                    .update_wu_params(self.config.clone(), avg_target_wu_params)
-                                    .await?;
+                                self.wu_params_once_reported = true;
                             }
-                            WuTuneType::No => {
-                                // do nothing
+                        }
+                        Some(target_wu_params) => {
+                            // store target wu params
+                            self.target_wu_params_history
+                                .insert(seqno, target_wu_params);
+
+                            // calculate MA target wu params
+                            let avg_range = self.target_wu_params_history.range((
+                                Bound::Excluded(seqno.saturating_sub(ma_interval)),
+                                Bound::Included(seqno),
+                            ));
+                            let avg_target_wu_params = safe_wu_params_avg(avg_range);
+
+                            // store MA target wu params
+                            self.avg_target_wu_params_history
+                                .insert(seqno, avg_target_wu_params.clone());
+
+                            // calculate MA from MA target wu params
+                            let avg_range = self.avg_target_wu_params_history.range((
+                                Bound::Excluded(seqno.saturating_sub(tune_interval)),
+                                Bound::Included(seqno),
+                            ));
+                            let avg_target_wu_params = safe_wu_params_avg(avg_range);
+
+                            tracing::debug!(
+                                %shard,
+                                seqno,
+                                current_build_in_msg_wu_param = avg_wu_metrics.wu_params.finalize.build_in_msg,
+                                avg_target_build_in_msg_wu_param = avg_target_wu_params.finalize.build_in_msg,
+                                "calculated avg target wu params",
+                            );
+
+                            // report target wu params to metrics
+                            report_wu_params(&avg_wu_metrics.wu_params, &avg_target_wu_params);
+                            self.wu_params_once_reported = true;
+
+                            // update wu params in blockchain if tune interval elapsed
+                            let tune_seqno = seqno / tune_interval * tune_interval;
+                            if !self.adjustments.contains_key(&tune_seqno) {
+                                match &self.config.tune {
+                                    WuTuneType::Rpc { rpc, .. } => {
+                                        tracing::info!(
+                                            %shard, seqno,
+                                            tune_seqno,
+                                            avg_lag, target_wu_price,
+                                            rpc,
+                                            ?avg_target_wu_params,
+                                            "updating target wu params in blockchain config via rpc",
+                                        );
+
+                                        // store current adjustment and gc previous
+                                        self.adjustments
+                                            .insert(tune_seqno, WuAdjustment { target_wu_price });
+                                        let gc_boundary = tune_seqno.saturating_sub(tune_interval);
+                                        if let Some((&first_key, _)) =
+                                            self.adjustments.first_key_value()
+                                            && first_key < gc_boundary
+                                        {
+                                            self.adjustments.retain(|k, _| k >= &gc_boundary);
+                                        }
+
+                                        // make adjustment
+                                        self.updater
+                                            .update_wu_params(
+                                                self.config.clone(),
+                                                avg_target_wu_params,
+                                            )
+                                            .await?;
+                                    }
+                                    WuTuneType::No => {
+                                        // do nothing
+                                    }
+                                }
                             }
                         }
                     }
