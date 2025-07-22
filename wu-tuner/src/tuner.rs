@@ -13,17 +13,120 @@ use tycho_types::models::{
     ShardIdent, WorkUnitsParams, WorkUnitsParamsExecute, WorkUnitsParamsFinalize,
     WorkUnitsParamsPrepare,
 };
+use tycho_util::FastHashSet;
 use tycho_util::num::{SafeSignedAvg, SafeUnsignedAvg, VecOfStreamingUnsignedMedian};
 
 use crate::config::{WuTuneType, WuTunerConfig};
 use crate::updater::WuParamsUpdater;
 use crate::{MempoolAnchorLag, WuEvent, WuEventData, WuMetrics};
 
+pub enum WuMetricsSpanValue {
+    Accum(WuMetricsAvg),
+    Result(Box<WuMetrics>),
+}
+
+pub struct WuMetricsSpan {
+    pub avg: WuMetricsSpanValue,
+    pub last: Box<WuMetrics>,
+}
+
+impl WuMetricsSpan {
+    pub fn new(metrics: Box<WuMetrics>) -> Self {
+        let mut avg = WuMetricsAvg::new();
+        avg.accum(&metrics);
+        Self {
+            avg: WuMetricsSpanValue::Accum(avg),
+            last: metrics,
+        }
+    }
+
+    pub fn accum(&mut self, v: Box<WuMetrics>) -> Result<()> {
+        match &mut self.avg {
+            WuMetricsSpanValue::Accum(avg) => avg.accum(&v),
+            WuMetricsSpanValue::Result(_) => {
+                anyhow::bail!("WuMetricsSpan.avg should be Accum here")
+            }
+        }
+        self.last = v;
+        Ok(())
+    }
+
+    pub fn get_result(&mut self) -> &WuMetrics {
+        if let WuMetricsSpanValue::Accum(accum) = &mut self.avg {
+            self.avg = WuMetricsSpanValue::Result(Box::new(accum.get_avg()));
+        }
+
+        let WuMetricsSpanValue::Result(avg) = &self.avg else {
+            unreachable!()
+        };
+
+        avg
+    }
+}
+
+pub enum AnchorsLagSpanValue {
+    Accum(SafeSignedAvg),
+    Result(i64),
+}
+
+pub struct AnchorsLagSpan {
+    pub avg: AnchorsLagSpanValue,
+    pub last: Option<MempoolAnchorLag>,
+    pub last_seqno: u32,
+}
+
+impl AnchorsLagSpan {
+    pub fn new(lag: MempoolAnchorLag, seqno: u32) -> Self {
+        Self {
+            avg: AnchorsLagSpanValue::Accum(SafeSignedAvg::default()),
+            last: Some(lag),
+            last_seqno: seqno,
+        }
+    }
+
+    pub fn accum(&mut self, v: MempoolAnchorLag, seqno: u32) -> Result<()> {
+        if self.last_seqno != seqno {
+            // accum lag value only for the last anchor after block seqno
+            self.accum_last()?;
+            self.last_seqno = seqno;
+        }
+        self.last = Some(v);
+        Ok(())
+    }
+
+    fn accum_last(&mut self) -> Result<()> {
+        if let Some(last) = self.last.take() {
+            match &mut self.avg {
+                AnchorsLagSpanValue::Accum(accum) => accum.accum(last.lag()),
+                AnchorsLagSpanValue::Result(_) => {
+                    anyhow::bail!("AnchorsLagSpan.avg should be Accum here")
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn get_result(&mut self) -> i64 {
+        if let AnchorsLagSpanValue::Accum(accum) = &mut self.avg {
+            if let Some(last) = self.last.take() {
+                accum.accum(last.lag());
+            }
+            self.avg = AnchorsLagSpanValue::Result(accum.get_avg() as i64);
+        }
+
+        let AnchorsLagSpanValue::Result(avg) = self.avg else {
+            unreachable!()
+        };
+
+        avg
+    }
+}
+
 #[derive(Default)]
 pub struct WuHistory {
-    metrics: BTreeMap<BlockSeqno, Box<WuMetrics>>,
+    metrics: BTreeMap<BlockSeqno, WuMetricsSpan>,
     avg_metrics: BTreeMap<BlockSeqno, WuMetrics>,
-    anchors_lag: BTreeMap<BlockSeqno, MempoolAnchorLag>,
+    anchors_lag: BTreeMap<BlockSeqno, AnchorsLagSpan>,
     avg_anchors_lag: BTreeMap<BlockSeqno, i64>,
 }
 
@@ -35,11 +138,14 @@ impl WuHistory {
         self.avg_anchors_lag.clear();
     }
 
-    fn gc(&mut self, gc_boundary: u32) {
-        self.metrics.retain(|k, _| k > &gc_boundary);
-        self.avg_metrics.retain(|k, _| k > &gc_boundary);
-        self.anchors_lag.retain(|k, _| k > &gc_boundary);
-        self.avg_anchors_lag.retain(|k, _| k > &gc_boundary);
+    fn gc_wu_metrics(&mut self, gc_boundary: u32) {
+        self.metrics.retain(|k, _| k >= &gc_boundary);
+        self.avg_metrics.retain(|k, _| k >= &gc_boundary);
+    }
+
+    fn gc_anchors_lag(&mut self, gc_boundary: u32) {
+        self.anchors_lag.retain(|k, _| k >= &gc_boundary);
+        self.avg_anchors_lag.retain(|k, _| k >= &gc_boundary);
     }
 }
 
@@ -56,7 +162,8 @@ where
     history: BTreeMap<ShardIdent, WuHistory>,
     target_wu_params_history: BTreeMap<BlockSeqno, WorkUnitsParams>,
     avg_target_wu_params_history: BTreeMap<BlockSeqno, WorkUnitsParams>,
-    wu_params_once_reported: bool,
+    wu_once_reported: FastHashSet<ShardIdent>,
+    lag_once_reported: bool,
     adjustments: BTreeMap<BlockSeqno, WuAdjustment>,
 }
 
@@ -71,7 +178,8 @@ where
             history: Default::default(),
             target_wu_params_history: Default::default(),
             avg_target_wu_params_history: Default::default(),
-            wu_params_once_reported: false,
+            wu_once_reported: Default::default(),
+            lag_once_reported: false,
             adjustments: Default::default(),
         }
     }
@@ -90,11 +198,23 @@ where
     pub async fn handle_wu_event(&mut self, event: WuEvent) -> Result<()> {
         let WuEvent { shard, seqno, data } = event;
 
-        let ma_interval = self.config.ma_interval.max(1) as u32;
-        let tune_interval = self.config.tune_interval.max(10) as u32;
+        let wu_span = self.config.wu_span.max(10) as u32;
+        let wu_ma_interval = self.config.wu_ma_interval.max(5) as u32;
+        let wu_ma_interval = wu_ma_interval.saturating_mul(wu_span);
 
-        // normilized seqno for calculating gc boundary
-        let normilized_seqno = seqno / ma_interval * ma_interval;
+        let lag_span = self.config.lag_span.max(10) as u32;
+        let lag_ma_interval = self.config.lag_ma_interval.max(4) as u32;
+        let lag_ma_interval = lag_ma_interval.saturating_mul(lag_span);
+
+        let tune_interval = self.config.tune_interval.max(100) as u32;
+        let tune_seqno = seqno / tune_interval * tune_interval;
+
+        // normilized seqno for calculations
+        // e.g. seqno = 244
+        let wu_span_seqno = seqno / wu_span * wu_span; // 240
+        let wu_ma_seqno = seqno / wu_ma_interval * wu_ma_interval; // 200
+        let lag_span_seqno = seqno / lag_span * lag_span; // 240
+        let lag_ma_seqno = seqno / lag_ma_interval * lag_ma_interval; // 240
 
         let history = self.history.entry(shard).or_default();
 
@@ -104,32 +224,40 @@ where
 
                 // drop history on a gap in metrics
                 if let Some((&last_key, _)) = history.metrics.last_key_value() {
-                    if last_key + 1 < seqno {
+                    // e.g. (240 + 10 < 244) == false
+                    if last_key + wu_span < seqno {
                         history.clear();
                         self.target_wu_params_history.clear();
                         self.avg_target_wu_params_history.clear();
 
                         tracing::debug!(
-                            %shard,
-                            seqno,
+                            %shard, seqno,
                             last_seqno = last_key,
+                            wu_span,
                             "drop wu history on the gap",
                         );
                     }
                 }
 
-                // clear history if wu params changed
-                if let Some(prev_metrics) = history.metrics.get(&seqno.saturating_sub(1))
-                    && metrics.wu_params != prev_metrics.wu_params
+                // report wu metrics and params on the start to avoid empty graphs
+                if !self.wu_once_reported.contains(&shard) {
+                    metrics.report_metrics(&shard);
+                    report_wu_params(&metrics.wu_params, &metrics.wu_params);
+                    self.wu_once_reported.insert(shard);
+                }
+
+                // handle if wu params changed
+                if let Some((_, last)) = history.metrics.last_key_value()
+                    && metrics.wu_params != last.last.wu_params
                 {
                     tracing::info!(
-                        %shard,
-                        seqno,
-                        prev_params = ?prev_metrics.wu_params,
+                        %shard, seqno,
+                        prev_params = ?last.last.wu_params,
                         curr_params = ?metrics.wu_params,
                         "wu params updated",
                     );
 
+                    // clear history
                     history.clear();
                     self.target_wu_params_history.clear();
                     self.avg_target_wu_params_history.clear();
@@ -138,21 +266,34 @@ where
                     report_wu_params(&metrics.wu_params, &metrics.wu_params);
                 }
 
-                // append history
-                history.metrics.insert(seqno, metrics);
+                // update history
+                match history.metrics.entry(wu_span_seqno) {
+                    std::collections::btree_map::Entry::Vacant(vacant) => {
+                        vacant.insert(WuMetricsSpan::new(metrics));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                        let span = occupied.get_mut();
+                        span.accum(metrics)?;
+                    }
+                }
 
                 tracing::trace!(
-                    %shard,
-                    seqno,
+                    %shard, seqno,
                     has_pending_messages,
                     metrics_history_len = history.metrics.len(),
                     "wu metrics received",
                 );
 
                 // calculate MA wu metrics
-                let avg_range = history.metrics.range((
-                    Bound::Excluded(seqno.saturating_sub(ma_interval)),
-                    Bound::Included(seqno),
+                if seqno != wu_ma_seqno {
+                    return Ok(());
+                }
+
+                // e.g. seqno = 200 -> avg_range = [150..200)
+                let avg_from_boundary = wu_ma_seqno.saturating_sub(wu_ma_interval);
+                let avg_range = history.metrics.range_mut((
+                    Bound::Included(avg_from_boundary),
+                    Bound::Excluded(wu_ma_seqno),
                 ));
                 let avg = safe_metrics_avg(avg_range);
 
@@ -160,64 +301,97 @@ where
                 avg.report_metrics(&shard);
 
                 tracing::trace!(
-                    %shard,
-                    seqno,
-                    "avg wu metrics calculated",
+                    %shard, seqno,
+                    "avg wu metrics calculated on [{0}..{1})",
+                    avg_from_boundary, wu_ma_seqno,
                 );
 
                 // store avg wu metrics to use further for tune
                 history.avg_metrics.insert(seqno, avg);
 
                 // clear outdated history
-                let gc_boundary = normilized_seqno.saturating_sub(ma_interval);
+                let gc_boundary = wu_ma_seqno.saturating_sub(wu_ma_interval); // e.g. seqno = 200 -> gc_boundary = 150
                 if let Some((&first_key, _)) = history.metrics.first_key_value() {
-                    if first_key <= gc_boundary {
-                        history.gc(gc_boundary);
+                    if first_key < gc_boundary {
+                        history.gc_wu_metrics(gc_boundary);
 
                         tracing::debug!(
-                            %shard,
-                            seqno,
+                            %shard, seqno,
+                            "wu metrics history gc < {0}",
                             gc_boundary,
-                            "wu metrics history gc",
                         );
                     }
                 }
             }
             WuEventData::AnchorLag(anchor_lag) => {
-                // // store only the first anchor lag after block
-                // if history.anchors_lag.contains_key(&seqno) {
-                //     return Ok(());
-                // }
-                history.anchors_lag.insert(seqno, anchor_lag.clone());
+                // report current anchors lag on the start to avoid empty graphs
+                if !self.lag_once_reported {
+                    report_anchor_lag_to_metrics(&shard, anchor_lag.lag());
+                    self.lag_once_reported = true;
+                }
+
+                // update history
+                match history.anchors_lag.entry(lag_span_seqno) {
+                    std::collections::btree_map::Entry::Vacant(vacant) => {
+                        vacant.insert(AnchorsLagSpan::new(anchor_lag.clone(), seqno));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                        let span = occupied.get_mut();
+                        span.accum(anchor_lag.clone(), seqno)?;
+                    }
+                }
 
                 tracing::trace!(
-                    %shard,
-                    seqno,
-                    ?anchor_lag,
+                    %shard, seqno,
+                    lag = anchor_lag.lag(),
+                    max_lag_ms = self.config.max_lag_ms,
                     lag_history_len = history.anchors_lag.len(),
-                    "anchor lag received and stored",
+                    "anchor lag received",
                 );
 
                 // calculate MA lag
-                let avg_range = history.anchors_lag.range((
-                    Bound::Excluded(seqno.saturating_sub(ma_interval)),
-                    Bound::Included(seqno),
+                if seqno < lag_ma_seqno
+                    || lag_ma_seqno == 0
+                    || history.avg_anchors_lag.contains_key(&lag_ma_seqno)
+                {
+                    return Ok(());
+                }
+
+                // e.g. seqno = 244 -> avg_range = [200..240)
+                let avg_from_boundary = lag_ma_seqno.saturating_sub(lag_ma_interval);
+                let avg_range = history.anchors_lag.range_mut((
+                    Bound::Included(avg_from_boundary),
+                    Bound::Excluded(lag_ma_seqno),
                 ));
                 let avg_lag = safe_anchors_lag_avg(avg_range);
 
                 // report avg anchor importing lag to metrics
                 report_anchor_lag_to_metrics(&shard, avg_lag);
 
-                tracing::trace!(
-                    %shard,
-                    seqno,
+                tracing::debug!(
+                    %shard, seqno,
                     avg_lag,
                     max_lag_ms = self.config.max_lag_ms,
-                    "avg anchor lag calculated",
+                    "avg anchor lag calculated on [{0}..{1})",
+                    avg_from_boundary, lag_ma_seqno,
                 );
 
                 // store avg lag
-                history.avg_anchors_lag.insert(seqno, avg_lag);
+                history.avg_anchors_lag.insert(lag_ma_seqno, avg_lag);
+
+                // clear outdated history
+                let gc_boundary = lag_ma_seqno.saturating_sub(lag_ma_interval); // e.g. seqno = 244 -> gc_boundary = 200
+                if let Some((&first_key, _)) = history.anchors_lag.first_key_value() {
+                    if first_key < gc_boundary {
+                        history.gc_anchors_lag(gc_boundary);
+
+                        tracing::debug!(
+                            %shard, seqno,
+                            "anchors lag history gc < {0}",
+                            gc_boundary,
+                        );
+                    }
+                }
 
                 // check lag and calculate target wu params
                 // NOTE: ONLY by shard blocks
@@ -226,27 +400,31 @@ where
                 }
 
                 // get last avg wu metrics
-                if let Some(avg_wu_metrics) = history.avg_metrics.get(&seqno) {
+                if let Some(avg_wu_metrics) = history.avg_metrics.get(&wu_ma_seqno) {
                     let mut target_wu_params = None;
 
-                    let mut target_wu_price = self.config.target_wu_price as f64 / 100.0;
+                    // first, get actual wu price
+                    let mut target_wu_price =
+                        avg_wu_metrics.wu_on_finalize.build_in_msgs_wu_price();
 
                     // when lag is negative but we do not have pending messages, it is okay
                     let avg_lag_abs = avg_lag.unsigned_abs();
                     if avg_lag_abs > self.config.max_lag_ms as u64
                         && (avg_lag > 0 || (avg_lag < 0 && avg_wu_metrics.has_pending_messages))
                     {
-                        // define target wu price
+                        // define new target wu price
                         // get prev adjustment if exists
-                        if let Some((_, prev_adjustment)) = self.adjustments.last_key_value() {
-                            // if current lag is > 0 then we should reduce target wu price
-                            if avg_lag > 0 {
-                                target_wu_price = (prev_adjustment.target_wu_price - 0.1).max(0.1);
-                            }
-                            // if current lag is < 0 then we should increase target wu price
-                            else {
-                                target_wu_price = prev_adjustment.target_wu_price + 0.1;
-                            }
+                        let prev_wu_price = self
+                            .adjustments
+                            .last_key_value()
+                            .map_or(target_wu_price, |(_, v)| v.target_wu_price);
+                        // if current lag is > 0 then we should reduce target wu price
+                        if avg_lag > 0 {
+                            target_wu_price = (prev_wu_price - 0.1).max(0.1);
+                        }
+                        // if current lag is < 0 then we should increase target wu price
+                        else {
+                            target_wu_price = prev_wu_price + 0.1;
                         }
 
                         // calculate target wu params
@@ -254,11 +432,11 @@ where
                             Self::calculate_target_wu_params(target_wu_price, avg_wu_metrics);
 
                         tracing::debug!(
-                            %shard,
-                            seqno,
+                            %shard, seqno,
                             avg_lag,
                             max_lag_ms = self.config.max_lag_ms,
                             current_build_in_msgs_wu_price = avg_wu_metrics.wu_on_finalize.build_in_msgs_wu_price(),
+                            prev_wu_price,
                             target_wu_price,
                             current_build_in_msg_wu_param = avg_wu_metrics.wu_params.finalize.build_in_msg,
                             target_build_in_msg_wu_param = target_params.finalize.build_in_msg,
@@ -274,25 +452,18 @@ where
                             // to calculate new params faster when lag appears
                             self.target_wu_params_history.clear();
                             self.avg_target_wu_params_history.clear();
-
-                            // report wu params on the start anyway to avoid empty graphs
-                            if !self.wu_params_once_reported {
-                                report_wu_params(
-                                    &avg_wu_metrics.wu_params,
-                                    &avg_wu_metrics.wu_params,
-                                );
-                                self.wu_params_once_reported = true;
-                            }
                         }
                         Some(target_wu_params) => {
                             // store target wu params
                             self.target_wu_params_history
-                                .insert(seqno, target_wu_params);
+                                .insert(lag_ma_seqno, target_wu_params);
 
                             // calculate MA target wu params
+                            // e.g. seqno = 244 -> avg_range = (140..240] = [160, 200, 240]
+                            let avg_from_boundary = lag_ma_seqno.saturating_sub(tune_interval);
                             let avg_range = self.target_wu_params_history.range((
-                                Bound::Excluded(seqno.saturating_sub(ma_interval)),
-                                Bound::Included(seqno),
+                                Bound::Excluded(avg_from_boundary),
+                                Bound::Included(lag_ma_seqno),
                             ));
                             let avg_target_wu_params = safe_wu_params_avg(avg_range);
 
@@ -301,26 +472,26 @@ where
                                 .insert(seqno, avg_target_wu_params.clone());
 
                             // calculate MA from MA target wu params
+                            // e.g. seqno = 244 -> avg_range = (140..240] = [160, 200, 240]
+                            let avg_from_boundary = lag_ma_seqno.saturating_sub(tune_interval);
                             let avg_range = self.avg_target_wu_params_history.range((
-                                Bound::Excluded(seqno.saturating_sub(tune_interval)),
-                                Bound::Included(seqno),
+                                Bound::Excluded(avg_from_boundary),
+                                Bound::Included(lag_ma_seqno),
                             ));
                             let avg_target_wu_params = safe_wu_params_avg(avg_range);
 
                             tracing::debug!(
-                                %shard,
-                                seqno,
+                                %shard, seqno,
                                 current_build_in_msg_wu_param = avg_wu_metrics.wu_params.finalize.build_in_msg,
                                 avg_target_build_in_msg_wu_param = avg_target_wu_params.finalize.build_in_msg,
-                                "calculated avg target wu params",
+                                "calculated avg target wu params on ({0}..{1}]",
+                                avg_from_boundary, lag_ma_seqno,
                             );
 
                             // report target wu params to metrics
                             report_wu_params(&avg_wu_metrics.wu_params, &avg_target_wu_params);
-                            self.wu_params_once_reported = true;
 
                             // update wu params in blockchain if tune interval elapsed
-                            let tune_seqno = seqno / tune_interval * tune_interval;
                             if !self.adjustments.contains_key(&tune_seqno) {
                                 match &self.config.tune {
                                     WuTuneType::Rpc { rpc, .. } => {
@@ -339,9 +510,9 @@ where
                                         let gc_boundary = tune_seqno.saturating_sub(tune_interval);
                                         if let Some((&first_key, _)) =
                                             self.adjustments.first_key_value()
-                                            && first_key < gc_boundary
+                                            && first_key <= gc_boundary
                                         {
-                                            self.adjustments.retain(|k, _| k >= &gc_boundary);
+                                            self.adjustments.retain(|k, _| k > &gc_boundary);
                                         }
 
                                         // make adjustment
@@ -361,21 +532,20 @@ where
                     }
 
                     // clear outdated target wu params history
-                    let gc_boundary = normilized_seqno.saturating_sub(ma_interval);
+                    let gc_boundary = tune_seqno.saturating_sub(tune_interval);
                     if let Some((&first_key, _)) = self.target_wu_params_history.first_key_value() {
                         if first_key <= gc_boundary {
                             self.target_wu_params_history
                                 .retain(|k, _| k > &gc_boundary);
 
                             tracing::debug!(
-                                %shard,
-                                seqno,
+                                %shard, seqno,
+                                "target wu params history gc <= {0}",
                                 gc_boundary,
-                                "target wu params history gc",
                             );
                         }
                     }
-                    let gc_boundary = normilized_seqno.saturating_sub(tune_interval);
+                    let gc_boundary = tune_seqno.saturating_sub(tune_interval);
                     if let Some((&first_key, _)) =
                         self.avg_target_wu_params_history.first_key_value()
                     {
@@ -384,10 +554,9 @@ where
                                 .retain(|k, _| k > &gc_boundary);
 
                             tracing::debug!(
-                                %shard,
-                                seqno,
+                                %shard, seqno,
+                                "avg target wu params history gc <= {0}",
                                 gc_boundary,
-                                "avg target wu params history gc",
                             );
                         }
                     }
@@ -622,183 +791,236 @@ where
 
 fn safe_metrics_avg<'a, I>(range: I) -> WuMetrics
 where
-    I: Iterator<Item = (&'a u32, &'a Box<WuMetrics>)>,
+    I: Iterator<Item = (&'a u32, &'a mut WuMetricsSpan)>,
 {
-    let mut avg = VecOfStreamingUnsignedMedian::new(53);
-    // let mut avg = SafeUnsignedVecAvg::new(53);
-
-    let mut last_wu_params = WorkUnitsParams::default();
-    let mut last_shard_accounts_count = 0;
-    let mut had_pending_messages = true;
+    let mut avg = WuMetricsAvg::new();
     for (_, v) in range {
-        last_wu_params = v.wu_params.clone();
-        had_pending_messages = had_pending_messages && v.has_pending_messages;
+        avg.accum(v.get_result());
+    }
 
-        last_shard_accounts_count = v.wu_on_finalize.shard_accounts_count;
+    avg.get_avg()
+}
 
-        avg.accum(0, v.wu_on_finalize.updated_accounts_count);
-        avg.accum_next(v.wu_on_finalize.in_msgs_len);
-        avg.accum_next(v.wu_on_finalize.out_msgs_len);
-        avg.accum_next(v.wu_on_execute.inserted_new_msgs_count);
+pub struct WuMetricsAvg {
+    last_wu_params: WorkUnitsParams,
+    last_shard_accounts_count: u64,
+    had_pending_messages: bool,
+    avg: VecOfStreamingUnsignedMedian,
+}
+
+impl WuMetricsAvg {
+    pub fn new() -> Self {
+        Self {
+            last_wu_params: Default::default(),
+            last_shard_accounts_count: 0,
+            had_pending_messages: true,
+            avg: VecOfStreamingUnsignedMedian::new(53),
+        }
+    }
+
+    pub fn accum(&mut self, v: &WuMetrics) {
+        self.last_wu_params = v.wu_params.clone();
+        self.had_pending_messages = self.had_pending_messages && v.has_pending_messages;
+
+        self.last_shard_accounts_count = v.wu_on_finalize.shard_accounts_count;
+
+        self.avg.accum(0, v.wu_on_finalize.updated_accounts_count);
+        self.avg.accum_next(v.wu_on_finalize.in_msgs_len);
+        self.avg.accum_next(v.wu_on_finalize.out_msgs_len);
+        self.avg.accum_next(v.wu_on_execute.inserted_new_msgs_count);
 
         // wu_on_prepare_msg_groups
-        avg.accum_next(v.wu_on_prepare_msg_groups.fixed_part);
-        avg.accum_next(v.wu_on_prepare_msg_groups.read_ext_msgs_count);
-        avg.accum_next(v.wu_on_prepare_msg_groups.read_ext_msgs_wu);
-        avg.accum_next(v.wu_on_prepare_msg_groups.read_ext_msgs_elapsed.as_nanos());
-        avg.accum_next(v.wu_on_prepare_msg_groups.read_existing_int_msgs_count);
-        avg.accum_next(v.wu_on_prepare_msg_groups.read_existing_int_msgs_wu);
-        avg.accum_next(
+        self.avg.accum_next(v.wu_on_prepare_msg_groups.fixed_part);
+        self.avg
+            .accum_next(v.wu_on_prepare_msg_groups.read_ext_msgs_count);
+        self.avg
+            .accum_next(v.wu_on_prepare_msg_groups.read_ext_msgs_wu);
+        self.avg
+            .accum_next(v.wu_on_prepare_msg_groups.read_ext_msgs_elapsed.as_nanos());
+        self.avg
+            .accum_next(v.wu_on_prepare_msg_groups.read_existing_int_msgs_count);
+        self.avg
+            .accum_next(v.wu_on_prepare_msg_groups.read_existing_int_msgs_wu);
+        self.avg.accum_next(
             v.wu_on_prepare_msg_groups
                 .read_existing_int_msgs_elapsed
                 .as_nanos(),
         );
-        avg.accum_next(v.wu_on_prepare_msg_groups.read_new_int_msgs_count);
-        avg.accum_next(v.wu_on_prepare_msg_groups.read_new_int_msgs_wu);
-        avg.accum_next(
+        self.avg
+            .accum_next(v.wu_on_prepare_msg_groups.read_new_int_msgs_count);
+        self.avg
+            .accum_next(v.wu_on_prepare_msg_groups.read_new_int_msgs_wu);
+        self.avg.accum_next(
             v.wu_on_prepare_msg_groups
                 .read_new_int_msgs_elapsed
                 .as_nanos(),
         );
-        avg.accum_next(v.wu_on_prepare_msg_groups.add_to_msgs_groups_ops_count);
-        avg.accum_next(v.wu_on_prepare_msg_groups.add_msgs_to_groups_wu);
-        avg.accum_next(
+        self.avg
+            .accum_next(v.wu_on_prepare_msg_groups.add_to_msgs_groups_ops_count);
+        self.avg
+            .accum_next(v.wu_on_prepare_msg_groups.add_msgs_to_groups_wu);
+        self.avg.accum_next(
             v.wu_on_prepare_msg_groups
                 .add_msgs_to_groups_elapsed
                 .as_nanos(),
         );
-        avg.accum_next(v.wu_on_prepare_msg_groups.total_elapsed.as_nanos());
+        self.avg
+            .accum_next(v.wu_on_prepare_msg_groups.total_elapsed.as_nanos());
 
         // wu_on_execute
-        avg.accum_next(v.wu_on_execute.groups_count);
-        avg.accum_next(v.wu_on_execute.sum_gas);
-        avg.accum_next(v.wu_on_execute.avg_group_accounts_count.get_avg());
-        avg.accum_next(v.wu_on_execute.avg_threads_count.get_avg());
-        avg.accum_next(v.wu_on_execute.execute_groups_vm_only_wu);
-        avg.accum_next(v.wu_on_execute.execute_groups_vm_only_elapsed.as_nanos());
-        avg.accum_next(v.wu_on_execute.process_txs_wu);
-        avg.accum_next(v.wu_on_execute.process_txs_elapsed.as_nanos());
+        self.avg.accum_next(v.wu_on_execute.groups_count);
+        self.avg.accum_next(v.wu_on_execute.sum_gas);
+        self.avg
+            .accum_next(v.wu_on_execute.avg_group_accounts_count.get_avg());
+        self.avg
+            .accum_next(v.wu_on_execute.avg_threads_count.get_avg());
+        self.avg
+            .accum_next(v.wu_on_execute.execute_groups_vm_only_wu);
+        self.avg
+            .accum_next(v.wu_on_execute.execute_groups_vm_only_elapsed.as_nanos());
+        self.avg.accum_next(v.wu_on_execute.process_txs_wu);
+        self.avg
+            .accum_next(v.wu_on_execute.process_txs_elapsed.as_nanos());
 
         // wu_on_finalize
-        avg.accum_next(v.wu_on_finalize.diff_msgs_count);
-        avg.accum_next(v.wu_on_finalize.create_queue_diff_wu);
-        avg.accum_next(v.wu_on_finalize.create_queue_diff_elapsed.as_nanos());
-        avg.accum_next(v.wu_on_finalize.apply_queue_diff_wu);
-        avg.accum_next(v.wu_on_finalize.apply_queue_diff_elapsed.as_nanos());
-        avg.accum_next(v.wu_on_finalize.update_shard_accounts_wu);
-        avg.accum_next(v.wu_on_finalize.update_shard_accounts_elapsed.as_nanos());
-        avg.accum_next(v.wu_on_finalize.build_accounts_blocks_wu);
-        avg.accum_next(v.wu_on_finalize.build_accounts_blocks_elapsed.as_nanos());
-        avg.accum_next(v.wu_on_finalize.build_accounts_elapsed.as_nanos());
-        avg.accum_next(v.wu_on_finalize.build_in_msgs_wu);
-        avg.accum_next(v.wu_on_finalize.build_in_msgs_elapsed.as_nanos());
-        avg.accum_next(v.wu_on_finalize.build_out_msgs_wu);
-        avg.accum_next(v.wu_on_finalize.build_out_msgs_elapsed.as_nanos());
-        avg.accum_next(
+        self.avg.accum_next(v.wu_on_finalize.diff_msgs_count);
+        self.avg.accum_next(v.wu_on_finalize.create_queue_diff_wu);
+        self.avg
+            .accum_next(v.wu_on_finalize.create_queue_diff_elapsed.as_nanos());
+        self.avg.accum_next(v.wu_on_finalize.apply_queue_diff_wu);
+        self.avg
+            .accum_next(v.wu_on_finalize.apply_queue_diff_elapsed.as_nanos());
+        self.avg
+            .accum_next(v.wu_on_finalize.update_shard_accounts_wu);
+        self.avg
+            .accum_next(v.wu_on_finalize.update_shard_accounts_elapsed.as_nanos());
+        self.avg
+            .accum_next(v.wu_on_finalize.build_accounts_blocks_wu);
+        self.avg
+            .accum_next(v.wu_on_finalize.build_accounts_blocks_elapsed.as_nanos());
+        self.avg
+            .accum_next(v.wu_on_finalize.build_accounts_elapsed.as_nanos());
+        self.avg.accum_next(v.wu_on_finalize.build_in_msgs_wu);
+        self.avg
+            .accum_next(v.wu_on_finalize.build_in_msgs_elapsed.as_nanos());
+        self.avg.accum_next(v.wu_on_finalize.build_out_msgs_wu);
+        self.avg
+            .accum_next(v.wu_on_finalize.build_out_msgs_elapsed.as_nanos());
+        self.avg.accum_next(
             v.wu_on_finalize
                 .build_accounts_and_messages_in_parallel_elased
                 .as_nanos(),
         );
-        avg.accum_next(v.wu_on_finalize.build_state_update_wu);
-        avg.accum_next(v.wu_on_finalize.build_state_update_elapsed.as_nanos());
-        avg.accum_next(v.wu_on_finalize.build_block_wu);
-        avg.accum_next(v.wu_on_finalize.build_block_elapsed.as_nanos());
-        avg.accum_next(v.wu_on_finalize.finalize_block_elapsed.as_nanos());
-        avg.accum_next(v.wu_on_finalize.total_elapsed.as_nanos());
+        self.avg.accum_next(v.wu_on_finalize.build_state_update_wu);
+        self.avg
+            .accum_next(v.wu_on_finalize.build_state_update_elapsed.as_nanos());
+        self.avg.accum_next(v.wu_on_finalize.build_block_wu);
+        self.avg
+            .accum_next(v.wu_on_finalize.build_block_elapsed.as_nanos());
+        self.avg
+            .accum_next(v.wu_on_finalize.finalize_block_elapsed.as_nanos());
+        self.avg
+            .accum_next(v.wu_on_finalize.total_elapsed.as_nanos());
 
         // wu_on_do_collate
-        avg.accum_next(v.wu_on_do_collate.resume_collation_wu);
-        avg.accum_next(v.wu_on_do_collate.resume_collation_elapsed.as_nanos());
-        avg.accum_next(v.wu_on_do_collate.resume_collation_wu_per_block);
-        avg.accum_next(v.wu_on_do_collate.resume_collation_elapsed_per_block_ns);
-        avg.accum_next(v.wu_on_do_collate.collation_total_elapsed.as_nanos());
+        self.avg.accum_next(v.wu_on_do_collate.resume_collation_wu);
+        self.avg
+            .accum_next(v.wu_on_do_collate.resume_collation_elapsed.as_nanos());
+        self.avg
+            .accum_next(v.wu_on_do_collate.resume_collation_wu_per_block);
+        self.avg
+            .accum_next(v.wu_on_do_collate.resume_collation_elapsed_per_block_ns);
+        self.avg
+            .accum_next(v.wu_on_do_collate.collation_total_elapsed.as_nanos());
     }
 
-    let updated_accounts_count = avg.get_avg(0) as u64;
-    let in_msgs_len = avg.get_avg_next() as u64;
-    let out_msgs_len = avg.get_avg_next() as u64;
-    let inserted_new_msgs_count = avg.get_avg_next() as u64;
+    pub fn get_avg(&mut self) -> WuMetrics {
+        let updated_accounts_count = self.avg.get_avg(0) as u64;
+        let in_msgs_len = self.avg.get_avg_next() as u64;
+        let out_msgs_len = self.avg.get_avg_next() as u64;
+        let inserted_new_msgs_count = self.avg.get_avg_next() as u64;
 
-    WuMetrics {
-        wu_params: last_wu_params,
-        wu_on_prepare_msg_groups: PrepareMsgGroupsWu {
-            fixed_part: avg.get_avg_next() as u64,
-            read_ext_msgs_count: avg.get_avg_next() as u64,
-            read_ext_msgs_wu: avg.get_avg_next() as u64,
-            read_ext_msgs_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            read_existing_int_msgs_count: avg.get_avg_next() as u64,
-            read_existing_int_msgs_wu: avg.get_avg_next() as u64,
-            read_existing_int_msgs_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            read_new_int_msgs_count: avg.get_avg_next() as u64,
-            read_new_int_msgs_wu: avg.get_avg_next() as u64,
-            read_new_int_msgs_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            add_to_msgs_groups_ops_count: avg.get_avg_next() as u64,
-            add_msgs_to_groups_wu: avg.get_avg_next() as u64,
-            add_msgs_to_groups_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            total_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-        },
-        wu_on_execute: ExecuteWu {
-            in_msgs_len,
-            out_msgs_len,
-            inserted_new_msgs_count,
-            groups_count: avg.get_avg_next() as u64,
-            sum_gas: avg.get_avg_next(),
-            avg_group_accounts_count: SafeUnsignedAvg::with_initial(avg.get_avg_next()),
-            avg_threads_count: SafeUnsignedAvg::with_initial(avg.get_avg_next()),
-            execute_groups_vm_only_wu: avg.get_avg_next() as u64,
-            execute_groups_vm_only_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            process_txs_wu: avg.get_avg_next() as u64,
-            process_txs_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-        },
-        wu_on_finalize: FinalizeWu {
-            shard_accounts_count: last_shard_accounts_count,
-            diff_msgs_count: avg.get_avg_next() as u64,
-            create_queue_diff_wu: avg.get_avg_next() as u64,
-            create_queue_diff_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            apply_queue_diff_wu: avg.get_avg_next() as u64,
-            apply_queue_diff_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            updated_accounts_count,
-            in_msgs_len,
-            out_msgs_len,
-            update_shard_accounts_wu: avg.get_avg_next() as u64,
-            update_shard_accounts_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            build_accounts_blocks_wu: avg.get_avg_next() as u64,
-            build_accounts_blocks_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            build_accounts_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            build_in_msgs_wu: avg.get_avg_next() as u64,
-            build_in_msgs_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            build_out_msgs_wu: avg.get_avg_next() as u64,
-            build_out_msgs_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            build_accounts_and_messages_in_parallel_elased: Duration::from_nanos(
-                avg.get_avg_next() as u64,
-            ),
-            build_state_update_wu: avg.get_avg_next() as u64,
-            build_state_update_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            build_block_wu: avg.get_avg_next() as u64,
-            build_block_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            finalize_block_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            total_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-        },
-        wu_on_do_collate: DoCollateWu {
-            shard_accounts_count: last_shard_accounts_count,
-            updated_accounts_count,
-            resume_collation_wu: avg.get_avg_next() as u64,
-            resume_collation_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-            resume_collation_wu_per_block: avg.get_avg_next() as u64,
-            resume_collation_elapsed_per_block_ns: avg.get_avg_next(),
-            collation_total_elapsed: Duration::from_nanos(avg.get_avg_next() as u64),
-        },
-        has_pending_messages: had_pending_messages,
+        WuMetrics {
+            wu_params: self.last_wu_params.clone(),
+            wu_on_prepare_msg_groups: PrepareMsgGroupsWu {
+                fixed_part: self.avg.get_avg_next() as u64,
+                read_ext_msgs_count: self.avg.get_avg_next() as u64,
+                read_ext_msgs_wu: self.avg.get_avg_next() as u64,
+                read_ext_msgs_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                read_existing_int_msgs_count: self.avg.get_avg_next() as u64,
+                read_existing_int_msgs_wu: self.avg.get_avg_next() as u64,
+                read_existing_int_msgs_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                read_new_int_msgs_count: self.avg.get_avg_next() as u64,
+                read_new_int_msgs_wu: self.avg.get_avg_next() as u64,
+                read_new_int_msgs_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                add_to_msgs_groups_ops_count: self.avg.get_avg_next() as u64,
+                add_msgs_to_groups_wu: self.avg.get_avg_next() as u64,
+                add_msgs_to_groups_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                total_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+            },
+            wu_on_execute: ExecuteWu {
+                in_msgs_len,
+                out_msgs_len,
+                inserted_new_msgs_count,
+                groups_count: self.avg.get_avg_next() as u64,
+                sum_gas: self.avg.get_avg_next(),
+                avg_group_accounts_count: SafeUnsignedAvg::with_initial(self.avg.get_avg_next()),
+                avg_threads_count: SafeUnsignedAvg::with_initial(self.avg.get_avg_next()),
+                execute_groups_vm_only_wu: self.avg.get_avg_next() as u64,
+                execute_groups_vm_only_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                process_txs_wu: self.avg.get_avg_next() as u64,
+                process_txs_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+            },
+            wu_on_finalize: FinalizeWu {
+                shard_accounts_count: self.last_shard_accounts_count,
+                diff_msgs_count: self.avg.get_avg_next() as u64,
+                create_queue_diff_wu: self.avg.get_avg_next() as u64,
+                create_queue_diff_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                apply_queue_diff_wu: self.avg.get_avg_next() as u64,
+                apply_queue_diff_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                updated_accounts_count,
+                in_msgs_len,
+                out_msgs_len,
+                update_shard_accounts_wu: self.avg.get_avg_next() as u64,
+                update_shard_accounts_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                build_accounts_blocks_wu: self.avg.get_avg_next() as u64,
+                build_accounts_blocks_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                build_accounts_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                build_in_msgs_wu: self.avg.get_avg_next() as u64,
+                build_in_msgs_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                build_out_msgs_wu: self.avg.get_avg_next() as u64,
+                build_out_msgs_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                build_accounts_and_messages_in_parallel_elased: Duration::from_nanos(
+                    self.avg.get_avg_next() as u64,
+                ),
+                build_state_update_wu: self.avg.get_avg_next() as u64,
+                build_state_update_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                build_block_wu: self.avg.get_avg_next() as u64,
+                build_block_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                finalize_block_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                total_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+            },
+            wu_on_do_collate: DoCollateWu {
+                shard_accounts_count: self.last_shard_accounts_count,
+                updated_accounts_count,
+                resume_collation_wu: self.avg.get_avg_next() as u64,
+                resume_collation_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+                resume_collation_wu_per_block: self.avg.get_avg_next() as u64,
+                resume_collation_elapsed_per_block_ns: self.avg.get_avg_next(),
+                collation_total_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
+            },
+            has_pending_messages: self.had_pending_messages,
+        }
     }
 }
 
 fn safe_anchors_lag_avg<'a, I>(range: I) -> i64
 where
-    I: Iterator<Item = (&'a u32, &'a MempoolAnchorLag)>,
+    I: Iterator<Item = (&'a u32, &'a mut AnchorsLagSpan)>,
 {
     let mut avg = SafeSignedAvg::default();
     for (_, v) in range {
-        avg.accum(v.lag());
+        avg.accum(v.get_result());
     }
     avg.get_avg() as i64
 }

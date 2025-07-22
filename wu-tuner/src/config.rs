@@ -9,7 +9,10 @@ use tycho_types::cell::HashBytes;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct WuTunerConfig {
-    pub ma_interval: u16,
+    pub wu_span: u16,
+    pub wu_ma_interval: u16,
+    pub lag_span: u16,
+    pub lag_ma_interval: u16,
     pub tune_interval: u16,
     pub tune: WuTuneType,
     pub max_lag_ms: u16,
@@ -19,7 +22,10 @@ pub struct WuTunerConfig {
 impl Default for WuTunerConfig {
     fn default() -> Self {
         Self {
-            ma_interval: 1000,
+            wu_span: 10,
+            wu_ma_interval: 100,
+            lag_span: 10,
+            lag_ma_interval: 10,
             tune_interval: 2000,
             tune: Default::default(),
             max_lag_ms: 300,
