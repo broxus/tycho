@@ -51,16 +51,17 @@ impl WuMetricsSpan {
         Ok(())
     }
 
-    pub fn get_result(&mut self) -> &WuMetrics {
+    pub fn get_result(&mut self) -> Option<&WuMetrics> {
         if let WuMetricsSpanValue::Accum(accum) = &mut self.avg {
-            self.avg = WuMetricsSpanValue::Result(Box::new(accum.get_avg()));
+            let avg = accum.get_avg()?;
+            self.avg = WuMetricsSpanValue::Result(Box::new(avg));
         }
 
         let WuMetricsSpanValue::Result(avg) = &self.avg else {
             unreachable!()
         };
 
-        avg
+        Some(avg)
     }
 }
 
@@ -295,7 +296,9 @@ where
                     Bound::Included(avg_from_boundary),
                     Bound::Excluded(wu_ma_seqno),
                 ));
-                let avg = safe_metrics_avg(avg_range);
+                let Some(avg) = safe_metrics_avg(avg_range) else {
+                    return Ok(());
+                };
 
                 // report avg wu metrics
                 avg.report_metrics(&shard);
@@ -363,7 +366,9 @@ where
                     Bound::Included(avg_from_boundary),
                     Bound::Excluded(lag_ma_seqno),
                 ));
-                let avg_lag = safe_anchors_lag_avg(avg_range);
+                let Some(avg_lag) = safe_anchors_lag_avg(avg_range) else {
+                    return Ok(());
+                };
 
                 // report avg anchor importing lag to metrics
                 report_anchor_lag_to_metrics(&shard, avg_lag);
@@ -467,7 +472,9 @@ where
                                 Bound::Excluded(avg_from_boundary),
                                 Bound::Included(lag_ma_seqno),
                             ));
-                            let avg_target_wu_params = safe_wu_params_avg(avg_range);
+                            let Some(avg_target_wu_params) = safe_wu_params_avg(avg_range) else {
+                                return Ok(());
+                            };
 
                             // store MA target wu params
                             self.avg_target_wu_params_history
@@ -480,7 +487,9 @@ where
                                 Bound::Excluded(avg_from_boundary),
                                 Bound::Included(lag_ma_seqno),
                             ));
-                            let avg_target_wu_params = safe_wu_params_avg(avg_range);
+                            let Some(avg_target_wu_params) = safe_wu_params_avg(avg_range) else {
+                                return Ok(());
+                            };
 
                             tracing::debug!(
                                 %shard, seqno,
@@ -791,13 +800,16 @@ where
     }
 }
 
-fn safe_metrics_avg<'a, I>(range: I) -> WuMetrics
+fn safe_metrics_avg<'a, I>(range: I) -> Option<WuMetrics>
 where
     I: Iterator<Item = (&'a u32, &'a mut WuMetricsSpan)>,
 {
     let mut avg = WuMetricsAvg::new();
     for (_, v) in range {
-        avg.accum(v.get_result());
+        let Some(span_res) = v.get_result() else {
+            continue;
+        };
+        avg.accum(span_res);
     }
 
     avg.get_avg()
@@ -872,10 +884,18 @@ impl WuMetricsAvg {
         // wu_on_execute
         self.avg.accum_next(v.wu_on_execute.groups_count);
         self.avg.accum_next(v.wu_on_execute.sum_gas);
-        self.avg
-            .accum_next(v.wu_on_execute.avg_group_accounts_count.get_avg());
-        self.avg
-            .accum_next(v.wu_on_execute.avg_threads_count.get_avg());
+        self.avg.accum_next(
+            v.wu_on_execute
+                .avg_group_accounts_count
+                .get_avg_checked()
+                .unwrap_or_default(),
+        );
+        self.avg.accum_next(
+            v.wu_on_execute
+                .avg_threads_count
+                .get_avg_checked()
+                .unwrap_or_default(),
+        );
         self.avg
             .accum_next(v.wu_on_execute.execute_groups_vm_only_wu);
         self.avg
@@ -936,13 +956,14 @@ impl WuMetricsAvg {
             .accum_next(v.wu_on_do_collate.collation_total_elapsed.as_nanos());
     }
 
-    pub fn get_avg(&mut self) -> WuMetrics {
-        let updated_accounts_count = self.avg.get_avg(0) as u64;
+    pub fn get_avg(&mut self) -> Option<WuMetrics> {
+        let updated_accounts_count = self.avg.get_avg_checked(0).map(|v| v as u64)?;
+
         let in_msgs_len = self.avg.get_avg_next() as u64;
         let out_msgs_len = self.avg.get_avg_next() as u64;
         let inserted_new_msgs_count = self.avg.get_avg_next() as u64;
 
-        WuMetrics {
+        Some(WuMetrics {
             wu_params: self.last_wu_params.clone(),
             wu_on_prepare_msg_groups: PrepareMsgGroupsWu {
                 fixed_part: self.avg.get_avg_next() as u64,
@@ -1012,11 +1033,11 @@ impl WuMetricsAvg {
                 collation_total_elapsed: Duration::from_nanos(self.avg.get_avg_next() as u64),
             },
             has_pending_messages: self.had_pending_messages,
-        }
+        })
     }
 }
 
-fn safe_anchors_lag_avg<'a, I>(range: I) -> i64
+fn safe_anchors_lag_avg<'a, I>(range: I) -> Option<i64>
 where
     I: Iterator<Item = (&'a u32, &'a mut AnchorsLagSpan)>,
 {
@@ -1024,15 +1045,15 @@ where
     for (_, v) in range {
         avg.accum(v.get_result());
     }
-    avg.get_avg() as i64
+
+    avg.get_avg_checked().map(|v| v as i64)
 }
 
-fn safe_wu_params_avg<'a, I>(range: I) -> WorkUnitsParams
+fn safe_wu_params_avg<'a, I>(range: I) -> Option<WorkUnitsParams>
 where
     I: Iterator<Item = (&'a u32, &'a WorkUnitsParams)>,
 {
     let mut avg = VecOfStreamingUnsignedMedian::new(26);
-    // let mut avg = SafeUnsignedVecAvg::new(26);
 
     for (_, v) in range {
         avg.accum(0, v.prepare.fixed_part);
@@ -1065,9 +1086,11 @@ where
         avg.accum_next(v.finalize.diff_tail_len);
     }
 
-    WorkUnitsParams {
+    let fixed_part = avg.get_avg_checked(0).map(|v| v as u32)?;
+
+    Some(WorkUnitsParams {
         prepare: WorkUnitsParamsPrepare {
-            fixed_part: avg.get_avg(0) as u32,
+            fixed_part,
             msgs_stats: 0,
             remaning_msgs_stats: 0,
             read_ext_msgs: avg.get_avg_next() as u16,
@@ -1101,7 +1124,7 @@ where
             apply_diff: avg.get_avg_next() as u16,
             diff_tail_len: avg.get_avg_next() as u16,
         },
-    }
+    })
 }
 
 fn report_target_wu_price(prev_wu_price: f64, target_wu_price: f64) {
