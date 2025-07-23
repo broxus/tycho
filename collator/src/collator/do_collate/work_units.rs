@@ -410,15 +410,18 @@ impl ExecuteWu {
         // sum(G) * C / D ~ WU * avg(T) - N * P * avg(A)
         // C ~ (WU * avg(T) - N * P * avg(A)) * D / sum(G)
 
-        let avg_threads_count = self.avg_threads_count.get_avg();
-        let avg_group_accounts_count = self.avg_group_accounts_count.get_avg();
+        let avg_threads_count = self.avg_threads_count.get_avg_checked();
+        let avg_group_accounts_count = self.avg_group_accounts_count.get_avg_checked();
         if self.groups_count == 0
-            || avg_threads_count == 0
-            || avg_group_accounts_count == 0
+            || avg_threads_count.is_none()
+            || avg_group_accounts_count.is_none()
             || self.sum_gas == 0
         {
             return None;
         }
+
+        let avg_threads_count = avg_threads_count.unwrap();
+        let avg_group_accounts_count = avg_group_accounts_count.unwrap();
 
         let target_wu_param = (target_wu as u128)
             .saturating_mul(avg_threads_count)
