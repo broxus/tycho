@@ -443,6 +443,8 @@ where
                             "calculated target wu params",
                         );
 
+                        report_target_wu_price(prev_wu_price, target_wu_price);
+
                         target_wu_params = Some(target_params);
                     }
 
@@ -469,7 +471,7 @@ where
 
                             // store MA target wu params
                             self.avg_target_wu_params_history
-                                .insert(seqno, avg_target_wu_params.clone());
+                                .insert(lag_ma_seqno, avg_target_wu_params.clone());
 
                             // calculate MA from MA target wu params
                             // e.g. seqno = 244 -> avg_range = (140..240] = [160, 200, 240]
@@ -510,9 +512,9 @@ where
                                         let gc_boundary = tune_seqno.saturating_sub(tune_interval);
                                         if let Some((&first_key, _)) =
                                             self.adjustments.first_key_value()
-                                            && first_key <= gc_boundary
+                                            && first_key < gc_boundary
                                         {
-                                            self.adjustments.retain(|k, _| k > &gc_boundary);
+                                            self.adjustments.retain(|k, _| k >= &gc_boundary);
                                         }
 
                                         // make adjustment
@@ -534,9 +536,9 @@ where
                     // clear outdated target wu params history
                     let gc_boundary = tune_seqno.saturating_sub(tune_interval);
                     if let Some((&first_key, _)) = self.target_wu_params_history.first_key_value() {
-                        if first_key <= gc_boundary {
+                        if first_key < gc_boundary {
                             self.target_wu_params_history
-                                .retain(|k, _| k > &gc_boundary);
+                                .retain(|k, _| k >= &gc_boundary);
 
                             tracing::debug!(
                                 %shard, seqno,
@@ -549,9 +551,9 @@ where
                     if let Some((&first_key, _)) =
                         self.avg_target_wu_params_history.first_key_value()
                     {
-                        if first_key <= gc_boundary {
+                        if first_key < gc_boundary {
                             self.avg_target_wu_params_history
-                                .retain(|k, _| k > &gc_boundary);
+                                .retain(|k, _| k >= &gc_boundary);
 
                             tracing::debug!(
                                 %shard, seqno,
@@ -1100,6 +1102,11 @@ where
             diff_tail_len: avg.get_avg_next() as u16,
         },
     }
+}
+
+fn report_target_wu_price(prev_wu_price: f64, target_wu_price: f64) {
+    metrics::gauge!("tycho_do_collate_wu_tuner_prev_wu_price").set(prev_wu_price);
+    metrics::gauge!("tycho_do_collate_wu_tuner_target_wu_price").set(target_wu_price);
 }
 
 fn report_wu_params(curr_wu_params: &WorkUnitsParams, target_wu_params: &WorkUnitsParams) {
