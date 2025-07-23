@@ -23,12 +23,17 @@ impl SafeUnsignedAvg {
     }
 
     pub fn get_avg(&self) -> u128 {
+        self.get_avg_checked()
+            .expect("should check first with `get_avg_checked`")
+    }
+
+    pub fn get_avg_checked(&self) -> Option<u128> {
         if self.counter == 0 {
-            0
+            None
         } else if self.counter == 1 {
-            self.sum
+            Some(self.sum)
         } else {
-            self.sum.saturating_div(self.counter)
+            Some(self.sum.saturating_div(self.counter))
         }
     }
 }
@@ -58,12 +63,17 @@ impl SafeSignedAvg {
     }
 
     pub fn get_avg(&self) -> i128 {
+        self.get_avg_checked()
+            .expect("should check first with `get_avg_checked`")
+    }
+
+    pub fn get_avg_checked(&self) -> Option<i128> {
         if self.counter == 0 {
-            0
+            None
         } else if self.counter == 1 {
-            self.sum
+            Some(self.sum)
         } else {
-            self.sum.saturating_div(self.counter)
+            Some(self.sum.saturating_div(self.counter))
         }
     }
 }
@@ -104,20 +114,29 @@ impl SafeUnsignedVecAvg {
     }
 
     pub fn get_avg(&mut self, idx: usize) -> u128 {
+        self.get_avg_checked(idx)
+            .expect("should check first with `get_avg_checked`")
+    }
+
+    pub fn get_avg_checked(&mut self, idx: usize) -> Option<u128> {
         self.idx = idx;
         self.get_avg_curr()
     }
 
     pub fn get_avg_next(&mut self) -> u128 {
+        self.get_avg_next_checked().unwrap()
+    }
+
+    pub fn get_avg_next_checked(&mut self) -> Option<u128> {
         self.idx += 1;
         self.get_avg_curr()
     }
 
-    fn get_avg_curr(&self) -> u128 {
+    fn get_avg_curr(&self) -> Option<u128> {
         if self.counters[self.idx] == 0 {
-            0
+            None
         } else {
-            self.sums[self.idx].saturating_div(self.counters[self.idx])
+            Some(self.sums[self.idx].saturating_div(self.counters[self.idx]))
         }
     }
 }

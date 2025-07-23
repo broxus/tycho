@@ -22,7 +22,12 @@ impl StreamingUnsignedMedian {
         }
     }
 
-    pub fn median(&self) -> Option<u128> {
+    pub fn get_median(&self) -> u128 {
+        self.get_median_checked()
+            .expect("should check first with `median_checked`")
+    }
+
+    pub fn get_median_checked(&self) -> Option<u128> {
         if self.lo.is_empty() {
             return None;
         }
@@ -73,24 +78,42 @@ impl VecOfStreamingUnsignedMedian {
     }
 
     pub fn get_avg(&mut self, idx: usize) -> u128 {
-        self.get_median(idx).unwrap_or_default()
+        self.get_median(idx)
+    }
+
+    pub fn get_avg_checked(&mut self, idx: usize) -> Option<u128> {
+        self.get_median_checked(idx)
     }
 
     pub fn get_avg_next(&mut self) -> u128 {
-        self.get_median_next().unwrap_or_default()
+        self.get_median_next()
     }
 
-    pub fn get_median(&mut self, idx: usize) -> Option<u128> {
+    pub fn get_avg_next_checked(&mut self) -> Option<u128> {
+        self.get_median_next_checked()
+    }
+
+    pub fn get_median(&mut self, idx: usize) -> u128 {
+        self.get_median_checked(idx)
+            .expect("should check first with `get_median_checked`")
+    }
+
+    pub fn get_median_checked(&mut self, idx: usize) -> Option<u128> {
         self.idx = idx;
         self.get_median_curr()
     }
 
-    pub fn get_median_next(&mut self) -> Option<u128> {
+    pub fn get_median_next(&mut self) -> u128 {
+        self.get_median_next_checked()
+            .expect("should check first with `get_median_checked`")
+    }
+
+    pub fn get_median_next_checked(&mut self) -> Option<u128> {
         self.idx += 1;
         self.get_median_curr()
     }
 
     fn get_median_curr(&self) -> Option<u128> {
-        self.inner[self.idx].median()
+        self.inner[self.idx].get_median_checked()
     }
 }
