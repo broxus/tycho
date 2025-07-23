@@ -11,7 +11,7 @@ use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::state::storage::QueueStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::MempoolAdapterStdImpl;
+use tycho_collator::mempool::{MempoolAdapterStdImpl, NoFilter};
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollatorConfig;
@@ -198,6 +198,7 @@ impl Node {
                 StateNodeAdapterStdImpl::new(listener, base.core_storage.clone(), sync_context)
             },
             mempool_adapter,
+            Arc::new(NoFilter),
             validator.clone(),
             CollatorStdImplFactory,
             self.mempool_config_override.clone(),

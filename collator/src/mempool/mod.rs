@@ -42,6 +42,45 @@ where
     }
 }
 
+// === Message Filters ===
+
+/// Trait for filtering external messages
+pub trait ExternalMessageFilter: Send + Sync {
+    /// Check if message should be included in the filtered result
+    fn should_include(&self, message: &ExternalMessage) -> bool;
+}
+
+/// No filter - include all messages
+pub struct NoFilter;
+
+/// Combine multiple filters with AND logic
+pub struct AndFilter {
+    pub filters: Vec<Box<dyn ExternalMessageFilter>>,
+}
+
+impl ExternalMessageFilter for AndFilter {
+    fn should_include(&self, message: &ExternalMessage) -> bool {
+        self.filters.iter().all(|f| f.should_include(message))
+    }
+}
+
+/// Combine multiple filters with OR logic
+pub struct OrFilter {
+    pub filters: Vec<Box<dyn ExternalMessageFilter>>,
+}
+
+impl ExternalMessageFilter for OrFilter {
+    fn should_include(&self, message: &ExternalMessage) -> bool {
+        self.filters.iter().any(|f| f.should_include(message))
+    }
+}
+
+impl ExternalMessageFilter for NoFilter {
+    fn should_include(&self, _message: &ExternalMessage) -> bool {
+        true
+    }
+}
+
 // === Events Listener ===
 
 #[async_trait]
@@ -69,12 +108,22 @@ pub trait MempoolAdapter: Send + Sync + 'static {
 
     /// Request, await, and return anchor from connected mempool by id.
     /// Return None if the requested anchor does not exist and cannot be synced from other nodes.
-    async fn get_anchor_by_id(&self, anchor_id: MempoolAnchorId) -> Result<GetAnchorResult>;
+    /// If filter is provided, messages in the returned anchor will be filtered accordingly.
+    async fn get_anchor_by_id(
+        &self,
+        anchor_id: MempoolAnchorId,
+        filter: &dyn ExternalMessageFilter,
+    ) -> Result<GetAnchorResult>;
 
     /// Request, await, and return the next anchor after the specified previous one.
     /// If anchor does not exist then await until it be produced or downloaded during sync.
     /// Return None if anchor cannot be produced or synced from other nodes.
-    async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<GetAnchorResult>;
+    /// If filter is provided, messages in the returned anchor will be filtered accordingly.
+    async fn get_next_anchor(
+        &self,
+        prev_anchor_id: MempoolAnchorId,
+        filter: &dyn ExternalMessageFilter,
+    ) -> Result<GetAnchorResult>;
 
     /// Clean cache from all anchors that before specified.
     /// We can do this for anchors that processed in blocks
@@ -129,6 +178,24 @@ impl MempoolAnchor {
         from_idx: usize,
     ) -> impl Iterator<Item = Arc<ExternalMessage>> + '_ {
         self.externals.iter().skip(from_idx).cloned()
+    }
+
+    /// Apply filter to external messages and return a new filtered anchor
+    pub fn apply_filter(&self, filter: &dyn ExternalMessageFilter) -> MempoolAnchor {
+        let filtered_externals = self
+            .externals
+            .iter()
+            .filter(|ext| filter.should_include(ext))
+            .cloned()
+            .collect();
+
+        MempoolAnchor {
+            id: self.id,
+            prev_id: self.prev_id,
+            author: self.author,
+            chain_time: self.chain_time,
+            externals: filtered_externals,
+        }
     }
 }
 

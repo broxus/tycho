@@ -9,7 +9,7 @@ use futures_util::future::Future;
 use messages_reader::{
     FinalizedMessagesReader, MessagesReader, MessagesReaderContext, ReaderState,
 };
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
@@ -24,7 +24,7 @@ use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
 
 use self::types::{BlockSerializerCache, CollatorStats, PrevData, WorkingState};
 use crate::internal_queue::types::EnqueuedMessage;
-use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchorId};
+use crate::mempool::{ExternalMessageFilter, GetAnchorResult, MempoolAdapter, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
 use crate::types::processed_upto::ProcessedUptoInfoExtension;
@@ -60,6 +60,7 @@ pub(crate) use messages_reader::tests::{TestInternalMessage, TestMessageFactory}
 pub struct CollatorContext {
     pub mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     pub mpool_adapter: Arc<dyn MempoolAdapter>,
+    pub em_filter: Arc<dyn ExternalMessageFilter>,
     pub state_node_adapter: Arc<dyn StateNodeAdapter>,
     pub config: Arc<CollatorConfig>,
     pub collation_session: Arc<CollationSessionInfo>,
@@ -157,6 +158,7 @@ impl CollatorFactory for CollatorStdImplFactory {
         CollatorStdImpl::start(
             cx.mq_adapter,
             cx.mpool_adapter,
+            cx.em_filter,
             cx.state_node_adapter,
             cx.config,
             cx.collation_session,
@@ -227,6 +229,7 @@ pub struct CollatorStdImpl {
     listener: Arc<dyn CollatorEventListener>,
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
+    filter: Arc<dyn ExternalMessageFilter>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     shard_id: ShardIdent,
     delayed_working_state: DelayedWorkingState,
@@ -250,6 +253,7 @@ impl CollatorStdImpl {
     pub async fn start(
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         mpool_adapter: Arc<dyn MempoolAdapter>,
+        filter: Arc<dyn ExternalMessageFilter>,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         config: Arc<CollatorConfig>,
         collation_session: Arc<CollationSessionInfo>,
@@ -277,6 +281,7 @@ impl CollatorStdImpl {
             listener,
             mq_adapter,
             mpool_adapter,
+            filter,
             state_node_adapter,
             shard_id,
             delayed_working_state: DelayedWorkingState::new(shard_id, async move {
@@ -536,6 +541,7 @@ impl CollatorStdImpl {
                 self.shard_id,
                 &mut self.anchors_cache,
                 self.mpool_adapter.clone(),
+                self.filter.clone(),
             )
             .await
         } else {
@@ -1066,6 +1072,7 @@ impl CollatorStdImpl {
         shard_id: ShardIdent,
         anchors_cache: &mut AnchorsCache,
         mpool_adapter: Arc<dyn MempoolAdapter>,
+        em_filter: Arc<dyn ExternalMessageFilter>,
         top_processed_to_anchor: MempoolAnchorId,
         max_consensus_lag_rounds: u32,
     ) -> Result<ImportNextAnchor> {
@@ -1089,7 +1096,9 @@ impl CollatorStdImpl {
             return Ok(ImportNextAnchor::Skipped);
         }
 
-        let get_anchor_result = mpool_adapter.get_next_anchor(prev_anchor_id).await?;
+        let get_anchor_result = mpool_adapter
+            .get_next_anchor(prev_anchor_id, em_filter.as_ref())
+            .await?;
 
         let has_our_externals = match &get_anchor_result {
             GetAnchorResult::Exist(next_anchor) => {
@@ -1138,6 +1147,7 @@ impl CollatorStdImpl {
         shard_id: ShardIdent,
         anchors_cache: &mut AnchorsCache,
         mpool_adapter: Arc<dyn MempoolAdapter>,
+        filter: Arc<dyn ExternalMessageFilter>,
     ) -> Result<ImportInitAnchorsResult, CollatorError> {
         let labels = [("workchain", shard_id.workchain().to_string())];
 
@@ -1234,7 +1244,7 @@ impl CollatorStdImpl {
             }
             None => {
                 let GetAnchorResult::Exist(anchor) = mpool_adapter
-                    .get_anchor_by_id(processed_to_anchor_id)
+                    .get_anchor_by_id(processed_to_anchor_id, filter.as_ref())
                     .await?
                 else {
                     return Err(CollatorError::Cancelled(
@@ -1278,8 +1288,9 @@ impl CollatorStdImpl {
                 break;
             }
 
-            let GetAnchorResult::Exist(anchor) =
-                mpool_adapter.get_next_anchor(prev_anchor_id).await?
+            let GetAnchorResult::Exist(anchor) = mpool_adapter
+                .get_next_anchor(prev_anchor_id, filter.as_ref())
+                .await?
             else {
                 return Err(CollatorError::Cancelled(
                     CollationCancelReason::NextAnchorNotFound(prev_anchor_id),
@@ -1443,6 +1454,7 @@ impl CollatorStdImpl {
                     self.shard_id,
                     &mut self.anchors_cache,
                     self.mpool_adapter.clone(),
+                    self.filter.clone(),
                     top_processed_to_anchor,
                     max_consensus_lag_rounds,
                 );
@@ -1592,6 +1604,7 @@ impl CollatorStdImpl {
             self.shard_id,
             &mut self.anchors_cache,
             self.mpool_adapter.clone(),
+            self.filter.clone(),
             working_state.mc_data.top_processed_to_anchor,
             working_state
                 .mc_data
@@ -1845,6 +1858,7 @@ impl CollatorStdImpl {
                         self.shard_id,
                         &mut self.anchors_cache,
                         self.mpool_adapter.clone(),
+                        self.filter.clone(),
                         working_state.mc_data.top_processed_to_anchor,
                         max_consensus_lag_rounds,
                     );

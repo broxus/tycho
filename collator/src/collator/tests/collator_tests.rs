@@ -11,7 +11,7 @@ use tycho_types::models::{
 
 use crate::collator::types::AnchorsCache;
 use crate::collator::{CollatorStdImpl, ImportInitAnchorsResult, InitAnchorSource};
-use crate::mempool::{MempoolAdapterStubImpl, MempoolAnchor, MempoolEventListener};
+use crate::mempool::{MempoolAdapterStubImpl, MempoolAnchor, MempoolEventListener, NoFilter};
 use crate::test_utils::try_init_test_tracing;
 use crate::types::processed_upto::{
     ExternalsProcessedUptoStuff, ExternalsRangeInfo, ProcessedUptoInfoExtension,
@@ -74,6 +74,7 @@ async fn test_import_init_anchors() {
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
+        Arc::new(NoFilter),
     )
     .await
     .unwrap();
@@ -119,6 +120,7 @@ async fn test_import_init_anchors() {
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
+        Arc::new(NoFilter),
     )
     .await
     .unwrap();
@@ -163,6 +165,7 @@ async fn test_import_init_anchors() {
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
+        Arc::new(NoFilter),
     )
     .await
     .unwrap();
@@ -207,6 +210,7 @@ async fn test_import_init_anchors() {
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
+        Arc::new(NoFilter),
     )
     .await
     .unwrap();
@@ -250,6 +254,7 @@ async fn test_import_init_anchors() {
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
+        Arc::new(NoFilter),
     )
     .await
     .unwrap();
@@ -294,6 +299,7 @@ async fn test_import_init_anchors() {
         shard_id,
         &mut anchors_cache,
         mpool_adapter.clone(),
+        Arc::new(NoFilter),
     )
     .await
     .unwrap();

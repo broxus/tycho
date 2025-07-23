@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -15,8 +15,8 @@ use tycho_types::models::*;
 use tycho_types::prelude::*;
 
 use crate::mempool::{
-    DebugStateUpdateContext, ExternalMessage, GetAnchorResult, MempoolAdapter, MempoolAnchor,
-    MempoolAnchorId, MempoolEventListener, StateUpdateContext,
+    DebugStateUpdateContext, ExternalMessage, ExternalMessageFilter, GetAnchorResult,
+    MempoolAdapter, MempoolAnchor, MempoolAnchorId, MempoolEventListener, StateUpdateContext,
 };
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
@@ -182,7 +182,11 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         Ok(())
     }
 
-    async fn get_anchor_by_id(&self, anchor_id: MempoolAnchorId) -> Result<GetAnchorResult> {
+    async fn get_anchor_by_id(
+        &self,
+        anchor_id: MempoolAnchorId,
+        _: &dyn ExternalMessageFilter,
+    ) -> Result<GetAnchorResult> {
         let mut last_attempt_at = None;
         loop {
             let Some(anchor) = self.anchors_cache.read().get(&anchor_id).cloned() else {
@@ -259,7 +263,11 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         }
     }
 
-    async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<GetAnchorResult> {
+    async fn get_next_anchor(
+        &self,
+        prev_anchor_id: MempoolAnchorId,
+        _: &dyn ExternalMessageFilter,
+    ) -> Result<GetAnchorResult> {
         let range = (
             std::ops::Bound::Excluded(prev_anchor_id),
             std::ops::Bound::Unbounded,
@@ -460,6 +468,7 @@ fn make_round_interval() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mempool::NoFilter;
 
     struct MempoolEventStubListener;
     #[async_trait]
@@ -484,27 +493,27 @@ mod tests {
             MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener), None);
 
         // try get existing anchor by id
-        let result = adapter.get_anchor_by_id(3).await?;
+        let result = adapter.get_anchor_by_id(3, &NoFilter).await?;
         assert!(result.anchor().is_some());
         assert_eq!(result.anchor().unwrap().id, 3);
 
         // try get next anchor after (id: 3)
-        let result = adapter.get_next_anchor(3).await?;
+        let result = adapter.get_next_anchor(3, &NoFilter).await?;
         assert!(result.anchor().is_some());
         assert_eq!(result.anchor().unwrap().id, 4);
 
         // try get next anchor after (id: 5), will wait some time
-        let result = adapter.get_next_anchor(5).await?;
+        let result = adapter.get_next_anchor(5, &NoFilter).await?;
         assert!(result.anchor().is_some());
         assert_eq!(result.anchor().unwrap().id, 6);
 
         // test clear anchors cache
         adapter.clear_anchors_cache(6)?;
-        let result = adapter.get_anchor_by_id(3).await?;
+        let result = adapter.get_anchor_by_id(3, &NoFilter).await?;
         assert!(result.anchor().is_none());
-        let result = adapter.get_anchor_by_id(4).await?;
+        let result = adapter.get_anchor_by_id(4, &NoFilter).await?;
         assert!(result.anchor().is_none());
-        let result = adapter.get_anchor_by_id(6).await?;
+        let result = adapter.get_anchor_by_id(6, &NoFilter).await?;
         assert!(result.anchor().is_some());
         assert_eq!(result.anchor().unwrap().id, 6);
 

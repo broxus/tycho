@@ -7,11 +7,11 @@ use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::state::storage::QueueStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::MempoolAdapterStubImpl;
+use tycho_collator::mempool::{MempoolAdapterStubImpl, NoFilter};
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
-use tycho_collator::types::{CollatorConfig, supported_capabilities};
+use tycho_collator::types::{supported_capabilities, CollatorConfig};
 use tycho_collator::validator::ValidatorStdImpl;
 use tycho_core::block_strider::{
     BlockProvider, BlockStrider, EmptyBlockProvider, OptionalBlockStuff,
@@ -114,6 +114,7 @@ async fn test_collation_process_on_stubs() {
             StateNodeAdapterStdImpl::new(listener, storage.clone(), CollatorSyncContext::Historical)
         },
         |listener| MempoolAdapterStubImpl::with_stub_externals(listener, Some(now)),
+        Arc::new(NoFilter),
         ValidatorStdImpl::new(
             validator_network,
             node_1_keypair.clone(),
