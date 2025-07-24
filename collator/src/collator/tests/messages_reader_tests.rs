@@ -609,6 +609,114 @@ async fn test_refill_messages() -> Result<()> {
         }
     }
 
+    //--------------
+    // TEST CASE 010: ONLY EXTERNALS, NO INTERNALS (single block)
+    //--------------
+
+    tracing::trace!("TEST CASE 010: ONLY EXTERNALS in last block");
+    //--------------
+
+    let transfer_messages = test_adapter
+        .msgs_factory
+        .create_transfer_messages(&transfers_wallets, 14)?;
+    test_adapter.import_anchor_with_messages(transfer_messages);
+
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
+
+    let transfer_messages = test_adapter
+        .msgs_factory
+        .create_transfer_messages(&transfers_wallets, 5)?;
+
+    let target_accounts: Vec<_> = transfer_messages
+        .iter()
+        .map(|m| m.info.dst.clone())
+        .collect();
+
+    let messages = test_adapter
+        .msgs_factory
+        .create_dummy_messages(&target_accounts, 15)?;
+
+    test_adapter.import_anchor_with_messages(messages);
+
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
+
+    // mc block
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
+
+    let messages = test_adapter
+        .msgs_factory
+        .create_dummy_messages(&target_accounts, 1000)?;
+
+    test_adapter.import_anchor_with_messages(messages);
+
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
+
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
+
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
+
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
+
+    let messages = test_adapter
+        .msgs_factory
+        .create_dummy_messages(&target_accounts, 1000)?;
+    test_adapter.import_anchor_with_messages(messages);
+
+    let processed_to_before = test_adapter
+        .sc_collator
+        .primary_working_state
+        .as_ref()
+        .unwrap()
+        .reader_state
+        .get_updated_processed_upto()
+        .get_internals_processed_to_by_partitions();
+
+    test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
+
+    let processed_to_after = test_adapter
+        .sc_collator
+        .primary_working_state
+        .as_ref()
+        .unwrap()
+        .reader_state
+        .get_updated_processed_upto()
+        .get_internals_processed_to_by_partitions();
+
+    let processed_to_before: BTreeMap<_, _> = processed_to_before.into_iter().collect();
+    let processed_to_after: BTreeMap<_, _> = processed_to_after.into_iter().collect();
+
+    tracing::info!("processed_to_before {:?}", processed_to_before);
+    tracing::info!("processed_to_after {:?}", processed_to_after);
+
+    assert_ne!(
+        processed_to_before, processed_to_after,
+        "should not have same processed_to after collating a block with externals only"
+    );
+
     Ok(())
 }
 
@@ -939,13 +1047,12 @@ impl<V: InternalMessageValue> TestCollator<V> {
             groups_count += 1;
 
             // read message group in primary
-            let msg_group_opt =
-                Self::collect_message_group(&mut primary_messages_reader, self.curr_lt)?;
+            let msg_group_opt = Self::collect_primary(&mut primary_messages_reader, self.curr_lt)?;
 
             if groups_count == 1 {
                 // read message group in secondary after refill
                 let secondary_msg_group_opt =
-                    Self::collect_message_group(&mut secondary_messages_reader, self.curr_lt)?;
+                    Self::collect_secondary(&mut secondary_messages_reader, self.curr_lt)?;
 
                 // compare messages groups
                 self.assert_message_group_opt_eq(
@@ -1141,14 +1248,22 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[tracing::instrument(skip_all)]
     fn refill_secondary(secondary_messages_reader: &mut MessagesReader<V>) -> Result<()> {
-        if secondary_messages_reader.check_need_refill() {
-            secondary_messages_reader.refill_buffers_upto_offsets(|| false)?;
-        }
+        secondary_messages_reader.refill_buffers_upto_offsets(|| false)?;
         Ok(())
     }
 
     #[tracing::instrument(skip_all)]
-    fn collect_message_group(
+    fn collect_primary(
+        messages_reader: &mut MessagesReader<V>,
+        curr_lt: Lt,
+    ) -> Result<Option<MessageGroup>> {
+        let msg_group_opt =
+            messages_reader.get_next_message_group(GetNextMessageGroupMode::Continue, curr_lt)?;
+        Ok(msg_group_opt)
+    }
+
+    #[tracing::instrument(skip_all)]
+    fn collect_secondary(
         messages_reader: &mut MessagesReader<V>,
         curr_lt: Lt,
     ) -> Result<Option<MessageGroup>> {

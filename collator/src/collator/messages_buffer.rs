@@ -678,7 +678,7 @@ struct SlotContext<'a> {
 #[derive(Default)]
 pub struct MessageGroup {
     #[allow(clippy::vec_box)]
-    msgs: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
+    pub msgs: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
     slots_info: SlotsInfo,
 }
 

@@ -310,6 +310,11 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             match new_messages.pop() {
                 Some(Reverse(msg)) => {
                     // update current position
+
+                    tracing::info!(
+                        "update current position for new message: {:?}",
+                        shard_reader_state.current_position
+                    );
                     shard_reader_state.current_position = msg.message.key();
 
                     // remember taken message

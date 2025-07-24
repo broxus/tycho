@@ -19,7 +19,9 @@ use crate::collator::types::{
     ParsedMessage,
 };
 use crate::internal_queue::iterator::QueueIterator;
-use crate::internal_queue::types::{Bound, DiffZone, InternalMessageValue, QueueShardBoundedRange};
+use crate::internal_queue::types::{
+    Bound, DiffZone, InternalMessageValue, QueueShardBoundedRange, QueueStatistics,
+};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::DebugIter;
@@ -329,12 +331,14 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
     pub fn set_processed_to_current_position(&mut self) -> Result<()> {
         let (_, last_range_reader) = self.get_last_range_reader()?;
+
         self.reader_state.processed_to = last_range_reader
             .reader_state
             .shards
             .iter()
             .map(|(k, v)| (*k, v.current_position))
             .collect();
+
         Ok(())
     }
 
@@ -349,6 +353,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 seqno,
                 reduce_cumulative_remaning_stats,
             )?;
+
             self.range_readers.insert(seqno, reader);
         }
         Ok(())
@@ -356,7 +361,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
     #[tracing::instrument(skip_all)]
     fn create_existing_internals_range_reader(
-        &self,
+        &mut self,
         mut range_reader_state: InternalsRangeReaderState,
         seqno: BlockSeqno,
         reduce_cumulative_remaning_stats: bool,
@@ -378,8 +383,48 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         }
 
         // get statistics for the range if it was not loaded before
-        if range_reader_state.msgs_stats.is_none() {
-            self.load_msg_stats(&mut range_reader_state, fully_read, &ranges)?;
+        let stats_is_empty = match range_reader_state.msgs_stats {
+            None => {
+                let stats = self.refresh_reader_state_by_stats(
+                    &ranges,
+                    fully_read,
+                    &mut range_reader_state,
+                )?;
+                stats.statistics().is_empty()
+            }
+            Some(ref stats) => stats.statistics().is_empty(),
+        };
+
+        if stats_is_empty {
+            fully_read = true;
+
+            // current position is the same as "to" for all shards
+            for shard_reader_state in range_reader_state.shards.values_mut() {
+                tracing::info!(
+                    "update current position for shard. before :{:?} after:{:?}",
+                    shard_reader_state.current_position,
+                    QueueKey::max_for_lt(shard_reader_state.to)
+                );
+                shard_reader_state.current_position = QueueKey::max_for_lt(shard_reader_state.to)
+                    .max(shard_reader_state.current_position);
+
+                if !self.range_readers.is_empty() {
+                    self.set_processed_to_current_position()?;
+                }
+            }
+        }
+
+        for shard_reader_state in range_reader_state.shards.values_mut() {
+            tracing::info!(
+                "stats_is_empty: {}, current_position: {:?}, fully_read: {:?}",
+                stats_is_empty,
+                shard_reader_state.current_position,
+                fully_read
+            );
+            tracing::info!(
+                "NO update current position for shard. {:?}",
+                shard_reader_state.current_position
+            );
         }
 
         // if remaining cumulative stats just loaded
@@ -455,12 +500,12 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         Ok(reader)
     }
 
-    fn load_msg_stats(
+    fn refresh_reader_state_by_stats(
         &self,
-        range_reader_state: &mut InternalsRangeReaderState,
-        fully_read: bool,
         ranges: &[QueueShardBoundedRange],
-    ) -> Result<()> {
+        fully_read: bool,
+        range_reader_state: &mut InternalsRangeReaderState,
+    ) -> Result<QueueStatistics> {
         let msgs_stats = self
             .mq_adapter
             .get_statistics(&vec![self.partition_id].into_iter().collect(), ranges)?;
@@ -475,9 +520,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             range_reader_state.read_stats = Default::default();
         }
 
-        range_reader_state.msgs_stats = Some(msgs_stats);
+        range_reader_state.msgs_stats = Some(msgs_stats.clone());
 
-        Ok(())
+        Ok(msgs_stats)
     }
 
     fn create_append_next_range_reader(&mut self) -> Result<BlockSeqno, CollatorError> {
@@ -489,15 +534,16 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
         let reader = self.create_next_internals_range_reader(Some(range_max_messages))?;
         let reader_seqno = reader.seqno;
-        // we should add created range reader using calculated reader seqno instead of current block seqno
-        // otherwise the next range will exeed the max blocks limit
+
         if self.range_readers.insert(reader_seqno, reader).is_some() {
             panic!(
                 "internals range reader should not already exist (for_shard_id: {}, seqno: {})",
                 self.for_shard_id, self.block_seqno,
             )
         };
+
         self.all_ranges_fully_read = false;
+
         Ok(reader_seqno)
     }
 
@@ -618,7 +664,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         };
 
         // get statistics for the range
-        self.load_msg_stats(&mut range_reader_state, fully_read, &ranges)?;
+        self.refresh_reader_state_by_stats(&ranges, fully_read, &mut range_reader_state)?;
 
         let reader = InternalsRangeReader {
             partition_id: self.partition_id,

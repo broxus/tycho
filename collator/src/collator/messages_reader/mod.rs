@@ -796,6 +796,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         loop {
             // stop refill when collation cancelled
             if is_cancelled() {
+                println!("refill messages buffer and skip groups upto");
                 return Ok(());
             }
 
@@ -803,6 +804,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 GetNextMessageGroupMode::Refill,
                 0, // can pass 0 because new messages reader was not initialized in this case
             )?;
+
             if msg_group.is_none() {
                 // on restart from a new genesis we will not be able to refill buffer with externals
                 // so we stop refilling when there is no more groups in buffer
@@ -985,6 +987,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 &msg_groups,
                 &self.internals_partition_readers,
             )?;
+
             msg_groups.insert(*par_id, msg_group);
             metrics_by_partitions.get_mut(*par_id).append(&metrics);
 
@@ -1110,7 +1113,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             self.msgs_exec_params.update();
         }
 
-        // retun None when messages group is empty
+        // return None when messages group is empty
         if msg_group.len() == 0
             // and we reached previous processed offset on refill
             && ((read_mode == GetNextMessageGroupMode::Refill && all_prev_processed_offset_reached)
@@ -1464,6 +1467,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             other_partitions_all_read_existing_collected = ?DebugIter(other_partitions_readers.iter().map(|(par_id, par)| (*par_id, par.all_read_existing_messages_collected()))),
             "check if read existing messages collected in other partitions",
         );
+
         if all_read_externals_collected
             && *par_reader_stage == MessagesReaderStage::FinishCurrentExternals
             && !prev_partitions_readers
@@ -1473,9 +1477,10 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 .values()
                 .any(|par| !par.all_read_existing_messages_collected())
         {
-            // finalize existing intenals read state
+            // finalize existing internals read state
             // drop all ranges except the last one
             par_reader.retain_only_last_range_reader()?;
+
             // mark all read messages processed
             par_reader.set_processed_to_current_position()?;
 
