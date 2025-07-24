@@ -1464,8 +1464,8 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             other_partitions_all_read_existing_collected = ?DebugIter(other_partitions_readers.iter().map(|(par_id, par)| (*par_id, par.all_read_existing_messages_collected()))),
             "check if read existing messages collected in other partitions",
         );
-        if all_read_externals_collected
-            && *par_reader_stage == MessagesReaderStage::FinishCurrentExternals
+
+        if *par_reader_stage == MessagesReaderStage::FinishCurrentExternals
             && !prev_partitions_readers
                 .values()
                 .any(|par| !par.all_read_existing_messages_collected())
@@ -1473,34 +1473,36 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 .values()
                 .any(|par| !par.all_read_existing_messages_collected())
         {
-            // finalize existing intenals read state
+            // finalize existing internals read state
             // drop all ranges except the last one
             par_reader.retain_only_last_range_reader()?;
             // mark all read messages processed
             par_reader.set_processed_to_current_position()?;
 
-            // NOTE: we can drop processing offset only when all read exiting messages
-            //      collected in all partitions, otherwise skip offset could differ in partitions
-            //      that may cause incorrect messages buffers refill after sync
+            if all_read_externals_collected {
+                // NOTE: we can drop processing offset only when all read exiting messages
+                //      collected in all partitions, otherwise skip offset could differ in partitions
+                //      that may cause incorrect messages buffers refill after sync
 
-            // mark that current partition can drop processed offset
-            res.can_drop_processing_offset = true;
+                // mark that current partition can drop processed offset
+                res.can_drop_processing_offset = true;
 
-            // set skip and processed offset to current offset
-            par_reader.set_skip_processed_offset_to_current()?;
+                // set skip and processed offset to current offset
+                par_reader.set_skip_processed_offset_to_current()?;
 
-            if read_mode != GetNextMessageGroupMode::Refill {
-                // switch to the "new messages processing" stage
-                // if all existing messages read (last range reader was created in current block)
-                let (last_seqno, _) = par_reader.get_last_range_reader()?;
-                if last_seqno == &par_reader.block_seqno {
-                    update_reader_stage(par_reader_stage, MessagesReaderStage::ExternalsAndNew);
-                } else {
-                    // otherwise return to the reading of existing messages
-                    update_reader_stage(
-                        par_reader_stage,
-                        MessagesReaderStage::ExistingAndExternals,
-                    );
+                if read_mode != GetNextMessageGroupMode::Refill {
+                    // switch to the "new messages processing" stage
+                    // if all existing messages read (last range reader was created in current block)
+                    let (last_seqno, _) = par_reader.get_last_range_reader()?;
+                    if last_seqno == &par_reader.block_seqno {
+                        update_reader_stage(par_reader_stage, MessagesReaderStage::ExternalsAndNew);
+                    } else {
+                        // otherwise return to the reading of existing messages
+                        update_reader_stage(
+                            par_reader_stage,
+                            MessagesReaderStage::ExistingAndExternals,
+                        );
+                    }
                 }
             }
         }

@@ -609,6 +609,53 @@ async fn test_refill_messages() -> Result<()> {
         }
     }
 
+    //--------------
+    // TEST CASE 010: ONLY EXTERNALS, NO INTERNALS (single block)
+    //--------------
+    tracing::trace!("TEST CASE 010: ONLY EXTERNALS, NO INTERNALS (single block)");
+
+    // create 100 dummy messages to transfers wallets
+    let target_accounts: Vec<_> = transfers_wallets.values().cloned().collect();
+    let dummy_messages = test_adapter
+        .msgs_factory
+        .create_dummy_messages(&target_accounts, DEFAULT_BLOCK_EXEC_COUNT_LIMIT * 2)?;
+    test_adapter.import_anchor_with_messages(dummy_messages);
+
+    let processed_to_before = test_adapter
+        .sc_collator
+        .primary_working_state
+        .as_ref()
+        .unwrap()
+        .reader_state
+        .get_updated_processed_upto()
+        .get_internals_processed_to_by_partitions();
+
+    // collate a block with externals only
+    let _ = test_adapter.test_collate_shards(
+        DEFAULT_BLOCK_EXEC_COUNT_LIMIT,
+        &TestAssertsParams::default(),
+    )?;
+
+    let processed_to_after = test_adapter
+        .sc_collator
+        .primary_working_state
+        .as_ref()
+        .unwrap()
+        .reader_state
+        .get_updated_processed_upto()
+        .get_internals_processed_to_by_partitions();
+
+    tracing::info!(
+        "processed_to before: {:?}, after first block: {:?}",
+        processed_to_before,
+        processed_to_after,
+    );
+
+    assert_ne!(
+        processed_to_before, processed_to_after,
+        "should not have same processed_to after collating a block with externals only"
+    );
+
     Ok(())
 }
 
