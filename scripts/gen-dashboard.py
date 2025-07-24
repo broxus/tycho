@@ -1875,11 +1875,19 @@ def collator_wu_metrics() -> RowPanel:
 def collator_wu_params() -> RowPanel:
     metrics = [
         create_gauge_panel(
-            "tycho_do_collate_wu_tuner_prev_wu_price",
-            "prev wu price",
+            "tycho_wu_tuner_actual_wu_price",
+            "actual wu price",
         ),
         create_gauge_panel(
-            "tycho_do_collate_wu_tuner_target_wu_price",
+            "tycho_wu_tuner_last_adjustment_wu_price",
+            "last adjustment wu price",
+        ),
+        create_gauge_panel(
+            "tycho_wu_tuner_adaptive_wu_price",
+            "adaptive wu price",
+        ),
+        create_gauge_panel(
+            "tycho_wu_tuner_target_wu_price",
             "target wu price",
         ),
         create_gauge_panel(

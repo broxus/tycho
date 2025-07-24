@@ -231,7 +231,7 @@ where
                         self.target_wu_params_history.clear();
                         self.avg_target_wu_params_history.clear();
 
-                        tracing::debug!(
+                        tracing::info!(
                             %shard, seqno,
                             last_seqno = last_key,
                             wu_span,
@@ -318,7 +318,7 @@ where
                     if first_key < gc_boundary {
                         history.gc_wu_metrics(gc_boundary);
 
-                        tracing::debug!(
+                        tracing::trace!(
                             %shard, seqno,
                             "wu metrics history gc < {0}",
                             gc_boundary,
@@ -390,7 +390,7 @@ where
                     if first_key < gc_boundary {
                         history.gc_anchors_lag(gc_boundary);
 
-                        tracing::debug!(
+                        tracing::trace!(
                             %shard, seqno,
                             "anchors lag history gc < {0}",
                             gc_boundary,
@@ -408,9 +408,7 @@ where
                 if let Some(avg_wu_metrics) = history.avg_metrics.get(&wu_ma_seqno) {
                     let mut target_wu_params = None;
 
-                    // first, get actual wu price
-                    let mut target_wu_price =
-                        avg_wu_metrics.wu_on_finalize.build_in_msgs_wu_price();
+                    let mut target_wu_price = self.config.target_wu_price as f64 / 100.0;
 
                     let lag_lower_bound = self.config.lag_bounds_ms.0 as i64;
                     let lag_upper_bound = self.config.lag_bounds_ms.1 as i64;
@@ -419,24 +417,39 @@ where
                     if (avg_wu_metrics.has_pending_messages || avg_lag >= 0)
                         && !(lag_lower_bound..lag_upper_bound).contains(&avg_lag)
                     {
-                        // define new target wu price
-                        // get prev adjustment if exists
-                        let prev_wu_price = self
+                        // get actual wu price
+                        let actual_wu_price =
+                            avg_wu_metrics.wu_on_finalize.build_in_msgs_wu_price();
+
+                        // get wu price from last adjustment
+                        let last_adjustment_wu_price = self
                             .adjustments
                             .last_key_value()
-                            .map_or(target_wu_price, |(_, v)| v.target_wu_price);
+                            .map(|(_, v)| v.target_wu_price);
+
+                        // get prev wu price from last adjustment or actual
+                        let prev_wu_price = last_adjustment_wu_price.unwrap_or(actual_wu_price);
+
+                        // calculate adaptive wu price
+                        let mut adaptive_wu_price =
                         // if current lag is > 0 then we should reduce target wu price
                         if avg_lag > lag_upper_bound {
-                            target_wu_price = (prev_wu_price - 0.1).max(0.1);
+                            (prev_wu_price - 0.1).max(0.1)
                         }
                         // if current lag is < 0 then we should increase target wu price
                         else if avg_lag < lag_lower_bound {
-                            target_wu_price = prev_wu_price + 0.1;
+                            prev_wu_price + 0.1
+                        } else {
+                            target_wu_price
+                        };
+                        // wu price above 2.0 is bad, get initial target price
+                        if adaptive_wu_price > 2.0 {
+                            adaptive_wu_price = target_wu_price;
                         }
 
-                        // wu price above 2.0 is bad, set initial target price
-                        if target_wu_price > 2.0 {
-                            target_wu_price = self.config.target_wu_price as f64 / 100.0;
+                        // use adaptive wu price if required
+                        if self.config.adaptive_wu_price {
+                            target_wu_price = adaptive_wu_price;
                         }
 
                         // calculate target wu params
@@ -448,14 +461,18 @@ where
                             avg_lag,
                             lag_bounds = ?self.config.lag_bounds_ms,
                             current_build_in_msgs_wu_price = avg_wu_metrics.wu_on_finalize.build_in_msgs_wu_price(),
-                            prev_wu_price,
-                            target_wu_price,
+                            prev_wu_price, adaptive_wu_price, target_wu_price,
                             current_build_in_msg_wu_param = avg_wu_metrics.wu_params.finalize.build_in_msg,
                             target_build_in_msg_wu_param = target_params.finalize.build_in_msg,
                             "calculated target wu params",
                         );
 
-                        report_target_wu_price(prev_wu_price, target_wu_price);
+                        report_wu_price(
+                            actual_wu_price,
+                            last_adjustment_wu_price,
+                            adaptive_wu_price,
+                            target_wu_price,
+                        );
 
                         target_wu_params = Some(target_params);
                     }
@@ -556,7 +573,7 @@ where
                             self.target_wu_params_history
                                 .retain(|k, _| k >= &gc_boundary);
 
-                            tracing::debug!(
+                            tracing::trace!(
                                 %shard, seqno,
                                 "target wu params history gc <= {0}",
                                 gc_boundary,
@@ -571,7 +588,7 @@ where
                             self.avg_target_wu_params_history
                                 .retain(|k, _| k >= &gc_boundary);
 
-                            tracing::debug!(
+                            tracing::trace!(
                                 %shard, seqno,
                                 "avg target wu params history gc <= {0}",
                                 gc_boundary,
@@ -1134,9 +1151,19 @@ where
     })
 }
 
-fn report_target_wu_price(prev_wu_price: f64, target_wu_price: f64) {
-    metrics::gauge!("tycho_do_collate_wu_tuner_prev_wu_price").set(prev_wu_price);
-    metrics::gauge!("tycho_do_collate_wu_tuner_target_wu_price").set(target_wu_price);
+fn report_wu_price(
+    actual_wu_price: f64,
+    last_adjustment_wu_price: Option<f64>,
+    adaptive_wu_price: f64,
+    target_wu_price: f64,
+) {
+    metrics::gauge!("tycho_wu_tuner_actual_wu_price").set(actual_wu_price);
+    metrics::gauge!("tycho_wu_tuner_adaptive_wu_price").set(adaptive_wu_price);
+    metrics::gauge!("tycho_wu_tuner_target_wu_price").set(target_wu_price);
+
+    if let Some(last) = last_adjustment_wu_price {
+        metrics::gauge!("tycho_wu_tuner_last_adjustment_wu_price").set(last);
+    }
 }
 
 fn report_wu_params(curr_wu_params: &WorkUnitsParams, target_wu_params: &WorkUnitsParams) {
