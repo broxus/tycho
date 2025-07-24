@@ -31,6 +31,11 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho node mem-profiler start`↴](#tycho-node-mem-profiler-start)
 * [`tycho node mem-profiler stop`↴](#tycho-node-mem-profiler-stop)
 * [`tycho node mem-profiler dump`↴](#tycho-node-mem-profiler-dump)
+* [`tycho node overlay`↴](#tycho-node-overlay)
+* [`tycho node overlay list`↴](#tycho-node-overlay-list)
+* [`tycho node overlay peers`↴](#tycho-node-overlay-peers)
+* [`tycho node dht`↴](#tycho-node-dht)
+* [`tycho node dht find-node`↴](#tycho-node-dht-find-node)
 * [`tycho tool`↴](#tycho-tool)
 * [`tycho tool gen-dht`↴](#tycho-tool-gen-dht)
 * [`tycho tool gen-key`↴](#tycho-tool-gen-key)
@@ -178,6 +183,8 @@ Manage the node
 * `compact` — Trigger a compaction in database
 * `wait-sync` — Wait until node synced
 * `mem-profiler` — Manage memory profiler
+* `overlay` — Overlay runtime tools
+* `dht` — DHT runtime tools
 
 
 
@@ -505,6 +512,82 @@ Dump the memory profiler data
 ###### **Options:**
 
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+
+
+
+## `tycho node overlay`
+
+Overlay runtime tools
+
+**Usage:** `tycho node overlay <COMMAND>`
+
+###### **Subcommands:**
+
+* `list` — List all active public and private overlays
+* `peers` — Get overlay peers
+
+
+
+## `tycho node overlay list`
+
+List all active public and private overlays
+
+**Usage:** `tycho node overlay list [OPTIONS]`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+
+
+
+## `tycho node overlay peers`
+
+Get overlay peers
+
+**Usage:** `tycho node overlay peers [OPTIONS] <OVERLAY_ID>`
+
+###### **Arguments:**
+
+* `<OVERLAY_ID>` — overlay id
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-h`, `--human-readable`
+* `--help`
+
+  Possible values: `true`, `false`
+
+
+
+
+## `tycho node dht`
+
+DHT runtime tools
+
+**Usage:** `tycho node dht <COMMAND>`
+
+###### **Subcommands:**
+
+* `find-node` — Find at most `k` nodes that can contain the specified `key`
+
+
+
+## `tycho node dht find-node`
+
+Find at most `k` nodes that can contain the specified `key`
+
+**Usage:** `tycho node dht find-node [OPTIONS] -k <K> <KEY>`
+
+###### **Arguments:**
+
+* `<KEY>` — Key hash
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-k <K>` — Maximum number of nodes to return
+* `--peer-id <PEER_ID>` — Target `PeerId`
 
 
 

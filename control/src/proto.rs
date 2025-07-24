@@ -7,7 +7,7 @@ use tycho_types::models::{
     BlockId, BlockIdShort, BlockchainConfig, GlobalVersion, ShardAccount, StdAddr,
 };
 use tycho_types::prelude::*;
-use tycho_util::serde_helpers;
+use tycho_util::{FastHashSet, serde_helpers};
 
 use crate::error::ServerResult;
 
@@ -69,6 +69,15 @@ pub trait ControlServer {
 
     /// Returns list of all block ids.
     async fn get_block_ids(req: BlockListRequest) -> ServerResult<BlockListResponse>;
+
+    /// Returns list of all overlays.
+    async fn get_overlay_ids() -> ServerResult<OverlayIdsResponse>;
+
+    /// Get overlay peers.
+    async fn get_overlay_peers(req: OverlayPeersRequest) -> ServerResult<OverlayPeersResponse>;
+
+    /// Search for `k` closest nodes known to `peer_id` that store `key`.
+    async fn dht_find_node(req: DhtFindNodeRequest) -> ServerResult<DhtFindNodeResponse>;
 
     /// Signs an elections payload.
     async fn sign_elections_payload(
@@ -285,4 +294,60 @@ pub struct NeighbourInfo {
     pub failed_requests: u64,
     pub total_requests: u64,
     pub roundtrip_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayIdsResponse {
+    pub public_overlays: FastHashSet<HashBytes>,
+    pub private_overlays: FastHashSet<HashBytes>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayPeersRequest {
+    pub overlay_id: HashBytes,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayPeersResponse {
+    pub overlay_type: OverlayType,
+    pub peers: Vec<OverlayPeer>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayPeer {
+    pub peer_id: HashBytes,
+    pub entry_created_at: Option<u32>,
+    pub info: Option<PeerInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum OverlayType {
+    Private,
+    Public,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DhtFindNodeRequest {
+    /// Remove peer id or `None` for local.
+    pub peer_id: Option<HashBytes>,
+    pub key: HashBytes,
+    pub k: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DhtFindNodeResponse {
+    pub nodes: Vec<DhtFindNodeResponseItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DhtFindNodeResponseItem {
+    pub peer_id: HashBytes,
+    pub info: PeerInfo,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub address_list: Vec<String>,
+    pub created_at: u32,
+    pub expires_at: u32,
 }

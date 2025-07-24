@@ -262,7 +262,9 @@ impl Node {
                 .with_validator_keypair(base.keypair.clone())
                 .with_collator(Arc::new(CollatorControl {
                     config: self.collator_config.clone(),
-                }));
+                }))
+                .with_dht_client(base.dht_client.clone())
+                .with_overlay_service(base.overlay_service.clone());
 
             #[cfg(feature = "jemalloc")]
             if let Some(profiler) = JemallocMemoryProfiler::connect() {

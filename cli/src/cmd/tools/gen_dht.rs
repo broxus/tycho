@@ -54,7 +54,7 @@ fn make_peer_info(key: &ed25519::SecretKey, addresses: Vec<Address>, ttl: Option
         id: peer_id,
         address_list: addresses.into_boxed_slice(),
         created_at: now,
-        expires_at: ttl.unwrap_or(u32::MAX),
+        expires_at: now.saturating_add(ttl.unwrap_or(u32::MAX)),
         signature: Box::new([0; 64]),
     };
     *node_info.signature = keypair.sign_tl(&node_info);

@@ -8,7 +8,7 @@ use tarpc::{client, context};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 use tycho_types::boc::{Boc, BocRepr};
-use tycho_types::cell::DynCell;
+use tycho_types::cell::{DynCell, HashBytes};
 use tycho_types::models::{BlockId, BlockIdShort, OwnedMessage, StdAddr};
 use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
@@ -269,6 +269,42 @@ impl ControlClient {
             .get_block_ids(current_context(), BlockListRequest { continuation })
             .await?
             .map_err(Into::into)
+    }
+
+    pub async fn get_overlay_ids(&self) -> ClientResult<OverlayIdsResponse> {
+        self.inner
+            .get_overlay_ids(current_context())
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn get_overlay_peers(
+        &self,
+        overaly_id: &HashBytes,
+    ) -> ClientResult<OverlayPeersResponse> {
+        self.inner
+            .get_overlay_peers(current_context(), OverlayPeersRequest {
+                overlay_id: *overaly_id,
+            })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn dht_find_node(
+        &self,
+        key: &HashBytes,
+        k: u32,
+        peer_id: Option<&HashBytes>,
+    ) -> ClientResult<Vec<DhtFindNodeResponseItem>> {
+        self.inner
+            .dht_find_node(current_context(), DhtFindNodeRequest {
+                peer_id: peer_id.copied(),
+                key: *key,
+                k,
+            })
+            .await?
+            .map_err(Into::into)
+            .map(|res| res.nodes)
     }
 }
 

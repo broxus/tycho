@@ -360,6 +360,10 @@ impl DhtService {
         self.0.routing_table.lock().unwrap().contains(peer_id)
     }
 
+    pub fn find_local_closest(&self, key: &[u8; 32], count: usize) -> Vec<Arc<PeerInfo>> {
+        self.0.routing_table.lock().unwrap().closest(key, count)
+    }
+
     pub fn store_value_locally(&self, value: &ValueRef<'_>) -> Result<bool, StorageError> {
         self.0.store_value_locally(value)
     }
