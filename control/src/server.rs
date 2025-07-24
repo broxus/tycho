@@ -22,7 +22,7 @@ use tycho_core::block_strider::{
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::storage::{ArchiveId, BlockHandle, CoreStorage};
 use tycho_crypto::ed25519;
-use tycho_network::Network;
+use tycho_network::{Network, OverlayService, PeerId, PrivateOverlay, PublicOverlay};
 use tycho_types::cell::Lazy;
 use tycho_types::models::{
     AccountState, DepthBalanceInfo, Message, OptionalAccount, ShardAccount, ShardIdent, StdAddr,
@@ -34,7 +34,7 @@ use tycho_util::FastHashMap;
 use crate::collator::Collator;
 use crate::error::{ServerError, ServerResult};
 use crate::profiler::{MemoryProfiler, StubMemoryProfiler};
-use crate::proto::{self, ArchiveInfo, ControlServer as _};
+use crate::proto::{self, ArchiveInfo, ControlServer as _, OverlayType};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlServerVersion {
@@ -158,6 +158,7 @@ pub struct ControlServerBuilder<
     memory_profiler: Option<Arc<dyn MemoryProfiler>>,
     validator_keypair: Option<Arc<ed25519::KeyPair>>,
     collator: Option<Arc<dyn Collator>>,
+    overlay_service: Option<OverlayService>,
 }
 
 impl ControlServerBuilder {
@@ -214,6 +215,7 @@ impl ControlServerBuilder {
                 manual_compaction,
                 memory_profiler,
                 validator_keypair: self.validator_keypair,
+                overlay_service: self.overlay_service,
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
             }),
@@ -229,6 +231,7 @@ impl<T2, T3, T4> ControlServerBuilder<((), T2, T3, T4)> {
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
+            overlay_service: self.overlay_service,
         }
     }
 }
@@ -244,6 +247,7 @@ impl<T1, T3, T4> ControlServerBuilder<(T1, (), T3, T4)> {
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
+            overlay_service: self.overlay_service,
         }
     }
 }
@@ -259,6 +263,7 @@ impl<T1, T2, T4> ControlServerBuilder<(T1, T2, (), T4)> {
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
+            overlay_service: self.overlay_service,
         }
     }
 }
@@ -274,6 +279,7 @@ impl<T1, T2, T3> ControlServerBuilder<(T1, T2, T3, ())> {
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
+            overlay_service: self.overlay_service,
         }
     }
 }
@@ -293,6 +299,11 @@ impl<T> ControlServerBuilder<T> {
         self.validator_keypair = Some(keypair);
         self
     }
+
+    pub fn with_overlay_service(mut self, service: OverlayService) -> Self {
+        self.overlay_service = Some(service);
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -308,6 +319,7 @@ impl ControlServer {
             memory_profiler: None,
             validator_keypair: None,
             collator: None,
+            overlay_service: None,
         }
     }
 }
@@ -713,6 +725,83 @@ impl proto::ControlServer for ControlServer {
         })
     }
 
+    async fn get_overlays(
+        self,
+        _: tarpc::context::Context,
+    ) -> ServerResult<proto::OverlayListResponse> {
+        let Some(overlay_service) = self.inner.overlay_service.as_ref() else {
+            return Err(ServerError::new(
+                "control server was created without a overlay service",
+            ));
+        };
+
+        let overlays = overlay_service
+            .public_overlays()
+            .into_keys()
+            .map(|id| (id, OverlayType::Public))
+            .chain(
+                overlay_service
+                    .private_overlays()
+                    .into_keys()
+                    .map(|id| (id, OverlayType::Private)),
+            )
+            .collect();
+
+        Ok(proto::OverlayListResponse { overlays })
+    }
+
+    async fn get_overlay_info(
+        self,
+        _: tarpc::context::Context,
+        req: proto::OverlayInfoRequest,
+    ) -> ServerResult<proto::OverlayInfoResponse> {
+        let Some(overlay_service) = self.inner.overlay_service.as_ref() else {
+            return Err(ServerError::new(
+                "control server was created without a overlay service",
+            ));
+        };
+
+        enum Wrapper<'a> {
+            Public(&'a PublicOverlay),
+            Private(&'a PrivateOverlay),
+        }
+
+        impl Wrapper<'_> {
+            fn kind(&self) -> OverlayType {
+                match self {
+                    Self::Public(_) => OverlayType::Public,
+                    Self::Private(_) => OverlayType::Private,
+                }
+            }
+            fn peers(&self) -> Vec<PeerId> {
+                match self {
+                    Self::Public(public) => public
+                        .read_entries()
+                        .iter()
+                        .map(|x| x.entry.peer_id)
+                        .collect(),
+                    Self::Private(private) => {
+                        private.read_entries().iter().map(|x| x.peer_id).collect()
+                    }
+                }
+            }
+        }
+
+        let public = overlay_service.public_overlays();
+        let private = overlay_service.private_overlays();
+
+        let overlay = public
+            .get(&req.id)
+            .map(Wrapper::Public)
+            .or_else(|| private.get(&req.id).map(Wrapper::Private))
+            .ok_or_else(|| ServerError::new("overlay not found"))?;
+
+        Ok(proto::OverlayInfoResponse {
+            kind: overlay.kind(),
+            peers: overlay.peers(),
+        })
+    }
+
     async fn sign_elections_payload(
         self,
         _: tarpc::context::Context,
@@ -765,6 +854,7 @@ struct Inner {
     manual_compaction: ManualCompaction,
     memory_profiler: Arc<dyn MemoryProfiler>,
     validator_keypair: Option<Arc<ed25519::KeyPair>>,
+    overlay_service: Option<OverlayService>,
     mc_accounts: RwLock<Option<CachedAccounts>>,
     sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,
 }

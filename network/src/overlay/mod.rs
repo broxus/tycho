@@ -5,7 +5,7 @@ use tl_proto::{TlError, TlRead};
 use tokio::sync::Notify;
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::time::now_sec;
-use tycho_util::{FastDashMap, FastHashSet};
+use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
 pub use self::config::OverlayConfig;
 use self::entries_merger::PublicOverlayEntriesMerger;
@@ -111,6 +111,22 @@ impl OverlayService {
 
     pub fn remove_public_overlay(&self, overlay_id: &OverlayId) -> bool {
         self.0.remove_public_overlay(overlay_id)
+    }
+
+    pub fn public_overlays(&self) -> FastHashMap<OverlayId, PublicOverlay> {
+        self.0
+            .public_overlays
+            .iter()
+            .map(|item| (*item.key(), item.value().clone()))
+            .collect()
+    }
+
+    pub fn private_overlays(&self) -> FastHashMap<OverlayId, PrivateOverlay> {
+        self.0
+            .private_overlays
+            .iter()
+            .map(|item| (*item.key(), item.value().clone()))
+            .collect()
     }
 }
 

@@ -3,6 +3,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use tycho_network::{OverlayId, PeerId};
 use tycho_types::models::{
     BlockId, BlockIdShort, BlockchainConfig, GlobalVersion, ShardAccount, StdAddr,
 };
@@ -69,6 +70,12 @@ pub trait ControlServer {
 
     /// Returns list of all block ids.
     async fn get_block_ids(req: BlockListRequest) -> ServerResult<BlockListResponse>;
+
+    /// Returns list of all overlays.
+    async fn get_overlays() -> ServerResult<OverlayListResponse>;
+
+    /// Returns Overlay info.
+    async fn get_overlay_info(req: OverlayInfoRequest) -> ServerResult<OverlayInfoResponse>;
 
     /// Signs an elections payload.
     async fn sign_elections_payload(
@@ -285,4 +292,26 @@ pub struct NeighbourInfo {
     pub failed_requests: u64,
     pub total_requests: u64,
     pub roundtrip_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayListResponse {
+    pub overlays: Vec<(OverlayId, OverlayType)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OverlayType {
+    Public,
+    Private,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayInfoRequest {
+    pub id: OverlayId,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayInfoResponse {
+    pub kind: OverlayType,
+    pub peers: Vec<PeerId>,
 }
