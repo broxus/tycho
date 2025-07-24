@@ -45,6 +45,14 @@ impl BlockStuff {
 
     #[cfg(any(test, feature = "test"))]
     pub fn new_empty(shard: ShardIdent, seqno: u32) -> Self {
+        Self::new_with(shard, seqno, |_| {})
+    }
+
+    #[cfg(any(test, feature = "test"))]
+    pub fn new_with<F>(shard: ShardIdent, seqno: u32, modify: F) -> Self
+    where
+        F: FnOnce(&mut Block),
+    {
         use tycho_types::cell::Lazy;
         use tycho_types::merkle::MerkleUpdate;
 
@@ -56,7 +64,7 @@ impl BlockStuff {
             ..Default::default()
         };
 
-        let block = Block {
+        let mut block = Block {
             global_id: 0,
             info: Lazy::new(&block_info).unwrap(),
             value_flow: Lazy::new(&ValueFlow::default()).unwrap(),
@@ -67,6 +75,9 @@ impl BlockStuff {
             },
             extra: Lazy::new(&BlockExtra::default()).unwrap(),
         };
+
+        // Apply modifications
+        modify(&mut block);
 
         let root = CellBuilder::build_from(&block).unwrap();
         let root_hash = *root.repr_hash();
