@@ -311,13 +311,13 @@ impl RoundTaskReady {
             );
             match validate.await? {
                 ValidateResult::Valid => Ok(()),
-                ValidateResult::Invalid => {
+                ValidateResult::Invalid(reason) => {
                     let _guard = round_ctx.span().enter();
-                    panic!("Failed to validate own point: Invalid {point:?}")
+                    panic!("Invalid own point: {reason} {point:?}")
                 }
                 ValidateResult::IllFormed(reason) => {
                     let _guard = round_ctx.span().enter();
-                    panic!("Failed to validate own point: {reason} {point:?}")
+                    panic!("Ill-formed own point: {reason} {point:?}")
                 }
             }
         })

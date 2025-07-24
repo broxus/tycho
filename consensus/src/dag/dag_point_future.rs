@@ -480,7 +480,7 @@ impl DagPointFuture {
         let is_valid = matches!(validated, ValidateResult::Valid);
         // TODO fill anchor flags in status
         match validated {
-            ValidateResult::Valid | ValidateResult::Invalid => {
+            ValidateResult::Valid | ValidateResult::Invalid(_) => {
                 let mut status = PointStatusValidated::default();
                 status.is_valid = is_valid;
                 status.is_certified = cert.is_certified();
