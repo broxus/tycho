@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -10,6 +11,7 @@ use base64::prelude::{BASE64_STANDARD, Engine as _};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use tycho_control::ControlClient;
+use tycho_network::OverlayId;
 use tycho_types::models::{BlockId, StdAddr};
 use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
@@ -38,6 +40,8 @@ pub enum CmdControl {
     WaitSync(CmdWaitSync),
     #[clap(subcommand)]
     MemProfiler(CmdMemProfiler),
+    #[clap(subcommand)]
+    Overlay(CmdOverlay),
 }
 
 impl CmdControl {
@@ -60,6 +64,7 @@ impl CmdControl {
             Self::Compact(cmd) => cmd.run(args),
             Self::WaitSync(cmd) => cmd.run(args),
             Self::MemProfiler(cmd) => cmd.run(args),
+            Self::Overlay(cmd) => cmd.run(args),
         }
     }
 }
@@ -756,6 +761,54 @@ impl CmdDumpQueueDiff {
             }))
         })
     }
+}
+
+/// Overlay.
+#[derive(Subcommand)]
+pub enum CmdOverlay {
+    List(CmdOverlayList),
+    Info(CmdOverlayInfo),
+}
+
+impl CmdOverlay {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        let control = match &self {
+            Self::List(cmd) => &cmd.args,
+            Self::Info(cmd) => &cmd.args,
+        }
+        .clone();
+
+        control.rt(args, |client| async move {
+            match self {
+                Self::List(_) => {
+                    let res = client.list_overlays().await?;
+                    print_json(res)
+                }
+                Self::Info(info) => {
+                    let res = client.overlay_info(OverlayId::from_str(&info.id)?).await?;
+                    print_json(res)
+                }
+            }
+        })
+    }
+}
+
+/// List all active public and private overlays.
+#[derive(Parser)]
+pub struct CmdOverlayList {
+    #[clap(flatten)]
+    args: ControlArgs,
+}
+
+/// Get overlay info.
+#[derive(Parser)]
+pub struct CmdOverlayInfo {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// overlay id
+    #[clap(long)]
+    id: String,
 }
 
 #[derive(Parser)]

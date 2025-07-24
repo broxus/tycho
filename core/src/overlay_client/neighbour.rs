@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use tycho_network::PeerId;
 use tycho_util::time::now_sec;
 
@@ -93,7 +94,7 @@ impl PunishReason {
 }
 
 /// Neighbour request statistics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NeighbourStats {
     /// Current reliability score.
     pub score: u8,

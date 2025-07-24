@@ -7,6 +7,7 @@ use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
 use tokio::sync::mpsc;
 use tracing::Instrument;
+use tycho_network::OverlayId;
 use tycho_types::boc::{Boc, BocRepr};
 use tycho_types::cell::DynCell;
 use tycho_types::models::{BlockId, BlockIdShort, OwnedMessage, StdAddr};
@@ -267,6 +268,20 @@ impl ControlClient {
     ) -> ClientResult<BlockListResponse> {
         self.inner
             .get_block_ids(current_context(), BlockListRequest { continuation })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn list_overlays(&self) -> ClientResult<OverlayListResponse> {
+        self.inner
+            .get_overlays(current_context())
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn overlay_info(&self, id: OverlayId) -> ClientResult<OverlayInfoResponse> {
+        self.inner
+            .get_overlay_info(current_context(), OverlayInfoRequest { id })
             .await?
             .map_err(Into::into)
     }
