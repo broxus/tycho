@@ -68,15 +68,10 @@ impl Cert {
 
     fn traverse_certify(direct_deps: CertDirectDeps) {
         // very much like commit: current @ r+0, includes @ r-1, witness @ r-2
-        let mut deps = {
-            let estimated_capacity =
-                (((direct_deps.includes.len() + direct_deps.witness.len()) * 3) / 2) + 1;
-            [
-                direct_deps.includes,
-                direct_deps.witness,
-                FastHashMap::with_capacity(estimated_capacity),
-            ]
-        };
+        let third = FastHashMap::with_capacity(
+            (direct_deps.includes.capacity()).max(direct_deps.witness.capacity()),
+        );
+        let mut deps = [direct_deps.includes, direct_deps.witness, third];
 
         while !deps.iter().all(|hm| hm.is_empty()) {
             let [current, includes, witness] = &mut deps;
