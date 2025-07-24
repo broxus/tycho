@@ -50,6 +50,8 @@ impl PublicOverlayClient {
         let validators_resolver =
             ValidatorsResolver::new(network.clone(), overlay.clone(), config.validators.clone());
 
+        let enable_neighbors_metrics = config.neighbors.enable_metrics;
+
         let mut res = Inner {
             network,
             overlay,
@@ -69,7 +71,11 @@ impl PublicOverlayClient {
         res.update_task = Some(tokio::spawn(res.clone().update_neighbours_task()).abort_handle());
         res.score_task = Some(tokio::spawn(res.clone().apply_score_task()).abort_handle());
         res.cleanup_task = Some(tokio::spawn(res.clone().cleanup_neighbours_task()).abort_handle());
-        res.metrics_task = Some(tokio::spawn(res.clone().update_metrics_task()).abort_handle());
+        res.metrics_task = if enable_neighbors_metrics {
+            Some(tokio::spawn(res.clone().update_metrics_task()).abort_handle())
+        } else {
+            None
+        };
 
         Self {
             inner: Arc::new(res),

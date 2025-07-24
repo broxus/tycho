@@ -127,6 +127,27 @@ impl PartialEq<PeerId> for &PeerId {
     }
 }
 
+impl PartialEq<[u8; 32]> for PeerId {
+    #[inline]
+    fn eq(&self, other: &[u8; 32]) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<PeerId> for [u8; 32] {
+    #[inline]
+    fn eq(&self, other: &PeerId) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialEq<&PeerId> for [u8; 32] {
+    #[inline]
+    fn eq(&self, other: &&PeerId) -> bool {
+        *self == other.0
+    }
+}
+
 impl std::ops::BitXor for PeerId {
     type Output = PeerId;
 

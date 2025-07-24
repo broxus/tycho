@@ -40,7 +40,7 @@ pub fn default_test_config() -> MempoolMergedConfig {
     builder.build().unwrap()
 }
 
-pub fn make_peer_info(keypair: &KeyPair, address_list: Vec<Address>, ttl: Option<u32>) -> PeerInfo {
+pub fn make_peer_info(keypair: &KeyPair, address_list: Vec<Address>) -> PeerInfo {
     let peer_id = PeerId::from(keypair.public_key);
 
     let now = now_sec();
@@ -48,7 +48,7 @@ pub fn make_peer_info(keypair: &KeyPair, address_list: Vec<Address>, ttl: Option
         id: peer_id,
         address_list: address_list.into_boxed_slice(),
         created_at: now,
-        expires_at: ttl.unwrap_or(u32::MAX),
+        expires_at: u32::MAX,
         signature: Box::new([0; 64]),
     };
     *peer_info.signature = keypair.sign_tl(&peer_info);

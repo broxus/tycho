@@ -109,7 +109,7 @@ fn make_network(
     let peer_info = keys
         .iter()
         .zip(bind_addresses.iter())
-        .map(|((_, key_pair), addr)| Arc::new(make_peer_info(key_pair, vec![addr.clone()], None)))
+        .map(|((_, key_pair), addr)| Arc::new(make_peer_info(key_pair, vec![addr.clone()])))
         .collect::<Vec<_>>();
 
     let merged_conf = default_test_config();

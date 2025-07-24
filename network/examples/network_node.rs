@@ -263,7 +263,7 @@ impl Node {
             id: peer_id,
             address_list: address_list.into_boxed_slice(),
             created_at: now,
-            expires_at: ttl.unwrap_or(u32::MAX),
+            expires_at: now.saturating_add(ttl.unwrap_or(u32::MAX)),
             signature: Box::new([0; 64]),
         };
         *node_info.signature = keypair.sign_tl(&node_info);

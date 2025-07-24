@@ -67,6 +67,11 @@ pub struct NeighborsConfig {
     /// Default: 1s.
     #[serde(with = "serde_helpers::humantime")]
     pub query_timeout: Duration,
+
+    /// Whether to enable `Neighbours` metrics.
+    ///
+    /// Default: `true`.
+    pub enable_metrics: bool,
 }
 
 impl Default for NeighborsConfig {
@@ -81,6 +86,7 @@ impl Default for NeighborsConfig {
             default_roundtrip: Duration::from_millis(300),
             send_timeout: Duration::from_millis(500),
             query_timeout: Duration::from_secs(1),
+            enable_metrics: true,
         }
     }
 }

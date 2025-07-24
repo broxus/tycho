@@ -10,6 +10,7 @@ use base64::prelude::{BASE64_STANDARD, Engine as _};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use tycho_control::ControlClient;
+use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockId, StdAddr};
 use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
@@ -38,6 +39,10 @@ pub enum CmdControl {
     WaitSync(CmdWaitSync),
     #[clap(subcommand)]
     MemProfiler(CmdMemProfiler),
+    #[clap(subcommand)]
+    Overlay(CmdOverlay),
+    #[clap(subcommand)]
+    Dht(CmdDht),
 }
 
 impl CmdControl {
@@ -60,6 +65,8 @@ impl CmdControl {
             Self::Compact(cmd) => cmd.run(args),
             Self::WaitSync(cmd) => cmd.run(args),
             Self::MemProfiler(cmd) => cmd.run(args),
+            Self::Overlay(cmd) => cmd.run(args),
+            Self::Dht(cmd) => cmd.run(args),
         }
     }
 }
@@ -215,7 +222,9 @@ impl CmdGetNeighbours {
         }
 
         self.args.rt(args, move |client| async move {
-            let res = client.get_neighbours_info().await?;
+            let mut res = client.get_neighbours_info().await?;
+            res.neighbours
+                .sort_unstable_by(|left, right| left.id.cmp(&right.id));
 
             if self.human_readable {
                 let mut table = tabled::Table::new(res.neighbours.into_iter().map(TableRow));
@@ -758,6 +767,182 @@ impl CmdDumpQueueDiff {
     }
 }
 
+/// Overlay runtime tools.
+#[derive(Subcommand)]
+#[clap(subcommand_required = true, arg_required_else_help = true)]
+pub enum CmdOverlay {
+    List(CmdOverlayList),
+    Peers(CmdOverlayPeers),
+}
+
+impl CmdOverlay {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        match self {
+            Self::List(cmd) => cmd.run(args),
+            Self::Peers(cmd) => cmd.run(args),
+        }
+    }
+}
+
+/// List all active public and private overlays.
+#[derive(Parser)]
+pub struct CmdOverlayList {
+    #[clap(flatten)]
+    args: ControlArgs,
+}
+
+impl CmdOverlayList {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            let ids = client.get_overlay_ids().await?;
+            print_json(ids)
+        })
+    }
+}
+
+/// Get overlay peers.
+#[derive(Parser)]
+#[clap(disable_help_flag = true)]
+pub struct CmdOverlayPeers {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// overlay id
+    #[clap()]
+    overlay_id: HashBytes,
+
+    #[clap(short, long)]
+    human_readable: bool,
+
+    #[clap(long, action = clap::ArgAction::HelpLong)]
+    help: Option<bool>,
+}
+
+impl CmdOverlayPeers {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        struct AddressList<'a>(&'a [String]);
+
+        impl std::fmt::Display for AddressList<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self.0 {
+                    [] => write!(f, "unknown"),
+                    [addr] => f.write_str(addr.as_str()),
+                    _ => {
+                        let mut first = true;
+                        for item in self.0 {
+                            if !std::mem::take(&mut first) {
+                                f.write_str(",")?;
+                            }
+                            f.write_str(item.as_str())?;
+                        }
+                        Ok(())
+                    }
+                }
+            }
+        }
+
+        struct PeerTableRow(tycho_control::proto::OverlayPeer);
+
+        impl tabled::Tabled for PeerTableRow {
+            const LENGTH: usize = 5;
+
+            fn fields(&self) -> Vec<Cow<'_, str>> {
+                let mut row = Vec::with_capacity(Self::LENGTH);
+                row.push(Cow::from(self.0.peer_id.to_string()));
+                row.push(match self.0.entry_created_at {
+                    Some(since) => Cow::from(DisplayTimestamp(since).to_string()),
+                    None => Cow::Borrowed("N/A"),
+                });
+                match &self.0.info {
+                    Some(info) => row.extend([
+                        Cow::from(AddressList(&info.address_list).to_string()),
+                        Cow::from(DisplayTimestamp(info.created_at).to_string()),
+                        Cow::from(DisplayTimestamp(info.expires_at).to_string()),
+                    ]),
+                    None => row.extend_from_slice(&[
+                        Cow::from("N/A"),
+                        Cow::from("N/A"),
+                        Cow::from("N/A"),
+                    ]),
+                }
+                row
+            }
+
+            fn headers() -> Vec<Cow<'static, str>> {
+                vec![
+                    Cow::from("peer_id"),
+                    Cow::from("entry_since"),
+                    Cow::from("address"),
+                    Cow::from("created_at"),
+                    Cow::from("expires_at"),
+                ]
+            }
+        }
+
+        self.args.rt(args, move |client| async move {
+            let mut res = client.get_overlay_peers(&self.overlay_id).await?;
+            res.peers
+                .sort_unstable_by(|left, right| left.peer_id.cmp(&right.peer_id));
+
+            if self.human_readable {
+                DisplayRelativeTimestamp::set_now(tycho_util::time::now_sec());
+
+                let mut table = tabled::Table::new(res.peers.into_iter().map(PeerTableRow));
+                table.with(tabled::settings::Style::psql());
+                println!("{table}");
+                Ok(())
+            } else {
+                print_json(res)
+            }
+        })
+    }
+}
+
+/// DHT runtime tools.
+#[derive(Subcommand)]
+#[clap(subcommand_required = true, arg_required_else_help = true)]
+pub enum CmdDht {
+    FindNode(CmdDhtFindNode),
+}
+
+impl CmdDht {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        match self {
+            Self::FindNode(cmd) => cmd.run(args),
+        }
+    }
+}
+
+/// Find at most `k` nodes that can contain the specified `key`.
+#[derive(Parser)]
+pub struct CmdDhtFindNode {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// Key hash
+    #[clap()]
+    key: HashBytes,
+
+    /// Maximum number of nodes to return
+    #[clap(short)]
+    k: u32,
+
+    /// Target `PeerId`
+    #[clap(long)]
+    peer_id: Option<HashBytes>,
+}
+
+impl CmdDhtFindNode {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            let res = client
+                .dht_find_node(&self.key, self.k, self.peer_id.as_ref())
+                .await?;
+            print_json(res)
+        })
+    }
+}
+
 #[derive(Parser)]
 #[group(required = true, multiple = false)]
 struct TriggerBy {
@@ -822,4 +1007,39 @@ impl ControlArgs {
                 }
             })
     }
+}
+#[repr(transparent)]
+struct DisplayTimestamp(u32);
+
+impl std::fmt::Display for DisplayTimestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.0, DisplayRelativeTimestamp(self.0))
+    }
+}
+
+#[repr(transparent)]
+struct DisplayRelativeTimestamp(u32);
+
+impl DisplayRelativeTimestamp {
+    fn set_now(now: u32) {
+        NOW.set(now);
+    }
+}
+
+impl std::fmt::Display for DisplayRelativeTimestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let now = NOW.get();
+        let ago = self.0 <= now;
+        let diff = Duration::from_secs(self.0.abs_diff(now) as u64);
+
+        if ago {
+            write!(f, "{} ago", humantime::format_duration(diff))
+        } else {
+            write!(f, "in {}", humantime::format_duration(diff))
+        }
+    }
+}
+
+thread_local! {
+    static NOW: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }

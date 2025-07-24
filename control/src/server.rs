@@ -22,14 +22,16 @@ use tycho_core::block_strider::{
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::storage::{ArchiveId, BlockHandle, BlockStorage, CoreStorage};
 use tycho_crypto::ed25519;
-use tycho_network::Network;
+use tycho_network::{
+    DhtClient, Network, NetworkExt, OverlayId, OverlayService, PeerId, PeerResolverHandle, Request,
+};
 use tycho_types::cell::Lazy;
 use tycho_types::models::{
     AccountState, DepthBalanceInfo, Message, OptionalAccount, ShardAccount, ShardIdent, StdAddr,
 };
 use tycho_types::num::Tokens;
 use tycho_types::prelude::*;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::collator::Collator;
 use crate::error::{ServerError, ServerResult};
@@ -158,6 +160,8 @@ pub struct ControlServerBuilder<
     memory_profiler: Option<Arc<dyn MemoryProfiler>>,
     validator_keypair: Option<Arc<ed25519::KeyPair>>,
     collator: Option<Arc<dyn Collator>>,
+    dht_client: Option<DhtClient>,
+    overlay_service: Option<OverlayService>,
 }
 
 impl ControlServerBuilder {
@@ -214,6 +218,8 @@ impl ControlServerBuilder {
                 manual_compaction,
                 memory_profiler,
                 validator_keypair: self.validator_keypair,
+                dht_client: self.dht_client,
+                overlay_service: self.overlay_service,
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
             }),
@@ -229,6 +235,8 @@ impl<T2, T3, T4> ControlServerBuilder<((), T2, T3, T4)> {
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
+            dht_client: self.dht_client,
+            overlay_service: self.overlay_service,
         }
     }
 }
@@ -244,6 +252,8 @@ impl<T1, T3, T4> ControlServerBuilder<(T1, (), T3, T4)> {
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
+            dht_client: self.dht_client,
+            overlay_service: self.overlay_service,
         }
     }
 }
@@ -259,6 +269,8 @@ impl<T1, T2, T4> ControlServerBuilder<(T1, T2, (), T4)> {
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
+            dht_client: self.dht_client,
+            overlay_service: self.overlay_service,
         }
     }
 }
@@ -274,6 +286,8 @@ impl<T1, T2, T3> ControlServerBuilder<(T1, T2, T3, ())> {
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
+            dht_client: self.dht_client,
+            overlay_service: self.overlay_service,
         }
     }
 }
@@ -293,6 +307,16 @@ impl<T> ControlServerBuilder<T> {
         self.validator_keypair = Some(keypair);
         self
     }
+
+    pub fn with_dht_client(mut self, client: DhtClient) -> Self {
+        self.dht_client = Some(client);
+        self
+    }
+
+    pub fn with_overlay_service(mut self, service: OverlayService) -> Self {
+        self.overlay_service = Some(service);
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -308,6 +332,8 @@ impl ControlServer {
             memory_profiler: None,
             validator_keypair: None,
             collator: None,
+            dht_client: None,
+            overlay_service: None,
         }
     }
 }
@@ -704,6 +730,132 @@ impl proto::ControlServer for ControlServer {
         })
     }
 
+    async fn get_overlay_ids(
+        self,
+        _: tarpc::context::Context,
+    ) -> ServerResult<proto::OverlayIdsResponse> {
+        let Some(overlay_service) = self.inner.overlay_service.as_ref() else {
+            return Err(ServerError::new(
+                "control server was created without a overlay service",
+            ));
+        };
+
+        fn map_overlay_ids<T>(overlays: FastHashMap<OverlayId, T>) -> FastHashSet<HashBytes> {
+            overlays.into_keys().map(|id| HashBytes(id.0)).collect()
+        }
+
+        Ok(proto::OverlayIdsResponse {
+            public_overlays: map_overlay_ids(overlay_service.public_overlays()),
+            private_overlays: map_overlay_ids(overlay_service.private_overlays()),
+        })
+    }
+
+    async fn get_overlay_peers(
+        self,
+        _: tarpc::context::Context,
+        req: proto::OverlayPeersRequest,
+    ) -> ServerResult<proto::OverlayPeersResponse> {
+        let service = self.inner.overlay_service.as_ref().ok_or_else(|| {
+            ServerError::new("control server was created without am overlay service")
+        })?;
+
+        fn make_peer_item(
+            peer_id: &PeerId,
+            entry_created_at: Option<u32>,
+            handle: &PeerResolverHandle,
+        ) -> proto::OverlayPeer {
+            proto::OverlayPeer {
+                peer_id: HashBytes(peer_id.0),
+                entry_created_at,
+                info: handle
+                    .load_handle()
+                    .map(|handle| map_peer_info(&handle.peer_info())),
+            }
+        }
+
+        let overlay_id = OverlayId::wrap(req.overlay_id.as_array());
+        let overlay_type;
+        let peers = 'peers: {
+            if let Some(overlay) = service.public_overlays().get(overlay_id) {
+                overlay_type = proto::OverlayType::Public;
+                break 'peers overlay
+                    .read_entries()
+                    .iter()
+                    .map(|item| {
+                        make_peer_item(
+                            &item.entry.peer_id,
+                            Some(item.entry.created_at),
+                            &item.resolver_handle,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+            }
+
+            if let Some(overlay) = service.private_overlays().get(overlay_id) {
+                overlay_type = proto::OverlayType::Private;
+                break 'peers overlay
+                    .read_entries()
+                    .iter()
+                    .map(|item| make_peer_item(&item.peer_id, None, &item.resolver_handle))
+                    .collect::<Vec<_>>();
+            }
+
+            return Err(ServerError::new("overlay not found"));
+        };
+
+        Ok(proto::OverlayPeersResponse {
+            overlay_type,
+            peers,
+        })
+    }
+
+    async fn dht_find_node(
+        self,
+        _: tarpc::context::Context,
+        req: proto::DhtFindNodeRequest,
+    ) -> ServerResult<proto::DhtFindNodeResponse> {
+        use tycho_network::proto::dht;
+
+        let dht_client = self
+            .inner
+            .dht_client
+            .as_ref()
+            .ok_or_else(|| ServerError::new("control server was created without DHT client"))?;
+
+        let nodes = if let Some(peer_id) = req.peer_id {
+            // TODO: Move `FindNode` into dht client.
+            let request = Request::from_tl(dht::rpc::FindNode {
+                key: req.key.0,
+                k: req.k,
+            });
+
+            let response = dht_client
+                .network()
+                .query(PeerId::wrap(peer_id.as_array()), request)
+                .await?;
+
+            let dht::NodeResponse { nodes } = response.parse_tl().map_err(|e| {
+                ServerError::new(format!("failed to deserialize DHT response: {e:?}"))
+            })?;
+
+            nodes
+        } else {
+            dht_client
+                .service()
+                .find_local_closest(req.key.as_array(), req.k as usize)
+        };
+
+        Ok(proto::DhtFindNodeResponse {
+            nodes: nodes
+                .into_iter()
+                .map(|item| proto::DhtFindNodeResponseItem {
+                    peer_id: HashBytes(item.id.0),
+                    info: map_peer_info(&item),
+                })
+                .collect(),
+        })
+    }
+
     async fn sign_elections_payload(
         self,
         _: tarpc::context::Context,
@@ -756,6 +908,8 @@ struct Inner {
     manual_compaction: ManualCompaction,
     memory_profiler: Arc<dyn MemoryProfiler>,
     validator_keypair: Option<Arc<ed25519::KeyPair>>,
+    dht_client: Option<DhtClient>,
+    overlay_service: Option<OverlayService>,
     mc_accounts: RwLock<Option<CachedAccounts>>,
     sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,
 }
@@ -888,6 +1042,14 @@ fn extend_signature_with_id(data: &[u8], signature_id: Option<i32>) -> Cow<'_, [
             Cow::Owned(result)
         }
         None => Cow::Borrowed(data),
+    }
+}
+
+fn map_peer_info(info: &tycho_network::PeerInfo) -> proto::PeerInfo {
+    proto::PeerInfo {
+        address_list: info.address_list.iter().map(ToString::to_string).collect(),
+        created_at: info.created_at,
+        expires_at: info.expires_at,
     }
 }
 
