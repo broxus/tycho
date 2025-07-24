@@ -24,7 +24,7 @@ impl Default for WuTunerConfig {
     fn default() -> Self {
         Self {
             wu_span: 10,
-            wu_ma_interval: 5,
+            wu_ma_interval: 4,
             lag_span: 10,
             lag_ma_interval: 4,
             tune_interval: 500,
