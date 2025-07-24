@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use rand::Rng;
 use rand::distr::uniform::{UniformInt, UniformSampler};
 use tokio::sync::Notify;
+use tycho_network::PeerId;
 use tycho_util::FastHashSet;
 
 use crate::overlay_client::neighbour::Neighbour;
@@ -15,12 +16,13 @@ pub struct Neighbours {
 }
 
 impl Neighbours {
-    pub fn new(entries: Vec<Neighbour>, max_neighbours: usize) -> Self {
+    pub fn new(local_id: PeerId, entries: Vec<Neighbour>, max_neighbours: usize) -> Self {
         let mut selection_index = SelectionIndex::new(max_neighbours);
         selection_index.update(&entries);
 
         Self {
             inner: Arc::new(Inner {
+                local_id,
                 max_neighbours,
                 entries: ArcSwap::new(Arc::new(entries)),
                 selection_index: Mutex::new(selection_index),
@@ -96,27 +98,30 @@ impl Neighbours {
 
     /// Update neighbours metrics.
     pub fn update_metrics(&self) {
+        let local_id = self.inner.local_id;
         let entries = self.get_active_neighbours();
 
         for neighbour in entries.iter() {
             let peer_id = neighbour.peer_id();
             let stats = neighbour.get_stats();
 
-            metrics::gauge!(
-                "tycho_core_overlay_client_neighbour_score",
-                "peer_id" => peer_id.to_string()
-            )
-            .set(stats.score as f64);
+            let labels = [
+                ("local_id", local_id.to_string()),
+                ("peer_id", peer_id.to_string()),
+            ];
+
+            metrics::gauge!("tycho_core_overlay_client_neighbour_score", &labels)
+                .set(stats.score as f64);
 
             metrics::gauge!(
                 "tycho_core_overlay_client_neighbour_total_requests",
-                "peer_id" => peer_id.to_string()
+                &labels
             )
             .set(stats.total_requests as f64);
 
             metrics::gauge!(
                 "tycho_core_overlay_client_neighbour_failed_requests",
-                "peer_id" => peer_id.to_string()
+                &labels
             )
             .set(stats.failed_requests as f64);
         }
@@ -195,6 +200,7 @@ impl Neighbours {
 }
 
 struct Inner {
+    local_id: PeerId,
     max_neighbours: usize,
     entries: ArcSwap<Vec<Neighbour>>,
     selection_index: Mutex<SelectionIndex>,

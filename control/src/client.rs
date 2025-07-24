@@ -8,7 +8,7 @@ use tarpc::{client, context};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 use tycho_types::boc::{Boc, BocRepr};
-use tycho_types::cell::DynCell;
+use tycho_types::cell::{DynCell, HashBytes};
 use tycho_types::models::{BlockId, BlockIdShort, OwnedMessage, StdAddr};
 use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
@@ -80,13 +80,6 @@ impl ControlClient {
     pub async fn dump_memory_profiler(&self) -> ClientResult<Vec<u8>> {
         self.inner
             .dump_memory_profiler(current_context())
-            .await?
-            .map_err(Into::into)
-    }
-
-    pub async fn get_neighbours_info(&self) -> ClientResult<NeighboursInfoResponse> {
-        self.inner
-            .get_neighbours_info(current_context())
             .await?
             .map_err(Into::into)
     }
@@ -267,6 +260,50 @@ impl ControlClient {
     ) -> ClientResult<BlockListResponse> {
         self.inner
             .get_block_ids(current_context(), BlockListRequest { continuation })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn list_overlays(&self) -> ClientResult<OverlayListResponse> {
+        self.inner
+            .get_overlays(current_context())
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn overlay_peers(&self, id: HashBytes) -> ClientResult<OverlayPeersResponse> {
+        self.inner
+            .get_overlay_peers(current_context(), OverlayRequest { id })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn overlay_neighbors(&self, id: HashBytes) -> ClientResult<OverlayNeighborsResponse> {
+        self.inner
+            .get_overlay_neighbors(current_context(), OverlayRequest { id })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn dht_node_info(
+        &self,
+        id: HashBytes,
+        at: HashBytes,
+        k: u32,
+    ) -> ClientResult<DhtInfoResponse> {
+        self.inner
+            .get_dht_node_info(current_context(), DhtInfoRequest {
+                search_id: id,
+                target_id: at,
+                k,
+            })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn dht_local_info(&self, id: HashBytes, k: u32) -> ClientResult<DhtInfoResponse> {
+        self.inner
+            .get_dht_local_info(current_context(), DhtLocalInfoRequest { id, k })
             .await?
             .map_err(Into::into)
     }

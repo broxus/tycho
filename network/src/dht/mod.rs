@@ -360,6 +360,17 @@ impl DhtService {
         self.0.routing_table.lock().unwrap().contains(peer_id)
     }
 
+    pub fn peers(&self, peer_id: &PeerId, count: usize) -> Vec<PeerId> {
+        self.0
+            .routing_table
+            .lock()
+            .unwrap()
+            .closest(peer_id.as_bytes(), count)
+            .iter()
+            .map(|x| x.id)
+            .collect()
+    }
+
     pub fn store_value_locally(&self, value: &ValueRef<'_>) -> Result<bool, StorageError> {
         self.0.store_value_locally(value)
     }
