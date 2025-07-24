@@ -17,6 +17,7 @@ pub struct WuTunerConfig {
     pub tune: WuTuneType,
     pub lag_bounds_ms: (i16, i16),
     pub target_wu_price: u16,
+    pub adaptive_wu_price: bool,
 }
 
 impl Default for WuTunerConfig {
@@ -30,6 +31,7 @@ impl Default for WuTunerConfig {
             tune: Default::default(),
             lag_bounds_ms: (200, 500),
             target_wu_price: 70,
+            adaptive_wu_price: false,
         }
     }
 }
