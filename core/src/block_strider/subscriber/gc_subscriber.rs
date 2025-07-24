@@ -1,19 +1,20 @@
+use std::collections::BTreeMap;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use parking_lot::Mutex;
 use rand::Rng;
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_types::models::BlockId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::block_strider::subscriber::find_longest_diffs_tail;
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
@@ -40,6 +41,8 @@ impl GcSubscriber {
             .find_last_key_block()
             .map_or(0, |handle| handle.id().seqno);
 
+        let diff_tail_cache = DiffTailCache::default();
+
         let (tick_tx, tick_rx) = watch::channel(None::<Tick>);
 
         let (archives_gc_trigger, archives_gc_rx) = watch::channel(None::<ManualGcTrigger>);
@@ -54,6 +57,7 @@ impl GcSubscriber {
             tick_rx.clone(),
             blocks_gc_rx,
             storage.clone(),
+            diff_tail_cache.clone(),
         ));
 
         let (states_gc_trigger, states_gc_rx) = watch::channel(None::<ManualGcTrigger>);
@@ -76,6 +80,7 @@ impl GcSubscriber {
             inner: Arc::new(Inner {
                 tick_tx,
                 last_key_block_seqno: AtomicU32::new(last_key_block_seqno),
+                diff_tail_cache,
 
                 archives_gc_trigger,
                 blocks_gc_trigger,
@@ -101,6 +106,9 @@ impl GcSubscriber {
     }
 
     fn handle_impl(&self, is_key_block: bool, block: &BlockStuff) {
+        // Accumulate diff tail len in cache for each block.
+        self.inner.diff_tail_cache.handle_block(block);
+
         if !block.id().is_masterchain() {
             return;
         }
@@ -204,7 +212,12 @@ impl GcSubscriber {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn blocks_gc(mut tick_rx: TickRx, mut manual_rx: ManualTriggerRx, storage: CoreStorage) {
+    async fn blocks_gc(
+        mut tick_rx: TickRx,
+        mut manual_rx: ManualTriggerRx,
+        storage: CoreStorage,
+        diff_tail_cache: DiffTailCache,
+    ) {
         let Some(config) = storage.config().blocks_gc else {
             tracing::warn!("manager disabled");
             return;
@@ -260,12 +273,16 @@ impl GcSubscriber {
                     // TODO: Must be in sync with the largest possible archive size (in mc blocks).
                     const MIN_SAFE_DISTANCE: u32 = 100;
 
-                    let tail_len = find_longest_diffs_tail(tick.mc_block_id, &storage).await;
-
-                    let tail_len = tail_len.unwrap_or_else(|e| {
-                        tracing::error!(?e, "failed to find longest diffs tail");
-                        0
-                    }) as u32;
+                    let Some(tail_len) = diff_tail_cache
+                        .wait_for_tail_len(tick.mc_block_id.seqno)
+                        .await
+                    else {
+                        tracing::warn!(
+                            seqno = ?tick.mc_block_id.seqno ,
+                            "tail diff not found in cache, skipping GC. This is expected during startup."
+                        );
+                        continue;
+                    };
 
                     metrics::gauge!("tycho_core_blocks_gc_tail_len").set(tail_len);
 
@@ -340,6 +357,9 @@ impl GcSubscriber {
             {
                 tracing::error!("failed to remove outdated blocks: {e:?}");
             }
+
+            // Clean up cache entries for removed blocks.
+            diff_tail_cache.cleanup(target_seqno);
         }
     }
 
@@ -444,6 +464,7 @@ impl GcSubscriber {
 struct Inner {
     tick_tx: TickTx,
     last_key_block_seqno: AtomicU32,
+    diff_tail_cache: DiffTailCache,
 
     archives_gc_trigger: ManualTriggerTx,
     blocks_gc_trigger: ManualTriggerTx,
@@ -542,5 +563,233 @@ impl BlockSubscriber for GcSubscriber {
     ) -> Self::HandleBlockFut<'a> {
         self.handle_impl(cx.is_key_block, &cx.block);
         futures_util::future::ready(Ok(()))
+    }
+}
+
+// === Diff Tail Cache ===
+
+#[derive(Default, Clone)]
+struct DiffTailCache {
+    inner: Arc<DiffTailCacheInner>,
+}
+
+#[derive(Default)]
+struct DiffTailCacheInner {
+    new_block_finalized: Notify,
+    latest_finalized_seqno: AtomicU32,
+    max_tail_len: AtomicU32,
+    finalized: Mutex<BTreeMap<u32, DiffTailCacheEntry>>,
+}
+
+impl DiffTailCache {
+    /// Caches block tail len at each known mc seqno.
+    ///
+    /// NOTE: Must be called for each block in such an order that
+    /// the masterchain block is handled right after all the shard
+    /// blocks it referenced.
+    fn handle_block(&self, block: &BlockStuff) {
+        const OFFSET: u32 = 1;
+
+        let this = self.inner.as_ref();
+
+        let seqno = block.id().seqno;
+        let tail_len = block.as_ref().out_msg_queue_updates.tail_len;
+
+        if block.id().is_masterchain() {
+            // Reset `max_tail_len`.
+            let acc = this.max_tail_len.swap(0, Ordering::AcqRel);
+
+            {
+                let mut finalized = this.finalized.lock();
+
+                let sc_tail_len = match acc.checked_sub(OFFSET) {
+                    // There were some shard blocks so the tail len has changed.
+                    Some(tail_len) => tail_len,
+                    // There were no shard blocks so we must reuse previous sc tail len.
+                    //
+                    // NOTE: This is quite a strange situation since non-empty internal
+                    // messages queue will force collating shard blocks and there might
+                    // not be such situation. But it's better to be safe just in case.
+                    None => match finalized.get(&seqno.saturating_sub(1)) {
+                        Some(prev) => prev.sc_tail_len,
+                        None => 1,
+                    },
+                };
+
+                let prev = finalized.insert(seqno, DiffTailCacheEntry {
+                    mc_tail_len: tail_len,
+                    sc_tail_len,
+                });
+                debug_assert!(prev.is_none(), "same block handled twice at runtime");
+            }
+
+            this.latest_finalized_seqno.store(seqno, Ordering::Release);
+            this.new_block_finalized.notify_waiters();
+        } else {
+            // Accumulate the maximum tail len at the block.
+            // NOTE: We use `OFFSET` here to check for "no shard blocks"
+            // situation later.
+            this.max_tail_len
+                .fetch_max(OFFSET + tail_len, Ordering::Release);
+        }
+    }
+
+    /// Waits until the cache has processed any block including
+    /// or after the specified seqno.
+    ///
+    /// Returns a tail len for that block or `None` if it was
+    /// already cleared.
+    async fn wait_for_tail_len(&self, mc_seqno: u32) -> Option<u32> {
+        let this = self.inner.as_ref();
+
+        // Wait until the specified mc seqno is reached.
+        loop {
+            let updated = this.new_block_finalized.notified();
+            if this.latest_finalized_seqno.load(Ordering::Acquire) >= mc_seqno {
+                break;
+            }
+            updated.await;
+        }
+
+        // At this point `finalized` map should contain the range
+        // at least upto the specified mc seqno.
+        this.finalized
+            .lock()
+            .get(&mc_seqno)
+            .map(DiffTailCacheEntry::compute_max)
+    }
+
+    /// Cleanup the finalized range up until the specified seqno
+    /// (including it).
+    fn cleanup(&self, upto_mc_seqno: u32) {
+        let mut finalized = self.inner.finalized.lock();
+        if let Some(lower_bound) = upto_mc_seqno.checked_add(1) {
+            let rest = finalized.split_off(&lower_bound);
+            *finalized = rest;
+        } else {
+            finalized.clear();
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DiffTailCacheEntry {
+    mc_tail_len: u32,
+    sc_tail_len: u32,
+}
+
+impl DiffTailCacheEntry {
+    fn compute_max(&self) -> u32 {
+        self.mc_tail_len.max(self.sc_tail_len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::pin;
+
+    use futures_util::future::poll_immediate;
+    use tycho_types::models::ShardIdent;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_tail_cache_basic_flow() {
+        let cache = DiffTailCache::default();
+
+        // Should not find any block after the startup.
+        assert_eq!(cache.wait_for_tail_len(0).await, None);
+
+        // === Masterchain block 1 ===
+
+        let mut wait_tail_len = pin!(cache.wait_for_tail_len(1));
+
+        // No block is finalized yet for this seqno.
+        assert_eq!(poll_immediate(&mut wait_tail_len).await, None);
+
+        // Handle shard blocks with different tail lengths
+        for (sc_seqno, tail_len) in [(100, 20), (101, 15), (102, 16)] {
+            let sc_block = BlockStuff::new_with(ShardIdent::BASECHAIN, sc_seqno, |block| {
+                block.out_msg_queue_updates.tail_len = tail_len;
+            });
+            cache.handle_block(&sc_block);
+        }
+
+        // Still no block until the masterchain is processed.
+        assert_eq!(poll_immediate(&mut wait_tail_len).await, None);
+
+        // Handle master block after all referenced shard blocks.
+        cache.handle_block(&BlockStuff::new_with(ShardIdent::MASTERCHAIN, 1, |block| {
+            block.out_msg_queue_updates.tail_len = 10;
+        }));
+
+        // Only now tail len should be available.
+        assert_eq!(wait_tail_len.await, Some(20));
+
+        // === Masterchain block 2 ===
+
+        let mut wait_tail_len = pin!(cache.wait_for_tail_len(2));
+
+        // No block is finalized yet for this seqno.
+        assert_eq!(poll_immediate(&mut wait_tail_len).await, None);
+
+        // No shard blocks here.
+        cache.handle_block(&BlockStuff::new_with(ShardIdent::MASTERCHAIN, 2, |block| {
+            block.out_msg_queue_updates.tail_len = 5;
+        }));
+
+        // Now the wait_task should complete with the finalized value (max from previous shards).
+        assert_eq!(wait_tail_len.await, Some(20));
+
+        // Also check directly
+        assert_eq!(cache.wait_for_tail_len(1).await, Some(20));
+        assert_eq!(cache.wait_for_tail_len(2).await, Some(20));
+
+        // === Masterchain block 3 ===
+
+        // Now it has shard block.
+        cache.handle_block(&BlockStuff::new_with(ShardIdent::BASECHAIN, 103, |block| {
+            block.out_msg_queue_updates.tail_len = 1;
+        }));
+
+        let mut wait_tail_len = pin!(cache.wait_for_tail_len(3));
+
+        // No block is finalized yet for this seqno (even after we started processing its shard blocks).
+        assert_eq!(poll_immediate(&mut wait_tail_len).await, None);
+
+        // Master with small tail.
+        cache.handle_block(&BlockStuff::new_with(ShardIdent::MASTERCHAIN, 3, |block| {
+            block.out_msg_queue_updates.tail_len = 2;
+        }));
+
+        assert_eq!(wait_tail_len.await, Some(2));
+
+        // Also check directly
+        assert_eq!(cache.wait_for_tail_len(3).await, Some(2));
+
+        // === Cleanup ===
+
+        cache.cleanup(1);
+
+        // Already cleared.
+        assert_eq!(poll_immediate(cache.wait_for_tail_len(0)).await, Some(None));
+        assert_eq!(poll_immediate(cache.wait_for_tail_len(1)).await, Some(None));
+        // Should still exist.
+        assert_eq!(
+            poll_immediate(cache.wait_for_tail_len(2)).await,
+            Some(Some(20))
+        );
+        assert_eq!(
+            poll_immediate(cache.wait_for_tail_len(3)).await,
+            Some(Some(2))
+        );
+        // Not yet exists.
+        assert_eq!(poll_immediate(cache.wait_for_tail_len(4)).await, None);
+
+        // Cleanup upto the future.
+        cache.cleanup(10);
+
+        // Not yet exists (since the latest processed block has not changed).
+        assert_eq!(poll_immediate(cache.wait_for_tail_len(4)).await, None);
     }
 }
