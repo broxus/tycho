@@ -79,10 +79,34 @@ pub enum IllFormedReason {
     NotDescribed, // TODO enum for each check
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum InvalidReason {
+    #[error("cannot validate point, no {0:?} round in DAG")]
+    NoRoundInDag(PointMap),
+    #[error("time is not greater than in prev point")]
+    TimeNotGreaterThanInPrevPoint,
+    #[error("anchor proof does not inherit time from its candidate")]
+    AnchorProofDoesntInheritAnchorTime,
+    #[error("anchor candidate's time is not inherited from its proof")]
+    AnchorTimeNotInheritedFromProof,
+    #[error("must have referenced prev point digest {}", .0.alt())]
+    MustHaveReferencedPrevPoint(Digest),
+    #[error("must have skipped round")]
+    MustHaveSkippedRound,
+    #[error("invalid dependency")]
+    InvalidDependency,
+    #[error("dependency time too far in future")]
+    DependencyTimeTooFarInFuture,
+    #[error("dependency has newer anchor {0:?}")]
+    NewerAnchorInDependency(AnchorStageRole),
+    #[error("anchor {0:?} link leads to other destination")]
+    AnchorLinkBadPath(AnchorStageRole),
+}
+
 #[derive(Debug)]
 pub enum ValidateResult {
     Valid,
-    Invalid,
+    Invalid(InvalidReason),
     IllFormed(IllFormedReason),
 }
 
@@ -131,53 +155,44 @@ impl Verifier {
             cmp::Ordering::Greater => {} // peer usage is already verified
         }
 
-        let Some(r_0_pre) = r_0.upgrade() else {
-            tracing::info!("cannot validate point, no round in local DAG");
-            return ctx.validated(&cert, ValidateResult::Invalid);
+        let Some(r_0) = r_0.upgrade() else {
+            let reason = InvalidReason::NoRoundInDag(PointMap::Evidence);
+            return ctx.validated(&cert, ValidateResult::Invalid(reason));
         };
         assert_eq!(
-            r_0_pre.round(),
+            r_0.round(),
             info.round(),
             "Coding error: dag round mismatches point round"
         );
 
-        if !Self::is_self_links_ok(&info, &r_0_pre) {
+        if !Self::is_self_links_ok(&info, &r_0) {
             return ctx.validated(&cert, ValidateResult::IllFormed(IllFormedReason::SelfLink));
         }
 
         if ![AnchorStageRole::Proof, AnchorStageRole::Trigger]
             .into_iter()
-            .all(|role| Self::is_anchor_link_ok(role, &info, &r_0_pre, ctx.conf()))
+            .all(|role| Self::is_anchor_link_ok(role, &info, &r_0, ctx.conf()))
         {
             let reason = IllFormedReason::AnchorLink;
             return ctx.validated(&cert, ValidateResult::IllFormed(reason));
         };
 
-        drop(r_0_pre);
-        drop(span_guard);
-
-        let span_guard = ctx.span().enter();
-
-        let Some(r_0) = r_0.upgrade() else {
-            tracing::info!("cannot validate point, no round in local DAG after proof check");
-            return ctx.validated(&cert, ValidateResult::Invalid);
-        };
-
         let Some(r_1) = r_0.prev().upgrade() else {
-            tracing::info!("cannot validate point's 'includes', no round in local DAG");
-            return ctx.validated(&cert, ValidateResult::Invalid);
+            let reason = InvalidReason::NoRoundInDag(PointMap::Includes);
+            return ctx.validated(&cert, ValidateResult::Invalid(reason));
         };
 
         let r_2_opt = r_1.prev().upgrade();
         if r_2_opt.is_none() && !info.witness().is_empty() {
-            tracing::debug!("cannot validate point's 'witness', no round in local DAG");
-            return ctx.validated(&cert, ValidateResult::Invalid);
+            let reason = InvalidReason::NoRoundInDag(PointMap::Witness);
+            return ctx.validated(&cert, ValidateResult::Invalid(reason));
         }
 
-        let (direct_deps, cert_deps) =
+        let (deps_and_prev, cert_deps) =
             Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &ctx);
 
         if let Some(prev_digest) = info.prev_digest() {
+            // point well-formedness is enough to act as a carrier for the majority of signatures
             let weak_cert =
                 (cert_deps.includes.get(prev_digest)).expect("prev cert must be included");
             // cannot be dropped because futures keep strong refs to Cert, but nevertheless
@@ -187,36 +202,29 @@ impl Verifier {
         }
         cert.set_deps(cert_deps);
 
-        let prev_other_versions = r_1
+        for prev_other_versions in r_1
             .view(&info.author(), |loc| {
+                // do not add same prev_digest twice - it is added as one of 'includes'
                 Self::other_versions(loc, info.prev_digest())
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+        {
+            // peer has to jump over a round if it could not produce valid point in prev loc
+            deps_and_prev.push(prev_other_versions);
+        }
 
-        let is_valid_fut = {
-            let deps_and_prev = direct_deps
-                .iter()
-                .cloned()
-                // peer has to jump over a round if it could not produce valid point in prev loc;
-                // do not add same prev_digest twice - it is added as one of 'includes';
-                // do not extend listed dependencies as they may become certified by majority
-                .chain(prev_other_versions.into_iter());
-            Self::is_valid(info.clone(), deps_and_prev.collect(), ctx.conf())
-                .instrument(ctx.span().clone())
-        };
+        let is_valid_fut =
+            Self::is_valid(info.clone(), deps_and_prev, ctx.conf()).instrument(ctx.span().clone());
 
         // drop strong links before await
         drop(r_0);
         drop(r_1);
         drop(span_guard);
 
-        let status = if is_valid_fut.await? {
-            ValidateResult::Valid
-        } else {
-            ValidateResult::Invalid
-        };
-
-        ctx.validated(&cert, status)
+        ctx.validated(&cert, match is_valid_fut.await? {
+            Some(reason) => ValidateResult::Invalid(reason),
+            None => ValidateResult::Valid,
+        })
     }
 
     fn is_self_links_ok(
@@ -299,8 +307,8 @@ impl Verifier {
         downloader: &Downloader,
         store: &MempoolStore,
         ctx: &ValidateCtx,
-    ) -> (Vec<DagPointFuture>, CertDirectDeps) {
-        let mut dependencies = Vec::with_capacity(info.includes().len() + info.witness().len());
+    ) -> (FuturesUnordered<DagPointFuture>, CertDirectDeps) {
+        let direct_deps = FuturesUnordered::new();
 
         // allocate a bit more so it's unlikely to grow during certify procedure
         let mut cert_deps = CertDirectDeps {
@@ -326,10 +334,10 @@ impl Verifier {
                 cert_deps.witness.insert(*digest, shared.weak_cert());
             }
 
-            dependencies.push(shared);
+            direct_deps.push(shared);
         }
 
-        (dependencies, cert_deps)
+        (direct_deps, cert_deps)
     }
 
     /// check only direct dependencies and location for previous point (let it jump over round)
@@ -337,7 +345,7 @@ impl Verifier {
         info: PointInfo,
         mut deps_and_prev: FuturesUnordered<DagPointFuture>,
         conf: &MempoolConfig,
-    ) -> TaskResult<bool> {
+    ) -> TaskResult<Option<InvalidReason>> {
         // point is well-formed if we got here, so point.proof matches point.includes
         let prev_digest_in_point = info.prev_digest();
         let prev_round = info.round().prev();
@@ -360,76 +368,78 @@ impl Verifier {
             if dag_point.round() == prev_round && dag_point.author() == info.author() {
                 match prev_digest_in_point {
                     Some(prev_digest_in_point) if prev_digest_in_point == dag_point.digest() => {
+                        // we validate a point that is a well-formed certificate for the previous,
+                        // so we must have already marked the prev as certified
+                        assert!(
+                            dag_point.is_certified(),
+                            "prev point was not marked as certified, Cert is broken"
+                        );
                         let Some(proven) = dag_point.trusted() else {
-                            // author must have skipped current point's round
-                            // to clear its bad history
-                            return Ok(false);
+                            return Ok(Some(InvalidReason::InvalidDependency));
                         };
-                        if !Self::is_proof_ok(&info, proven) {
-                            return Ok(false);
-                        } // else ok continue
+                        if let Some(reason) = Self::is_proof_ok(&info, proven) {
+                            return Ok(Some(reason));
+                        }
                     }
                     Some(_) | None => {
-                        #[allow(clippy::match_same_arms, reason = "comments")]
                         match dag_point {
-                            DagPoint::Valid(_) => {
-                                // Some: point must have named _this_ point in `prev_digest`
-                                // None: point must have filled `prev_digest` and `includes`
-                                return Ok(false);
+                            DagPoint::Valid(valid) => {
+                                return Ok(Some(InvalidReason::MustHaveReferencedPrevPoint(
+                                    *valid.info().digest(),
+                                )));
                             }
                             DagPoint::Invalid(_) | DagPoint::IllFormed(_) => {
-                                // Some: point must have named _this_ point in `prev_digest`,
-                                //       just to be invalid for an invalid dependency
-                                // None: author must have skipped current point's round
-                                return Ok(false);
+                                return Ok(Some(InvalidReason::MustHaveSkippedRound));
                             }
-                            DagPoint::NotFound(not_found) if not_found.is_certified() => {
-                                // same as for valid
-                                return Ok(false);
-                            }
-                            DagPoint::NotFound(_) => {
-                                // failed download is ok for both Some and None:
-                                // it's other point's dependency, that really may not exist
+                            DagPoint::NotFound(not_found) => {
+                                if not_found.is_certified() {
+                                    return Ok(Some(InvalidReason::MustHaveReferencedPrevPoint(
+                                        not_found.id().digest,
+                                    )));
+                                } // else: skip, because it may be some other point's dependency
                             }
                         }
                     }
                 }
             } else {
                 let Some(dep) = dag_point.trusted() else {
-                    // just invalid dependency
-                    return Ok(false);
+                    return Ok(Some(InvalidReason::InvalidDependency));
                 };
                 if dep.time() > max_allowed_dep_time {
                     // dependency time may exceed those in point only by a small value from config
-                    return Ok(false);
+                    return Ok(Some(InvalidReason::DependencyTimeTooFarInFuture));
                 }
-                if dep.anchor_round(AnchorStageRole::Trigger) > anchor_trigger_id.round
-                    || dep.anchor_round(AnchorStageRole::Proof) > anchor_proof_id.round
-                {
-                    // did not actualize the chain
-                    return Ok(false);
+                for (anchor_role, anchor_role_round) in [
+                    (AnchorStageRole::Trigger, anchor_trigger_id.round),
+                    (AnchorStageRole::Proof, anchor_proof_id.round),
+                ] {
+                    if dep.anchor_round(anchor_role) > anchor_role_round {
+                        return Ok(Some(InvalidReason::NewerAnchorInDependency(anchor_role)));
+                    }
                 }
 
                 let dep_id = dep.id();
                 if dep_id == anchor_trigger_link_id
                     && dep.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
                 {
-                    // path does not lead to destination
-                    return Ok(false);
+                    return Ok(Some(InvalidReason::AnchorLinkBadPath(
+                        AnchorStageRole::Trigger,
+                    )));
                 }
                 if dep_id == anchor_proof_link_id {
                     if dep.anchor_id(AnchorStageRole::Proof) != anchor_proof_id {
-                        // path does not lead to destination
-                        return Ok(false);
+                        return Ok(Some(InvalidReason::AnchorLinkBadPath(
+                            AnchorStageRole::Proof,
+                        )));
                     }
                     if dep.anchor_time() != info.anchor_time() {
                         // anchor candidate's time is not inherited from its proof
-                        return Ok(false);
+                        return Ok(Some(InvalidReason::AnchorTimeNotInheritedFromProof));
                     }
                 }
             }
         }
-        Ok(true)
+        Ok(None)
     }
 
     /// blame author and every dependent point's author
@@ -622,7 +632,7 @@ impl Verifier {
     fn is_proof_ok(
         info: &PointInfo,   // @ r+0
         proven: &PointInfo, // @ r-1
-    ) -> bool {
+    ) -> Option<InvalidReason> {
         assert_eq!(
             info.author(),
             proven.author(),
@@ -643,13 +653,13 @@ impl Verifier {
         );
         if info.time() <= proven.time() {
             // time must be increasing by the same author until it stops referencing previous points
-            return false;
+            return Some(InvalidReason::TimeNotGreaterThanInPrevPoint);
         }
         if info.anchor_proof() == &Link::ToSelf && info.anchor_time() != proven.time() {
             // anchor proof must inherit its candidate's time
-            return false;
+            return Some(InvalidReason::AnchorProofDoesntInheritAnchorTime);
         }
-        true
+        None
     }
 }
 
@@ -700,11 +710,12 @@ impl ValidateCtx {
                     "validated",
                 );
             }
-            ValidateResult::Invalid => {
+            ValidateResult::Invalid(reason) => {
                 tracing::warn!(
                     parent: self.span(),
                     is_certified = cert.is_certified(),
                     result = "invalid",
+                    reason = display(reason),
                     "validated",
                 );
             }

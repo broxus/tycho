@@ -78,7 +78,7 @@ impl DagRound {
             prev,
         }));
 
-        for peer in peers.iter() {
+        for peer in &*peers {
             (this.0.locations).insert(*peer, DagLocation::new(this.downgrade()));
         }
 
