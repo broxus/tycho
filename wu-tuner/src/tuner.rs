@@ -347,7 +347,7 @@ where
                 tracing::trace!(
                     %shard, seqno,
                     lag = anchor_lag.lag(),
-                    max_lag_ms = self.config.max_lag_ms,
+                    lag_bounds = ?self.config.lag_bounds_ms,
                     lag_history_len = history.anchors_lag.len(),
                     "anchor lag received",
                 );
@@ -376,7 +376,7 @@ where
                 tracing::debug!(
                     %shard, seqno,
                     avg_lag,
-                    max_lag_ms = self.config.max_lag_ms,
+                    lag_bounds = ?self.config.lag_bounds_ms,
                     "avg anchor lag calculated on [{0}..{1})",
                     avg_from_boundary, lag_ma_seqno,
                 );
@@ -412,10 +412,12 @@ where
                     let mut target_wu_price =
                         avg_wu_metrics.wu_on_finalize.build_in_msgs_wu_price();
 
-                    // when lag is negative but we do not have pending messages, it is okay
-                    let avg_lag_abs = avg_lag.unsigned_abs();
-                    if avg_lag_abs > self.config.max_lag_ms as u64
-                        && (avg_lag > 0 || (avg_lag < 0 && avg_wu_metrics.has_pending_messages))
+                    let lag_lower_bound = self.config.lag_bounds_ms.0 as i64;
+                    let lag_upper_bound = self.config.lag_bounds_ms.1 as i64;
+
+                    // it is okay when lag is negative but we do not have pending messages
+                    if (avg_wu_metrics.has_pending_messages || avg_lag >= 0)
+                        && !(lag_lower_bound..lag_upper_bound).contains(&avg_lag)
                     {
                         // define new target wu price
                         // get prev adjustment if exists
@@ -424,12 +426,17 @@ where
                             .last_key_value()
                             .map_or(target_wu_price, |(_, v)| v.target_wu_price);
                         // if current lag is > 0 then we should reduce target wu price
-                        if avg_lag > 0 {
+                        if avg_lag > lag_upper_bound {
                             target_wu_price = (prev_wu_price - 0.1).max(0.1);
                         }
                         // if current lag is < 0 then we should increase target wu price
-                        else {
+                        else if avg_lag < lag_lower_bound {
                             target_wu_price = prev_wu_price + 0.1;
+                        }
+
+                        // wu price above 2.0 is bad, set initial target price
+                        if target_wu_price > 2.0 {
+                            target_wu_price = self.config.target_wu_price as f64 / 100.0;
                         }
 
                         // calculate target wu params
@@ -439,7 +446,7 @@ where
                         tracing::debug!(
                             %shard, seqno,
                             avg_lag,
-                            max_lag_ms = self.config.max_lag_ms,
+                            lag_bounds = ?self.config.lag_bounds_ms,
                             current_build_in_msgs_wu_price = avg_wu_metrics.wu_on_finalize.build_in_msgs_wu_price(),
                             prev_wu_price,
                             target_wu_price,
