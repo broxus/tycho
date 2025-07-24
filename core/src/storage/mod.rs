@@ -4,6 +4,7 @@ use anyhow::Result;
 use tycho_storage::StorageContext;
 use tycho_storage::kv::ApplyMigrations;
 
+pub use self::block::tail_cache::TailDiffCache;
 pub use self::block::{
     ArchiveId, BlockGcStats, BlockStorage, BlockStorageConfig, MaybeExistingHandle,
     PackageEntryKey, PartialBlockId, StoreBlockResult,
@@ -93,6 +94,7 @@ impl CoreStorage {
         persistent_state_storage.preload().await?;
 
         let node_state_storage = NodeStateStorage::new(db.clone());
+        let tail_diff_cache = Arc::new(TailDiffCache::new());
 
         Ok(Self {
             inner: Arc::new(Inner {
@@ -105,6 +107,7 @@ impl CoreStorage {
                 persistent_state_storage,
                 block_connection_storage,
                 node_state_storage,
+                tail_diff_cache,
             }),
         })
     }
@@ -144,6 +147,10 @@ impl CoreStorage {
     pub fn node_state(&self) -> &NodeStateStorage {
         &self.inner.node_state_storage
     }
+
+    pub fn tail_diff_cache(&self) -> &TailDiffCache {
+        &self.inner.tail_diff_cache
+    }
 }
 
 struct Inner {
@@ -157,4 +164,5 @@ struct Inner {
     shard_state_storage: Arc<ShardStateStorage>,
     node_state_storage: NodeStateStorage,
     persistent_state_storage: PersistentStateStorage,
+    tail_diff_cache: Arc<TailDiffCache>,
 }
