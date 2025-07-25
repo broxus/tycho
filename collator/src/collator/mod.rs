@@ -13,6 +13,7 @@ use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
+use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
@@ -21,6 +22,7 @@ use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
+use tycho_util::sync::rayon_run;
 use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
 
 use self::types::{BlockSerializerCache, CollatorStats, PrevData, WorkingState};
@@ -645,24 +647,36 @@ impl CollatorStdImpl {
                         prev_task.store_new_state_task.await?;
 
                         // load stored state
-                        let mut pure_state_root = self
+                        let prev_state = self
                             .state_node_adapter
-                            .load_state_root(&prev_task.block_id)
-                            .await?;
+                            .load_state(&prev_task.block_id)
+                            .await
+                            .context("failed to load prev shard state")?;
 
                         // apply state update from last task
                         let histogram_apply_merkles = HistogramGuard::begin_with_labels(
                             "tycho_collator_resume_collation_apply_merkles_time_high",
                             &labels,
                         );
-                        pure_state_root = last_task.state_update.apply(&pure_state_root)?;
+
+                        let prev_root = prev_state.root_cell().clone();
+
+                        let split_at = split_aug_dict_raw(prev_state.state().load_accounts()?, 5)?
+                            .into_keys()
+                            .collect::<ahash::HashSet<_>>();
+
+                        let update = last_task.state_update.clone();
+                        let new_state = rayon_run(move || update.par_apply(&prev_root, &split_at))
+                            .await
+                            .context("Failed to apply state update")?;
+
                         drop(histogram_apply_merkles);
 
                         // finalize last store task in background
                         self.background_store_new_state_tx.send(last_task)?;
 
                         // and update pure prev state in working state
-                        Self::update_prev_data(&mut working_state, pure_state_root).await?;
+                        Self::update_prev_data(&mut working_state, new_state).await?;
                     }
 
                     // finalize all remaining state store tasks in background
