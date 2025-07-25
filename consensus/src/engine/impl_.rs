@@ -212,16 +212,22 @@ impl Engine {
         for round in (head_min_round.0..=dag_top_round.0).map(Round) {
             let dag_round = self.dag.top().scan(round).expect("must exist");
             let keys = KeyGroup::new(round, &self.round_task.state.peer_schedule);
-            let first_valid = keys
+            let versions = keys
                 .to_produce
                 .as_deref()
                 .map(|k| PeerId::from(k.public_key))
-                .and_then(|local_id| dag_round.view(&local_id, |loc| loc.first_valid()))
-                .flatten()
-                .and_then(|dag_point_fut| dag_point_fut.now_or_never())
-                .transpose()?
-                .map(|dag_point| dag_point.id());
-            if let Some(last_id) = first_valid {
+                .and_then(|local_id| dag_round.view(&local_id, |loc| loc.versions.clone()))
+                .unwrap_or_default()
+                .into_values()
+                .collect::<FuturesUnordered<_>>()
+                .try_collect::<Vec<_>>()
+                .await?;
+            let earliest = versions
+                .iter()
+                .filter_map(|dp| dp.trusted()) // will repeat valid only, but choose top round
+                .min_by_key(|info| info.time()) // in case of a fork after db deletion
+                .map(|info| info.id());
+            if let Some(last_id) = earliest {
                 tracing::info!(
                     parent: round_ctx.span(),
                     "found stored broadcast {:?}", last_id.alt()
@@ -237,6 +243,7 @@ impl Engine {
                 // do not repeat such bcast @ r+0 because
                 // * collected evidence are not stored so cannot produce point @ r+1
                 // * not need to produce point @ r+1 because consensus moved to r+2
+                tracing::info!(parent: round_ctx.span(), "will not repeat too old broadcast");
                 (dag_top_round.next(), None)
             }
             Some(last_id) => {
