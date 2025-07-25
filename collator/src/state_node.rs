@@ -222,7 +222,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             &labels,
         );
 
-        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
+        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
 
         let (handle, _) = self
             .storage
