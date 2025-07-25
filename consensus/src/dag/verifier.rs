@@ -386,9 +386,12 @@ impl Verifier {
                     Some(_) | None => {
                         match dag_point {
                             DagPoint::Valid(valid) => {
-                                return Ok(Some(InvalidReason::MustHaveReferencedPrevPoint(
-                                    *valid.info().digest(),
-                                )));
+                                // a requirement to reference the first resolved is reproducible
+                                if valid.is_first_valid() {
+                                    return Ok(Some(InvalidReason::MustHaveReferencedPrevPoint(
+                                        *valid.info().digest(),
+                                    )));
+                                } // else: will not throw err only when first valid is referenced
                             }
                             DagPoint::Invalid(_) | DagPoint::IllFormed(_) => {
                                 return Ok(Some(InvalidReason::MustHaveSkippedRound));

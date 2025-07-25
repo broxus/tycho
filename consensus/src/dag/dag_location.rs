@@ -39,13 +39,6 @@ impl DagLocation {
             versions: BTreeMap::new(),
         }
     }
-
-    /// the one that will be accounted in [`Threshold`](super::threshold::Threshold),
-    /// but may resolve later; better `await`, plain `.now_or_never()` will lead to data race
-    pub fn first_valid(&self) -> Option<DagPointFuture> {
-        let digest = self.state.0.valid.0.get()?;
-        self.versions.get(digest).cloned()
-    }
 }
 
 #[derive(Clone)]
@@ -149,7 +142,7 @@ impl InclusionState {
         if status.is_first_resolved() {
             let resolved = self.0.resolved.get_or_init(|| {
                 if status.is_valid() {
-                    FirstResolved::Valid(id.digest, Default::default())
+                    FirstResolved::Valid(id.digest, OnceLock::new())
                 } else {
                     FirstResolved::NotValid(id.digest)
                 }
@@ -222,7 +215,7 @@ impl InclusionState {
                     signable.get_or_init(|| {
                         Ok(Signable {
                             valid: valid.clone(),
-                            signature: Default::default(),
+                            signature: OnceLock::new(),
                         })
                     });
                 }
