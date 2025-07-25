@@ -90,6 +90,8 @@ impl ShardStateStorage {
             return Err(ShardStateStorageError::BlockHandleIdMismatch.into());
         }
 
+        tracing::info!("Store state root 2: {}", handle.id().as_short_id());
+
         self.store_state_root(handle, state.root_cell().clone(), hint)
             .await
     }

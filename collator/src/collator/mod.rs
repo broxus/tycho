@@ -14,6 +14,7 @@ use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
+use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
@@ -22,6 +23,7 @@ use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
+use tycho_util::sync::rayon_run;
 use tycho_util::time::now_millis;
 use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
 
@@ -615,6 +617,8 @@ impl CollatorStdImpl {
         collation_session: Arc<CollationSessionInfo>,
         new_prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()> {
+        tracing::info!(target: tracing_targets::COLLATOR, "resume_collation");
+
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let histogram =
             HistogramGuard::begin_with_labels("tycho_collator_resume_collation_time_high", &labels);
@@ -650,34 +654,88 @@ impl CollatorStdImpl {
                         Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
                             .await?;
                     } else {
-                        // if it is not finished then wait for the previous one and apply merkle update
-                        let prev_task = self.store_new_state_tasks.pop().unwrap();
-                        prev_task.store_new_state_task.await?;
+                        let mut unfinished_tasks: Vec<StateUpdateContext> = vec![last_task];
 
-                        // load stored state
-                        let mut pure_state_root = self
-                            .state_node_adapter
-                            .load_state_root(&prev_task.block_id)
-                            .await?;
+                        while let Some(prev_task) = self.store_new_state_tasks.pop() {
+                            if prev_task.store_new_state_task.is_finished() {
+                                let is_complete = unfinished_tasks
+                                    .windows(2)
+                                    .all(|w| w[1].block_id.seqno + 1 == w[0].block_id.seqno);
 
-                        // apply state update from last task
-                        let histogram_apply_merkles = HistogramGuard::begin_with_labels(
-                            "tycho_collator_resume_collation_apply_merkles_time_high",
-                            &labels,
-                        );
-                        pure_state_root = last_task.state_update.apply(&pure_state_root)?;
-                        drop(histogram_apply_merkles);
+                                if !is_complete
+                                    || prev_task.block_id.seqno + 1
+                                        != unfinished_tasks.last().unwrap().block_id.seqno
+                                {
+                                    let last_task = unfinished_tasks.remove(0);
 
-                        // finalize last store task in background
-                        self.background_store_new_state_tx.send(last_task)?;
+                                    last_task.store_new_state_task.await?;
 
-                        // and update pure prev state in working state
-                        Self::update_prev_data(&mut working_state, pure_state_root).await?;
-                    }
+                                    // and reload pure prev state in working state
+                                    Self::reload_prev_data(
+                                        &mut working_state,
+                                        self.state_node_adapter.clone(),
+                                    )
+                                    .await?;
 
-                    // finalize all remaining state store tasks in background
-                    for cx in self.store_new_state_tasks.drain(..) {
-                        self.background_store_new_state_tx.send(cx)?;
+                                    break;
+                                }
+
+                                prev_task.store_new_state_task.await?;
+
+                                tracing::info!(target: tracing_targets::COLLATOR, count = unfinished_tasks.len(), "unfinished_tasks");
+
+                                // load stored state
+                                let mut prev_state = self
+                                    .state_node_adapter
+                                    .load_state_root(&prev_task.block_id)
+                                    .await
+                                    .context("failed to load prev shard state 2")?;
+
+                                let mut old = prev_task.block_id.as_short_id();
+                                while let Some(task) = unfinished_tasks.pop() {
+                                    tracing::info!(target: tracing_targets::COLLATOR, %old, new = %task.block_id.as_short_id(), "apply merkle updates");
+
+                                    let split_at = {
+                                        let shard_accounts = prev_state
+                                            .as_ref()
+                                            .reference_cloned(1)
+                                            .context("invalid shard state")?
+                                            .parse::<ShardAccounts>()
+                                            .context("failed to load shard accounts")?;
+
+                                        split_aug_dict_raw(shard_accounts, 4)
+                                            .context("failed to split shard accounts")?
+                                            .into_keys()
+                                            .collect::<ahash::HashSet<_>>()
+                                    };
+
+                                    prev_state = rayon_run({
+                                        let state_update = task.state_update.clone();
+                                        move || state_update.par_apply(&prev_state, &split_at)
+                                    })
+                                    .await
+                                    .context("Failed to apply state update")?;
+
+                                    old = task.block_id.as_short_id();
+
+                                    // finalize last store task in background
+                                    self.background_store_new_state_tx.send(task)?;
+                                }
+
+                                // and update pure prev state in working state
+                                Self::update_prev_data(&mut working_state, prev_state.clone())
+                                    .await?;
+
+                                break;
+                            } else {
+                                unfinished_tasks.push(prev_task);
+                            }
+                        }
+
+                        // finalize all remaining state store tasks in background
+                        for cx in self.store_new_state_tasks.drain(..) {
+                            self.background_store_new_state_tx.send(cx)?;
+                        }
                     }
                 }
             }
@@ -858,6 +916,8 @@ impl CollatorStdImpl {
             prev_blocks_ids = prev_shard_data.blocks_ids().clone();
             tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
         }
+
+        tracing::info!(target: tracing_targets::COLLATOR, block_id = %prev_blocks_ids[0].as_short_id(), "update_prev_data");
 
         let prev_state =
             ShardStateStuff::from_root(&prev_blocks_ids[0], pure_state_root, &tracker)?;
@@ -1651,7 +1711,7 @@ impl CollatorStdImpl {
         &mut self,
         mut working_state: Box<WorkingState>,
     ) -> Result<()> {
-        tracing::debug!(target: tracing_targets::COLLATOR,
+        tracing::info!(target: tracing_targets::COLLATOR,
             "Check if can collate next master block",
         );
 
@@ -1839,7 +1899,7 @@ impl CollatorStdImpl {
         &mut self,
         mut working_state: Box<WorkingState>,
     ) -> Result<()> {
-        tracing::debug!(target: tracing_targets::COLLATOR,
+        tracing::info!(target: tracing_targets::COLLATOR,
             "Check if can collate next shard block",
         );
 
