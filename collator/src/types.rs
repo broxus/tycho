@@ -85,7 +85,7 @@ impl Default for CollatorConfig {
             fast_sync: true,
             accounts_split_depth: 4,
             merkle_split_depth: 5,
-            untrack_prev_state_after: 0,
+            untrack_prev_state_after: 1,
         }
     }
 }
