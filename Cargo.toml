@@ -20,6 +20,8 @@ members = [
     "network",
     "rpc",
     "simulator",
+    "slasher",
+    "slasher-traits",
     "storage",
     "storage-traits",
     "tycho-build-info",
@@ -151,6 +153,8 @@ tycho-control = { path = "./control", version = "0.3.4" }
 tycho-core = { path = "./core", version = "0.3.4" }
 tycho-network = { path = "./network", version = "0.3.4" }
 tycho-rpc = { path = "./rpc", version = "0.3.4" }
+tycho-slasher = { path = "./slasher", version = "0.3.4" }
+tycho-slasher-traits = { path = "./slasher-traits", version = "0.3.4" }
 tycho-storage = { path = "./storage", version = "0.3.4" }
 tycho-storage-traits = { path = "./storage-traits", version = "0.3.4" }
 tycho-util = { path = "./util", version = "0.3.4" }
