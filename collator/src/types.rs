@@ -69,6 +69,8 @@ pub struct CollatorConfig {
     pub merkle_split_depth: u8,
 
     /// TODO
+    ///
+    /// Default: `5`
     pub untrack_prev_state_after: u8,
 }
 
@@ -83,67 +85,8 @@ impl Default for CollatorConfig {
             fast_sync: true,
             accounts_split_depth: 4,
             merkle_split_depth: 5,
-            untrack_prev_state_after: default_5(),
+            untrack_prev_state_after: 1,
         }
-    }
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_5() -> u8 {
-    5
-}
-
-#[derive(Serialize, Deserialize)]
-struct PartialCollatorConfig {
-    min_mc_block_delta_from_bc_to_sync: u32,
-    check_value_flow: bool,
-    validate_config: bool,
-    #[serde(default = "default_true")]
-    fast_sync: bool,
-    accounts_split_depth: u8,
-    merkle_split_depth: u8,
-    #[serde(default = "default_5")]
-    untrack_prev_state_after: u8,
-}
-
-impl<'de> serde::Deserialize<'de> for CollatorConfig {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let partial = PartialCollatorConfig::deserialize(deserializer)?;
-
-        Ok(Self {
-            min_mc_block_delta_from_bc_to_sync: partial.min_mc_block_delta_from_bc_to_sync,
-            check_value_flow: partial.check_value_flow,
-            validate_config: partial.validate_config,
-            fast_sync: partial.fast_sync,
-            accounts_split_depth: partial.accounts_split_depth,
-            merkle_split_depth: partial.merkle_split_depth,
-            untrack_prev_state_after: partial.untrack_prev_state_after,
-            ..Default::default()
-        })
-    }
-}
-
-impl serde::Serialize for CollatorConfig {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        PartialCollatorConfig {
-            min_mc_block_delta_from_bc_to_sync: self.min_mc_block_delta_from_bc_to_sync,
-            check_value_flow: self.check_value_flow,
-            validate_config: self.validate_config,
-            fast_sync: self.fast_sync,
-            accounts_split_depth: self.accounts_split_depth,
-            merkle_split_depth: self.merkle_split_depth,
-            untrack_prev_state_after: self.untrack_prev_state_after,
-        }
-        .serialize(serializer)
     }
 }
 
