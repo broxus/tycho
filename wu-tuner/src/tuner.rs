@@ -210,7 +210,7 @@ where
 
         let tune_interval = self.config.tune_interval.max(100) as u32;
         let tune_seqno = seqno / tune_interval * tune_interval;
-        
+
         // normilized seqno for calculations
         // e.g. seqno = 244
         let wu_span_seqno = seqno / wu_span * wu_span; // 240
@@ -455,14 +455,27 @@ where
                     // calculate adaptive wu price
                     adaptive_wu_price =
                         // if current lag is > 0 then we should reduce target wu price
-                        if avg_lag > lag_upper_bound {
-                            (prev_wu_price - 0.1).max(0.1)
+                        if avg_lag >= lag_upper_bound {
+                            let delta = avg_lag - lag_upper_bound;
+                            let adj = if delta > 10000 {
+                                0.2
+                            } else if delta > 2000 {
+                                0.1
+                            } else {
+                                0.05
+                            };
+                            prev_wu_price.saturating_add_floor(-adj)
                         }
                         // if current lag is < 0 then we should increase target wu price
                         else if avg_lag < lag_lower_bound {
-                            prev_wu_price + 0.1
+                            let adj = if (lag_lower_bound - avg_lag) > 500 {
+                                0.2
+                            } else {
+                                0.1
+                            };
+                            prev_wu_price.saturating_add_floor(adj)
                         } else {
-                            target_wu_price
+                            unreachable!()
                         };
 
                     // wu price above 2.0 is bad, get initial target price
@@ -853,6 +866,16 @@ where
         }
 
         target_wu_params
+    }
+}
+
+trait SaturatingAddFloor {
+    fn saturating_add_floor(self, adj: Self) -> Self;
+}
+
+impl SaturatingAddFloor for f64 {
+    fn saturating_add_floor(self, adj: Self) -> Self {
+        (self + adj).max(0.02)
     }
 }
 
