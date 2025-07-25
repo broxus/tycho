@@ -62,6 +62,7 @@ tycho-consensus = { workspace = true }
 tycho-core = { workspace = true }
 tycho-executor = { workspace = true }
 tycho-network = { workspace = true }
+tycho-slasher-traits = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-vm = { workspace = true }
