@@ -19,8 +19,7 @@ pub struct CommitterTask {
 enum Inner {
     Uninit,
     Ready(Committer),
-    Dropping(Task<Result<Committer, Cancelled>>),
-    Fallible(Task<Result<Committer, EngineError>>),
+    Running(Task<Result<Committer, EngineError>>),
 }
 
 impl CommitterTask {
@@ -49,18 +48,13 @@ impl CommitterTask {
     pub async fn update_task(
         &mut self,
         full_history_bottom: Option<Round>,
-        committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
+        anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
         round_ctx: &RoundCtx,
     ) -> EngineResult<()> {
         let Some(committer) = self.inner.take_ready().await? else {
             return Ok(());
         };
-        let is_dropping = committer.dag_len() > round_ctx.conf().consensus.min_front_rounds() as _;
-        self.inner = if is_dropping {
-            Inner::dropping(committer, full_history_bottom, committed_info_tx, round_ctx)
-        } else {
-            Inner::fallible(committer, full_history_bottom, committed_info_tx, round_ctx)
-        };
+        self.inner = Inner::running(committer, full_history_bottom, anchors_tx, round_ctx);
         Ok(())
     }
 }
@@ -70,53 +64,42 @@ impl Inner {
         Ok(match mem::replace(self, Inner::Uninit) {
             Inner::Uninit => panic!("must be taken only once"),
             Inner::Ready(committer) => Some(committer),
-            Inner::Dropping(task) => {
+            Inner::Running(task) => {
                 if task.is_finished() {
                     Some(task.await??)
                 } else {
-                    *self = Self::Dropping(task);
-                    None
-                }
-            }
-            Inner::Fallible(task) => {
-                if task.is_finished() {
-                    Some(task.await??)
-                } else {
-                    *self = Inner::Fallible(task);
+                    *self = Self::Running(task);
                     None
                 }
             }
         })
     }
 
-    /// This version does not throw `HistoryConflict`
-    fn dropping(
+    fn running(
         mut committer: Committer,
-        full_history_bottom: Option<Round>,
-        committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
+        mut full_history_bottom: Option<Round>,
+        anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
         round_ctx: &RoundCtx,
     ) -> Self {
         let task_ctx = round_ctx.task();
         let round_ctx = round_ctx.clone();
-        let dropping_task = move || {
+        let task = move || {
             // may run for long several times in a row and commit nothing, because of missed points
             let _span = round_ctx.span().enter();
-
-            let mut committed = None;
-            let mut new_full_history_bottom = None;
 
             let start_bottom = committer.bottom_round().0;
             let start_dag_len = committer.dag_len();
 
-            for attempt in 0.. {
+            let mut attempt = 0;
+            let committed = loop {
+                attempt += 1;
+                let is_dropping =
+                    committer.dag_len() > round_ctx.conf().consensus.min_front_rounds() as _;
                 match committer.commit(round_ctx.conf()) {
-                    Ok(data) => {
-                        committed = Some(data);
-                        break;
-                    }
-                    Err(HistoryConflict(round)) => {
+                    Ok(data) => break Some(data),
+                    Err(HistoryConflict(round)) if is_dropping => {
                         let result = committer.drop_upto(round.next(), round_ctx.conf());
-                        new_full_history_bottom = Some(result.unwrap_or_else(|x| x));
+                        full_history_bottom = Some(result.unwrap_or_else(|x| x));
                         tracing::info!(
                             start_bottom,
                             start_dag_len,
@@ -126,21 +109,33 @@ impl Inner {
                             "comitter rounds were dropped as impossible to sync"
                         );
                         if result.is_err() {
-                            break; // dropped all except top round
+                            break None; // dropped all except top round
                         } else if attempt > start_dag_len {
                             panic!(
-                                "infinite loop on dropping dag rounds: \
+                                "infinite loop on dropping dag rounds: attempt {attempt}, \
                                  start dag len {start_dag_len}, start bottom {start_bottom} \
                                  resulting {:?}",
                                 committer.alt()
                             )
                         };
                     }
+                    Err(history_conflict) => {
+                        tracing::warn!(
+                            err = %history_conflict,
+                            start_bottom,
+                            start_dag_len,
+                            current_bottom = ?committer.bottom_round(),
+                            current_dag_len = committer.dag_len(),
+                            attempt,
+                            "will try to fix local history"
+                        );
+                        return Err(history_conflict.into());
+                    }
                 }
-            }
+            };
 
-            if let Some(new_bottom) = new_full_history_bottom.or(full_history_bottom) {
-                committed_info_tx
+            if let Some(new_bottom) = full_history_bottom {
+                anchors_tx
                     .send(MempoolOutput::NewStartAfterGap(new_bottom))
                     .map_err(|_closed| Cancelled())?;
             }
@@ -149,7 +144,7 @@ impl Inner {
                 round_ctx.log_committed(&committed);
                 for data in committed {
                     round_ctx.commit_metrics(&data.anchor);
-                    committed_info_tx
+                    anchors_tx
                         .send(MempoolOutput::NextAnchor(data))
                         .map_err(|_closed| Cancelled())?;
                 }
@@ -160,58 +155,7 @@ impl Inner {
             Ok(committer)
         };
 
-        Self::Dropping(task_ctx.spawn_blocking(dropping_task))
-    }
-
-    fn fallible(
-        mut committer: Committer,
-        full_history_bottom: Option<Round>,
-        committed_info_tx: mpsc::UnboundedSender<MempoolOutput>,
-        round_ctx: &RoundCtx,
-    ) -> Self {
-        let task_ctx = round_ctx.task();
-        let round_ctx = round_ctx.clone();
-        let fallible_task = move || {
-            // may run for long several times in a row and commit nothing, because of missed points
-            let _span = round_ctx.span().enter();
-
-            let start_bottom = committer.bottom_round().0;
-            let start_dag_len = committer.dag_len();
-
-            let committed = match committer.commit(round_ctx.conf()) {
-                Ok(data) => data,
-                Err(history_conflict) => {
-                    tracing::warn!(
-                        err = %history_conflict,
-                        start_bottom,
-                        start_dag_len,
-                        current_bottom = ?committer.bottom_round(),
-                        current_dag_len = committer.dag_len(),
-                        "will try to fix local history"
-                    );
-                    return Err(history_conflict.into());
-                }
-            };
-
-            if let Some(new_bottom) = full_history_bottom {
-                committed_info_tx
-                    .send(MempoolOutput::NewStartAfterGap(new_bottom))
-                    .map_err(|_closed| EngineError::Cancelled)?;
-            }
-
-            round_ctx.log_committed(&committed);
-            for data in committed {
-                round_ctx.commit_metrics(&data.anchor);
-                committed_info_tx
-                    .send(MempoolOutput::NextAnchor(data))
-                    .map_err(|_closed| EngineError::Cancelled)?;
-            }
-
-            EngineCtx::meter_dag_len(committer.dag_len());
-
-            Ok(committer)
-        };
-        Inner::Fallible(task_ctx.spawn_blocking(fallible_task))
+        Self::Running(task_ctx.spawn_blocking(task))
     }
 }
 
