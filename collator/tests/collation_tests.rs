@@ -13,12 +13,12 @@ use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNod
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::{CollatorConfig, supported_capabilities};
 use tycho_collator::validator::ValidatorStdImpl;
-use tycho_collator::validator::event::collector::ValidationEventCollector;
 use tycho_core::block_strider::{
     BlockProvider, BlockStrider, EmptyBlockProvider, OptionalBlockStuff,
     PersistentBlockStriderState, PrintSubscriber, StateSubscriber, StateSubscriberContext,
 };
 use tycho_crypto::ed25519;
+use tycho_slasher_traits::NoopValidatorEventsListener;
 use tycho_types::models::BlockId;
 
 mod common;
@@ -108,8 +108,6 @@ async fn test_collation_process_on_stubs() {
 
     let now = tycho_util::time::now_millis();
 
-    let event_collector = Arc::new(ValidationEventCollector::default());
-
     let manager = CollationManager::start(
         node_1_keypair.clone(),
         config,
@@ -122,7 +120,7 @@ async fn test_collation_process_on_stubs() {
             validator_network,
             node_1_keypair.clone(),
             Default::default(),
-            event_collector,
+            Arc::new(NoopValidatorEventsListener),
         ),
         CollatorStdImplFactory {
             wu_tuner_event_sender: None,
