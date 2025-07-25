@@ -2477,26 +2477,20 @@ def validator() -> RowPanel:
             "Number of cached invalid signatures",
         ),
         create_heatmap_panel(
-            "tycho_validator_collector_get_stats_for_blocks_time", "Collector: get stats for blocks"
+            "tycho_validator_collector_get_stats_for_blocks_time",
+            "Collector: get stats for blocks",
         ),
         create_heatmap_panel(
             "tycho_validator_collector_truncate_range_time", "Collector: truncate range"
         ),
-        create_heatmap_panel(
-            "tycho_validator_collector_on_signature_event_time", "Collector: on signature event"
-        ),
-        create_heatmap_panel(
-            "tycho_validator_collector_on_validation_complete_time", "Collector: on validation complete"
+        create_gauge_panel(
+            "tycho_validator_collector_valid_sigs_total_count",
+            "Collector: total valid signatures in stats",
         ),
         create_gauge_panel(
-             "tycho_validator_collector_valid_sigs_total_count",
-             "Collector: total valid signatures in stats",
+            "tycho_validator_collector_invalid_sigs_total_count",
+            "Collector: total invalid signatures in stats",
         ),
-        create_gauge_panel(
-             "tycho_validator_collector_invalid_sigs_total_count",
-             "Collector: total invalid signatures in stats",
-        ),
-
     ]
     return create_row("Validator", metrics)
 
