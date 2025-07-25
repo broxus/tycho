@@ -7,12 +7,12 @@ use indexmap::{self, IndexMap};
 use serde::{Deserialize, Serialize};
 use session::DebugLogValidatorSesssion;
 use tycho_crypto::ed25519::KeyPair;
+use tycho_slasher_traits::{SessionStartedEvent, ValidatorEventsListener};
 use tycho_types::models::*;
 use tycho_util::{FastHashMap, serde_helpers};
 
 use self::session::ValidatorSession;
 use crate::tracing_targets;
-use crate::validator::event::{SessionCtx, ValidationEvents};
 use crate::validator::rpc::ExchangeSignaturesBackoff;
 use crate::validator::{
     AddSession, ValidationSessionId, ValidationStatus, Validator, ValidatorNetworkContext,
@@ -77,7 +77,7 @@ impl ValidatorStdImpl {
         net_context: ValidatorNetworkContext,
         keypair: Arc<KeyPair>,
         config: ValidatorStdImplConfig,
-        listener: Arc<dyn ValidationEvents>,
+        listener: Arc<dyn ValidatorEventsListener>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -114,10 +114,12 @@ impl Validator for ValidatorStdImpl {
                 );
                 let session_id = session.id();
                 entry.insert(session);
-                self.inner
-                    .listener
-                    .on_session_open(&SessionCtx { session_id })?;
-
+                self.inner.listener.on_session_started(SessionStartedEvent {
+                    session_id: session_id.into(),
+                    shard_ident: info.shard_ident,
+                    start_block_seqno: info.start_block_seqno,
+                    validators: info.validators,
+                });
                 Ok(())
             }
             indexmap::map::Entry::Occupied(_) => {
@@ -149,24 +151,22 @@ impl Validator for ValidatorStdImpl {
             );
         };
 
+        // NOTE: Use `scopeguard` to notify listener even when the future is dropped.
+        let guard = scopeguard::guard((), |_| {
+            self.inner
+                .listener
+                .on_validation_skipped(session.id().into(), block_id);
+        });
+
         let validation_result = session.validate_block(block_id).await?;
         match validation_result {
-            ValidationStatus::Skipped => {
-                self.inner.listener.on_validation_skipped(
-                    &SessionCtx {
-                        session_id: session.id(),
-                    },
-                    block_id,
-                )?;
-            }
             ValidationStatus::Complete(_) => {
-                self.inner.listener.on_validation_complete(
-                    &SessionCtx {
-                        session_id: session.id(),
-                    },
-                    block_id,
-                )?;
+                scopeguard::ScopeGuard::into_inner(guard); // disarm "skipped" signal
+                self.inner
+                    .listener
+                    .on_validation_complete(session.id().into(), block_id);
             }
+            ValidationStatus::Skipped => drop(guard), // trigger "skipped" signal
         }
 
         Ok(validation_result)
@@ -246,7 +246,7 @@ struct Inner {
     keypair: Arc<KeyPair>,
     sessions: parking_lot::Mutex<Sessions>,
     config: ValidatorStdImplConfig,
-    listener: Arc<dyn ValidationEvents>,
+    listener: Arc<dyn ValidatorEventsListener>,
 }
 
 type Sessions = FastHashMap<ShardIdent, ShardSessions>;
