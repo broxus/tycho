@@ -210,7 +210,7 @@ where
 
         let tune_interval = self.config.tune_interval.max(100) as u32;
         let tune_seqno = seqno / tune_interval * tune_interval;
-        
+
         // normilized seqno for calculations
         // e.g. seqno = 244
         let wu_span_seqno = seqno / wu_span * wu_span; // 240
@@ -454,14 +454,24 @@ where
                     // calculate adaptive wu price
                     adaptive_wu_price =
                         // if current lag is > 0 then we should reduce target wu price
-                        if avg_lag > lag_upper_bound {
-                            (prev_wu_price - 0.1).max(0.1)
+                        if avg_lag >= lag_upper_bound {
+                            let adj = if (avg_lag - lag_upper_bound) > 1000 {
+                                0.1
+                            } else {
+                                0.05
+                            };
+                            (prev_wu_price - adj).max(0.02)
                         }
                         // if current lag is < 0 then we should increase target wu price
                         else if avg_lag < lag_lower_bound {
-                            prev_wu_price + 0.1
+                            let adj = if (lag_lower_bound - avg_lag) > 1000 {
+                                0.1
+                            } else {
+                                0.05
+                            };
+                            prev_wu_price + adj
                         } else {
-                            target_wu_price
+                            unreachable!()
                         };
 
                     // wu price above 2.0 is bad, get initial target price
