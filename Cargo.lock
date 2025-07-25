@@ -3862,6 +3862,7 @@ dependencies = [
  "tycho-crypto",
  "tycho-network",
  "tycho-rpc",
+ "tycho-slasher",
  "tycho-storage",
  "tycho-types",
  "tycho-util",
@@ -3908,6 +3909,7 @@ dependencies = [
  "tycho-crypto",
  "tycho-executor",
  "tycho-network",
+ "tycho-slasher-traits",
  "tycho-storage",
  "tycho-types",
  "tycho-util",
@@ -4180,6 +4182,26 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "tycho-util",
+]
+
+[[package]]
+name = "tycho-slasher"
+version = "0.3.5"
+dependencies = [
+ "metrics",
+ "parking_lot",
+ "tokio",
+ "tracing",
+ "tycho-slasher-traits",
+ "tycho-types",
+ "tycho-util",
+]
+
+[[package]]
+name = "tycho-slasher-traits"
+version = "0.3.5"
+dependencies = [
+ "tycho-types",
 ]
 
 [[package]]

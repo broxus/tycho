@@ -17,7 +17,6 @@ use tycho_collator::mempool::{
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollatorConfig;
-use tycho_collator::validator::event::collector::ValidationEventCollector;
 use tycho_collator::validator::{
     ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
@@ -219,7 +218,9 @@ impl Node {
         let top_shards = mc_state.get_top_shards()?;
         message_queue_adapter.clear_uncommitted_state(&top_shards)?;
 
-        let validator_events_collector = Arc::new(ValidationEventCollector::default());
+        // NOTE: Stub
+        let slasher = tycho_slasher::Slasher::default();
+
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {
                 network: base.network.clone(),
@@ -229,7 +230,7 @@ impl Node {
             },
             base.keypair.clone(),
             self.validator_config,
-            validator_events_collector,
+            slasher.validator_events_listener(),
         );
 
         // Explicitly handle the initial state
