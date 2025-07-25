@@ -1,0 +1,26 @@
+[package]
+name = "tycho-slasher"
+description = "Tycho slasher implementation."
+include = ["src/**/*.rs", "src/**/*.tl", "./LICENSE-*", "./README.md"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# crates.io deps
+metrics = { workspace = true }
+parking_lot = { workspace = true }
+scopeguard = { workspace = true}
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+tycho-types = { workspace = true }
+
+# local deps
+tycho-slasher-traits = { workspace = true }
+tycho-util = { workspace = true }
+
+[lints]
+workspace = true
