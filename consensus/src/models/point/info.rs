@@ -5,7 +5,6 @@ use std::sync::Arc;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
-use crate::engine::MempoolConfig;
 use crate::models::{
     AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature, UnixTime,
 };
@@ -134,12 +133,6 @@ impl PointInfo {
 
     pub fn prev_digest(&self) -> Option<&Digest> {
         (self.0.data).includes.get(&self.0.author)
-    }
-
-    /// blame author and every dependent point's author
-    /// must be checked right after integrity, before any manipulations with the point
-    pub fn is_well_formed(&self, conf: &MempoolConfig) -> bool {
-        (self.0.data).is_well_formed(self.0.round, self.0.payload_len, conf)
     }
 
     pub(super) fn has_well_formed_maps(&self) -> bool {

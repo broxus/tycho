@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
-use crate::engine::MempoolConfig;
 use crate::models::point::{Digest, Round, UnixTime};
 use crate::models::proto_utils::{evidence_btree_map, points_btree_map};
 use crate::models::{PeerCount, Signature};
@@ -98,33 +97,8 @@ impl PointData {
         4 + max_possible_maps + 2 * Link::MAX_TL_BYTES + 2 * UnixTime::MAX_TL_BYTES
     };
 
-    /// counterpart of [`Self::has_well_formed_maps`] that must be called later
-    /// and allows to link this [`Point`] with its dependencies for validation and commit
-    pub(super) fn is_well_formed(
-        &self,
-        round: Round,
-        payload_len: u32,
-        conf: &MempoolConfig,
-    ) -> bool {
-        // check for being earlier than genesis takes place with other peer checks
-        #[allow(clippy::nonminimal_bool, reason = "independent logical checks")]
-        if round == conf.genesis_round {
-            payload_len == 0
-                && self.anchor_trigger == Link::ToSelf
-                && self.anchor_proof == Link::ToSelf
-                && self.time == self.anchor_time
-        } else {
-            // leader must maintain its chain of proofs,
-            // while others must link to previous points (checked at the end of this method);
-            // its decided later (using dag round data) whether current point belongs to leader
-            !(self.anchor_proof == Link::ToSelf && self.evidence.is_empty())
-                && !(self.anchor_trigger == Link::ToSelf && self.evidence.is_empty())
-                && self.time > self.anchor_time
-        }
-    }
-
-    /// counterpart of [`Self::is_well_formed`] that must be called earlier,
-    /// does not require config and allows to use [`Point`] methods
+    /// counterpart of [`crate::dag::Verifier::verify`] that must be called earlier,
+    /// does not require config and allows to use [`crate::models::Point`] methods
     pub(super) fn has_well_formed_maps(&self, author: PeerId, round: Round) -> bool {
         // proof for previous point consists of digest and 2F++ evidences
         // proof is listed in includes - to count for 2/3+1, verify and commit dependencies

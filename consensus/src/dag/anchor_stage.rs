@@ -63,10 +63,10 @@ impl AnchorStage {
             _ => unreachable!(),
         }
     }
-}
 
-pub fn align_genesis(start_round: u32) -> Round {
-    Round(((start_round + 1) / WAVE_ROUNDS) * WAVE_ROUNDS + 2)
+    pub fn align_genesis(start_round: u32) -> Round {
+        Round(((start_round + 1) / WAVE_ROUNDS) * WAVE_ROUNDS + 2)
+    }
 }
 
 #[cfg(test)]
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     pub fn test_genesis_aligned() -> Result<()> {
         for start_round in 0..10 {
-            let genesis_round = align_genesis(start_round).0;
+            let genesis_round = AnchorStage::align_genesis(start_round).0;
             ensure!(
                 genesis_round >= start_round,
                 "genesis round must not be less than start round after alignment, \

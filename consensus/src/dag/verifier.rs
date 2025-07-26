@@ -10,7 +10,7 @@ use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
-use crate::dag::{DagRound, WeakDagRound};
+use crate::dag::{AnchorStage, DagRound, WeakDagRound};
 use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
@@ -65,18 +65,21 @@ pub enum IllFormedReason {
     LinksAcrossGenesis,
     #[error("links both anchor roles to same round")]
     LinksSameRound,
-    #[error("self link")]
-    SelfLink,
-    #[error("anchor link")]
-    AnchorLink,
     #[error("{0:?} peer map must be empty")]
     MustBeEmpty(PointMap),
     #[error("unknown peers in {:?} map: {}", .0.1, .0.0.as_slice().alt())]
     UnknownPeers((Vec<PeerId>, PointMap)),
     #[error("{} peers is not enough in {:?} map for 3F+1={}", .0.0, .0.2, .0.1.full())]
     LackOfPeers((usize, PeerCount, PointMap)),
-    #[error("some structure issue")]
-    NotDescribed, // TODO enum for each check
+    #[error("anchor time")]
+    AnchorTime,
+    #[error("anchor stage role {0:?}")]
+    SelfAnchorStage(AnchorStageRole),
+    // Errors below are thrown from `validate()` because they require DagRound
+    #[error("self link")]
+    SelfLink,
+    #[error("anchor link to {0:?}")]
+    AnchorLink(AnchorStageRole),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -141,6 +144,7 @@ impl Verifier {
     ) -> TaskResult<ValidateResult> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
         let span_guard = ctx.span().enter();
+        let peer_schedule = downloader.peer_schedule();
 
         match info.round().cmp(&ctx.conf().genesis_round) {
             cmp::Ordering::Less => {
@@ -156,6 +160,10 @@ impl Verifier {
         }
 
         let Some(r_0) = r_0.upgrade() else {
+            // have to decide between ill-formed and invalid
+            if let Some(reason) = Self::check_links(&info, None, peer_schedule, ctx.conf()) {
+                return ctx.validated(&cert, ValidateResult::IllFormed(reason));
+            }
             let reason = InvalidReason::NoRoundInDag(PointMap::Evidence);
             return ctx.validated(&cert, ValidateResult::Invalid(reason));
         };
@@ -165,17 +173,9 @@ impl Verifier {
             "Coding error: dag round mismatches point round"
         );
 
-        if !Self::is_self_links_ok(&info, &r_0) {
-            return ctx.validated(&cert, ValidateResult::IllFormed(IllFormedReason::SelfLink));
-        }
-
-        if ![AnchorStageRole::Proof, AnchorStageRole::Trigger]
-            .into_iter()
-            .all(|role| Self::is_anchor_link_ok(role, &info, &r_0, ctx.conf()))
-        {
-            let reason = IllFormedReason::AnchorLink;
+        if let Some(reason) = Self::check_links(&info, Some(&r_0), peer_schedule, ctx.conf()) {
             return ctx.validated(&cert, ValidateResult::IllFormed(reason));
-        };
+        }
 
         let Some(r_1) = r_0.prev().upgrade() else {
             let reason = InvalidReason::NoRoundInDag(PointMap::Includes);
@@ -227,12 +227,18 @@ impl Verifier {
         })
     }
 
-    fn is_self_links_ok(
-        info: &PointInfo,     // @ r+0
-        dag_round: &DagRound, // r+0
-    ) -> bool {
+    fn check_links(
+        info: &PointInfo,
+        point_round: Option<&DagRound>,
+        peer_schedule: &PeerSchedule,
+        conf: &MempoolConfig,
+    ) -> Option<IllFormedReason> {
         // existence of proofs in leader points is a part of point's well-formedness check
-        match &dag_round.anchor_stage() {
+        let is_self_link_ok = match point_round
+            .ok_or_else(|| AnchorStage::of(info.round(), peer_schedule, conf))
+            .as_ref()
+            .map_or_else(|fallback| fallback.as_ref(), |round| round.anchor_stage())
+        {
             Some(stage) if stage.leader == info.author() => {
                 // either Proof directly points on candidate
                 if stage.role == AnchorStageRole::Proof
@@ -250,39 +256,35 @@ impl Verifier {
             Some(_) | None => {
                 info.anchor_proof() != &Link::ToSelf && info.anchor_trigger() != &Link::ToSelf
             }
-        }
-    }
-
-    /// the only method that scans the DAG deeper than 2 rounds
-    fn is_anchor_link_ok(
-        link_field: AnchorStageRole,
-        info: &PointInfo,     // @ r+0
-        dag_round: &DagRound, // start with r+0
-        conf: &MempoolConfig,
-    ) -> bool {
-        let linked_id = info.anchor_id(link_field);
-
-        let Some(round) = dag_round.scan(linked_id.round) else {
-            // too old indirect reference does not invalidate the point,
-            // because its direct dependencies ('link through') will be validated anyway
-            return true;
         };
-
-        if round.round() == conf.genesis_round {
-            // notice that point is required to link to the freshest leader point
-            // among all its (in)direct dependencies, which is checked later
-            return true;
+        if !is_self_link_ok {
+            return Some(IllFormedReason::SelfLink);
         }
 
-        match round.anchor_stage() {
-            Some(stage) if stage.role == link_field && stage.leader == linked_id.author => {}
-            _ => {
-                // link does not match round's leader, prescribed by AnchorStage
-                return false;
+        for link_field in [AnchorStageRole::Proof, AnchorStageRole::Trigger] {
+            let linked_id = info.anchor_id(link_field);
+
+            if linked_id.round == conf.genesis_round {
+                // notice that point is required to link to the freshest leader point
+                // among all its (in)direct dependencies, which is checked later
+                continue;
             }
-        };
-
-        true
+            let is_ok = match point_round.and_then(|dr| dr.scan(linked_id.round)) {
+                Some(linked_round) => linked_round.anchor_stage().is_some_and(|stage| {
+                    stage.role == link_field && stage.leader == linked_id.author
+                }),
+                None => {
+                    AnchorStage::of(linked_id.round, peer_schedule, conf).is_some_and(|stage| {
+                        stage.role == link_field && stage.leader == linked_id.author
+                    })
+                }
+            };
+            if !is_ok {
+                // link does not match round's leader, prescribed by AnchorStage
+                return Some(IllFormedReason::AnchorLink(link_field));
+            }
+        }
+        None
     }
 
     fn other_versions(
@@ -500,14 +502,9 @@ impl Verifier {
             return Some(VerifyError::IllFormed(reason));
         }
 
-        // check size only now, as config seems up to date
-        if info.payload_bytes() > conf.consensus.payload_batch_bytes {
-            let reason = IllFormedReason::TooLargePayload(info.payload_bytes());
+        // check only now, as config seems up to date
+        if let Some(reason) = Self::is_well_formed(info, conf) {
             return Some(VerifyError::IllFormed(reason));
-        }
-
-        if !info.is_well_formed(conf) {
-            return Some(VerifyError::IllFormed(IllFormedReason::NotDescribed));
         }
 
         // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
@@ -626,6 +623,46 @@ impl Verifier {
             }
             _ => None, // to validate dependencies
         }
+    }
+
+    /// counterpart of [`crate::models::PointData::has_well_formed_maps`] that must be called later
+    /// and allows to link this [`PointInfo`] with its dependencies for validation and commit;
+    /// its decided later in [`Self::check_links`] whether current point belongs to leader
+    fn is_well_formed(info: &PointInfo, conf: &MempoolConfig) -> Option<IllFormedReason> {
+        if info.round() == conf.genesis_round {
+            if info.payload_len() > 0 {
+                return Some(IllFormedReason::TooLargePayload(info.payload_bytes()));
+            }
+            // evidence map is required to be empty during other peer sets checks
+            if info.anchor_proof() != &Link::ToSelf {
+                return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Proof));
+            }
+            if info.anchor_trigger() != &Link::ToSelf {
+                return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Trigger));
+            }
+            if info.time() != info.anchor_time() {
+                return Some(IllFormedReason::AnchorTime);
+            }
+        } else {
+            if info.payload_bytes() > conf.consensus.payload_batch_bytes {
+                return Some(IllFormedReason::TooLargePayload(info.payload_bytes()));
+            }
+            // leader must maintain its chain of proofs,
+            // while others must link to previous points (checked at the end of this method)
+            if info.evidence().is_empty() {
+                if info.anchor_proof() == &Link::ToSelf {
+                    return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Proof));
+                }
+                if info.anchor_trigger() == &Link::ToSelf {
+                    return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Trigger));
+                }
+            }
+            if info.time() <= info.anchor_time() {
+                // point time must be greater than anchor time
+                return Some(IllFormedReason::AnchorTime);
+            }
+        };
+        None
     }
 
     /// blame author and every dependent point's author

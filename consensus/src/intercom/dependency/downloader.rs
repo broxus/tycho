@@ -97,6 +97,10 @@ impl Downloader {
         }
     }
 
+    pub fn peer_schedule(&self) -> &PeerSchedule {
+        &self.inner.peer_schedule
+    }
+
     /// 2F "point not found" responses lead to invalidation of all referencing points;
     /// failed network queries are retried after all peers were queried the same amount of times,
     /// and only successful responses that point is not found are taken into account.
