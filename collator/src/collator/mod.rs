@@ -13,6 +13,7 @@ use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
+use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
@@ -658,11 +659,26 @@ impl CollatorStdImpl {
                             &labels,
                         );
 
-                        let update = last_task.state_update.clone();
-                        let new_state =
-                            rayon_run(move || update.par_apply(&prev_root, &Default::default()))
-                                .await
-                                .context("Failed to apply state update")?;
+                        let split_at = {
+                            let shard_accounts = prev_root
+                                .as_ref()
+                                .reference_cloned(1)
+                                .context("invalid shard state")?
+                                .parse::<ShardAccounts>()
+                                .context("failed to load shard accounts")?;
+
+                            split_aug_dict_raw(shard_accounts, 5)
+                                .context("failed to split shard accounts")?
+                                .into_keys()
+                                .collect::<ahash::HashSet<_>>()
+                        };
+
+                        let new_state = rayon_run({
+                            let update = last_task.state_update.clone();
+                            move || update.par_apply(&prev_root, &split_at)
+                        })
+                        .await
+                        .context("Failed to apply state update")?;
 
                         drop(histogram_apply_merkles);
 
