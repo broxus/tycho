@@ -7,7 +7,7 @@ use tycho_crypto::ed25519::{KeyPair, SecretKey};
 use tycho_network::{OverlayId, PeerId};
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
-use crate::dag::align_genesis;
+use crate::dag::AnchorStage;
 use crate::models::{Link, Point, PointData, Round, UnixTime};
 
 // replace with `ArcSwapOption` + copy on get() if need to change in runtime
@@ -130,7 +130,7 @@ impl MempoolConfigBuilder {
             .as_ref()
             .context("mempool consensus config is not known")?;
 
-        let genesis_round = align_genesis(genesis_info.start_round);
+        let genesis_round = AnchorStage::align_genesis(genesis_info.start_round);
 
         let mempool_config = MempoolConfig {
             consensus: consensus.clone(),
