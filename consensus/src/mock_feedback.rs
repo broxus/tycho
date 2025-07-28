@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use futures_util::never::Never;
 use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt};
 use itertools::Itertools;
 use tl_proto::{TlRead, TlWrite};
 use tokio::time::MissedTickBehavior;
@@ -89,7 +89,11 @@ impl MockFeedbackSender {
             send_futures.clear();
 
             for peer_id in &receivers {
-                let future = self.dispatcher.send_feedback(peer_id, &request);
+                let future = self
+                    .dispatcher
+                    .clone()
+                    .send_feedback(*peer_id, request.clone())
+                    .boxed();
                 send_futures.push(future);
             }
         }
