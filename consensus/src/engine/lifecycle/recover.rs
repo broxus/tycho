@@ -55,6 +55,10 @@ impl EngineRecoverLoop {
 
             let never_ok = engine_run.await;
 
+            self.net_args
+                .overlay_service
+                .remove_private_overlay(&self.merged_conf.overlay_id);
+
             let task_tracker = {
                 let guard = self.run_attrs.lock();
                 guard.tracker.clone()
