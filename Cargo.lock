@@ -3945,6 +3945,7 @@ dependencies = [
  "tracing-subscriber",
  "tycho-crypto",
  "tycho-network",
+ "tycho-slasher-traits",
  "tycho-storage",
  "tycho-types",
  "tycho-util",
@@ -4176,10 +4177,13 @@ dependencies = [
 name = "tycho-slasher"
 version = "0.2.12"
 dependencies = [
+ "async-trait",
+ "indexmap",
  "metrics",
  "parking_lot",
  "tokio",
  "tracing",
+ "tycho-network",
  "tycho-slasher-traits",
  "tycho-types",
  "tycho-util",
@@ -4189,7 +4193,10 @@ dependencies = [
 name = "tycho-slasher-traits"
 version = "0.2.12"
 dependencies = [
+ "async-trait",
+ "tycho-network",
  "tycho-types",
+ "tycho-util",
 ]
 
 [[package]]

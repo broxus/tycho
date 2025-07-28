@@ -1,9 +1,11 @@
 use std::mem;
+use std::sync::Arc;
 use std::time::Duration;
 
 use itertools::Itertools;
 use tokio::sync::mpsc;
 use tokio::time::Interval;
+use tycho_slasher_traits::MempoolEventsListener;
 
 use crate::dag::{Committer, HistoryConflict};
 use crate::effects::{AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task};
@@ -49,12 +51,19 @@ impl CommitterTask {
         &mut self,
         full_history_bottom: Option<Round>,
         anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+        stats_tx: Arc<dyn MempoolEventsListener>,
         round_ctx: &RoundCtx,
     ) -> EngineResult<()> {
         let Some(committer) = self.inner.take_ready().await? else {
             return Ok(());
         };
-        self.inner = Inner::running(committer, full_history_bottom, anchors_tx, round_ctx);
+        self.inner = Inner::running(
+            committer,
+            full_history_bottom,
+            anchors_tx,
+            stats_tx,
+            round_ctx,
+        );
         Ok(())
     }
 }
@@ -79,6 +88,7 @@ impl Inner {
         mut committer: Box<Committer>,
         mut full_history_bottom: Option<Round>,
         anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+        stats_tx: Arc<dyn MempoolEventsListener>,
         round_ctx: &RoundCtx,
     ) -> Self {
         let task_ctx = round_ctx.task();
@@ -142,12 +152,18 @@ impl Inner {
 
             if let Some(committed) = committed {
                 round_ctx.log_committed(&committed);
+                let anchor_rounds =
+                    (committed.iter().map(|a| a.anchor.round())).collect::<Vec<_>>();
                 for data in committed {
-                    let anchor_round = data.anchor.round();
                     round_ctx.commit_metrics(&data.anchor);
                     anchors_tx
                         .send(MempoolOutput::NextAnchor(data))
                         .map_err(|_closed| Cancelled())?;
+                }
+                // stats should be reported for each round separately - to be grouped by consumer
+                for anchor_round in anchor_rounds {
+                    let stats = committer.remove_committed(anchor_round, round_ctx.conf())?;
+                    stats_tx.put_stats(stats.anchor_round.0, stats.data);
                     anchors_tx
                         .send(MempoolOutput::CommitFinished(anchor_round))
                         .map_err(|_closed| Cancelled())?;
