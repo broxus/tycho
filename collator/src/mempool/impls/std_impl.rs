@@ -11,6 +11,7 @@ use tracing::Instrument;
 use tycho_consensus::prelude::*;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver};
+use tycho_slasher_traits::MempoolEventsListener;
 use tycho_storage::StorageContext;
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
@@ -31,6 +32,7 @@ pub struct MempoolAdapterStdImpl {
 
     mempool_db: Arc<MempoolDb>,
     input_buffer: InputBuffer,
+    stats_tx: Arc<dyn MempoolEventsListener>,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
 }
 
@@ -41,6 +43,7 @@ impl MempoolAdapterStdImpl {
         peer_resolver: &PeerResolver,
         overlay_service: &OverlayService,
         storage_context: &StorageContext,
+        stats_tx: Arc<dyn MempoolEventsListener>,
         mempool_node_config: &MempoolNodeConfig,
     ) -> Result<Self> {
         let config_builder = MempoolConfigBuilder::new(mempool_node_config);
@@ -61,6 +64,8 @@ impl MempoolAdapterStdImpl {
             mempool_db: MempoolDb::open(storage_context.clone(), RoundWatch::default())
                 .context("failed to create mempool adapter storage")?,
             input_buffer: InputBuffer::default(),
+
+            stats_tx,
             top_known_anchor: RoundWatch::default(),
         })
     }
@@ -170,7 +175,7 @@ impl MempoolAdapterStdImpl {
     ) -> Result<EngineSession> {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Starting mempool engine...");
 
-        let (anchor_tx, anchor_rx) = mpsc::unbounded_channel();
+        let (anchors_tx, anchors_rx) = mpsc::unbounded_channel();
 
         self.input_buffer.apply_config(&merged_conf.conf.consensus);
 
@@ -182,7 +187,8 @@ impl MempoolAdapterStdImpl {
             mempool_db: self.mempool_db.clone(),
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: self.top_known_anchor.clone(),
-            output: anchor_tx,
+            anchors_tx,
+            stats_tx: self.stats_tx.clone(),
         };
 
         // actual oldest sync round will be not less than this
@@ -218,13 +224,13 @@ impl MempoolAdapterStdImpl {
             engine_stop_tx,
         );
 
-        let mut anchor_task = AnchorHandler::new(&merged_conf.conf.consensus, anchor_rx)
+        let mut anchors_task = AnchorHandler::new(&merged_conf.conf.consensus, anchors_rx)
             .run(self.cache.clone(), self.mempool_db.clone())
             .boxed();
 
         tokio::spawn(async move {
             tokio::select! {
-                () = &mut anchor_task => {}, // just poll
+                () = &mut anchors_task => {}, // just poll
                 engine_result = &mut engine_stop_rx => match engine_result {
                     Ok(()) => tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,

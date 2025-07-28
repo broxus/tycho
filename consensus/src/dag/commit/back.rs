@@ -114,6 +114,20 @@ impl DagBack {
         }
     }
 
+    pub fn drain_upto(&mut self, new_bottom_round: Round) -> Vec<DagRound> {
+        let to_drain = (new_bottom_round - self.bottom_round().0).0 as usize;
+        let mut drained = Vec::with_capacity(to_drain);
+        while let Some(entry) = self.rounds.first_entry() {
+            if *entry.key() < new_bottom_round {
+                drained.push(entry.remove());
+            } else {
+                break;
+            }
+        }
+        assert_eq!(to_drain, drained.len(), "drained not contiguous dag part");
+        drained
+    }
+
     /// not yet used commit triggers in historical order;
     /// `last_proof_round` allows to continue chain from its end
     pub(super) fn triggers(
