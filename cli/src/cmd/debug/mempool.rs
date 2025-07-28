@@ -12,7 +12,7 @@ use tycho_consensus::prelude::{
     EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolConfigBuilder,
     MempoolDb, MempoolMergedConfig,
 };
-use tycho_consensus::test_utils::{AnchorConsumer, LastAnchorFile, test_logger};
+use tycho_consensus::test_utils::{AnchorConsumer, LastAnchorFile, StatsSender, test_logger};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::node::NodeKeys;
@@ -305,9 +305,10 @@ impl Mempool {
     ) -> Result<(EngineSession, AnchorConsumer)> {
         let local_id = self.net_args.network.peer_id();
 
-        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
+        let (anchors_tx, anchors_rx) = mpsc::unbounded_channel();
+        let (stats_tx, stats_rx) = mpsc::unbounded_channel();
         let mut anchor_consumer = AnchorConsumer::default();
-        anchor_consumer.add(*local_id, committed_rx);
+        anchor_consumer.add(*local_id, anchors_rx, stats_rx);
 
         let bind = EngineBinding {
             mempool_db: MempoolDb::open(
@@ -316,7 +317,8 @@ impl Mempool {
             )?,
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: anchor_consumer.top_known_anchor.clone(),
-            output: committed_tx,
+            anchors_tx,
+            stats_tx: Arc::new(StatsSender { sender: stats_tx }),
         };
 
         let session = EngineSession::new(

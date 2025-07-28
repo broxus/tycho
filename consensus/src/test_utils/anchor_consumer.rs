@@ -2,7 +2,7 @@ use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::{StreamExt, StreamMap};
@@ -12,12 +12,13 @@ use tycho_util::FastHashMap;
 use crate::effects::AltFormat;
 use crate::engine::MempoolMergedConfig;
 use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
-use crate::models::{MempoolOutput, PointId, Round};
+use crate::models::{MempoolOutput, MempoolStatsOutput, PointId, Round};
 use crate::test_utils::last_anchor_file::LastAnchorFile;
 
 #[derive(Default)]
 pub struct AnchorConsumer {
-    streams: StreamMap<PeerId, UnboundedReceiverStream<MempoolOutput>>,
+    anchors_streams: StreamMap<PeerId, UnboundedReceiverStream<MempoolOutput>>,
+    stats_streams: StreamMap<PeerId, UnboundedReceiverStream<MempoolStatsOutput>>,
     // all committers must share the same sequence of anchor points
     anchors: FastHashMap<Round, FastHashMap<PeerId, PointId>>,
     // all committers must share the same anchor history (linearized inclusion dag) for each anchor
@@ -33,15 +34,29 @@ pub struct AnchorConsumer {
 }
 
 impl AnchorConsumer {
-    pub fn add(&mut self, peer_id: PeerId, committed: UnboundedReceiver<MempoolOutput>) {
-        self.streams
-            .insert(peer_id, UnboundedReceiverStream::new(committed));
+    pub fn add(
+        &mut self,
+        peer_id: PeerId,
+        anchors_rx: UnboundedReceiver<MempoolOutput>,
+        stats_rx: UnboundedReceiver<MempoolStatsOutput>,
+    ) {
+        self.anchors_streams
+            .insert(peer_id, UnboundedReceiverStream::new(anchors_rx));
+        self.stats_streams
+            .insert(peer_id, UnboundedReceiverStream::new(stats_rx));
     }
 
     pub async fn drain(mut self, mut file: LastAnchorFile) {
         loop {
-            let (_, commit_result) = self.next_event().await;
-            self.drain_anchor(&mut file, commit_result);
+            let (peer_id, either) = self.next_event().await;
+            match either {
+                Either::Left(commit_result) => {
+                    self.drain_anchor(&mut file, commit_result);
+                }
+                Either::Right(stats) => {
+                    tracing::debug!("{} sent {:?}", peer_id.alt(), stats.alt());
+                }
+            }
         }
     }
 
@@ -49,15 +64,29 @@ impl AnchorConsumer {
         // Genesis point is excluded from commit, points only reference it
         let mut next_expected_history_round = merged_conf.conf.genesis_round.next();
         loop {
-            let (peer_id, commit_result) = self.next_event().await;
-            self.check_anchor(&mut next_expected_history_round, peer_id, commit_result);
+            let (peer_id, either) = self.next_event().await;
+            match either {
+                Either::Left(commit_result) => {
+                    self.check_anchor(&mut next_expected_history_round, peer_id, commit_result);
+                }
+                Either::Right(stats) => {
+                    tracing::debug!("{} sent {:?}", peer_id.alt(), stats.alt());
+                }
+            }
         }
     }
 
-    async fn next_event(&mut self) -> (PeerId, MempoolOutput) {
-        let maybe_anchor = self.streams.next().await;
-        let (peer_id, commit_result) = maybe_anchor.expect("committed anchor reader must be alive");
-        (peer_id, commit_result)
+    async fn next_event(&mut self) -> (PeerId, Either<MempoolOutput, MempoolStatsOutput>) {
+        tokio::select! {
+            maybe_anchor = self.anchors_streams.next() => {
+                let (peer_id, commit_result) = maybe_anchor.expect("committed anchor reader must be alive");
+                (peer_id, Either::Left(commit_result))
+            }
+            maybe_stats = self.stats_streams.next() => {
+                let (peer_id, stats) = maybe_stats.expect("peer stats reader must be alive");
+                (peer_id, Either::Right(stats))
+            }
+        }
     }
 
     fn drain_anchor(&mut self, file: &mut LastAnchorFile, commit_result: MempoolOutput) {
@@ -128,10 +157,10 @@ impl AnchorConsumer {
             Entry::Occupied(mut stored_anchor) => {
                 let committers = stored_anchor.get_mut();
                 assert!(
-                    committers.len() < self.streams.len(),
+                    committers.len() < self.anchors_streams.len(),
                     "Broken test: we can't store {} committers for total {} peers at round {}",
                     committers.len(),
-                    self.streams.len(),
+                    self.anchors_streams.len(),
                     anchor_round.0,
                 );
                 assert!(
@@ -178,7 +207,7 @@ impl AnchorConsumer {
         let mut common_anchors = vec![];
         let mut common_history = vec![];
         self.anchors.retain(|anchor_round, value| {
-            if value.len() == self.streams.len() {
+            if value.len() == self.anchors_streams.len() {
                 let history = self
                     .history
                     .remove(anchor_round)

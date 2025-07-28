@@ -46,8 +46,9 @@ weedb = { workspace = true }
 
 # local deps
 tycho-network = { workspace = true }
-tycho-util = { workspace = true }
+tycho-slasher-traits = { workspace = true }
 tycho-storage = { workspace = true }
+tycho-util = { workspace = true }
 
 [dev-dependencies]
 humantime = { workspace = true }
