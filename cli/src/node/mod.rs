@@ -32,6 +32,7 @@ use tycho_core::node::{NodeBase, NodeKeys};
 use tycho_core::storage::NodeSyncState;
 use tycho_network::InboundRequestMeta;
 use tycho_rpc::{NodeBaseInitRpc, RpcConfig};
+use tycho_slasher::Slasher;
 use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 use tycho_wu_tuner::service::WuTunerServiceBuilder;
@@ -48,6 +49,7 @@ pub struct Node {
     overwrite_cold_boot_type: Option<ColdBootType>,
 
     queue_state_factory: QueueStateImplFactory,
+    slasher: Slasher,
     rpc_mempool_adapter: RpcMempoolAdapter,
     moderator: Option<Moderator>,
     rpc_config: Option<RpcConfig>,
@@ -79,6 +81,10 @@ impl Node {
             .init_storage()
             .await?;
 
+        // NOTE: Stub
+        let slasher = Slasher::default();
+
+        // Setup blockchain rpc
         let (rpc_mempool_adapter, moderator) = if is_single_node {
             let adapter = RpcMempoolAdapter {
                 inner: Arc::new(MempoolAdapterSingleNodeImpl::new(
@@ -106,6 +112,7 @@ impl Node {
                     base.overlay_service(),
                     mempool_db,
                     moderator.clone(),
+                    slasher.mempool_events_listener(),
                     &node_config.mempool.node,
                 )?),
             };
@@ -123,6 +130,7 @@ impl Node {
             base,
             overwrite_cold_boot_type: None,
             queue_state_factory,
+            slasher,
             rpc_mempool_adapter,
             moderator,
             rpc_config: node_config.rpc,
@@ -218,9 +226,6 @@ impl Node {
         let top_shards = mc_state.get_top_shards()?;
         message_queue_adapter.clear_uncommitted_state(&top_shards)?;
 
-        // NOTE: Stub
-        let slasher = tycho_slasher::Slasher::default();
-
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {
                 network: base.network.clone(),
@@ -230,7 +235,7 @@ impl Node {
             },
             base.keypair.clone(),
             self.validator_config,
-            slasher.validator_events_listener(),
+            self.slasher.validator_events_listener(),
         );
 
         // Explicitly handle the initial state

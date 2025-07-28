@@ -144,7 +144,8 @@ fn make_network(
         let commit_finished = anchor_consumer.commit_finished.clone();
 
         let (anchors_tx, anchors_rx) = mpsc::unbounded_channel();
-        anchor_consumer.add(peer_id, anchors_rx);
+        let (stats_tx, stats_rx) = mpsc::unbounded_channel();
+        anchor_consumer.add(peer_id, anchors_rx, stats_rx);
 
         let handle = std::thread::Builder::new()
             .name(format!("engine-{peer_id:.4}"))
@@ -206,6 +207,7 @@ fn make_network(
                             top_known_anchor,
                             commit_finished,
                             anchors_tx,
+                            stats_tx: Arc::new(StatsSender { sender: stats_tx }),
                         };
 
                         let (engine_stop_tx, engine_stop_rx) = oneshot::channel();

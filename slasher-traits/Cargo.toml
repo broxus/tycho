@@ -11,9 +11,13 @@ license.workspace = true
 
 [dependencies]
 # crates.io deps
+async-trait = { workspace = true }
+thiserror = { workspace = true }
 
 # local deps
+tycho-network = { workspace = true } # TODO: Somehow get only models from the network
 tycho-types = { workspace = true }
+tycho-util = { workspace = true }
 
 [lints]
 workspace = true

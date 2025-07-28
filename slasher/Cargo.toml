@@ -11,6 +11,8 @@ license.workspace = true
 
 [dependencies]
 # crates.io deps
+async-trait = {workspace = true}
+indexmap = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
@@ -20,6 +22,7 @@ tycho-types = { workspace = true }
 # local deps
 tycho-slasher-traits = { workspace = true }
 tycho-util = { workspace = true }
+tycho-network = { workspace = true }        # TODO: Somehow get only models from the network
 
 [lints]
 workspace = true

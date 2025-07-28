@@ -1,18 +1,17 @@
 use std::mem;
+use std::sync::Arc;
 use std::time::Duration;
 
 use itertools::Itertools;
 use tokio::sync::mpsc;
 use tokio::time::Interval;
+use tycho_slasher_traits::{MempoolEventsListener, MempoolPeerStats, MempoolStatsMergeError};
 
 use crate::dag::{Committer, HistoryConflict};
 use crate::effects::{AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task};
 use crate::engine::lifecycle::EngineError;
 use crate::engine::{ConsensusConfigExt, EngineResult, MempoolConfig, NodeConfig};
-use crate::models::{
-    AnchorData, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError, MempoolStatsOutput,
-    PointInfo, Round,
-};
+use crate::models::{AnchorData, MempoolOutput, MempoolStatsOutput, PointInfo, Round};
 use crate::moderator::Moderator;
 
 pub struct CommitterTask {
@@ -61,12 +60,13 @@ impl CommitterTask {
         &mut self,
         full_history_bottom: Option<Round>,
         anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+        stats_tx: Arc<dyn MempoolEventsListener>,
         round_ctx: &RoundCtx,
     ) -> EngineResult<()> {
         let Some(inner) = self.state.take_ready().await? else {
             return Ok(());
         };
-        self.state = State::running(inner, full_history_bottom, anchors_tx, round_ctx);
+        self.state = State::running(inner, full_history_bottom, anchors_tx, stats_tx, round_ctx);
         Ok(())
     }
 }
@@ -91,6 +91,7 @@ impl State {
         mut inner: Box<Inner>,
         mut full_history_bottom: Option<Round>,
         anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+        stats_tx: Arc<dyn MempoolEventsListener>,
         round_ctx: &RoundCtx,
     ) -> Self {
         let task_ctx = round_ctx.task();
@@ -168,6 +169,7 @@ impl State {
                     let (stats, events) =
                         (inner.committer).remove_committed(anchor_round, round_ctx.conf())?;
                     all_stats.push(stats);
+                    _ = stats_tx; // TODO stats_tx.put_stats(stats.anchor_round.0, stats.data);
                     for event in events {
                         inner.moderator.report(event);
                     }

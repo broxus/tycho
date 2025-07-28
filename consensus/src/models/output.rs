@@ -1,8 +1,9 @@
 use tycho_network::PeerId;
+use tycho_slasher_traits::MempoolPeerStats;
 use tycho_util::FastHashMap;
 
 use crate::effects::{AltFmt, AltFormat};
-use crate::models::{MempoolPeerStats, PointInfo, Round};
+use crate::models::{PointInfo, Round};
 
 pub struct AnchorData {
     pub anchor: PointInfo,

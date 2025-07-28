@@ -1,6 +1,7 @@
 use std::cmp;
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
@@ -10,6 +11,7 @@ use futures_util::{FutureExt, TryStreamExt};
 use itertools::{Either, Itertools};
 use tokio::sync::mpsc;
 use tycho_network::PeerId;
+use tycho_slasher_traits::MempoolEventsListener;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{DagFront, DagRound, KeyGroup, Verifier};
@@ -32,6 +34,7 @@ pub struct Engine {
     dag: DagFront,
     committer_run: CommitterTask,
     anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+    stats_tx: Arc<dyn MempoolEventsListener>,
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
     peer_schedule_updater: Task<Never>,
@@ -114,6 +117,7 @@ impl Engine {
             dag,
             committer_run,
             anchors_tx: bind.anchors_tx.clone(),
+            stats_tx: bind.stats_tx.clone(),
             db_cleaner,
             round_task,
             peer_schedule_updater,
@@ -418,6 +422,7 @@ impl Engine {
                         let committer_update = self.committer_run.update_task(
                             full_history_bottom.take(),
                             self.anchors_tx.clone(),
+                            self.stats_tx.clone(),
                             &round_ctx,
                         );
                         committer_update.await?;
@@ -468,6 +473,7 @@ impl Engine {
                         self.committer_run.update_task(
                             full_history_bottom.take(),
                             self.anchors_tx.clone(),
+                            self.stats_tx.clone(),
                             &round_ctx,
                         ).await?;
                     },
