@@ -1,5 +1,18 @@
 use std::ops::RangeInclusive;
 
+use tycho_network::PeerId;
+use tycho_util::FastHashMap;
+
+pub trait MempoolEventsListener: Send + Sync {
+    fn put_stats(&self, anchor_round: u32, data: FastHashMap<PeerId, MempoolPeerStats>);
+}
+
+#[async_trait::async_trait]
+pub trait MempoolEventsCache: Send + Sync {
+    async fn get_stats(&self, rounds: RangeInclusive<u32>)
+    -> FastHashMap<PeerId, MempoolPeerStats>;
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MempoolStatsMergeError {
     #[error("stat range {:?} cannot include new out-of-order round {}", .0, .1)]
