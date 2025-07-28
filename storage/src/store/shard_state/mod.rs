@@ -95,6 +95,8 @@ impl ShardStateStorage {
         root_cell: Cell,
         hint: StoreStateHint,
     ) -> Result<bool> {
+        metrics::counter!("tycho_storage_store_state_root_count").increment(1);
+
         if handle.has_state() {
             return Ok(false);
         }
