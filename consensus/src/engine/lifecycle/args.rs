@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver, PrivateOverlay};
+use tycho_slasher_traits::MempoolEventsListener;
 
 use crate::effects::{AltFormat, TaskTracker};
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
@@ -16,7 +17,8 @@ pub struct EngineBinding {
     pub mempool_db: Arc<MempoolDb>,
     pub input_buffer: InputBuffer,
     pub top_known_anchor: RoundWatch<TopKnownAnchor>,
-    pub output: mpsc::UnboundedSender<MempoolOutput>,
+    pub anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+    pub stats_tx: Arc<dyn MempoolEventsListener>,
 }
 
 #[derive(Clone)]
