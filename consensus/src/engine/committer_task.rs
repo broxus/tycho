@@ -1,9 +1,11 @@
 use std::mem;
+use std::sync::Arc;
 use std::time::Duration;
 
 use itertools::Itertools;
 use tokio::sync::mpsc;
 use tokio::time::Interval;
+use tycho_slasher_traits::MempoolEventsListener;
 
 use crate::dag::{Committer, HistoryConflict};
 use crate::effects::{AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task};
@@ -58,12 +60,13 @@ impl CommitterTask {
         &mut self,
         full_history_bottom: Option<Round>,
         anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+        stats_tx: Arc<dyn MempoolEventsListener>,
         round_ctx: &RoundCtx,
     ) -> EngineResult<()> {
         let Some(inner) = self.state.take_ready().await? else {
             return Ok(());
         };
-        self.state = State::running(inner, full_history_bottom, anchors_tx, round_ctx);
+        self.state = State::running(inner, full_history_bottom, anchors_tx, stats_tx, round_ctx);
         Ok(())
     }
 }
@@ -88,6 +91,7 @@ impl State {
         mut inner: Box<Inner>,
         mut full_history_bottom: Option<Round>,
         anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+        stats_tx: Arc<dyn MempoolEventsListener>,
         round_ctx: &RoundCtx,
     ) -> Self {
         let task_ctx = round_ctx.task();
@@ -161,8 +165,9 @@ impl State {
                 }
                 // stats should be reported for each round separately - to be grouped by consumer
                 for anchor_round in anchor_rounds {
-                    let (_stats, events) =
+                    let (stats, events) =
                         (inner.committer).remove_committed(anchor_round, round_ctx.conf())?;
+                    stats_tx.put_stats(stats.anchor_round.0, stats.data);
                     // Note: we are in a spawned blocking thread
                     inner.moderator.report_blocking(events, &round_ctx);
                     anchors_tx

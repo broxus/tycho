@@ -4,14 +4,12 @@ use std::sync::atomic;
 use ahash::HashMapExt;
 use futures_util::FutureExt;
 use tycho_network::PeerId;
+use tycho_slasher_traits::{MempoolPeerCounters, MempoolPeerStats};
 use tycho_util::FastHashMap;
 
 use crate::dag::DagRound;
 use crate::effects::{AltFormat, TaskResult};
-use crate::models::{
-    DagPoint, Digest, IllFormedPoint, InvalidPoint, MempoolPeerCounters, MempoolPeerStats, PointId,
-    PointInfo, Round,
-};
+use crate::models::{DagPoint, Digest, IllFormedPoint, InvalidPoint, PointId, PointInfo, Round};
 use crate::moderator::JournalEvent;
 
 type RoundDataMap = FastHashMap<PeerId, PeerRoundData>;
