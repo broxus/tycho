@@ -22,6 +22,7 @@ use super::{
 
 pub(crate) mod blobs;
 mod package_entry;
+pub mod tail_cache;
 
 pub use blobs::{ArchiveId, BlockGcStats};
 

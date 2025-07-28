@@ -14,7 +14,7 @@ pub use self::futures::{
 pub use self::gc_subscriber::{GcSubscriber, ManualGcTrigger};
 pub use self::metrics_subscriber::MetricsSubscriber;
 pub use self::ps_subscriber::PsSubscriber;
-use crate::storage::{BlockHandle, CoreStorage};
+use crate::storage::CoreStorage;
 
 mod futures;
 mod gc_subscriber;
@@ -506,60 +506,4 @@ pub mod test {
             future::ready(Ok(()))
         }
     }
-}
-
-pub async fn find_longest_diffs_tail(mc_block: BlockId, storage: &CoreStorage) -> Result<usize> {
-    let mc_block_stuff = load_mc_block_stuff(mc_block, storage).await?;
-
-    let shard_block_handles = load_shard_block_handles(&mc_block_stuff, storage).await?;
-
-    let mut max_tail_len = None;
-
-    for block_handle in shard_block_handles {
-        let block = storage
-            .block_storage()
-            .load_block_data(&block_handle)
-            .await?;
-        let tail_len = block.block().out_msg_queue_updates.tail_len as usize;
-
-        max_tail_len = Some(max_tail_len.map_or(tail_len, |max: usize| max.max(tail_len)));
-    }
-
-    let mc_tail_len = mc_block_stuff.block().out_msg_queue_updates.tail_len as usize;
-    let result_tail_len = max_tail_len.map_or(mc_tail_len, |max: usize| mc_tail_len.max(max));
-
-    Ok(result_tail_len)
-}
-
-async fn load_mc_block_stuff(mc_seqno: BlockId, storage: &CoreStorage) -> Result<BlockStuff> {
-    let mc_handle = storage.block_handle_storage().load_handle(&mc_seqno);
-    if let Some(mc_handle) = mc_handle {
-        let mc_block_stuff = storage.block_storage().load_block_data(&mc_handle).await?;
-        Ok(mc_block_stuff)
-    } else {
-        anyhow::bail!("mc block handle not found: {mc_seqno}");
-    }
-}
-
-async fn load_shard_block_handles(
-    mc_block_stuff: &BlockStuff,
-    storage: &CoreStorage,
-) -> Result<Vec<BlockHandle>> {
-    let block_handles = storage.block_handle_storage();
-    let mut shard_block_handles = Vec::new();
-
-    for entry in mc_block_stuff.load_custom()?.shards.latest_blocks() {
-        let block_id = entry?;
-        if block_id.seqno == 0 {
-            continue;
-        }
-
-        let Some(block_handle) = block_handles.load_handle(&block_id) else {
-            anyhow::bail!("top shard block handle not found: {block_id}");
-        };
-
-        shard_block_handles.push(block_handle);
-    }
-
-    Ok(shard_block_handles)
 }

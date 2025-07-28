@@ -13,7 +13,6 @@ use tycho_block_util::block::BlockStuff;
 use tycho_types::models::BlockId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::block_strider::subscriber::find_longest_diffs_tail;
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
@@ -259,12 +258,17 @@ impl GcSubscriber {
                     // TODO: Must be in sync with the largest possible archive size (in mc blocks).
                     const MIN_SAFE_DISTANCE: u32 = 100;
 
-                    let tail_len = find_longest_diffs_tail(tick.mc_block_id, &storage).await;
-
-                    let tail_len = tail_len.unwrap_or_else(|e| {
-                        tracing::error!(?e, "failed to find longest diffs tail");
-                        0
-                    }) as u32;
+                    let tail_len = match storage.tail_diff_cache().get(tick.mc_block_id.seqno).await
+                    {
+                        Some(tail_len) => tail_len,
+                        None => {
+                            tracing::warn!(
+                                seqno = ?tick.mc_block_id.seqno ,
+                                "tail diff not found in cache, skipping GC. This is expected during startup."
+                            );
+                            continue;
+                        }
+                    };
 
                     metrics::gauge!("tycho_core_blocks_gc_tail_len").set(tail_len);
 
@@ -339,6 +343,9 @@ impl GcSubscriber {
             {
                 tracing::error!("failed to remove outdated blocks: {e:?}");
             }
+
+            // Clean up cache entries for removed blocks
+            storage.tail_diff_cache().cleanup(target_seqno);
         }
     }
 

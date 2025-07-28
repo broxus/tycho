@@ -19,6 +19,9 @@ impl BlockSaver {
     }
 
     pub async fn save_block(&self, cx: &BlockSubscriberContext) -> Result<BlockHandle> {
+        // Update tail diff cache
+        self.storage.tail_diff_cache().update_block(&cx.block);
+
         // Construct prev ids
         let (prev_id, prev_id_alt) = cx
             .block
