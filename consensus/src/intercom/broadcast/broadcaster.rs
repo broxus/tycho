@@ -3,9 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use futures_util::StreamExt;
-use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, oneshot, watch};
 use tokio::time::MissedTickBehavior;
@@ -14,7 +13,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::LastOwnPoint;
 use crate::dyn_event;
-use crate::effects::{AltFormat, BroadcastCtx, Cancelled, Ctx, RoundCtx, TaskResult};
+use crate::effects::{AltFormat, BroadcastCtx, Cancelled, Ctx, RoundCtx, Task, TaskResult};
 use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::core::{BroadcastResponse, QueryRequest, SignatureResponse};
 use crate::intercom::peer_schedule::PeerState;
@@ -46,11 +45,11 @@ pub struct Broadcaster {
 
     bcast_request: Request,
     bcast_peers: FastHashSet<PeerId>,
-    bcast_futures: FuturesUnordered<BoxFuture<'static, (PeerId, Result<BroadcastResponse>)>>,
+    bcast_futures: FuturesUnordered<Task<(PeerId, Result<BroadcastResponse>)>>,
 
     sig_request: Request,
     sig_peers: FastHashSet<PeerId>,
-    sig_futures: FuturesUnordered<BoxFuture<'static, (PeerId, bool, Result<SignatureResponse>)>>,
+    sig_futures: FuturesUnordered<Task<(PeerId, bool, Result<SignatureResponse>)>>,
 
     point: Point,
 }
@@ -142,11 +141,13 @@ impl Broadcaster {
                 // rare event essential for up-to-date retries
                 update = self.peer_updates.recv() => self.match_peer_updates(update)?,
                 // either request signature immediately or postpone until retry
-                Some((peer_id, result)) = self.bcast_futures.next() => {
+                Some(task_result) = self.bcast_futures.next() => {
+                    let (peer_id, result) = task_result?;
                     self.match_broadcast_result(&peer_id, result);
                 },
                 // most frequent arm that provides data to decide if retry or fail or finish
-                Some((peer_id, after_bcast, result)) = self.sig_futures.next() => {
+                Some(task_result) = self.sig_futures.next() => {
+                    let (peer_id, after_bcast, result) = task_result?;
                     self.match_signature_result(&peer_id, after_bcast, result);
                 },
                 else => {
@@ -187,11 +188,13 @@ impl Broadcaster {
                     }
                 }
                 // either request signature immediately or postpone until retry
-                Some((peer_id, result)) = self.bcast_futures.next() => {
+                Some(task_result) = self.bcast_futures.next() => {
+                    let (peer_id, result) = task_result?;
                     self.match_broadcast_result(&peer_id, result);
                 },
                 // most frequent arm that provides data to decide if retry or fail or finish
-                Some((peer_id, after_bcast, result)) = self.sig_futures.next() => {
+                Some(task_result) = self.sig_futures.next() => {
+                    let (peer_id, after_bcast, result) = task_result?;
                     self.match_signature_result(&peer_id, after_bcast, result);
                 },
                 else => {
@@ -351,8 +354,12 @@ impl Broadcaster {
     fn broadcast(&mut self, peer_id: &PeerId) {
         if !self.removed_peers.contains(peer_id) {
             self.bcast_futures.push(
-                self.dispatcher
-                    .query_broadcast(peer_id, &self.bcast_request),
+                self.ctx.task().spawn(
+                    self.dispatcher
+                        .clone()
+                        .query_broadcast(*peer_id, self.bcast_request.clone())
+                        .map(Ok),
+                ),
             );
             tracing::trace!(
                 parent: self.ctx.span(),
@@ -370,11 +377,14 @@ impl Broadcaster {
 
     fn request_signature(&mut self, after_bcast: bool, peer_id: &PeerId) {
         if !self.removed_peers.contains(peer_id) && self.signers.contains(peer_id) {
-            self.sig_futures.push(self.dispatcher.query_signature(
-                peer_id,
-                after_bcast,
-                &self.sig_request,
-            ));
+            self.sig_futures.push(
+                self.ctx.task().spawn(
+                    self.dispatcher
+                        .clone()
+                        .query_signature(*peer_id, after_bcast, self.sig_request.clone())
+                        .map(Ok),
+                ),
+            );
             tracing::trace!(
                 parent: self.ctx.span(),
                 peer = display(peer_id.alt()),

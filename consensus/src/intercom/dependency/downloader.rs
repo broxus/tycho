@@ -3,9 +3,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::StreamExt;
-use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt};
 use rand::RngCore;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -16,7 +15,7 @@ use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
-use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, TaskResult};
+use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, Task, TaskResult};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::{ConsensusConfigExt, MempoolConfig};
 use crate::intercom::core::{PointByIdResponse, PointQueryResult, QueryRequest};
@@ -212,7 +211,7 @@ struct DownloadTask<T> {
     updates: broadcast::Receiver<(PeerId, PeerState)>,
 
     undone_peers: FastHashMap<PeerId, PeerStatus>,
-    downloading: FuturesUnordered<BoxFuture<'static, (PeerId, PointQueryResult)>>,
+    downloading: FuturesUnordered<Task<(PeerId, PointQueryResult)>>,
 
     attempt: u8,
 }
@@ -238,7 +237,8 @@ impl<T: DownloadType> DownloadTask<T> {
                 Ok(bcast_result) = &mut broadcast_result => break Some(bcast_result),
                 Some(depender) = dependers_rx.recv() => self.add_depender(&depender),
                 update = self.updates.recv() => self.match_peer_updates(update)?,
-                Some((peer_id, result)) = self.downloading.next() =>
+                Some(task_result) = self.downloading.next() => {
+                    let (peer_id, result) = task_result?;
                     match self.verify(&peer_id, result) {
                         Some(found) => break Some(found),
                         None => if self.not_found as usize >= self.peer_count.majority_of_others() {
@@ -246,7 +246,8 @@ impl<T: DownloadType> DownloadTask<T> {
                         } else if self.downloading.is_empty() {
                             interval.reset_immediately(); // restart interval and tick immediately
                         }
-                    },
+                    }
+                }
                 // most rare arm to make progress despite slow responding peers
                 _ = interval.tick() => self.download_random(), // first tick fires immediately
             }
@@ -309,10 +310,14 @@ impl<T: DownloadType> DownloadTask<T> {
         status.is_in_flight = true;
 
         self.downloading.push(
-            self.parent
-                .inner
-                .dispatcher
-                .query_point(peer_id, &self.request),
+            self.ctx.task().spawn(
+                self.parent
+                    .inner
+                    .dispatcher
+                    .clone()
+                    .query_point(*peer_id, self.request.clone())
+                    .map(Ok),
+            ),
         );
     }
 
