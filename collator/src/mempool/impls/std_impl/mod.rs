@@ -11,6 +11,7 @@ use tracing::Instrument;
 use tycho_consensus::prelude::*;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver};
+use tycho_slasher_traits::MempoolEventsListener;
 
 use crate::mempool::impls::common::cache::Cache;
 use crate::mempool::impls::common::v_set_adapter::VSetAdapter;
@@ -27,6 +28,7 @@ pub struct MempoolAdapterStdImpl {
 
     mempool_db: Arc<MempoolDb>,
     input_buffer: InputBuffer,
+    stats_tx: Arc<dyn MempoolEventsListener>,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
 }
 
@@ -37,6 +39,7 @@ struct StdConfigAdapter {
 }
 
 impl MempoolAdapterStdImpl {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         key_pair: Arc<KeyPair>,
         network: &Network,
@@ -44,6 +47,7 @@ impl MempoolAdapterStdImpl {
         overlay_service: &OverlayService,
         mempool_db: Arc<MempoolDb>,
         moderator: Moderator,
+        stats_tx: Arc<dyn MempoolEventsListener>,
         mempool_node_config: &MempoolNodeConfig,
     ) -> Result<Self> {
         let config_builder = MempoolConfigBuilder::new(mempool_node_config);
@@ -64,6 +68,8 @@ impl MempoolAdapterStdImpl {
             }),
             mempool_db,
             input_buffer: InputBuffer::default(),
+
+            stats_tx,
             top_known_anchor: RoundWatch::default(),
         })
     }
@@ -189,6 +195,7 @@ impl MempoolAdapterStdImpl {
             top_known_anchor: self.top_known_anchor.clone(),
             commit_finished: commit_finished.clone(),
             anchors_tx,
+            stats_tx: self.stats_tx.clone(),
         };
 
         // actual oldest sync round will be not less than this
