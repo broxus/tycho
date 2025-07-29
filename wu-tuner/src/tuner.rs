@@ -441,12 +441,22 @@ where
                     return Ok(());
                 };
 
-                // get MA from MA wu metrics on 1/2 of tune interval
-                let avg_range = history.avg_metrics.range((
-                    Bound::Included(avg_from_boundary),
-                    Bound::Excluded(wu_params_ma_seqno),
-                ));
-                let Some(avg_wu_metrics) = safe_metrics_avg_2(avg_range) else {
+                // // take just last avg anchors lag
+                // let Some((_, &avg_lag)) = history.avg_anchors_lag.last_key_value() else {
+                //     return Ok(());
+                // };
+
+                // // get MA from MA wu metrics on 1/2 of tune interval
+                // let avg_range = history.avg_metrics.range((
+                //     Bound::Included(avg_from_boundary),
+                //     Bound::Excluded(wu_params_ma_seqno),
+                // ));
+                // let Some(avg_wu_metrics) = safe_metrics_avg_2(avg_range) else {
+                //     return Ok(());
+                // };
+
+                // take just last avg wu metrics
+                let Some((_, avg_wu_metrics)) = history.avg_metrics.last_key_value() else {
                     return Ok(());
                 };
 
@@ -517,7 +527,7 @@ where
 
                     // calculate target wu params
                     let target_params =
-                        Self::calculate_target_wu_params(target_wu_price, &avg_wu_metrics);
+                        Self::calculate_target_wu_params(target_wu_price, avg_wu_metrics);
 
                     tracing::debug!(
                         %shard, seqno,
