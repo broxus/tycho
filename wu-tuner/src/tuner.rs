@@ -14,7 +14,9 @@ use tycho_types::models::{
     WorkUnitsParamsPrepare,
 };
 use tycho_util::FastHashSet;
-use tycho_util::num::{SafeSignedAvg, SafeUnsignedAvg, VecOfStreamingUnsignedMedian};
+use tycho_util::num::{
+    SafeSignedAvg, SafeUnsignedAvg, SafeUnsignedVecAvg, VecOfStreamingUnsignedMedian,
+};
 
 use crate::config::{WuTuneType, WuTunerConfig};
 use crate::updater::WuParamsUpdater;
@@ -938,7 +940,7 @@ pub struct WuMetricsAvg {
     last_wu_params: WorkUnitsParams,
     last_shard_accounts_count: u64,
     had_pending_messages: bool,
-    avg: VecOfStreamingUnsignedMedian,
+    avg: SafeUnsignedVecAvg,
 }
 
 impl WuMetricsAvg {
@@ -947,7 +949,7 @@ impl WuMetricsAvg {
             last_wu_params: Default::default(),
             last_shard_accounts_count: 0,
             had_pending_messages: true,
-            avg: VecOfStreamingUnsignedMedian::new(53),
+            avg: SafeUnsignedVecAvg::new(53),
         }
     }
 
