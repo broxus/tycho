@@ -11,8 +11,11 @@ use tycho_types::cell::HashBytes;
 pub struct WuTunerConfig {
     pub wu_span: u16,
     pub wu_ma_interval: u16,
+    pub wu_ma_range: u16,
     pub lag_span: u16,
     pub lag_ma_interval: u16,
+    pub lag_ma_range: u16,
+    pub wu_params_ma_interval: u16,
     pub tune_interval: u16,
     pub tune: WuTuneType,
     pub lag_bounds_ms: (i16, i16),
@@ -24,14 +27,17 @@ impl Default for WuTunerConfig {
     fn default() -> Self {
         Self {
             wu_span: 10,
-            wu_ma_interval: 4,
+            wu_ma_interval: 2,
+            wu_ma_range: 300,
             lag_span: 10,
-            lag_ma_interval: 4,
+            lag_ma_interval: 2,
+            lag_ma_range: 300,
+            wu_params_ma_interval: 100,
             tune_interval: 500,
             tune: Default::default(),
-            lag_bounds_ms: (200, 500),
-            target_wu_price: 70,
-            adaptive_wu_price: false,
+            lag_bounds_ms: (100, 5000),
+            target_wu_price: 65,
+            adaptive_wu_price: true,
         }
     }
 }

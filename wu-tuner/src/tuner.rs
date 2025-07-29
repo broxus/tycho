@@ -129,7 +129,7 @@ pub struct WuHistory {
     avg_metrics: BTreeMap<BlockSeqno, WuMetrics>,
     anchors_lag: BTreeMap<BlockSeqno, AnchorsLagSpan>,
     avg_anchors_lag: BTreeMap<BlockSeqno, i64>,
-    last_calculated_anchors_lag_seqno: u32,
+    last_calculated_avg_anchors_lag_seqno: u32,
 }
 
 impl WuHistory {
@@ -162,6 +162,8 @@ where
     config: Arc<WuTunerConfig>,
     updater: U,
     history: BTreeMap<ShardIdent, WuHistory>,
+    last_calculated_wu_params_seqno: u32,
+    wu_params_last_updated_on_seqno: u32,
     target_wu_params_history: BTreeMap<BlockSeqno, WorkUnitsParams>,
     avg_target_wu_params_history: BTreeMap<BlockSeqno, WorkUnitsParams>,
     wu_once_reported: FastHashSet<ShardIdent>,
@@ -178,6 +180,8 @@ where
             config,
             updater,
             history: Default::default(),
+            last_calculated_wu_params_seqno: 0,
+            wu_params_last_updated_on_seqno: 0,
             target_wu_params_history: Default::default(),
             avg_target_wu_params_history: Default::default(),
             wu_once_reported: Default::default(),
@@ -203,12 +207,16 @@ where
         let wu_span = self.config.wu_span.max(10) as u32;
         let wu_ma_interval = self.config.wu_ma_interval.max(2) as u32;
         let wu_ma_interval = wu_ma_interval.saturating_mul(wu_span);
+        let wu_ma_range = self.config.wu_ma_range.max(100) as u32;
 
         let lag_span = self.config.lag_span.max(10) as u32;
         let lag_ma_interval = self.config.lag_ma_interval.max(2) as u32;
         let lag_ma_interval = lag_ma_interval.saturating_mul(lag_span);
+        let lag_ma_range = self.config.lag_ma_range.max(100) as u32;
 
-        let tune_interval = self.config.tune_interval.max(100) as u32;
+        let wu_params_ma_interval = self.config.wu_params_ma_interval.max(40) as u32;
+
+        let tune_interval = self.config.tune_interval.max(200) as u32;
         let tune_seqno = seqno / tune_interval * tune_interval;
 
         // normilized seqno for calculations
@@ -217,6 +225,7 @@ where
         let wu_ma_seqno = seqno / wu_ma_interval * wu_ma_interval; // 240
         let lag_span_seqno = seqno / lag_span * lag_span; // 240
         let lag_ma_seqno = seqno / lag_ma_interval * lag_ma_interval; // 240
+        let wu_params_ma_seqno = seqno / wu_params_ma_interval * wu_params_ma_interval; // 240
 
         let history = self.history.entry(shard).or_default();
 
@@ -266,6 +275,13 @@ where
 
                     // report updated wu params to metrics
                     report_wu_params(&metrics.wu_params, &metrics.wu_params);
+
+                    self.wu_params_last_updated_on_seqno = seqno;
+                }
+
+                // on start set wu params last updated on current seqno
+                if self.wu_params_last_updated_on_seqno == 0 {
+                    self.wu_params_last_updated_on_seqno = seqno;
                 }
 
                 // update history
@@ -292,8 +308,8 @@ where
                     return Ok(());
                 }
 
-                // e.g. seqno = 240 -> avg_range = [190..240)
-                let avg_from_boundary = ma_seqno.saturating_sub(tune_interval / 2);
+                // e.g. seqno = 240 -> avg_range = [140..240)
+                let avg_from_boundary = ma_seqno.saturating_sub(wu_ma_range);
                 let avg_range = history.metrics.range_mut((
                     Bound::Included(avg_from_boundary),
                     Bound::Excluded(ma_seqno),
@@ -315,7 +331,7 @@ where
                 history.avg_metrics.insert(ma_seqno, avg);
 
                 // clear outdated history
-                let gc_boundary = wu_ma_seqno.saturating_sub(tune_interval); // e.g. seqno = 240 -> gc_boundary = 140
+                let gc_boundary = wu_ma_seqno.saturating_sub(tune_interval); // e.g. seqno = 240 -> gc_boundary = 40
                 if let Some((&first_key, _)) = history.metrics.first_key_value() {
                     if first_key < gc_boundary {
                         history.gc_wu_metrics(gc_boundary);
@@ -357,13 +373,13 @@ where
                 // calculate MA lag
                 if seqno < lag_ma_seqno
                     || lag_ma_seqno == 0
-                    || history.last_calculated_anchors_lag_seqno == lag_ma_seqno
+                    || history.last_calculated_avg_anchors_lag_seqno == lag_ma_seqno
                 {
                     return Ok(());
                 }
 
-                // e.g. seqno = 244 -> avg_range = [190..240)
-                let avg_from_boundary = lag_ma_seqno.saturating_sub(tune_interval / 2);
+                // e.g. seqno = 244 -> avg_range = [140..240)
+                let avg_from_boundary = lag_ma_seqno.saturating_sub(lag_ma_range);
                 let avg_range = history.anchors_lag.range_mut((
                     Bound::Included(avg_from_boundary),
                     Bound::Excluded(lag_ma_seqno),
@@ -371,7 +387,7 @@ where
                 let Some(avg_lag) = safe_anchors_lag_avg(avg_range) else {
                     return Ok(());
                 };
-                history.last_calculated_anchors_lag_seqno = lag_ma_seqno;
+                history.last_calculated_avg_anchors_lag_seqno = lag_ma_seqno;
 
                 // report avg anchor importing lag to metrics
                 report_anchor_lag_to_metrics(&shard, avg_lag);
@@ -388,7 +404,7 @@ where
                 history.avg_anchors_lag.insert(lag_ma_seqno, avg_lag);
 
                 // clear outdated history
-                let gc_boundary = lag_ma_seqno.saturating_sub(tune_interval); // e.g. seqno = 244 -> gc_boundary = 140
+                let gc_boundary = lag_ma_seqno.saturating_sub(tune_interval); // e.g. seqno = 244 -> gc_boundary = 40
                 if let Some((&first_key, _)) = history.anchors_lag.first_key_value() {
                     if first_key < gc_boundary {
                         history.gc_anchors_lag(gc_boundary);
@@ -407,11 +423,19 @@ where
                     return Ok(());
                 }
 
+                // try calculate target wu params
+                if seqno < wu_params_ma_seqno
+                    || wu_params_ma_seqno == 0
+                    || self.last_calculated_wu_params_seqno == wu_params_ma_seqno
+                {
+                    return Ok(());
+                }
+
                 // get MA from MA lag on 1/2 of tune interval
-                let avg_from_boundary = lag_ma_seqno.saturating_sub(tune_interval / 2);
+                let avg_from_boundary = wu_params_ma_seqno.saturating_sub(tune_interval / 2);
                 let avg_range = history.avg_anchors_lag.range((
                     Bound::Included(avg_from_boundary),
-                    Bound::Excluded(lag_ma_seqno),
+                    Bound::Excluded(wu_params_ma_seqno),
                 ));
                 let Some(avg_lag) = safe_anchors_lag_avg_2(avg_range) else {
                     return Ok(());
@@ -420,7 +444,7 @@ where
                 // get MA from MA wu metrics on 1/2 of tune interval
                 let avg_range = history.avg_metrics.range((
                     Bound::Included(avg_from_boundary),
-                    Bound::Excluded(lag_ma_seqno),
+                    Bound::Excluded(wu_params_ma_seqno),
                 ));
                 let Some(avg_wu_metrics) = safe_metrics_avg_2(avg_range) else {
                     return Ok(());
@@ -522,15 +546,10 @@ where
                     report_wu_params(&avg_wu_metrics.wu_params, &target_wu_params);
 
                     // needs to collect history more then 1/2 of tune interval to be able to perform update
-                    let first_seqno_in_history = history
-                        .metrics
-                        .first_key_value()
-                        .map(|(k, _)| *k)
-                        .unwrap_or_default();
                     let tune_half_seqno = tune_seqno.saturating_sub(tune_interval / 2);
 
                     // update wu params in blockchain if tune interval elapsed
-                    if first_seqno_in_history < tune_half_seqno
+                    if self.wu_params_last_updated_on_seqno < tune_half_seqno
                         && !self.adjustments.contains_key(&tune_seqno)
                     {
                         match &self.config.tune {
