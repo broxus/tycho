@@ -259,7 +259,7 @@ where
                     self.wu_once_reported.insert(shard);
                 }
 
-                // clear history if wu params changed
+                // check if wu params updated
                 if let Some((_, last)) = history.metrics.last_key_value()
                     && metrics.wu_params != last.last.wu_params
                 {
@@ -269,10 +269,6 @@ where
                         prev_params = ?last.last.wu_params,
                         "wu params updated",
                     );
-
-                    history.clear();
-                    self.target_wu_params_history.clear();
-                    self.avg_target_wu_params_history.clear();
 
                     // report updated wu params to metrics
                     report_wu_params(&metrics.wu_params, &metrics.wu_params);
