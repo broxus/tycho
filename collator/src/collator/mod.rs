@@ -606,6 +606,8 @@ impl CollatorStdImpl {
         collation_session: Arc<CollationSessionInfo>,
         new_prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()> {
+        tracing::info!(target: tracing_targets::COLLATOR, "resume_collation");
+
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let histogram =
             HistogramGuard::begin_with_labels("tycho_collator_resume_collation_time_high", &labels);
@@ -631,20 +633,41 @@ impl CollatorStdImpl {
                     && self.store_new_state_tasks.len()
                         > self.config.untrack_prev_state_after as usize
                 {
+                    let _histogram_1 = HistogramGuard::begin_with_labels(
+                        "tycho_collator_handle_shard_time_high",
+                        &labels,
+                    );
+
                     // get last store task
                     let last_task = self.store_new_state_tasks.pop().unwrap();
 
                     // if it is finished then we can just reload prev state
                     if last_task.store_new_state_task.is_finished() {
+                        let histogram = HistogramGuard::begin_with_labels(
+                            "tycho_collator_wait_last_task_time_high",
+                            &labels,
+                        );
+
                         last_task.store_new_state_task.await?;
+
+                        drop(histogram);
+
+                        tracing::info!(target: tracing_targets::COLLATOR, "reload_prev_data");
 
                         // and reload pure prev state in working state
                         Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
                             .await?;
                     } else {
+                        let histogram_4 = HistogramGuard::begin_with_labels(
+                            "tycho_collator_wait_prev_task_time_high",
+                            &labels,
+                        );
+
                         // if it is not finished then wait for the previous one and apply merkle update
                         let prev_task = self.store_new_state_tasks.pop().unwrap();
                         prev_task.store_new_state_task.await?;
+
+                        drop(histogram_4);
 
                         // load stored state
                         let prev_root = self
@@ -682,12 +705,22 @@ impl CollatorStdImpl {
 
                         drop(histogram_apply_merkles);
 
+                        let _histogram_2 = HistogramGuard::begin_with_labels(
+                            "tycho_collator_update_prev_data_time_high",
+                            &labels,
+                        );
+
                         // finalize last store task in background
                         self.background_store_new_state_tx.send(last_task)?;
 
                         // and update pure prev state in working state
                         Self::update_prev_data(&mut working_state, new_state).await?;
                     }
+
+                    let _histogram_3 = HistogramGuard::begin_with_labels(
+                        "tycho_collator_finalize_state_task_time_high",
+                        &labels,
+                    );
 
                     // finalize all remaining state store tasks in background
                     for cx in self.store_new_state_tasks.drain(..) {
@@ -1657,7 +1690,7 @@ impl CollatorStdImpl {
         &mut self,
         mut working_state: Box<WorkingState>,
     ) -> Result<()> {
-        tracing::debug!(target: tracing_targets::COLLATOR,
+        tracing::info!(target: tracing_targets::COLLATOR,
             "Check if can collate next master block",
         );
 
@@ -1844,7 +1877,7 @@ impl CollatorStdImpl {
         &mut self,
         mut working_state: Box<WorkingState>,
     ) -> Result<()> {
-        tracing::debug!(target: tracing_targets::COLLATOR,
+        tracing::info!(target: tracing_targets::COLLATOR,
             "Check if can collate next shard block",
         );
 
