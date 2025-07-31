@@ -106,7 +106,8 @@ impl CommitArchiveTask {
                             return Err(BlockStorageError::BlockDataNotFound.into());
                         };
 
-                        tycho_util::compression::zstd_decompress(&data, &mut decompressed_buffer)?;
+                        tycho_util::compression::ZstdDecompress::begin(&data)?
+                            .decompress(&mut decompressed_buffer)?;
                         let data = &decompressed_buffer;
 
                         // Serialize entry header

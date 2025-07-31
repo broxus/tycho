@@ -22,7 +22,7 @@ use tycho_network::PeerId;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::models::{BlockId, ShardStateUnsplit};
 use tycho_types::prelude::*;
-use tycho_util::compression::{ZstdCompressStream, zstd_decompress};
+use tycho_util::compression::{ZstdCompressStream, zstd_decompress_simple};
 use tycho_util::project_root;
 
 use crate::network::TestNode;
@@ -320,16 +320,15 @@ async fn archives() -> Result<()> {
     // Get the compressed archive data from storage
     let stored_archive_data = storage
         .block_storage()
-        .get_archive_compressed(archive_id)
+        .get_archive_compressed_full(archive_id)
         .await?
         .expect("archive should exist");
 
     // Decompress the stored archive and compare with the original
-    let mut decompressed_stored = Vec::new();
-    zstd_decompress(&stored_archive_data, &mut decompressed_stored)?;
+    let decompressed_stored = zstd_decompress_simple(&stored_archive_data)?;
 
     // Compare the decompressed content
-    let original_decompressed = decompress(&first_archive_data);
+    let original_decompressed = zstd_decompress_simple(&first_archive_data)?;
     assert_eq!(
         original_decompressed, decompressed_stored,
         "Archive content should match after decompression"
@@ -429,8 +428,7 @@ fn repack_heavy_archives() -> Result<()> {
         let data = std::fs::read(&path)?;
 
         // Decompress
-        let mut decompressed = Vec::new();
-        zstd_decompress(&data, &mut decompressed)?;
+        let decompressed = zstd_decompress_simple(&data)?;
         drop(data);
 
         // Compress
@@ -713,13 +711,13 @@ async fn check_archive(storage: &CoreStorage, original_archive: &[u8], seqno: u3
 
     let got_archive = storage
         .block_storage()
-        .get_archive_compressed(archive_id)
+        .get_archive_compressed_full(archive_id)
         .await?
         .expect("archive should exist");
     let got_archive = got_archive.as_ref();
 
-    let original_decompressed = decompress(original_archive);
-    let got_decompressed = decompress(got_archive);
+    let original_decompressed = zstd_decompress_simple(original_archive)?;
+    let got_decompressed = zstd_decompress_simple(got_archive)?;
 
     let original_len = original_decompressed.len();
     let got_len = got_decompressed.len();
@@ -743,12 +741,6 @@ async fn check_archive(storage: &CoreStorage, original_archive: &[u8], seqno: u3
     assert_eq!(original_len, got_len, "Decompressed size mismatch");
 
     Ok(())
-}
-
-fn decompress(data: &[u8]) -> Vec<u8> {
-    let mut decompressed = Vec::new();
-    zstd_decompress(data, &mut decompressed).unwrap();
-    decompressed
 }
 
 struct CheckArchive<'a>(&'a Archive);

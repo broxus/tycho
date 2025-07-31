@@ -150,6 +150,10 @@ tycho-util = { path = "./util", version = "0.2.12" }
 tycho-util-proc = { path = "./util-proc", version = "0.2.12" }
 tycho-wu-tuner = { path = "./wu-tuner", version = "0.2.12" }
 
+[patch.crates-io]
+# add patches here
+cassadilia = { git = "https://github.com/broxus/cassadilia.git", rev = "733dfac5775a9a350fb04db46a9b08870574f1d8" }
+
 [workspace.lints.rust]
 future_incompatible = "warn"
 nonstandard_style = "warn"
