@@ -107,7 +107,7 @@ impl Producer {
 
         let includes = includes
             .into_iter()
-            .map(|info| (info.author(), *info.digest()))
+            .map(|info| (*info.author(), *info.digest()))
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(
@@ -118,7 +118,7 @@ impl Producer {
 
         let witness = witness
             .into_iter()
-            .map(|info| (info.author(), *info.digest()))
+            .map(|info| (*info.author(), *info.digest()))
             .collect::<BTreeMap<_, _>>();
 
         let evidence = proven_vertex
@@ -217,11 +217,11 @@ impl Producer {
         if info.round() == current_round.round().prev()
             && info.anchor_link(link_field) == &Link::ToSelf
         {
-            Link::Direct(Through::Includes(info.author()))
+            Link::Direct(Through::Includes(*info.author()))
         } else {
             Link::Indirect {
                 to: info.anchor_id(link_field),
-                path: Through::Includes(info.author()),
+                path: Through::Includes(*info.author()),
             }
         }
     }
@@ -248,11 +248,11 @@ impl Producer {
         if info.round() == current_round.prev().prev()
             && info.anchor_link(link_field) == &Link::ToSelf
         {
-            *link = Link::Direct(Through::Witness(info.author()));
+            *link = Link::Direct(Through::Witness(*info.author()));
         } else {
             *link = Link::Indirect {
                 to: info.anchor_id(link_field),
-                path: Through::Witness(info.author()),
+                path: Through::Witness(*info.author()),
             };
         }
     }
