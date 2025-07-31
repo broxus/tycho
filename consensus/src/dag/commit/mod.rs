@@ -123,10 +123,10 @@ impl Committer {
 
             let _span = tracing::error_span!(
                 "anchor",
-                author = display(&next.anchor.author().alt()),
+                author = display(next.anchor.author().alt()),
                 round = next.anchor.round().0,
-                digest = display(&next.anchor.digest().alt()),
-                proof = display(&next.proof.digest().alt()),
+                digest = display(next.anchor.digest().alt()),
+                proof = display(next.proof.digest().alt()),
                 trigger = (next.direct_trigger.as_ref()).map(|p| display(p.digest().alt())),
             )
             .entered();

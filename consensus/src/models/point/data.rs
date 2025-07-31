@@ -128,7 +128,7 @@ impl PointData {
     }
 
     /// should be disclosed by wrapping point
-    pub(super) fn anchor_link(&self, link_field: AnchorStageRole) -> &'_ Link {
+    pub(super) fn anchor_link(&self, link_field: AnchorStageRole) -> &Link {
         match link_field {
             AnchorStageRole::Trigger => &self.anchor_trigger,
             AnchorStageRole::Proof => &self.anchor_proof,

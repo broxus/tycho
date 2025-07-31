@@ -93,11 +93,11 @@ impl DagRound {
         self.0.peer_count
     }
 
-    pub fn anchor_stage(&self) -> Option<&'_ AnchorStage> {
+    pub fn anchor_stage(&self) -> Option<&AnchorStage> {
         self.0.anchor_stage.as_ref()
     }
 
-    pub fn threshold(&self) -> &'_ Threshold {
+    pub fn threshold(&self) -> &Threshold {
         &self.0.threshold
     }
 
@@ -138,7 +138,7 @@ impl DagRound {
             .filter_map(move |a| filter_map(a.pair()))
     }
 
-    pub fn prev(&self) -> &'_ WeakDagRound {
+    pub fn prev(&self) -> &WeakDagRound {
         &self.0.prev
     }
 
@@ -160,7 +160,7 @@ impl DagRound {
             self.round(),
             "Coding error: point round does not match dag round"
         );
-        self.edit(&point.info().author(), |loc| {
+        self.edit(point.info().author(), |loc| {
             loc.versions
                 .entry(*point.info().digest())
                 .and_modify(|_| {
@@ -188,7 +188,7 @@ impl DagRound {
             self.round(),
             "Coding error: point round does not match dag round"
         );
-        self.edit(&point.info().author(), |loc| {
+        self.edit(point.info().author(), |loc| {
             loc.versions
                 .entry(*point.info().digest())
                 .and_modify(|first| first.resolve_download(point, Some(reason)))
@@ -214,7 +214,7 @@ impl DagRound {
             self.round(),
             "Coding error: point round does not match dag round"
         );
-        self.edit(&point.info().author(), |loc| {
+        self.edit(point.info().author(), |loc| {
             loc.versions
                 .entry(*point.info().digest())
                 .and_modify(|first| first.resolve_download(point, None))
@@ -289,7 +289,7 @@ impl DagRound {
             self.round(),
             "Coding error: point restore round does not match dag round"
         );
-        let author = point_restore.author();
+        let author = *point_restore.author();
         self.edit(&author, |loc| {
             loc.versions
                 .entry(*point_restore.digest())

@@ -46,11 +46,11 @@ impl PointRestore {
             Self::NotFound(round, _, _) => *round,
         }
     }
-    pub fn author(&self) -> PeerId {
+    pub fn author(&self) -> &PeerId {
         match self {
             Self::Exists(info) | Self::Validated(info, _) => info.author(),
-            Self::IllFormed(id, _) => id.author,
-            Self::NotFound(_, _, status) => status.author,
+            Self::IllFormed(id, _) => &id.author,
+            Self::NotFound(_, _, status) => &status.author,
         }
     }
     pub fn digest(&self) -> &Digest {
@@ -62,7 +62,7 @@ impl PointRestore {
     }
     pub fn id(&self) -> PointId {
         PointId {
-            author: self.author(),
+            author: *self.author(),
             round: self.round(),
             digest: *self.digest(),
         }

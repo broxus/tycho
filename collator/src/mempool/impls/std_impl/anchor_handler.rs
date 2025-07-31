@@ -118,7 +118,7 @@ impl Shuttle {
                     id: anchor_id,
                     prev_id: committed.prev_anchor.map(|round| round.0),
                     chain_time,
-                    author: committed.anchor.author(),
+                    author: *committed.anchor.author(),
                     externals: unique_messages,
                 }));
             }

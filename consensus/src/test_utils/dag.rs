@@ -101,7 +101,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
         .expect("prev anchor_time must exist");
     let includes = prev_points
         .iter()
-        .map(|point| (point.author(), *point.digest()))
+        .map(|point| (*point.author(), *point.digest()))
         .collect::<BTreeMap<_, _>>();
 
     let mut points = FastHashMap::default();
@@ -120,7 +120,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
             msg_bytes,
             round_ctx.conf(),
         );
-        points.insert(point.info().author(), point);
+        points.insert(*point.info().author(), point);
     }
 
     for point in points.values() {

@@ -203,7 +203,7 @@ impl Verifier {
         cert.set_deps(cert_deps);
 
         for prev_other_versions in r_1
-            .view(&info.author(), |loc| {
+            .view(info.author(), |loc| {
                 // do not add same prev_digest twice - it is added as one of 'includes'
                 Self::other_versions(loc, info.prev_digest())
             })
@@ -325,10 +325,9 @@ impl Verifier {
             (info.witness().iter()).map(move |(author, digest)| (r_2, false, author, digest))
         });
 
-        let curr_author = &info.author();
         for (dag_round, is_includes, author, digest) in includes.chain(witness) {
             let shared =
-                dag_round.add_dependency(author, digest, curr_author, downloader, store, ctx);
+                dag_round.add_dependency(author, digest, info.author(), downloader, store, ctx);
 
             if is_includes {
                 cert_deps.includes.insert(*digest, shared.weak_cert());
@@ -519,7 +518,7 @@ impl Verifier {
                 return Some(VerifyError::Fail(reason));
             }
             (Ok(total), scheduled) => {
-                if !scheduled.contains(&info.author()) {
+                if !scheduled.contains(info.author()) {
                     let reason = VerifyFailReason::UnknownAuthor;
                     return Some(VerifyError::Fail(reason));
                 }
