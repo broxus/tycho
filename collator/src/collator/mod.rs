@@ -638,6 +638,10 @@ impl CollatorStdImpl {
                         &labels,
                     );
 
+                    for task in &self.store_new_state_tasks {
+                        tracing::info!(target: tracing_targets::COLLATOR, block_id = %task.block_id.as_short_id(), "waiting tasks");
+                    }
+
                     // get last store task
                     let last_task = self.store_new_state_tasks.pop().unwrap();
 
@@ -683,7 +687,8 @@ impl CollatorStdImpl {
                             Ok(new_state)
                         };
 
-                        let mut unfinished_tasks: Vec<StateUpdateContext> = vec![];
+                        let mut unfinished_tasks: Vec<StateUpdateContext> = vec![last_task];
+
                         while let Some(prev_task) = self.store_new_state_tasks.pop() {
                             if prev_task.store_new_state_task.is_finished() {
                                 let histogram_4 = HistogramGuard::begin_with_labels(
@@ -698,27 +703,26 @@ impl CollatorStdImpl {
                                 tracing::info!(target: tracing_targets::COLLATOR, count = unfinished_tasks.len(), "unfinished_tasks");
 
                                 // load stored state
-                                let prev_root = self
+                                let mut prev_state = self
                                     .state_node_adapter
                                     .load_state_root(&prev_task.block_id)
                                     .await
                                     .context("failed to load prev shard state")?;
 
-                                let mut new_state =
-                                    apply_merkle(prev_root.clone(), prev_task.state_update.clone())
-                                        .await?;
-
+                                let mut old = prev_task.block_id.as_short_id();
                                 while let Some(task) = unfinished_tasks.pop() {
-                                    new_state =
-                                        apply_merkle(new_state.clone(), task.state_update.clone())
-                                            .await?;
+                                    tracing::info!(target: tracing_targets::COLLATOR, %old, new = %task.block_id.as_short_id(), "apply merkle updates");
+
+                                    prev_state = task.state_update.apply(&prev_state)?;
+
+                                    old = task.block_id.as_short_id();
 
                                     // finalize last store task in background
                                     self.background_store_new_state_tx.send(task)?;
                                 }
 
                                 // and update pure prev state in working state
-                                Self::update_prev_data(&mut working_state, new_state).await?;
+                                Self::update_prev_data(&mut working_state, prev_state).await?;
                             } else {
                                 unfinished_tasks.push(prev_task);
                             }
