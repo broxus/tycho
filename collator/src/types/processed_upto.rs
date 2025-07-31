@@ -420,10 +420,7 @@ pub fn find_min_processed_to_by_shards(
 ) -> ProcessedTo {
     let mut result = ProcessedTo::default();
 
-    for (_, shard_processed_to_by_partitions) in all_shards_processed_to_by_partitions
-        .values()
-        .filter(|(updated, _)| *updated)
-    {
+    for (_, shard_processed_to_by_partitions) in all_shards_processed_to_by_partitions.values() {
         for partition_processed_to in shard_processed_to_by_partitions.values() {
             for (&shard_id, &to_key) in partition_processed_to {
                 result
