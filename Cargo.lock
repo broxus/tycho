@@ -435,13 +435,13 @@ dependencies = [
 [[package]]
 name = "cassadilia"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef0c827399f6ae34c474b2f3a480b35cea5c0160977abfcc865c06bfcd7c3f2c"
+source = "git+https://github.com/broxus/cassadilia.git?rev=7b7bf14344a86bbed9abdb40fa61dfc5adce83d8#7b7bf14344a86bbed9abdb40fa61dfc5adce83d8"
 dependencies = [
  "blake3",
  "bytes",
  "hex",
  "kdl",
+ "libc",
  "parking_lot",
  "tempfile",
  "thiserror 2.0.12",

@@ -196,6 +196,7 @@ impl GcSubscriber {
             if let Err(e) = storage
                 .block_storage()
                 .remove_outdated_archives(target_seqno)
+                .await
             {
                 tracing::error!("failed to remove outdated archives: {e:?}");
             }
