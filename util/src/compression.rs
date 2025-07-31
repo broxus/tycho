@@ -6,50 +6,85 @@ use zstd_safe::{CCtx, CParameter, DCtx, InBuffer, OutBuffer, ResetDirective, get
 
 type Result<T> = std::result::Result<T, ZstdError>;
 
-/// tries to decompress data with known size from header, if it fails, fallbacks to streaming decompression
-pub fn zstd_decompress(input: &[u8], output: &mut Vec<u8>) -> Result<()> {
-    output.clear(); // clear even if input is empty
-
-    if input.is_empty() {
-        return Ok(());
-    }
-
-    // try to decompress with known size from header
-    if try_decompress_with_size(input, output)? {
-        return Ok(());
-    }
-
-    // otherwise fallback to streaming decompress
-    let mut streaming_decoder = ZstdDecompressStream::new(input.len())?;
-    streaming_decoder.write(input, output)?;
-
-    Ok(())
+#[derive(Clone, Copy)]
+pub struct ZstdDecompress<'a> {
+    input: &'a [u8],
+    decompressed_size: Option<u64>,
 }
 
-fn try_decompress_with_size(input: &[u8], output: &mut Vec<u8>) -> Result<bool> {
-    let decompressed_size =
-        unsafe { zstd_sys::ZSTD_getFrameContentSize(input.as_ptr().cast(), input.len() as _) };
-    // fixme: or ZSTD_findDecompressedSize should be used?
+impl<'a> ZstdDecompress<'a> {
+    pub fn estimate_size(input: &'a [u8]) -> Result<Option<u64>> {
+        const ZSTD_CONTENTSIZE_UNKNOWN: u64 = u64::MAX;
+        const ZSTD_CONTENTSIZE_ERROR: u64 = u64::MAX - 1;
 
-    // cast to i32 to match zstd_sys::ZSTD_CONTENTSIZE_*
-    let decompressed_size_err = decompressed_size as i32;
-
-    match decompressed_size_err {
-        // fixme: should we try streaming decompression if zstd_sys::ZSTD_CONTENTSIZE_ERROR?
-        zstd_sys::ZSTD_CONTENTSIZE_UNKNOWN | zstd_sys::ZSTD_CONTENTSIZE_ERROR => Ok(false),
-        // fixme: i'm not sure, maybe this should kick in if input is too large (e.g. > 4GB)
-        _ if decompressed_size > input.len().saturating_mul(10) as u64 => {
-            Err(ZstdError::SuspiciousCompressionRatio {
-                compressed_size: input.len(),
-                decompressed_size,
-            })
+        if input.is_empty() {
+            return Ok(Some(0));
         }
-        _ => {
-            output.reserve(decompressed_size as _);
-            zstd_safe::decompress(output, input).map_err(ZstdError::from_raw)?;
-            Ok(true)
+
+        // Try to decompress with known size from header
+        let decompressed_size =
+            unsafe { zstd_sys::ZSTD_getFrameContentSize(input.as_ptr().cast(), input.len() as _) };
+
+        match decompressed_size {
+            // TODO: Maybe forbid decompress when unknown?
+            ZSTD_CONTENTSIZE_UNKNOWN => Ok(None),
+            ZSTD_CONTENTSIZE_ERROR => Err(ZstdError::InvalidDecompressedSize {
+                decompressed_size,
+                input_size: input.len(),
+            }),
+            _ if decompressed_size > input.len().saturating_mul(10) as u64 => {
+                Err(ZstdError::SuspiciousCompressionRatio {
+                    compressed_size: input.len(),
+                    decompressed_size,
+                })
+            }
+            _ => Ok(Some(decompressed_size)),
         }
     }
+
+    pub fn begin(input: &'a [u8]) -> Result<Self> {
+        let decompressed_size = Self::estimate_size(input)?;
+        Ok(Self {
+            input,
+            decompressed_size,
+        })
+    }
+
+    pub fn with_known_size(input: &'a [u8], decompressed_size: Option<u64>) -> Self {
+        Self {
+            input,
+            decompressed_size,
+        }
+    }
+
+    pub fn decompressed_size(&self) -> Option<u64> {
+        self.decompressed_size
+    }
+
+    pub fn decompress(self, output: &mut Vec<u8>) -> Result<()> {
+        const MAX_SAFE_RESERVE: usize = 1 << 30; // 1 GB
+
+        output.clear();
+        if self.input.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(decompressed_size) = self.decompressed_size {
+            output.reserve(std::cmp::min(decompressed_size as usize, MAX_SAFE_RESERVE));
+            zstd_safe::decompress(output, self.input).map_err(ZstdError::from_raw)?;
+            Ok(())
+        } else {
+            ZstdDecompressStream::new(self.input.len())?.write(self.input, output)
+        }
+    }
+}
+
+/// tries to decompress data with known size from header, if it fails, fallbacks to streaming decompression
+#[cfg(any(test, feature = "test"))]
+pub fn zstd_decompress_simple(input: &[u8]) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    ZstdDecompress::begin(input)?.decompress(&mut output)?;
+    Ok(output)
 }
 
 /// Compresses the input data using zstd with the specified compression level.
@@ -69,7 +104,7 @@ pub fn zstd_compress(input: &[u8], output: &mut Vec<u8>, compression_level: i32)
 
 /// Test utility for compression operations
 #[cfg(any(test, feature = "test"))]
-pub fn compress(data: &[u8]) -> Vec<u8> {
+pub fn zstd_compress_simple(data: &[u8]) -> Vec<u8> {
     let mut compressed = Vec::new();
     zstd_compress(data, &mut compressed, 3);
     compressed
@@ -413,22 +448,19 @@ mod tests {
             let mut compressed = Vec::new();
             zstd_compress(&input, &mut compressed, 3);
 
-            let mut decompressed = Vec::new();
-            zstd_decompress(&compressed, &mut decompressed).unwrap();
+            let decompressed = zstd_decompress_simple(&compressed).unwrap();
             assert_eq!(input, decompressed.as_slice());
         }
 
         let input = b"Hello, world!";
         let mut compressed = Vec::new();
         zstd_compress(input, &mut compressed, 3);
-        let mut decompressed = Vec::new();
-        zstd_decompress(&compressed, &mut decompressed).unwrap();
+        let decompressed = zstd_decompress_simple(&compressed).unwrap();
         assert_eq!(input, decompressed.as_slice());
 
         let mut input = b"bad".to_vec();
         input.extend_from_slice(&compressed);
-        let mut decompressed = Vec::new();
-        zstd_decompress(&input, &mut decompressed).unwrap_err();
+        zstd_decompress_simple(&input).unwrap_err();
     }
 
     #[test]
@@ -489,11 +521,7 @@ mod tests {
         compressor.finish(&mut compress_buffer).unwrap();
         result_buf.extend_from_slice(&compress_buffer);
 
-        let decompressed = {
-            let mut buff = Vec::new();
-            zstd_decompress(&result_buf, &mut buff).unwrap();
-            buff
-        };
+        let decompressed = zstd_decompress_simple(&result_buf).unwrap();
         assert_eq!(input, decompressed);
 
         let decompressed = {
@@ -510,7 +538,7 @@ mod tests {
     #[test]
     fn test_dos() {
         for malicious in malicious_files() {
-            if let Ok(true) = try_decompress_with_size(&malicious, &mut Vec::new()) {
+            if zstd_decompress_simple(&malicious).is_ok() {
                 panic!("Malicious file was decompressed successfully");
             }
         }

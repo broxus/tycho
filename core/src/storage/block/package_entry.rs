@@ -89,7 +89,7 @@ impl StoredValue for PartialBlockId {
 }
 
 /// Package entry id.
-#[derive(Debug, Hash, Eq, PartialEq, Clone)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 pub struct PackageEntryKey {
     pub block_id: PartialBlockId,
     pub ty: ArchiveEntryType,
@@ -272,7 +272,7 @@ mod tests {
                 },
                 ..base
             },
-            base.clone(),
+            base,
             Ordering::Greater,
         );
 
@@ -298,7 +298,7 @@ mod tests {
 
         // seqno
         check(
-            base.clone(),
+            base,
             PackageEntryKey {
                 block_id: PartialBlockId {
                     seqno: base.block_id.seqno + 1,
@@ -313,7 +313,7 @@ mod tests {
         let mut bigger_hash = base.block_id.root_hash;
         bigger_hash.0[31] = 2; // just need a lexicographically larger hash
         check(
-            base.clone(),
+            base,
             PackageEntryKey {
                 block_id: PartialBlockId {
                     root_hash: bigger_hash,
@@ -326,7 +326,7 @@ mod tests {
 
         // entry type
         check(
-            base.clone(),
+            base,
             PackageEntryKey {
                 ty: ArchiveEntryType::Proof,
                 ..base

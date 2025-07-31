@@ -15,7 +15,7 @@ use tycho_types::models::{
 };
 use tycho_types::num::Tokens;
 use tycho_util::FastHashSet;
-use tycho_util::compression::zstd_decompress;
+use tycho_util::compression::zstd_decompress_simple;
 
 use crate::storage::persistent_state::{
     CacheKey, PersistentStateKind, QueueStateReader, QueueStateWriter,
@@ -91,8 +91,7 @@ async fn persistent_shard_state() -> Result<()> {
             .await
             .unwrap();
 
-        let mut boc = Vec::new();
-        zstd_decompress(&persistent_state_data, &mut boc)?;
+        let boc = zstd_decompress_simple(&persistent_state_data)?;
 
         // Check state
         let cell = Boc::decode(&boc)?;
@@ -356,7 +355,7 @@ async fn persistent_queue_state_read_write() -> Result<()> {
             .clone();
         assert_eq!(cached.mc_seqno, target_mc_seqno);
 
-        let mut written = tokio::fs::read(
+        let written = tokio::fs::read(
             states_dir
                 .file(PersistentStateKind::Queue.make_file_name(&target_block_id))
                 .path(),
@@ -366,8 +365,7 @@ async fn persistent_queue_state_read_write() -> Result<()> {
 
         let compressed_size = written.len() as u64;
 
-        written.clear();
-        zstd_decompress(&cached.file, &mut written)?;
+        let written = zstd_decompress_simple(&cached.file)?;
 
         let decompressed_size = written.len() as u64;
 

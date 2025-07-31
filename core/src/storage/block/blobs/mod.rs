@@ -55,12 +55,13 @@ use tycho_storage::kv::StoredValue;
 use tycho_types::boc::{Boc, BocRepr};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::*;
+use tycho_util::compression::ZstdDecompress;
 use tycho_util::metrics::HistogramGuard;
-pub use types::{ArchiveId, ArchiveState, BlockGcStats, BlockStorageError};
-pub use util::remove_blocks;
 use weedb::rocksdb;
 
 use self::task::CommitArchiveTask;
+pub use self::types::{ArchiveId, ArchiveState, BlockGcStats, BlockStorageError};
+pub use self::util::remove_blocks;
 use super::package_entry::{PackageEntryKey, PackageEntryKeyEncoder, PartialBlockId};
 use crate::storage::block_handle::BlockDataGuard;
 use crate::storage::{BlockHandle, BlockHandleStorage, CoreDb};
@@ -124,9 +125,9 @@ impl BlobStorage {
     fn recover_archive_state(&self) -> Result<ArchiveState> {
         let committed_archives = self
             .archives
-            .index_snapshot()
-            .keys()
-            .copied()
+            .read_index_state()
+            .iter()
+            .map(|(id, _)| *id)
             .collect::<BTreeSet<u32>>();
 
         let mut building_archives = Vec::new();
@@ -239,48 +240,53 @@ impl BlobStorage {
             })
         });
 
-        let index = self.blocks.index_snapshot();
+        let blocks = self.blocks.clone();
+        tokio::task::spawn_blocking(move || {
+            let index = blocks.read_index_state().keys_snapshot();
 
-        let iter = match &continuation_key {
-            Some(key) => index.range(key..),
-            None => index.range(..),
-        };
+            let iter = match &continuation_key {
+                Some(key) => index.range(key..),
+                None => index.range(..),
+            };
 
-        let mut blocks = Vec::new();
-        let mut last_key = None;
+            let mut result = Vec::new();
+            let mut last_key = None;
 
-        for (key, _) in iter {
-            if key.ty != ArchiveEntryType::Block {
-                // Ignore non-block entries
-                continue;
+            for (key, _) in iter {
+                if key.ty != ArchiveEntryType::Block {
+                    // Ignore non-block entries
+                    continue;
+                }
+
+                if result.len() >= LIMIT {
+                    last_key = Some(key.block_id.as_short_id());
+                    break;
+                }
+
+                // Get the compressed block data to calculate the actual file hash
+                if let Some(compressed_data) = blocks.get(key)? {
+                    let mut decompressed = Vec::new();
+                    tycho_util::compression::ZstdDecompress::begin(&compressed_data)?
+                        .decompress(&mut decompressed)?;
+
+                    // Calculate hash of the decompressed BOC data
+                    let file_hash = Boc::file_hash(&decompressed);
+                    let block_id = key.block_id.make_full(file_hash);
+
+                    result.push(block_id);
+                }
             }
 
-            if blocks.len() >= LIMIT {
-                last_key = Some(key.block_id.as_short_id());
-                break;
-            }
-
-            // Get the compressed block data to calculate the actual file hash
-            if let Some(compressed_data) = self.blocks.get(key)? {
-                let mut decompressed = Vec::new();
-                tycho_util::compression::zstd_decompress(&compressed_data, &mut decompressed)?;
-
-                // Calculate hash of the decompressed BOC data
-                let file_hash = Boc::file_hash(&decompressed);
-                let block_id = key.block_id.make_full(file_hash);
-
-                blocks.push(block_id);
-            }
-        }
-
-        Ok((blocks, last_key))
+            Ok((result, last_key))
+        })
+        .await?
     }
 
     pub fn list_archive_ids(&self) -> Vec<u32> {
         self.archive_ids.read().items.iter().cloned().collect()
     }
 
-    pub fn find_mc_block_data(&self, mc_seqno: u32) -> Result<Option<Block>> {
+    pub async fn find_mc_block_data(&self, mc_seqno: u32) -> Result<Option<Block>> {
         let lower_bound = BlockId {
             shard: ShardIdent::MASTERCHAIN,
             seqno: mc_seqno,
@@ -298,23 +304,32 @@ impl BlobStorage {
         let lower_key = PackageEntryKey::block(&lower_bound);
         let upper_key = PackageEntryKey::block(&upper_bound);
 
-        let index = self.blocks.index_snapshot();
+        let blocks = self.blocks.clone();
+        tokio::task::spawn_blocking(move || {
+            let index = blocks
+                .read_index_state()
+                .range(lower_key..upper_key)
+                .filter_map(|(key, _)| (key.ty == ArchiveEntryType::Block).then_some(*key))
+                .collect::<Vec<_>>();
 
-        for (key, _) in index.range(lower_key..upper_key) {
-            if key.ty != ArchiveEntryType::Block {
-                continue;
+            for key in index {
+                if key.ty != ArchiveEntryType::Block {
+                    continue;
+                }
+
+                // Found a masterchain block with the requested seqno
+                // Now we need to fetch the actual block data
+                if let Some(compressed_data) = blocks.get(&key)? {
+                    let mut decompressed = Vec::new();
+                    tycho_util::compression::ZstdDecompress::begin(&compressed_data)?
+                        .decompress(&mut decompressed)?;
+                    return Ok(Some(BocRepr::decode::<Block, _>(&decompressed)?));
+                }
             }
 
-            // Found a masterchain block with the requested seqno
-            // Now we need to fetch the actual block data
-            if let Some(compressed_data) = self.blocks.get(key)? {
-                let mut decompressed = Vec::new();
-                tycho_util::compression::zstd_decompress(&compressed_data, &mut decompressed)?;
-                return Ok(Some(BocRepr::decode::<Block, _>(&decompressed)?));
-            }
-        }
-
-        Ok(None)
+            Ok(None)
+        })
+        .await?
     }
 
     /// This function is the primary way we add a block to a long-term storage archive. It's a three-step process:
@@ -427,7 +442,7 @@ impl BlobStorage {
     }
 
     pub fn get_archive_size(&self, id: u32) -> Result<Option<usize>> {
-        if let Some(size) = self.archives.size(&id)? {
+        if let Some(size) = self.archives.get_size(&id)? {
             return Ok(Some(size as usize));
         }
 
@@ -435,11 +450,18 @@ impl BlobStorage {
     }
 
     /// Get the complete archive (compressed).
-    pub async fn get_archive(&self, id: u32) -> Result<Option<Bytes>> {
-        if let Some(compressed_data) = self.archives.get(&id)? {
-            return Ok(Some(compressed_data));
-        }
-        Ok(None)
+    ///
+    /// Must not be used for anything other than tests.
+    #[cfg(any(test, feature = "test"))]
+    pub async fn get_archive_full(&self, id: u32) -> Result<Option<Bytes>> {
+        let archives = self.archives.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some(compressed_data) = archives.get(&id)? {
+                return Ok(Some(compressed_data));
+            }
+            Ok(None)
+        })
+        .await?
     }
 
     /// Get a chunk of the archive at the specified offset.
@@ -449,88 +471,107 @@ impl BlobStorage {
             return Err(BlockStorageError::InvalidOffset.into());
         }
 
-        self.archives
-            .get_range(&id, offset, offset + chunk_size)?
-            .ok_or(BlockStorageError::ArchiveNotFound.into())
+        let archives = self.archives.clone();
+        tokio::task::spawn_blocking(move || {
+            archives
+                .get_range(&id, offset, offset + chunk_size)?
+                .ok_or(BlockStorageError::ArchiveNotFound.into())
+        })
+        .await?
     }
 
     pub fn subscribe_to_archive_ids(&self) -> broadcast::Receiver<u32> {
         self.archive_ids_tx.subscribe()
     }
 
-    pub fn remove_outdated_archives(&self, until_id: u32) -> Result<()> {
+    pub async fn remove_outdated_archives(&self, mut until_id: u32) -> Result<()> {
         tracing::trace!("started archives GC");
 
-        let mut archive_ids = self.archive_ids.write();
+        let (len, first, last) = {
+            let mut archive_ids = self.archive_ids.write();
 
-        let retained_ids = match archive_ids
-            .items
-            .iter()
-            .rev()
-            .find(|&id| *id < until_id)
-            .cloned()
-        {
-            // Splits `archive_ids` into two parts - [..until_id] and [until_id..]
-            // `archive_ids` will now contain [..until_id]
-            Some(until_id) => archive_ids.items.split_off(&until_id),
-            None => {
-                tracing::trace!("nothing to remove");
+            let retained_ids = match archive_ids
+                .items
+                .iter()
+                .rev()
+                .find(|&id| *id < until_id)
+                .cloned()
+            {
+                // Splits `archive_ids` into two parts - [..until_id] and [until_id..]
+                // `archive_ids` will now contain [..until_id]
+                Some(until_id) => archive_ids.items.split_off(&until_id),
+                None => {
+                    tracing::trace!("nothing to remove");
+                    return Ok(());
+                }
+            };
+            // so we must swap maps to retain [until_id..] and get ids to remove
+            let removed_ids = std::mem::replace(&mut archive_ids.items, retained_ids);
+
+            // Print removed range bounds and compute real `until_id`
+            let (Some(&first), Some(&last)) = (removed_ids.first(), removed_ids.last()) else {
+                tracing::info!("nothing to remove");
                 return Ok(());
-            }
-        };
-        // so we must swap maps to retain [until_id..] and get ids to remove
-        let removed_ids = std::mem::replace(&mut archive_ids.items, retained_ids);
+            };
 
-        // Print removed range bounds and compute real `until_id`
-        let (Some(first), Some(last)) = (removed_ids.first(), removed_ids.last()) else {
-            tracing::info!("nothing to remove");
-            return Ok(());
-        };
+            let len = removed_ids.len();
+            until_id = match archive_ids.items.first() {
+                Some(until_id) => *until_id,
+                None => last + 1,
+            };
 
-        let len = removed_ids.len();
-        let until_id = match archive_ids.items.first() {
-            Some(until_id) => *until_id,
-            None => *last + 1,
+            (len, first, last)
         };
 
-        drop(archive_ids);
+        let archives = self.archives.clone();
+        let db = self.db.clone();
 
-        self.archives.remove_range(0..until_id)?;
+        tokio::task::spawn_blocking(move || {
+            archives.remove_range(0..until_id)?;
 
-        // Clean up archive_block_ids entries for deleted archives
-        let archive_block_ids_cf = self.db.archive_block_ids.cf();
-        let write_options = self.db.archive_block_ids.write_config();
+            // Clean up archive_block_ids entries for deleted archives
+            let archive_block_ids_cf = db.archive_block_ids.cf();
+            let write_options = db.archive_block_ids.write_config();
 
-        // Remove all archive_block_ids entries for archives in range [0, until_id)
-        let start_key = 0u32.to_be_bytes();
-        let end_key = until_id.to_be_bytes();
+            // Remove all archive_block_ids entries for archives in range [0, until_id)
+            let start_key = 0u32.to_be_bytes();
+            let end_key = until_id.to_be_bytes();
 
-        self.db.rocksdb().delete_range_cf_opt(
-            &archive_block_ids_cf,
-            start_key,
-            end_key,
-            write_options,
-        )?;
+            db.rocksdb().delete_range_cf_opt(
+                &archive_block_ids_cf,
+                start_key,
+                end_key,
+                write_options,
+            )?;
 
-        tracing::info!(archive_count = len, first, last, "finished archives GC");
-        Ok(())
+            tracing::info!(archive_count = len, first, last, "finished archives GC");
+            Ok(())
+        })
+        .await?
     }
 
     pub async fn add_data(
         &self,
         id: &PackageEntryKey,
-        data: &[u8],
+        data: Bytes,
         // guard is used to ensure that the caller holds a lock on the block. It's passed so we don't
         //  accidentally take recursive locks on the same block.
         _guard: &BlockDataGuard<'_>,
     ) -> Result<()> {
-        let mut compressed = vec![];
-        tycho_util::compression::zstd_compress(data, &mut compressed, 3);
+        let id = *id;
+        let blocks = self.blocks.clone();
 
-        let mut tx = self.blocks.put(id.clone())?;
-        tx.write(&compressed)?;
-        tx.finish()?;
-        Ok(())
+        tokio::task::spawn_blocking(move || {
+            let mut compressed = vec![];
+            tycho_util::compression::zstd_compress(&data, &mut compressed, 3);
+            drop(data);
+
+            let mut tx = blocks.put(id)?;
+            tx.write(&compressed)?;
+            tx.finish()?;
+            Ok(())
+        })
+        .await?
     }
 
     pub async fn get_block_data_decompressed(
@@ -538,31 +579,19 @@ impl BlobStorage {
         handle: &BlockHandle,
         id: &PackageEntryKey,
     ) -> Result<Bytes> {
-        let compressed = self.get_block_data(handle, id).await?;
+        let _lock = lock_block_handle(handle, id.ty).await;
 
-        let mut decompressed = Vec::new();
-        tycho_util::compression::zstd_decompress(&compressed, &mut decompressed)?;
-
-        Ok(Bytes::from(decompressed))
-    }
-
-    pub async fn get_block_data(
-        &self,
-        handle: &BlockHandle,
-        id: &PackageEntryKey,
-    ) -> Result<Bytes> {
-        let _lock = match id.ty {
-            ArchiveEntryType::Block => handle.block_data_lock(),
-            ArchiveEntryType::Proof => handle.proof_data_lock(),
-            ArchiveEntryType::QueueDiff => handle.queue_diff_data_lock(),
-        }
-        .read()
-        .await;
-
-        match self.blocks.get(id)? {
-            Some(compressed_data) => Ok(compressed_data),
+        let id = *id;
+        let blocks = self.blocks.clone();
+        tokio::task::spawn_blocking(move || match blocks.get(&id)? {
+            Some(compressed_data) => {
+                let mut output = Vec::new();
+                ZstdDecompress::begin(&compressed_data)?.decompress(&mut output)?;
+                Ok(Bytes::from(output))
+            }
             None => Err(BlockStorageError::PackageEntryNotFound.into()),
-        }
+        })
+        .await?
     }
 
     pub async fn get_block_data_range(
@@ -576,10 +605,14 @@ impl BlobStorage {
             ty: ArchiveEntryType::Block,
         };
 
-        match self.blocks.get_range(&id, offset, offset + length)? {
-            Some(data) => Ok(Some(data)),
-            None => Ok(None),
-        }
+        let blocks = self.blocks.clone();
+        tokio::task::spawn_blocking(move || {
+            match blocks.get_range(&id, offset, offset + length)? {
+                Some(data) => Ok(Some(data)),
+                None => Ok(None),
+            }
+        })
+        .await?
     }
 
     pub(super) fn blocks(&self) -> &Cas<PackageEntryKey> {
@@ -650,6 +683,16 @@ impl BlobStorage {
     pub fn db(&self) -> &CoreDb {
         &self.db
     }
+}
+
+async fn lock_block_handle(handle: &BlockHandle, ty: ArchiveEntryType) -> BlockDataGuard<'_> {
+    match ty {
+        ArchiveEntryType::Block => handle.block_data_lock(),
+        ArchiveEntryType::Proof => handle.proof_data_lock(),
+        ArchiveEntryType::QueueDiff => handle.queue_diff_data_lock(),
+    }
+    .read()
+    .await
 }
 
 #[derive(Default)]
@@ -749,7 +792,7 @@ mod test {
         key: PackageEntryKey,
         data: &[u8],
     ) -> Result<()> {
-        let compressed = tycho_util::compression::compress(data);
+        let compressed = tycho_util::compression::zstd_compress_simple(data);
         let mut tx = blocks.put(key)?;
         tx.write(&compressed)?;
         tx.finish()?;
@@ -898,12 +941,11 @@ mod test {
         assert!(r.is_none(), "Should be removed after archive commit");
 
         let archive = storage
-            .get_archive(1)
+            .get_archive_full(1)
             .await?
             .expect("Archive 1 should exist");
 
-        let mut decompressed = Vec::new();
-        tycho_util::compression::zstd_decompress(&archive, &mut decompressed)?;
+        let decompressed = tycho_util::compression::zstd_decompress_simple(&archive)?;
         let archive = ArchiveReader::new(&decompressed)?;
 
         for entry in archive {
