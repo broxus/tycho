@@ -322,21 +322,19 @@ where
             }
 
             // Update gc ranges
-            if *top_shard_block_changed {
-                for (shard_ident, processed_to_key) in diff.processed_to.iter() {
-                    gc_ranges
-                        .entry(*shard_ident)
-                        .and_modify(|last: &mut GcEndKey| {
-                            if processed_to_key < &last.end_key {
-                                last.end_key = *processed_to_key;
-                                last.on_top_block_id = *block_id;
-                            }
-                        })
-                        .or_insert(GcEndKey {
-                            end_key: *processed_to_key,
-                            on_top_block_id: *block_id,
-                        });
-                }
+            for (shard_ident, processed_to_key) in diff.processed_to.iter() {
+                gc_ranges
+                    .entry(*shard_ident)
+                    .and_modify(|last: &mut GcEndKey| {
+                        if processed_to_key < &last.end_key {
+                            last.end_key = *processed_to_key;
+                            last.on_top_block_id = *block_id;
+                        }
+                    })
+                    .or_insert(GcEndKey {
+                        end_key: *processed_to_key,
+                        on_top_block_id: *block_id,
+                    });
             }
         }
 

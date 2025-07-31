@@ -42,7 +42,7 @@ fn test_calculate_min_processed_to_masterchain() {
     // updated shard should override current_processed_to
     assert_eq!(result, Some(QueueKey::max_for_lt(3)));
 
-    // check not updated
+    // check not updated.
     mc_data_shards_processed_to_by_partitions.clear();
     mc_data_shards_processed_to_by_partitions
         .insert(not_updated_shard, (false, processed_to_by_partitions));
@@ -54,8 +54,8 @@ fn test_calculate_min_processed_to_masterchain() {
         &mc_data_shards_processed_to_by_partitions,
     );
 
-    // not updated shard should not override current_processed_to
-    assert_eq!(result, Some(QueueKey::max_for_lt(5)));
+    // not updated shard should override current_processed_to too
+    assert_eq!(result, Some(QueueKey::max_for_lt(3)));
 }
 
 #[test]
@@ -110,8 +110,8 @@ fn test_calculate_min_processed_to_shard() {
         &mc_data_shards_processed_to_by_partitions,
     );
 
-    // Not updated shard should not override current_processed_to
-    assert_eq!(result, Some(QueueKey::max_for_lt(11)));
+    // Not updated shard should override current_processed_to too
+    assert_eq!(result, Some(QueueKey::max_for_lt(7)));
 
     // Verify combination with masterchain value
     let mut processed_to_by_partitions = ProcessedToByPartitions::default();

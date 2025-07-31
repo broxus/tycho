@@ -1357,12 +1357,7 @@ fn calculate_min_internals_processed_to_for_shard(
         min_processed_to: &mut Option<QueueKey>,
         skip_condition: impl Fn(&ShardIdent) -> bool,
     ) {
-        // Iterate through shards with updated top shard blocks and find min processed_to
-        for (shard, (updated, processed_to_by_partitions)) in mc_data_shards_processed_to {
-            if !*updated {
-                continue;
-            }
-
+        for (shard, (_, processed_to_by_partitions)) in mc_data_shards_processed_to {
             if skip_condition(shard) {
                 continue;
             }
