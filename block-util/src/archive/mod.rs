@@ -185,6 +185,14 @@ impl ArchiveData {
             ArchiveData::Existing => Err(WithArchiveDataError),
         }
     }
+
+    /// Assumes that the object is constructed with known raw data.
+    pub fn clone_new_archive_data(&self) -> Result<Bytes, WithArchiveDataError> {
+        match self {
+            ArchiveData::New(data) => Ok(data.clone()),
+            ArchiveData::Existing => Err(WithArchiveDataError),
+        }
+    }
 }
 
 /// Parsed data wrapper, augmented with the optional raw data.
@@ -223,6 +231,11 @@ impl<T> WithArchiveData<T> {
     /// Assumes that the object is constructed with known raw data.
     pub fn as_new_archive_data(&self) -> Result<&[u8], WithArchiveDataError> {
         self.archive_data.as_new_archive_data()
+    }
+
+    /// Assumes that the object is constructed with known raw data.
+    pub fn clone_new_archive_data(&self) -> Result<Bytes, WithArchiveDataError> {
+        self.archive_data.clone_new_archive_data()
     }
 }
 

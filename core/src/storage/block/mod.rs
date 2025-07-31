@@ -147,7 +147,7 @@ impl BlockStorage {
         let archive_id = PackageEntryKey::block(block_id);
         let mut updated = false;
         if !handle.has_data() {
-            let data = archive_data.as_new_archive_data()?;
+            let data = archive_data.clone_new_archive_data()?;
             metrics::histogram!("tycho_storage_store_block_data_size").record(data.len() as f64);
 
             let lock = handle.block_data_lock().write().await;
@@ -197,7 +197,7 @@ impl BlockStorage {
             .get_block_data_decompressed(handle, &PackageEntryKey::block(handle.id()))
             .await?;
 
-        if data.len() > BIG_DATA_THRESHOLD {
+        if data.len() < BIG_DATA_THRESHOLD {
             BlockStuff::deserialize(handle.id(), data.as_ref())
         } else {
             let handle = handle.clone();
@@ -242,11 +242,11 @@ impl BlockStorage {
 
     pub fn get_compressed_block_data_size(&self, handle: &BlockHandle) -> Result<Option<u64>> {
         let key = PackageEntryKey::block(handle.id());
-        Ok(self.blob_storage.blocks().size(&key)?)
+        Ok(self.blob_storage.blocks().get_size(&key)?)
     }
 
-    pub fn find_mc_block_data(&self, mc_seqno: u32) -> Result<Option<Block>> {
-        self.blob_storage.find_mc_block_data(mc_seqno)
+    pub async fn find_mc_block_data(&self, mc_seqno: u32) -> Result<Option<Block>> {
+        self.blob_storage.find_mc_block_data(mc_seqno).await
     }
 
     // === Block proof ===
@@ -271,7 +271,7 @@ impl BlockStorage {
         let mut updated = false;
         let archive_id = PackageEntryKey::proof(block_id);
         if !handle.has_proof() {
-            let data = proof.as_new_archive_data()?;
+            let data = proof.clone_new_archive_data()?;
 
             let lock = handle.proof_data_lock().write().await;
             if !handle.has_proof() {
@@ -327,7 +327,7 @@ impl BlockStorage {
         let mut updated = false;
         let archive_id = PackageEntryKey::queue_diff(block_id);
         if !handle.has_queue_diff() {
-            let data = queue_diff.as_new_archive_data()?;
+            let data = queue_diff.clone_new_archive_data()?;
 
             let lock = handle.queue_diff_data_lock().write().await;
             if !handle.has_queue_diff() {
@@ -386,8 +386,12 @@ impl BlockStorage {
         self.blob_storage.get_archive_size(id)
     }
 
-    pub async fn get_archive_compressed(&self, id: u32) -> Result<Option<Bytes>> {
-        self.blob_storage.get_archive(id).await
+    /// Get the complete archive (compressed).
+    ///
+    /// Must not be used for anything other than tests.
+    #[cfg(any(test, feature = "test"))]
+    pub async fn get_archive_compressed_full(&self, id: u32) -> Result<Option<Bytes>> {
+        self.blob_storage.get_archive_full(id).await
     }
 
     /// Get a chunk of the archive at the specified offset.
@@ -399,8 +403,8 @@ impl BlockStorage {
         self.blob_storage.subscribe_to_archive_ids()
     }
 
-    pub fn remove_outdated_archives(&self, until_id: u32) -> Result<()> {
-        self.blob_storage.remove_outdated_archives(until_id)
+    pub async fn remove_outdated_archives(&self, until_id: u32) -> Result<()> {
+        self.blob_storage.remove_outdated_archives(until_id).await
     }
 
     // === GC stuff ===
@@ -420,6 +424,7 @@ impl BlockStorage {
         let block = self
             .blob_storage
             .find_mc_block_data(mc_seqno)
+            .await
             .context("failed to load target block data")?
             .context("target block not found")?;
 
@@ -637,7 +642,7 @@ mod tests {
 
     #[tokio::test]
     async fn blocks_gc() -> Result<()> {
-        const GARBAGE: &[u8] = b"garbage";
+        const GARBAGE: Bytes = Bytes::from_static(b"garbage");
         const ENTRY_TYPES: [ArchiveEntryType; 3] = [
             ArchiveEntryType::Block,
             ArchiveEntryType::Proof,
@@ -726,7 +731,11 @@ mod tests {
                 for ty in ENTRY_TYPES {
                     let key = PackageEntryKey::from((block_id, ty));
                     // Check if the entry exists in Cassadilia
-                    let exists_in_cas = blocks.blob_storage().blocks().contains_key(&key);
+                    let exists_in_cas = blocks
+                        .blob_storage()
+                        .blocks()
+                        .read_index_state()
+                        .contains_key(&key);
                     assert_eq!(!exists_in_cas, must_be_removed);
                 }
 
