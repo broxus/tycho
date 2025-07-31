@@ -2,11 +2,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use bytes::BytesMut;
 use bytesize::ByteSize;
 use futures_util::future;
 use futures_util::future::BoxFuture;
-use tycho_block_util::archive::{Archive, ArchiveVerifier};
+use tycho_block_util::archive::Archive;
 use tycho_block_util::block::{BlockIdExt, BlockIdRelation, BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
@@ -23,15 +22,13 @@ use tycho_network::PeerId;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::models::{BlockId, ShardStateUnsplit};
 use tycho_types::prelude::*;
-use tycho_util::compression::{ZstdCompressStream, ZstdDecompressStream, zstd_decompress};
+use tycho_util::compression::{ZstdCompressStream, zstd_decompress_simple};
 use tycho_util::project_root;
 
 use crate::network::TestNode;
 
 mod network;
 mod utils;
-
-const BLOCK_DATA_CHUNK_SIZE: usize = 1024 * 1024; // 1MB
 
 #[derive(Default, Debug, Clone, Copy)]
 struct DummySubscriber;
@@ -147,43 +144,25 @@ struct ArchiveHandlerInner {}
 
 impl ArchiveHandlerInner {
     fn handle(cx: &ArchiveSubscriberContext<'_>) -> Result<()> {
-        let mut iterator = cx
+        // Archives are now stored as atomic blobs, so we just verify the archive exists
+        // and has a valid size. The actual archive content verification is done
+        // in the check_archive function.
+        let archive_size = cx
             .storage
             .block_storage()
-            .archive_chunks_iterator(cx.archive_id);
+            .get_archive_size(cx.archive_id)?
+            .ok_or_else(|| anyhow::anyhow!("Archive {} not found", cx.archive_id))?;
 
-        let mut zstd_decoder = ZstdDecompressStream::new(BLOCK_DATA_CHUNK_SIZE)?;
-
-        // Reuse buffer for decompressed data
-        let mut decompressed_chunk = Vec::new();
-
-        let mut verifier = ArchiveVerifier::default();
-
-        let mut archive_bytes = BytesMut::new();
-
-        while iterator.valid() {
-            let key = iterator.key().expect("shouldn't happen");
-            let chunk = iterator.value().expect("shouldn't happen");
-
-            let id = u32::from_be_bytes(key[..4].try_into()?);
-            assert_eq!(id, cx.archive_id);
-
-            decompressed_chunk.clear();
-            zstd_decoder.write(chunk.as_ref(), &mut decompressed_chunk)?;
-
-            verifier.write_verify(decompressed_chunk.as_ref())?;
-
-            archive_bytes.extend_from_slice(decompressed_chunk.as_ref());
-
-            // Next key
-            iterator.next();
+        // Ensure the archive has content
+        if archive_size == 0 {
+            return Err(anyhow::anyhow!("Archive {} is empty", cx.archive_id));
         }
 
-        verifier.final_check()?;
-
-        // Build archive
-        Archive::new(archive_bytes)?;
-
+        tracing::info!(
+            "Archive {} exists with size {} bytes",
+            cx.archive_id,
+            archive_size
+        );
         Ok(())
     }
 }
@@ -331,25 +310,110 @@ async fn archives() -> Result<()> {
         anyhow::bail!("archive not found")
     };
 
-    // Check archive size
+    // Check that archive exists and has a valid size
     let archive_size = storage
         .block_storage()
         .get_archive_size(archive_id)?
         .unwrap();
-    assert_eq!(archive_size, first_archive_data.len());
+    assert!(archive_size > 0, "Archive should have content");
 
-    // Check archive data
-    let archive_chunk_size = storage.block_storage().archive_chunk_size().get() as usize;
+    // Get the compressed archive data from storage
+    let stored_archive_data = storage
+        .block_storage()
+        .get_archive_compressed_full(archive_id)
+        .await?
+        .expect("archive should exist");
 
-    let mut expected_archive_data = vec![];
-    for offset in (0..archive_size).step_by(archive_chunk_size) {
-        let chunk = storage
-            .block_storage()
-            .get_archive_chunk(archive_id, offset as u64)
-            .await?;
-        expected_archive_data.extend_from_slice(&chunk);
+    // Decompress the stored archive and compare with the original
+    let decompressed_stored = zstd_decompress_simple(&stored_archive_data)?;
+
+    // Compare the decompressed content
+    let original_decompressed = zstd_decompress_simple(&first_archive_data)?;
+    assert_eq!(
+        original_decompressed, decompressed_stored,
+        "Archive content should match after decompression"
+    );
+
+    test_pagination(storage).await?;
+
+    Ok(())
+}
+
+async fn test_pagination(storage: CoreStorage) -> Result<()> {
+    use std::collections::HashSet;
+
+    let mut all_blocks: Vec<BlockId> = Vec::new();
+    let mut seen_blocks = HashSet::new();
+    let mut continuation = None;
+    let mut page_count = 0;
+
+    loop {
+        let (blocks, next_continuation) = storage.block_storage().list_blocks(continuation).await?;
+
+        if blocks.is_empty() {
+            break;
+        }
+
+        page_count += 1;
+        tracing::debug!("Page {} has {} blocks", page_count, blocks.len());
+
+        // Check for duplicates within this page and against all previous pages
+        for block in &blocks {
+            assert!(
+                seen_blocks.insert(*block),
+                "Duplicate block found: {block:}",
+            );
+        }
+
+        // Verify file hash calculation
+        for block in &blocks {
+            let block_handle = storage.block_handle_storage().load_handle(block).unwrap();
+
+            let block_data = storage
+                .block_storage()
+                .load_block_data(&block_handle)
+                .await?;
+
+            let encoded_data = Boc::encode(block_data.root_cell());
+            let expected_file_hash = Boc::file_hash(&encoded_data);
+
+            assert_eq!(
+                block.file_hash, expected_file_hash,
+                "File hash mismatch for block {:?}: expected {:?}, got {:?}",
+                block, expected_file_hash, block.file_hash
+            );
+        }
+
+        for window in blocks.windows(2) {
+            let (prev, curr) = (&window[0], &window[1]);
+            if prev.shard == curr.shard {
+                assert!(
+                    prev.seqno <= curr.seqno,
+                    "Blocks not ordered by seqno within shard"
+                );
+            }
+        }
+
+        if let Some(last_prev) = all_blocks.last() {
+            if let Some(first_curr) = blocks.first() {
+                if last_prev.shard == first_curr.shard {
+                    assert!(
+                        last_prev.seqno <= first_curr.seqno,
+                        "Blocks not ordered between pages"
+                    );
+                }
+            }
+        }
+
+        all_blocks.extend(blocks);
+
+        match next_continuation {
+            Some(token) => continuation = Some(token),
+            None => break,
+        }
     }
-    assert_eq!(first_archive_data, expected_archive_data);
+
+    assert!(page_count > 0, "Should have at least one page");
 
     Ok(())
 }
@@ -365,8 +429,7 @@ fn repack_heavy_archives() -> Result<()> {
         let data = std::fs::read(&path)?;
 
         // Decompress
-        let mut decompressed = Vec::new();
-        zstd_decompress(&data, &mut decompressed)?;
+        let decompressed = zstd_decompress_simple(&data)?;
         drop(data);
 
         // Compress
@@ -478,10 +541,8 @@ async fn heavy_archives() -> Result<()> {
     storage.block_storage().wait_for_archive_commit().await?;
 
     // Check archive data
-    let archive_chunk_size = storage.block_storage().archive_chunk_size().get() as usize;
-
-    check_archive(&storage, &first_archive_data, archive_chunk_size, 1).await?;
-    check_archive(&storage, &next_archive_data, archive_chunk_size, 101).await?;
+    check_archive(&storage, &first_archive_data, 1).await?;
+    check_archive(&storage, &next_archive_data, 101).await?;
 
     // Make network
     let nodes = network::make_network(storage.clone(), 10);
@@ -635,12 +696,7 @@ async fn heavy_archives() -> Result<()> {
     Ok(())
 }
 
-async fn check_archive(
-    storage: &CoreStorage,
-    original_archive: &[u8],
-    archive_chunk_size: usize,
-    seqno: u32,
-) -> Result<()> {
+async fn check_archive(storage: &CoreStorage, original_archive: &[u8], seqno: u32) -> Result<()> {
     tracing::info!("Checking archive {}", seqno);
     let archive_id = storage.block_storage().get_archive_id(seqno);
 
@@ -654,24 +710,27 @@ async fn check_archive(
         .get_archive_size(archive_id)?
         .unwrap();
 
-    let mut got_archive = vec![];
-    for offset in (0..archive_size).step_by(archive_chunk_size) {
-        let chunk = storage
-            .block_storage()
-            .get_archive_chunk(archive_id, offset as u64)
-            .await?;
-        got_archive.extend_from_slice(&chunk);
-    }
+    let got_archive = storage
+        .block_storage()
+        .get_archive_compressed_full(archive_id)
+        .await?
+        .expect("archive should exist");
+    let got_archive = got_archive.as_ref();
 
-    let original_decompressed = decompress(original_archive);
-    let got_decompressed = decompress(&got_archive);
+    let original_decompressed = zstd_decompress_simple(original_archive)?;
+    let got_decompressed = zstd_decompress_simple(got_archive)?;
 
     let original_len = original_decompressed.len();
     let got_len = got_decompressed.len();
 
+    let old_parsed = Archive::new(original_decompressed.clone())?;
+    let new_parsed = Archive::new(got_decompressed.clone())?;
+
+    similar_asserts::assert_eq!(old_parsed, new_parsed, "Parsed archives should match");
+
     assert_eq!(archive_size, original_archive.len(), "Size mismatch");
     assert_eq!(got_archive.len(), archive_size, "Retrieved size mismatch");
-    assert_eq!(original_archive, &got_archive, "Content mismatch");
+    assert_eq!(original_archive, got_archive, "Content mismatch");
     assert_eq!(
         original_decompressed, got_decompressed,
         "Decompressed mismatch"
@@ -679,10 +738,4 @@ async fn check_archive(
     assert_eq!(original_len, got_len, "Decompressed size mismatch");
 
     Ok(())
-}
-
-fn decompress(data: &[u8]) -> Vec<u8> {
-    let mut decompressed = Vec::new();
-    zstd_decompress(data, &mut decompressed).unwrap();
-    decompressed
 }

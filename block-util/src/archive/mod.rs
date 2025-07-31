@@ -5,7 +5,8 @@
 //!  * Archive entry header ([`ArchiveEntryHeader`] as TL)
 //!  * Archive entry data
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -161,6 +162,34 @@ impl Archive {
     }
 }
 
+impl Eq for Archive {}
+impl PartialEq for Archive {
+    fn eq(&self, other: &Self) -> bool {
+        self.mc_block_ids == other.mc_block_ids
+            && self.blocks.keys().collect::<BTreeSet<_>>()
+                == other.blocks.keys().collect::<BTreeSet<_>>()
+    }
+}
+
+impl Debug for Archive {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Archive")
+            .field(
+                "mc_block_ids",
+                &self.mc_block_ids.keys().collect::<BTreeSet<_>>(),
+            )
+            .field(
+                "blocks",
+                &self
+                    .blocks
+                    .keys()
+                    .map(|x| x.as_short_id())
+                    .collect::<BTreeSet<_>>(),
+            )
+            .finish()
+    }
+}
+
 #[derive(Default)]
 pub struct ArchiveDataEntry {
     pub block: Option<Bytes>,
@@ -181,6 +210,14 @@ impl ArchiveData {
     pub fn as_new_archive_data(&self) -> Result<&[u8], WithArchiveDataError> {
         match self {
             ArchiveData::New(data) => Ok(data),
+            ArchiveData::Existing => Err(WithArchiveDataError),
+        }
+    }
+
+    /// Assumes that the object is constructed with known raw data.
+    pub fn clone_new_archive_data(&self) -> Result<Bytes, WithArchiveDataError> {
+        match self {
+            ArchiveData::New(data) => Ok(data.clone()),
             ArchiveData::Existing => Err(WithArchiveDataError),
         }
     }
@@ -222,6 +259,11 @@ impl<T> WithArchiveData<T> {
     /// Assumes that the object is constructed with known raw data.
     pub fn as_new_archive_data(&self) -> Result<&[u8], WithArchiveDataError> {
         self.archive_data.as_new_archive_data()
+    }
+
+    /// Assumes that the object is constructed with known raw data.
+    pub fn clone_new_archive_data(&self) -> Result<Bytes, WithArchiveDataError> {
+        self.archive_data.clone_new_archive_data()
     }
 }
 
