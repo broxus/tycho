@@ -40,7 +40,7 @@ impl Digest {
         Self(value)
     }
 
-    pub fn inner(&self) -> &'_ [u8; 32] {
+    pub fn inner(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -70,7 +70,7 @@ impl Signature {
 
     pub(super) const ZERO: Self = Self([0; 64]);
 
-    pub(super) fn inner(&self) -> &'_ [u8; 64] {
+    pub(super) fn inner(&self) -> &[u8; 64] {
         &self.0
     }
 

@@ -70,7 +70,7 @@ impl Point {
             digest: &Digest::ZERO,
             signature: &Signature::ZERO,
             body: PointBodyWrite {
-                author,
+                author: &author,
                 round,
                 payload,
                 data: &data,
@@ -139,7 +139,7 @@ impl Point {
 
         let raw = PointRawRead::<'_>::read_from(&mut &serialized[..])?;
 
-        if !(raw.signature).verifies(&raw.author()?, &raw.digest) {
+        if !(raw.signature).verifies(raw.author()?, &raw.digest) {
             return Ok(Err(PointIntegrityError::BadSig));
         };
 

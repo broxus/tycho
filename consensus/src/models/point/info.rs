@@ -30,8 +30,8 @@ impl Debug for PointInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PointInfo")
             .field("digest", self.digest())
-            .field("signature", &self.signature())
-            .field("author", &self.author())
+            .field("signature", self.signature())
+            .field("author", self.author())
             .field("round", &self.round())
             .field("payload_len", &self.payload_len())
             .field("payload_bytes", &self.payload_bytes())
@@ -84,8 +84,8 @@ impl PointInfo {
         &self.0.signature
     }
 
-    pub fn author(&self) -> PeerId {
-        self.0.author
+    pub fn author(&self) -> &PeerId {
+        &self.0.author
     }
 
     pub fn round(&self) -> Round {
@@ -155,7 +155,7 @@ impl PointInfo {
         })
     }
 
-    pub fn anchor_link(&self, link_field: AnchorStageRole) -> &'_ Link {
+    pub fn anchor_link(&self, link_field: AnchorStageRole) -> &Link {
         (self.0.data).anchor_link(link_field)
     }
 

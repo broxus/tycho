@@ -179,7 +179,7 @@ impl Threshold {
 
     fn push_ready(ready: &mut FastHashMap<PeerId, PointInfo>, info: PointInfo) {
         ready
-            .entry(info.author())
+            .entry(*info.author())
             .and_modify(|old| {
                 panic!(
                     "cannot add to threshold same author twice: exists {:?} new digest {}",
