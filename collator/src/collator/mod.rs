@@ -616,7 +616,14 @@ impl CollatorStdImpl {
         self.collation_session = collation_session;
 
         let working_state = if !reset {
+            let histogram_3 = HistogramGuard::begin_with_labels(
+                "tycho_collator_wait_delayed_state_time_high",
+                &labels,
+            );
+
             let mut working_state = self.delayed_working_state.wait().await?;
+
+            drop(histogram_3);
 
             // update mc_data if newer
             if working_state.mc_data.block_id.seqno < mc_data.block_id.seqno {
@@ -638,67 +645,49 @@ impl CollatorStdImpl {
                         &labels,
                     );
 
-                    for task in &self.store_new_state_tasks {
-                        tracing::info!(target: tracing_targets::COLLATOR, block_id = %task.block_id.as_short_id(), "waiting tasks");
-                    }
-
                     // get last store task
                     let last_task = self.store_new_state_tasks.pop().unwrap();
 
                     // if it is finished then we can just reload prev state
                     if last_task.store_new_state_task.is_finished() {
-                        let histogram = HistogramGuard::begin_with_labels(
-                            "tycho_collator_wait_last_task_time_high",
-                            &labels,
-                        );
-
                         last_task.store_new_state_task.await?;
-
-                        drop(histogram);
-
-                        tracing::info!(target: tracing_targets::COLLATOR, "reload_prev_data");
 
                         // and reload pure prev state in working state
                         Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
                             .await?;
                     } else {
-                        let apply_merkle = async |prev_root: Cell,
-                                                  state_update: MerkleUpdate|
-                               -> Result<Cell> {
-                            let split_at = {
-                                let shard_accounts = prev_root
-                                    .as_ref()
-                                    .reference_cloned(1)
-                                    .context("invalid shard state")?
-                                    .parse::<ShardAccounts>()
-                                    .context("failed to load shard accounts")?;
-
-                                split_aug_dict_raw(shard_accounts, 5)
-                                    .context("failed to split shard accounts")?
-                                    .into_keys()
-                                    .collect::<ahash::HashSet<_>>()
-                            };
-
-                            let new_state =
-                                rayon_run(move || state_update.par_apply(&prev_root, &split_at))
-                                    .await
-                                    .context("Failed to apply state update")?;
-
-                            Ok(new_state)
-                        };
-
                         let mut unfinished_tasks: Vec<StateUpdateContext> = vec![last_task];
 
                         while let Some(prev_task) = self.store_new_state_tasks.pop() {
                             if prev_task.store_new_state_task.is_finished() {
-                                let histogram_4 = HistogramGuard::begin_with_labels(
-                                    "tycho_collator_wait_prev_task_time_high",
+                                let histogram_2 = HistogramGuard::begin_with_labels(
+                                    "tycho_collator_apply_merkles_time_high",
                                     &labels,
                                 );
 
-                                prev_task.store_new_state_task.await?;
+                                let is_complete = unfinished_tasks
+                                    .windows(2)
+                                    .all(|w| w[1].block_id.seqno + 1 == w[0].block_id.seqno);
 
-                                drop(histogram_4);
+                                if !is_complete
+                                    || prev_task.block_id.seqno + 1
+                                        != unfinished_tasks.last().unwrap().block_id.seqno
+                                {
+                                    let last_task = unfinished_tasks.remove(0);
+
+                                    last_task.store_new_state_task.await?;
+
+                                    // and reload pure prev state in working state
+                                    Self::reload_prev_data(
+                                        &mut working_state,
+                                        self.state_node_adapter.clone(),
+                                    )
+                                    .await?;
+
+                                    break;
+                                }
+
+                                prev_task.store_new_state_task.await?;
 
                                 tracing::info!(target: tracing_targets::COLLATOR, count = unfinished_tasks.len(), "unfinished_tasks");
 
@@ -713,15 +702,34 @@ impl CollatorStdImpl {
                                 while let Some(task) = unfinished_tasks.pop() {
                                     tracing::info!(target: tracing_targets::COLLATOR, %old, new = %task.block_id.as_short_id(), "apply merkle updates");
 
-                                    prev_state =
-                                        apply_merkle(prev_state.clone(), task.state_update.clone())
-                                            .await?;
+                                    let split_at = {
+                                        let shard_accounts = prev_state
+                                            .as_ref()
+                                            .reference_cloned(1)
+                                            .context("invalid shard state")?
+                                            .parse::<ShardAccounts>()
+                                            .context("failed to load shard accounts")?;
+
+                                        split_aug_dict_raw(shard_accounts, 4)
+                                            .context("failed to split shard accounts")?
+                                            .into_keys()
+                                            .collect::<ahash::HashSet<_>>()
+                                    };
+
+                                    prev_state = rayon_run({
+                                        let state_update = task.state_update.clone();
+                                        move || state_update.par_apply(&prev_state, &split_at)
+                                    })
+                                    .await
+                                    .context("Failed to apply state update")?;
 
                                     old = task.block_id.as_short_id();
 
                                     // finalize last store task in background
                                     self.background_store_new_state_tx.send(task)?;
                                 }
+
+                                drop(histogram_2);
 
                                 // and update pure prev state in working state
                                 Self::update_prev_data(&mut working_state, prev_state.clone())
