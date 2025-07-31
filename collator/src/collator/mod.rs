@@ -707,13 +707,15 @@ impl CollatorStdImpl {
                                     .state_node_adapter
                                     .load_state_root(&prev_task.block_id)
                                     .await
-                                    .context("failed to load prev shard state")?;
+                                    .context("failed to load prev shard state 2")?;
 
                                 let mut old = prev_task.block_id.as_short_id();
                                 while let Some(task) = unfinished_tasks.pop() {
                                     tracing::info!(target: tracing_targets::COLLATOR, %old, new = %task.block_id.as_short_id(), "apply merkle updates");
 
-                                    prev_state = task.state_update.apply(&prev_state)?;
+                                    prev_state =
+                                        apply_merkle(prev_state.clone(), task.state_update.clone())
+                                            .await?;
 
                                     old = task.block_id.as_short_id();
 
@@ -722,7 +724,10 @@ impl CollatorStdImpl {
                                 }
 
                                 // and update pure prev state in working state
-                                Self::update_prev_data(&mut working_state, prev_state).await?;
+                                Self::update_prev_data(&mut working_state, prev_state.clone())
+                                    .await?;
+
+                                break;
                             } else {
                                 unfinished_tasks.push(prev_task);
                             }
@@ -910,6 +915,8 @@ impl CollatorStdImpl {
             prev_blocks_ids = prev_shard_data.blocks_ids().clone();
             tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
         }
+
+        tracing::info!(target: tracing_targets::COLLATOR, block_id = %prev_blocks_ids[0].as_short_id(), "update_prev_data");
 
         let prev_state =
             ShardStateStuff::from_root(&prev_blocks_ids[0], pure_state_root, &tracker)?;
