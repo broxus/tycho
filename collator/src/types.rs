@@ -67,11 +67,6 @@ pub struct CollatorConfig {
     ///
     /// Default: `5` (means 32 shards).
     pub merkle_split_depth: u8,
-
-    /// TODO
-    ///
-    /// Default: `5`
-    pub untrack_prev_state_after: u8,
 }
 
 impl Default for CollatorConfig {
@@ -85,7 +80,6 @@ impl Default for CollatorConfig {
             fast_sync: true,
             accounts_split_depth: 4,
             merkle_split_depth: 5,
-            untrack_prev_state_after: 1,
         }
     }
 }
