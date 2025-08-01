@@ -184,11 +184,11 @@ impl Point {
 #[cfg(test)]
 #[allow(dead_code, reason = "false positives")]
 pub mod test_point {
-    use std::collections::BTreeMap;
 
     use bytes::Bytes;
     use rand::RngCore;
     use tycho_crypto::ed25519::SecretKey;
+    use tycho_util::FastHashMap;
 
     use super::*;
     use crate::models::{Link, PointId, Round, Through, UnixTime};
@@ -230,9 +230,9 @@ pub mod test_point {
 
     pub fn point(key_pair: &KeyPair, payload: &[Bytes], conf: &MempoolConfig) -> Point {
         let prev_digest = Digest::new(&[42]);
-        let mut includes = BTreeMap::default();
+        let mut includes = FastHashMap::default();
         includes.insert(PeerId::from(key_pair.public_key), prev_digest);
-        let mut evidence = BTreeMap::default();
+        let mut evidence = FastHashMap::default();
         let mut buf = [0; Digest::MAX_TL_BYTES];
         for i in 0..PEERS {
             let key_pair = new_key_pair();
@@ -249,7 +249,7 @@ pub mod test_point {
         let data = PointData {
             time: anchor_time.next(),
             includes,
-            witness: BTreeMap::from([
+            witness: FastHashMap::from_iter([
                 (PeerId([1; 32]), Digest::new(&[1])),
                 (PeerId([2; 32]), Digest::new(&[2])),
             ]),
