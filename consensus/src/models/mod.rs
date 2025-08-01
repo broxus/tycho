@@ -11,4 +11,3 @@ mod output;
 mod peer_count;
 mod point;
 mod point_status;
-mod proto_utils;
