@@ -174,7 +174,7 @@ impl ControlServerBuilder {
 
             let mc_state = storage
                 .shard_state_storage()
-                .load_state(&mc_block_id)
+                .load_state(mc_block_id.seqno, &mc_block_id)
                 .await?;
 
             let config = mc_state.config_params()?;
@@ -548,7 +548,7 @@ impl proto::ControlServer for ControlServer {
                 .inner
                 .storage
                 .shard_state_storage()
-                .load_state(block_handle.id())
+                .load_state(block_handle.ref_by_mc_seqno(), block_handle.id())
                 .await?;
 
             // Find the account state in it
