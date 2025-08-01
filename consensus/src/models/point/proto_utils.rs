@@ -1,7 +1,6 @@
-use std::collections::BTreeMap;
-
 use tl_proto::{RawBytes, TlPacket, TlRead, TlResult, TlWrite};
 use tycho_network::PeerId;
+use tycho_util::FastHashMap;
 
 use crate::models::Round;
 use crate::models::point::{Digest, PointData, Signature};
@@ -81,42 +80,43 @@ impl PointRawRead<'_> {
 pub mod digests_map {
     use super::*;
 
-    pub fn size_hint(items: &BTreeMap<PeerId, Digest>) -> usize {
+    pub fn size_hint(items: &FastHashMap<PeerId, Digest>) -> usize {
         4 + (items.len() * (32 + 32))
     }
 
-    pub fn write<P: TlPacket>(items: &BTreeMap<PeerId, Digest>, packet: &mut P) {
-        btree_map::write(items, packet);
+    pub fn write<P: TlPacket>(items: &FastHashMap<PeerId, Digest>, packet: &mut P) {
+        hash_map::write(items, packet);
     }
 
-    pub fn read(data: &mut &[u8]) -> TlResult<BTreeMap<PeerId, Digest>> {
-        btree_map::read(data)
+    pub fn read(data: &mut &[u8]) -> TlResult<FastHashMap<PeerId, Digest>> {
+        hash_map::read(data)
     }
 }
 
 pub mod signatures_map {
     use super::*;
 
-    pub fn size_hint(items: &BTreeMap<PeerId, Signature>) -> usize {
+    pub fn size_hint(items: &FastHashMap<PeerId, Signature>) -> usize {
         4 + (items.len() * (32 + 64))
     }
 
-    pub fn write<P: TlPacket>(items: &BTreeMap<PeerId, Signature>, packet: &mut P) {
-        btree_map::write(items, packet);
+    pub fn write<P: TlPacket>(items: &FastHashMap<PeerId, Signature>, packet: &mut P) {
+        hash_map::write(items, packet);
     }
 
-    pub fn read(data: &mut &[u8]) -> TlResult<BTreeMap<PeerId, Signature>> {
-        btree_map::read(data)
+    pub fn read(data: &mut &[u8]) -> TlResult<FastHashMap<PeerId, Signature>> {
+        hash_map::read(data)
     }
 }
 
-mod btree_map {
+mod hash_map {
+    use ahash::HashMapExt;
     use tl_proto::TlError;
 
     use super::*;
     use crate::models::PeerCount;
 
-    pub fn write<P, T>(items: &BTreeMap<PeerId, T>, packet: &mut P)
+    pub fn write<P, T>(items: &FastHashMap<PeerId, T>, packet: &mut P)
     where
         P: TlPacket,
         T: TlWrite,
@@ -129,7 +129,7 @@ mod btree_map {
         }
     }
 
-    pub fn read<'a, T>(data: &mut &'a [u8]) -> TlResult<BTreeMap<PeerId, T>>
+    pub fn read<'a, T>(data: &mut &'a [u8]) -> TlResult<FastHashMap<PeerId, T>>
     where
         T: TlRead<'a>,
     {
@@ -139,7 +139,7 @@ mod btree_map {
             return Err(TlError::InvalidData);
         }
 
-        let mut items = BTreeMap::new();
+        let mut items = FastHashMap::with_capacity(len);
         for _ in 0..len {
             let peer_id = PeerId::read_from(data)?;
             let item = <T>::read_from(data)?;

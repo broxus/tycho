@@ -1,5 +1,4 @@
 use std::array;
-use std::collections::BTreeMap;
 use std::convert::identity;
 use std::sync::Arc;
 
@@ -102,7 +101,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
     let includes = prev_points
         .iter()
         .map(|point| (*point.author(), *point.digest()))
-        .collect::<BTreeMap<_, _>>();
+        .collect::<FastHashMap<_, _>>();
 
     let mut points = FastHashMap::default();
     for idx in 0..PEER_COUNT {
@@ -157,7 +156,7 @@ fn point<const PEER_COUNT: usize>(
     round: Round,
     idx: usize,
     peers: &[(PeerId, Arc<KeyPair>); PEER_COUNT],
-    includes: &BTreeMap<PeerId, Digest>,
+    includes: &FastHashMap<PeerId, Digest>,
     max_prev_time: UnixTime,
     max_anchor_time: UnixTime,
     anchor_stage: Option<&AnchorStage>,
@@ -176,7 +175,7 @@ fn point<const PEER_COUNT: usize>(
 
     let evidence = match includes.get(&peers[idx].0) {
         Some(prev_digest) => {
-            let mut evidence = BTreeMap::default();
+            let mut evidence = FastHashMap::default();
             for i in &rand_arr::<PEER_COUNT>()[..(peer_count.majority_of_others() + 1)] {
                 if *i == idx {
                     continue;
@@ -185,7 +184,7 @@ fn point<const PEER_COUNT: usize>(
             }
             evidence
         }
-        None => BTreeMap::default(),
+        None => FastHashMap::default(),
     };
 
     let mut payload = Vec::with_capacity(msg_count);

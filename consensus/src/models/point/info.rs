@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
+use tycho_util::FastHashMap;
 
 use crate::models::{
     AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature, UnixTime,
@@ -104,14 +104,14 @@ impl PointInfo {
         &self.0.data
     }
 
-    pub fn includes(&self) -> &BTreeMap<PeerId, Digest> {
+    pub fn includes(&self) -> &FastHashMap<PeerId, Digest> {
         &(self.0.data).includes
     }
 
-    pub fn witness(&self) -> &BTreeMap<PeerId, Digest> {
+    pub fn witness(&self) -> &FastHashMap<PeerId, Digest> {
         &(self.0.data).witness
     }
-    pub fn evidence(&self) -> &BTreeMap<PeerId, Signature> {
+    pub fn evidence(&self) -> &FastHashMap<PeerId, Signature> {
         &(self.0.data).evidence
     }
 

@@ -1,7 +1,6 @@
-use std::collections::BTreeMap;
-
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
+use tycho_util::FastHashMap;
 
 use crate::models::point::proto_utils::{digests_map, signatures_map};
 use crate::models::point::{Digest, Round, UnixTime};
@@ -28,16 +27,16 @@ pub struct PointData {
     /// mandatory includes author's own vertex iff proof is given.
     /// Repeatable order on every node is needed for commit; map is used during validation
     #[tl(with = "digests_map")]
-    pub includes: BTreeMap<PeerId, Digest>,
+    pub includes: FastHashMap<PeerId, Digest>,
     /// `>= 0` points @ r-2, signed by author @ r-1
     /// Repeatable order on every node needed for commit; map is used during validation
     #[tl(with = "digests_map")]
-    pub witness: BTreeMap<PeerId, Digest>,
+    pub witness: FastHashMap<PeerId, Digest>,
     /// signatures for own point from previous round (if one exists, else empty map):
     /// the node may prove its vertex@r-1 with its point@r+0 only; contains signatures from
     /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
     #[tl(with = "signatures_map")]
-    pub evidence: BTreeMap<PeerId, Signature>,
+    pub evidence: FastHashMap<PeerId, Signature>,
     /// last included by author; defines author's last committed anchor
     pub anchor_trigger: Link,
     /// last included by author; maintains anchor chain linked without explicit DAG traverse
