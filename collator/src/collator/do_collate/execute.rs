@@ -112,7 +112,11 @@ impl Phase<ExecuteState> {
                     .execute_metrics
                     .execute_groups_vm_only_timer
                     .start();
-                let group_result = self.extra.executor.executor.execute_group(msg_group)?;
+                let group_result = self
+                    .extra
+                    .executor
+                    .executor
+                    .execute_group(msg_group, &mut self.extra.execute_wu)?;
                 self.extra
                     .execute_metrics
                     .execute_groups_vm_only_timer
@@ -123,11 +127,6 @@ impl Phase<ExecuteState> {
                 self.state.collation_data.tx_count += group_tx_count as u64;
                 self.state.collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
                 self.state.collation_data.ext_msgs_skipped_count += group_result.ext_msgs_skipped;
-
-                self.extra.execute_wu.append_executed_group(
-                    &self.state.collation_config.work_units_params.execute,
-                    &group_result,
-                );
 
                 // Process transactions
                 self.extra.execute_metrics.process_txs_timer.start();
@@ -208,16 +207,23 @@ impl Phase<ExecuteState> {
             &msgs_reader_metrics,
             fill_msgs_total_elapsed,
         );
+        prepare_msg_groups_wu
+            .log_wu_metrics(&self.state.collation_config.work_units_params.prepare);
 
         self.extra.prepare_msg_groups_wu = Some(prepare_msg_groups_wu);
         self.extra.msgs_reader_metrics = Some(msgs_reader_metrics);
 
         // calc execute wu
-        self.extra.execute_wu.calculate(
+        self.extra.execute_wu.calculate_process_txs_wu(
             &self.state.collation_config.work_units_params.execute,
-            &self.extra.execute_metrics,
-            &self.state.collation_data,
+            self.state.collation_data.in_msgs.len() as u64,
+            self.state.collation_data.out_msgs.len() as u64,
+            self.state.collation_data.inserted_new_msgs_count,
         );
+
+        self.extra
+            .execute_wu
+            .append_elapsed_timings(&self.extra.execute_metrics);
 
         Ok(())
     }

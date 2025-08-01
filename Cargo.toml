@@ -24,6 +24,7 @@ members = [
     "storage",
     "util-proc",
     "util",
+    "wu-tuner",
 ]
 
 [workspace.dependencies]
@@ -145,6 +146,7 @@ tycho-storage = { path = "./storage", version = "0.2.12" }
 tycho-storage-traits = { path = "./storage-traits", version = "0.2.12" }
 tycho-util = { path = "./util", version = "0.2.12" }
 tycho-util-proc = { path = "./util-proc", version = "0.2.12" }
+tycho-wu-tuner = { path = "./wu-tuner", version = "0.2.12" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
