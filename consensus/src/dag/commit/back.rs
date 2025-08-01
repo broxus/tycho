@@ -3,11 +3,13 @@ use std::ops::{Bound, RangeInclusive};
 use std::sync::atomic;
 use std::{array, mem};
 
+use ahash::HashMapExt;
 use futures_util::FutureExt;
 use itertools::Itertools;
 use rand::SeedableRng;
 use rand::prelude::SliceRandom;
 use tycho_network::PeerId;
+use tycho_util::FastHashMap;
 
 use crate::dag::commit::SyncError;
 use crate::dag::commit::anchor_chain::EnqueuedAnchor;
@@ -395,7 +397,7 @@ impl DagBack {
         anchor: &PointInfo, // @ r+1
         conf: &MempoolConfig,
     ) -> Result<VecDeque<ValidPoint>, SyncError> {
-        fn extend(to: &mut BTreeMap<PeerId, Digest>, from: &BTreeMap<PeerId, Digest>) {
+        fn extend(to: &mut FastHashMap<PeerId, Digest>, from: &FastHashMap<PeerId, Digest>) {
             if to.is_empty() {
                 *to = from.clone();
             } else {
@@ -409,7 +411,7 @@ impl DagBack {
         let history_limit =
             (conf.genesis_round.next()).max(anchor.round() - conf.consensus.commit_history_rounds);
 
-        let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]
+        let mut r = array::from_fn::<_, 3, _>(|_| FastHashMap::new()); // [r+0, r-1, r-2]
         extend(&mut r[0], anchor.includes()); // points @ r+0
         extend(&mut r[1], anchor.witness()); // points @ r-1
 
@@ -433,6 +435,7 @@ impl DagBack {
 
             // take points @ r+0, shuffle deterministically with anchor digest as a seed
             let mut sorted = mem::take(&mut r[0]).into_iter().collect::<Vec<_>>();
+            sorted.sort_unstable();
             sorted.shuffle(&mut rng);
             for (node, digest) in &sorted {
                 // Every point must be valid (we've validated anchor dependencies already),

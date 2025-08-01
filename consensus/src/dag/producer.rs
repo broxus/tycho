@@ -1,6 +1,5 @@
-use std::collections::BTreeMap;
-
 use tycho_network::PeerId;
+use tycho_util::FastHashMap;
 
 use crate::dag::{DagHead, DagRound};
 use crate::effects::{AltFormat, RoundCtx};
@@ -12,8 +11,8 @@ use crate::models::{
 
 pub struct LastOwnPoint {
     pub digest: Digest,
-    pub evidence: BTreeMap<PeerId, Signature>,
-    pub includes: BTreeMap<PeerId, Digest>,
+    pub evidence: FastHashMap<PeerId, Signature>,
+    pub includes: FastHashMap<PeerId, Digest>,
     pub round: Round,
     pub signers: PeerCount,
 }
@@ -108,7 +107,7 @@ impl Producer {
         let includes = includes
             .into_iter()
             .map(|info| (*info.author(), *info.digest()))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<FastHashMap<_, _>>();
 
         assert_eq!(
             proven_vertex,
@@ -119,7 +118,7 @@ impl Producer {
         let witness = witness
             .into_iter()
             .map(|info| (*info.author(), *info.digest()))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<FastHashMap<_, _>>();
 
         let evidence = proven_vertex
             .zip(last_own_point)
