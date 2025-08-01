@@ -461,7 +461,7 @@ where
                             } else {
                                 0.05
                             };
-                            (prev_wu_price - adj).max(0.02)
+                            prev_wu_price.saturating_add_floor(-adj)
                         }
                         // if current lag is < 0 then we should increase target wu price
                         else if avg_lag < lag_lower_bound {
@@ -470,7 +470,7 @@ where
                             } else {
                                 0.05
                             };
-                            prev_wu_price + adj
+                            prev_wu_price.saturating_add_floor(adj)
                         } else {
                             unreachable!()
                         };
@@ -597,7 +597,9 @@ where
         );
         let target_build_accounts_blocks_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_build_accounts_blocks_wu_by_price(target_wu_price);
+            .calc_target_build_accounts_blocks_wu_by_price(
+                target_wu_price.saturating_add_floor(0.05),
+            );
         if let Some(target_wu_param) = wu_metrics
             .wu_on_finalize
             .calc_target_build_accounts_blocks_wu_param(
@@ -616,7 +618,9 @@ where
             .pow_shard_accounts_count(wu_metrics.wu_params.finalize.state_update_msg, scale);
         let target_update_shard_accounts_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_update_shard_accounts_wu_by_price(target_wu_price);
+            .calc_target_update_shard_accounts_wu_by_price(
+                target_wu_price.saturating_add_floor(-0.05),
+            );
         if let Some(target_wu_param) = wu_metrics
             .wu_on_finalize
             .calc_target_update_shard_accounts_wu_param(
@@ -633,7 +637,7 @@ where
         // calculate target build_state_update_wu and param
         let target_build_state_update_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_build_state_update_wu_by_price(target_wu_price);
+            .calc_target_build_state_update_wu_by_price(target_wu_price.saturating_add_floor(0.1));
         if let Some(target_wu_param) = wu_metrics
             .wu_on_finalize
             .calc_target_build_state_update_wu_param(
@@ -665,7 +669,7 @@ where
         // calculate target create_queue_diff_wu and param
         let target_create_queue_diff_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_create_queue_diff_wu_by_price(target_wu_price);
+            .calc_target_create_queue_diff_wu_by_price(target_wu_price.saturating_add_floor(0.1));
         if let Some(target_wu_param) = wu_metrics
             .wu_on_finalize
             .calc_target_create_queue_diff_wu_param(target_create_queue_diff_wu)
@@ -676,7 +680,7 @@ where
         // calculate target apply_queue_diff_wu and param
         let target_apply_queue_diff_wu = wu_metrics
             .wu_on_finalize
-            .calc_target_apply_queue_diff_wu_by_price(target_wu_price);
+            .calc_target_apply_queue_diff_wu_by_price(target_wu_price.saturating_add_floor(0.1));
         if let Some(target_wu_param) = wu_metrics
             .wu_on_finalize
             .calc_target_apply_queue_diff_wu_param(target_apply_queue_diff_wu)
@@ -689,7 +693,7 @@ where
         // calulate target read_ext_msgs_wu and param
         let target_read_ext_msgs_wu = wu_metrics
             .wu_on_prepare_msg_groups
-            .calc_target_read_ext_msgs_wu_by_price(target_wu_price);
+            .calc_target_read_ext_msgs_wu_by_price(target_wu_price.saturating_add_floor(0.15));
         if let Some(target_wu_param) = wu_metrics
             .wu_on_prepare_msg_groups
             .calc_target_read_ext_msgs_wu_param(target_read_ext_msgs_wu)
@@ -700,7 +704,9 @@ where
         // calulate target read_existing_int_msgs_wu and param
         let target_read_existing_int_msgs_wu = wu_metrics
             .wu_on_prepare_msg_groups
-            .calc_target_read_existing_int_msgs_wu_by_price(target_wu_price);
+            .calc_target_read_existing_int_msgs_wu_by_price(
+                target_wu_price.saturating_add_floor(0.1),
+            );
         if let Some(target_wu_param) = wu_metrics
             .wu_on_prepare_msg_groups
             .calc_target_read_existing_int_msgs_wu_param(target_read_existing_int_msgs_wu)
@@ -711,7 +717,7 @@ where
         // calulate target read_new_int_msgs_wu and param
         let target_read_new_int_msgs_wu = wu_metrics
             .wu_on_prepare_msg_groups
-            .calc_target_read_new_int_msgs_wu_by_price(target_wu_price);
+            .calc_target_read_new_int_msgs_wu_by_price(target_wu_price.saturating_add_floor(-0.1));
         if let Some(target_wu_param) = wu_metrics
             .wu_on_prepare_msg_groups
             .calc_target_read_new_int_msgs_wu_param(target_read_new_int_msgs_wu)
@@ -735,7 +741,9 @@ where
         // calulate target execute_groups_vm_only_wu and param
         let target_execute_groups_vm_only_wu = wu_metrics
             .wu_on_execute
-            .calc_target_execute_groups_vm_only_wu_by_price(target_wu_price);
+            .calc_target_execute_groups_vm_only_wu_by_price(
+                target_wu_price.saturating_add_floor(-0.1),
+            );
         if let Some(target_wu_param) = wu_metrics.wu_on_execute.calc_target_execute_wu_param(
             target_execute_groups_vm_only_wu,
             target_wu_params.execute.prepare as u64,
@@ -747,7 +755,7 @@ where
         // calulate target target_process_txs_wu and param
         let target_process_txs_wu = wu_metrics
             .wu_on_execute
-            .calc_target_process_txs_wu_by_price(target_wu_price);
+            .calc_target_process_txs_wu_by_price(target_wu_price.saturating_add_floor(0.05));
         if let Some(target_wu_param) = wu_metrics
             .wu_on_execute
             .calc_target_process_txs_wu_param(target_process_txs_wu)
@@ -763,7 +771,7 @@ where
         // calculate target resume_collation_wu and param
         let target_resume_collation_wu = wu_metrics
             .wu_on_do_collate
-            .calc_target_resume_collation_wu_by_price(target_wu_price);
+            .calc_target_resume_collation_wu_by_price(target_wu_price.saturating_add_floor(0.05));
         let pow_updated_accounts_count = wu_metrics
             .wu_on_do_collate
             .pow_updated_accounts_count(wu_metrics.wu_params.finalize.serialize_diff, scale);
@@ -782,6 +790,16 @@ where
         }
 
         target_wu_params
+    }
+}
+
+trait SaturatingAddFloor {
+    fn saturating_add_floor(self, adj: Self) -> Self;
+}
+
+impl SaturatingAddFloor for f64 {
+    fn saturating_add_floor(self, adj: Self) -> Self {
+        (self + adj).max(0.02)
     }
 }
 
