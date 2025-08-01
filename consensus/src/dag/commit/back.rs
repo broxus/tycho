@@ -397,13 +397,12 @@ impl DagBack {
         anchor: &PointInfo, // @ r+1
         conf: &MempoolConfig,
     ) -> Result<VecDeque<ValidPoint>, SyncError> {
-        fn extend(to: &mut FastHashMap<PeerId, Digest>, from: &FastHashMap<PeerId, Digest>) {
+        fn extend(to: &mut FastHashMap<Digest, PeerId>, from: &FastHashMap<PeerId, Digest>) {
             if to.is_empty() {
-                *to = from.clone();
-            } else {
-                for (peer, digest) in from {
-                    to.insert(*peer, *digest);
-                }
+                to.reserve(from.len());
+            }
+            for (peer, digest) in from {
+                to.insert(*digest, *peer);
             }
         }
         // do not commit genesis - we may place some arbitrary payload in it,
@@ -437,13 +436,13 @@ impl DagBack {
             let mut sorted = mem::take(&mut r[0]).into_iter().collect::<Vec<_>>();
             sorted.sort_unstable();
             sorted.shuffle(&mut rng);
-            for (node, digest) in &sorted {
+            for (digest, peer) in &sorted {
                 // Every point must be valid (we've validated anchor dependencies already),
                 // but some points don't have previous one to proof as vertex.
                 // Any equivocated point (except anchor) is ok, as they are globally available
                 // because of anchor, and their payload is deduplicated after mempool anyway.
                 let global = // point @ r+0; break and return `None` if not ready yet
-                    Self::ready_valid_point(point_round, node, digest, "point")?;
+                    Self::ready_valid_point(point_round, peer, digest, "point")?;
                 // select only uncommitted ones
                 if !global.is_committed().load(atomic::Ordering::Relaxed) {
                     extend(&mut r[1], global.info().includes()); // points @ r-1
