@@ -53,7 +53,7 @@ where
         let (state, handles) = if handle.has_state() {
             // Fast path when state is already applied
             let state = state_storage
-                .load_state(handle.id())
+                .load_state(handle.ref_by_mc_seqno(), handle.id())
                 .await
                 .context("failed to load applied shard state")?;
 
@@ -66,8 +66,9 @@ where
                 .context("failed to construct prev id")?;
 
             let (prev_root_cell, handles, old_split_at) = {
+                // NOTE: Use zero epoch here since we don't need to reuse these states.
                 let prev_state = state_storage
-                    .load_state(&prev_id)
+                    .load_state(0, &prev_id)
                     .await
                     .context("failed to load prev shard state")?;
 
@@ -77,8 +78,9 @@ where
 
                 match &prev_id_alt {
                     Some(prev_id) => {
+                        // NOTE: Use zero epoch here since we don't need to reuse these states.
                         let prev_state_alt = state_storage
-                            .load_state(prev_id)
+                            .load_state(0, prev_id)
                             .await
                             .context("failed to load alt prev shard state")?;
 

@@ -2742,7 +2742,11 @@ impl StateNodeAdapter for TestStateNodeAdapter {
         Ok(res)
     }
 
-    async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
+    async fn load_state(
+        &self,
+        _ref_by_mc_seqno: u32,
+        block_id: &BlockId,
+    ) -> Result<ShardStateStuff> {
         let res = self.storage.get(&block_id.shard).and_then(|s| {
             s.get(&block_id.seqno)
                 .map(|(state_stuff, _, _, _)| state_stuff)

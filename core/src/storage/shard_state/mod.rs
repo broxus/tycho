@@ -41,14 +41,16 @@ pub struct ShardStateStorage {
 }
 
 impl ShardStateStorage {
+    // TODO: Replace args with a config.
     pub fn new(
         db: CoreDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
         temp_file_storage: TempFileStorage,
         cache_size_bytes: ByteSize,
+        drop_interval: u32,
     ) -> Result<Arc<Self>> {
-        let cell_storage = CellStorage::new(db.clone(), cache_size_bytes);
+        let cell_storage = CellStorage::new(db.clone(), cache_size_bytes, drop_interval);
 
         Ok(Arc::new(Self {
             db,
@@ -194,7 +196,12 @@ impl ShardStateStorage {
         Ok(updated)
     }
 
-    pub async fn store_state_file(&self, block_id: &BlockId, boc: File) -> Result<ShardStateStuff> {
+    pub async fn store_state_file(
+        &self,
+        ref_by_mc_seqno: u32,
+        block_id: &BlockId,
+        boc: File,
+    ) -> Result<ShardStateStuff> {
         let ctx = StoreStateContext {
             db: self.db.clone(),
             cell_storage: self.cell_storage.clone(),
@@ -209,14 +216,18 @@ impl ShardStateStorage {
             // NOTE: Ensure that GC lock is captured by the spawned thread.
             let _gc_lock = gc_lock;
 
-            ctx.store(&block_id, boc)
+            ctx.store(ref_by_mc_seqno, &block_id, boc)
         })
         .await?
     }
 
-    pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
+    pub async fn load_state(
+        &self,
+        ref_by_mc_seqno: u32,
+        block_id: &BlockId,
+    ) -> Result<ShardStateStuff> {
         let cell_id = self.load_state_root(block_id)?;
-        let cell = self.cell_storage.load_cell(cell_id)?;
+        let cell = self.cell_storage.load_cell(&cell_id, ref_by_mc_seqno)?;
 
         ShardStateStuff::from_root(block_id, Cell::from(cell as Arc<_>), &self.min_ref_mc_state)
     }
@@ -291,7 +302,7 @@ impl ShardStateStorage {
                 let (stats, mut batch) = if block_id.is_masterchain() {
                     cell_storage.remove_cell(alloc.get().as_bump(), &root_hash)?
                 } else {
-                    let root_cell = Cell::from(cell_storage.load_cell(root_hash)? as Arc<_>);
+                    let root_cell = Cell::from(cell_storage.load_cell(&root_hash, 0)? as Arc<_>);
 
                     let split_at = split_shard_accounts(&root_cell, accounts_split_depth)?
                         .into_keys()

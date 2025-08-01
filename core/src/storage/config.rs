@@ -14,6 +14,11 @@ pub struct CoreStorageConfig {
     #[important]
     pub cells_cache_size: ByteSize,
 
+    /// Minimal epoch interval when the state can be reused.
+    ///
+    /// Default: 3.
+    pub drop_interval: u32,
+
     /// Archives storage config.
     ///
     /// Archives are disabled if this field is `None`.
@@ -53,6 +58,7 @@ impl Default for CoreStorageConfig {
     fn default() -> Self {
         Self {
             cells_cache_size: ByteSize::mb(256),
+            drop_interval: 3,
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),
