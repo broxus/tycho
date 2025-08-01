@@ -1046,8 +1046,9 @@ pub struct StorageCell {
     cell_storage: Arc<CellStorage>,
     descriptor: CellDescriptor,
     bit_len: u16,
-    data: Vec<u8>,
-    hashes: Vec<(HashBytes, u16)>,
+    data_ptr: *const u8,
+    data_len: u8,
+    hash_count: u8,
 
     reference_states: [AtomicU8; 4],
     reference_data: [UnsafeCell<StorageCellReferenceData>; 4],
@@ -1058,6 +1059,8 @@ impl StorageCell {
     const REF_RUNNING: u8 = 0x1;
     const REF_STORAGE: u8 = 0x2;
     const REF_REPLACED: u8 = 0x3;
+
+    const HASHES_ITEM_LEN: usize = 32 + 2;
 
     pub fn deserialize(cell_storage: Arc<CellStorage>, buffer: &[u8]) -> Option<Self> {
         if buffer.len() < 4 {
@@ -1070,40 +1073,35 @@ impl StorageCell {
         let hash_count = descriptor.hash_count() as usize;
         let ref_count = descriptor.reference_count() as usize;
 
-        let total_len = 4usize + byte_len + (32 + 2) * hash_count + 32 * ref_count;
+        let allocated_len = byte_len + hash_count * Self::HASHES_ITEM_LEN;
+        let total_len = 4usize + allocated_len + 32 * ref_count;
         if buffer.len() < total_len {
             return None;
         }
 
-        let data = buffer[4..4 + byte_len].to_vec();
-
-        let mut hashes = Vec::with_capacity(hash_count);
-        let mut offset = 4 + byte_len;
-        for _ in 0..hash_count {
-            hashes.push((
-                HashBytes::from_slice(&buffer[offset..offset + 32]),
-                u16::from_le_bytes([buffer[offset + 32], buffer[offset + 33]]),
-            ));
-            offset += 32 + 2;
-        }
+        let data_ptr = Box::into_raw(Box::<[u8]>::from(&buffer[4..4 + allocated_len])).cast::<u8>();
 
         let reference_states = Default::default();
-        let reference_data = unsafe {
+        let mut reference_data = unsafe {
             MaybeUninit::<[UnsafeCell<StorageCellReferenceData>; 4]>::uninit().assume_init()
         };
 
-        for slot in reference_data.iter().take(ref_count) {
-            let slot = slot.get().cast::<u8>();
-            unsafe { std::ptr::copy_nonoverlapping(buffer.as_ptr().add(offset), slot, 32) };
-            offset += 32;
+        const { assert!(std::mem::size_of::<UnsafeCell<StorageCellReferenceData>>() == 32) };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                buffer.as_ptr().add(4 + allocated_len),
+                reference_data.as_mut_ptr().cast::<u8>(),
+                32 * ref_count,
+            );
         }
 
         Some(Self {
             cell_storage,
             bit_len,
             descriptor,
-            data,
-            hashes,
+            data_ptr,
+            data_len: byte_len as u8,
+            hash_count: hash_count as u8,
             reference_states,
             reference_data,
         })
@@ -1262,7 +1260,8 @@ impl CellImpl for StorageCell {
     }
 
     fn data(&self) -> &[u8] {
-        &self.data
+        // SAFETY: Data was not deallocated yet.
+        unsafe { std::slice::from_raw_parts(self.data_ptr, self.data_len as usize) }
     }
 
     fn bit_len(&self) -> u16 {
@@ -1283,12 +1282,14 @@ impl CellImpl for StorageCell {
 
     fn hash(&self, level: u8) -> &HashBytes {
         let i = self.descriptor.level_mask().hash_index(level);
-        &self.hashes[i as usize].0
+        let offset = self.data_len as usize + (i as usize) * Self::HASHES_ITEM_LEN;
+        HashBytes::wrap(unsafe { &*self.data_ptr.add(offset).cast::<[u8; 32]>() })
     }
 
     fn depth(&self, level: u8) -> u16 {
         let i = self.descriptor.level_mask().hash_index(level);
-        self.hashes[i as usize].1
+        let offset = self.data_len as usize + (i as usize) * Self::HASHES_ITEM_LEN + 32;
+        u16::from_le_bytes(unsafe { *self.data_ptr.add(offset).cast::<[u8; 2]>() })
     }
 
     fn take_first_child(&mut self) -> Option<Cell> {
@@ -1347,6 +1348,16 @@ impl CellImpl for StorageCell {
 
 impl Drop for StorageCell {
     fn drop(&mut self) {
+        let allocated_len =
+            self.data_len as usize + (self.hash_count as usize) * Self::HASHES_ITEM_LEN;
+
+        _ = unsafe {
+            Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                self.data_ptr.cast_mut(),
+                allocated_len,
+            ))
+        };
+
         self.cell_storage.drop_cell(DynCell::repr_hash(self));
         for i in 0..4 {
             let state = self.reference_states[i].load(Ordering::Acquire);
