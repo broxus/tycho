@@ -9,7 +9,7 @@ use tycho_network::PeerId;
 use tycho_types::models::ConsensusConfig;
 
 use crate::engine::MempoolConfig;
-use crate::models::point::serde_helpers::{PointBodyWrite, PointRawRead, PointRead, PointWrite};
+use crate::models::point::proto_utils::{PointBodyWrite, PointRawRead, PointRead, PointWrite};
 use crate::models::point::{Digest, PointData, Signature};
 use crate::models::{PointInfo, Round};
 
