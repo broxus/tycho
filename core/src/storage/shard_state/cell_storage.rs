@@ -26,12 +26,18 @@ pub struct CellStorage {
     db: CoreDb,
     cells_cache: Arc<CellsIndex>,
     raw_cells_cache: Arc<RawCellsCache>,
+    drop_interval: u32,
 }
 
-type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
+type CellsIndex = FastDashMap<HashBytes, CachedCell>;
+
+struct CachedCell {
+    epoch: u32,
+    weak: Weak<StorageCell>,
+}
 
 impl CellStorage {
-    pub fn new(db: CoreDb, cache_size_bytes: ByteSize) -> Arc<Self> {
+    pub fn new(db: CoreDb, cache_size_bytes: ByteSize, drop_interval: u32) -> Arc<Self> {
         let cells_cache = Default::default();
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
 
@@ -45,6 +51,7 @@ impl CellStorage {
             db,
             cells_cache,
             raw_cells_cache,
+            drop_interval,
         })
     }
 
@@ -641,18 +648,20 @@ impl CellStorage {
 
     pub fn load_cell(
         self: &Arc<Self>,
-        hash: HashBytes,
+        hash: &HashBytes,
+        epoch: u32,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
         let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
-        if let Some(cell) = self.cells_cache.get(&hash)
-            && let Some(cell) = cell.upgrade()
+        if let Some(cell) = self.cells_cache.get(hash)
+            && cell.epoch.saturating_add(self.drop_interval) >= epoch
+            && let Some(cell) = cell.weak.upgrade()
         {
             return Ok(cell);
         }
 
-        let cell = match self.raw_cells_cache.get_raw(&self.db, &hash) {
-            Ok(Some(value)) => match StorageCell::deserialize(self.clone(), &value.slice) {
+        let mut cell = match self.raw_cells_cache.get_raw(&self.db, hash) {
+            Ok(Some(value)) => match StorageCell::deserialize(self.clone(), &value.slice, epoch) {
                 Some(cell) => Arc::new(cell),
                 None => return Err(CellStorageError::InvalidCell),
             },
@@ -660,11 +669,32 @@ impl CellStorage {
             Err(e) => return Err(CellStorageError::Internal(e)),
         };
 
-        if self
-            .cells_cache
-            .insert(hash, Arc::downgrade(&cell))
-            .is_none()
-        {
+        let has_new;
+        match self.cells_cache.entry(*hash) {
+            dashmap::Entry::Vacant(entry) => {
+                has_new = true;
+                entry.insert(CachedCell {
+                    epoch,
+                    weak: Arc::downgrade(&cell),
+                });
+            }
+            dashmap::Entry::Occupied(mut entry) => {
+                has_new = false;
+                if entry.get().epoch >= epoch
+                    && let Some(mut prev) = entry.get().weak.upgrade()
+                {
+                    drop(entry);
+                    std::mem::swap(&mut prev, &mut cell);
+                } else {
+                    entry.insert(CachedCell {
+                        epoch,
+                        weak: Arc::downgrade(&cell),
+                    });
+                }
+            }
+        };
+
+        if has_new {
             metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
         }
 
@@ -996,7 +1026,11 @@ impl CellStorage {
     }
 
     pub fn drop_cell(&self, hash: &HashBytes) {
-        if self.cells_cache.remove(hash).is_some() {
+        if self
+            .cells_cache
+            .remove_if(hash, |_, cell| cell.weak.strong_count() == 0)
+            .is_some()
+        {
             metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
         }
     }
@@ -1049,6 +1083,7 @@ pub struct StorageCell {
     data_ptr: *const u8,
     data_len: u8,
     hash_count: u8,
+    epoch: u32,
 
     reference_states: [AtomicU8; 4],
     reference_data: [UnsafeCell<StorageCellReferenceData>; 4],
@@ -1062,7 +1097,7 @@ impl StorageCell {
 
     const HASHES_ITEM_LEN: usize = 32 + 2;
 
-    pub fn deserialize(cell_storage: Arc<CellStorage>, buffer: &[u8]) -> Option<Self> {
+    pub fn deserialize(cell_storage: Arc<CellStorage>, buffer: &[u8], epoch: u32) -> Option<Self> {
         if buffer.len() < 4 {
             return None;
         }
@@ -1102,6 +1137,7 @@ impl StorageCell {
             data_ptr,
             data_len: byte_len as u8,
             hash_count: hash_count as u8,
+            epoch,
             reference_states,
             reference_data,
         })
@@ -1176,7 +1212,7 @@ impl StorageCell {
         let mut res = Ok(());
         Self::initialize_inner(state, &mut || match self
             .cell_storage
-            .load_cell(unsafe { (*slot).hash })
+            .load_cell(unsafe { &(*slot).hash }, self.epoch)
         {
             Ok(cell) => unsafe {
                 *slot = StorageCellReferenceData {

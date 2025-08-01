@@ -106,7 +106,7 @@ async fn test_storage_accessors() {
 
     storage
         .shard_state_storage()
-        .load_state(&last_mc_block_id)
+        .load_state(last_mc_block_id.seqno, &last_mc_block_id)
         .await
         .unwrap();
 }

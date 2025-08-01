@@ -136,7 +136,7 @@ impl NodeBase {
         let mc_state = self
             .core_storage
             .shard_state_storage()
-            .load_state(block_id)
+            .load_state(block_id.seqno, block_id)
             .await?;
 
         let config = mc_state.config_params()?;
