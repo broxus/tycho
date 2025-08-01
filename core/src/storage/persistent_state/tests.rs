@@ -67,7 +67,7 @@ async fn persistent_shard_state() -> Result<()> {
 
     // Load zerostate from db
     {
-        let loaded_state = shard_states.load_state(zerostate.block_id()).await?;
+        let loaded_state = shard_states.load_state(0, zerostate.block_id()).await?;
         assert_eq!(zerostate.state(), loaded_state.state());
         assert_eq!(zerostate.block_id(), loaded_state.block_id());
         assert_eq!(zerostate.root_cell(), loaded_state.root_cell());
