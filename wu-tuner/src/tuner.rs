@@ -433,7 +433,7 @@ where
                 let mut target_wu_params = None;
 
                 // get actual wu price
-                let actual_wu_price = avg_wu_metrics.wu_on_finalize.build_in_msgs_wu_price();
+                let actual_wu_price = avg_wu_metrics.collation_total_wu_price();
 
                 // get wu price from last adjustment
                 let last_adjustment_wu_price = self
@@ -448,8 +448,8 @@ where
                 let lag_lower_bound = self.config.lag_bounds_ms.0 as i64;
                 let lag_upper_bound = self.config.lag_bounds_ms.1 as i64;
 
-                // it is okay when lag is negative but we do not have pending messages
-                if (avg_wu_metrics.has_pending_messages || avg_lag >= 0)
+                // it is okay when lag is negative but we do not have messages
+                if (avg_wu_metrics.wu_on_execute.groups_count > 0 || avg_lag >= 0)
                     && !(lag_lower_bound..lag_upper_bound).contains(&avg_lag)
                 {
                     // get prev wu price from last adjustment or actual
@@ -502,7 +502,7 @@ where
                         %shard, seqno,
                         has_pending_messages = avg_wu_metrics.has_pending_messages,
                         avg_lag, lag_bounds = ?self.config.lag_bounds_ms,
-                        current_build_in_msgs_wu_price = avg_wu_metrics.wu_on_finalize.build_in_msgs_wu_price(),
+                        current_wu_price = avg_wu_metrics.collation_total_wu_price(),
                         prev_wu_price, adaptive_wu_price, target_wu_price,
                         current_build_in_msg_wu_param = avg_wu_metrics.wu_params.finalize.build_in_msg,
                         target_build_in_msg_wu_param = target_params.finalize.build_in_msg,
