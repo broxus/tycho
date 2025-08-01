@@ -448,7 +448,7 @@ impl StarterInner {
 
         tracing::info!("imported zerostates");
 
-        let state = state_storage.load_state(&zerostate_id).await?;
+        let state = state_storage.load_state(0, &zerostate_id).await?;
         let handle = handle_storage
             .load_handle(&zerostate_id)
             .expect("shouldn't happen");
@@ -678,7 +678,7 @@ impl StarterInner {
         let block_handle = block_handles.load_handle(block_id);
         if let Some(handle) = &block_handle {
             if handle.has_state() {
-                let state = shard_states.load_state(block_id).await?;
+                let state = shard_states.load_state(mc_seqno, block_id).await?;
 
                 if !handle.has_persistent_shard_state() {
                     let from = if state_file.exists() {
@@ -714,7 +714,9 @@ impl StarterInner {
             // NOTE: `store_state_file` error is mostly unrecoverable since the operation
             //       context is too large to be atomic.
             // TODO: Make this operation recoverable to allow an infinite number of attempts.
-            let state = shard_states.store_state_file(block_id, file).await?;
+            let state = shard_states
+                .store_state_file(mc_seqno, block_id, file)
+                .await?;
 
             let block_handle = match block_handle {
                 Some(handle) => handle,

@@ -57,9 +57,10 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Return id of last master block that was applied to node local state
     fn load_last_applied_mc_block_id(&self) -> Result<BlockId>;
     /// Return master or shard state on specified block from node local state
-    async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff>;
+    async fn load_state(&self, ref_by_mc_seqno: u32, block_id: &BlockId)
+    -> Result<ShardStateStuff>;
     /// Return master or shard state root on specified block from node local state
-    async fn load_state_root(&self, block_id: &BlockId) -> Result<Cell>;
+    async fn load_state_root(&self, ref_by_mc_seqno: u32, block_id: &BlockId) -> Result<Cell>;
     /// Store shard state root in the storage.
     /// Returns `true` when state was updated in storage.
     async fn store_state_root(
@@ -182,7 +183,11 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         Ok(las_applied_mc_block_id)
     }
 
-    async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
+    async fn load_state(
+        &self,
+        ref_by_mc_seqno: u32,
+        block_id: &BlockId,
+    ) -> Result<ShardStateStuff> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_load_state_time");
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
@@ -190,13 +195,13 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let state = self
             .storage
             .shard_state_storage()
-            .load_state(block_id)
+            .load_state(ref_by_mc_seqno, block_id)
             .await?;
 
         Ok(state)
     }
 
-    async fn load_state_root(&self, block_id: &BlockId) -> Result<Cell> {
+    async fn load_state_root(&self, ref_by_mc_seqno: u32, block_id: &BlockId) -> Result<Cell> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_load_state_root_time");
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state root: {}", block_id.as_short_id());
@@ -206,7 +211,10 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             .shard_state_storage()
             .load_state_root(block_id)?;
 
-        let cell = self.storage.shard_state_storage().load_cell(hash)?;
+        let cell = self
+            .storage
+            .shard_state_storage()
+            .load_cell(ref_by_mc_seqno, hash)?;
 
         Ok(cell)
     }
