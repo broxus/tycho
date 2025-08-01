@@ -445,8 +445,8 @@ where
                 let lag_lower_bound = self.config.lag_bounds_ms.0 as i64;
                 let lag_upper_bound = self.config.lag_bounds_ms.1 as i64;
 
-                // it is okay when lag is negative but we do not have pending messages
-                if (avg_wu_metrics.has_pending_messages || avg_lag >= 0)
+                // it is okay when lag is negative but we do not have messages
+                if (avg_wu_metrics.wu_on_execute.groups_count > 0 || avg_lag >= 0)
                     && !(lag_lower_bound..lag_upper_bound).contains(&avg_lag)
                 {
                     // get prev wu price from last adjustment or actual
