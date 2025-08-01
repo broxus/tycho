@@ -627,7 +627,8 @@ impl CollatorStdImpl {
             let mut working_state = self.delayed_working_state.wait().await?;
 
             // update mc_data if newer
-            if working_state.mc_data.block_id.seqno < mc_data.block_id.seqno {
+            let prev_mc_seqno = working_state.mc_data.block_id.seqno;
+            if prev_mc_seqno < mc_data.block_id.seqno {
                 working_state.collation_config = Arc::new(mc_data.config.get_collation_config()?);
                 working_state.mc_data = mc_data;
 
@@ -646,8 +647,12 @@ impl CollatorStdImpl {
                         last_task.store_new_state_task.await?;
 
                         // and reload pure prev state in working state
-                        Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
-                            .await?;
+                        Self::reload_prev_data(
+                            prev_mc_seqno,
+                            &mut working_state,
+                            self.state_node_adapter.clone(),
+                        )
+                        .await?;
                     } else {
                         let mut unfinished_tasks: Vec<StateUpdateContext> = vec![last_task];
 
@@ -683,6 +688,7 @@ impl CollatorStdImpl {
 
                                 // and reload pure prev state in the working state
                                 Self::reload_prev_data(
+                                    prev_mc_seqno,
                                     &mut working_state,
                                     self.state_node_adapter.clone(),
                                 )
@@ -696,7 +702,7 @@ impl CollatorStdImpl {
                             // load stored state
                             let mut prev_state = self
                                 .state_node_adapter
-                                .load_state_root(&task.block_id)
+                                .load_state_root(prev_mc_seqno, &task.block_id)
                                 .await
                                 .context("failed to load prev shard state")?;
 
@@ -893,8 +899,12 @@ impl CollatorStdImpl {
             prev_blocks_ids = %DisplayBlockIdsIntoIter(&prev_blocks_ids),
             "loading prev states and queue diffs...",
         );
-        let (prev_states, prev_queue_diff_hashes) =
-            Self::load_states_and_diffs(state_node_adapter, prev_blocks_ids).await?;
+        let (prev_states, prev_queue_diff_hashes) = Self::load_states_and_diffs(
+            mc_data.block_id.seqno,
+            state_node_adapter,
+            prev_blocks_ids,
+        )
+        .await?;
 
         // build and validate working state
         tracing::debug!(target: tracing_targets::COLLATOR, "building working state...");
@@ -936,6 +946,7 @@ impl CollatorStdImpl {
     }
 
     async fn reload_prev_data(
+        prev_mc_seqno: u32,
         working_state: &mut WorkingState,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
     ) -> Result<()> {
@@ -955,7 +966,8 @@ impl CollatorStdImpl {
             "loading prev states...",
         );
         let prev_states =
-            Self::load_prev_states(state_node_adapter.as_ref(), &prev_blocks_ids).await?;
+            Self::load_prev_states(prev_mc_seqno, state_node_adapter.as_ref(), &prev_blocks_ids)
+                .await?;
 
         // update working state
         tracing::debug!(target: tracing_targets::COLLATOR, "updating prev data in working state from reloaded state root...");
@@ -1041,8 +1053,13 @@ impl CollatorStdImpl {
                 )?,
                 GetNewShardStateStuff::ReloadFromStorage(store_new_state_task) => {
                     store_new_state_task.await?;
+                    // NOTE: state epoch is `block_id.seqno` because it is mc block id.
                     let load_task = JoinTask::new({
-                        async move { state_node_adapter.load_state(&block_id).await }
+                        async move {
+                            state_node_adapter
+                                .load_state(block_id.seqno, &block_id)
+                                .await
+                        }
                     });
                     load_task.await?
                 }
@@ -1073,6 +1090,7 @@ impl CollatorStdImpl {
 
     /// Load required prev states and prev queue diff hashes
     async fn load_states_and_diffs(
+        ref_by_mc_seqno: u32,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         prev_blocks_ids: Vec<BlockId>,
     ) -> Result<(Vec<ShardStateStuff>, Vec<HashBytes>)> {
@@ -1081,8 +1099,15 @@ impl CollatorStdImpl {
             let state_node_adapter = state_node_adapter.clone();
             let prev_blocks_ids = prev_blocks_ids.clone();
             let span = tracing::Span::current();
-            async move { Self::load_prev_states(state_node_adapter.as_ref(), &prev_blocks_ids).await }
-                .instrument(span)
+            async move {
+                Self::load_prev_states(
+                    ref_by_mc_seqno,
+                    state_node_adapter.as_ref(),
+                    &prev_blocks_ids,
+                )
+                .await
+            }
+            .instrument(span)
         });
 
         let prev_hashes_fut: JoinTask<Result<Vec<HashBytes>>> = JoinTask::new({
@@ -1111,12 +1136,15 @@ impl CollatorStdImpl {
     }
 
     async fn load_prev_states(
+        prev_mc_seqno: u32,
         state_node_adapter: &dyn StateNodeAdapter,
         prev_blocks_ids: &[BlockId],
     ) -> Result<Vec<ShardStateStuff>> {
         let mut prev_states = vec![];
         for prev_block_id in prev_blocks_ids {
-            let state = state_node_adapter.load_state(prev_block_id).await?;
+            let state = state_node_adapter
+                .load_state(prev_mc_seqno, prev_block_id)
+                .await?;
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "loaded prev shard state for prev_block_id {}",
                 prev_block_id.as_short_id(),
