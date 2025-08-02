@@ -208,6 +208,11 @@ impl ShardStateStorage {
         ShardStateStuff::from_root(block_id, Cell::from(cell as Arc<_>), &self.min_ref_mc_state)
     }
 
+    pub fn load_cell(&self, cell_id: HashBytes) -> Result<Cell> {
+        let cell = self.cell_storage.load_cell(cell_id)?;
+        Ok(Cell::from(cell as Arc<_>))
+    }
+
     #[tracing::instrument(skip(self))]
     pub async fn remove_outdated_states(&self, mc_seqno: u32) -> Result<()> {
         // Compute recent block ids for the specified masterchain seqno
