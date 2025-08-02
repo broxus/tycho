@@ -201,10 +201,12 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state root: {}", block_id.as_short_id());
 
-        let cell = self
+        let hash = self
             .storage
             .shard_state_storage()
             .load_state_root(block_id)?;
+
+        let cell = self.storage.shard_state_storage().load_cell(hash)?;
 
         Ok(cell)
     }
