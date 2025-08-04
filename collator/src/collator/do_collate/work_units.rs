@@ -1625,7 +1625,12 @@ pub fn unpack_from_u16(packed: u16) -> (u16, u16) {
         return (1, 1);
     }
     let a = packed / 100;
-    let b = packed % 100;
+
+    let mut b = packed % 100;
+    if b == 0 {
+        b = 1;
+    }
+
     (a, b)
 }
 
@@ -1635,6 +1640,8 @@ pub fn compute_scaled_pow(
     pow_coeff_denominator: u32,
     scale: u128,
 ) -> u128 {
+    assert_ne!(pow_coeff_denominator, 0);
+
     fn compute_root(y: BigUint, denominator: u32) -> BigUint {
         let one = BigUint::from(1u128);
         let mut low = BigUint::ZERO;
@@ -1684,6 +1691,20 @@ fn test_compute_scaled_pow() {
     let res = x * res;
     println!(
         "{x}^(1+{pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
+        (res as f64 / scale as f64),
+    );
+
+    // 20k^0/0
+    let pow_coeff = 0;
+    let (pow_coeff_numerator, pow_coeff_denominator) = unpack_from_u16(pow_coeff);
+    let res = compute_scaled_pow(
+        x,
+        pow_coeff_numerator as u32,
+        pow_coeff_denominator as u32,
+        scale,
+    );
+    println!(
+        "{x}^({pow_coeff_numerator}/{pow_coeff_denominator}) = {}",
         (res as f64 / scale as f64),
     );
 

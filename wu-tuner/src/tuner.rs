@@ -243,23 +243,23 @@ where
                 }
 
                 // handle if wu params changed
-                if let Some((_, last)) = history.metrics.last_key_value()
-                    && metrics.wu_params != last.last.wu_params
-                {
-                    tracing::info!(
-                        %shard, seqno,
-                        prev_params = ?last.last.wu_params,
-                        curr_params = ?metrics.wu_params,
-                        "wu params updated",
-                    );
+                if let Some((_, last)) = history.metrics.last_key_value() {
+                    if metrics.wu_params != last.last.wu_params {
+                        tracing::info!(
+                            %shard, seqno,
+                            prev_params = ?last.last.wu_params,
+                            curr_params = ?metrics.wu_params,
+                            "wu params updated",
+                        );
 
-                    // clear history
-                    history.clear();
+                        // clear history
+                        history.clear();
 
-                    // report updated wu params to metrics
-                    report_wu_params(&metrics.wu_params, &metrics.wu_params);
+                        // report updated wu params to metrics
+                        report_wu_params(&metrics.wu_params, &metrics.wu_params);
 
-                    self.wu_params_last_updated_on_seqno = seqno;
+                        self.wu_params_last_updated_on_seqno = seqno;
+                    }
                 }
 
                 // on start set wu params last updated on current seqno
@@ -551,10 +551,10 @@ where
                                 self.adjustments
                                     .insert(tune_seqno, WuAdjustment { target_wu_price });
                                 let gc_boundary = tune_seqno.saturating_sub(tune_interval);
-                                if let Some((&first_key, _)) = self.adjustments.first_key_value()
-                                    && first_key < gc_boundary
-                                {
-                                    self.adjustments.retain(|k, _| k >= &gc_boundary);
+                                if let Some((&first_key, _)) = self.adjustments.first_key_value() {
+                                    if first_key < gc_boundary {
+                                        self.adjustments.retain(|k, _| k >= &gc_boundary);
+                                    }
                                 }
                             }
                             WuTuneType::No => {
