@@ -38,6 +38,8 @@ pub struct ShardStateStorage {
     max_new_sc_cell_count: AtomicUsize,
 
     accounts_split_depth: u8,
+
+    background_drop_cell_tx: std::sync::mpsc::Sender<Cell>,
 }
 
 impl ShardStateStorage {
@@ -50,6 +52,15 @@ impl ShardStateStorage {
     ) -> Result<Arc<Self>> {
         let cell_storage = CellStorage::new(db.clone(), cache_size_bytes);
 
+        let (background_drop_cell_tx, background_drop_cell_rx) = std::sync::mpsc::channel::<Cell>();
+
+        std::thread::spawn(move || {
+            while let Ok(cell) = background_drop_cell_rx.recv() {
+                let _hist = HistogramGuard::begin("tycho_storage_cell_drop_time_high");
+                drop(cell);
+            }
+        });
+
         Ok(Arc::new(Self {
             db,
             block_handle_storage,
@@ -60,7 +71,8 @@ impl ShardStateStorage {
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
-            accounts_split_depth: 4,
+            accounts_split_depth: 5,
+            background_drop_cell_tx,
         }))
     }
 
@@ -122,6 +134,7 @@ impl ShardStateStorage {
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
         let accounts_split_depth = self.accounts_split_depth;
+        let background_drop_cell_tx = self.background_drop_cell_tx.clone();
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
@@ -163,9 +176,9 @@ impl ShardStateStorage {
 
             raw_db.write(batch)?;
 
-            drop(root_cell);
-
             hist.finish();
+
+            background_drop_cell_tx.send(root_cell)?;
 
             let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
             if updated {
@@ -293,10 +306,14 @@ impl ShardStateStorage {
 
                 in_mem_remove.finish();
 
+                let in_db_remove = HistogramGuard::begin("tycho_storage_state_remove_time_high");
+
                 batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
                 db.raw()
                     .rocksdb()
                     .write_opt(batch, db.cells.write_config())?;
+
+                in_db_remove.finish();
 
                 Ok::<_, anyhow::Error>((stats, alloc))
             })
@@ -313,7 +330,8 @@ impl ShardStateStorage {
             iter.next();
 
             metrics::counter!("tycho_storage_state_gc_count").increment(1);
-            metrics::counter!("tycho_storage_state_gc_cells_count").increment(1);
+            metrics::histogram!("tycho_storage_state_gc_cells_count").record(total as f64);
+
             if block_id.is_masterchain() {
                 metrics::gauge!("tycho_gc_states_seqno").set(block_id.seqno as f64);
             }
