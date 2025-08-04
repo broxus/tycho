@@ -653,7 +653,9 @@ impl CollatorStdImpl {
 
                         // Process previous tasks until finding the finished one
                         while let Some(task) = self.store_new_state_tasks.pop() {
-                            if !task.store_new_state_task.is_finished() {
+                            if !task.store_new_state_task.is_finished()
+                                && unfinished_tasks.len() < 3
+                            {
                                 unfinished_tasks.push(task);
                                 continue;
                             }
@@ -696,7 +698,7 @@ impl CollatorStdImpl {
                                 .state_node_adapter
                                 .load_state_root(&task.block_id)
                                 .await
-                                .context("failed to load prev shard state 2")?;
+                                .context("failed to load prev shard state")?;
 
                             while let Some(task) = unfinished_tasks.pop() {
                                 let split_at = {
@@ -707,7 +709,7 @@ impl CollatorStdImpl {
                                         .parse::<ShardAccounts>()
                                         .context("failed to load shard accounts")?;
 
-                                    split_aug_dict_raw(shard_accounts, 4)
+                                    split_aug_dict_raw(shard_accounts, 5)
                                         .context("failed to split shard accounts")?
                                         .into_keys()
                                         .collect::<ahash::HashSet<_>>()
@@ -725,15 +727,15 @@ impl CollatorStdImpl {
                             }
 
                             // and update pure prev state in working state
-                            Self::update_prev_data(&mut working_state, prev_state.clone()).await?;
+                            Self::update_prev_data(&mut working_state, prev_state).await?;
 
                             break;
                         }
+                    }
 
-                        // finalize all remaining state store tasks in background
-                        for cx in self.store_new_state_tasks.drain(..) {
-                            self.background_store_new_state_tx.send(cx)?;
-                        }
+                    // finalize all remaining state store tasks in background
+                    for cx in self.store_new_state_tasks.drain(..) {
+                        self.background_store_new_state_tx.send(cx)?;
                     }
                 }
             }
