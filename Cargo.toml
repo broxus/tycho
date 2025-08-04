@@ -150,6 +150,9 @@ tycho-util = { path = "./util", version = "0.2.12" }
 tycho-util-proc = { path = "./util-proc", version = "0.2.12" }
 tycho-wu-tuner = { path = "./wu-tuner", version = "0.2.12" }
 
+[patch.crates-io]
+tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "a6b39beb1b4bb31a5183b3745619892516da2f79" }
+
 [workspace.lints.rust]
 future_incompatible = "warn"
 nonstandard_style = "warn"
