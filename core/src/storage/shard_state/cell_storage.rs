@@ -1093,7 +1093,6 @@ impl StorageCell {
     const REF_EMPTY: u8 = 0x0;
     const REF_RUNNING: u8 = 0x1;
     const REF_STORAGE: u8 = 0x2;
-    const REF_REPLACED: u8 = 0x3;
 
     const HASHES_ITEM_LEN: usize = 32 + 2;
 
@@ -1327,59 +1326,6 @@ impl CellImpl for StorageCell {
         let offset = self.data_len as usize + (i as usize) * Self::HASHES_ITEM_LEN + 32;
         u16::from_le_bytes(unsafe { *self.data_ptr.add(offset).cast::<[u8; 2]>() })
     }
-
-    fn take_first_child(&mut self) -> Option<Cell> {
-        let state = self.reference_states[0].swap(Self::REF_EMPTY, Ordering::AcqRel);
-        let data = self.reference_data[0].get_mut();
-        match state {
-            Self::REF_STORAGE => Some(unsafe { data.take_storage_cell() }),
-            Self::REF_REPLACED => Some(unsafe { data.take_replaced_cell() }),
-            _ => None,
-        }
-    }
-
-    fn replace_first_child(&mut self, parent: Cell) -> std::result::Result<Cell, Cell> {
-        let state = self.reference_states[0].load(Ordering::Acquire);
-        if state < Self::REF_STORAGE {
-            return Err(parent);
-        }
-
-        self.reference_states[0].store(Self::REF_REPLACED, Ordering::Release);
-        let data = self.reference_data[0].get_mut();
-
-        let cell = match state {
-            Self::REF_STORAGE => unsafe { data.take_storage_cell() },
-            Self::REF_REPLACED => unsafe { data.take_replaced_cell() },
-            _ => return Err(parent),
-        };
-        data.replaced_cell = ManuallyDrop::new(parent);
-        Ok(cell)
-    }
-
-    fn take_next_child(&mut self) -> Option<Cell> {
-        while self.descriptor.reference_count() > 1 {
-            self.descriptor.d1 -= 1;
-            let idx = (self.descriptor.d1 & CellDescriptor::REF_COUNT_MASK) as usize;
-
-            let state = self.reference_states[idx].swap(Self::REF_EMPTY, Ordering::AcqRel);
-            let data = self.reference_data[idx].get_mut();
-
-            return Some(match state {
-                Self::REF_STORAGE => unsafe { data.take_storage_cell() },
-                Self::REF_REPLACED => unsafe { data.take_replaced_cell() },
-                _ => continue,
-            });
-        }
-
-        None
-    }
-
-    fn stats(&self) -> CellTreeStats {
-        // TODO: make real implementation
-
-        // STUB: just return default value
-        Default::default()
-    }
 }
 
 impl Drop for StorageCell {
@@ -1399,11 +1345,10 @@ impl Drop for StorageCell {
             let state = self.reference_states[i].load(Ordering::Acquire);
             let data = self.reference_data[i].get_mut();
 
-            unsafe {
-                match state {
-                    Self::REF_STORAGE => ManuallyDrop::drop(&mut data.storage_cell),
-                    Self::REF_REPLACED => ManuallyDrop::drop(&mut data.replaced_cell),
-                    _ => {}
+            if state == Self::REF_STORAGE {
+                let cell = unsafe { ManuallyDrop::take(&mut data.storage_cell) };
+                if Arc::strong_count(&cell) == 1 {
+                    SafeDeleter::retire(cell);
                 }
             }
         }
@@ -1418,18 +1363,6 @@ pub union StorageCellReferenceData {
     hash: HashBytes,
     /// Complete state.
     storage_cell: ManuallyDrop<Arc<StorageCell>>,
-    /// Replaced state.
-    replaced_cell: ManuallyDrop<Cell>,
-}
-
-impl StorageCellReferenceData {
-    unsafe fn take_storage_cell(&mut self) -> Cell {
-        Cell::from(unsafe { ManuallyDrop::take(&mut self.storage_cell) } as Arc<_>)
-    }
-
-    unsafe fn take_replaced_cell(&mut self) -> Cell {
-        unsafe { ManuallyDrop::take(&mut self.replaced_cell) }
-    }
 }
 
 struct RawCellsCache {
