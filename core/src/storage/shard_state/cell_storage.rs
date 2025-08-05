@@ -1091,7 +1091,6 @@ impl StorageCell {
     const REF_EMPTY: u8 = 0x0;
     const REF_RUNNING: u8 = 0x1;
     const REF_STORAGE: u8 = 0x2;
-    const REF_REPLACED: u8 = 0x3;
 
     const HASHES_ITEM_LEN: usize = 32 + 2;
 
@@ -1325,13 +1324,6 @@ impl CellImpl for StorageCell {
         let offset = self.data_len as usize + (i as usize) * Self::HASHES_ITEM_LEN + 32;
         u16::from_le_bytes(unsafe { *self.data_ptr.add(offset).cast::<[u8; 2]>() })
     }
-
-    fn stats(&self) -> CellTreeStats {
-        // TODO: make real implementation
-
-        // STUB: just return default value
-        Default::default()
-    }
 }
 
 impl Drop for StorageCell {
@@ -1351,11 +1343,10 @@ impl Drop for StorageCell {
             let state = self.reference_states[i].load(Ordering::Acquire);
             let data = self.reference_data[i].get_mut();
 
-            unsafe {
-                match state {
-                    Self::REF_STORAGE => ManuallyDrop::drop(&mut data.storage_cell),
-                    Self::REF_REPLACED => ManuallyDrop::drop(&mut data.replaced_cell),
-                    _ => {}
+            if state == Self::REF_STORAGE {
+                let cell = unsafe { ManuallyDrop::take(&mut data.storage_cell) };
+                if Arc::strong_count(&cell) == 1 {
+                    SafeDeleter::retire(cell);
                 }
             }
         }
@@ -1370,8 +1361,6 @@ pub union StorageCellReferenceData {
     hash: HashBytes,
     /// Complete state.
     storage_cell: ManuallyDrop<Arc<StorageCell>>,
-    /// Replaced state.
-    replaced_cell: ManuallyDrop<Cell>,
 }
 
 struct RawCellsCache {
