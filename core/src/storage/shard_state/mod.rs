@@ -163,7 +163,9 @@ impl ShardStateStorage {
 
             raw_db.write(batch)?;
 
+            let drop_cell_hist = HistogramGuard::begin("tycho_storage_cell_drop_time_high");
             drop(root_cell);
+            drop_cell_hist.finish();
 
             hist.finish();
 
@@ -288,10 +290,14 @@ impl ShardStateStorage {
 
                 in_mem_remove.finish();
 
+                let in_db_remove = HistogramGuard::begin("tycho_storage_state_remove_time_high");
+
                 batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
                 db.raw()
                     .rocksdb()
                     .write_opt(batch, db.cells.write_config())?;
+
+                in_db_remove.finish();
 
                 Ok::<_, anyhow::Error>((stats, alloc))
             })
@@ -308,7 +314,8 @@ impl ShardStateStorage {
             iter.next();
 
             metrics::counter!("tycho_storage_state_gc_count").increment(1);
-            metrics::counter!("tycho_storage_state_gc_cells_count").increment(1);
+            metrics::histogram!("tycho_storage_state_gc_cells_count").record(total as f64);
+
             if block_id.is_masterchain() {
                 metrics::gauge!("tycho_gc_states_seqno").set(block_id.seqno as f64);
             }
