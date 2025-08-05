@@ -651,7 +651,7 @@ impl CellStorage {
         hash: &HashBytes,
         epoch: u32,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
-        let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
+        // let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
         if let Some(cell) = self.cells_cache.get(hash) {
             if cell.epoch.saturating_add(self.drop_interval) >= epoch {
@@ -670,17 +670,17 @@ impl CellStorage {
             Err(e) => return Err(CellStorageError::Internal(e)),
         };
 
-        let has_new;
+        // let has_new;
         match self.cells_cache.entry(*hash) {
             dashmap::Entry::Vacant(entry) => {
-                has_new = true;
+                // has_new = true;
                 entry.insert(CachedCell {
                     epoch,
                     weak: Arc::downgrade(&cell),
                 });
             }
             dashmap::Entry::Occupied(mut entry) => {
-                has_new = false;
+                // has_new = false;
                 if entry.get().epoch >= epoch
                     && let Some(mut prev) = entry.get().weak.upgrade()
                 {
@@ -695,9 +695,9 @@ impl CellStorage {
             }
         };
 
-        if has_new {
-            metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
-        }
+        // if has_new {
+        //     metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
+        // }
 
         Ok(cell)
     }
@@ -1027,13 +1027,16 @@ impl CellStorage {
     }
 
     pub fn drop_cell(&self, hash: &HashBytes) {
-        if self
-            .cells_cache
-            .remove_if(hash, |_, cell| cell.weak.strong_count() == 0)
-            .is_some()
-        {
-            metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
-        }
+        self.cells_cache
+            .remove_if(hash, |_, cell| cell.weak.strong_count() == 0);
+
+        // if self
+        //     .cells_cache
+        //     .remove_if(hash, |_, cell| cell.weak.strong_count() == 0)
+        //     .is_some()
+        // {
+        //     metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
+        // }
     }
 }
 
