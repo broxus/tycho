@@ -117,7 +117,12 @@ struct ZerostateConfig {
     minter_public_key: Option<ed25519::PublicKey>,
 
     config_balance: Tokens,
+    #[serde(default, with = "Boc", skip_serializing_if = "Option::is_none")]
+    config_code: Option<Cell>,
+
     elector_balance: Tokens,
+    #[serde(default, with = "Boc", skip_serializing_if = "Option::is_none")]
+    elector_code: Option<Cell>,
 
     #[serde(with = "serde_account_states")]
     accounts: FastHashMap<HashBytes, OptionalAccount>,
@@ -268,24 +273,42 @@ impl ZerostateConfig {
             &self.config_public_key != zero_public_key(),
             "config public key is not set"
         );
-        self.accounts.insert(
+        let prev = self.accounts.insert(
             config_address,
             build_config_account(
                 &self.config_public_key,
                 &config_address,
                 self.config_balance,
+                self.config_code.clone(),
             )?
             .into(),
         );
+        if prev.is_some() {
+            anyhow::bail!(
+                "full config account state cannot be specified manually, \
+                use \"config_code\" param instead"
+            );
+        }
 
         // Elector
         let Some(elector_address) = self.params.get::<ConfigParam1>()? else {
             anyhow::bail!("elector address is not set (param 1)");
         };
-        self.accounts.insert(
+        let prev = self.accounts.insert(
             elector_address,
-            build_elector_code(&elector_address, self.elector_balance)?.into(),
+            build_elector_account(
+                &elector_address,
+                self.elector_balance,
+                self.elector_code.clone(),
+            )?
+            .into(),
         );
+        if prev.is_some() {
+            anyhow::bail!(
+                "full elector account state cannot be specified manually, \
+                use \"elector_code\" param instead"
+            );
+        }
 
         // Minter
         match (&self.minter_public_key, self.params.get::<ConfigParam2>()?) {
@@ -477,7 +500,9 @@ impl Default for ZerostateConfig {
             config_public_key: *zero_public_key(),
             minter_public_key: None,
             config_balance: Tokens::new(500_000_000_000), // 500
+            config_code: None,
             elector_balance: Tokens::new(500_000_000_000), // 500
+            elector_code: None,
             accounts: Default::default(),
             validators: Default::default(),
             params: make_default_params().unwrap(),
@@ -842,10 +867,11 @@ fn build_config_account(
     pubkey: &ed25519::PublicKey,
     address: &HashBytes,
     balance: Tokens,
+    custom_code: Option<Cell>,
 ) -> Result<Account> {
     const CONFIG_CODE: &[u8] = include_bytes!("../../../res/config_code.boc");
 
-    let code = Boc::decode(CONFIG_CODE)?;
+    let code = custom_code.unwrap_or_else(|| Boc::decode(CONFIG_CODE).unwrap());
 
     let mut data = CellBuilder::new();
     data.store_reference(Cell::empty_cell())?;
@@ -876,10 +902,14 @@ fn build_config_account(
     Ok(account)
 }
 
-fn build_elector_code(address: &HashBytes, balance: Tokens) -> Result<Account> {
+fn build_elector_account(
+    address: &HashBytes,
+    balance: Tokens,
+    custom_code: Option<Cell>,
+) -> Result<Account> {
     const ELECTOR_CODE: &[u8] = include_bytes!("../../../res/elector_code.boc");
 
-    let code = Boc::decode(ELECTOR_CODE)?;
+    let code = custom_code.unwrap_or_else(|| Boc::decode(ELECTOR_CODE).unwrap());
 
     let mut data = CellBuilder::new();
     data.store_small_uint(0, 3)?; // empty dict, empty dict, empty dict
