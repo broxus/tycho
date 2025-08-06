@@ -39,7 +39,7 @@ mod types;
 mod util;
 mod writer;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
@@ -64,7 +64,7 @@ pub use self::types::{ArchiveId, ArchiveState, BlockGcStats, BlockStorageError};
 pub use self::util::remove_blocks;
 use super::package_entry::{PackageEntryKey, PackageEntryKeyEncoder, PartialBlockId};
 use crate::storage::block_handle::BlockDataGuard;
-use crate::storage::{BlockHandle, BlockHandleStorage, CoreDb};
+use crate::storage::{BlockFlags, BlockHandle, BlockHandleStorage, BlockMeta, CoreDb};
 
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 
@@ -88,7 +88,7 @@ impl BlobStorage {
         block_handle_storage: Arc<BlockHandleStorage>,
         blobdb_path: &Path,
         pre_create_cas_dirs: bool,
-    ) -> Result<Self> {
+    ) -> Result<(Self, u32)> {
         let (archive_ids_tx, _) = broadcast::channel(4);
         let config = cassadilia::Config {
             sync_mode: cassadilia::SyncMode::Sync,
@@ -105,7 +105,7 @@ impl BlobStorage {
         )?;
         let archives = Cas::open(blobdb_path.join("archives"), ArchiveKeyEncoder, config)?;
 
-        Ok(Self {
+        let storage = Self {
             db,
             block_handle_storage,
             archive_ids_tx,
@@ -114,7 +114,103 @@ impl BlobStorage {
 
             blocks,
             archives,
-        })
+        };
+
+        let cleanup_count = storage.cleanup_orphaned_metadata()?;
+
+        Ok((storage, cleanup_count))
+    }
+
+    /// Scans `block_handles` and removes entries that have no corresponding blocks in cas.
+    pub(crate) fn cleanup_orphaned_metadata(&self) -> Result<u32> {
+        let started_at = Instant::now();
+        tracing::info!("started cleaning up orphaned block metadata");
+
+        let blocks_index = self.blocks.read_index_state();
+        let mut blocks_in_cas = HashSet::new();
+        for (key, _) in blocks_index.iter() {
+            if key.ty == ArchiveEntryType::Block {
+                blocks_in_cas.insert(*key.block_id.root_hash.as_array());
+            }
+        }
+        drop(blocks_index);
+
+        let raw = self.db.rocksdb().as_ref();
+
+        let block_handles_cf = self.db.block_handles.cf();
+        let full_block_ids_cf = self.db.full_block_ids.cf();
+        let block_connections_cf = self.db.block_connections.cf();
+
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut removed_count = 0u32;
+
+        let full_block_ids_readopts = self.db.full_block_ids.new_read_config();
+        let mut iter = raw.raw_iterator_cf_opt(&full_block_ids_cf, full_block_ids_readopts);
+        iter.seek_to_first();
+
+        while let Some((key, _)) = iter.item() {
+            let partial_id = PartialBlockId::from_slice(key);
+            let root_hash = *partial_id.root_hash.as_array();
+
+            if !blocks_in_cas.contains(&root_hash) {
+                let is_genesis = partial_id.seqno == 0;
+                let flags = self
+                    .db
+                    .block_handles
+                    .get(root_hash)
+                    .expect("db is dead")
+                    .expect("all 3 tables are written in 1 transaction");
+                let flags = BlockMeta::deserialize(&mut flags.as_ref());
+                let is_special = flags
+                    .flags()
+                    .contains(BlockFlags::IS_KEY_BLOCK | BlockFlags::IS_PERSISTENT);
+
+                tracing::debug!(
+                    root_hash = %HashBytes::from_slice(&root_hash),
+                    seqno = partial_id.seqno,
+                    is_special,
+                    is_genesis,
+                    "checking orphaned block metadata"
+                );
+
+                let is_protected = is_special || is_genesis;
+
+                if !is_protected {
+                    tracing::warn!(
+                        root_hash = %HashBytes::from_slice(&root_hash),
+                        seqno = partial_id.seqno,
+                        "removing orphaned block metadata"
+                    );
+
+                    // Delete from all three tables
+                    batch.delete_cf(&full_block_ids_cf, key);
+                    batch.delete_cf(&block_handles_cf, root_hash);
+
+                    // Delete both connection directions
+                    // Key format: PartialBlockId (48 bytes) + direction (1 byte)
+                    let mut conn_key = [0u8; 49];
+                    conn_key[..48].copy_from_slice(key);
+                    conn_key[48] = 0x00; // prev
+                    batch.delete_cf(&block_connections_cf, &conn_key[..]);
+                    conn_key[48] = 0x01; // next  
+                    batch.delete_cf(&block_connections_cf, &conn_key[..]);
+
+                    removed_count += 1;
+                }
+            }
+            iter.next();
+        }
+        iter.status()?;
+
+        raw.write(batch)?;
+
+        tracing::info!(
+            removed_count,
+            elapsed = %humantime::format_duration(started_at.elapsed()),
+            "cleanup_orphaned_metadata completed"
+        );
+
+        Ok(removed_count)
     }
 
     pub fn archive_chunk_size() -> NonZeroU32 {
@@ -550,7 +646,7 @@ impl BlobStorage {
         .await?
     }
 
-    pub async fn add_data(
+    pub(crate) async fn add_data(
         &self,
         id: &PackageEntryKey,
         data: Bytes,
@@ -616,6 +712,12 @@ impl BlobStorage {
     }
 
     pub(super) fn blocks(&self) -> &Cas<PackageEntryKey> {
+        &self.blocks
+    }
+
+    // yay integration tests
+    #[cfg(any(test, feature = "test"))]
+    pub fn blocks_for_test(&self) -> &Cas<PackageEntryKey> {
         &self.blocks
     }
 
@@ -763,7 +865,7 @@ mod test {
     pub async fn create_test_storage() -> Result<(BlobStorage, TempDir)> {
         let (db, handles, temp_dir) = create_temp_db_and_handles().await?;
         let storage = BlobStorage::new(db, handles, temp_dir.path(), false)?;
-        Ok((storage, temp_dir))
+        Ok((storage.0, temp_dir))
     }
 
     pub async fn create_test_storage_components() -> Result<(

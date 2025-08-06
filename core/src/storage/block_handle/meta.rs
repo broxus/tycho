@@ -95,6 +95,7 @@ impl StoredValue for BlockMeta {
     where
         Self: Sized,
     {
+        assert_eq!(reader.len(), Self::SIZE_HINT, "invalid block meta");
         let flags = reader.get_u64_le();
         let gen_utime = reader.get_u32_le();
 

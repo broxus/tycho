@@ -17,8 +17,11 @@ use tycho_core::block_strider::{
 };
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use tycho_core::overlay_client::PublicOverlayClient;
-use tycho_core::storage::{ArchiveId, CoreStorage, CoreStorageConfig, NewBlockMeta};
+use tycho_core::storage::{
+    ArchiveId, BlockFlags, BlockMeta, CoreStorage, CoreStorageConfig, NewBlockMeta, PackageEntryKey,
+};
 use tycho_network::PeerId;
+use tycho_storage::kv::StoredValue;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::models::{BlockId, ShardStateUnsplit};
 use tycho_types::prelude::*;
@@ -243,7 +246,7 @@ async fn archives() -> Result<()> {
     let zerostate_data = utils::read_file("zerostate.boc")?;
     let zerostate = utils::parse_zerostate(&zerostate_data)?;
     let zerostate_id = *zerostate.block_id();
-    let storage = prepare_storage(config, zerostate).await?;
+    let storage = prepare_storage(config.clone(), zerostate.clone()).await?;
 
     // Init state applier
     let state_subscriber = DummySubscriber;
@@ -334,12 +337,13 @@ async fn archives() -> Result<()> {
         "Archive content should match after decompression"
     );
 
-    test_pagination(storage).await?;
+    let all_blocks = test_pagination(storage.clone()).await?;
+    test_orphaned_metadata_cleanup(storage, all_blocks, config, zerostate).await?;
 
     Ok(())
 }
 
-async fn test_pagination(storage: CoreStorage) -> Result<()> {
+async fn test_pagination(storage: CoreStorage) -> Result<Vec<BlockId>> {
     use std::collections::HashSet;
 
     let mut all_blocks: Vec<BlockId> = Vec::new();
@@ -414,6 +418,62 @@ async fn test_pagination(storage: CoreStorage) -> Result<()> {
     }
 
     assert!(page_count > 0, "Should have at least one page");
+
+    Ok(all_blocks)
+}
+
+async fn test_orphaned_metadata_cleanup(
+    storage: CoreStorage,
+    blocks: Vec<BlockId>,
+    config: StorageConfig,
+    zerostate: ShardStateStuff,
+) -> Result<()> {
+    assert_eq!(storage.orphans_cleaned(), 0, "fresh storage has orphans");
+
+    const NUM_DELETED: usize = 50;
+    let meta_store = &storage.db().block_handles;
+    let is_protected = |block_id: &BlockId| {
+        if block_id.seqno == 0 {
+            return true;
+        }
+        let meta = meta_store.get(block_id.root_hash).unwrap().unwrap();
+        let meta = BlockMeta::deserialize(&mut &meta[..]);
+
+        meta.flags()
+            .contains(BlockFlags::IS_KEY_BLOCK | BlockFlags::IS_PERSISTENT)
+    };
+
+    let blocks_to_delete: Vec<_> = blocks
+        .into_iter()
+        .filter(|x| x.is_masterchain() && !is_protected(x))
+        .take(NUM_DELETED)
+        .collect();
+
+    assert_eq!(blocks_to_delete.len(), NUM_DELETED);
+
+    let blocks_cas = storage.block_storage().blob_storage().blocks_for_test();
+
+    // Simulate crash: delete from CAS but leave metadata
+    for block_id in &blocks_to_delete {
+        for key_fn in [
+            PackageEntryKey::block,
+            PackageEntryKey::proof,
+            PackageEntryKey::queue_diff,
+        ] {
+            assert!(blocks_cas.remove(&key_fn(block_id))?);
+        }
+        tracing::info!(root_hash = ?block_id.root_hash, "Deleted block from CAS");
+    }
+
+    drop(storage);
+
+    // Cleanup should happen on reopen
+    let storage = prepare_storage(config, zerostate).await?;
+    assert_eq!(
+        storage.orphans_cleaned(),
+        NUM_DELETED as u32,
+        "cleanup failed"
+    );
 
     Ok(())
 }

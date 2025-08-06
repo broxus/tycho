@@ -36,7 +36,7 @@ pub struct BlockStorage {
     block_connection_storage: Arc<BlockConnectionStorage>,
     block_subscriptions: SlotSubscriptions<BlockId, BlockStuff>,
     store_block_data: tokio::sync::RwLock<()>,
-    blob_storage: blobs::BlobStorage,
+    pub(crate) blob_storage: blobs::BlobStorage,
 }
 
 impl BlockStorage {
@@ -47,11 +47,11 @@ impl BlockStorage {
         config: BlockStorageConfig,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_connection_storage: Arc<BlockConnectionStorage>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, u32)> {
         fn weigher(_key: &BlockId, value: &BlockStuff) -> u32 {
             const BLOCK_STUFF_OVERHEAD: u32 = 1024; // 1 KB
 
-            std::mem::size_of::<BlockId>() as u32
+            size_of::<BlockId>() as u32
                 + BLOCK_STUFF_OVERHEAD
                 + value.data_size().try_into().unwrap_or(u32::MAX)
         }
@@ -62,7 +62,7 @@ impl BlockStorage {
             .weigher(weigher)
             .build_with_hasher(Default::default());
 
-        let blob_storage = blobs::BlobStorage::new(
+        let (blob_storage, cleanup_count) = blobs::BlobStorage::new(
             db,
             block_handle_storage.clone(),
             &config.blobs_root,
@@ -71,14 +71,17 @@ impl BlockStorage {
 
         blob_storage.preload_archive_ids().await?;
 
-        Ok(Self {
-            blocks_cache,
-            block_handle_storage,
-            block_connection_storage,
-            block_subscriptions: Default::default(),
-            store_block_data: Default::default(),
-            blob_storage,
-        })
+        Ok((
+            Self {
+                blocks_cache,
+                block_handle_storage,
+                block_connection_storage,
+                block_subscriptions: Default::default(),
+                store_block_data: Default::default(),
+                blob_storage,
+            },
+            cleanup_count,
+        ))
     }
 
     pub fn archive_chunk_size(&self) -> NonZeroU32 {
@@ -478,8 +481,8 @@ impl BlockStorage {
         self.blob_storage.db()
     }
 
-    #[cfg(test)]
-    pub(crate) fn blob_storage(&self) -> &blobs::BlobStorage {
+    #[cfg(any(test, feature = "test"))]
+    pub fn blob_storage(&self) -> &blobs::BlobStorage {
         &self.blob_storage
     }
 }

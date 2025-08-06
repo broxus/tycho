@@ -67,15 +67,14 @@ impl CoreStorage {
         };
         let block_handle_storage = Arc::new(BlockHandleStorage::new(db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(db.clone()));
-        let block_storage = Arc::new(
-            BlockStorage::new(
-                db.clone(),
-                blocks_storage_config,
-                block_handle_storage.clone(),
-                block_connection_storage.clone(),
-            )
-            .await?,
-        );
+        let (block_storage, orphaned_metadata_cleaned) = BlockStorage::new(
+            db.clone(),
+            blocks_storage_config,
+            block_handle_storage.clone(),
+            block_connection_storage.clone(),
+        )
+        .await?;
+        let block_storage = Arc::new(block_storage);
         let shard_state_storage = ShardStateStorage::new(
             db.clone(),
             block_handle_storage.clone(),
@@ -106,6 +105,7 @@ impl CoreStorage {
                 persistent_state_storage,
                 block_connection_storage,
                 node_state_storage,
+                orphaned_metadata_cleaned,
             }),
         })
     }
@@ -145,6 +145,10 @@ impl CoreStorage {
     pub fn node_state(&self) -> &NodeStateStorage {
         &self.inner.node_state_storage
     }
+
+    pub fn orphans_cleaned(&self) -> u32 {
+        self.inner.orphaned_metadata_cleaned
+    }
 }
 
 struct Inner {
@@ -158,4 +162,6 @@ struct Inner {
     shard_state_storage: Arc<ShardStateStorage>,
     node_state_storage: NodeStateStorage,
     persistent_state_storage: PersistentStateStorage,
+
+    orphaned_metadata_cleaned: u32,
 }
