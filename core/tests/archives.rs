@@ -17,8 +17,11 @@ use tycho_core::block_strider::{
 };
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use tycho_core::overlay_client::PublicOverlayClient;
-use tycho_core::storage::{ArchiveId, CoreStorage, CoreStorageConfig, NewBlockMeta};
+use tycho_core::storage::{
+    ArchiveId, BlockFlags, BlockMeta, CoreStorage, CoreStorageConfig, NewBlockMeta, PackageEntryKey,
+};
 use tycho_network::PeerId;
+use tycho_storage::kv::StoredValue;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::models::{BlockId, ShardStateUnsplit};
 use tycho_types::prelude::*;
@@ -243,7 +246,7 @@ async fn archives() -> Result<()> {
     let zerostate_data = utils::read_file("zerostate.boc")?;
     let zerostate = utils::parse_zerostate(&zerostate_data)?;
     let zerostate_id = *zerostate.block_id();
-    let storage = prepare_storage(config, zerostate).await?;
+    let storage = prepare_storage(config.clone(), zerostate.clone()).await?;
 
     // Init state applier
     let state_subscriber = DummySubscriber;
@@ -334,12 +337,13 @@ async fn archives() -> Result<()> {
         "Archive content should match after decompression"
     );
 
-    test_pagination(storage).await?;
+    let all_blocks = test_pagination(storage.clone()).await?;
+    test_orphaned_metadata_cleanup(storage, all_blocks, config, zerostate).await?;
 
     Ok(())
 }
 
-async fn test_pagination(storage: CoreStorage) -> Result<()> {
+async fn test_pagination(storage: CoreStorage) -> Result<Vec<BlockId>> {
     use std::collections::HashSet;
 
     let mut all_blocks: Vec<BlockId> = Vec::new();
@@ -413,6 +417,197 @@ async fn test_pagination(storage: CoreStorage) -> Result<()> {
     }
 
     assert!(page_count > 0, "Should have at least one page");
+
+    Ok(all_blocks)
+}
+
+async fn test_orphaned_metadata_cleanup(
+    storage: CoreStorage,
+    blocks: Vec<BlockId>,
+    config: StorageConfig,
+    zerostate: ShardStateStuff,
+) -> Result<()> {
+    assert_eq!(
+        storage.open_stats().orphaned_flags_count,
+        0,
+        "fresh storage has orphans"
+    );
+
+    let meta_store = &storage.db().block_handles;
+    let is_protected = |block_id: &BlockId| {
+        if block_id.seqno == 0 {
+            return true;
+        }
+        let meta = meta_store.get(block_id.root_hash).unwrap().unwrap();
+        let meta = BlockMeta::deserialize(&mut &meta[..]);
+
+        meta.flags()
+            .contains(BlockFlags::IS_KEY_BLOCK | BlockFlags::IS_PERSISTENT)
+    };
+
+    let mut test_blocks: Vec<_> = blocks
+        .into_iter()
+        .filter(|x| x.is_masterchain() && !is_protected(x))
+        .collect();
+
+    // Ensure we have enough blocks for testing
+    assert!(test_blocks.len() >= 55);
+
+    let blocks_cas = storage.block_storage().blob_storage().blocks_for_test();
+
+    // Track which blocks we're modifying for verification
+    let mut blocks_with_all_deleted = Vec::new();
+    let mut blocks_with_block_deleted = Vec::new();
+    let mut blocks_with_proof_deleted = Vec::new();
+
+    // Scenario 1: Delete all components from CAS for 25 blocks
+    for block_id in test_blocks.drain(..25) {
+        for key_fn in [
+            PackageEntryKey::block,
+            PackageEntryKey::proof,
+            PackageEntryKey::queue_diff,
+        ] {
+            assert!(blocks_cas.remove(&key_fn(&block_id))?);
+        }
+        blocks_with_all_deleted.push(block_id);
+        tracing::info!(root_hash = ?block_id.root_hash, "Deleted all components from CAS");
+    }
+
+    // Scenario 2: Delete only block data for 10 blocks
+    for block_id in test_blocks.drain(..10) {
+        assert!(blocks_cas.remove(&PackageEntryKey::block(&block_id))?);
+        blocks_with_block_deleted.push(block_id);
+        tracing::info!(root_hash = ?block_id.root_hash, "Deleted only block data from CAS");
+    }
+
+    // Scenario 3: Delete only proof for 10 blocks
+    for block_id in test_blocks.drain(..10) {
+        assert!(blocks_cas.remove(&PackageEntryKey::proof(&block_id))?);
+        blocks_with_proof_deleted.push(block_id);
+        tracing::info!(root_hash = ?block_id.root_hash, "Deleted only proof from CAS");
+    }
+
+    // Scenario 4: Remove flags but keep data in CAS (test flag restoration)
+    let mut blocks_with_flags_removed = Vec::new();
+    for block_id in test_blocks.drain(..10) {
+        // Load current metadata
+        let meta_bytes = meta_store
+            .get(block_id.root_hash)?
+            .expect("Metadata should exist");
+        let meta = BlockMeta::deserialize(&mut &meta_bytes[..]);
+
+        // Remove all data flags while keeping the data in CAS
+        meta.remove_flags(BlockFlags::HAS_ALL_BLOCK_PARTS);
+        // Write back the modified metadata with cleared flags
+        meta_store.insert(block_id.root_hash, meta.to_vec())?;
+
+        blocks_with_flags_removed.push(block_id);
+        tracing::info!(root_hash = ?block_id.root_hash, "Removed flags but kept data in CAS");
+    }
+
+    let total_orphaned_cleaned = blocks_with_all_deleted.len()
+        + blocks_with_block_deleted.len()
+        + blocks_with_proof_deleted.len();
+    let total_orphaned_restored = blocks_with_flags_removed.len();
+
+    drop(storage);
+
+    // Cleanup should happen on reopen
+    let storage = prepare_storage(config, zerostate).await?;
+    assert_eq!(
+        storage.open_stats().orphaned_flags_count,
+        total_orphaned_cleaned as u32,
+        "orphaned metadata cleaned count mismatch"
+    );
+    assert_eq!(
+        storage.open_stats().restored_flags_count,
+        total_orphaned_restored as u32,
+        "orphaned data restored count mismatch"
+    );
+
+    // Verify that metadata still exists but with correct flags
+    let meta_store = &storage.db().block_handles;
+
+    // Check blocks with all components deleted
+    for block_id in &blocks_with_all_deleted {
+        let meta = meta_store
+            .get(block_id.root_hash)?
+            .expect("Metadata should still exist");
+        let meta = BlockMeta::deserialize(&mut &meta[..]);
+        let flags = meta.flags();
+
+        assert!(
+            !flags.contains(BlockFlags::HAS_DATA),
+            "HAS_DATA should be cleared"
+        );
+        assert!(
+            !flags.contains(BlockFlags::HAS_PROOF),
+            "HAS_PROOF should be cleared"
+        );
+        assert!(
+            !flags.contains(BlockFlags::HAS_QUEUE_DIFF),
+            "HAS_QUEUE_DIFF should be cleared"
+        );
+    }
+
+    // Check blocks with only block data deleted
+    for block_id in &blocks_with_block_deleted {
+        let meta = meta_store
+            .get(block_id.root_hash)?
+            .expect("Metadata should still exist");
+        let meta = BlockMeta::deserialize(&mut &meta[..]);
+        let flags = meta.flags();
+
+        assert!(
+            !flags.contains(BlockFlags::HAS_DATA),
+            "HAS_DATA should be cleared"
+        );
+        assert!(
+            flags.contains(BlockFlags::HAS_PROOF),
+            "HAS_PROOF should remain set"
+        );
+        assert!(
+            flags.contains(BlockFlags::HAS_QUEUE_DIFF),
+            "HAS_QUEUE_DIFF should remain set"
+        );
+    }
+
+    // Check blocks with only proof deleted
+    for block_id in &blocks_with_proof_deleted {
+        let meta = meta_store
+            .get(block_id.root_hash)?
+            .expect("Metadata should still exist");
+        let meta = BlockMeta::deserialize(&mut &meta[..]);
+        let flags = meta.flags();
+
+        assert!(
+            flags.contains(BlockFlags::HAS_DATA),
+            "HAS_DATA should remain set"
+        );
+        assert!(
+            !flags.contains(BlockFlags::HAS_PROOF),
+            "HAS_PROOF should be cleared"
+        );
+        assert!(
+            flags.contains(BlockFlags::HAS_QUEUE_DIFF),
+            "HAS_QUEUE_DIFF should remain set"
+        );
+    }
+
+    // check fkd up meta
+    for block_id in &blocks_with_flags_removed {
+        let meta = meta_store
+            .get(block_id.root_hash)?
+            .expect("Metadata should still exist");
+        let meta = BlockMeta::deserialize(&mut &meta[..]);
+        let flags = meta.flags();
+
+        assert!(
+            flags.contains(BlockFlags::HAS_ALL_BLOCK_PARTS),
+            "All parts should be restored {:?}",
+            block_id
+        );
+    }
 
     Ok(())
 }

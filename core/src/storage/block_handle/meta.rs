@@ -72,9 +72,14 @@ impl BlockMeta {
         self.gen_utime
     }
 
-    pub(crate) fn add_flags(&self, flags: BlockFlags) -> bool {
+    pub fn add_flags(&self, flags: BlockFlags) -> bool {
         let flags = (flags.bits() as u64) << BLOCK_FLAGS_OFFSET;
         self.flags.fetch_or(flags, Ordering::Release) & flags != flags
+    }
+
+    pub fn remove_flags(&self, flags: BlockFlags) -> bool {
+        let flags = (flags.bits() as u64) << BLOCK_FLAGS_OFFSET;
+        self.flags.fetch_and(!flags, Ordering::Release) & flags != 0
     }
 }
 
@@ -95,6 +100,7 @@ impl StoredValue for BlockMeta {
     where
         Self: Sized,
     {
+        assert_eq!(reader.len(), Self::SIZE_HINT, "invalid block meta");
         let flags = reader.get_u64_le();
         let gen_utime = reader.get_u32_le();
 

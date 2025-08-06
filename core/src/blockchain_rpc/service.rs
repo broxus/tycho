@@ -15,7 +15,7 @@ use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOU
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
 use crate::storage::{
-    ArchiveId, BlockConnection, CoreStorage, KeyBlocksDirection, PersistentStateKind,
+    ArchiveId, BlockConnection, BlockStorage, CoreStorage, KeyBlocksDirection, PersistentStateKind,
 };
 
 const RPC_METHOD_TIMINGS_METRIC: &str = "tycho_blockchain_rpc_method_time";
@@ -526,7 +526,7 @@ impl<B> Inner<B> {
                     (ArchiveId::Found(id), Ok(Some(size))) if size > 0 => ArchiveInfo::Found {
                         id: id as u64,
                         size: NonZeroU64::new(size as _).unwrap(),
-                        chunk_size: block_storage.archive_chunk_size(),
+                        chunk_size: BlockStorage::DEFAULT_BLOB_CHUNK_SIZE,
                     },
                     (ArchiveId::TooNew, Ok(None)) => ArchiveInfo::TooNew,
                     _ => ArchiveInfo::NotFound,
