@@ -33,10 +33,13 @@ use crate::collator::types::{FinalizeMetrics, PartialValueFlow, RandSeed};
 use crate::internal_queue::types::{Bound, DiffZone, EnqueuedMessage, QueueShardBoundedRange};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
+use crate::types::processed_upto::{
+    build_all_shards_processed_to_by_partitions, find_min_processed_to_by_shards,
+};
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
-    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedToByPartitions,
-    ShardDescriptionShort, ShardDescriptionShortExt, TopBlockDescription, TopShardBlockInfo,
+    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ShardDescriptionShort,
+    ShardDescriptionShortExt, TopBlockDescription, TopShardBlockInfo,
 };
 
 #[cfg(test)]
@@ -314,6 +317,7 @@ impl CollatorStdImpl {
             .mc_shards_processed_to_by_partitions
             .clone();
 
+        let block_id_short = state.collation_data.block_id_short;
         let prepare_phase =
             Phase::<PrepareState>::new(mq_adapter.clone(), reader_state, anchors_cache, state);
 
@@ -352,27 +356,19 @@ impl CollatorStdImpl {
             update_queue_task,
         ) = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
 
-        // TODO: use build_all_shards_processed_to_by_partitions() and find_min_processed_to_by_shards()
-        //      to unify the min_processed_to calculation logic
-
-        // get min processed to for current shard from shard and mc_data
-        let current_min_processed_to = processed_upto
-            .get_min_internals_processed_to_by_shards()
-            .get(&shard_id)
-            .cloned();
-        let min_processed_to_from_mc_data = mc_data
-            .processed_upto
-            .get_min_internals_processed_to_by_shards()
-            .get(&shard_id)
-            .cloned();
-
-        // calculate minimal internals processed_to for current shard
-        let min_processed_to = calculate_min_internals_processed_to_for_shard(
-            &shard_id,
-            current_min_processed_to,
-            min_processed_to_from_mc_data,
-            &shards_processed_to_by_partitions,
+        // Use unified helper methods for min_processed_to calculation
+        let all_shards_processed_to = build_all_shards_processed_to_by_partitions(
+            block_id_short,
+            processed_upto.get_internals_processed_to_by_partitions(),
+            mc_data
+                .processed_upto
+                .get_internals_processed_to_by_partitions(),
+            shards_processed_to_by_partitions.clone(),
+            &mc_data.shards,
         );
+
+        let min_processed_to_by_shards = find_min_processed_to_by_shards(&all_shards_processed_to);
+        let min_processed_to = min_processed_to_by_shards.get(&shard_id).cloned();
 
         // exit collation if cancelled
         if collation_is_cancelled.check() {
@@ -1343,71 +1339,6 @@ impl CollatorStdImpl {
             Ok(None)
         }
     }
-}
-
-fn calculate_min_internals_processed_to_for_shard(
-    shard_id: &ShardIdent,
-    shard_min_processed_to: Option<QueueKey>,
-    mc_data_min_processed_to: Option<QueueKey>,
-    mc_data_shards_processed_to: &FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
-) -> Option<QueueKey> {
-    fn find_min_processed_to(
-        mc_data_shards_processed_to: &FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
-        shard_id: &ShardIdent,
-        min_processed_to: &mut Option<QueueKey>,
-        skip_condition: impl Fn(&ShardIdent) -> bool,
-    ) {
-        for (shard, (_, processed_to_by_partitions)) in mc_data_shards_processed_to {
-            if skip_condition(shard) {
-                continue;
-            }
-
-            for partition_processed_to in processed_to_by_partitions.values() {
-                if let Some(to_key) = partition_processed_to.get(shard_id) {
-                    *min_processed_to = match *min_processed_to {
-                        Some(min) => Some(min.min(*to_key)),
-                        None => Some(*to_key),
-                    };
-                }
-            }
-        }
-    }
-
-    let mut min_processed_to: Option<QueueKey> = None;
-
-    if shard_id.is_masterchain() {
-        find_min_processed_to(
-            mc_data_shards_processed_to,
-            shard_id,
-            &mut min_processed_to,
-            |_| false,
-        );
-
-        // Combine with current and masterchain values
-        min_processed_to = [shard_min_processed_to, min_processed_to]
-            .into_iter()
-            .flatten()
-            .min();
-    } else {
-        find_min_processed_to(
-            mc_data_shards_processed_to,
-            shard_id,
-            &mut min_processed_to,
-            |shard| shard == shard_id || shard.is_masterchain(),
-        );
-
-        // Combine with current and masterchain values and shard values
-        min_processed_to = [
-            shard_min_processed_to,
-            min_processed_to,
-            mc_data_min_processed_to,
-        ]
-        .into_iter()
-        .flatten()
-        .min();
-    }
-
-    min_processed_to
 }
 
 pub fn is_first_block_after_prev_master(
