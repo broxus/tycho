@@ -23,8 +23,9 @@ use super::{
 pub(crate) mod blobs;
 mod package_entry;
 
-pub use blobs::{ArchiveId, BlockGcStats};
+pub use blobs::{ArchiveId, BlockGcStats, OpenStats};
 
+use crate::storage::block::blobs::DEFAULT_CHUNK_SIZE;
 use crate::storage::config::BlobDbConfig;
 
 const METRIC_LOAD_BLOCK_TOTAL: &str = "tycho_storage_load_block_total";
@@ -36,10 +37,12 @@ pub struct BlockStorage {
     block_connection_storage: Arc<BlockConnectionStorage>,
     block_subscriptions: SlotSubscriptions<BlockId, BlockStuff>,
     store_block_data: tokio::sync::RwLock<()>,
-    blob_storage: blobs::BlobStorage,
+    pub(crate) blob_storage: blobs::BlobStorage,
 }
 
 impl BlockStorage {
+    pub const DEFAULT_BLOB_CHUNK_SIZE: NonZeroU32 =
+        NonZeroU32::new(DEFAULT_CHUNK_SIZE as u32).unwrap();
     // === Init stuff ===
 
     pub async fn new(
@@ -51,7 +54,7 @@ impl BlockStorage {
         fn weigher(_key: &BlockId, value: &BlockStuff) -> u32 {
             const BLOCK_STUFF_OVERHEAD: u32 = 1024; // 1 KB
 
-            std::mem::size_of::<BlockId>() as u32
+            size_of::<BlockId>() as u32
                 + BLOCK_STUFF_OVERHEAD
                 + value.data_size().try_into().unwrap_or(u32::MAX)
         }
@@ -81,8 +84,8 @@ impl BlockStorage {
         })
     }
 
-    pub fn archive_chunk_size(&self) -> NonZeroU32 {
-        blobs::BlobStorage::archive_chunk_size()
+    pub fn open_stats(&self) -> &OpenStats {
+        self.blob_storage.open_stats()
     }
 
     /// Iterates over all archives and preloads their ids into memory.
@@ -478,8 +481,8 @@ impl BlockStorage {
         self.blob_storage.db()
     }
 
-    #[cfg(test)]
-    pub(crate) fn blob_storage(&self) -> &blobs::BlobStorage {
+    #[cfg(any(test, feature = "test"))]
+    pub fn blob_storage(&self) -> &blobs::BlobStorage {
         &self.blob_storage
     }
 }

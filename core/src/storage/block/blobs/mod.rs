@@ -40,14 +40,13 @@ mod util;
 mod writer;
 
 use std::collections::BTreeSet;
-use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
 use bytes::Bytes;
-use cassadilia::{Cas, KeyEncoderError};
+use cassadilia::Cas;
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tycho_block_util::archive::ArchiveEntryType;
@@ -60,16 +59,16 @@ use tycho_util::metrics::HistogramGuard;
 use weedb::rocksdb;
 
 use self::task::CommitArchiveTask;
-pub use self::types::{ArchiveId, ArchiveState, BlockGcStats, BlockStorageError};
+pub use self::types::{ArchiveId, ArchiveState, BlockGcStats, BlockStorageError, OpenStats};
 pub use self::util::remove_blocks;
-use super::package_entry::{PackageEntryKey, PackageEntryKeyEncoder, PartialBlockId};
+use super::package_entry::{PackageEntryKey, PartialBlockId};
 use crate::storage::block_handle::BlockDataGuard;
-use crate::storage::{BlockHandle, BlockHandleStorage, CoreDb};
+use crate::storage::{BlockFlags, BlockHandle, BlockHandleStorage, BlockMeta, CoreDb};
 
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 
 // Default archive chunk size (no longer used for actual chunking, kept for protocol compatibility)
-const DEFAULT_ARCHIVE_CHUNK_SIZE: u32 = 1024 * 1024; // 1 MB
+pub(super) const DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024; // 1 MB
 
 pub struct BlobStorage {
     db: CoreDb,
@@ -77,6 +76,7 @@ pub struct BlobStorage {
     archive_ids: RwLock<ArchiveIds>,
     prev_archive_commit: tokio::sync::Mutex<Option<CommitArchiveTask>>,
     archive_ids_tx: ArchiveIdsTx,
+    open_stats: OpenStats,
 
     blocks: Cas<PackageEntryKey>,
     archives: Cas<u32>,
@@ -98,27 +98,135 @@ impl BlobStorage {
             verify_blob_integrity: true,     // Better safe than sorry
             fail_on_integrity_errors: false, // But not to safe
         };
-        let blocks = Cas::open(
-            blobdb_path.join("packages"),
-            PackageEntryKeyEncoder,
-            config.clone(),
-        )?;
-        let archives = Cas::open(blobdb_path.join("archives"), ArchiveKeyEncoder, config)?;
+        let blocks = Cas::open(blobdb_path.join("packages"), config.clone())?;
+        let archives = Cas::open(blobdb_path.join("archives"), config)?;
 
-        Ok(Self {
+        let mut storage = Self {
             db,
             block_handle_storage,
             archive_ids_tx,
             archive_ids: Default::default(),
             prev_archive_commit: Default::default(),
+            open_stats: Default::default(),
 
             blocks,
             archives,
+        };
+
+        storage.open_stats = storage.cleanup_orphaned_metadata()?;
+
+        Ok(storage)
+    }
+
+    /// Fixes consistency between metadata flags and actual data presence in CAS.
+    /// Handles both cases:
+    /// - Blob is absent but the flag is still set (removes flag). In case of interrupted gc.
+    /// - Blob exists but the flag is not set (restores flag). In case of interrupted block save.
+    pub(crate) fn cleanup_orphaned_metadata(&self) -> Result<OpenStats> {
+        let started_at = Instant::now();
+        tracing::info!("started fixing block metadata consistency");
+
+        // Collect archive statistics
+        let archives_index = self.archives.read_index_state();
+        let archive_count = archives_index.len();
+        let mut archives_iter = archives_index.iter();
+        let archive_min_id = archives_iter.next().map(|(id, _)| *id);
+        let archive_max_id = archives_iter
+            .next_back()
+            .map(|(id, _)| *id)
+            .or(archive_min_id);
+        drop(archives_index);
+
+        let blocks_index = self.blocks.read_index_state();
+        let package_entries_count = blocks_index.len();
+
+        let raw = self.db.rocksdb().as_ref();
+        let block_handles_cf = self.db.block_handles.cf();
+        let full_block_ids_cf = self.db.full_block_ids.cf();
+
+        let mut batch = rocksdb::WriteBatch::default();
+        let mut orphaned_flags_count = 0u32;
+        let mut restored_flags_count = 0u32;
+
+        let mut iter =
+            raw.raw_iterator_cf_opt(&full_block_ids_cf, self.db.full_block_ids.new_read_config());
+        iter.seek_to_first();
+
+        while let Some((key, _)) = iter.item() {
+            let block_id = PartialBlockId::from_slice(key);
+            let root_hash = *block_id.root_hash.as_array();
+
+            // Get metadata
+            let meta_bytes = self
+                .db
+                .block_handles
+                .get(root_hash)?
+                .expect("all 3 tables are written in 1 transaction");
+
+            let calculated = BlockMeta::deserialize(&mut meta_bytes.as_ref());
+            let before_flags = calculated.flags();
+
+            // Always recompute flags from actual stored data
+            for (ty, flag) in [
+                (ArchiveEntryType::Block, BlockFlags::HAS_DATA),
+                (ArchiveEntryType::Proof, BlockFlags::HAS_PROOF),
+                (ArchiveEntryType::QueueDiff, BlockFlags::HAS_QUEUE_DIFF),
+            ] {
+                let key = PackageEntryKey { block_id, ty };
+
+                // in cas, not in flags
+                if blocks_index.contains_key(&key) {
+                    calculated.add_flags(flag);
+                } else {
+                    calculated.remove_flags(flag);
+                }
+            }
+
+            // If changed, save and update counters
+            if calculated.flags() != before_flags {
+                batch.put_cf(&block_handles_cf, root_hash, calculated.to_vec());
+                let removed_flags = before_flags - calculated.flags();
+                let added_flags = calculated.flags() - before_flags;
+
+                tracing::debug!(
+                    ?block_id,
+                    ?added_flags,
+                    ?removed_flags,
+                    "Correcting block metadata inconsistency"
+                );
+
+                if removed_flags.intersects(BlockFlags::HAS_ALL_BLOCK_PARTS) {
+                    orphaned_flags_count += 1;
+                }
+                if added_flags.intersects(BlockFlags::HAS_ALL_BLOCK_PARTS) {
+                    restored_flags_count += 1;
+                }
+            }
+
+            iter.next();
+        }
+        iter.status()?;
+        raw.write(batch)?;
+
+        tracing::info!(
+            orphaned_metadata_cleaned = orphaned_flags_count,
+            orphaned_data_restored = restored_flags_count,
+            elapsed = %humantime::format_duration(started_at.elapsed()),
+            "fix_metadata_consistency completed"
+        );
+
+        Ok(OpenStats {
+            orphaned_flags_count,
+            restored_flags_count,
+            archive_count,
+            archive_min_id,
+            archive_max_id,
+            package_entries_count,
         })
     }
 
-    pub fn archive_chunk_size() -> NonZeroU32 {
-        NonZeroU32::new(DEFAULT_ARCHIVE_CHUNK_SIZE).unwrap()
+    pub fn open_stats(&self) -> &OpenStats {
+        &self.open_stats
     }
 
     /// Recover archive state from Cassadilia index and `archive_block_ids`
@@ -466,15 +574,14 @@ impl BlobStorage {
 
     /// Get a chunk of the archive at the specified offset.
     pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<Bytes> {
-        let chunk_size = Self::archive_chunk_size().get() as u64;
-        if offset % chunk_size != 0 {
+        if offset % DEFAULT_CHUNK_SIZE != 0 {
             return Err(BlockStorageError::InvalidOffset.into());
         }
 
         let archives = self.archives.clone();
         tokio::task::spawn_blocking(move || {
             archives
-                .get_range(&id, offset, offset + chunk_size)?
+                .get_range(&id, offset, offset + DEFAULT_CHUNK_SIZE)?
                 .ok_or(BlockStorageError::ArchiveNotFound.into())
         })
         .await?
@@ -550,7 +657,7 @@ impl BlobStorage {
         .await?
     }
 
-    pub async fn add_data(
+    pub(crate) async fn add_data(
         &self,
         id: &PackageEntryKey,
         data: Bytes,
@@ -616,6 +723,12 @@ impl BlobStorage {
     }
 
     pub(super) fn blocks(&self) -> &Cas<PackageEntryKey> {
+        &self.blocks
+    }
+
+    // yay integration tests
+    #[cfg(any(test, feature = "test"))]
+    pub fn blocks_for_test(&self) -> &Cas<PackageEntryKey> {
         &self.blocks
     }
 
@@ -709,22 +822,6 @@ struct ArchiveIds {
 
 type ArchiveIdsTx = broadcast::Sender<u32>;
 
-struct ArchiveKeyEncoder;
-
-impl cassadilia::KeyEncoder<u32> for ArchiveKeyEncoder {
-    fn encode(&self, key: &u32) -> std::result::Result<Vec<u8>, KeyEncoderError> {
-        Ok(key.to_be_bytes().to_vec())
-    }
-
-    fn decode(&self, data: &[u8]) -> std::result::Result<u32, KeyEncoderError> {
-        if data.len() != 4 {
-            return Err(KeyEncoderError::DecodeError);
-        }
-
-        Ok(u32::from_be_bytes(data.try_into().unwrap()))
-    }
-}
-
 #[cfg(test)]
 mod test {
     use std::collections::HashSet;
@@ -735,7 +832,6 @@ mod test {
     use tycho_types::prelude::HashBytes;
 
     use super::*;
-    use crate::storage::block::package_entry::PackageEntryKeyEncoder;
     use crate::storage::{BlockFlags, BlockHandle, NewBlockMeta};
 
     const TEST_BLOCK_DATA: &[u8] = b"test block data";
@@ -776,12 +872,10 @@ mod test {
         let (db, handles, temp_dir) = create_temp_db_and_handles().await?;
         let blocks = Cas::<PackageEntryKey>::open(
             temp_dir.path().join("packages"),
-            PackageEntryKeyEncoder,
             cassadilia::Config::default(),
         )?;
         let archives = Cas::<u32>::open(
             temp_dir.path().join("archives"),
-            ArchiveKeyEncoder,
             cassadilia::Config::default(),
         )?;
         Ok((db, handles, blocks, archives, temp_dir))

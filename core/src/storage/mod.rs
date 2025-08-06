@@ -5,7 +5,7 @@ use tycho_storage::StorageContext;
 use tycho_storage::kv::ApplyMigrations;
 
 pub use self::block::{
-    ArchiveId, BlockGcStats, BlockStorage, BlockStorageConfig, MaybeExistingHandle,
+    ArchiveId, BlockGcStats, BlockStorage, BlockStorageConfig, MaybeExistingHandle, OpenStats,
     PackageEntryKey, PartialBlockId, StoreBlockResult,
 };
 pub use self::block_connection::{BlockConnection, BlockConnectionStorage};
@@ -29,7 +29,7 @@ pub use self::shard_state::{
 
 pub mod tables;
 
-mod block;
+pub(crate) mod block;
 mod block_connection;
 mod block_handle;
 mod config;
@@ -67,15 +67,14 @@ impl CoreStorage {
         };
         let block_handle_storage = Arc::new(BlockHandleStorage::new(db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(db.clone()));
-        let block_storage = Arc::new(
-            BlockStorage::new(
-                db.clone(),
-                blocks_storage_config,
-                block_handle_storage.clone(),
-                block_connection_storage.clone(),
-            )
-            .await?,
-        );
+        let block_storage = BlockStorage::new(
+            db.clone(),
+            blocks_storage_config,
+            block_handle_storage.clone(),
+            block_connection_storage.clone(),
+        )
+        .await?;
+        let block_storage = Arc::new(block_storage);
         let shard_state_storage = ShardStateStorage::new(
             db.clone(),
             block_handle_storage.clone(),
@@ -144,6 +143,10 @@ impl CoreStorage {
 
     pub fn node_state(&self) -> &NodeStateStorage {
         &self.inner.node_state_storage
+    }
+
+    pub fn open_stats(&self) -> &OpenStats {
+        self.inner.block_storage.open_stats()
     }
 }
 

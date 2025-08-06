@@ -20,7 +20,7 @@ use tycho_core::block_strider::{
     GcSubscriber, ManualGcTrigger, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
-use tycho_core::storage::{ArchiveId, BlockHandle, CoreStorage};
+use tycho_core::storage::{ArchiveId, BlockHandle, BlockStorage, CoreStorage};
 use tycho_crypto::ed25519;
 use tycho_network::Network;
 use tycho_types::cell::Lazy;
@@ -656,7 +656,7 @@ impl proto::ControlServer for ControlServer {
         Ok(proto::ArchiveInfoResponse::Found(proto::ArchiveInfo {
             id,
             size: NonZeroU64::new(size as _).unwrap(),
-            chunk_size: blocks.archive_chunk_size(),
+            chunk_size: BlockStorage::DEFAULT_BLOB_CHUNK_SIZE,
         }))
     }
 
@@ -684,7 +684,7 @@ impl proto::ControlServer for ControlServer {
                 Some(ArchiveInfo {
                     id,
                     size: NonZeroU64::new(size as _).unwrap(),
-                    chunk_size: storage.archive_chunk_size(),
+                    chunk_size: BlockStorage::DEFAULT_BLOB_CHUNK_SIZE,
                 })
             })
             .collect();

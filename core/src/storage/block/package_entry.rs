@@ -1,7 +1,6 @@
 use std::cmp::Ordering;
 use std::hash::Hash;
 
-use cassadilia::KeyEncoderError;
 use tycho_block_util::archive::ArchiveEntryType;
 use tycho_storage::kv::{StoredValue, StoredValueBuffer};
 use tycho_types::cell::HashBytes;
@@ -95,6 +94,45 @@ pub struct PackageEntryKey {
     pub ty: ArchiveEntryType,
 }
 
+impl PackageEntryKey {
+    pub const SIZE_HINT: usize = 4 + 8 + 4 + 32 + 1; // workchain(4) + prefix(8) + seqno(4) + root_hash(32) + ty(1)
+}
+
+impl cassadilia::KeyBytes for PackageEntryKey {
+    type Bytes = [u8; Self::SIZE_HINT];
+
+    fn to_key_bytes(&self) -> Self::Bytes {
+        let mut result = [0u8; Self::SIZE_HINT];
+        result[..4].copy_from_slice(&self.block_id.shard.workchain().to_be_bytes());
+        result[4..12].copy_from_slice(&self.block_id.shard.prefix().to_be_bytes());
+        result[12..16].copy_from_slice(&self.block_id.seqno.to_be_bytes());
+        result[16..48].copy_from_slice(self.block_id.root_hash.as_slice());
+        result[48] = self.ty as u8;
+        result
+    }
+
+    fn from_key_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::SIZE_HINT {
+            return None;
+        }
+
+        let workchain = i32::from_be_bytes(bytes[..4].try_into().ok()?);
+        let prefix = u64::from_be_bytes(bytes[4..12].try_into().ok()?);
+        let seqno = u32::from_be_bytes(bytes[12..16].try_into().ok()?);
+        let root_hash = HashBytes::from_slice(&bytes[16..48]);
+        let ty = ArchiveEntryType::from_byte(bytes[48])?;
+
+        Some(Self {
+            block_id: PartialBlockId {
+                shard: ShardIdent::new(workchain, prefix)?,
+                seqno,
+                root_hash,
+            },
+            ty,
+        })
+    }
+}
+
 impl Ord for PackageEntryKey {
     fn cmp(&self, other: &Self) -> Ordering {
         // NOTE: Can't just derive Ord here.
@@ -127,26 +165,6 @@ impl PartialOrd for PackageEntryKey {
     }
 }
 
-pub struct PackageEntryKeyEncoder;
-impl cassadilia::KeyEncoder<PackageEntryKey> for PackageEntryKeyEncoder {
-    fn encode(&self, key: &PackageEntryKey) -> Result<Vec<u8>, KeyEncoderError> {
-        let mut buffer = Vec::with_capacity(PackageEntryKey::SIZE_HINT);
-        key.serialize(&mut buffer);
-
-        Ok(buffer)
-    }
-
-    fn decode(&self, data: &[u8]) -> Result<PackageEntryKey, KeyEncoderError> {
-        let mut reader = data;
-        let key = PackageEntryKey::deserialize(&mut reader);
-        if reader.is_empty() {
-            Ok(key)
-        } else {
-            Err(KeyEncoderError::DecodeError)
-        }
-    }
-}
-
 impl PackageEntryKey {
     pub fn block(block_id: &BlockId) -> Self {
         Self {
@@ -168,57 +186,12 @@ impl PackageEntryKey {
             ty: ArchiveEntryType::QueueDiff,
         }
     }
-
-    pub fn from_slice(data: &[u8]) -> Self {
-        let mut reader = data;
-        Self::deserialize(&mut reader)
-    }
 }
 
 impl From<(BlockId, ArchiveEntryType)> for PackageEntryKey {
     fn from((block_id, ty): (BlockId, ArchiveEntryType)) -> Self {
         Self {
             block_id: block_id.into(),
-            ty,
-        }
-    }
-}
-
-impl StoredValue for PackageEntryKey {
-    const SIZE_HINT: usize = 4 + 8 + 4 + 32 + 1;
-
-    type OnStackSlice = [u8; Self::SIZE_HINT];
-
-    fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
-        let mut result = [0; Self::SIZE_HINT];
-        result[..4].copy_from_slice(&self.block_id.shard.workchain().to_be_bytes());
-        result[4..12].copy_from_slice(&self.block_id.shard.prefix().to_be_bytes());
-        result[12..16].copy_from_slice(&self.block_id.seqno.to_be_bytes());
-        result[16..48].copy_from_slice(self.block_id.root_hash.as_slice());
-        result[48] = self.ty as u8;
-        buffer.write_raw_slice(&result);
-    }
-
-    fn deserialize(reader: &mut &[u8]) -> Self
-    where
-        Self: Sized,
-    {
-        assert_eq!(reader.len(), Self::SIZE_HINT, "invalid package entry");
-
-        let workchain = i32::from_be_bytes(reader[..4].try_into().unwrap());
-        let prefix = u64::from_be_bytes(reader[4..12].try_into().unwrap());
-        let seqno = u32::from_be_bytes(reader[12..16].try_into().unwrap());
-        let root_hash = HashBytes::from_slice(&reader[16..48]);
-        let ty = ArchiveEntryType::from_byte(reader[48]).expect("invalid entry type");
-
-        *reader = &reader[Self::SIZE_HINT..];
-
-        Self {
-            block_id: PartialBlockId {
-                shard: ShardIdent::new(workchain, prefix).expect("invalid shard ident"),
-                seqno,
-                root_hash,
-            },
             ty,
         }
     }
