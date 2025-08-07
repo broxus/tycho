@@ -962,6 +962,7 @@ impl CollatorStdImpl {
         block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
         new_observable_state_root: Cell,
+        prev_observable_state_root: Cell,
         state_update: MerkleUpdate,
         store_new_state_task: JoinTask<Result<bool>>,
         new_queue_diff_hash: HashBytes,
@@ -990,6 +991,8 @@ impl CollatorStdImpl {
                     block_id,
                     store_new_state_task,
                     state_update,
+                    _root: new_observable_state_root.clone(),
+                    _prev_root: prev_observable_state_root,
                 });
 
                 // build state stuff from new observable state after collation
@@ -2257,6 +2260,8 @@ struct StateUpdateContext {
     block_id: BlockId,
     store_new_state_task: JoinTask<Result<bool>>,
     state_update: MerkleUpdate,
+    _root: Cell,
+    _prev_root: Cell,
 }
 
 struct AnchorsProcessingInfo {

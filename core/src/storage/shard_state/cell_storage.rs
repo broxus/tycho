@@ -1373,7 +1373,7 @@ impl RawCellsCache {
 
         const MAX_CELL_SIZE: u64 = 192;
         const KEY_SIZE: u64 = 32;
-        const SHARDS: usize = 512;
+        const SHARDS: usize = 1024;
 
         let estimated_cell_cache_capacity = size_in_bytes / (KEY_SIZE + MAX_CELL_SIZE);
         tracing::info!(
