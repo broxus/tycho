@@ -170,10 +170,8 @@ impl ConnectionManager {
                     metrics::gauge!(METRIC_CONNECTIONS_ACTIVE).decrement(1);
 
                     // NOTE: unwrap here is to propagate panic from the spawned future
-                    if let Err(e) = connection_handler_output {
-                        if e.is_panic() {
-                            std::panic::resume_unwind(e.into_panic());
-                        }
+                    if let Err(e) = connection_handler_output && e.is_panic() {
+                        std::panic::resume_unwind(e.into_panic());
                     }
                 }
                 Some(peer_id) = self.delayed_callbacks.wait_for_next_expired() => {

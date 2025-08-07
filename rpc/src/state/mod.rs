@@ -988,13 +988,13 @@ fn load_blockchain_config(mc_state: &ShardStateStuff) -> Option<Arc<LatestBlockc
     match tycho_vm::SmcInfoTonV6::unpack_config_partial(&extra.config.params, now) {
         Ok(unpacked) => {
             let mut modifiers = tycho_vm::BehaviourModifiers::default();
-            if let Ok(global_id) = extra.config.params.get_global_id() {
-                if let Ok(global) = extra.config.params.get_global_version() {
-                    modifiers.signature_with_id = global
-                        .capabilities
-                        .contains(GlobalCapability::CapSignatureWithId)
-                        .then_some(global_id);
-                }
+            if let Ok(global_id) = extra.config.params.get_global_id()
+                && let Ok(global) = extra.config.params.get_global_version()
+            {
+                modifiers.signature_with_id = global
+                    .capabilities
+                    .contains(GlobalCapability::CapSignatureWithId)
+                    .then_some(global_id);
             }
 
             Some(Arc::new(LatestBlockchainConfig {

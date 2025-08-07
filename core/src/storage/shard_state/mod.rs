@@ -331,10 +331,10 @@ impl ShardStateStorage {
     /// Returns `None` if all states are recent enough
     pub async fn compute_recent_blocks(&self, mut mc_seqno: u32) -> Result<Option<TopBlocks>> {
         // 0. Adjust masterchain seqno with minimal referenced masterchain state
-        if let Some(min_ref_mc_seqno) = self.min_ref_mc_state.seqno() {
-            if min_ref_mc_seqno < mc_seqno {
-                mc_seqno = min_ref_mc_seqno;
-            }
+        if let Some(min_ref_mc_seqno) = self.min_ref_mc_state.seqno()
+            && min_ref_mc_seqno < mc_seqno
+        {
+            mc_seqno = min_ref_mc_seqno;
         }
 
         let snapshot = self.db.rocksdb().snapshot();

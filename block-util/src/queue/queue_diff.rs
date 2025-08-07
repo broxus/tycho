@@ -258,10 +258,10 @@ impl Iterator for QueueDiffMessagesIter {
                 // Get the last ref from the envelope, it will be the message itself
                 let out_msg = out_msg.out_msg_envelope.inner();
                 let ref_count = out_msg.descriptor().reference_count();
-                if ref_count > 0 {
-                    if let Some(cell) = out_msg.reference_cloned(ref_count - 1) {
-                        return Some(Lazy::from_raw(cell));
-                    }
+                if ref_count > 0
+                    && let Some(cell) = out_msg.reference_cloned(ref_count - 1)
+                {
+                    return Some(Lazy::from_raw(cell));
                 }
 
                 Some(Err(Error::InvalidData))

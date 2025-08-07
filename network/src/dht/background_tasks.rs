@@ -72,12 +72,11 @@ impl DhtInner {
                         }
                     }
                     Action::RefreshRoutingTable => {
-                        if let Some(fut) = prev_refresh_routing_table_fut.take() {
-                            if let Err(e) = fut.await {
-                                if e.is_panic() {
-                                    std::panic::resume_unwind(e.into_panic());
-                                }
-                            }
+                        if let Some(fut) = prev_refresh_routing_table_fut.take()
+                            && let Err(e) = fut.await
+                            && e.is_panic()
+                        {
+                            std::panic::resume_unwind(e.into_panic());
                         }
 
                         prev_refresh_routing_table_fut = Some(tokio::spawn(async move {

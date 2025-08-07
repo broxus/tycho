@@ -115,17 +115,17 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
         reader.create_existing_range_readers(remaning_msgs_stats_just_loaded)?;
 
-        if remaning_msgs_stats_just_loaded {
-            if let Some(remaning_msgs_stats) = &reader.remaning_msgs_stats {
-                tracing::trace!(target: tracing_targets::COLLATOR,
-                    partition_id = %reader.partition_id,
-                    remaning_msgs_stats = ?DebugIter(remaning_msgs_stats.statistics().iter().map(|item| {
-                        let (addr, count) = item.pair();
-                        (get_short_addr_string(addr), *count)
-                    })),
-                    "reduced cumulative remaning_msgs_stats",
-                );
-            }
+        if remaning_msgs_stats_just_loaded
+            && let Some(remaning_msgs_stats) = &reader.remaning_msgs_stats
+        {
+            tracing::trace!(target: tracing_targets::COLLATOR,
+                partition_id = %reader.partition_id,
+                remaning_msgs_stats = ?DebugIter(remaning_msgs_stats.statistics().iter().map(|item| {
+                    let (addr, count) = item.pair();
+                    (get_short_addr_string(addr), *count)
+                })),
+                "reduced cumulative remaning_msgs_stats",
+            );
         }
 
         Ok(reader)
@@ -385,48 +385,48 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         // if remaining cumulative stats just loaded
         // then we need to reduce it by the read state
         // only if current range is above processed_to
-        if let Some(remaning_msgs_stats) = &self.remaning_msgs_stats {
-            if reduce_cumulative_remaning_stats {
-                let current_shard_processed_to_key = self
-                    .reader_state
-                    .processed_to
-                    .get(&self.for_shard_id)
-                    .copied()
-                    .unwrap_or_default();
-                let current_shard_range_to_key = range_reader_state
-                    .shards
-                    .get(&self.for_shard_id)
-                    .map(|r_s| QueueKey::max_for_lt(r_s.to))
-                    .unwrap_or_default();
-                if current_shard_range_to_key > current_shard_processed_to_key {
-                    // ensure all other shards range to key is not below processed_to
-                    for (shard_id, &processed_to_key) in &self.reader_state.processed_to {
-                        if shard_id == &self.for_shard_id {
-                            continue;
-                        }
-
-                        let shard_range_to_key = range_reader_state
-                            .shards
-                            .get(shard_id)
-                            .map(|r_s| QueueKey::max_for_lt(r_s.to))
-                            .unwrap();
-                        ensure!(shard_range_to_key >= processed_to_key);
+        if let Some(remaning_msgs_stats) = &self.remaning_msgs_stats
+            && reduce_cumulative_remaning_stats
+        {
+            let current_shard_processed_to_key = self
+                .reader_state
+                .processed_to
+                .get(&self.for_shard_id)
+                .copied()
+                .unwrap_or_default();
+            let current_shard_range_to_key = range_reader_state
+                .shards
+                .get(&self.for_shard_id)
+                .map(|r_s| QueueKey::max_for_lt(r_s.to))
+                .unwrap_or_default();
+            if current_shard_range_to_key > current_shard_processed_to_key {
+                // ensure all other shards range to key is not below processed_to
+                for (shard_id, &processed_to_key) in &self.reader_state.processed_to {
+                    if shard_id == &self.for_shard_id {
+                        continue;
                     }
 
-                    // reduce remaining stats
-                    tracing::trace!(target: tracing_targets::COLLATOR,
-                        partition_id = %self.partition_id,
-                        seqno,
-                        read_stats = ?DebugIter(range_reader_state.read_stats.statistics().iter().map(|(addr, count)| (addr.to_string(), *count))),
-                        remaning_msgs_stats = ?DebugIter(remaning_msgs_stats.statistics().iter().map(|item| {
-                            let (addr, count) = item.pair();
-                            (get_short_addr_string(addr), *count)
-                        })),
-                        "reduce cumulative remaning_msgs_stats",
-                    );
-                    for (account_addr, &count) in range_reader_state.read_stats.statistics() {
-                        remaning_msgs_stats.decrement_for_account(account_addr.clone(), count);
-                    }
+                    let shard_range_to_key = range_reader_state
+                        .shards
+                        .get(shard_id)
+                        .map(|r_s| QueueKey::max_for_lt(r_s.to))
+                        .unwrap();
+                    ensure!(shard_range_to_key >= processed_to_key);
+                }
+
+                // reduce remaining stats
+                tracing::trace!(target: tracing_targets::COLLATOR,
+                    partition_id = %self.partition_id,
+                    seqno,
+                    read_stats = ?DebugIter(range_reader_state.read_stats.statistics().iter().map(|(addr, count)| (addr.to_string(), *count))),
+                    remaning_msgs_stats = ?DebugIter(remaning_msgs_stats.statistics().iter().map(|item| {
+                        let (addr, count) = item.pair();
+                        (get_short_addr_string(addr), *count)
+                    })),
+                    "reduce cumulative remaning_msgs_stats",
+                );
+                for (account_addr, &count) in range_reader_state.read_stats.statistics() {
+                    remaning_msgs_stats.decrement_for_account(account_addr.clone(), count);
                 }
             }
         }
@@ -1178,10 +1178,10 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
                     // check stats in previous partition
                     check_ops_count.saturating_add_assign(1);
 
-                    if let Some(remaning_msgs_stats) = &prev_par_reader.remaning_msgs_stats {
-                        if remaning_msgs_stats.statistics().contains_key(&dst_addr) {
-                            return (true, check_ops_count);
-                        }
+                    if let Some(remaning_msgs_stats) = &prev_par_reader.remaning_msgs_stats
+                        && remaning_msgs_stats.statistics().contains_key(&dst_addr)
+                    {
+                        return (true, check_ops_count);
                     }
                 }
 

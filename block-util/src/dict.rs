@@ -168,10 +168,10 @@ where
         for<'a> A: AugDictExtra + Store + Load<'a>,
     {
         let (left_shard_ident, right_shard_ident) = 'split: {
-            if depth > 0 {
-                if let Some((left, right)) = shard.split() {
-                    break 'split (left, right);
-                }
+            if depth > 0
+                && let Some((left, right)) = shard.split()
+            {
+                break 'split (left, right);
             }
             shards.push((*shard, dict));
             return Ok(());

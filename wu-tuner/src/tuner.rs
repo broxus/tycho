@@ -311,23 +311,23 @@ where
         }
 
         // handle if wu params changed
-        if let Some((_, last)) = history.metrics.last_key_value() {
-            if metrics.wu_params != last.last.wu_params {
-                tracing::info!(
-                    %shard, seqno,
-                    prev_params = ?last.last.wu_params,
-                    curr_params = ?metrics.wu_params,
-                    "wu params updated",
-                );
+        if let Some((_, last)) = history.metrics.last_key_value()
+            && metrics.wu_params != last.last.wu_params
+        {
+            tracing::info!(
+                %shard, seqno,
+                prev_params = ?last.last.wu_params,
+                curr_params = ?metrics.wu_params,
+                "wu params updated",
+            );
 
-                // clear history
-                history.clear();
+            // clear history
+            history.clear();
 
-                // report updated wu params to metrics
-                report_wu_params(&metrics.wu_params, &metrics.wu_params);
+            // report updated wu params to metrics
+            report_wu_params(&metrics.wu_params, &metrics.wu_params);
 
-                self.wu_params_last_updated_on_seqno = seqno;
-            }
+            self.wu_params_last_updated_on_seqno = seqno;
         }
 
         // on start set wu params last updated on current seqno
@@ -383,16 +383,16 @@ where
 
         // clear outdated history
         let gc_boundary = wu_ma_seqno.saturating_sub(tune_interval); // e.g. seqno = 240 -> gc_boundary = 40
-        if let Some((&first_key, _)) = history.metrics.first_key_value() {
-            if first_key < gc_boundary {
-                history.gc_wu_metrics(gc_boundary);
+        if let Some((&first_key, _)) = history.metrics.first_key_value()
+            && first_key < gc_boundary
+        {
+            history.gc_wu_metrics(gc_boundary);
 
-                tracing::trace!(
-                    %shard, seqno,
-                    "wu metrics history gc < {0}",
-                    gc_boundary,
-                );
-            }
+            tracing::trace!(
+                %shard, seqno,
+                "wu metrics history gc < {0}",
+                gc_boundary,
+            );
         }
 
         Ok(())
@@ -475,16 +475,16 @@ where
 
         // clear outdated history
         let gc_boundary = lag_ma_seqno.saturating_sub(tune_interval); // e.g. seqno = 244 -> gc_boundary = 40
-        if let Some((&first_key, _)) = history.anchors_lag.first_key_value() {
-            if first_key < gc_boundary {
-                history.gc_anchors_lag(gc_boundary);
+        if let Some((&first_key, _)) = history.anchors_lag.first_key_value()
+            && first_key < gc_boundary
+        {
+            history.gc_anchors_lag(gc_boundary);
 
-                tracing::trace!(
-                    %shard, seqno,
-                    "anchors lag history gc < {0}",
-                    gc_boundary,
-                );
-            }
+            tracing::trace!(
+                %shard, seqno,
+                "anchors lag history gc < {0}",
+                gc_boundary,
+            );
         }
 
         // check lag and calculate target wu params
@@ -655,10 +655,10 @@ where
                         self.adjustments
                             .insert(tune_seqno, WuAdjustment { target_wu_price });
                         let gc_boundary = tune_seqno.saturating_sub(tune_interval);
-                        if let Some((&first_key, _)) = self.adjustments.first_key_value() {
-                            if first_key < gc_boundary {
-                                self.adjustments.retain(|k, _| k >= &gc_boundary);
-                            }
+                        if let Some((&first_key, _)) = self.adjustments.first_key_value()
+                            && first_key < gc_boundary
+                        {
+                            self.adjustments.retain(|k, _| k >= &gc_boundary);
                         }
                     }
                     WuTuneType::No => {

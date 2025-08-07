@@ -488,13 +488,13 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 .internals_partition_readers
                 .get_mut(&MAIN_PARTITION_ID)
                 .unwrap();
-            if let Ok(last_int_range_reader) = par_reader.get_last_range_reader_mut() {
-                if last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages {
-                    last_int_range_reader
-                        .reader_state
-                        .buffer
-                        .remove_messages_by_accounts(&moved_from_par_0_accounts);
-                }
+            if let Ok(last_int_range_reader) = par_reader.get_last_range_reader_mut()
+                && last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages
+            {
+                last_int_range_reader
+                    .reader_state
+                    .buffer
+                    .remove_messages_by_accounts(&moved_from_par_0_accounts);
             }
         }
 

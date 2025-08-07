@@ -1140,14 +1140,11 @@ impl CollatorStdImpl {
 
         let mut shard_pairs = Vec::new();
         for (shard, curr) in mc_data.shards.iter() {
-            if curr.top_sc_block_updated && *shard != block_id_short.shard {
-                if let Some(prev) = prev_shards.get(shard) {
-                    shard_pairs.push((
-                        *shard,
-                        prev.get_block_id(*shard),
-                        curr.get_block_id(*shard),
-                    ));
-                }
+            if curr.top_sc_block_updated
+                && *shard != block_id_short.shard
+                && let Some(prev) = prev_shards.get(shard)
+            {
+                shard_pairs.push((*shard, prev.get_block_id(*shard), curr.get_block_id(*shard)));
             }
         }
 
