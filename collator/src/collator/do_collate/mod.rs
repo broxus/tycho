@@ -897,6 +897,7 @@ impl CollatorStdImpl {
                     "tycho_collator_build_new_state_time_high",
                     &labels,
                 );
+
                 adapter
                     .store_state_root(&block_id, meta, new_state_root, hint)
                     .await

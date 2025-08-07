@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 use tokio::sync::{broadcast, watch};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::queue::QueueDiffStuff;
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::storage::{
     BlockHandle, CoreStorage, MaybeExistingHandle, NewBlockMeta, StoreStateHint,
 };
@@ -91,6 +91,10 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Handle sync context update
     fn set_sync_context(&self, sync_context: CollatorSyncContext);
     fn load_init_block_id(&self) -> Option<BlockId>;
+
+    fn load_state_from_cache(&self, block_id: &BlockId) -> Result<ShardStateStuff>;
+
+    fn store_state_to_cache(&self, block_id: BlockId, state: Cell);
 }
 
 pub struct StateNodeAdapterStdImpl {
@@ -102,6 +106,9 @@ pub struct StateNodeAdapterStdImpl {
     sync_context_tx: watch::Sender<CollatorSyncContext>,
 
     delayed_state_notifier: DelayedStateNotifier,
+
+    states: FastDashMap<BlockId, Cell>,
+    tracker: MinRefMcStateTracker,
 }
 
 impl StateNodeAdapterStdImpl {
@@ -119,6 +126,8 @@ impl StateNodeAdapterStdImpl {
             broadcaster,
             sync_context_tx,
             delayed_state_notifier: DelayedStateNotifier::default(),
+            states: Default::default(),
+            tracker: MinRefMcStateTracker::default(),
         };
 
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Start watching for sync context updates");
@@ -382,6 +391,20 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
     fn load_init_block_id(&self) -> Option<BlockId> {
         self.storage.node_state().load_init_mc_block_id()
+    }
+
+    fn load_state_from_cache(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
+        let cell = self
+            .states
+            .get(block_id)
+            .ok_or_else(|| anyhow!("state not exists in cache"))?
+            .clone();
+
+        ShardStateStuff::from_root(block_id, cell, &self.tracker)
+    }
+
+    fn store_state_to_cache(&self, block_id: BlockId, state: Cell) {
+        self.states.insert(block_id, state);
     }
 }
 

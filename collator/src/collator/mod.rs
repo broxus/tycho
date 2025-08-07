@@ -593,14 +593,14 @@ impl CollatorStdImpl {
         self.collation_session = collation_session;
 
         // previously wait when all state store tasks finished
-        if !self.store_new_state_tasks.is_empty() {
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                "awaiting when all state store tasks finished...",
-            );
-            for task in self.store_new_state_tasks.drain(..) {
-                task.await?;
-            }
-        }
+        // if !self.store_new_state_tasks.is_empty() {
+        //     tracing::debug!(target: tracing_targets::COLLATOR,
+        //         "awaiting when all state store tasks finished...",
+        //     );
+        //     for task in self.store_new_state_tasks.drain(..) {
+        //         task.await?;
+        //     }
+        // }
 
         let working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
@@ -792,21 +792,32 @@ impl CollatorStdImpl {
         // drop prev shard data and usage tree
         let prev_queue_diff_hashes;
         let prev_blocks_ids;
-        {
+        let prev_states = {
             working_state.usage_tree.take();
 
             let prev_shard_data = working_state.prev_shard_data.take().unwrap();
             prev_queue_diff_hashes = prev_shard_data.prev_queue_diff_hashes().clone();
             prev_blocks_ids = prev_shard_data.blocks_ids().clone();
-        }
 
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            prev_blocks_ids = %DisplayBlockIdsIntoIter(&prev_blocks_ids),
-            "loading prev states...",
-        );
-        let prev_states =
-            Self::load_prev_states(prev_mc_seqno, state_node_adapter.as_ref(), &prev_blocks_ids)
-                .await?;
+            let mut prev_states = vec![];
+            for state in prev_shard_data.pure_states() {
+                prev_states.push(state.clone());
+            }
+
+            prev_states
+        };
+
+        // tracing::debug!(target: tracing_targets::COLLATOR,
+        //     prev_blocks_ids = %DisplayBlockIdsIntoIter(&prev_blocks_ids),
+        //     "loading prev states...",
+        // );
+        //
+        // let prev_states = Self::load_prev_states_from_cache(
+        //     prev_mc_seqno,
+        //     state_node_adapter.as_ref(),
+        //     &prev_blocks_ids,
+        // )
+        // .await?;
 
         // update working state
         tracing::debug!(target: tracing_targets::COLLATOR, "updating working state...");
@@ -975,6 +986,27 @@ impl CollatorStdImpl {
                 "loaded prev shard state for prev_block_id {}",
                 prev_block_id.as_short_id(),
             );
+            prev_states.push(state);
+        }
+        Ok(prev_states)
+    }
+
+    async fn load_prev_states_from_cache(
+        prev_mc_seqno: u32,
+        state_node_adapter: &dyn StateNodeAdapter,
+        prev_blocks_ids: &[BlockId],
+    ) -> Result<Vec<ShardStateStuff>> {
+        let mut prev_states = vec![];
+        for prev_block_id in prev_blocks_ids {
+            let state = if prev_block_id.seqno == 0 {
+                state_node_adapter
+                    .load_state(prev_mc_seqno, prev_block_id)
+                    .await?
+            } else {
+                tracing::info!(block_id = %prev_block_id.as_short_id(), "load_state_from_cache");
+                state_node_adapter.load_state_from_cache(prev_block_id)?
+            };
+
             prev_states.push(state);
         }
         Ok(prev_states)
