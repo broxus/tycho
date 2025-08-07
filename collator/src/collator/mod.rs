@@ -1,5 +1,6 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -20,6 +21,7 @@ use tycho_types::cell::{Cell, HashBytes};
 use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
+use tycho_util::time::now_millis;
 use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
 
 use self::types::{BlockSerializerCache, CollatorStats, PrevData, WorkingState};
@@ -45,6 +47,7 @@ mod messages_buffer;
 mod messages_reader;
 mod types;
 
+pub use do_collate::work_units;
 pub use error::CollationCancelReason;
 pub use types::{ForceMasterCollation, ShardDescriptionExt};
 
@@ -602,7 +605,7 @@ impl CollatorStdImpl {
             }
         }
 
-        let working_state = if !reset {
+        let mut working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
 
             // update mc_data if newer
@@ -745,7 +748,9 @@ impl CollatorStdImpl {
 
             working_state
         };
-        drop(histogram);
+
+        // will use time elapsed to resume collation to calculate wu price
+        working_state.resume_collation_elapsed = histogram.finish();
 
         if self.shard_id.is_masterchain() {
             self.try_collate_next_master_block_impl(working_state).await
@@ -823,6 +828,7 @@ impl CollatorStdImpl {
         has_unprocessed_messages: bool,
         reader_state: ReaderState,
         tracker: MinRefMcStateTracker,
+        resume_collation_elapsed: Duration,
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let _histogram = HistogramGuard::begin_with_labels(
@@ -888,6 +894,7 @@ impl CollatorStdImpl {
                 mc_data: new_mc_data,
                 collation_config,
                 wu_used_from_last_anchor: prev_shard_data.wu_used_from_last_anchor(),
+                resume_collation_elapsed,
                 prev_shard_data: Some(prev_shard_data),
                 usage_tree: Some(usage_tree),
                 has_unprocessed_messages: Some(has_unprocessed_messages),
@@ -976,6 +983,7 @@ impl CollatorStdImpl {
             next_block_id_short,
             mc_data,
             wu_used_from_last_anchor: prev_shard_data.wu_used_from_last_anchor(),
+            resume_collation_elapsed: Duration::ZERO,
             reader_state: ReaderState::new(prev_shard_data.processed_upto()),
             prev_shard_data: Some(prev_shard_data),
             usage_tree: Some(usage_tree),
@@ -1089,10 +1097,16 @@ impl CollatorStdImpl {
             return Ok(ImportNextAnchor::Skipped);
         }
 
+        let anchor_requested_at = now_millis();
+
         let get_anchor_result = mpool_adapter.get_next_anchor(prev_anchor_id).await?;
 
         let has_our_externals = match &get_anchor_result {
             GetAnchorResult::Exist(next_anchor) => {
+                // report anchor importing lag to metrics
+                metrics::gauge!("tycho_collator_anchor_importing_lag_ms", &labels)
+                    .set(anchor_requested_at as f64 - next_anchor.chain_time as f64);
+
                 let our_exts_count = next_anchor.count_externals_for(&shard_id, 0);
                 anchors_cache.insert(next_anchor.clone(), our_exts_count);
 
