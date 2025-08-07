@@ -1003,7 +1003,8 @@ impl CollatorStdImpl {
                     block_id,
                     store_new_state_task,
                     state_update,
-                    prev_root: prev_observable_state_root,
+                    _root: new_observable_state_root.clone(),
+                    _prev_root: prev_observable_state_root,
                 });
 
                 // build state stuff from new observable state after collation
@@ -2287,7 +2288,8 @@ struct StateUpdateContext {
     block_id: BlockId,
     store_new_state_task: JoinTask<Result<bool>>,
     state_update: MerkleUpdate,
-    prev_root: Cell,
+    _root: Cell,
+    _prev_root: Cell,
 }
 
 struct AnchorsProcessingInfo {

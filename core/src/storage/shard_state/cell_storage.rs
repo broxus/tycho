@@ -38,7 +38,10 @@ struct CachedCell {
 
 impl CellStorage {
     pub fn new(db: CoreDb, cache_size_bytes: ByteSize, drop_interval: u32) -> Arc<Self> {
-        let cells_cache = Default::default();
+        let cells_cache = Arc::new(CellsIndex::with_hasher_and_shard_amount(
+            Default::default(),
+            512,
+        ));
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
 
         spawn_metrics_loop(
@@ -1410,7 +1413,7 @@ impl RawCellsCache {
 
         const MAX_CELL_SIZE: u64 = 192;
         const KEY_SIZE: u64 = 32;
-        const SHARDS: usize = 512;
+        const SHARDS: usize = 1024;
 
         let estimated_cell_cache_capacity = size_in_bytes / (KEY_SIZE + MAX_CELL_SIZE);
         tracing::info!(
