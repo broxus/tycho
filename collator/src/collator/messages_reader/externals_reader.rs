@@ -758,10 +758,9 @@ impl ExternalsReader {
 
                                 if let Some(remaning_msgs_stats) =
                                     &prev_par_reader.remaning_msgs_stats
+                                    && remaning_msgs_stats.statistics().contains_key(&dst_addr)
                                 {
-                                    if remaning_msgs_stats.statistics().contains_key(&dst_addr) {
-                                        return (true, check_ops_count);
-                                    }
+                                    return (true, check_ops_count);
                                 }
                             }
 

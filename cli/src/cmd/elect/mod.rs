@@ -296,12 +296,12 @@ impl CmdRun {
                         elections_end,
                         "stakes will unfreeze after the end of current elections"
                     );
-                } else if let Some(until_unfreeze) = unfreeze_at.checked_sub(now_sec()) {
-                    if until_unfreeze > 0 {
-                        tracing::info!(until_unfreeze, "waiting for stakes to unfreeze");
-                        interval = until_unfreeze + time_diff; // Wait for time diff to be able to recover the stake
-                        continue;
-                    }
+                } else if let Some(until_unfreeze) = unfreeze_at.checked_sub(now_sec())
+                    && until_unfreeze > 0
+                {
+                    tracing::info!(until_unfreeze, "waiting for stakes to unfreeze");
+                    interval = until_unfreeze + time_diff; // Wait for time diff to be able to recover the stake
+                    continue;
                 }
             }
 
@@ -744,18 +744,18 @@ impl SimpleValidatorParams {
         let wallet = Wallet::new(ctx.client, &self.wallet_secret, ctx.config.signature_id);
 
         // Try to recover tokens
-        if ctx.recover_stake {
-            if let Some(stake) = ctx.elector_data.credits.get(&wallet.address.address) {
-                // TODO: Lock some guard
+        if ctx.recover_stake
+            && let Some(stake) = ctx.elector_data.credits.get(&wallet.address.address)
+        {
+            // TODO: Lock some guard
 
-                tracing::info!(%stake, "recovering stake");
-                let message =
-                    ElectionsContext::make_recover_msg(&ctx.config.elector_addr, price_factor);
-                wallet
-                    .transfer(message, TransferParams::reliable(price_factor))
-                    .await
-                    .context("failed to recover stake")?;
-            }
+            tracing::info!(%stake, "recovering stake");
+            let message =
+                ElectionsContext::make_recover_msg(&ctx.config.elector_addr, price_factor);
+            wallet
+                .transfer(message, TransferParams::reliable(price_factor))
+                .await
+                .context("failed to recover stake")?;
         }
 
         // Check for an existing stake
@@ -1024,10 +1024,10 @@ impl Wallet {
                     break 'check;
                 };
 
-                if let Ok(stored_timestamp) = data.get_u64(256) {
-                    if stored_timestamp >= message.timestamp {
-                        return Ok(());
-                    }
+                if let Ok(stored_timestamp) = data.get_u64(256)
+                    && stored_timestamp >= message.timestamp
+                {
+                    return Ok(());
                 }
             }
 
@@ -1156,12 +1156,11 @@ struct ClientFactory {
 impl ClientFactory {
     async fn create(&self) -> Result<Client> {
         let inner = 'client: {
-            if let Some(rpc) = &self.rpc {
-                if self.force_rpc || !self.sock.exists() {
-                    let rpc =
-                        JrpcClient::new(rpc.clone()).context("failed to create JRPC client")?;
-                    break 'client ClientImpl::Jrpc(rpc);
-                }
+            if let Some(rpc) = &self.rpc
+                && (self.force_rpc || !self.sock.exists())
+            {
+                let rpc = JrpcClient::new(rpc.clone()).context("failed to create JRPC client")?;
+                break 'client ClientImpl::Jrpc(rpc);
             }
 
             let control = ControlClient::connect(&self.sock)

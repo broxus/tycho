@@ -127,11 +127,11 @@ impl MemorySlicerGuard<'_> {
             solve_constraints(*self.available, constraints.as_constraitns_slice());
         let result_total = result.iter().map(|size| size.as_u64()).sum();
 
-        if let Some(available) = self.available.0.checked_sub(result_total) {
-            if solved {
-                self.available.0 = available;
-                return Ok(C::make_output(result));
-            }
+        if let Some(available) = self.available.0.checked_sub(result_total)
+            && solved
+        {
+            self.available.0 = available;
+            return Ok(C::make_output(result));
         }
 
         Err(ByteSize(result_total))

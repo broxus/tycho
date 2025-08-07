@@ -676,26 +676,26 @@ impl StarterInner {
 
         // Fast path goes first. If the state exists we only need to try to save persistent.
         let block_handle = block_handles.load_handle(block_id);
-        if let Some(handle) = &block_handle {
-            if handle.has_state() {
-                let state = shard_states.load_state(block_id).await?;
+        if let Some(handle) = &block_handle
+            && handle.has_state()
+        {
+            let state = shard_states.load_state(block_id).await?;
 
-                if !handle.has_persistent_shard_state() {
-                    let from = if state_file.exists() {
-                        StoreZeroStateFrom::File(state_file)
-                    } else {
-                        StoreZeroStateFrom::State(state.clone())
-                    };
-                    if let Err(e) = try_save_persistent(handle, from).await {
-                        tracing::error!(%block_id, "failed to store persistent shard state: {e:?}");
-                    }
+            if !handle.has_persistent_shard_state() {
+                let from = if state_file.exists() {
+                    StoreZeroStateFrom::File(state_file)
+                } else {
+                    StoreZeroStateFrom::State(state.clone())
+                };
+                if let Err(e) = try_save_persistent(handle, from).await {
+                    tracing::error!(%block_id, "failed to store persistent shard state: {e:?}");
                 }
-
-                remove_state_file.await;
-
-                tracing::info!("using the stored shard state");
-                return Ok((handle.clone(), state));
             }
+
+            remove_state_file.await;
+
+            tracing::info!("using the stored shard state");
+            return Ok((handle.clone(), state));
         }
 
         // Try download the state
@@ -832,10 +832,10 @@ async fn download_block_proof_task(
     let block_handle_storage = storage.block_handle_storage();
 
     // Check whether block proof is already stored locally
-    if let Some(handle) = block_handle_storage.load_handle(&block_id) {
-        if let Ok(proof) = block_storage.load_block_proof(&handle).await {
-            return WithArchiveData::loaded(proof);
-        }
+    if let Some(handle) = block_handle_storage.load_handle(&block_id)
+        && let Ok(proof) = block_storage.load_block_proof(&handle).await
+    {
+        return WithArchiveData::loaded(proof);
     }
 
     // TODO: add retry count to interrupt infinite loop

@@ -768,12 +768,12 @@ impl Inner {
         let mut index = self.mc_seqno_to_block_ids.lock();
 
         // Remove previous entry if exists
-        if let Some(prev_mc_seqno) = prev_mc_seqno {
-            if let btree_map::Entry::Occupied(mut entry) = index.entry(prev_mc_seqno) {
-                entry.get_mut().remove(block_id);
-                if entry.get().is_empty() {
-                    entry.remove();
-                }
+        if let Some(prev_mc_seqno) = prev_mc_seqno
+            && let btree_map::Entry::Occupied(mut entry) = index.entry(prev_mc_seqno)
+        {
+            entry.get_mut().remove(block_id);
+            if entry.get().is_empty() {
+                entry.remove();
             }
         }
 
@@ -817,10 +817,10 @@ impl HandlesQueue {
 
     fn push(&mut self, new_handle: BlockHandle) -> bool {
         // Allow only new blocks
-        if let Some(newest) = self.handles.front() {
-            if newest.id().seqno >= new_handle.id().seqno {
-                return false;
-            }
+        if let Some(newest) = self.handles.front()
+            && newest.id().seqno >= new_handle.id().seqno
+        {
+            return false;
         }
 
         // Remove too old states

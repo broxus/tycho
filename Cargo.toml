@@ -2,7 +2,7 @@
 version = "0.2.12"
 edition = "2024"
 authors = ["Broxus Team"]
-rust-version = "1.85.0"
+rust-version = "1.88.0"
 repository = "https://github.com/broxus/tycho"
 license = "MIT OR Apache-2.0"
 

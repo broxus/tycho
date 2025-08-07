@@ -935,13 +935,13 @@ impl Phase<FinalizeState> {
         // 1.10. update genesis round and time from the mempool global config if present and higher
         let mut consensus_info = prev_state_extra.consensus_info;
 
-        if let Some(mp_cfg_override) = &collation_data.mempool_config_override {
-            if (mp_cfg_override.genesis_info).overrides(&consensus_info.genesis_info) {
-                // mempool applied genesis and config during boot, now update genesis in state
-                consensus_info.genesis_info = mp_cfg_override.genesis_info;
+        if let Some(mp_cfg_override) = &collation_data.mempool_config_override
+            && (mp_cfg_override.genesis_info).overrides(&consensus_info.genesis_info)
+        {
+            // mempool applied genesis and config during boot, now update genesis in state
+            consensus_info.genesis_info = mp_cfg_override.genesis_info;
 
-                is_key_block = true;
-            }
+            is_key_block = true;
         }
 
         // 2. update shard_hashes and shard_fees
@@ -1208,8 +1208,8 @@ impl Phase<FinalizeState> {
             .filter(|account| !account.transactions.is_empty())
             .map(|mut updated_account| {
                 if is_masterchain {
-                    if &updated_account.account_addr == config_address {
-                        if let Some(Account {
+                    if &updated_account.account_addr == config_address
+                        && let Some(Account {
                             state:
                                 AccountState::Active(StateInit {
                                     data: Some(data), ..
@@ -1219,12 +1219,11 @@ impl Phase<FinalizeState> {
                             .shard_account
                             .load_account()
                             .context("failed to load account")?
-                        {
-                            new_config_params = Some(
-                                data.parse::<BlockchainConfigParams>()
-                                    .context("failed to parse config params")?,
-                            );
-                        }
+                    {
+                        new_config_params = Some(
+                            data.parse::<BlockchainConfigParams>()
+                                .context("failed to parse config params")?,
+                        );
                     }
 
                     public_libraries_diff

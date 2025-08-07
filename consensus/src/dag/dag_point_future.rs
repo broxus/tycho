@@ -512,15 +512,15 @@ impl DagPointFuture {
     }
 
     pub fn resolve_download(&self, broadcast: &Point, ill_formed_reason: Option<&IllFormedReason>) {
-        if let DagPointFutureType::Download { resolve, .. } = &self.0 {
-            if let Some(oneshot) = resolve.take() {
-                let result = match ill_formed_reason {
-                    None => DownloadResult::Verified(broadcast.clone()),
-                    Some(reason) => DownloadResult::IllFormed(broadcast.clone(), reason.clone()),
-                };
-                // receiver is dropped upon completion
-                oneshot.send(result).ok();
-            }
+        if let DagPointFutureType::Download { resolve, .. } = &self.0
+            && let Some(oneshot) = resolve.take()
+        {
+            let result = match ill_formed_reason {
+                None => DownloadResult::Verified(broadcast.clone()),
+                Some(reason) => DownloadResult::IllFormed(broadcast.clone(), reason.clone()),
+            };
+            // receiver is dropped upon completion
+            oneshot.send(result).ok();
         }
     }
 

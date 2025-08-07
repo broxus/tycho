@@ -245,17 +245,16 @@ where
 
         // Check that applied diff is greater than committed pointer
         let committed_pointer = self.state.get_commit_pointers()?;
-        if let Some(committed_pointer) = committed_pointer.get(&block_id_short.shard) {
-            if let Some(min_message) = diff.min_message() {
-                if min_message <= &committed_pointer.queue_key {
-                    bail!(
-                        "Diff min_message is less than committed_pointer: block_id={}, diff_min_message={}, committed_pointer={}",
-                        block_id_short.seqno,
-                        min_message,
-                        committed_pointer.queue_key
-                    );
-                }
-            }
+        if let Some(committed_pointer) = committed_pointer.get(&block_id_short.shard)
+            && let Some(min_message) = diff.min_message()
+            && min_message <= &committed_pointer.queue_key
+        {
+            bail!(
+                "Diff min_message is less than committed_pointer: block_id={}, diff_min_message={}, committed_pointer={}",
+                block_id_short.seqno,
+                min_message,
+                committed_pointer.queue_key
+            );
         }
         self.state
             .write_diff(&block_id_short, &statistics, *hash, diff)?;
@@ -280,17 +279,17 @@ where
         // check current commit pointer. If it is greater than committing diff then skip
         let committed_pointer = self.state.get_commit_pointers()?;
         let mc_pointer = committed_pointer.get(&mc_block_id.shard);
-        if let Some(mc_pointer) = mc_pointer {
-            if mc_pointer.seqno >= mc_block_id.seqno {
-                tracing::debug!(
-                    target: tracing_targets::MQ,
-                    "Skip commit diff for block_id: {}. Committed by next mc_block_id: {}",
-                    mc_block_id,
-                    mc_pointer.seqno
-                );
-                // Skip commit because it was already committed
-                return Ok(());
-            }
+        if let Some(mc_pointer) = mc_pointer
+            && mc_pointer.seqno >= mc_block_id.seqno
+        {
+            tracing::debug!(
+                target: tracing_targets::MQ,
+                "Skip commit diff for block_id: {}. Committed by next mc_block_id: {}",
+                mc_block_id,
+                mc_pointer.seqno
+            );
+            // Skip commit because it was already committed
+            return Ok(());
         }
 
         let mut gc_ranges = FastHashMap::default();

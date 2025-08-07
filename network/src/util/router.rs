@@ -109,12 +109,12 @@ fn find_handler<'a, T: AsRef<[u8]>, S>(
     indices: &FastHashMap<u32, usize>,
     handlers: &'a [S],
 ) -> Option<&'a S> {
-    if let Some(id) = read_le_u32(req.as_ref()) {
-        if let Some(&index) = indices.get(&id) {
-            // NOTE: intentionally panics if index is out of bounds as it is
-            // an implementation error.
-            return Some(handlers.get(index).expect("index must be in bounds"));
-        }
+    if let Some(id) = read_le_u32(req.as_ref())
+        && let Some(&index) = indices.get(&id)
+    {
+        // NOTE: intentionally panics if index is out of bounds as it is
+        // an implementation error.
+        return Some(handlers.get(index).expect("index must be in bounds"));
     }
     None
 }

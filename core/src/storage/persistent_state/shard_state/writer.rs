@@ -156,10 +156,10 @@ impl<'a> ShardStateWriter<'a> {
 
         let mut cancelled = cancelled.map(|c| c.debounce(1000));
         for &cell_size in intermediate.cell_sizes.iter().rev() {
-            if let Some(cancelled) = &mut cancelled {
-                if cancelled.check() {
-                    anyhow::bail!("Cell writing cancelled")
-                }
+            if let Some(cancelled) = &mut cancelled
+                && cancelled.check()
+            {
+                anyhow::bail!("Cell writing cancelled")
             }
 
             intermediate.total_size -= cell_size as u64;
@@ -246,10 +246,10 @@ impl<'a> ShardStateWriter<'a> {
 
         let mut cancelled = cancelled.map(|c| c.debounce(1000));
         while let Some((index, data)) = stack.pop() {
-            if let Some(cancelled) = &mut cancelled {
-                if cancelled.check() {
-                    anyhow::bail!("Persistent state writing cancelled")
-                }
+            if let Some(cancelled) = &mut cancelled
+                && cancelled.check()
+            {
+                anyhow::bail!("Persistent state writing cancelled")
             }
 
             match data {

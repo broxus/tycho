@@ -94,21 +94,21 @@ impl<'de> serde::Deserialize<'de> for SimpleElectionsConfig {
         let secret = ed25519::SecretKey::from_bytes(partial.wallet_secret.0);
         let public = ed25519::PublicKey::from(&secret);
 
-        if let Some(stored_public) = partial.wallet_public {
-            if stored_public.as_array() != public.as_bytes() {
-                return Err(Error::custom(format!(
-                    "public key mismatch (stored: {stored_public}, expected: {public})",
-                )));
-            }
+        if let Some(stored_public) = partial.wallet_public
+            && stored_public.as_array() != public.as_bytes()
+        {
+            return Err(Error::custom(format!(
+                "public key mismatch (stored: {stored_public}, expected: {public})",
+            )));
         }
 
         let wallet_address = Self::compute_wallet_address(&public);
-        if let Some(stored_wallet) = partial.wallet_address {
-            if stored_wallet != wallet_address {
-                return Err(Error::custom(format!(
-                    "wallet address mismatch (stored: {stored_wallet}, expected: {wallet_address})",
-                )));
-            }
+        if let Some(stored_wallet) = partial.wallet_address
+            && stored_wallet != wallet_address
+        {
+            return Err(Error::custom(format!(
+                "wallet address mismatch (stored: {stored_wallet}, expected: {wallet_address})",
+            )));
         }
 
         Ok(Self {

@@ -627,13 +627,13 @@ impl<B> Inner<B> {
         state_kind: PersistentStateKind,
     ) -> PersistentStateInfo {
         let persistent_state_storage = self.storage().persistent_state_storage();
-        if self.config.serve_persistent_states {
-            if let Some(info) = persistent_state_storage.get_state_info(block_id, state_kind) {
-                return PersistentStateInfo::Found {
-                    size: info.size,
-                    chunk_size: info.chunk_size,
-                };
-            }
+        if self.config.serve_persistent_states
+            && let Some(info) = persistent_state_storage.get_state_info(block_id, state_kind)
+        {
+            return PersistentStateInfo::Found {
+                size: info.size,
+                chunk_size: info.chunk_size,
+            };
         }
         PersistentStateInfo::NotFound
     }

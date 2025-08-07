@@ -73,12 +73,12 @@ impl<'de> Deserialize<'de> for NodeKeys {
         let secret = ed25519::SecretKey::from_bytes(partial.secret.0);
         let public = ed25519::PublicKey::from(&secret);
 
-        if let Some(stored_public) = partial.public {
-            if stored_public.as_array() != public.as_bytes() {
-                return Err(Error::custom(format!(
-                    "public key mismatch (stored: {stored_public}, expected: {public})",
-                )));
-            }
+        if let Some(stored_public) = partial.public
+            && stored_public.as_array() != public.as_bytes()
+        {
+            return Err(Error::custom(format!(
+                "public key mismatch (stored: {stored_public}, expected: {public})",
+            )));
         }
 
         Ok(NodeKeys {

@@ -142,10 +142,10 @@ impl BlockchainBlockProvider {
 
         loop {
             // Primary
-            if !self.use_fallback.load(Ordering::Relaxed) {
-                if let res @ Some(_) = primary().await {
-                    return res;
-                }
+            if !self.use_fallback.load(Ordering::Relaxed)
+                && let res @ Some(_) = primary().await
+            {
+                return res;
             }
 
             // Fallback
@@ -204,10 +204,10 @@ impl BlockchainBlockProvider {
 
         loop {
             // Primary
-            if !self.use_fallback.load(Ordering::Relaxed) {
-                if let res @ Some(_) = primary().await {
-                    return res;
-                }
+            if !self.use_fallback.load(Ordering::Relaxed)
+                && let res @ Some(_) = primary().await
+            {
+                return res;
             }
 
             // Fallback
