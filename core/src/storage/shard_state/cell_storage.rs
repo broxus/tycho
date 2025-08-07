@@ -654,7 +654,7 @@ impl CellStorage {
         hash: &HashBytes,
         epoch: u32,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
-        let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
+        // let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
         if let Some(cell) = self.cells_cache.get(hash) {
             if cell.epoch.saturating_add(self.drop_interval) >= epoch {
@@ -699,7 +699,7 @@ impl CellStorage {
         };
 
         if has_new {
-            metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
+            // metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
         }
 
         Ok(cell)
@@ -1035,7 +1035,7 @@ impl CellStorage {
             .remove_if(hash, |_, cell| cell.weak.strong_count() == 0)
             .is_some()
         {
-            metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
+            // metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
         }
     }
 }
@@ -1453,10 +1453,10 @@ impl RawCellsCache {
             GuardResult::Value(value) => Ok(Some(value)),
             GuardResult::Guard(g) => {
                 let value = {
-                    let started_at = Instant::now();
-                    scopeguard::defer! {
-                        self.rocksdb_access_histogram.record(started_at.elapsed());
-                    }
+                    // let started_at = Instant::now();
+                    // scopeguard::defer! {
+                    //     self.rocksdb_access_histogram.record(started_at.elapsed());
+                    // }
 
                     db.cells.get(key.as_slice())?
                 };
