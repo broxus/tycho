@@ -180,7 +180,7 @@ impl ShardStateStorage {
 
             hist.finish();
 
-            background_drop_cell_tx.send(root_cell)?;
+            // background_drop_cell_tx.send(root_cell)?;
 
             let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
             if updated {
