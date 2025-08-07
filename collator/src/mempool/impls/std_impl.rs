@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::FutureExt;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::Instrument;
 use tycho_consensus::prelude::*;
 use tycho_crypto::ed25519::KeyPair;
@@ -22,8 +22,8 @@ use crate::mempool::impls::std_impl::anchor_handler::AnchorHandler;
 use crate::mempool::impls::std_impl::cache::Cache;
 use crate::mempool::impls::std_impl::config::ConfigAdapter;
 use crate::mempool::{
-    DebugStateUpdateContext, GetAnchorResult, MempoolAdapter, MempoolAdapterFactory,
-    MempoolAnchorId, MempoolEventListener, StateUpdateContext,
+    DebugStateUpdateContext, ExternalMessageFilter, GetAnchorResult, MempoolAdapter,
+    MempoolAdapterFactory, MempoolAnchorId, MempoolEventListener, StateUpdateContext,
 };
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
@@ -299,7 +299,11 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         Ok(())
     }
 
-    async fn get_anchor_by_id(&self, anchor_id: MempoolAnchorId) -> Result<GetAnchorResult> {
+    async fn get_anchor_by_id(
+        &self,
+        anchor_id: MempoolAnchorId,
+        filter: &dyn ExternalMessageFilter,
+    ) -> Result<GetAnchorResult> {
         tracing::debug!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             %anchor_id,
@@ -307,14 +311,21 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         );
 
         let result = match self.cache.get_anchor_by_id(anchor_id).await {
-            Some(anchor) => GetAnchorResult::Exist(anchor),
+            Some(anchor) => {
+                let filtered_anchor = anchor.apply_filter(filter);
+                GetAnchorResult::Exist(Arc::new(filtered_anchor))
+            }
             None => GetAnchorResult::NotExist,
         };
 
         Ok(result)
     }
 
-    async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<GetAnchorResult> {
+    async fn get_next_anchor(
+        &self,
+        prev_anchor_id: MempoolAnchorId,
+        filter: &dyn ExternalMessageFilter,
+    ) -> Result<GetAnchorResult> {
         tracing::debug!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             %prev_anchor_id,
@@ -322,7 +333,10 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         );
 
         let result = match self.cache.get_next_anchor(prev_anchor_id).await? {
-            Some(anchor) => GetAnchorResult::Exist(anchor),
+            Some(anchor) => {
+                let filtered_anchor = anchor.apply_filter(filter);
+                GetAnchorResult::Exist(Arc::new(filtered_anchor))
+            }
             None => GetAnchorResult::NotExist,
         };
 

@@ -1,13 +1,13 @@
-use std::collections::{BTreeMap, VecDeque, hash_map};
+use std::collections::{hash_map, BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use ahash::HashMapExt;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tycho_block_util::block::{ValidatorSubsetInfo, calc_next_block_id_short};
+use tycho_block_util::block::{calc_next_block_id_short, ValidatorSubsetInfo};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::MempoolGlobalConfig;
@@ -35,13 +35,13 @@ use crate::internal_queue::types::{
 };
 use crate::manager::types::{BlockCacheStoreResult, HandledBlockFromBcCtx};
 use crate::mempool::{
-    MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
-    StateUpdateContext,
+    ExternalMessageFilter, MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId,
+    MempoolEventListener, StateUpdateContext,
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::processed_upto::{
-    ProcessedUptoInfoExtension, ProcessedUptoInfoStuff, find_min_processed_to_by_shards,
+    find_min_processed_to_by_shards, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff,
 };
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
@@ -110,6 +110,7 @@ where
     dispatcher: Arc<AsyncDispatcher<Self>>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
+    em_filter: Arc<dyn ExternalMessageFilter>,
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
 
     collator_factory: CF,
@@ -297,6 +298,7 @@ where
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         state_node_adapter_factory: STF,
         mpool_adapter_factory: MPF,
+        em_filter: Arc<dyn ExternalMessageFilter>,
         validator: V,
         collator_factory: CF,
         mempool_config_override: Option<MempoolGlobalConfig>,
@@ -335,6 +337,7 @@ where
             dispatcher: arc_dispatcher.clone(),
             state_node_adapter: state_node_adapter.clone(),
             mpool_adapter: mpool_adapter.clone(),
+            em_filter: em_filter.clone(),
             mq_adapter: mq_adapter.clone(),
             collator_factory,
             validator,
@@ -2368,6 +2371,7 @@ where
                         .start(CollatorContext {
                             mq_adapter: self.mq_adapter.clone(),
                             mpool_adapter: self.mpool_adapter.clone(),
+                            em_filter: self.em_filter.clone(),
                             state_node_adapter: self.state_node_adapter.clone(),
                             config: self.config.clone(),
                             collation_session: new_session_info.clone(),
