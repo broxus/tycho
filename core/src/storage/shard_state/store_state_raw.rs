@@ -28,12 +28,17 @@ pub struct StoreStateContext {
 }
 
 impl StoreStateContext {
-    pub fn store<R>(&self, block_id: &BlockId, reader: R) -> Result<ShardStateStuff>
+    pub fn store<R>(
+        &self,
+        ref_by_mc_seqno: u32,
+        block_id: &BlockId,
+        reader: R,
+    ) -> Result<ShardStateStuff>
     where
         R: std::io::Read,
     {
         let preprocessed = self.preprocess(reader)?;
-        self.finalize(block_id, preprocessed)
+        self.finalize(ref_by_mc_seqno, block_id, preprocessed)
     }
 
     fn preprocess<R>(&self, reader: R) -> Result<PreprocessedState>
@@ -97,6 +102,7 @@ impl StoreStateContext {
 
     fn finalize(
         &self,
+        ref_by_mc_seqno: u32,
         block_id: &BlockId,
         preprocessed: PreprocessedState,
     ) -> Result<ShardStateStuff> {
@@ -225,7 +231,7 @@ impl StoreStateContext {
             Some(root) => {
                 let cell_id = HashBytes::from_slice(&root[..32]);
 
-                let cell = self.cell_storage.load_cell(cell_id)?;
+                let cell = self.cell_storage.load_cell(&cell_id, ref_by_mc_seqno)?;
                 Ok(ShardStateStuff::from_root(
                     block_id,
                     Cell::from(cell as Arc<_>),
@@ -613,7 +619,7 @@ mod test {
             #[allow(clippy::disallowed_methods)]
             let file = File::open(file.path())?;
 
-            store_ctx.store(&block_id, file)?;
+            store_ctx.store(0, &block_id, file)?;
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");
@@ -632,7 +638,7 @@ mod test {
             let (_, value) = state?;
 
             // check that state actually exists
-            let cell = cell_storage.load_cell(HashBytes::from_slice(value.as_ref()))?;
+            let cell = cell_storage.load_cell(&HashBytes::from_slice(value.as_ref()), 0)?;
 
             let (_, batch) = cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
@@ -741,7 +747,7 @@ mod test {
         tracing::info!("Starting GC");
         let total = cell_keys.len();
         for (id, key) in cell_keys.into_iter().enumerate() {
-            let cell = cell_storage.load_cell(key)?;
+            let cell = cell_storage.load_cell(&key, 0)?;
 
             traverse_cell((cell as Arc<DynCell>).as_ref());
 

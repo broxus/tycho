@@ -26,12 +26,18 @@ pub struct CellStorage {
     db: CoreDb,
     cells_cache: Arc<CellsIndex>,
     raw_cells_cache: Arc<RawCellsCache>,
+    drop_interval: u32,
 }
 
-type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
+type CellsIndex = FastDashMap<HashBytes, CachedCell>;
+
+struct CachedCell {
+    epoch: u32,
+    weak: Weak<StorageCell>,
+}
 
 impl CellStorage {
-    pub fn new(db: CoreDb, cache_size_bytes: ByteSize) -> Arc<Self> {
+    pub fn new(db: CoreDb, cache_size_bytes: ByteSize, drop_interval: u32) -> Arc<Self> {
         let cells_cache = Default::default();
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
 
@@ -45,6 +51,7 @@ impl CellStorage {
             db,
             cells_cache,
             raw_cells_cache,
+            drop_interval,
         })
     }
 
@@ -641,18 +648,21 @@ impl CellStorage {
 
     pub fn load_cell(
         self: &Arc<Self>,
-        hash: HashBytes,
+        hash: &HashBytes,
+        epoch: u32,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
         let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
-        if let Some(cell) = self.cells_cache.get(&hash) {
-            if let Some(cell) = cell.upgrade() {
-                return Ok(cell);
+        if let Some(cell) = self.cells_cache.get(hash) {
+            if cell.epoch.saturating_add(self.drop_interval) >= epoch {
+                if let Some(cell) = cell.weak.upgrade() {
+                    return Ok(cell);
+                }
             }
         }
 
-        let cell = match self.raw_cells_cache.get_raw(&self.db, &hash) {
-            Ok(Some(value)) => match StorageCell::deserialize(self.clone(), &value.slice) {
+        let mut cell = match self.raw_cells_cache.get_raw(&self.db, hash) {
+            Ok(Some(value)) => match StorageCell::deserialize(self.clone(), &value.slice, epoch) {
                 Some(cell) => Arc::new(cell),
                 None => return Err(CellStorageError::InvalidCell),
             },
@@ -660,11 +670,32 @@ impl CellStorage {
             Err(e) => return Err(CellStorageError::Internal(e)),
         };
 
-        if self
-            .cells_cache
-            .insert(hash, Arc::downgrade(&cell))
-            .is_none()
-        {
+        let has_new;
+        match self.cells_cache.entry(*hash) {
+            dashmap::Entry::Vacant(entry) => {
+                has_new = true;
+                entry.insert(CachedCell {
+                    epoch,
+                    weak: Arc::downgrade(&cell),
+                });
+            }
+            dashmap::Entry::Occupied(mut entry) => {
+                has_new = false;
+                if entry.get().epoch >= epoch
+                    && let Some(mut prev) = entry.get().weak.upgrade()
+                {
+                    drop(entry);
+                    std::mem::swap(&mut prev, &mut cell);
+                } else {
+                    entry.insert(CachedCell {
+                        epoch,
+                        weak: Arc::downgrade(&cell),
+                    });
+                }
+            }
+        };
+
+        if has_new {
             metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
         }
 
@@ -996,7 +1027,11 @@ impl CellStorage {
     }
 
     pub fn drop_cell(&self, hash: &HashBytes) {
-        if self.cells_cache.remove(hash).is_some() {
+        if self
+            .cells_cache
+            .remove_if(hash, |_, cell| cell.weak.strong_count() == 0)
+            .is_some()
+        {
             metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
         }
     }
@@ -1043,8 +1078,10 @@ pub struct StorageCell {
     cell_storage: Arc<CellStorage>,
     descriptor: CellDescriptor,
     bit_len: u16,
-    data: Vec<u8>,
-    hashes: Vec<(HashBytes, u16)>,
+    data_ptr: *const u8,
+    data_len: u8,
+    hash_count: u8,
+    epoch: u32,
 
     reference_states: [AtomicU8; 4],
     reference_data: [UnsafeCell<StorageCellReferenceData>; 4],
@@ -1054,9 +1091,10 @@ impl StorageCell {
     const REF_EMPTY: u8 = 0x0;
     const REF_RUNNING: u8 = 0x1;
     const REF_STORAGE: u8 = 0x2;
-    const REF_REPLACED: u8 = 0x3;
 
-    pub fn deserialize(cell_storage: Arc<CellStorage>, buffer: &[u8]) -> Option<Self> {
+    const HASHES_ITEM_LEN: usize = 32 + 2;
+
+    pub fn deserialize(cell_storage: Arc<CellStorage>, buffer: &[u8], epoch: u32) -> Option<Self> {
         if buffer.len() < 4 {
             return None;
         }
@@ -1067,40 +1105,36 @@ impl StorageCell {
         let hash_count = descriptor.hash_count() as usize;
         let ref_count = descriptor.reference_count() as usize;
 
-        let total_len = 4usize + byte_len + (32 + 2) * hash_count + 32 * ref_count;
+        let allocated_len = byte_len + hash_count * Self::HASHES_ITEM_LEN;
+        let total_len = 4usize + allocated_len + 32 * ref_count;
         if buffer.len() < total_len {
             return None;
         }
 
-        let data = buffer[4..4 + byte_len].to_vec();
-
-        let mut hashes = Vec::with_capacity(hash_count);
-        let mut offset = 4 + byte_len;
-        for _ in 0..hash_count {
-            hashes.push((
-                HashBytes::from_slice(&buffer[offset..offset + 32]),
-                u16::from_le_bytes([buffer[offset + 32], buffer[offset + 33]]),
-            ));
-            offset += 32 + 2;
-        }
+        let data_ptr = Box::into_raw(Box::<[u8]>::from(&buffer[4..4 + allocated_len])).cast::<u8>();
 
         let reference_states = Default::default();
-        let reference_data = unsafe {
+        let mut reference_data = unsafe {
             MaybeUninit::<[UnsafeCell<StorageCellReferenceData>; 4]>::uninit().assume_init()
         };
 
-        for slot in reference_data.iter().take(ref_count) {
-            let slot = slot.get().cast::<u8>();
-            unsafe { std::ptr::copy_nonoverlapping(buffer.as_ptr().add(offset), slot, 32) };
-            offset += 32;
+        const { assert!(std::mem::size_of::<UnsafeCell<StorageCellReferenceData>>() == 32) };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                buffer.as_ptr().add(4 + allocated_len),
+                reference_data.as_mut_ptr().cast::<u8>(),
+                32 * ref_count,
+            );
         }
 
         Some(Self {
             cell_storage,
             bit_len,
             descriptor,
-            data,
-            hashes,
+            data_ptr,
+            data_len: byte_len as u8,
+            hash_count: hash_count as u8,
+            epoch,
             reference_states,
             reference_data,
         })
@@ -1175,7 +1209,7 @@ impl StorageCell {
         let mut res = Ok(());
         Self::initialize_inner(state, &mut || match self
             .cell_storage
-            .load_cell(unsafe { (*slot).hash })
+            .load_cell(unsafe { &(*slot).hash }, self.epoch)
         {
             Ok(cell) => unsafe {
                 *slot = StorageCellReferenceData {
@@ -1259,7 +1293,8 @@ impl CellImpl for StorageCell {
     }
 
     fn data(&self) -> &[u8] {
-        &self.data
+        // SAFETY: Data was not deallocated yet.
+        unsafe { std::slice::from_raw_parts(self.data_ptr, self.data_len as usize) }
     }
 
     fn bit_len(&self) -> u16 {
@@ -1280,80 +1315,38 @@ impl CellImpl for StorageCell {
 
     fn hash(&self, level: u8) -> &HashBytes {
         let i = self.descriptor.level_mask().hash_index(level);
-        &self.hashes[i as usize].0
+        let offset = self.data_len as usize + (i as usize) * Self::HASHES_ITEM_LEN;
+        HashBytes::wrap(unsafe { &*self.data_ptr.add(offset).cast::<[u8; 32]>() })
     }
 
     fn depth(&self, level: u8) -> u16 {
         let i = self.descriptor.level_mask().hash_index(level);
-        self.hashes[i as usize].1
-    }
-
-    fn take_first_child(&mut self) -> Option<Cell> {
-        let state = self.reference_states[0].swap(Self::REF_EMPTY, Ordering::AcqRel);
-        let data = self.reference_data[0].get_mut();
-        match state {
-            Self::REF_STORAGE => Some(unsafe { data.take_storage_cell() }),
-            Self::REF_REPLACED => Some(unsafe { data.take_replaced_cell() }),
-            _ => None,
-        }
-    }
-
-    fn replace_first_child(&mut self, parent: Cell) -> std::result::Result<Cell, Cell> {
-        let state = self.reference_states[0].load(Ordering::Acquire);
-        if state < Self::REF_STORAGE {
-            return Err(parent);
-        }
-
-        self.reference_states[0].store(Self::REF_REPLACED, Ordering::Release);
-        let data = self.reference_data[0].get_mut();
-
-        let cell = match state {
-            Self::REF_STORAGE => unsafe { data.take_storage_cell() },
-            Self::REF_REPLACED => unsafe { data.take_replaced_cell() },
-            _ => return Err(parent),
-        };
-        data.replaced_cell = ManuallyDrop::new(parent);
-        Ok(cell)
-    }
-
-    fn take_next_child(&mut self) -> Option<Cell> {
-        while self.descriptor.reference_count() > 1 {
-            self.descriptor.d1 -= 1;
-            let idx = (self.descriptor.d1 & CellDescriptor::REF_COUNT_MASK) as usize;
-
-            let state = self.reference_states[idx].swap(Self::REF_EMPTY, Ordering::AcqRel);
-            let data = self.reference_data[idx].get_mut();
-
-            return Some(match state {
-                Self::REF_STORAGE => unsafe { data.take_storage_cell() },
-                Self::REF_REPLACED => unsafe { data.take_replaced_cell() },
-                _ => continue,
-            });
-        }
-
-        None
-    }
-
-    fn stats(&self) -> CellTreeStats {
-        // TODO: make real implementation
-
-        // STUB: just return default value
-        Default::default()
+        let offset = self.data_len as usize + (i as usize) * Self::HASHES_ITEM_LEN + 32;
+        u16::from_le_bytes(unsafe { *self.data_ptr.add(offset).cast::<[u8; 2]>() })
     }
 }
 
 impl Drop for StorageCell {
     fn drop(&mut self) {
+        let allocated_len =
+            self.data_len as usize + (self.hash_count as usize) * Self::HASHES_ITEM_LEN;
+
+        _ = unsafe {
+            Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                self.data_ptr.cast_mut(),
+                allocated_len,
+            ))
+        };
+
         self.cell_storage.drop_cell(DynCell::repr_hash(self));
         for i in 0..4 {
             let state = self.reference_states[i].load(Ordering::Acquire);
             let data = self.reference_data[i].get_mut();
 
-            unsafe {
-                match state {
-                    Self::REF_STORAGE => ManuallyDrop::drop(&mut data.storage_cell),
-                    Self::REF_REPLACED => ManuallyDrop::drop(&mut data.replaced_cell),
-                    _ => {}
+            if state == Self::REF_STORAGE {
+                let cell = unsafe { ManuallyDrop::take(&mut data.storage_cell) };
+                if Arc::strong_count(&cell) == 1 {
+                    SafeDeleter::retire(cell);
                 }
             }
         }
@@ -1368,18 +1361,6 @@ pub union StorageCellReferenceData {
     hash: HashBytes,
     /// Complete state.
     storage_cell: ManuallyDrop<Arc<StorageCell>>,
-    /// Replaced state.
-    replaced_cell: ManuallyDrop<Cell>,
-}
-
-impl StorageCellReferenceData {
-    unsafe fn take_storage_cell(&mut self) -> Cell {
-        Cell::from(unsafe { ManuallyDrop::take(&mut self.storage_cell) } as Arc<_>)
-    }
-
-    unsafe fn take_replaced_cell(&mut self) -> Cell {
-        unsafe { ManuallyDrop::take(&mut self.replaced_cell) }
-    }
 }
 
 struct RawCellsCache {

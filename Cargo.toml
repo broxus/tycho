@@ -146,6 +146,10 @@ tycho-storage-traits = { path = "./storage-traits", version = "0.2.12" }
 tycho-util = { path = "./util", version = "0.2.12" }
 tycho-util-proc = { path = "./util-proc", version = "0.2.12" }
 
+[patch.crates-io]
+# patches here
+tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "1751768a2224fd0bb0a48d0d78fd641df80ebb6a" }
+
 [workspace.lints.rust]
 future_incompatible = "warn"
 nonstandard_style = "warn"
