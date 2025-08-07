@@ -497,7 +497,7 @@ impl Phase<FinalizeState> {
 
         let new_state_root;
         let total_validator_fees;
-        let (state_update, new_observable_state) = {
+        let (state_update, new_observable_state, prev_state_root) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time_high",
                 labels,
@@ -676,7 +676,11 @@ impl Phase<FinalizeState> {
             )?;
 
             self.extra.finalize_metrics.build_state_update_elapsed = histogram.finish();
-            (merkle_update, new_observable_state)
+            (
+                merkle_update,
+                new_observable_state,
+                self.state.prev_shard_data.pure_state_root().clone(),
+            )
         };
 
         let (new_block, new_block_extra, new_mc_block_extra) = {
@@ -897,6 +901,7 @@ impl Phase<FinalizeState> {
                 mc_data: new_mc_data,
                 state_update,
                 new_state_root,
+                prev_state_root,
                 new_observable_state,
                 finalize_wu: self.extra.finalize_wu,
                 finalize_metrics: self.extra.finalize_metrics,
