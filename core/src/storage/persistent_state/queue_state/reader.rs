@@ -112,18 +112,18 @@ impl<'a> QueueDiffReader<'a> {
         };
 
         loop {
-            if let Some(boc) = &mut self.parsed_boc {
-                if let Some(cell) = boc.next() {
-                    if boc.roots.is_empty() {
-                        *self.parsed_boc = None;
-                        *self.boc_index += 1;
-                    }
-
-                    *self.message_index += 1;
-                    anyhow::ensure!(cell.repr_hash() == expected_hash, "message hash mismatch");
-
-                    return Ok(Some(cell));
+            if let Some(boc) = &mut self.parsed_boc
+                && let Some(cell) = boc.next()
+            {
+                if boc.roots.is_empty() {
+                    *self.parsed_boc = None;
+                    *self.boc_index += 1;
                 }
+
+                *self.message_index += 1;
+                anyhow::ensure!(cell.repr_hash() == expected_hash, "message hash mismatch");
+
+                return Ok(Some(cell));
             }
 
             let Some(data) = self.state.messages.get(*self.boc_index) else {

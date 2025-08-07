@@ -143,11 +143,11 @@ impl<'a> RequestTracker<'a> {
         self.inflight_requests_len -= 1;
         metrics::gauge!(METRIC_REQ_HANDLERS).decrement(1);
 
-        if let Err(e) = req {
-            if e.is_panic() {
-                tracing::error!("request handler panicked");
-                std::panic::resume_unwind(e.into_panic());
-            }
+        if let Err(e) = req
+            && e.is_panic()
+        {
+            tracing::error!("request handler panicked");
+            std::panic::resume_unwind(e.into_panic());
         }
 
         true

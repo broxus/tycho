@@ -186,12 +186,12 @@ impl<T: AsPeerInfo> Bucket<T> {
                     break 'data data;
                 }
             } else if self.nodes.len() >= max_k {
-                if matches!(self.nodes.front(), Some(node) if node.is_expired(now_sec(), timeout)) {
-                    if let Some(data) = f(peer_info) {
-                        // Found an expired node, replace it
-                        self.nodes.pop_front();
-                        break 'data data;
-                    }
+                if matches!(self.nodes.front(), Some(node) if node.is_expired(now_sec(), timeout))
+                    && let Some(data) = f(peer_info)
+                {
+                    // Found an expired node, replace it
+                    self.nodes.pop_front();
+                    break 'data data;
                 }
             } else if let Some(data) = f(peer_info) {
                 // Found an empty slot, insert the new node

@@ -308,12 +308,12 @@ impl BlockStorage {
         let guard = self.store_block_data.write().await;
 
         // Try to load the block data
-        if let Some(handle) = block_handle_storage.load_handle(block_id) {
-            if handle.has_data() {
-                drop(guard);
-                let block = self.load_block_data(&handle).await?;
-                return Ok(BlockStuffAug::loaded(block));
-            }
+        if let Some(handle) = block_handle_storage.load_handle(block_id)
+            && handle.has_data()
+        {
+            drop(guard);
+            let block = self.load_block_data(&handle).await?;
+            return Ok(BlockStuffAug::loaded(block));
         }
 
         // Add subscription for the block and drop the lock
@@ -1565,10 +1565,10 @@ fn remove_blocks(
             None => break blocks_iter.status()?,
         };
 
-        if let Some(cancelled) = &mut cancelled {
-            if cancelled.check() {
-                anyhow::bail!("blocks GC cancelled");
-            }
+        if let Some(cancelled) = &mut cancelled
+            && cancelled.check()
+        {
+            anyhow::bail!("blocks GC cancelled");
         }
 
         // Key structure:

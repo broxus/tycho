@@ -46,10 +46,10 @@ impl Cert {
         } else {
             self.0.set_deps(direct_deps);
             // `certify()` call may set `is_certified` but miss `has_deps`, so have to re-check
-            if self.is_certified() {
-                if let Some(direct_deps) = self.0.try_take_deps() {
-                    Self::traverse_certify(direct_deps);
-                }
+            if self.is_certified()
+                && let Some(direct_deps) = self.0.try_take_deps()
+            {
+                Self::traverse_certify(direct_deps);
             }
         }
     }

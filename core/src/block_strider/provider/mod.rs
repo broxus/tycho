@@ -165,32 +165,32 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
     type CleanupFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        if self.cleanup_left_at.load(Ordering::Acquire) == u32::MAX {
-            if let Some(left) = self.left.load_full() {
-                return Box::pin(async move {
-                    let res = left.get_next_block(prev_block_id).await;
-                    if res.is_some() {
-                        return res;
-                    }
+        if self.cleanup_left_at.load(Ordering::Acquire) == u32::MAX
+            && let Some(left) = self.left.load_full()
+        {
+            return Box::pin(async move {
+                let res = left.get_next_block(prev_block_id).await;
+                if res.is_some() {
+                    return res;
+                }
 
-                    // Schedule left provider cleanup for the next block.
-                    self.cleanup_left_at
-                        .store(prev_block_id.seqno.saturating_add(1), Ordering::Release);
+                // Schedule left provider cleanup for the next block.
+                self.cleanup_left_at
+                    .store(prev_block_id.seqno.saturating_add(1), Ordering::Release);
 
-                    // Fallback to right
-                    self.right.get_next_block(prev_block_id).await
-                });
-            }
+                // Fallback to right
+                self.right.get_next_block(prev_block_id).await
+            });
         }
 
         Box::pin(self.right.get_next_block(prev_block_id))
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
-        if self.cleanup_left_at.load(Ordering::Acquire) == u32::MAX {
-            if let Some(left) = self.left.load_full() {
-                return Box::pin(async move { left.get_block(block_id_relation).await });
-            }
+        if self.cleanup_left_at.load(Ordering::Acquire) == u32::MAX
+            && let Some(left) = self.left.load_full()
+        {
+            return Box::pin(async move { left.get_block(block_id_relation).await });
         }
 
         Box::pin(self.right.get_block(block_id_relation))
@@ -504,10 +504,10 @@ impl ProofChecker {
                 check_with_master_state(proof, &zerostate, &virt_block, &virt_block_info)?;
             } else {
                 let prev_key_block_proof = 'prev_proof: {
-                    if let Some(prev_proof) = self.cached_prev_key_block_proof.load_full() {
-                        if &prev_proof.as_ref().proof_for == handle.id() {
-                            break 'prev_proof prev_proof;
-                        }
+                    if let Some(prev_proof) = self.cached_prev_key_block_proof.load_full()
+                        && &prev_proof.as_ref().proof_for == handle.id()
+                    {
+                        break 'prev_proof prev_proof;
                     }
 
                     let prev_key_block_proof = block_storage

@@ -53,17 +53,17 @@ impl<C: ColumnFamily> VersionProvider for StateVersionProvider<C> {
     fn get_version(&self, db: &WeeDbRaw) -> Result<Option<Semver>, MigrationError> {
         let state = db.instantiate_table::<C>();
 
-        if let Some(db_name) = state.get(Self::DB_NAME_KEY)? {
-            if db_name.as_ref() != self.db_name.as_bytes() {
-                return Err(MigrationError::Custom(
-                    format!(
-                        "expected db name: {}, got: {}",
-                        self.db_name,
-                        String::from_utf8_lossy(db_name.as_ref())
-                    )
-                    .into(),
-                ));
-            }
+        if let Some(db_name) = state.get(Self::DB_NAME_KEY)?
+            && db_name.as_ref() != self.db_name.as_bytes()
+        {
+            return Err(MigrationError::Custom(
+                format!(
+                    "expected db name: {}, got: {}",
+                    self.db_name,
+                    String::from_utf8_lossy(db_name.as_ref())
+                )
+                .into(),
+            ));
         }
 
         let value = state.get(Self::DB_VERSION_KEY)?;

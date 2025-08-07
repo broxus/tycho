@@ -143,10 +143,10 @@ impl Cmd {
         // Download global config
         let global_config = 'config: {
             let path = self.global_config.unwrap();
-            if let Ok(meta) = Path::new(&path).metadata() {
-                if meta.is_file() {
-                    break 'config std::fs::read(path)?.into();
-                }
+            if let Ok(meta) = Path::new(&path).metadata()
+                && meta.is_file()
+            {
+                break 'config std::fs::read(path)?.into();
             }
 
             reqwest::get(&path)
