@@ -1,8 +1,8 @@
 use tycho_types::cell::HashBytes;
 use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::{
-    BlockExtra, BlockId, BlockInfo, BlockRef, BlockchainConfig, GlobalVersion, McBlockExtra,
-    McStateExtra, OutMsgQueueUpdates, PrevBlockRef, ShardDescription, ShardFeeCreated, ShardIdent,
+    BlockExtra, BlockId, BlockInfo, BlockRef, BlockchainConfig, McBlockExtra, McStateExtra,
+    OutMsgQueueUpdates, PrevBlockRef, ShardDescription, ShardFeeCreated, ShardIdent,
     ShardStateUnsplit, ValueFlow,
 };
 use tycho_util::FastHashMap;
@@ -75,24 +75,12 @@ impl std::fmt::Debug for DebugBlockInfo<'_> {
             .field("gen_catchain_seqno", &self.0.gen_catchain_seqno)
             .field("min_ref_mc_seqno", &self.0.min_ref_mc_seqno)
             .field("prev_key_block_seqno", &self.0.prev_key_block_seqno)
-            .field("gen_software", &self.0.gen_software)
+            .field("gen_software_version", &self.0.gen_software.version)
+            .field(
+                "gen_software_capabilities",
+                &self.0.gen_software.capabilities,
+            )
             .finish()
-    }
-}
-
-pub struct DisplayGlobalVersion<'a>(pub &'a GlobalVersion);
-impl std::fmt::Debug for DisplayGlobalVersion<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-impl std::fmt::Display for DisplayGlobalVersion<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "ver: {}, capabilities: {:?}",
-            self.0.version, self.0.capabilities
-        )
     }
 }
 

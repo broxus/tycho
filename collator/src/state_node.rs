@@ -81,8 +81,8 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     fn accept_block(&self, block: Arc<BlockStuffForSync>) -> Result<()>;
     /// Waits for the specified block to be received and returns it
     async fn wait_for_block(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
-    /// Waits for the specified block by prev_id to be received and returns it
-    async fn wait_for_block_next(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
+    /// Waits for the specified block by `prev_id` to be received and returns it
+    async fn wait_for_block_next(&self, prev_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Handle state after block was applied
     async fn handle_state(&self, state: &ShardStateStuff) -> Result<()>;
     /// Load queue diff

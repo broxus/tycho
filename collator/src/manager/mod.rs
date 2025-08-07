@@ -1213,7 +1213,7 @@ where
     /// 2. Stop block validation if needed
     /// 3. Commit block if it was collated first
     /// 4. Notify mempool about new master block
-    /// 5. Sync to received block if it is far ahead last collated and last synced_to
+    /// 5. Sync to received block if it is far ahead last collated and last `synced_to`
     #[tracing::instrument(skip_all, fields(block_id = %ctx.state.block_id().as_short_id(), is_last_mc_block_in_batch))]
     async fn handle_block_from_bc(
         &self,

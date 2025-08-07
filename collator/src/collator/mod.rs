@@ -127,7 +127,7 @@ pub trait CollatorEventListener: Send + Sync {
 pub trait Collator: Send + Sync + 'static {
     /// Enqueue collator stop task
     async fn enqueue_stop(&self) -> Result<()>;
-    /// Enqueue update McData if newer, reset PrevData and run next collation attempt
+    /// Enqueue update `McData` if newer, reset `PrevData` and run next collation attempt
     async fn enqueue_resume_collation(
         &self,
         mc_data: Arc<McData>,
@@ -179,7 +179,7 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
             .await
     }
 
-    /// Enqueue update McData if newer, reset PrevData if required and run next collation attempt
+    /// Enqueue update `McData` if newer, reset `PrevData` if required and run next collation attempt
     async fn enqueue_resume_collation(
         &self,
         mc_data: Arc<McData>,

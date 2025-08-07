@@ -55,7 +55,7 @@ impl<V: InternalMessageValue> Eq for MessageExt<V> {}
 
 impl<V: InternalMessageValue> PartialOrd for MessageExt<V> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.message.cmp(&other.message))
+        Some(self.cmp(other))
     }
 }
 
