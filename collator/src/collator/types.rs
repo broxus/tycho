@@ -1230,7 +1230,6 @@ pub struct FinalizeBlockResult {
     pub old_mc_data: Arc<McData>,
     pub state_update: MerkleUpdate,
     pub new_state_root: Cell,
-    pub prev_state_root: Cell,
     pub new_observable_state: Box<ShardStateUnsplit>,
     pub finalize_wu: FinalizeWu,
     pub finalize_metrics: FinalizeMetrics,
