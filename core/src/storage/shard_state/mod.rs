@@ -288,10 +288,14 @@ impl ShardStateStorage {
 
                 in_mem_remove.finish();
 
+                let in_db_remove = HistogramGuard::begin("tycho_storage_state_remove_time_high");
+
                 batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
                 db.raw()
                     .rocksdb()
                     .write_opt(batch, db.cells.write_config())?;
+
+                in_db_remove.finish();
 
                 Ok::<_, anyhow::Error>((stats, alloc))
             })

@@ -643,10 +643,14 @@ impl CellStorage {
         self: &Arc<Self>,
         hash: HashBytes,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
-        let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
+        // let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
+
+        metrics::counter!("tycho_storage_load_cell_total").increment(1);
 
         if let Some(cell) = self.cells_cache.get(&hash) {
+            metrics::counter!("tycho_storage_load_cell_hit_weak_total").increment(1);
             if let Some(cell) = cell.upgrade() {
+                metrics::counter!("tycho_storage_load_cell_hit_total").increment(1);
                 return Ok(cell);
             }
         }
@@ -665,7 +669,7 @@ impl CellStorage {
             .insert(hash, Arc::downgrade(&cell))
             .is_none()
         {
-            metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
+            // metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
         }
 
         Ok(cell)
@@ -997,7 +1001,7 @@ impl CellStorage {
 
     pub fn drop_cell(&self, hash: &HashBytes) {
         if self.cells_cache.remove(hash).is_some() {
-            metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
+            // metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
         }
     }
 }
