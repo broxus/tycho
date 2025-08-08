@@ -1,11 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-pub mod bc_pub {
-    pub(crate) use super::bc::{Action, send_config_action_ext};
-}
-
-mod bc;
+pub(crate) mod bc;
 mod gen_account;
 mod gen_dht;
 mod gen_key;

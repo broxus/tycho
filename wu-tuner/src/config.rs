@@ -68,6 +68,9 @@ impl WuTunerConfig {
             config_path = %path.display(),
             "Started watching for changes in WuTuner config",
         );
+        scopeguard::defer!({
+            tracing::info!("Stopped watching for changes in WuTuner config");
+        });
 
         let config_path = path.clone();
         let get_metadata = move || {
@@ -105,7 +108,5 @@ impl WuTunerConfig {
                 }
             }
         }
-
-        tracing::info!("Stopped watching for changes in WuTuner config");
     }
 }

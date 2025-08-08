@@ -39,9 +39,9 @@ pub fn update_wu_params(
             .expect("it is guaranteed that idx 28 exists here");
 
         // send ext message
-        tools::bc_pub::send_config_action_ext(
+        tools::bc::send_config_action_ext(
             &client,
-            tools::bc_pub::Action::SubmitParam {
+            tools::bc::Action::SubmitParam {
                 index: BC_PARAM_IDX,
                 value,
             },
