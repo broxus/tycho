@@ -78,7 +78,7 @@ impl Default for CollatorConfig {
             check_value_flow: false,
             validate_config: true,
             fast_sync: true,
-            accounts_split_depth: 4,
+            accounts_split_depth: 5,
             merkle_split_depth: 5,
         }
     }
