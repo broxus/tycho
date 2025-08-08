@@ -644,7 +644,7 @@ impl CollatorStdImpl {
                         // Process previous tasks until finding the finished one
                         while let Some(task) = self.store_new_state_tasks.pop() {
                             if !task.store_new_state_task.is_finished()
-                                && unfinished_tasks.len() < 3
+                                && unfinished_tasks.len() < 5
                             {
                                 unfinished_tasks.push(task);
                                 continue;
@@ -689,6 +689,8 @@ impl CollatorStdImpl {
                                 .load_state_root(&task.block_id)
                                 .await
                                 .context("failed to load prev shard state")?;
+
+                            assert_eq!(prev_state, task._root);
 
                             while let Some(task) = unfinished_tasks.pop() {
                                 let split_at = {
@@ -962,7 +964,6 @@ impl CollatorStdImpl {
         block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
         new_observable_state_root: Cell,
-        prev_observable_state_root: Cell,
         state_update: MerkleUpdate,
         store_new_state_task: JoinTask<Result<bool>>,
         new_queue_diff_hash: HashBytes,
@@ -992,7 +993,6 @@ impl CollatorStdImpl {
                     store_new_state_task,
                     state_update,
                     _root: new_observable_state_root.clone(),
-                    _prev_root: prev_observable_state_root,
                 });
 
                 // build state stuff from new observable state after collation
@@ -2261,7 +2261,6 @@ struct StateUpdateContext {
     store_new_state_task: JoinTask<Result<bool>>,
     state_update: MerkleUpdate,
     _root: Cell,
-    _prev_root: Cell,
 }
 
 struct AnchorsProcessingInfo {
