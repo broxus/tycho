@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-mod bc;
+pub(crate) mod bc;
 mod gen_account;
 mod gen_dht;
 mod gen_key;
