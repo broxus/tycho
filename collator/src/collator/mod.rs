@@ -705,7 +705,7 @@ impl CollatorStdImpl {
                                         .parse::<ShardAccounts>()
                                         .context("failed to load shard accounts")?;
 
-                                    split_aug_dict_raw(shard_accounts, 5)
+                                    split_aug_dict_raw(shard_accounts, 4)
                                         .context("failed to split shard accounts")?
                                         .into_keys()
                                         .collect::<ahash::HashSet<_>>()
@@ -1002,7 +1002,7 @@ impl CollatorStdImpl {
                     block_id,
                     store_new_state_task,
                     state_update,
-                    _root: new_observable_state_root.clone(),
+                    _root: Default::default(),
                 });
 
                 // build state stuff from new observable state after collation
