@@ -204,15 +204,15 @@ impl BlocksCache {
             let mut processed_to_by_partitions_opt = None;
 
             // try to find in cache
-            if let Some(shard_cache) = self.inner.shards.get(&top_sc_block_id.shard) {
-                if let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno) {
-                    processed_to_by_partitions_opt = Some(
-                        sc_block_entry
-                            .data
-                            .processed_upto()
-                            .get_internals_processed_to_by_partitions(),
-                    );
-                }
+            if let Some(shard_cache) = self.inner.shards.get(&top_sc_block_id.shard)
+                && let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno)
+            {
+                processed_to_by_partitions_opt = Some(
+                    sc_block_entry
+                        .data
+                        .processed_upto()
+                        .get_internals_processed_to_by_partitions(),
+                );
             }
 
             result.insert(top_sc_block_id, (updated, processed_to_by_partitions_opt));
@@ -271,23 +271,23 @@ impl BlocksCache {
 
             let mut prev_block_ids = None;
             let mut not_found = true;
-            if let Some(shard_cache) = self.inner.shards.get(&prev_sc_block_id.shard) {
-                if let Some(sc_block_entry) = shard_cache.blocks.get(&prev_sc_block_id.seqno) {
-                    not_found = false;
+            if let Some(shard_cache) = self.inner.shards.get(&prev_sc_block_id.shard)
+                && let Some(sc_block_entry) = shard_cache.blocks.get(&prev_sc_block_id.seqno)
+            {
+                not_found = false;
 
-                    // if shard block included in current master block subgraph
-                    if force_include // top shard blocks consider included anyway in this case
+                // if shard block included in current master block subgraph
+                if force_include // top shard blocks consider included anyway in this case
                         || sc_block_entry.ref_by_mc_seqno == mc_block_key.seqno
-                    {
-                        prev_block_ids = Some((
-                            Some(prev_sc_block_id),
-                            sc_block_entry.prev_blocks_ids.clone(),
-                        ));
+                {
+                    prev_block_ids = Some((
+                        Some(prev_sc_block_id),
+                        sc_block_entry.prev_blocks_ids.clone(),
+                    ));
 
-                        sc_block_entry.prev_blocks_ids.iter().for_each(|sub_prev| {
-                            prev_shard_blocks_ids.push_back((*sub_prev, false));
-                        });
-                    }
+                    sc_block_entry.prev_blocks_ids.iter().for_each(|sub_prev| {
+                        prev_shard_blocks_ids.push_back((*sub_prev, false));
+                    });
                 }
             }
 
@@ -934,10 +934,10 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
 
     /// Returns Some(seqno: u32) of last known synced block when it is newer than provided
     fn check_refresh_last_known_synced(&mut self, block_seqno: BlockSeqno) -> Option<BlockSeqno> {
-        if let Some(last_known) = self.last_known_synced {
-            if last_known >= block_seqno {
-                return Some(last_known);
-            }
+        if let Some(last_known) = self.last_known_synced
+            && last_known >= block_seqno
+        {
+            return Some(last_known);
         }
         self.last_known_synced = Some(block_seqno);
         None
@@ -986,12 +986,12 @@ impl MasterBlocksCacheData {
     }
 
     fn move_range_start(&mut self, block_seqno: u32) {
-        if let Some((range_start, range_end)) = self.applied_mc_queue_range {
-            if block_seqno >= range_start {
-                let new_range_start = block_seqno + 1;
-                self.applied_mc_queue_range =
-                    (new_range_start <= range_end).then_some((new_range_start, range_end));
-            }
+        if let Some((range_start, range_end)) = self.applied_mc_queue_range
+            && block_seqno >= range_start
+        {
+            let new_range_start = block_seqno + 1;
+            self.applied_mc_queue_range =
+                (new_range_start <= range_end).then_some((new_range_start, range_end));
         }
     }
 

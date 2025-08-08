@@ -530,16 +530,16 @@ where
         };
 
         // skip diff below min processed to
-        if let Some(min_pt) = min_processed_to {
-            if queue_diff.as_ref().max_message <= *min_pt {
-                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                    "Skipping diff for block {}: max_message {} <= min_processed_to {}",
-                    block_id.as_short_id(),
-                    queue_diff.as_ref().max_message,
-                    min_pt,
-                );
-                return Ok(None);
-            }
+        if let Some(min_pt) = min_processed_to
+            && queue_diff.as_ref().max_message <= *min_pt
+        {
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                "Skipping diff for block {}: max_message {} <= min_processed_to {}",
+                block_id.as_short_id(),
+                queue_diff.as_ref().max_message,
+                min_pt,
+            );
+            return Ok(None);
         }
 
         // skip already applied diff
@@ -1787,15 +1787,15 @@ where
                 }
 
                 // if diff is below top applied then skip
-                if let Some(border) = queue_diffs_applied_to_top_blocks.get(shard_id) {
-                    if prev_block_id.seqno <= *border {
-                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                            prev_block_id = %prev_block_id.as_short_id(),
-                            top_applied_seqno = border,
-                            "previous queue diff skipped because it below top applied",
-                        );
-                        continue;
-                    }
+                if let Some(border) = queue_diffs_applied_to_top_blocks.get(shard_id)
+                    && prev_block_id.seqno <= *border
+                {
+                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                        prev_block_id = %prev_block_id.as_short_id(),
+                        top_applied_seqno = border,
+                        "previous queue diff skipped because it below top applied",
+                    );
+                    continue;
                 }
 
                 // if diff is before init block (from persistent state)
@@ -1955,15 +1955,14 @@ where
                     // if diff is below top applied then skip
                     if let Some(border) =
                         queue_diffs_applied_to_top_blocks.get(&block_entry.block_id.shard)
+                        && block_entry.block_id.seqno <= *border
                     {
-                        if block_entry.block_id.seqno <= *border {
-                            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                                received_block_id = %block_entry.block_id.as_short_id(),
-                                top_applied_seqno = border,
-                                "queue diff apply skipped because it is below top applied",
-                            );
-                            continue;
-                        }
+                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                            received_block_id = %block_entry.block_id.as_short_id(),
+                            top_applied_seqno = border,
+                            "queue diff apply skipped because it is below top applied",
+                        );
+                        continue;
                     }
 
                     let min_processed_to =
@@ -2088,16 +2087,16 @@ where
         let mut delayed_mc_data = None;
         {
             let mut guard = self.delayed_mc_state_update.lock();
-            if let Some(mc_data) = guard.clone() {
-                if mc_data.block_id <= *block_id {
-                    // process delayed mc state only if committed block is equal
-                    if mc_data.block_id == *block_id {
-                        delayed_mc_data = Some(mc_data);
-                    }
-
-                    // remove delayed mc state even if committed block is ahead
-                    *guard = None;
+            if let Some(mc_data) = guard.clone()
+                && mc_data.block_id <= *block_id
+            {
+                // process delayed mc state only if committed block is equal
+                if mc_data.block_id == *block_id {
+                    delayed_mc_data = Some(mc_data);
                 }
+
+                // remove delayed mc state even if committed block is ahead
+                *guard = None;
             }
         }
         if let Some(mc_data) = delayed_mc_data {

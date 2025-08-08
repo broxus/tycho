@@ -54,10 +54,10 @@ impl<'a> QueueStateWriter<'a> {
         const MAX_ROOTS_PER_CHUNK: usize = 10000;
         const MAX_CHUNK_SIZE: u64 = 10 << 20; // 10 MB
 
-        if let Some(cancelled) = cancelled {
-            if cancelled.check() {
-                anyhow::bail!(Cancelled);
-            }
+        if let Some(cancelled) = cancelled
+            && cancelled.check()
+        {
+            anyhow::bail!(Cancelled);
         }
 
         let states_dir = self.states_dir;
@@ -112,10 +112,10 @@ impl<'a> QueueStateWriter<'a> {
             let mut message_count = 0usize;
             let mut total_size = 0u64;
             for entry in iter.by_ref().take(MAX_ROOTS_PER_CHUNK) {
-                if let Some(cancelled) = &mut cancelled {
-                    if cancelled.check() {
-                        anyhow::bail!(Cancelled);
-                    }
+                if let Some(cancelled) = &mut cancelled
+                    && cancelled.check()
+                {
+                    anyhow::bail!(Cancelled);
                 }
 
                 let message_cell = entry?.into_inner();

@@ -283,13 +283,13 @@ impl GcSubscriber {
                     };
 
                     // Debounce GC
-                    if let Some(last) = last_tiggered_at {
-                        if last.elapsed() < min_interval {
-                            // Sleep until the desired interval
-                            // AND continue to wait for the next trigger
-                            sleep_until = Some(last + min_interval);
-                            continue;
-                        }
+                    if let Some(last) = last_tiggered_at
+                        && last.elapsed() < min_interval
+                    {
+                        // Sleep until the desired interval
+                        // AND continue to wait for the next trigger
+                        sleep_until = Some(last + min_interval);
+                        continue;
                     }
 
                     // NOTE: You should update this in other branches as well,

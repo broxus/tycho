@@ -645,10 +645,10 @@ impl CellStorage {
     ) -> Result<Arc<StorageCell>, CellStorageError> {
         let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
-        if let Some(cell) = self.cells_cache.get(&hash) {
-            if let Some(cell) = cell.upgrade() {
-                return Ok(cell);
-            }
+        if let Some(cell) = self.cells_cache.get(&hash)
+            && let Some(cell) = cell.upgrade()
+        {
+            return Ok(cell);
         }
 
         let cell = match self.raw_cells_cache.get_raw(&self.db, &hash) {
@@ -1555,12 +1555,12 @@ impl RawCellsCache {
 
         match db.cells.get(key.as_slice()) {
             Ok(value) => {
-                if let Some(value) = value {
-                    if let (rc, Some(value)) = refcount::decode_value_with_rc(&value) {
-                        return StorageCell::deserialize_references(value, refs_buffer)
-                            .then_some(rc)
-                            .ok_or(CellStorageError::InvalidCell);
-                    }
+                if let Some(value) = value
+                    && let (rc, Some(value)) = refcount::decode_value_with_rc(&value)
+                {
+                    return StorageCell::deserialize_references(value, refs_buffer)
+                        .then_some(rc)
+                        .ok_or(CellStorageError::InvalidCell);
                 }
 
                 Err(CellStorageError::CellNotFound)

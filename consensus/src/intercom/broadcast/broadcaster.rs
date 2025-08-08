@@ -218,11 +218,10 @@ impl Broadcaster {
                 } else {
                     if self.attempt > 2 // artificial delay for stable point rate
                         && self.signatures.len() >= self.signers_count.majority_of_others()
+                        && let Some(sender) = mem::take(&mut self.bcaster_signal)
                     {
-                        if let Some(sender) = mem::take(&mut self.bcaster_signal) {
-                            _ = sender.send(BroadcasterSignal::Ok);
-                        };
-                    }
+                        _ = sender.send(BroadcasterSignal::Ok);
+                    };
                     if self.attempt == 0 {
                         // network is stuck, give all broadcast filters a push; forget rejections
                         self.sig_peers.clear();

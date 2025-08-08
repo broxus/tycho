@@ -292,16 +292,16 @@ impl PeerResolverInner {
             // NOTE: Acquire network ref only during the operation.
             {
                 let network = self.weak_network.upgrade()?;
-                if let Some(peer_info) = network.known_peers().get(&data.peer_id) {
-                    if PeerResolverTimings::is_new_info(prev_timings, &peer_info) {
-                        tracing::trace!(
-                            peer_id = %data.peer_id,
-                            attempts,
-                            is_stale,
-                            "peer info exists",
-                        );
-                        return Some((network, peer_info));
-                    }
+                if let Some(peer_info) = network.known_peers().get(&data.peer_id)
+                    && PeerResolverTimings::is_new_info(prev_timings, &peer_info)
+                {
+                    tracing::trace!(
+                        peer_id = %data.peer_id,
+                        attempts,
+                        is_stale,
+                        "peer info exists",
+                    );
+                    return Some((network, peer_info));
                 }
 
                 let dht_client = self.dht_service.make_client(&network);

@@ -403,15 +403,14 @@ impl RpcStorage {
             iter.seek(range_from);
         }
 
-        if cursor.is_some() {
-            if let Some(key) = iter.key() {
-                if key == range_from.as_slice() {
-                    if reverse {
-                        iter.prev();
-                    } else {
-                        iter.next();
-                    }
-                }
+        if cursor.is_some()
+            && let Some(key) = iter.key()
+            && key == range_from.as_slice()
+        {
+            if reverse {
+                iter.prev();
+            } else {
+                iter.next();
             }
         }
 
@@ -1280,10 +1279,10 @@ impl RpcStorage {
                     }
 
                     // Don't write tx for account from blacklist
-                    if let Some(blacklist) = &rpc_blacklist {
-                        if blacklist.contains(&tx_info[..33]) {
-                            continue;
-                        }
+                    if let Some(blacklist) = &rpc_blacklist
+                        && blacklist.contains(&tx_info[..33])
+                    {
+                        continue;
                     }
 
                     let tx_hash = tx_cell.inner().repr_hash();
@@ -1408,12 +1407,10 @@ impl RpcStorage {
     ) -> Result<()> {
         // Find the new code hash
         let new_code_hash = 'code_hash: {
-            if !remove {
-                if let Some((_, account)) = accounts.get(account)? {
-                    match extract_code_hash(&account)? {
-                        ExtractedCodeHash::Exact(hash) => break 'code_hash hash,
-                        ExtractedCodeHash::Skip => return Ok(()),
-                    }
+            if !remove && let Some((_, account)) = accounts.get(account)? {
+                match extract_code_hash(&account)? {
+                    ExtractedCodeHash::Exact(hash) => break 'code_hash hash,
+                    ExtractedCodeHash::Skip => return Ok(()),
                 }
             }
             None
@@ -2298,12 +2295,11 @@ fn extract_code_hash(account: &ShardAccount) -> Result<ExtractedCodeHash> {
         return Ok(ExtractedCodeHash::Skip);
     }
 
-    if let Some(account) = account.load_account()? {
-        if let AccountState::Active(state_init) = &account.state {
-            if let Some(code) = &state_init.code {
-                return Ok(ExtractedCodeHash::Exact(Some(*code.repr_hash())));
-            }
-        }
+    if let Some(account) = account.load_account()?
+        && let AccountState::Active(state_init) = &account.state
+        && let Some(code) = &state_init.code
+    {
+        return Ok(ExtractedCodeHash::Exact(Some(*code.repr_hash())));
     }
 
     Ok(ExtractedCodeHash::Exact(None))
@@ -2323,10 +2319,10 @@ fn split_shard(
         builder: &mut CellBuilder,
     ) -> Result<()> {
         let (left_shard_ident, right_shard_ident) = 'split: {
-            if depth > 0 {
-                if let Some((left, right)) = shard.split() {
-                    break 'split (left, right);
-                }
+            if depth > 0
+                && let Some((left, right)) = shard.split()
+            {
+                break 'split (left, right);
             }
             shards.insert(*shard, accounts.clone());
             return Ok(());

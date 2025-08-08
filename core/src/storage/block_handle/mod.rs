@@ -74,10 +74,10 @@ impl BlockHandleStorage {
         let block_handles = &self.db.block_handles;
 
         // Fast path - lookup in cache
-        if let Some(handle) = self.cache.get(block_id) {
-            if let Some(handle) = handle.upgrade() {
-                return (handle, HandleCreationStatus::Fetched);
-            }
+        if let Some(handle) = self.cache.get(block_id)
+            && let Some(handle) = handle.upgrade()
+        {
+            return (handle, HandleCreationStatus::Fetched);
         }
 
         match block_handles.get(block_id.root_hash.as_slice()).unwrap() {
@@ -128,10 +128,10 @@ impl BlockHandleStorage {
         let block_handles = &self.db.block_handles;
 
         // Fast path - lookup in cache
-        if let Some(handle) = self.cache.get(block_id) {
-            if let Some(handle) = handle.upgrade() {
-                return Some(handle);
-            }
+        if let Some(handle) = self.cache.get(block_id)
+            && let Some(handle) = handle.upgrade()
+        {
+            return Some(handle);
         }
 
         // Load meta from storage

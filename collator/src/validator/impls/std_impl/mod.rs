@@ -127,10 +127,10 @@ impl Validator for ValidatorStdImpl {
         block_id: &BlockId,
     ) -> Result<ValidationStatus> {
         let session = 'session: {
-            if let Some(shard_sessions) = self.inner.sessions.lock().get(&block_id.shard) {
-                if let Some(session) = shard_sessions.get(&session_id) {
-                    break 'session session.clone();
-                }
+            if let Some(shard_sessions) = self.inner.sessions.lock().get(&block_id.shard)
+                && let Some(session) = shard_sessions.get(&session_id)
+            {
+                break 'session session.clone();
             }
 
             anyhow::bail!(

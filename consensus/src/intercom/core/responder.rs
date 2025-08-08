@@ -97,10 +97,10 @@ impl Service<ServiceRequest> for Responder {
         #[cfg(feature = "mock-feedback")]
         {
             use crate::mock_feedback::RoundBoxed;
-            if let Ok(data) = _req.parse_tl::<RoundBoxed>() {
-                if let Some(tka) = self.0.top_known_anchor.get() {
-                    tka.set_max(data.round);
-                }
+            if let Ok(data) = _req.parse_tl::<RoundBoxed>()
+                && let Some(tka) = self.0.top_known_anchor.get()
+            {
+                tka.set_max(data.round);
             }
         }
         future::ready(())

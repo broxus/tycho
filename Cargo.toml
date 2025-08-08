@@ -2,7 +2,7 @@
 version = "0.2.12"
 edition = "2024"
 authors = ["Broxus Team"]
-rust-version = "1.85.0"
+rust-version = "1.88.0"
 repository = "https://github.com/broxus/tycho"
 license = "MIT OR Apache-2.0"
 
@@ -24,6 +24,7 @@ members = [
     "storage",
     "util-proc",
     "util",
+    "wu-tuner",
 ]
 
 [workspace.dependencies]
@@ -145,6 +146,7 @@ tycho-storage = { path = "./storage", version = "0.2.12" }
 tycho-storage-traits = { path = "./storage-traits", version = "0.2.12" }
 tycho-util = { path = "./util", version = "0.2.12" }
 tycho-util-proc = { path = "./util-proc", version = "0.2.12" }
+tycho-wu-tuner = { path = "./wu-tuner", version = "0.2.12" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"

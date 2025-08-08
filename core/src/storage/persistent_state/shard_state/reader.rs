@@ -219,11 +219,11 @@ struct CrcOptReader<R> {
 impl<R: Read> Read for CrcOptReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let out = self.inner.read(buf)?;
-        if let Some(checksum) = &mut self.checksum {
-            if let Some(remaining) = self.checksum_until.checked_sub(self.read) {
-                let to_crc = std::cmp::min(out, remaining as usize);
-                *checksum = crc32c_append(*checksum, &buf[..to_crc]);
-            }
+        if let Some(checksum) = &mut self.checksum
+            && let Some(remaining) = self.checksum_until.checked_sub(self.read)
+        {
+            let to_crc = std::cmp::min(out, remaining as usize);
+            *checksum = crc32c_append(*checksum, &buf[..to_crc]);
         }
         Ok(out)
     }

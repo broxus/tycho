@@ -229,17 +229,16 @@ impl InclusionState {
                     resolved.alt(),
                 ),
             }
-        } else if let Some(resolved) = self.0.resolved.get() {
-            if let FirstResolved::Valid(digest, _) | FirstResolved::NotValid(digest) = resolved {
-                if digest == dag_point.digest() {
-                    panic!(
-                        "{:?} {} has no first_resolved flag, but acquired its state {:?}",
-                        dag_point.id().alt(),
-                        dag_point.alt(),
-                        resolved.alt(),
-                    )
-                }
-            }
+        } else if let Some(resolved) = self.0.resolved.get()
+            && let FirstResolved::Valid(digest, _) | FirstResolved::NotValid(digest) = resolved
+            && digest == dag_point.digest()
+        {
+            panic!(
+                "{:?} {} has no first_resolved flag, but acquired its state {:?}",
+                dag_point.id().alt(),
+                dag_point.alt(),
+                resolved.alt(),
+            )
         }
         ValidateCtx::resolved(dag_point); // meter after checks
 

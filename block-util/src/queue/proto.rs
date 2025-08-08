@@ -542,10 +542,10 @@ pub mod processed_to_map {
             let shard_ident = tl::shard_ident::read(data)?;
 
             // Require that shards are sorted in ascending order.
-            if let Some(prev_shard) = prev_shard {
-                if shard_ident <= prev_shard {
-                    return Err(tl_proto::TlError::InvalidData);
-                }
+            if let Some(prev_shard) = prev_shard
+                && shard_ident <= prev_shard
+            {
+                return Err(tl_proto::TlError::InvalidData);
             }
             prev_shard = Some(shard_ident);
 
@@ -600,10 +600,10 @@ pub mod router_partitions_map {
                 return Err(TlError::InvalidData);
             };
 
-            if let Some(prev_index) = prev_index {
-                if partition_index <= prev_index {
-                    return Err(TlError::InvalidData);
-                }
+            if let Some(prev_index) = prev_index
+                && partition_index <= prev_index
+            {
+                return Err(TlError::InvalidData);
             }
             prev_index = Some(partition_index);
 
@@ -617,10 +617,10 @@ pub mod router_partitions_map {
             for _ in 0..account_count {
                 let account = RouterAddr::read_from(data)?;
 
-                if let Some(prev_account) = &prev_account {
-                    if &account <= prev_account {
-                        return Err(TlError::InvalidData);
-                    }
+                if let Some(prev_account) = &prev_account
+                    && &account <= prev_account
+                {
+                    return Err(TlError::InvalidData);
                 }
                 prev_account = Some(account);
 

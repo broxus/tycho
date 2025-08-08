@@ -548,11 +548,43 @@ impl Phase<FinalizeState> {
                 in_msgs_len, out_msgs_len,
             );
 
+            // calculate resume collation wu
+            self.state.do_collate_wu.calculate_resume_collation_wu(
+                &self.state.collation_config.work_units_params.finalize,
+                &self.state.collation_config.work_units_params.execute,
+                shard_accounts_count,
+                updated_accounts_count,
+                &self.state.mc_data,
+                &shard,
+            );
+
+            let blocks_count_between_masters =
+                self.state.mc_data.get_blocks_count_between_masters(&shard);
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "resume_collation_wu: {}, state_accounts_count: {}, \
+                blocks_count_between_masters: {} ",
+                self.state.do_collate_wu.resume_collation_wu,
+                shard_accounts_count,
+                blocks_count_between_masters,
+            );
+
+            // report shard blocks count in last master block
+            if !shard.is_masterchain() && self.state.is_first_block_after_prev_master {
+                metrics::gauge!("tycho_shard_blocks_count_in_last_master_block", labels)
+                    .set(blocks_count_between_masters as f64);
+            }
+
             // compute total wu used from last anchor
             let mut new_wu_used_from_last_anchor = wu_used_from_last_anchor
-                .saturating_add(self.extra.execute_result.prepare_msg_groups_wu.total_wu)
+                .saturating_add(self.extra.execute_result.prepare_msg_groups_wu.total_wu())
                 .saturating_add(self.extra.execute_result.execute_wu.total_wu())
                 .saturating_add(self.extra.finalize_wu.total_wu());
+            // append resume collation wu only on the first block after master
+            if self.state.is_first_block_after_prev_master {
+                new_wu_used_from_last_anchor = new_wu_used_from_last_anchor
+                    .saturating_add(self.state.do_collate_wu.resume_collation_wu);
+            }
 
             // total wu used should cover max the number of rounds
             // which mempool can be ahead of last applied master block
@@ -575,7 +607,7 @@ impl Phase<FinalizeState> {
                 wu_used_from_last_anchor,
                 new_wu_used_from_last_anchor,
                 max_wu_used_limit,
-                self.extra.execute_result.prepare_msg_groups_wu.total_wu,
+                self.extra.execute_result.prepare_msg_groups_wu.total_wu(),
                 self.extra.execute_result.execute_wu.total_wu(),
                 self.extra.finalize_wu.total_wu(),
             );
@@ -867,6 +899,7 @@ impl Phase<FinalizeState> {
                 new_observable_state,
                 finalize_wu: self.extra.finalize_wu,
                 finalize_metrics: self.extra.finalize_metrics,
+                do_collate_wu: self.state.do_collate_wu,
                 old_mc_data: self.state.mc_data,
                 collation_config: self.state.collation_config,
             },
@@ -902,13 +935,13 @@ impl Phase<FinalizeState> {
         // 1.10. update genesis round and time from the mempool global config if present and higher
         let mut consensus_info = prev_state_extra.consensus_info;
 
-        if let Some(mp_cfg_override) = &collation_data.mempool_config_override {
-            if (mp_cfg_override.genesis_info).overrides(&consensus_info.genesis_info) {
-                // mempool applied genesis and config during boot, now update genesis in state
-                consensus_info.genesis_info = mp_cfg_override.genesis_info;
+        if let Some(mp_cfg_override) = &collation_data.mempool_config_override
+            && (mp_cfg_override.genesis_info).overrides(&consensus_info.genesis_info)
+        {
+            // mempool applied genesis and config during boot, now update genesis in state
+            consensus_info.genesis_info = mp_cfg_override.genesis_info;
 
-                is_key_block = true;
-            }
+            is_key_block = true;
         }
 
         // 2. update shard_hashes and shard_fees
@@ -1175,8 +1208,8 @@ impl Phase<FinalizeState> {
             .filter(|account| !account.transactions.is_empty())
             .map(|mut updated_account| {
                 if is_masterchain {
-                    if &updated_account.account_addr == config_address {
-                        if let Some(Account {
+                    if &updated_account.account_addr == config_address
+                        && let Some(Account {
                             state:
                                 AccountState::Active(StateInit {
                                     data: Some(data), ..
@@ -1186,12 +1219,11 @@ impl Phase<FinalizeState> {
                             .shard_account
                             .load_account()
                             .context("failed to load account")?
-                        {
-                            new_config_params = Some(
-                                data.parse::<BlockchainConfigParams>()
-                                    .context("failed to parse config params")?,
-                            );
-                        }
+                    {
+                        new_config_params = Some(
+                            data.parse::<BlockchainConfigParams>()
+                                .context("failed to parse config params")?,
+                        );
                     }
 
                     public_libraries_diff

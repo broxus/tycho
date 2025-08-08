@@ -83,10 +83,10 @@ impl PeerScheduleStateful {
         let mut is_applied = false;
         let mut is_broadcast_receiver = false;
         for whole_set in &mut self.validator_set {
-            if let Some(peer_state) = whole_set.get_mut(peer_id) {
-                if *peer_state != state {
-                    *peer_state = state;
-                }
+            if let Some(peer_state) = whole_set.get_mut(peer_id)
+                && *peer_state != state
+            {
+                *peer_state = state;
             }
         }
         for i in 0..self.active_subset.len() {

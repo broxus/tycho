@@ -129,15 +129,14 @@ impl Neighbours {
         });
 
         // If all neighbours are reliable and valid then remove the worst
-        if entries.len() >= self.inner.max_neighbours {
-            if let Some((worst_index, _)) = entries
+        if entries.len() >= self.inner.max_neighbours
+            && let Some((worst_index, _)) = entries
                 .iter()
                 .enumerate()
                 .min_by(|(_, l), (_, r)| l.cmp_score(r))
-            {
-                entries.swap_remove(worst_index);
-                changed = true;
-            }
+        {
+            entries.swap_remove(worst_index);
+            changed = true;
         }
 
         for neighbour in new {
