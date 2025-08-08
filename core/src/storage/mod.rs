@@ -5,11 +5,10 @@ use tycho_storage::StorageContext;
 use tycho_storage::kv::ApplyMigrations;
 
 pub use self::block::{
-    ArchiveId, BlockDataEntryKey, BlockGcStats, BlockStorage, BlockStorageConfig,
-    MaybeExistingHandle, PackageEntryKey, PartialBlockId, StoreBlockResult,
+    ArchiveId, BlockGcStats, BlockStorage, BlockStorageConfig, MaybeExistingHandle,
+    PackageEntryKey, PartialBlockId, StoreBlockResult,
 };
 pub use self::block_connection::{BlockConnection, BlockConnectionStorage};
-pub(crate) use self::block_handle::BlockDataGuard;
 pub use self::block_handle::{
     BlockFlags, BlockHandle, BlockHandleStorage, BlockMeta, HandleCreationStatus,
     KeyBlocksDirection, LoadedBlockMeta, NewBlockMeta, WeakBlockHandle,
@@ -62,19 +61,20 @@ impl CoreStorage {
         db.apply_migrations().await?;
 
         let blocks_storage_config = BlockStorageConfig {
-            archive_chunk_size: config.archive_chunk_size,
             blocks_cache: config.blocks_cache,
-            split_block_tasks: config.split_block_tasks,
+            blobs_root: ctx.root_dir().path().join("blobs"),
+            blob_db_config: config.blob_db.clone(),
         };
         let block_handle_storage = Arc::new(BlockHandleStorage::new(db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(db.clone()));
-        let block_storage = Arc::new(BlockStorage::new(
+        let (block_storage, orphaned_metadata_cleaned) = BlockStorage::new(
             db.clone(),
             blocks_storage_config,
             block_handle_storage.clone(),
             block_connection_storage.clone(),
-            config.archive_chunk_size,
-        ));
+        )
+        .await?;
+        let block_storage = Arc::new(block_storage);
         let shard_state_storage = ShardStateStorage::new(
             db.clone(),
             block_handle_storage.clone(),
@@ -94,9 +94,6 @@ impl CoreStorage {
 
         let node_state_storage = NodeStateStorage::new(db.clone());
 
-        block_storage.finish_block_data().await?;
-        block_storage.preload_archive_ids().await?;
-
         Ok(Self {
             inner: Arc::new(Inner {
                 ctx,
@@ -108,6 +105,7 @@ impl CoreStorage {
                 persistent_state_storage,
                 block_connection_storage,
                 node_state_storage,
+                orphaned_metadata_cleaned,
             }),
         })
     }
@@ -147,6 +145,10 @@ impl CoreStorage {
     pub fn node_state(&self) -> &NodeStateStorage {
         &self.inner.node_state_storage
     }
+
+    pub fn orphans_cleaned(&self) -> u32 {
+        self.inner.orphaned_metadata_cleaned
+    }
 }
 
 struct Inner {
@@ -160,4 +162,6 @@ struct Inner {
     shard_state_storage: Arc<ShardStateStorage>,
     node_state_storage: NodeStateStorage,
     persistent_state_storage: PersistentStateStorage,
+
+    orphaned_metadata_cleaned: u32,
 }

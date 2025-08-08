@@ -14,16 +14,6 @@ pub struct CoreStorageConfig {
     #[important]
     pub cells_cache_size: ByteSize,
 
-    /// Archive chunk size.
-    ///
-    /// Default: 1 MB.
-    pub archive_chunk_size: ByteSize,
-
-    /// Number of concurrent running split block tasks.
-    ///
-    /// Default: 100.
-    pub split_block_tasks: usize,
-
     /// Archives storage config.
     ///
     /// Archives are disabled if this field is `None`.
@@ -41,6 +31,9 @@ pub struct CoreStorageConfig {
 
     /// Blocks cache config.
     pub blocks_cache: BlocksCacheConfig,
+
+    /// Blob DB config.
+    pub blob_db: BlobDbConfig,
 }
 
 impl CoreStorageConfig {
@@ -48,6 +41,9 @@ impl CoreStorageConfig {
     pub fn new_potato() -> Self {
         Self {
             cells_cache_size: ByteSize::kb(1024),
+            blob_db: BlobDbConfig {
+                pre_create_cas_tree: false,
+            },
             ..Default::default()
         }
     }
@@ -57,12 +53,11 @@ impl Default for CoreStorageConfig {
     fn default() -> Self {
         Self {
             cells_cache_size: ByteSize::mb(256),
-            split_block_tasks: 100,
-            archive_chunk_size: ByteSize::kb(1024),
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),
             blocks_cache: BlocksCacheConfig::default(),
+            blob_db: BlobDbConfig::default(),
         }
     }
 }
@@ -173,6 +168,20 @@ impl Default for BlocksCacheConfig {
         Self {
             ttl: Duration::from_secs(300),
             size: ByteSize::mb(500),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BlobDbConfig {
+    pub pre_create_cas_tree: bool,
+}
+
+impl Default for BlobDbConfig {
+    fn default() -> Self {
+        Self {
+            pre_create_cas_tree: true,
         }
     }
 }
