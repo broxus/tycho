@@ -16,6 +16,7 @@ tycho-types = { workspace = true, features = ["blake3"] }
 futures-util = { workspace = true }
 metrics = { workspace = true }
 num-bigint = { workspace = true }
+scopeguard = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
