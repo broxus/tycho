@@ -645,10 +645,13 @@ impl CellStorage {
     ) -> Result<Arc<StorageCell>, CellStorageError> {
         let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
-        if let Some(cell) = self.cells_cache.get(&hash)
-            && let Some(cell) = cell.upgrade()
-        {
-            return Ok(cell);
+        metrics::counter!("tycho_storage_load_cell_total").increment(1);
+
+        if let Some(cell) = self.cells_cache.get(&hash) {
+            if let Some(cell) = cell.upgrade() {
+                metrics::counter!("tycho_storage_load_cell_hit_total").increment(1);
+                return Ok(cell);
+            }
         }
 
         let cell = match self.raw_cells_cache.get_raw(&self.db, &hash) {
@@ -674,7 +677,7 @@ impl CellStorage {
     pub fn remove_cell_mt(
         &self,
         herd: &Herd,
-        root: &HashBytes,
+        roots: &[HashBytes],
         split_at: FastHashSet<HashBytes>,
     ) -> Result<(usize, WriteBatch), CellStorageError> {
         type RemoveResult = Result<(), CellStorageError>;
@@ -796,6 +799,8 @@ impl CellStorage {
                 repr_hash: &HashBytes,
                 alloc: &mut Alloc<'a>,
             ) -> Result<Option<&'a [HashBytes]>, CellStorageError> {
+                metrics::counter!("tycho_remove_cell_total").increment(1);
+
                 use dashmap::mapref::entry::Entry;
 
                 // Fast path: cell is already presented in this transaction, just update refs.
@@ -907,7 +912,14 @@ impl CellStorage {
 
         let ctx = RemoveContext::new(&self.db, herd, &self.raw_cells_cache, split_at);
 
-        std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
+        std::thread::scope(|scope| {
+            for root in roots {
+                scope.spawn(|| {
+                    // TODO: Handle error properly.
+                    ctx.traverse_cell(root, scope).unwrap();
+                });
+            }
+        });
 
         // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
         //       and a bit more just in case.
@@ -1409,8 +1421,13 @@ impl RawCellsCache {
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
         use quick_cache::sync::GuardResult;
 
+        metrics::counter!("tycho_storage_load_raw_cell_total").increment(1);
+
         match self.inner.get_value_or_guard(key, None) {
-            GuardResult::Value(value) => Ok(Some(value)),
+            GuardResult::Value(value) => {
+                metrics::counter!("tycho_storage_load_raw_cell_hit_total").increment(1);
+                Ok(Some(value))
+            }
             GuardResult::Guard(g) => {
                 let value = {
                     let started_at = Instant::now();
