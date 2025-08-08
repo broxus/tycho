@@ -43,29 +43,35 @@ struct DownloaderInner {
 }
 
 trait DownloadType: Send + 'static {
-    fn next_peers(attempt: u8, available_peers: usize, conf: &MempoolConfig) -> usize;
+    fn next_peers(
+        attempt: u8,
+        already_downloading: usize,
+        peer_count: &PeerCount,
+        conf: &MempoolConfig,
+    ) -> usize {
+        Self::max_downloads_per_attempt(attempt as usize, conf)
+            .min(peer_count.reliable_minority())
+            .saturating_sub(already_downloading)
+    }
+
+    fn max_downloads_per_attempt(attempt: usize, conf: &MempoolConfig) -> usize;
 }
 
 /// Exponential increase of peers to query
 struct ExponentialQuery;
 impl DownloadType for ExponentialQuery {
-    fn next_peers(attempt: u8, available_peers: usize, conf: &MempoolConfig) -> usize {
-        // result increases exponentially
+    fn max_downloads_per_attempt(attempt: usize, conf: &MempoolConfig) -> usize {
         let download_peers = conf.consensus.download_peers as usize;
-        download_peers
-            .saturating_mul(download_peers.saturating_pow(attempt as u32))
-            .min(available_peers)
+        download_peers.saturating_mul(download_peers.saturating_pow(attempt as u32))
     }
 }
 
 /// Linear increase of peers to query
 struct LinearQuery;
 impl DownloadType for LinearQuery {
-    fn next_peers(attempt: u8, available_peers: usize, conf: &MempoolConfig) -> usize {
+    fn max_downloads_per_attempt(attempt: usize, conf: &MempoolConfig) -> usize {
         let download_peers = conf.consensus.download_peers as usize;
-        download_peers
-            .saturating_add(download_peers.saturating_mul(attempt as usize))
-            .min(available_peers)
+        download_peers.saturating_add(download_peers.saturating_mul(attempt))
     }
 }
 
@@ -286,9 +292,15 @@ impl<T: DownloadType> DownloadTask<T> {
             .collect::<Vec<_>>();
         filtered.sort_unstable_by(|(_, ord_l), (_, ord_r)| ord_l.cmp(ord_r));
 
-        let count = T::next_peers(self.attempt, filtered.len(), self.ctx.conf());
+        let to_add = T::next_peers(
+            self.attempt,
+            self.downloading.len(),
+            &self.peer_count,
+            self.ctx.conf(),
+        )
+        .min(filtered.len());
 
-        for (peer_id, _) in &filtered[..count] {
+        for (peer_id, _) in &filtered[..to_add] {
             self.download_one(peer_id);
         }
 
@@ -439,6 +451,7 @@ impl<T: DownloadType> DownloadTask<T> {
         }
     }
 }
+
 impl DownloadCtx {
     fn meter_unreliable() {
         metrics::counter!("tycho_mempool_download_unreliable_responses").increment(1);
@@ -459,5 +472,81 @@ impl DownloadCtx {
 
         metrics::gauge!("tycho_mempool_download_depth_rounds")
             .set(self.download_max_depth(point_id.round));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use super::*;
+    use crate::models::PeerCount;
+    use crate::test_utils::default_test_config;
+
+    fn test_impl<T: DownloadType>(
+        expected_to_add: &[usize],
+        already_downloading: usize,
+        peer_count: PeerCount,
+    ) -> Result<()> {
+        let mut attempt = 0;
+
+        let merged_conf = default_test_config();
+
+        for (step, _) in expected_to_add.iter().enumerate() {
+            let actual_peers =
+                T::next_peers(attempt, already_downloading, &peer_count, &merged_conf.conf);
+
+            anyhow::ensure!(
+                expected_to_add[step] == actual_peers,
+                "step {}, attempt {}, already_downloading {}, expected {}, got {}",
+                step,
+                attempt,
+                already_downloading,
+                expected_to_add[step],
+                actual_peers,
+            );
+
+            anyhow::ensure!(actual_peers + already_downloading <= peer_count.reliable_minority());
+
+            attempt = attempt.wrapping_add(1);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn linear_basic() -> Result<()> {
+        let expected_to_add = [2, 4, 6, 8, 10, 11, 11];
+        let already_downloading = 0;
+        let peer_count = PeerCount::try_from(30)?;
+
+        test_impl::<LinearQuery>(&expected_to_add, already_downloading, peer_count)
+    }
+
+    #[test]
+    fn linear_already_downloading() -> Result<()> {
+        let expected_to_add = [0, 0, 2, 4, 6, 7, 7, 7];
+        let already_downloading = 4;
+        let peer_count = PeerCount::try_from(30)?;
+
+        test_impl::<LinearQuery>(&expected_to_add, already_downloading, peer_count)
+    }
+
+    #[test]
+    fn exponential_basic() -> Result<()> {
+        let expected_to_add = [2, 4, 8, 11, 11];
+        let already_downloading = 0;
+        let peer_count = PeerCount::try_from(30)?;
+
+        test_impl::<ExponentialQuery>(&expected_to_add, already_downloading, peer_count)
+    }
+
+    #[test]
+    fn exponential_already_downloading() -> Result<()> {
+        let expected_to_add = [0, 0, 4, 7, 7];
+        let already_downloading = 4;
+        let peer_count = PeerCount::try_from(30)?;
+
+        test_impl::<ExponentialQuery>(&expected_to_add, already_downloading, peer_count)
     }
 }
