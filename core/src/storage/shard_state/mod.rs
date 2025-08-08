@@ -275,6 +275,8 @@ impl ShardStateStorage {
                 let in_mem_remove =
                     HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
 
+                let all_remove = HistogramGuard::begin("tycho_storage_state_remove_time_high");
+
                 let (stats, mut batch) = if block_id.is_masterchain() {
                     cell_storage.remove_cell(alloc.get().as_bump(), &root_hash)?
                 } else {
@@ -292,6 +294,10 @@ impl ShardStateStorage {
                 db.raw()
                     .rocksdb()
                     .write_opt(batch, db.cells.write_config())?;
+
+                all_remove.finish();
+
+                metrics::histogram!("tycho_storage_state_cells_gc_count").record(stats as f64);
 
                 Ok::<_, anyhow::Error>((stats, alloc))
             })
