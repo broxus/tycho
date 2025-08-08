@@ -239,11 +239,9 @@ impl McData {
 
             match (seqno_from_last_mc_data, seqno_from_prev_mc_data) {
                 (Some(seqno_from_last_mc_data), Some(seqno_from_prev_mc_data)) => {
-                    seqno_from_last_mc_data
-                        .saturating_sub(seqno_from_prev_mc_data)
-                        .max(1) as u64
+                    seqno_from_last_mc_data.saturating_sub(seqno_from_prev_mc_data) as u64
                 }
-                _ => 1,
+                _ => 0,
             }
         }
     }

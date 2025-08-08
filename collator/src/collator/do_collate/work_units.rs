@@ -1252,14 +1252,13 @@ impl DoCollateWu {
         );
 
         let blocks_count_between_masters = mc_data.get_blocks_count_between_masters(current_shard);
-        assert!(blocks_count_between_masters != 0);
         self.resume_collation_wu_per_block = self
             .resume_collation_wu
-            .saturating_div(blocks_count_between_masters);
+            .saturating_div(blocks_count_between_masters.max(1));
         self.resume_collation_elapsed_per_block_ns = self
             .resume_collation_elapsed
             .as_nanos()
-            .saturating_div(blocks_count_between_masters as u128);
+            .saturating_div(blocks_count_between_masters.max(1) as u128);
     }
 
     pub fn shard_accounts_count_log(&self) -> u64 {
