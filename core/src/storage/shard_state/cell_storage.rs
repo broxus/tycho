@@ -32,13 +32,30 @@ type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
 
 impl CellStorage {
     pub fn new(db: CoreDb, cache_size_bytes: ByteSize) -> Arc<Self> {
-        let cells_cache = Default::default();
+        let cells_cache: Arc<CellsIndex> = Default::default();
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
 
         spawn_metrics_loop(
             &raw_cells_cache.clone(),
             Duration::from_secs(5),
             |c| async move { c.refresh_metrics() },
+        );
+
+        spawn_metrics_loop(
+            &cells_cache.clone(),
+            Duration::from_secs(5),
+            |x| async move {
+                let weak_refs_count = x.len();
+                let strong_refs_count = x
+                    .iter()
+                    .filter(|entry| entry.value().strong_count() > 0)
+                    .count();
+
+                metrics::gauge!("tycho_storage_cells_cache_weak_refs_total")
+                    .set(weak_refs_count as f64);
+                metrics::gauge!("tycho_storage_cells_cache_strong_refs_total")
+                    .set(strong_refs_count as f64);
+            },
         );
 
         Arc::new(Self {
@@ -668,7 +685,7 @@ impl CellStorage {
             .insert(hash, Arc::downgrade(&cell))
             .is_none()
         {
-            // metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
+            metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
         }
 
         Ok(cell)
@@ -799,6 +816,8 @@ impl CellStorage {
                 repr_hash: &HashBytes,
                 alloc: &mut Alloc<'a>,
             ) -> Result<Option<&'a [HashBytes]>, CellStorageError> {
+                metrics::counter!("tycho_remove_cell_total").increment(1);
+
                 use dashmap::mapref::entry::Entry;
 
                 // Fast path: cell is already presented in this transaction, just update refs.
@@ -999,7 +1018,9 @@ impl CellStorage {
     }
 
     pub fn drop_cell(&self, hash: &HashBytes) {
-        self.cells_cache.remove(hash);
+        if self.cells_cache.remove(hash).is_some() {
+            metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
+        }
     }
 }
 
@@ -1410,8 +1431,13 @@ impl RawCellsCache {
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
         use quick_cache::sync::GuardResult;
 
+        metrics::counter!("tycho_storage_load_raw_cell_total").increment(1);
+
         match self.inner.get_value_or_guard(key, None) {
-            GuardResult::Value(value) => Ok(Some(value)),
+            GuardResult::Value(value) => {
+                metrics::counter!("tycho_storage_load_raw_cell_hit_total").increment(1);
+                Ok(Some(value))
+            }
             GuardResult::Guard(g) => {
                 let value = {
                     // let started_at = Instant::now();
