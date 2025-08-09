@@ -32,7 +32,7 @@ impl StatusFlags {
     pub const ILL_FORMED_BYTES: usize = 1;
     pub const NOT_FOUND_BYTES: usize = 1 + 32;
 
-    pub fn try_from_stored(value: &[u8]) -> Result<Option<Self>, String> {
+    pub fn try_from_stored(value: &[u8]) -> anyhow::Result<Option<Self>> {
         if value.is_empty() {
             return Ok(None);
         }
@@ -45,13 +45,8 @@ impl StatusFlags {
         } else {
             len == Self::VALIDATED_BYTES
         };
-        if is_ok {
-            Ok(Some(flags))
-        } else {
-            Err(format!(
-                "unexpected {len} bytes for stored status: {flags:?}",
-            ))
-        }
+        anyhow::ensure!(is_ok, "unexpected {len} bytes for stored status: {flags:?}");
+        Ok(Some(flags))
     }
 }
 

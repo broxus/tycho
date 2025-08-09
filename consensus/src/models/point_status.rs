@@ -325,7 +325,7 @@ impl PointStatusStored {
         }
     }
     pub fn decode(stored: &[u8]) -> anyhow::Result<Self> {
-        let Some(flags) = StatusFlags::try_from_stored(stored).map_err(anyhow::Error::msg)? else {
+        let Some(flags) = StatusFlags::try_from_stored(stored)? else {
             return Ok(Self::Exists);
         };
         let resolved = if flags.contains(StatusFlags::Found) {
