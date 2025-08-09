@@ -13,7 +13,7 @@ use tycho_util::futures::{Shared, WeakShared};
 use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
-use crate::dag::{DagRound, IllFormedReason, ValidateResult, Verifier};
+use crate::dag::{DagRound, IllFormedReason, InvalidReason, ValidateResult, Verifier};
 use crate::effects::{
     AltFormat, Cancelled, Ctx, DownloadCtx, RoundCtx, SpawnLimit, TaskResult, ValidateCtx,
 };
@@ -98,7 +98,7 @@ impl DagPointFuture {
                     "local point must be first valid, got {status}"
                 );
 
-                let dag_point = DagPoint::new_validated(point.info().clone(), cert, &status);
+                let dag_point = DagPoint::new_valid(point.info().clone(), cert, &status);
 
                 store.insert_point(&point, PointStatusStoredRef::Validated(&status));
                 state.resolve(&dag_point);
@@ -401,7 +401,11 @@ impl DagPointFuture {
         let validate_or_restore = match point_restore {
             PointRestore::Exists(info) => Either::Left(info),
             PointRestore::Validated(info, status) => {
-                let dag_point = DagPoint::new_validated(info, cert, &status);
+                let dag_point = if status.is_valid {
+                    DagPoint::new_valid(info, cert, &status)
+                } else {
+                    DagPoint::new_invalid(info, cert, &status, InvalidReason::AfterLoadFromDb)
+                };
                 state.acquire_restore(&dag_point.id(), &status);
                 Either::Right(dag_point)
             }
@@ -479,16 +483,24 @@ impl DagPointFuture {
     ) -> (DagPoint, PointStatusStored) {
         let _guard = ctx.span().enter();
         let id = info.id();
-        let is_valid = matches!(validated, ValidateResult::Valid);
         // TODO fill anchor flags in status
         match validated {
-            ValidateResult::Valid | ValidateResult::Invalid(_) => {
+            ValidateResult::Valid => {
                 let mut status = PointStatusValidated::default();
-                status.is_valid = is_valid;
+                status.is_valid = true;
                 status.is_certified = cert.is_certified();
                 state.acquire(&id, &mut status);
                 (
-                    DagPoint::new_validated(info, cert, &status),
+                    DagPoint::new_valid(info, cert, &status),
+                    PointStatusStored::Validated(status),
+                )
+            }
+            ValidateResult::Invalid(reason) => {
+                let mut status = PointStatusValidated::default();
+                status.is_certified = cert.is_certified();
+                state.acquire(&id, &mut status);
+                (
+                    DagPoint::new_invalid(info, cert, &status, reason),
                     PointStatusStored::Validated(status),
                 )
             }

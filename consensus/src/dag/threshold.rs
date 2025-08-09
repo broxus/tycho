@@ -410,6 +410,6 @@ mod test {
             conf,
         );
 
-        DagPoint::new_validated(point.info().clone(), Cert::default(), &status)
+        DagPoint::new_valid(point.info().clone(), Cert::default(), &status)
     }
 }

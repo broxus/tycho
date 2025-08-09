@@ -46,6 +46,14 @@ pub enum VerifyError {
     #[error("ill-formed: {0}")]
     IllFormed(IllFormedReason),
 }
+
+#[derive(Debug)]
+pub enum ValidateResult {
+    IllFormed(IllFormedReason),
+    Invalid(InvalidReason),
+    Valid,
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum VerifyFailReason {
     #[error("point before genesis cannot be verified")]
@@ -55,9 +63,10 @@ pub enum VerifyFailReason {
     #[error("author is not scheduled: outdated peer schedule or author out of nowhere")]
     UnknownAuthor,
 }
+
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum IllFormedReason {
-    #[error("unknown after load from DB")]
+    #[error("ill-formed after load from DB")]
     AfterLoadFromDb, // TODO describe all reasons and save them to DB, then remove this stub
     #[error("too large payload: {0} bytes")]
     TooLargePayload(u32),
@@ -84,6 +93,8 @@ pub enum IllFormedReason {
 
 #[derive(thiserror::Error, Debug)]
 pub enum InvalidReason {
+    #[error("invalid after load from DB")]
+    AfterLoadFromDb, // TODO describe all reasons and save them to DB, then remove this stub
     #[error("cannot validate point, no {0:?} round in DAG")]
     NoRoundInDag(PointMap),
     #[error("cannot validate point, dependency was dropped with its round")]
@@ -106,13 +117,6 @@ pub enum InvalidReason {
     NewerAnchorInDependency(AnchorStageRole),
     #[error("anchor {0:?} link leads to other destination")]
     AnchorLinkBadPath(AnchorStageRole),
-}
-
-#[derive(Debug)]
-pub enum ValidateResult {
-    Valid,
-    Invalid(InvalidReason),
-    IllFormed(IllFormedReason),
 }
 
 // If any round exceeds dag rounds, the arg point @ r+0 is considered valid by itself.
@@ -145,7 +149,7 @@ impl Verifier {
         ctx: ValidateCtx,
     ) -> TaskResult<ValidateResult> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
-        let span_guard = ctx.span().enter();
+        let entered_span = ctx.span().clone().entered();
         let peer_schedule = downloader.peer_schedule();
 
         match info.round().cmp(&ctx.conf().genesis_round) {
@@ -183,15 +187,10 @@ impl Verifier {
             let reason = InvalidReason::NoRoundInDag(PointMap::Includes);
             return ctx.validated(&cert, ValidateResult::Invalid(reason));
         };
-
         let r_2_opt = r_1.prev().upgrade();
-        if r_2_opt.is_none() && !info.witness().is_empty() {
-            let reason = InvalidReason::NoRoundInDag(PointMap::Witness);
-            return ctx.validated(&cert, ValidateResult::Invalid(reason));
-        }
 
-        let (deps_and_prev, cert_deps) =
-            Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &ctx);
+        let (mut deps_and_prev, cert_deps) =
+            Self::spawn_direct_deps(&info, &r_1, r_2_opt.as_ref(), &downloader, &store, &ctx);
 
         if let Some(prev_digest) = info.prev_digest() {
             // point well-formedness is enough to act as a carrier for the majority of signatures
@@ -202,24 +201,28 @@ impl Verifier {
         }
         cert.set_deps(cert_deps);
 
-        for prev_other_versions in r_1
-            .view(info.author(), |loc| {
+        if r_2_opt.is_none() && !info.witness().is_empty() {
+            // to catch history conflict earlier we've spawned deps and certified the prev one
+            let reason = InvalidReason::NoRoundInDag(PointMap::Witness);
+            return ctx.validated(&cert, ValidateResult::Invalid(reason));
+        }
+
+        deps_and_prev.extend(
+            // peer has to jump over a round if it could not produce valid point in prev loc
+            r_1.view(info.author(), |loc| {
                 // do not add same prev_digest twice - it is added as one of 'includes'
                 Self::other_versions(loc, info.prev_digest())
             })
-            .unwrap_or_default()
-        {
-            // peer has to jump over a round if it could not produce valid point in prev loc
-            deps_and_prev.push(prev_other_versions);
-        }
+            .unwrap_or_default(),
+        );
 
         let is_valid_fut =
-            Self::is_valid(info.clone(), deps_and_prev, ctx.conf()).instrument(ctx.span().clone());
+            Self::is_valid(info, deps_and_prev, ctx.conf()).instrument(entered_span.exit());
 
         // drop strong links before await
         drop(r_0);
         drop(r_1);
-        drop(span_guard);
+        drop(r_2_opt);
 
         ctx.validated(&cert, match is_valid_fut.await? {
             Some(reason) => ValidateResult::Invalid(reason),
@@ -303,9 +306,9 @@ impl Verifier {
     }
 
     fn spawn_direct_deps(
-        info: &PointInfo,          // @ r+0
-        r_1: &DagRound,            // r-1
-        r_2_opt: Option<DagRound>, // r-2
+        info: &PointInfo,           // @ r+0
+        r_1: &DagRound,             // r-1
+        r_2_opt: Option<&DagRound>, // r-2
         downloader: &Downloader,
         store: &MempoolStore,
         ctx: &ValidateCtx,
@@ -321,7 +324,7 @@ impl Verifier {
         // integrity check passed, so includes contain author's prev point proof
         let includes = (info.includes().iter()).map(|(author, digest)| (r_1, true, author, digest));
 
-        let witness = r_2_opt.iter().flat_map(|r_2| {
+        let witness = r_2_opt.into_iter().flat_map(|r_2| {
             (info.witness().iter()).map(move |(author, digest)| (r_2, false, author, digest))
         });
 
