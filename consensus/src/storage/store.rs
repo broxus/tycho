@@ -15,7 +15,7 @@ use crate::models::{
     Digest, Point, PointInfo, PointRestore, PointRestoreSelect, PointStatusStored,
     PointStatusStoredRef, Round,
 };
-use crate::storage::MempoolDb;
+use crate::storage::{MempoolDb, StatusFlags};
 
 #[derive(Clone)]
 pub struct MempoolStore(Arc<dyn MempoolStoreImpl>);
@@ -305,8 +305,13 @@ impl MempoolStoreImpl for MempoolDb {
         batch.delete_range_cf(&status_t.cf(), start, end_excl);
         loop {
             let Some(kv) = iter.next() else { break };
-            let k = kv.context("status iter next")?.0;
-            batch.put_cf(&status_t.cf(), k, []);
+            let (k, v) = kv.context("status iter next")?;
+            let new_v =
+                match StatusFlags::try_from_stored(&v).with_context(|| super::format_key(&k))? {
+                    Some(flags) if !flags.contains(StatusFlags::Found) => &*v,
+                    _ => &[],
+                };
+            batch.put_cf(&status_t.cf(), k, new_v);
         }
 
         db.write(batch)?;
