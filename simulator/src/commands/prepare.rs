@@ -211,6 +211,8 @@ impl Node {
 
         let output = Command::new("cargo")
             .arg("run")
+            .arg("--package")
+            .arg("tycho-network")
             .arg("--example")
             .arg("network-node")
             .arg("--")
