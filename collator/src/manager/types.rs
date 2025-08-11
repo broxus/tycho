@@ -55,12 +55,13 @@ pub(super) struct CollationSyncState {
     pub last_received_mc_block_seqno: Option<BlockSeqno>,
     /// Last received applied master block id we have synced to
     pub last_synced_to_mc_block_id: Option<BlockId>,
+    /// Master block collation forced by no pending messages after block in any shard
+    pub mc_forced_by_no_pending_msgs: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct CollationState {
     pub status: CollationStatus,
-    pub mc_collation_forced: bool,
     pub last_imported_chain_times: Vec<(u64, bool)>,
 }
 
@@ -68,7 +69,6 @@ impl Default for CollationState {
     fn default() -> Self {
         Self {
             status: CollationStatus::AttemptsInProgress,
-            mc_collation_forced: false,
             last_imported_chain_times: vec![],
         }
     }

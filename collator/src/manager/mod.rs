@@ -2642,11 +2642,6 @@ where
             collation_state
                 .last_imported_chain_times
                 .retain(|(ct, _)| ct > &chain_time);
-            let mc_collation_forced = collation_state
-                .last_imported_chain_times
-                .iter()
-                .any(|(_, forced)| *forced);
-            collation_state.mc_collation_forced = mc_collation_forced;
         }
     }
 
@@ -2687,21 +2682,36 @@ where
 
         // check if master collation hard forced for all shards
         if shard_id.is_masterchain()
-            && matches!(force_mc_block, ForceMasterCollation::ByUprocessedMessages)
+            && matches!(force_mc_block, ForceMasterCollation::ByUnprocessedMessages)
         {
             guard.mc_collation_forced_for_all = true;
         };
-        let hard_forced_for_all = guard.mc_collation_forced_for_all;
 
-        // save current shard collator state
-        let forced_in_current_shard = force_mc_block.is_forced();
+        // check if master collation forced by no pending messages after shard block
+        if matches!(
+            force_mc_block,
+            ForceMasterCollation::NoPendingMessagesAfterShardBlocks
+        ) {
+            guard.mc_forced_by_no_pending_msgs = true;
+        }
+
+        let hard_forced_for_all = guard.mc_collation_forced_for_all;
+        let mc_forced_by_no_pending_msgs = guard.mc_forced_by_no_pending_msgs;
+
+        let mut forced_in_current_shard = force_mc_block.is_forced();
+
+        // consider master collation forced when no pending messages after block in any shard
+        if shard_id.is_masterchain() && mc_forced_by_no_pending_msgs {
+            forced_in_current_shard = true;
+        }
+
+        // save forced flag to current shard with anchor ct
         let current_collation_state = guard.states.entry(shard_id).or_default();
         current_collation_state
             .last_imported_chain_times
             .push((last_imported_anchor_ct, forced_in_current_shard));
-        current_collation_state.mc_collation_forced |= forced_in_current_shard;
 
-        // check if should collate master by current shard or because forced in master collator
+        // check if it should collate master by current shard or because forced in master collator
         let should_collate_by_current_shard = if hard_forced_for_all {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
@@ -2710,11 +2720,22 @@ where
             );
             true
         } else if forced_in_current_shard {
-            tracing::info!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Master block collation forced in current shard {}",
-                shard_id,
-            );
+            if mc_forced_by_no_pending_msgs && shard_id.is_masterchain() {
+                // NOTE: mc_forced_by_no_pending_msgs global flag does not mean
+                //      that master block collation forced in all shards.
+                //      Only in shard that rised the flag and in master
+                tracing::info!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "Master block collation forced \
+                    by no pending messages after shard block",
+                );
+            } else {
+                tracing::info!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "Master block collation forced in current shard {}",
+                    shard_id,
+                );
+            }
             true
         } else {
             // check if master block interval exceeded in current shard
@@ -2857,6 +2878,7 @@ where
 
         // drop "forced for all" flag if we decided to collate master
         guard.mc_collation_forced_for_all = false;
+        guard.mc_forced_by_no_pending_msgs = false;
 
         NextCollationStep::CollateMaster(next_mc_block_chain_time)
     }
