@@ -412,7 +412,35 @@ fn test_detect_next_collation_step() {
     println!("22: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
     assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct));
 
-    CM::renew_mc_block_latest_chain_time(&mut guard, mc_anchor_ct);
+    // Test behavior: NoPendingMessagesAfterShardBlocks
+    CM::renew_mc_block_latest_chain_time(&mut guard, sc_anchor_ct);
+
+    // no forcing collation master block
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        mc_shard_id,
+        mc_anchor_ct,
+        ForceMasterCollation::No,
+        mc_block_min_interval_ms,
+    );
+    println!("23: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
+    assert!(
+        matches!(next_step, NextCollationStep::ResumeAttemptsIn(sl) if sl.contains(&mc_shard_id))
+    );
+
+    // force mc block collation after shard block collation
+    sc_anchor_ct += 1000;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        sc_shard_id,
+        sc_anchor_ct,
+        ForceMasterCollation::NoPendingMessagesAfterShardBlocks,
+        mc_block_min_interval_ms,
+    );
+    println!("24: shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
+    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == sc_anchor_ct));
 }
 
 #[tokio::test]

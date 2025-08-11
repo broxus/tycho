@@ -2676,6 +2676,15 @@ where
         {
             guard.mc_collation_forced_for_all = true;
         };
+
+        // check if master collation should be forced for all shards when no pending messages after shard blocks
+        if matches!(
+            force_mc_block,
+            ForceMasterCollation::NoPendingMessagesAfterShardBlocks
+        ) {
+            guard.mc_collation_forced_for_all = true;
+        };
+
         let hard_forced_for_all = guard.mc_collation_forced_for_all;
 
         // save current shard collator state

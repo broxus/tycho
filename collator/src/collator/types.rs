@@ -1252,6 +1252,7 @@ pub enum ForceMasterCollation {
     ByUncommittedChain,
     ByAnchorImportSkipped,
     ByUprocessedMessages,
+    NoPendingMessagesAfterShardBlocks,
 }
 impl ForceMasterCollation {
     pub fn is_forced(&self) -> bool {
