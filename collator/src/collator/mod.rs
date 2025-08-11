@@ -230,7 +230,7 @@ pub struct CollatorStdImpl {
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     shard_id: ShardIdent,
     delayed_working_state: DelayedWorkingState,
-    store_new_state_tasks: Vec<JoinTask<Result<bool>>>,
+    store_new_state_tasks: Vec<JoinTask<Result<Cell>>>,
     anchors_cache: AnchorsCache,
     block_serializer_cache: BlockSerializerCache,
     stats: CollatorStats,
@@ -592,13 +592,16 @@ impl CollatorStdImpl {
         // update collation session info to refer to a correct subset in collated block
         self.collation_session = collation_session;
 
+        let mut cells = vec![];
+
         // previously wait when all state store tasks finished
         if !self.store_new_state_tasks.is_empty() {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "awaiting when all state store tasks finished...",
             );
             for task in self.store_new_state_tasks.drain(..) {
-                task.await?;
+                let cell = task.await?;
+                cells.push(cell);
             }
         }
 
@@ -619,6 +622,7 @@ impl CollatorStdImpl {
                 if !self.shard_id.is_masterchain() && working_state.next_block_id_short.seqno != 0 {
                     Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
                         .await?;
+                    drop(cells);
                 }
             }
 
@@ -816,7 +820,7 @@ impl CollatorStdImpl {
         block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
         new_state_root: Cell,
-        store_new_state_task: JoinTask<Result<bool>>,
+        store_new_state_task: JoinTask<Result<Cell>>,
         new_queue_diff_hash: HashBytes,
         new_mc_data: Arc<McData>,
         collation_config: Arc<CollationConfig>,
@@ -831,7 +835,7 @@ impl CollatorStdImpl {
         );
 
         enum GetNewShardStateStuff {
-            ReloadFromStorage(JoinTask<Result<bool>>),
+            ReloadFromStorage(JoinTask<Result<Cell>>),
             BuildFromNewObservable {
                 block_id: BlockId,
                 shard_state: Box<ShardStateUnsplit>,

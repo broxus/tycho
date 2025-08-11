@@ -894,8 +894,10 @@ impl CollatorStdImpl {
                     &labels,
                 );
                 adapter
-                    .store_state_root(&block_id, meta, new_state_root, hint)
-                    .await
+                    .store_state_root(&block_id, meta, new_state_root.clone(), hint)
+                    .await?;
+
+                Ok(new_state_root)
             }
         });
 
