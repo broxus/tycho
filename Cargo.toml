@@ -130,7 +130,7 @@ tycho-crypto = { version = "0.4", features = ["tl-proto", "serde", "rand9"] }
 tycho-executor = "0.2.0"
 tycho-types = { version = "0.2.1", features = ["tycho", "stats"] }
 tycho-vm = "0.2.0"
-weedb = "0.5.0"
+weedb = "0.6.0"
 zstd-safe = "7.2"
 zstd-sys = "2.0"
 
