@@ -85,7 +85,7 @@ sudo apt install clang lld libjemalloc-dev libgflags-dev libzstd-dev liblz4-dev
 cd /path/to
 git clone https://github.com/facebook/rocksdb.git
 cd rocksdb
-git checkout v9.7.4
+git checkout v10.4.2
 
 # Build the library
 mkdir -p build && cd ./build
@@ -93,11 +93,15 @@ export CC=/usr/bin/clang
 export CXX=/usr/bin/clang++
 cmake -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release \
   -DWITH_LZ4=ON -DWITH_ZSTD=ON -DWITH_JEMALLOC=ON ..
-make -j16 rocksdb
+make -j16 rocksdb rocksdb-shared
 
 # Set env somewhere
 export ROCKSDB_LIB_DIR=/path/to/rocksdb/build
 ```
+
+> By default the manually built RocksDB will be linked dynamically.
+> You can set `ROCKSDB_STATIC=1` to link the library statically.
+> However, for debug builds everything compiles faster without it.
 
 ## Contributing
 
