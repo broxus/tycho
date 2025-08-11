@@ -16,6 +16,7 @@ use tycho_consensus::test_utils::*;
 use tycho_crypto::ed25519::{KeyPair, SecretKey};
 use tycho_network::{Address, DhtConfig, NetworkConfig, OverlayConfig, PeerId, PeerResolverConfig};
 use tycho_storage::StorageContext;
+use tycho_util::cli::signal;
 
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -206,9 +207,10 @@ fn make_network(
 
                         started.add_permits(1);
                         tracing::info!("created engine {peer_id}");
+
                         tokio::try_join!(
                             engine_stop_rx.map(|_| Err::<(), ()>(())),
-                            run_guard.until_any_dropped()
+                            run_guard.until_any_dropped(),
                         )
                         .ok();
                     });
@@ -222,6 +224,7 @@ fn make_network(
         .spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .worker_threads(1)
+                .enable_io()
                 .build()
                 .expect("new tokio runtime")
                 .block_on(async {
@@ -229,9 +232,13 @@ fn make_network(
                         .acquire_many(node_count)
                         .await
                         .expect("wait nodes start");
+
+                    let stop_signal = signal::any_signal(signal::TERMINATION_SIGNALS);
+
                     tokio::try_join!(
                         (anchor_consumer.check(&merged_conf)).map(|_| Err::<(), ()>(())),
-                        run_guard.until_any_dropped()
+                        run_guard.until_any_dropped(),
+                        stop_signal.map(|_| Err::<(), ()>(())),
                     )
                     .ok();
                 });
