@@ -210,7 +210,7 @@ fn test_detect_next_collation_step() {
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
-        ForceMasterCollation::ByUprocessedMessages,
+        ForceMasterCollation::ByUnprocessedMessages,
         mc_block_min_interval_ms,
     );
     println!("10: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
@@ -226,7 +226,7 @@ fn test_detect_next_collation_step() {
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
-        ForceMasterCollation::ByUprocessedMessages,
+        ForceMasterCollation::ByUnprocessedMessages,
         mc_block_min_interval_ms,
     );
     println!("11: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
@@ -412,7 +412,193 @@ fn test_detect_next_collation_step() {
     println!("22: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
     assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct));
 
+    // Test behavior: NoPendingMessagesAfterShardBlocks with not reached interval + master collation first
+    mc_anchor_ct = 25000;
+    sc_anchor_ct = 25000;
     CM::renew_mc_block_latest_chain_time(&mut guard, mc_anchor_ct);
+
+    // 1. No forcing collation master block
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        mc_shard_id,
+        mc_anchor_ct,
+        ForceMasterCollation::No,
+        mc_block_min_interval_ms,
+    );
+    println!("23: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
+    assert!(
+        matches!(next_step, NextCollationStep::ResumeAttemptsIn(sl) if sl.contains(&mc_shard_id))
+    );
+
+    // 2. Set the status that shard is ready for collation master block
+    sc_anchor_ct += 1000;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        sc_shard_id,
+        sc_anchor_ct,
+        ForceMasterCollation::NoPendingMessagesAfterShardBlocks,
+        mc_block_min_interval_ms,
+    );
+    println!("24: shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
+    assert!(matches!(next_step, NextCollationStep::ResumeAttemptsIn(sl) if sl.is_empty()));
+    assert!(guard.mc_forced_by_no_pending_msgs);
+
+    // 3. Master without reached interval - master should be forced by no pending messages in shard
+    mc_anchor_ct += 1100;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        mc_shard_id,
+        mc_anchor_ct,
+        ForceMasterCollation::No,
+        mc_block_min_interval_ms,
+    );
+    println!("25: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
+    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct));
+
+    // Test behavior: NoPendingMessagesAfterShardBlocks with interval reach + master collation first
+    mc_anchor_ct = 30000;
+    sc_anchor_ct = 30000;
+    CM::renew_mc_block_latest_chain_time(&mut guard, mc_anchor_ct);
+
+    // 1. No forcing collation master block
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        mc_shard_id,
+        mc_anchor_ct,
+        ForceMasterCollation::No,
+        mc_block_min_interval_ms,
+    );
+    println!("26: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
+    assert!(
+        matches!(next_step, NextCollationStep::ResumeAttemptsIn(sl) if sl.contains(&mc_shard_id))
+    );
+
+    // 2. Set the status that shard is ready for collation master block
+    sc_anchor_ct += 1000;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        sc_shard_id,
+        sc_anchor_ct,
+        ForceMasterCollation::NoPendingMessagesAfterShardBlocks,
+        mc_block_min_interval_ms,
+    );
+    println!("27: shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
+    assert!(matches!(next_step, NextCollationStep::ResumeAttemptsIn(sl) if sl.is_empty()));
+    assert!(guard.mc_forced_by_no_pending_msgs);
+
+    // 3. Master with reached interval - master should be forced
+    mc_anchor_ct += 3000;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        mc_shard_id,
+        mc_anchor_ct,
+        ForceMasterCollation::No,
+        mc_block_min_interval_ms,
+    );
+    println!("28: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
+    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct  ));
+
+    // Test behavior: Master with reached interval + Shard forces
+    mc_anchor_ct = 35000;
+    sc_anchor_ct = 35000;
+    CM::renew_mc_block_latest_chain_time(&mut guard, mc_anchor_ct);
+
+    // 1. Master with reached interval
+    mc_anchor_ct += 3000;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        mc_shard_id,
+        mc_anchor_ct,
+        ForceMasterCollation::No,
+        mc_block_min_interval_ms,
+    );
+    println!("29: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
+    // Master is ready for collation, but should wait for shards
+    assert!(matches!(next_step, NextCollationStep::ResumeAttemptsIn(_)));
+
+    // 2. Shard without reached interval - forces master block collation
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        sc_shard_id,
+        sc_anchor_ct,
+        ForceMasterCollation::NoPendingMessagesAfterShardBlocks,
+        mc_block_min_interval_ms,
+    );
+    println!("30: shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
+    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct));
+
+    // Test behavior: Shard forces + Master with reached interval
+    mc_anchor_ct = 40000;
+    sc_anchor_ct = 40000;
+    CM::renew_mc_block_latest_chain_time(&mut guard, mc_anchor_ct);
+
+    // 1. Shard without reached interval - forces master block collation
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        sc_shard_id,
+        sc_anchor_ct,
+        ForceMasterCollation::NoPendingMessagesAfterShardBlocks,
+        mc_block_min_interval_ms,
+    );
+    println!("31: shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
+    // Shard forces, but master is not ready
+    assert!(matches!(next_step, NextCollationStep::ResumeAttemptsIn(sl) if sl.is_empty()));
+    assert!(guard.mc_forced_by_no_pending_msgs);
+
+    // 2. Master with reached interval - master should be forced
+    mc_anchor_ct += 3000;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        mc_shard_id,
+        mc_anchor_ct,
+        ForceMasterCollation::No,
+        mc_block_min_interval_ms,
+    );
+    println!("32: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
+    // Master is ready (interval reached) and shard forces, so CollateMaster
+    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct));
+
+    // Test behavior: Shard forces + Master not reached interval
+    mc_anchor_ct = 45000;
+    sc_anchor_ct = 45000;
+    CM::renew_mc_block_latest_chain_time(&mut guard, mc_anchor_ct);
+
+    // 1. Shard without reached interval - forces master block collation
+    sc_anchor_ct += 1200;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        sc_shard_id,
+        sc_anchor_ct,
+        ForceMasterCollation::NoPendingMessagesAfterShardBlocks,
+        mc_block_min_interval_ms,
+    );
+    println!("33: shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
+    assert!(matches!(next_step, NextCollationStep::ResumeAttemptsIn(sl) if sl.is_empty()));
+    assert!(guard.mc_forced_by_no_pending_msgs);
+
+    // 2. Master without reached interval - master should be forced by no pending messages in shard
+    mc_anchor_ct += 1000;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        mc_shard_id,
+        mc_anchor_ct,
+        ForceMasterCollation::No,
+        mc_block_min_interval_ms,
+    );
+    println!("34: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
+    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == sc_anchor_ct));
 }
 
 #[tokio::test]
