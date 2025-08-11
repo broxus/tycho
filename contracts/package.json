@@ -1,0 +1,32 @@
+{
+  "name": "tycho-contracts",
+  "version": "0.0.1",
+  "scripts": {
+    "bp": "blueprint",
+    "start": "blueprint run",
+    "build": "blueprint build",
+    "test": "jest --verbose",
+    "release": "blueprint pack && npm publish --access public"
+  },
+  "dependencies": {
+    "@ton/core": "~0"
+  },
+  "devDependencies": {
+    "@tact-lang/compiler": "1.6.13",
+    "@ton-community/func-js": ">=0.10.0",
+    "@ton/blueprint": ">=0.40.0",
+    "@ton/crypto": "^3.3.0",
+    "@ton/sandbox": ">=0.37.0",
+    "@ton/test-utils": ">=0.11.0",
+    "@ton/tolk-js": ">=1.0.0",
+    "@ton/ton": ">=15.2.1 <16.0.0",
+    "@tychosdk/emulator": "^0.2.0",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^22.15.32",
+    "arg": "^5.0.2",
+    "jest": "^30.0.0",
+    "ts-jest": "^29.4.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  }
+}
