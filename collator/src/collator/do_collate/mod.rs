@@ -943,6 +943,14 @@ impl CollatorStdImpl {
                 None => finalized.collation_config,
             };
 
+            // force next master block if there are no pending messages after current shard block
+            let force_next_mc_block =
+                if !self.shard_id.is_masterchain() && !has_unprocessed_messages {
+                    ForceMasterCollation::NoPendingMessagesAfterShardBlocks
+                } else {
+                    force_next_mc_block
+                };
+
             // return collation result
             self.listener
                 .on_block_candidate(BlockCollationResult {
