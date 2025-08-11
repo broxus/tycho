@@ -1,9 +1,9 @@
 FROM fedora:41
 
-ARG ROCKSDB_COMMIT=ae8fb3e5000e46d8d4c9dbf3a36019c0aaceebff
+ARG ROCKSDB_COMMIT=410c5623195ecbe4699b9b5a5f622c7325cec6fe
 
 RUN dnf install -y \
-    git clang lld gcc-c++ make cmake which gflags-devel snappy-devel zlib-devel bzip2-devel libzstd-devel lz4-devel jemalloc-devel \
+    git clang lld gcc-c++ make cmake which gflags-devel zlib-devel bzip2-devel libzstd-devel lz4-devel jemalloc-devel \
  && dnf clean all
 
 WORKDIR /build
@@ -21,6 +21,6 @@ RUN git clone https://github.com/facebook/rocksdb.git && \
           -DWITH_ZSTD=ON \
           -DWITH_JEMALLOC=ON \
           .. && \
-    make -j$(nproc) rocksdb && cp librocksdb.a /usr/lib64/librocksdb.a
+    make -j$(nproc) install
 
 ENV ROCKSDB_LIB_DIR /usr/lib64
