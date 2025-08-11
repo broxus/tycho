@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import asyncio
 import argparse
@@ -62,7 +63,7 @@ async def main():
 def load_keys(sign: str):
     if len(sign) == 64:
         try:
-            return nt.KeyPair(secret=bytes.fromhex())
+            return nt.KeyPair(secret=bytes.fromhex(sign))
         except ValueError:
             pass
 
