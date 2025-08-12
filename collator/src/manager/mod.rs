@@ -690,6 +690,7 @@ where
             force_mc_block,
             None,
             collation_config.mc_block_min_interval_ms as _,
+            collation_config.mc_block_max_interval_ms as _,
         )
         .await
     }
@@ -697,6 +698,7 @@ where
     /// 1. Check if should collate master
     /// 2. And schedule master block collation
     /// 3. Or schedule next collation attempt in current shard
+    #[allow(clippy::too_many_arguments)]
     async fn run_next_collation_step(
         &self,
         prev_mc_block_id: &BlockId,
@@ -705,6 +707,7 @@ where
         force_mc_block: ForceMasterCollation,
         trigger_shard_block_id_opt: Option<BlockId>,
         mc_block_min_interval_ms: u64,
+        mc_block_max_interval_ms: u64,
     ) -> Result<()> {
         let next_step = Self::detect_next_collation_step(
             &mut self.collation_sync_state.lock(),
@@ -717,6 +720,7 @@ where
             chain_time,
             force_mc_block,
             mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
         );
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -1106,6 +1110,7 @@ where
                 collation_result.force_next_mc_block,
                 Some(block_id),
                 collation_result.collation_config.mc_block_min_interval_ms as _,
+                collation_result.collation_config.mc_block_max_interval_ms as _,
             )
             .await?;
         }
@@ -2658,6 +2663,7 @@ where
         last_imported_anchor_ct: u64,
         force_mc_block: ForceMasterCollation,
         mc_block_min_interval_ms: u64,
+        mc_block_max_interval_ms: u64,
     ) -> NextCollationStep {
         let _histogram = HistogramGuard::begin("detect_next_collation_step_time");
 
@@ -2686,7 +2692,7 @@ where
             .push((last_imported_anchor_ct, forced_in_current_shard));
         current_collation_state.mc_collation_forced |= forced_in_current_shard;
 
-        // check if should collate master by current shard or because forced in master collator
+        // check if it should collate master by current shard or because forced in master collator
         let should_collate_by_current_shard = if hard_forced_for_all {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
@@ -2706,23 +2712,69 @@ where
             let chain_time_elapsed_ms = last_imported_anchor_ct
                 .checked_sub(mc_block_latest_chain_time)
                 .unwrap_or_default();
-            let mc_block_interval_exceeded = chain_time_elapsed_ms > mc_block_min_interval_ms;
-            if mc_block_interval_exceeded {
-                tracing::info!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    mc_block_min_interval_ms,
-                    chain_time_elapsed_ms,
-                    %shard_id,
-                    "Master block interval exceeded by elapsed chain time in current shard",
-                );
-                true
+
+            let mc_block_min_interval_exceeded = chain_time_elapsed_ms > mc_block_min_interval_ms;
+
+            if mc_block_min_interval_exceeded {
+                let shard_blocks_produced_since_last_mc =
+                    active_shards.iter().any(|&active_shard| {
+                        if active_shard.is_masterchain() {
+                            return false;
+                        }
+
+                        guard.states.get(&active_shard).is_some_and(|shard_state| {
+                            // ← Используем is_some_and вместо map().unwrap_or(false)
+                            shard_state
+                                .last_imported_chain_times
+                                .iter()
+                                .any(|(ct, _)| *ct > mc_block_latest_chain_time)
+                        })
+                    });
+
+                if shard_blocks_produced_since_last_mc {
+                    // If shard blocks were produced, collate immediately after minimum interval
+                    tracing::info!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        mc_block_min_interval_ms,
+                        chain_time_elapsed_ms,
+                        %shard_id,
+                        "Master block minimum interval exceeded and shard blocks were produced - will collate master block immediately",
+                    );
+                    true
+                } else {
+                    // If no shard blocks were produced, wait for maximum interval
+                    let mc_block_max_interval_exceeded =
+                        chain_time_elapsed_ms > mc_block_max_interval_ms;
+
+                    if mc_block_max_interval_exceeded {
+                        tracing::info!(
+                            target: tracing_targets::COLLATION_MANAGER,
+                            mc_block_max_interval_ms,
+                            chain_time_elapsed_ms,
+                            %shard_id,
+                            "Master block maximum interval exceeded with no shard blocks produced - will collate master block",
+                        );
+                        true
+                    } else {
+                        tracing::debug!(
+                            target: tracing_targets::COLLATION_MANAGER,
+                            mc_block_min_interval_ms,
+                            mc_block_max_interval_ms,
+                            chain_time_elapsed_ms,
+                            %shard_id,
+                            "Master block minimum interval exceeded but maximum interval not yet reached \
+                            and no shard blocks produced - waiting for maximum interval",
+                        );
+                        false
+                    }
+                }
             } else {
                 tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
                     mc_block_min_interval_ms,
                     chain_time_elapsed_ms,
                     %shard_id,
-                    "Elapsed chain time has not exceeded master block interval in current shard \
+                    "Elapsed chain time has not exceeded master block minimum interval in current shard \
                     - do not need to collate next master block",
                 );
                 false

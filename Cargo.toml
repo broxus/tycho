@@ -258,3 +258,6 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package."*"]
 opt-level = 1
+
+[patch.crates-io]
+tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "fe470abdd957bba01c5f780c819b843a1c5f929b" }
