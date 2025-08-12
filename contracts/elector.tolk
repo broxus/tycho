@@ -2,6 +2,7 @@ import "@stdlib/gas-payments"
 import "@stdlib/lisp-lists"
 import "@stdlib/tvm-dicts"
 import "@stdlib/tvm-lowlevel"
+import "lib/config-params"
 
 tolk 1.0
 
@@ -9,12 +10,25 @@ const newStakeMessageTag = 0x4e73744b
 const recoverStakeMessageTag = 0x47657424
 const upgradeCodeMessageTag = 0x4e436f64
 
+const UPDATE_VSET_MSG_VALUE = 1 << 30 // ~1 token
+
+/// Contract state.
 struct Storage {
-    curElect: Cell<Election>?
+    /// Active election.
+    currentElection: Cell<Election>?
+    /// Funds available to be recovered.
+    ///
+    /// uint256 (address) => coins
     credits: dict
+    /// Finished elections.
+    ///
+    /// uint32 (electAt) => `PastElection`
     pastElections: dict
+    /// Tracked bounces balance.
     grams: coins
+    /// Election id of the current validator set.
     activeId: uint32
+    /// Hash of the current validator set.
     activeHash: uint256
 }
 
@@ -26,20 +40,55 @@ fun Storage.save(self) {
     contract.setData(self.toCell());
 }
 
+/// Active election state.
 struct Election {
+    /// Unix timestamp when election starts.
+    ///
+    /// Used as an unique election id.
     electAt: uint32
+    /// Unix timestamp when election finishes.
     electClose: uint32
+    /// Minimal stake for participants.
     minStake: coins
+    /// Minimal total stake for elections to be considered successful.
     totalStake: coins
-    members: dict
+    /// Participants map.
+    ///
+    /// uint256 (pubkey) => `ElectionParticipant`
+    participants: dict
+    /// Whether the election finished without reaching required conditions.
     failed: bool
+    /// Whether the election finished sucessfully.
     finished: bool
 }
 
+/// Active election participant info.
+struct ElectionParticipant {
+    /// Uncut stake.
+    stake: coins
+    /// Unix timestamp when this entry was registered.
+    time: uint32
+    /// Max allowed factor for stake (encoded with 16-bit fixed point).
+    maxFactor: uint32
+    /// Address (in masterchain) of the validator.
+    addr: uint256
+    /// ADNL address of the validator.
+    ///
+    /// NOTE: Same as pubkey for Tycho-based networks.
+    adnlAddr: uint256
+}
+
+/// Finished election state.
 struct PastElection {
+    /// Unix timestamp when participant stakes are unfrozen.
     unfreezeAt: uint32
+    /// A period in seconds for which validators' stakes are frozen.
     stakeHeld: uint32
+    /// Hash of the serialized validator set.
     vsetHash: uint256
+    /// Frozen stakes.
+    ///
+    /// uint256 (pubkey) => `FrozenStake`
     frozenDict: dict
     totalStake: coins
     bonuses: coins
@@ -47,113 +96,588 @@ struct PastElection {
     complaints: dict
 }
 
-fun PastElection.toBuilder(self): builder {
-    return beginCell().storeAny(self);
-}
-
-struct ElectionMember {
-    stake: coins
-    time: uint32
-    maxFactor: uint32
+/// Description of frozen validator stake.
+struct FrozenStake {
+    /// Address (in masterchain) of the validator.
     addr: uint256
-    adnlAddr: uint256
+    /// Validator's weight in vset.
+    weight: uint64
+    /// Frozen amount.
+    stake: coins
+    /// Whether validator was banned.
+    ///
+    /// NOTE: will be used by slashing, maybe should have two bits
+    ///       (only disallow bonuses / full stake seizure).
+    banned: bool
 }
 
-struct ValidatorConfig {
-    electedFor: int32
-    electionsBeginBefore: int32
-    electionsEndBefore: int32
-    stakeHeldFor: int32
+// struct CurrentVset {
+//     vset: Cell<ValidatorSet>
+//     totalWeight: uint64
+//     list: dict
+// }
+// fun CurrentVset.load() {
+//     val vset = blockchain.configParam(34)! as Cell<ValidatorSet>;
+//     var cs: ValidatorSet = lazy vset.load();
+//     return CurrentVset {
+//         vset,
+//         totalWeight: cs.totalWeight,
+//         list: cs.list,
+//     };
+// }
+// struct UnfreezeResult {
+//     credits: dict
+//     recovered: coins
+// }
+// === Tick-Tock transaction logic ===
+// Tick-tock implementation
+fun onRunTickTock(isTock: bool) {
+    // check whether an election is being conducted
+    var data = lazy Storage.load();
+    if (data.currentElection != null) {
+        var election: Election = data.currentElection!.load();
+
+        // have an active election
+        if (data.conductElections(election)) {
+            return; // elections conducted, exit
+        }
+        if (data.validatorSetInstalled(election)) {
+            return; // validator set installed, current elections removed
+        }
+    } else {
+        if (data.announceNewElections()) {
+            return; // new elections announced, exit
+        }
+    }
+
+    if (data.updateActiveVsetId()) {
+        return; // active validator set id updated, exit
+    }
+
+    data.checkUnfreeze();
 }
 
-fun ValidatorConfig.load(): ValidatorConfig {
-    var param = blockchain.configParam(15);
-    return ValidatorConfig.fromCell(param!);
+fun Storage.conductElections(mutate self, election: Election): bool {
+    if (blockchain.now() < election.electClose) {
+        // Elections not finished yet.
+        return false;
+    }
+    if (blockchain.configParam(0) == null) {
+        // No configuration smart contract to send result to.
+        return postponeElections();
+    }
+
+    val stakeParams = ValidatorSetStakeConfig.load();
+    if (election.totalStake < stakeParams.minTotalStake) {
+        // Insufficient total stake, postpone elections.
+        return postponeElections();
+    }
+    if (election.failed) {
+        // Do not retry failed elections until new stakes arrive.
+        return postponeElections();
+    }
+    if (election.finished) {
+        // Elections finished.
+        return false;
+    }
+
+    var countParams = ValidatorSetSizeConfig.load();
+    countParams.minValidators = max(countParams.minValidators, 1);
+
+    val result = ElectionResult.compute(
+        self.credits,
+        election.participants,
+        stakeParams,
+        countParams
+    );
+    val failed = result.validatorCount == 0;
+    election.failed = failed;
+    election.finished = !failed;
+    if (failed) {
+        // Elections failed, update stored state with updated flags.
+        self.credits = result.credits;
+        self.currentElection = election.toCell();
+        self.save();
+        return postponeElections();
+    }
+
+    // Create the resulting validator set.
+    val timingsConfig = ValidatorSetTimingsConfig.load();
+    val start = max(blockchain.now() + timingsConfig.electionsEndBefore - 60, election.electAt);
+
+    var vset = ValidatorSet {
+        utimeSince: start,
+        utimeUntil: start + timingsConfig.electedFor,
+        total: result.validatorCount,
+        main: min(result.validatorCount, countParams.maxMainValidators),
+        totalWeight: result.totalWeight,
+        list: result.validators,
+    }
+        .toCell();
+
+    // Notify config contract with a new validator set.
+    var configAddress = blockchain.configParam(0)!.beginParse().preloadUint(256);
+    createMessage({
+        bounce: true,
+        value: UPDATE_VSET_MSG_VALUE,
+        dest: (MASTERCHAIN, configAddress),
+        body: beginCell() //
+            .storeUint(0x4e565354, 32)
+            .storeUint(election.electAt, 64)
+            .storeRef(vset),
+    })
+        .send(SEND_MODE_PAY_FEES_SEPARATELY);
+
+    // Update storage.
+    var pastElection = PastElection {
+        unfreezeAt: start + timingsConfig.electedFor + timingsConfig.stakeHeldFor,
+        stakeHeld: timingsConfig.stakeHeldFor,
+        vsetHash: vset.hash(),
+        frozenDict: result.frozen,
+        totalStake: result.totalStake,
+        bonuses: 0,
+        complaints: createEmptyDict(),
+    };
+    self.pastElections.uDictSetBuilder(32, election.electAt, beginCell().storeAny(pastElection));
+
+    self.credits = result.credits;
+    self.currentElection = election.toCell();
+    self.save();
+
+    return true;
 }
 
-struct (0x12) ValidatorSet {
-    utime_since: uint32
-    utime_until: uint32
-    total: uint16
-    main: uint16
-    totalWeight: uint64
-    list: dict
+struct ElectionResult {
+    credits: dict
+    validators: dict
+    totalWeight: int
+    frozen: dict
+    totalStake: coins
+    validatorCount: int
 }
 
-struct CurrentVset {
-    vset: Cell<ValidatorSet>
-    totalWeight: uint64
-    list: dict
-}
+fun ElectionResult.compute(
+    credits: dict,
+    participants: dict,
+    stakeConfig: ValidatorSetStakeConfig,
+    sizeConfig: ValidatorSetSizeConfig,
+): ElectionResult {
+    // Count and sort all members by a composite key of (stake, reverse(time), pubkey).
+    var stakeCount = 0;
+    var sortedMembers = createEmptyDict();
+    var nextPubkey = -1;
+    do {
+        var (pubkey, cs, found) = participants.uDictGetNext(256, nextPubkey);
+        if (found) {
+            nextPubkey = pubkey!;
+            var participant = ElectionParticipant.fromSlice(cs!);
 
-fun CurrentVset.load() {
-    val vset = blockchain.configParam(34)! as Cell<ValidatorSet>;
+            val key = beginCell() //
+                .storeUint(participant.stake, 128)
+                .storeInt(-participant.time, 32)
+                .storeUint(pubkey!, 256)
+                .endCell()
+                .beginParse();
 
-    var cs: ValidatorSet = lazy vset.load();
+            val value = beginCell() //
+                .storeUint(min(participant.maxFactor, stakeConfig.maxStakeFactor), 32)
+                .storeUint(participant.adnlAddr, 256);
 
-    return CurrentVset {
-        vset,
-        totalWeight: cs.totalWeight,
-        list: cs.list,
+            sortedMembers.sDictSetBuilder(128 + 32 + 256, key, value);
+            stakeCount += 1;
+        }
+    } while (found);
+
+    // Truncate validator count.
+    stakeCount = min(stakeCount, sizeConfig.maxValidators);
+    if (stakeCount < sizeConfig.minValidators) {
+        return ElectionResult.empty(credits);
+    }
+
+    // Parse `sortedMembers` into a list of stakes.
+    var allStakes = createEmptyList();
+    do {
+        // TODO: Replace `sDictDeleteFirstAndGet` with `sDictGetNext`.
+        var (key, cs, found) = sortedMembers.sDictDeleteFirstAndGet(128 + 32 + 256);
+        if (found) {
+            val stake = min(key!.loadUint(128), stakeConfig.maxStake);
+            key!.loadUint(32); // skip time
+            val pubkey = key!.preloadUint(256);
+
+            val maxF = cs!.loadUint(32);
+            val adnlAddr = cs!.preloadUint(256);
+
+            allStakes = listPrepend([stake, maxF, pubkey, adnlAddr], allStakes);
+        }
+    } while (found);
+
+    // `allStakes` is the list of all stakes in decreasing order.
+    // We now need to skip the required amount of validators with the greatest stake.
+    var tailOffset = sizeConfig.minValidators - 1;
+    var allStakesTail = allStakes;
+    repeat (tailOffset) {
+        allStakesTail = listGetTail(allStakesTail)!;
+    }
+
+    // `allStakesTail` contains all stakes except the first `minValidators - 1` items.
+    // For each item in this tail we recompute the total stake and select
+    // only the configuration with the maximum value.
+    var (bestStake, selectedCount) = (0, 0);
+    do {
+        val (head: tuple, tail) = listSplit(allStakesTail);
+        allStakesTail = tail!;
+
+        var stake = head.get<coins>(0);
+        tailOffset += 1;
+
+        if (stake >= stakeConfig.minStake) {
+            val totalStake = computeTotalStake(allStakes, tailOffset, stake);
+            if (totalStake > bestStake) {
+                (bestStake, selectedCount) = (totalStake, tailOffset);
+            }
+        }
+    } while (tailOffset < stakeCount);
+
+    // Do nothing if either no total stakes were computed or the result stake is too low.
+    if ((selectedCount == 0) || (bestStake < stakeConfig.minTotalStake)) {
+        return ElectionResult.empty(credits);
+    }
+
+    // Find minimal stake.
+    // TODO: Why not just use `stake` from the previous loop?
+    allStakes.stackMoveToTop();
+    allStakesTail = allStakes;
+    repeat (selectedCount - 1) {
+        allStakesTail = listGetTail(allStakesTail)!;
+    }
+    val minStake = listGetHead<tuple>(allStakesTail).get<coins>(0);
+
+    // Create both the new validator set and the refund set.
+    var i = 0;
+    var totalStake: coins = 0;
+    var totalWeight = 0;
+    var validators = createEmptyDict();
+    var frozen = createEmptyDict();
+    do {
+        val (value: tuple, tail) = listSplit(allStakes);
+        allStakes = tail!;
+
+        var stake = value.get<coins>(0);
+        val maxF = value.get<int>(1);
+        val pubkey = value.get<uint256>(2);
+        val adnlAddr = value.get<uint256>(3);
+
+        // Lookup source address first.
+        var (cs, memberExists) = participants.uDictGet(256, pubkey);
+        assert(memberExists, 61);
+        var participant = lazy ElectionParticipant.fromSlice(cs!);
+        val addr = participant.addr;
+
+        if (i < selectedCount) {
+            // One of the first selected members, include into validator set.
+            var trueStake = min(stake, (maxF * minStake) >> 16);
+            stake -= trueStake;
+
+            // ed25519_pubkey#8e81278a pubkey:bits256 = SigPubKey;  // 288 bits
+            // validator_addr#73 public_key:SigPubKey weight:uint64 adnl_addr:bits256 = ValidatorDescr;
+            var weight = (trueStake << 60) / bestStake;
+            totalStake += trueStake;
+            totalWeight += weight;
+
+            // Add validator set item.
+            var validatorDescr = ValidatorDescr {
+                pubkey,
+                weight,
+                adnlAddr,
+            };
+            validators.uDictSetBuilder(16, i, beginCell().storeAny(validatorDescr));
+
+            // Add frozen stakes item.
+            var frozenStakeDescr = FrozenStake {
+                addr,
+                weight,
+                stake: trueStake,
+                banned: false,
+            };
+            frozen.uDictSetBuilder(256, pubkey, beginCell().storeAny(frozenStakeDescr));
+        }
+
+        // Return unused part of stake to the source address.
+        if (stake != 0) {
+            credits = creditTo(credits, addr, stake);
+        }
+
+        i += 1;
+    } while (tail != null);
+
+    assert(totalStake == bestStake, 49);
+
+    return ElectionResult {
+        credits,
+        validators,
+        totalWeight,
+        frozen,
+        totalStake,
+        validatorCount: selectedCount,
     };
 }
 
-struct ValidatorDescr {
-    value: slice?
-    totalWeight: int
+fun NewElection.empty(credits: dict) {
+    return ElectionResult {
+        credits,
+        validators: createEmptyDict(),
+        totalWeight: 0,
+        frozen: createEmptyDict(),
+        totalStake: 0,
+        validatorCount: 0,
+    };
 }
 
-fun CurrentVset.getDescr(self, idx: int) {
-    var (value, _found) = self.list.uDictGet(16, idx);
-    return ValidatorDescr { value, totalWeight: self.totalWeight };
+// Сomputes the total stake out of the first n entries of all stakes.
+fun computeTotalStake(allStakes: tuple, n: int, lowestStake: coins): coins {
+    var totalStake: coins = 0;
+    repeat (n) {
+        var (head, tail) = listSplit<tuple>(allStakes);
+        allStakes = tail!;
+
+        var stake = head.get<coins>(0);
+        var maxF = head.get<int>(1);
+        stake = min(stake, (maxF * lowestStake) >> 16);
+        totalStake += stake;
+    }
+    return totalStake;
 }
 
-type ValidatorDescription = ValidatorDescrSimple | ValidatorDescrWithAddr
-
-const ed25519PubkeyTag = 0x8e81278a
-
-struct (0x53) ValidatorDescrSimple {
-    pubkeyTag: uint32 = ed25519PubkeyTag // ed25519_pubkey tag
-    pubkey: uint256
-    weight: uint64
+fun postponeElections(): bool {
+    return false;
 }
 
-struct (0x73) ValidatorDescrWithAddr {
-    pubkeyTag: uint32 = ed25519PubkeyTag // ed25519_pubkey tag
-    pubkey: uint256
-    weight: uint64
-    adnlAddr: uint256
-}
-
-fun ValidatorDescr.loadValidatorInfo(cs: slice): ValidatorInfo {
-    val descr = lazy ValidatorDescription.fromSlice(cs);
-    var pubkey: uint256;
-    var weight: uint64;
-    match (descr) {
-        ValidatorDescrSimple => {
-            assert(descr.pubkeyTag == ed25519PubkeyTag, 41);
-            pubkey = descr.pubkey;
-            weight = descr.weight;
-        }
-        ValidatorDescrWithAddr => {
-            assert(descr.pubkeyTag == ed25519PubkeyTag, 41);
-            pubkey = descr.pubkey;
-            weight = descr.weight;
-        }
-        else => throw 41,
+fun Storage.validatorSetInstalled(mutate self, election: Election): bool {
+    if (!election.finished) {
+        // Elections not finished yet.
+        return false;
+    }
+    val (cs, found) = self.pastElections.uDictGet(32, election.electAt);
+    if (!found) {
+        // No election data in dictionary.
+        return false;
     }
 
-    return ValidatorInfo { pubkey, weight };
+    // Get vset hash.
+    val pastElection = lazy PastElection.fromSlice(cs!);
+    val vsetHash = pastElection.vsetHash;
+
+    // Find vset hash in config params (search in current or next vset).
+    if (
+        blockchain.configParam(PARAM_IDX_CURRENT_VSET).hashEq(vsetHash) ||
+        blockchain.configParam(PARAM_IDX_NEXT_VSET).hashEq(vsetHash)
+    ) {
+        // Reset `currentElection` since it is not needed anymore.
+        self.currentElection = null;
+        self.save();
+
+        self.updateActiveVsetId();
+        return true;
+    }
+
+    return false;
 }
 
-struct ValidatorInfo {
-    pubkey: uint256
-    weight: uint64
+fun Storage.announceNewElections(mutate self): bool {
+    if (blockchain.configParam(PARAM_IDX_NEXT_VSET) != null) {
+        // Next validator set exists, no elections needed.
+        return false;
+    }
+
+    // Check that current account is an elector.
+    var electorAddr = blockchain.configParam(1)!.beginParse().preloadUint(256);
+    var (myWc, myAddr) = contract.getAddress().getWorkchainAndHash();
+    if (myWc != MASTERCHAIN || myAddr != electorAddr) {
+        // this smart contract is not the elections smart contract anymore, no new elections
+        return false;
+    }
+
+    // Get time when the current validator set expires.
+    var currentVsetCs = blockchain.configParam(34); // current validator set
+    if (currentVsetCs == null) {
+        return false;
+    }
+    val currentVset = lazy ValidatorSet.fromCell(currentVsetCs!);
+
+    val timingsConfig = ValidatorSetTimingsConfig.load();
+    var t = blockchain.now();
+    val t0 = currentVset.utimeUntil - timingsConfig.electionsBeginBefore;
+    if (t < t0) {
+        // Too early for the next elections.
+        return false;
+    }
+    // Less than `electionsBeginBefore` seconds left, create new elections.
+    if (t - t0 < 60) {
+        // pretend that the elections started at t0
+        t = t0;
+    }
+
+    // Get stake parameters
+    val stakeConfig = ValidatorSetStakeConfig.load();
+
+    // Init current elections.
+    val electAt = t + timingsConfig.electionsBeginBefore;
+    val electClose = electAt - timingsConfig.electionsEndBefore;
+
+    self.currentElection = Election {
+        electAt,
+        electClose,
+        minStake: stakeConfig.minStake,
+        totalStake: 0,
+        participants: createEmptyDict(),
+        failed: false,
+        finished: false,
+    }
+        .toCell();
+
+    self.save();
+
+    return true;
 }
 
-struct UnfreezeResult {
-    credits: dict
-    recovered: coins
+fun Storage.updateActiveVsetId(mutate self): bool {
+    val currentVsetHash = blockchain.configParam(PARAM_IDX_CURRENT_VSET)!.hash();
+    if (currentVsetHash == self.activeHash) {
+        // Validator set unchanged.
+        return false;
+    }
+
+    if (self.activeId != 0) {
+        // activeId becomes inactive
+        val (cs, found) = self.pastElections.uDictGet(32, self.activeId);
+        if (found) {
+            var pastElection = lazy PastElection.fromSlice(cs!);
+            assert(pastElection.vsetHash == self.activeHash, 57);
+
+            // Adjust unfreeze time of this validator set.
+            pastElection.unfreezeAt = blockchain.now() + pastElection.stakeHeld;
+            self.pastElections.uDictSetBuilder(
+                32,
+                self.activeId,
+                beginCell().storeAny(pastElection)
+            );
+        }
+    }
+
+    // Look up new activeId by hash.
+    var nextId = -1;
+    do {
+        var (id, cs, found) = self.pastElections.uDictGetNext(32, nextId);
+        if (found) {
+            nextId = id!;
+            var pastElection = lazy PastElection.fromSlice(cs!);
+
+            if (pastElection.vsetHash == currentVsetHash) {
+                // Transfer 1/8 of accumulated everybody's grams to this validator set as bonuses.
+                var amount = (self.grams >> 3);
+                self.grams -= amount;
+                pastElection.bonuses += amount;
+
+                // Serialize back
+                self.pastElections.uDictSetBuilder(32, nextId, beginCell().storeAny(pastElection));
+
+                // Break.
+                found = false;
+            }
+        }
+    } while (found);
+
+    // Save active election id and vset hash.
+    self.activeId = nextId == -1 ? 0 : nextId;
+    self.activeHash = currentVsetHash;
+    self.save();
+    return true;
+}
+
+fun Storage.checkUnfreeze(mutate self): bool {
+    var nextId = -1;
+    do {
+        var (id, cs, found) = self.pastElections.uDictGetNext(32, nextId);
+        if (found) {
+            nextId = id!;
+            var pastElection = lazy PastElection.fromSlice(cs!);
+
+            if ((pastElection.unfreezeAt <= blockchain.now()) && (nextId != self.activeId)) {
+                // Unfreeze!
+                var (newCredits, newPastElections, unusedPrizes) = unfreezeAll(
+                    self.credits,
+                    self.pastElections,
+                    nextId
+                );
+                self.credits = newCredits;
+                self.pastElections = newPastElections;
+                self.grams += unusedPrizes;
+                // Unfreeze only one at time, exit loop.
+                self.save();
+                // Exit loop.
+                found = false;
+            }
+        }
+    } while (found);
+    return nextId != -1;
+}
+
+// Main message handler
+fun onInternalMessage(msgValue: coins, inMsgCell: cell, inMsgBody: slice) {
+    var cs = inMsgCell.beginParse();
+    val flags = cs.loadUint(4); // int_msg_info$0 ihr_disabled:Bool bounce:Bool bounced:Bool
+    if (flags & 1) {
+        // ignore all bounced messages
+        return;
+    }
+    val sAddr = cs.loadAddress();
+    if (inMsgBody.isEmpty()) {
+        // inbound message has empty body
+        processSimpleTransfer(sAddr, msgValue);
+        return;
+    }
+    val op = inMsgBody.loadUint(32);
+    if (op == 0) {
+        // simple transfer with comment, return
+        processSimpleTransfer(sAddr, msgValue);
+        return;
+    }
+    val queryId = inMsgBody.loadUint(64);
+    if (op == newStakeMessageTag) {
+        // new stake message
+        processNewStake(sAddr, msgValue, inMsgBody, queryId);
+        return;
+    }
+    if (op == recoverStakeMessageTag) {
+        // recover stake request
+        recoverStake(op, sAddr, inMsgBody, queryId);
+        return;
+    }
+    if (op == upgradeCodeMessageTag) {
+        // upgrade code (accepted only from configuration smart contract)
+        val ok = upgradeCode(sAddr, inMsgBody, queryId);
+        sendMessageBack(sAddr, ok ? 0xce436f64 : 0xffffffff, queryId, op, 0, 64);
+        return;
+    }
+    var cfgOk = (op == 0xee764f4b);
+    if (cfgOk || (op == 0xee764f6f)) {
+        // confirmation from configuration smart contract
+        configSetConfirmed(sAddr, inMsgBody, queryId, cfgOk);
+        return;
+    }
+
+    if (!(op & (1 << 31))) {
+        // unknown query, return error
+        sendMessageBack(
+            sAddr,
+            0xffffffff,
+            queryId,
+            op,
+            0,
+            SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE
+        );
+        return;
+    }
 }
 
 fun sendMessageBack(
@@ -241,7 +765,7 @@ fun processSimpleTransfer(sAddr: address, msgValue: coins) {
     } else {
         var pe = PastElection.fromSlice(fs!, { assertEndAfterReading: true });
         pe.bonuses += msgValue;
-        data.pastElections.uDictSetBuilder(32, data.activeId, pe.toBuilder());
+        data.pastElections.uDictSetBuilder(32, data.activeId, beginCell().storeAny(pe));
     }
 
     data.save();
@@ -308,7 +832,7 @@ fun processNewStake(sAddr: address, msgValue: coins, cs: slice, queryId: int) {
 
         return;
     }
-    var (member, found) = election.members.uDictGet(256, validatorPubkey);
+    var (member, found) = election.participants.uDictGet(256, validatorPubkey);
     if (found) {
         // entry found, merge stakes
         msgValue += member!.loadCoins();
@@ -330,7 +854,7 @@ fun processNewStake(sAddr: address, msgValue: coins, cs: slice, queryId: int) {
     acceptExternalMessage();
 
     // store stake in the dictionary
-    election.members.uDictSetBuilder(
+    election.participants.uDictSetBuilder(
         256,
         validatorPubkey,
         beginCell().storeCoins(msgValue).storeUint(blockchain.now(), 32).storeUint(maxFactor, 32)
@@ -344,6 +868,11 @@ fun processNewStake(sAddr: address, msgValue: coins, cs: slice, queryId: int) {
     if (queryId != 0) {
         sendConfirmation(sAddr, queryId, 0);
     }
+}
+
+struct UnfreezeResult {
+    credits: dict
+    recovered: coins
 }
 
 fun unfreezeWithoutBonuses(credits: dict, freezeDict: dict, totStakes: coins): UnfreezeResult {
@@ -527,578 +1056,50 @@ fun upgradeCode(sAddr: address, cs: slice, queryId: int): bool {
     return true;
 }
 
-// Tick-tock implementation
-fun onRunTickTock(isTock: bool) {
-    // check whether an election is being conducted
-    var ds = contract.getData().beginParse();
-    val (elect, credits) = (ds.loadDict(), ds.loadDict());
-    if (elect != null) {
-        // have an active election
-        if (conductElections(ds, elect, credits)) {
-            return; // elections conducted, exit
-        }
-        if (validatorSetInstalled(ds, elect, credits)) {
-            return; // validator set installed, current elections removed
-        }
-    } else {
-        if (announceNewElections(ds, elect, credits)) {
-            return; // new elections announced, exit
-        }
-    }
-    val updateResult = updateActiveVsetId();
-    if (updateResult) {
-        return; // active validator set id updated, exit
-    }
-
-    checkUnfreeze();
-}
-
-fun postponeElections(): bool {
-    return false;
-}
-
-// computes the total stake out of the first n entries of list l
-fun computeTotalStake(l: tuple, n: int, mStake: coins): coins {
-    var totStake: coins = 0;
-    var currentList = l;
-    repeat (n) {
-        var (head, newList) = listSplit<tuple>(currentList);
-        currentList = newList!; //TODO: double check
-        var stake = head.get<coins>(0);
-        var maxF = head.get<int>(1);
-        stake = min(stake, (maxF * mStake) >> 16);
-        totStake += stake;
-    }
-    return totStake;
-}
-
-fun tryElect(
-    credits: dict,
-    members: dict,
-    minStake: coins,
-    maxStake: coins,
-    minTotalStake: coins,
-    maxStakeFactor: int,
-): (dict, dict, int, dict, coins, int) {
-    var cs = blockchain.configParam(16)!.beginParse();
-    var (maxValidators, _, minValidators) = (cs.loadUint(16), cs.loadUint(16), cs.loadUint(16));
-    cs.assertEnd();
-
-    minValidators = max(minValidators, 1);
-    var n = 0;
-    var sdict = createEmptyDict();
-    var pubkey = -1;
-    do {
-        var (nextKeyOpt, memberCsOpt, found) = members.uDictGetNext(256, pubkey);
-        if (found) {
-            pubkey = nextKeyOpt!;
-            var memberCs = memberCsOpt!;
-
-            val stake = memberCs.loadCoins();
-            val time = memberCs.loadUint(32);
-            val maxFactor = memberCs.loadUint(32);
-            val addr = memberCs.loadUint(256);
-            val adnlAddr = memberCs.loadUint(256);
-            memberCs.assertEnd();
-
-            val key = beginCell().storeUint(stake, 128).storeInt(-time, 32) //what
-                .storeUint(pubkey, 256)
-                .endCell()
-                .beginParse();
-            sdict.sDictSetBuilder(
-                128 + 32 + 256,
-                key,
-                beginCell().storeUint(min(maxFactor, maxStakeFactor), 32).storeUint(addr, 256)
-                    .storeUint(adnlAddr, 256)
-            );
-            n += 1;
-        }
-    } while (found);
-    n = min(n, maxValidators);
-    if (n < minValidators) {
-        return (credits, createEmptyDict(), 0, createEmptyDict(), 0, 0);
-    }
-    var l = createEmptyList();
-
-    do {
-        var (keyOpt, validatorCsOpt, found) = sdict.sDictDeleteFirstAndGet(128 + 32 + 256);
-        if (found) {
-            var key = keyOpt!;
-            var validatorCs = validatorCsOpt!;
-
-            val stake = min(key.loadUint(128), maxStake);
-            key.loadUint(32); // skip time
-            val pubkey = key.preloadUint(256);
-
-            val maxF = validatorCs.loadUint(32);
-            validatorCs.loadUint(256); // skip addr
-            val adnlAddr = validatorCs.preloadUint(256);
-
-            val head = [stake, maxF, pubkey, adnlAddr] as tuple; //TODO: safe?
-            l = listPrepend(head, l);
-        }
-    } while (found);
-    // l is the list of all stakes in decreasing order
-    var i = minValidators - 1;
-    var l1 = l;
-    repeat (i) {
-        l1 = listGetTail(l1)!; //TODO: double check this !
-    }
-
-    var (bestStake, m) = (0, 0);
-    do {
-        val (head: tuple, newList) = listSplit(l1);
-        l1 = newList!; //todo: double check this
-        var stake = head.get<coins>(0);
-        i += 1;
-        if (stake >= minStake) {
-            val totStake = computeTotalStake(l, i, stake);
-            if (totStake > bestStake) {
-                (bestStake, m) = (totStake, i);
-            }
-        }
-    } while (i < n);
-
-    if ((m == 0) || (bestStake < minTotalStake)) {
-        return (credits, createEmptyDict(), 0, createEmptyDict(), 0, 0);
-    }
-    // we have to select first m validators from list l
-    l.stackMoveToTop();
-    l1 = l;
-
-    repeat (m - 1) {
-        l1 = listGetTail(l1)!; //todo: double check this
-    }
-
-    val head = listGetHead<tuple>(l1); //todo: not sure. need to test
-    val mStake = head.get<coins>(0);
-
-    // create both the new validator set and the refund set
-    i = 0; //reset counter
-    var totStake: coins = 0;
-    var totWeight = 0;
-    var vset = createEmptyDict();
-    var frozen = createEmptyDict();
-    var currentList: tuple? = l;
-    do {
-        val (validatorData: tuple, newList) = listSplit(currentList);
-        currentList = newList;
-        //var (stake: coins, maxF, pubkey, adnlAddr) = validatorData;
-        var stake = validatorData.get<coins>(0);
-        val maxF = validatorData.get<int>(1);
-        val pubkey = validatorData.get<uint256>(2);
-        val adnlAddr = validatorData.get<uint256>(3);
-        // lookup source address first
-        var (valueOpt, validatorExists) = members.uDictGet(256, pubkey);
-        assert(validatorExists, 61);
-        var value = valueOpt!;
-
-        value.loadCoins(); // skip stake
-        value.skipBits(64); // skip time and maxFactor
-        val srcAddr = value.preloadUint(256);
-
-        if (i < m) {
-            // one of the first m members, include into validator set
-            var trueStake = min(stake, (maxF * mStake) >> 16);
-            stake -= trueStake;
-            // ed25519_pubkey#8e81278a pubkey:bits256 = SigPubKey;  // 288 bits
-            // validator_addr#73 public_key:SigPubKey weight:uint64 adnl_addr:bits256 = ValidatorDescr;
-            var weight = (trueStake << 60) / bestStake;
-            totStake += trueStake;
-            totWeight += weight;
-
-            var vInfo = beginCell().storeUint(adnlAddr != 0 ? 0x73 : 0x53, 8) // validator_addr#73 or validator#53
-                .storeUint(0x8e81278a, 32) // ed25519_pubkey#8e81278a
-                .storeUint(pubkey, 256) // pubkey:bits256
-                .storeUint(weight, 64); // weight:uint64
-
-            if (adnlAddr != 0) {
-                vInfo = vInfo.storeUint(adnlAddr, 256); // adnl_addr:bits256
-            }
-            vset.uDictSetBuilder(16, i, vInfo);
-            frozen.uDictSetBuilder(
-                256,
-                pubkey,
-                beginCell().storeUint(srcAddr, 256).storeUint(weight, 64).storeCoins(trueStake)
-                    .storeBool(true)
-            );
-        }
-        if (stake != 0) {
-            // non-zero unused part of the stake, credit to the source address
-            credits = creditTo(credits, srcAddr, stake);
-        }
-        i += 1;
-    } while (currentList != null);
-    assert(totStake == bestStake, 49);
-    return (credits, vset, totWeight, frozen, totStake, m);
-}
-
-fun conductElections(ds: slice, elect: cell, credits: dict): bool {
-    var election = Election.fromCell(elect, { assertEndAfterReading: true });
-    if (blockchain.now() < election.electClose) {
-        // elections not finished yet
-        return false;
-    }
-    if (blockchain.configParam(0) == null) {
-        // no configuration smart contract to send result to
-        return postponeElections();
-    }
-
-    var cs = blockchain.configParam(17)!.beginParse();
-    var minStake = cs.loadCoins();
-    var maxStake = cs.loadCoins();
-    var minTotalStake = cs.loadCoins();
-    var maxStakeFactor = cs.loadUint(32);
-    cs.assertEnd();
-
-    if (election.totalStake < minTotalStake) {
-        // insufficient total stake, postpone elections
-        return postponeElections();
-    }
-    if (election.failed) {
-        // do not retry failed elections until new stakes arrive
-        return postponeElections();
-    }
-    if (election.finished) {
-        // elections finished
-        return false;
-    }
-    var (newCredits, vdict, totalWeight, frozen, totalStakes, cnt) = tryElect(
-        credits,
-        election.members,
-        minStake,
-        maxStake,
-        minTotalStake,
-        maxStakeFactor
-    );
-    // pack elections; if cnt==0, set failed=true, finished=false.
-    var failed = (cnt == 0);
-    var finished = !failed;
-    elect = Election {
-        electAt: election.electAt,
-        electClose: election.electClose,
-        minStake: minStake,
-        totalStake: election.totalStake,
-        members: election.members,
-        failed: failed,
-        finished: finished,
-    }
-        .toCell();
-
-    if (cnt == 0) {
-        // elections failed, set elect_failed to true
-        contract.setData(beginCell().storeDict(elect).storeDict(newCredits).storeSlice(ds).endCell());
-        return postponeElections();
-    }
-    // serialize a query to the configuration smart contract
-    // to install the computed validator set as the next validator set
-    var validatorConfig = ValidatorConfig.load();
-    var start = max(blockchain.now() + validatorConfig.electionsEndBefore - 60, election.electAt);
-    var mainValidators = blockchain.configParam(16)!.beginParse().skipBits(16).preloadUint(16);
-    var vset = beginCell().storeUint(0x12, 8) // validators_ext#12
-        .storeUint(start, 32) // utime_since:uint32
-        .storeUint(start + validatorConfig.electedFor, 32) // utime_until:uint32
-        .storeUint(cnt, 16) // total:(## 16)
-        .storeUint(min(cnt, mainValidators), 16) // main:(## 16)
-        .storeUint(totalWeight, 64) // total_weight:uint64
-        .storeDict(vdict) // list:(HashmapE 16 ValidatorDescr)
-        .endCell();
-    var configAddr = blockchain.configParam(0)!.beginParse().preloadUint(256);
-    sendValidatorSetToConfig(configAddr, vset, election.electAt);
-    // add frozen to the dictionary of past elections
-    var pastElectionsDict = ds.loadDict();
-
-    val electionsBuilder = PastElection {
-        unfreezeAt: start + validatorConfig.electedFor + validatorConfig.stakeHeldFor,
-        stakeHeld: validatorConfig.stakeHeldFor as uint32, //TODO: found incosistency in original func
-        vsetHash: vset.hash(),
-        frozenDict: frozen,
-        totalStake: totalStakes,
-        bonuses: 0,
-        complaints: createEmptyDict(),
-    }
-        .toBuilder();
-
-    pastElectionsDict.uDictSetBuilder(32, election.electAt, electionsBuilder);
-    // store credits and frozen until end
-    contract.setData(beginCell().storeDict(elect).storeDict(newCredits).storeDict(pastElectionsDict)
-        .storeSlice(ds)
-        .endCell());
-    return true;
-}
-
-fun updateActiveVsetId(): bool {
-    var data = Storage.load();
-    val curHash = blockchain.configParam(34)!.hash();
-    if (curHash == data.activeHash) {
-        // validator set unchanged
-        return false;
-    }
-    if (data.activeId != 0) {
-        // activeId becomes inactive
-        val (fsOpt, found) = data.pastElections.uDictGet(32, data.activeId);
-        if (found) {
-            var fs = fsOpt!;
-
-            // adjust unfreeze time of this validator set
-            var unfreezeTime = fs.loadUint(32);
-            var fs0 = fs; //todo: is it cloning?
-
-            val (stakeHeld, hash) = (fs.loadUint(32), fs.loadUint(256));
-            assert(hash == data.activeHash, 57);
-            unfreezeTime = blockchain.now() + stakeHeld;
-            data.pastElections.uDictSetBuilder(
-                32,
-                data.activeId,
-                beginCell().storeUint(unfreezeTime, 32).storeSlice(fs0)
-            );
-        }
-    }
-    // look up new activeId by hash
-    var id = -1;
-    do {
-        var (nextKeyOpt, fsOpt, found) = data.pastElections.uDictGetNext(32, id);
-        if (found) {
-            id = nextKeyOpt!;
-            var fs = fsOpt!;
-            var tm = fs.skipBits(32).loadUint(32);
-            var hash = fs.loadUint(256);
-            if (hash == curHash) {
-                // parse more of this record
-                var (dict, totalStake, bonuses) = (fs.loadDict(), fs.loadCoins(), fs.loadCoins());
-                // transfer 1/8 of accumulated everybody's grams to this validator set as bonuses
-                var amount = (data.grams >> 3);
-                data.grams -= amount;
-                bonuses += amount;
-                // serialize back
-                data.pastElections.uDictSetBuilder(
-                    32,
-                    id,
-                    beginCell().storeUint(tm, 64).storeUint(hash, 256).storeDict(dict).storeCoins(totalStake)
-                        .storeCoins(bonuses)
-                        .storeSlice(fs)
-                );
-
-                found = false;
-            }
-        }
-    } while (found);
-
-    data.activeId = id == -1 ? 0 : id;
-    data.activeHash = curHash;
-    data.save();
-    return true;
-}
-
-fun validatorSetInstalled(ds: slice, elect: cell, credits: dict): bool {
-    val election = Election.fromCell(elect, { assertEndAfterReading: true });
-    if (!election.finished) {
-        // elections not finished yet
-        return false;
-    }
-    val pastElections = ds.loadDict();
-    val (fsOpt, found) = pastElections.uDictGet(32, election.electAt);
-    if (!found) {
-        // no election data in dictionary
-        return false;
-    }
-    var fs = fsOpt!;
-    // recover validator set hash
-    val vsetHash = fs.skipBits(64).preloadUint(256);
-    if (blockchain.configParam(34).hashEq(vsetHash) | blockchain.configParam(36).hashEq(vsetHash)) {
-        // this validator set has been installed, forget elections
-        contract.setData(beginCell().storeBool(false) // forget current elections
-            .storeDict(credits)
-            .storeDict(pastElections)
-            .storeSlice(ds)
-            .endCell());
-        updateActiveVsetId();
-        return true;
-    }
-    return false;
-}
-
-fun checkUnfreeze(): bool {
-    var data = Storage.load();
-    var id = -1;
-    do {
-        var (nextKeyOpt, fsOpt, found) = data.pastElections.uDictGetNext(32, id);
-        if (found) {
-            id = nextKeyOpt!;
-            var fs = fsOpt!;
-            var unfreezeAt = fs.loadUint(32);
-            if ((unfreezeAt <= blockchain.now()) & (id != data.activeId)) {
-                // unfreeze!
-                var (newCredits, newPastElections, unusedPrizes) = unfreezeAll(
-                    data.credits,
-                    data.pastElections,
-                    id
-                );
-                data.credits = newCredits;
-                data.pastElections = newPastElections;
-                data.grams += unusedPrizes;
-                // unfreeze only one at time, exit loop
-                data.save();
-                // exit loop
-                found = false;
-            }
-        }
-    } while (found);
-    return id != -1;
-}
-
-fun announceNewElections(ds: slice, elect: dict?, credits: dict): bool {
-    var nextVset = blockchain.configParam(36); // next validator set
-    if (nextVset != null) {
-        // next validator set exists, no elections needed
-        return false;
-    }
-    var electorAddr = blockchain.configParam(1)!.beginParse().preloadUint(256);
-    var (myWc, myAddr) = contract.getAddress().getWorkchainAndHash();
-    if ((myWc + 1) != BASECHAIN || (myAddr != electorAddr)) {
-        // this smart contract is not the elections smart contract anymore, no new elections
-        return false;
-    }
-    var curVset = blockchain.configParam(34); // current validator set
-    if (curVset == null) {
-        return false;
-    }
-    curVset = curVset!;
-
-    val validatorConfig = ValidatorConfig.load();
-    val curValidUntil = curVset.beginParse().skipBits(8 + 32).preloadUint(32);
-    var t = blockchain.now();
-    val t0 = curValidUntil - validatorConfig.electionsBeginBefore;
-    if (t < t0) {
-        // too early for the next elections
-        return false;
-    }
-    // less than elect_before_begin seconds left, create new elections
-    if (t - t0 < 60) {
-        // pretend that the elections started at t0
-        t = t0;
-    }
-    // get stake parameters
-    val minStake = blockchain.configParam(17)!.beginParse().loadCoins();
-    // announce new elections
-    val electAt = t + validatorConfig.electionsBeginBefore;
-    val electClose = electAt - validatorConfig.electionsEndBefore;
-    elect = Election {
-        electAt: electAt,
-        electClose: electClose,
-        minStake: minStake,
-        totalStake: 0,
-        members: createEmptyDict(),
-        failed: false,
-        finished: false,
-    }
-        .toCell();
-    contract.setData(beginCell().storeDict(elect).storeDict(credits).storeSlice(ds).endCell());
-    return true;
-}
-
-// Main message handler
-fun onInternalMessage(msgValue: coins, inMsgCell: cell, inMsgBody: slice) {
-    var cs = inMsgCell.beginParse();
-    val flags = cs.loadUint(4); // int_msg_info$0 ihr_disabled:Bool bounce:Bool bounced:Bool
-    if (flags & 1) {
-        // ignore all bounced messages
-        return;
-    }
-    val sAddr = cs.loadAddress();
-    if (inMsgBody.isEmpty()) {
-        // inbound message has empty body
-        processSimpleTransfer(sAddr, msgValue);
-        return;
-    }
-    val op = inMsgBody.loadUint(32);
-    if (op == 0) {
-        // simple transfer with comment, return
-        processSimpleTransfer(sAddr, msgValue);
-        return;
-    }
-    val queryId = inMsgBody.loadUint(64);
-    if (op == newStakeMessageTag) {
-        // new stake message
-        processNewStake(sAddr, msgValue, inMsgBody, queryId);
-        return;
-    }
-    if (op == recoverStakeMessageTag) {
-        // recover stake request
-        recoverStake(op, sAddr, inMsgBody, queryId);
-        return;
-    }
-    if (op == upgradeCodeMessageTag) {
-        // upgrade code (accepted only from configuration smart contract)
-        val ok = upgradeCode(sAddr, inMsgBody, queryId);
-        sendMessageBack(sAddr, ok ? 0xce436f64 : 0xffffffff, queryId, op, 0, 64);
-        return;
-    }
-    var cfgOk = (op == 0xee764f4b);
-    if (cfgOk || (op == 0xee764f6f)) {
-        // confirmation from configuration smart contract
-        configSetConfirmed(sAddr, inMsgBody, queryId, cfgOk);
-        return;
-    }
-
-    if (!(op & (1 << 31))) {
-        // unknown query, return error
-        sendMessageBack(
-            sAddr,
-            0xffffffff,
-            queryId,
-            op,
-            0,
-            SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE
-        );
-        return;
-    }
-}
-
 // === Getters ===
 /// Returns active election id or 0.
 get fun active_election_id(): int {
     val data = lazy Storage.load();
-    if (data.curElect == null) {
+    if (data.currentElection == null) {
         return 0;
     }
 
-    var curElect = lazy data.curElect.load();
-    return curElect.electAt;
+    var election = lazy data.currentElection.load();
+    return election.electAt;
 }
 
 /// Checks whether a public key participates in current elections.
 get fun participates_in(validatorPubkey: int): coins {
     val data = lazy Storage.load();
-    if (data.curElect == null) {
+    if (data.currentElection == null) {
         return 0;
     }
 
-    val curElect = lazy data.curElect.load();
-    var (cs, found) = curElect.members.uDictGet(256, validatorPubkey);
+    val election = lazy data.currentElection.load();
+    var (cs, found) = election.participants.uDictGet(256, validatorPubkey);
     if (!found) {
         return 0;
     }
 
-    val member = lazy ElectionMember.fromSlice(cs!);
+    val member = lazy ElectionParticipant.fromSlice(cs!);
     return member.stake;
 }
 
 /// Returns the list of all participants of current elections with their stakes.
 get fun participant_list(): tuple {
     val data = lazy Storage.load();
-    if (data.curElect == null) {
+    if (data.currentElection == null) {
         return createEmptyTuple();
     }
 
-    val curElect = lazy data.curElect.load();
+    val election = lazy data.currentElection.load();
     var l = createEmptyTuple();
     var nextId = maxInt();
     do {
-        var (id, cs, found) = curElect.members.uDictGetPrev(256, nextId);
+        var (id, cs, found) = election.participants.uDictGetPrev(256, nextId);
         if (found) {
-            val member = lazy ElectionMember.fromSlice(cs!);
-            l = listPrepend([id, member.stake], l);
+            val participant = lazy ElectionParticipant.fromSlice(cs!);
+            l = listPrepend([id, participant.stake], l);
             nextId = id!;
         }
     } while (found);
@@ -1108,30 +1109,28 @@ get fun participant_list(): tuple {
 // returns the list of all participants of current elections with their data
 get fun participant_list_extended(): tuple {
     val data = lazy Storage.load();
-    if (data.curElect == null) {
+    if (data.currentElection == null) {
         return [0, 0, 0, 0, [], 0, 0] as tuple;
     }
 
-    val curElect = lazy data.curElect.load();
+    val election = lazy data.currentElection.load();
     var l = createEmptyTuple();
     var nextId = maxInt();
     do {
-        var (id, cs, found) = curElect.members.uDictGetPrev(256, nextId);
+        var (id, cs, found) = election.participants.uDictGetPrev(256, nextId);
         if (found) {
-            val member = lazy ElectionMember.fromSlice(cs!);
-            l = listPrepend([id, [member.stake, member.maxFactor, member.addr, member.adnlAddr]], l);
+            val participant = lazy ElectionParticipant.fromSlice(cs!);
+            val info = [
+                participant.stake, participant.maxFactor, participant.addr, participant.adnlAddr
+            ];
+            l = listPrepend([id, info], l);
             nextId = id!;
         }
     } while (found);
 
     return [
-        curElect.electAt,
-        curElect.electClose,
-        curElect.minStake,
-        curElect.totalStake,
-        l,
-        curElect.failed,
-        curElect.finished,
+        election.electAt, election.electClose, election.minStake, election.totalStake, l, election
+            .failed, election.finished
     ] as tuple;
 }
 
@@ -1144,7 +1143,7 @@ get fun compute_returned_stake(walletAddr: int): coins {
 
 // returns the list of past election ids
 get fun past_election_ids(): tuple {
-    val data = Storage.load();
+    val data = lazy Storage.load();
     var nextId = (1 << 32);
     var list = createEmptyTuple();
     do {
