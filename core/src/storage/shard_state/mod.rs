@@ -335,7 +335,8 @@ impl ShardStateStorage {
                     .into_iter()
                     .map(|(x, _)| x)
                     .collect::<Vec<_>>();
-                let (stats, mut batch) = cell_storage.remove_cell_mt(&alloc, &roots, split_at)?;
+                let (stats, mut batch) =
+                    cell_storage.remove_cell_mt(&alloc, &roots, Default::default())?;
 
                 in_mem_remove.finish();
 

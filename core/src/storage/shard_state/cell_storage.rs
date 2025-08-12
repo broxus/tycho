@@ -878,7 +878,7 @@ impl CellStorage {
                         let cache = self.raw_cache;
                         s.spawn(move || {
                             for shard in shards {
-                                // SAFETY: `RawIter` will not outlibe the `RawTable`.
+                                // SAFETY: `RawIter` will not outlive the `RawTable`.
                                 for value in unsafe { shard.iter() } {
                                     // SAFETY: `Bucket` is a valid item, received from a valid iterator.
                                     let (key, value) = unsafe { value.as_ref() };
