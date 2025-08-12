@@ -119,8 +119,8 @@ export KUBECONFIG=~/.kube/config
 kubectl config use-context ${CONTEXT}
 
 simulator prepare
-sumulator build install
-sumulator build remove
+simulator build install
+simulator build remove
 
 simulator start
 simulator stop
