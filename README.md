@@ -91,7 +91,7 @@ git checkout v10.4.2
 mkdir -p build && cd ./build
 export CC=/usr/bin/clang
 export CXX=/usr/bin/clang++
-cmake -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release \
+cmake -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-Wno-nontrivial-memcall \
   -DWITH_LZ4=ON -DWITH_ZSTD=ON -DWITH_JEMALLOC=ON ..
 make -j16 rocksdb rocksdb-shared
 

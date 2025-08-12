@@ -16,15 +16,17 @@ impl K3sDocker {
             return Err(err);
         }
 
-        if builder_values.base_image.build {
+        let base_image_name = {
             let base_image = &builder_values.base_image;
-            let image_name = format!("{}:{}", base_image.repository, base_image.tag);
+            format!("{}:{}", base_image.repository, base_image.tag)
+        };
 
-            println!("Building docker image {image_name}");
+        if builder_values.base_image.build {
+            println!("Building docker image {base_image_name}");
             Command::new("docker")
                 .arg("build")
                 .arg("-t")
-                .arg(image_name)
+                .arg(&base_image_name)
                 .arg("-f")
                 .arg(&config.project_root.base_dockerfile)
                 .arg(&config.project_root.dir)
@@ -43,6 +45,8 @@ impl K3sDocker {
             .arg("build")
             .arg("-t")
             .arg(image_name)
+            .arg("--build-arg")
+            .arg(format!("BASE={base_image_name}"))
             .arg("-f")
             .arg(&config.project_root.tycho_dockerfile)
             .arg(&config.project_root.dir)
