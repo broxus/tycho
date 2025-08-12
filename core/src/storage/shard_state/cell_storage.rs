@@ -914,12 +914,11 @@ impl CellStorage {
 
         std::thread::scope(|scope| {
             for root in roots {
-                scope.spawn(|| {
-                    // TODO: Handle error properly.
-                    ctx.traverse_cell(root, scope).unwrap();
-                });
+                ctx.traverse_cell(root, scope)?;
             }
-        });
+
+            Ok::<(), CellStorageError>(())
+        })?;
 
         // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
         //       and a bit more just in case.
