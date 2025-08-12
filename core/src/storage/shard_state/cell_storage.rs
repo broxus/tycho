@@ -31,6 +31,10 @@ pub struct CellStorage {
 type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
 
 impl CellStorage {
+    pub fn validate_cache(&self) -> Result<(), CellStorageError> {
+        self.raw_cells_cache.validate_cache(&self.db)
+    }
+
     pub fn new(db: CoreDb, cache_size_bytes: ByteSize) -> Arc<Self> {
         let cells_cache = Default::default();
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
@@ -117,7 +121,7 @@ impl CellStorage {
             fn load_temp(&self, key: &HashBytes) -> Result<CellHashesIter<'a>, CellStorageError> {
                 let data = match self.db.temp_cells.get(key) {
                     Ok(Some(data)) => data,
-                    Ok(None) => return Err(CellStorageError::CellNotFound),
+                    Ok(None) => return Err(CellStorageError::CellNotFound1),
                     Err(e) => return Err(CellStorageError::Internal(e)),
                 };
 
@@ -659,7 +663,7 @@ impl CellStorage {
                 Some(cell) => Arc::new(cell),
                 None => return Err(CellStorageError::InvalidCell),
             },
-            Ok(None) => return Err(CellStorageError::CellNotFound),
+            Ok(None) => return Err(CellStorageError::CellNotFound1),
             Err(e) => return Err(CellStorageError::Internal(e)),
         };
 
@@ -720,7 +724,7 @@ impl CellStorage {
                     herd,
                     split_at,
                     transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
-                        128,
+                        65536,
                         Default::default(),
                         512,
                     ),
@@ -837,6 +841,8 @@ impl CellStorage {
             fn finalize(self, batch: &mut WriteBatch) -> usize {
                 let _hist = HistogramGuard::begin("tycho_storage_batch_write_parallel_time_high");
 
+                // assert!(self.delayed_removes.lock().unwrap().is_empty());
+
                 // Write transaction to the `WriteBatch`
                 std::thread::scope(|s| {
                     // Apply delayed removes before finalizing the transaction.
@@ -878,7 +884,7 @@ impl CellStorage {
                         let cache = self.raw_cache;
                         s.spawn(move || {
                             for shard in shards {
-                                // SAFETY: `RawIter` will not outlibe the `RawTable`.
+                                // SAFETY: `RawIter` will not outlive the `RawTable`.
                                 for value in unsafe { shard.iter() } {
                                     // SAFETY: `Bucket` is a valid item, received from a valid iterator.
                                     let (key, value) = unsafe { value.as_ref() };
@@ -919,7 +925,9 @@ impl CellStorage {
                     ctx.traverse_cell(root, scope).unwrap();
                 });
             }
-        });
+
+            Ok::<(), CellStorageError>(())
+        })?;
 
         // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
         //       and a bit more just in case.
@@ -1023,6 +1031,14 @@ struct RemovedCell<'a> {
 impl<'a> RemovedCell<'a> {
     fn remove(&mut self) -> Result<Option<&'a [HashBytes]>, CellStorageError> {
         self.removes += 1;
+
+        debug_assert!(
+            self.removes as i64 <= self.old_rc,
+            "invalid removes count: removes={}, old_rc={}",
+            self.removes,
+            self.old_rc
+        );
+
         if self.removes as i64 <= self.old_rc {
             Ok(self.next_refs())
         } else {
@@ -1041,8 +1057,12 @@ impl<'a> RemovedCell<'a> {
 
 #[derive(thiserror::Error, Debug)]
 pub enum CellStorageError {
-    #[error("Cell not found in cell db")]
-    CellNotFound,
+    #[error("Cell not found in cell db 1")]
+    CellNotFound1,
+    #[error("Cell not found in cell db 2")]
+    CellNotFound2,
+    #[error("Cell not found in cell db 2")]
+    CellNotFound3,
     #[error("Invalid cell")]
     InvalidCell,
     #[error("Cell counter mismatch")]
@@ -1494,6 +1514,39 @@ impl RawCellsCache {
         }
     }
 
+    fn validate_cache(&self, db: &CoreDb) -> Result<(), CellStorageError> {
+        for (hash, value) in self.inner.iter() {
+            let rc_cache = value.header.header.load(Ordering::Acquire);
+
+            if rc_cache != Self::RC_NAN {
+                let mut cnt = 0;
+                loop {
+                    let value = db.cells.get(hash.as_slice())?.unwrap();
+                    let rc_db = refcount::decode_value_with_rc(&value).0;
+
+                    if rc_cache != rc_db {
+                        tracing::error!(
+                            "Cache is invalid: cache = {rc_cache} db = {rc_db}, cnt = {cnt}"
+                        );
+
+                        cnt += 1;
+                        if cnt > 5 {
+                            panic!("invalid cache: cache = {rc_cache} db = {rc_db}");
+                        }
+
+                        std::thread::sleep(Duration::from_secs(1));
+
+                        continue;
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn get_rc_for_delete(
         &self,
         db: &CoreDb,
@@ -1506,7 +1559,7 @@ impl RawCellsCache {
         if let Some(value) = self.inner.peek(key) {
             let rc = value.header.header.load(Ordering::Acquire);
             if rc <= 0 {
-                return Err(CellStorageError::CellNotFound);
+                return Err(CellStorageError::CellNotFound2);
             } else if rc != i64::MAX {
                 return StorageCell::deserialize_references(&value.slice, refs_buffer)
                     .then_some(rc)
@@ -1524,7 +1577,7 @@ impl RawCellsCache {
                         .ok_or(CellStorageError::InvalidCell);
                 }
 
-                Err(CellStorageError::CellNotFound)
+                Err(CellStorageError::CellNotFound3)
             }
             Err(e) => Err(CellStorageError::Internal(e)),
         }

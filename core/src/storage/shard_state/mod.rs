@@ -130,6 +130,7 @@ impl ShardStateStorage {
         let block_id = *handle.id();
         let raw_db = self.db.rocksdb().clone();
         let cf = self.db.shard_states.get_unbounded_cf();
+        let cells_cf = self.db.cells.get_unbounded_cf();
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
@@ -175,6 +176,10 @@ impl ShardStateStorage {
                 .record(estimated_update_size_bytes as f64);
 
             raw_db.write(batch)?;
+            raw_db.flush_cf(&cells_cf.bound())?;
+
+            // let bound = Option::<[u8; 0]>::None;
+            // raw_db.compact_range_cf(&cells_cf.bound(), bound, bound);
 
             hist.finish();
 
@@ -264,7 +269,7 @@ impl ShardStateStorage {
         let mut removed_cells = 0usize;
 
         loop {
-            const BATCH_SIZE: usize = 2;
+            const BATCH_SIZE: usize = 5;
 
             let mut current_batch = Vec::with_capacity(BATCH_SIZE);
             let mut current_batch_keys = Vec::with_capacity(BATCH_SIZE);
@@ -312,6 +317,8 @@ impl ShardStateStorage {
                 self.gc_lock.lock().await
             };
 
+            // self.cell_storage.validate_cache()?;
+
             let db = self.db.clone();
             let cell_storage = self.cell_storage.clone();
             let accounts_split_depth = self.accounts_split_depth;
@@ -348,6 +355,16 @@ impl ShardStateStorage {
                 db.raw()
                     .rocksdb()
                     .write_opt(batch, db.cells.write_config())?;
+                db.raw()
+                    .rocksdb()
+                    .flush_cf(&db.cells.get_unbounded_cf().bound())?;
+
+                // let bound = Option::<[u8; 0]>::None;
+                // db.raw().rocksdb().compact_range_cf(
+                //     &db.cells.get_unbounded_cf().bound(),
+                //     bound,
+                //     bound,
+                // );
 
                 db_remove.finish();
 

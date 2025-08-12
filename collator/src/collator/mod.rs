@@ -623,7 +623,7 @@ impl CollatorStdImpl {
 
         // update collation session info to refer to a correct subset in collated block
         self.collation_session = collation_session;
-        let working_state = if !reset {
+        let mut working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
 
             // update mc_data if newer
