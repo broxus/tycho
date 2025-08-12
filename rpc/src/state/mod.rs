@@ -679,7 +679,9 @@ impl Inner {
                 let key_block = blocks.load_block_data(&handle).await?;
                 self.update_mc_block_cache(&key_block)?;
             } else {
-                let state = shard_states.load_state(handle.id()).await?;
+                let state = shard_states
+                    .load_state(handle.id().seqno, handle.id())
+                    .await?;
                 let state = state.as_ref();
 
                 let Some(extra) = state.load_custom()? else {
@@ -691,7 +693,9 @@ impl Inner {
             }
         }
 
-        let mut mc_state = shard_states.load_state(mc_block_id).await?;
+        let mut mc_state = shard_states
+            .load_state(mc_block_id.seqno, mc_block_id)
+            .await?;
         self.update_timings(mc_state.as_ref().gen_utime, mc_state.as_ref().seqno);
 
         if let Some(rpc_storage) = &self.rpc_storage {
@@ -723,7 +727,9 @@ impl Inner {
                 for item in shards.latest_blocks() {
                     let block_id = item?;
 
-                    let state = shard_states.load_state(&block_id).await?;
+                    let state = shard_states
+                        .load_state(mc_block_id.seqno, &block_id)
+                        .await?;
 
                     // Reset shard accounts.
                     // NOTE: Consume shard state to prevent if from being fully loaded.
@@ -736,7 +742,9 @@ impl Inner {
                 rpc_storage.store_instance_id(node_instance_id);
 
                 // Reload mc state.
-                mc_state = shard_states.load_state(mc_block_id).await?;
+                mc_state = shard_states
+                    .load_state(mc_block_id.seqno, mc_block_id)
+                    .await?;
             }
 
             // Fill config.
@@ -749,7 +757,9 @@ impl Inner {
 
             for item in shards.latest_blocks() {
                 let block_id = item?;
-                let state = shard_states.load_state(&block_id).await?;
+                let state = shard_states
+                    .load_state(mc_block_id.seqno, &block_id)
+                    .await?;
 
                 // Fill accounts cache.
                 self.sc_accounts

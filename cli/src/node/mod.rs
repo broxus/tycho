@@ -130,7 +130,7 @@ impl Node {
         let mc_state = base
             .core_storage
             .shard_state_storage()
-            .load_state(last_block_id)
+            .load_state(last_block_id.seqno, last_block_id)
             .await?;
 
         {
