@@ -240,12 +240,10 @@ impl ShardStateStorage {
         let mut removed_states = 0usize;
         let mut removed_cells = 0usize;
         loop {
-            let _hist = HistogramGuard::begin("tycho_storage_state_gc_time_high");
-
-            const BATCH_SIZE: usize = 2;
+            const BATCH_SIZE: usize = 3;
 
             let mut current_batch = Vec::with_capacity(BATCH_SIZE);
-            let mut current_batch_keys = Vec::with_capacity(BATCH_SIZE);
+            // let mut current_batch_keys = Vec::with_capacity(BATCH_SIZE);
             let mut current_batch_blocks = Vec::with_capacity(BATCH_SIZE);
 
             // Collect states for batch processing
@@ -269,8 +267,8 @@ impl ShardStateStorage {
                     continue;
                 }
 
-                current_batch.push((root_hash, block_id.is_masterchain()));
-                current_batch_keys.push(key.to_vec());
+                current_batch.push((root_hash, block_id.is_masterchain(), key.to_vec()));
+                // current_batch_keys.push(key.to_vec());
                 current_batch_blocks.push(block_id);
 
                 iter.next();
@@ -280,8 +278,6 @@ impl ShardStateStorage {
             if current_batch.is_empty() {
                 break; // No more states to process
             }
-
-            let _hist = HistogramGuard::begin("tycho_storage_state_gc_time_high");
 
             alloc.reset();
 
@@ -298,7 +294,7 @@ impl ShardStateStorage {
                     HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
 
                 let mut split_at: FastHashSet<HashBytes> = Default::default();
-                for (root_hash, is_masterchain) in &current_batch {
+                for (root_hash, is_masterchain, _key) in &current_batch {
                     if !is_masterchain {
                         let root_cell = Cell::from(cell_storage.load_cell(*root_hash)? as Arc<_>);
 
@@ -309,19 +305,27 @@ impl ShardStateStorage {
                     }
                 }
 
-                let roots = current_batch
-                    .into_iter()
-                    .map(|(x, _)| x)
-                    .collect::<Vec<_>>();
-                let (stats, mut batch) = cell_storage.remove_cell_mt(&alloc, &roots, split_at)?;
+                let mut batches = Vec::with_capacity(BATCH_SIZE);
+                for (root, _, key) in current_batch {
+                    let (_stats, mut batch) =
+                        cell_storage.remove_cell_mt(&alloc, &root, Default::default())?;
 
-                for key in current_batch_keys {
                     batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
+
+                    batches.push(batch);
                 }
 
                 in_mem_remove.finish();
 
-                Ok::<_, anyhow::Error>((stats, alloc))
+                for batch in batches {
+                    db.raw()
+                        .rocksdb()
+                        .write_opt(batch, db.cells.write_config())?;
+                }
+
+                // metrics::histogram!("tycho_storage_state_cells_gc_count").record(stats as f64);
+
+                Ok::<_, anyhow::Error>((0, alloc))
             })
             .await??;
 
@@ -330,21 +334,15 @@ impl ShardStateStorage {
             removed_cells += total;
             alloc = inner_alloc; // Reuse allocation without passing alloc by ref
 
-            // tracing::debug!(removed_cells = total, %block_id);
-
             removed_states += 1;
-            // iter.next();
 
             metrics::counter!("tycho_storage_state_gc_count").increment(1);
             metrics::counter!("tycho_storage_state_gc_cells_count").increment(1);
-
             for block_id in current_batch_blocks {
                 if block_id.is_masterchain() {
                     metrics::gauge!("tycho_gc_states_seqno").set(block_id.seqno as f64);
                 }
             }
-
-            // tracing::debug!(removed_states, removed_cells, %block_id, "removed state");
         }
 
         // Done
