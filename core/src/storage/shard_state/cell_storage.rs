@@ -674,7 +674,7 @@ impl CellStorage {
     pub fn remove_cell_mt(
         &self,
         herd: &Herd,
-        root: &HashBytes,
+        roots: &[HashBytes],
         split_at: FastHashSet<HashBytes>,
     ) -> Result<(usize, WriteBatch), CellStorageError> {
         type RemoveResult = Result<(), CellStorageError>;
@@ -907,7 +907,14 @@ impl CellStorage {
 
         let ctx = RemoveContext::new(&self.db, herd, &self.raw_cells_cache, split_at);
 
-        std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
+        std::thread::scope(|scope| {
+            for root in roots {
+                scope.spawn(|| {
+                    // TODO: Handle error properly.
+                    ctx.traverse_cell(root, scope).unwrap();
+                });
+            }
+        });
 
         // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
         //       and a bit more just in case.
