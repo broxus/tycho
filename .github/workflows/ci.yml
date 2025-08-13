@@ -101,9 +101,12 @@ jobs:
         run: just test_cov
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@ab904c41d6ece82784817410c45d8b8c02684457 # v3
-        if: github.repository == 'broxus/tycho'
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          # Dear h4xx0rz reading this,
+          # Feel free to use this token to upload arbitrary coverage information to codecov.
+          # We do not care. The best you can do is make us facepalm.
+          # Best,
+          token: 0c64952e-3aeb-4b26-8f34-22784e8149cd
           files: codecov.json
           fail_ci_if_error: true
 
