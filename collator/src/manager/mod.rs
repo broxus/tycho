@@ -2672,21 +2672,24 @@ where
 
         // check if master collation hard forced for all shards
         if shard_id.is_masterchain()
-            && matches!(force_mc_block, ForceMasterCollation::ByUprocessedMessages)
+            && matches!(force_mc_block, ForceMasterCollation::ByUnprocessedMessages)
         {
             guard.mc_collation_forced_for_all = true;
         };
+
         let hard_forced_for_all = guard.mc_collation_forced_for_all;
 
         // save current shard collator state
         let forced_in_current_shard = force_mc_block.is_forced();
+
         let current_collation_state = guard.states.entry(shard_id).or_default();
         current_collation_state
             .last_imported_chain_times
             .push((last_imported_anchor_ct, forced_in_current_shard));
+
         current_collation_state.mc_collation_forced |= forced_in_current_shard;
 
-        // check if should collate master by current shard or because forced in master collator
+        // check if it should collate master by current shard or because forced in master collator
         let should_collate_by_current_shard = if hard_forced_for_all {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
