@@ -71,6 +71,7 @@ tycho-util = { workspace = true, features = ["test"] }
 default = []
 test = ["tycho-block-util/test", "tycho-storage/test", "tycho-core/test"]
 block-creator-stats = []
+omit-master-block-history = []
 
 [lints]
 workspace = true
