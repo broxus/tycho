@@ -210,7 +210,7 @@ fn test_detect_next_collation_step() {
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
-        ForceMasterCollation::ByUprocessedMessages,
+        ForceMasterCollation::ByUnprocessedMessages,
         mc_block_min_interval_ms,
     );
     println!("10: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
@@ -226,7 +226,7 @@ fn test_detect_next_collation_step() {
         active_shards.clone(),
         mc_shard_id,
         mc_anchor_ct,
-        ForceMasterCollation::ByUprocessedMessages,
+        ForceMasterCollation::ByUnprocessedMessages,
         mc_block_min_interval_ms,
     );
     println!("11: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
@@ -429,7 +429,7 @@ fn test_detect_next_collation_step() {
         matches!(next_step, NextCollationStep::ResumeAttemptsIn(sl) if sl.contains(&mc_shard_id))
     );
 
-    // force mc block collation after shard block collation
+    // set the status that shard is ready for collation master block
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
@@ -440,7 +440,19 @@ fn test_detect_next_collation_step() {
         mc_block_min_interval_ms,
     );
     println!("24: shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
-    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == sc_anchor_ct));
+    assert!(matches!(next_step, NextCollationStep::ResumeAttemptsIn(sl) if sl.is_empty()));
+
+    mc_anchor_ct += 1000;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        mc_shard_id,
+        mc_anchor_ct,
+        ForceMasterCollation::ByUnprocessedMessages,
+        mc_block_min_interval_ms,
+    );
+    println!("25: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
+    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct ));
 }
 
 #[tokio::test]

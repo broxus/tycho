@@ -1251,7 +1251,7 @@ pub enum ForceMasterCollation {
     No,
     ByUncommittedChain,
     ByAnchorImportSkipped,
-    ByUprocessedMessages,
+    ByUnprocessedMessages,
     NoPendingMessagesAfterShardBlocks,
 }
 impl ForceMasterCollation {

@@ -1569,7 +1569,7 @@ impl CollatorStdImpl {
                     working_state.mc_data.block_id,
                     working_state.next_block_id_short,
                     working_state.prev_shard_data_ref().gen_chain_time(),
-                    ForceMasterCollation::ByUprocessedMessages,
+                    ForceMasterCollation::ByUnprocessedMessages,
                     working_state.collation_config.clone(),
                 )
                 .await?;
@@ -2026,10 +2026,10 @@ impl CollatorStdImpl {
                     TryCollateCheck::ForceMcBlockByUncommittedChainLength => {
                         ForceMasterCollation::ByUncommittedChain
                     }
-                    _ if anchor_import_skipped => ForceMasterCollation::ByAnchorImportSkipped,
-                    _ if uncommitted_chain_length >= 1 => {
+                    TryCollateCheck::NoPendingMessages if uncommitted_chain_length >= 1 => {
                         ForceMasterCollation::NoPendingMessagesAfterShardBlocks
                     }
+                    _ if anchor_import_skipped => ForceMasterCollation::ByAnchorImportSkipped,
                     _ => ForceMasterCollation::No,
                 };
 
