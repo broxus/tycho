@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque, btree_map};
+use std::collections::{BTreeMap, VecDeque, btree_map, hash_map};
 
 use rayon::iter::IntoParallelIterator;
 use tycho_block_util::queue::QueueKey;
@@ -17,6 +17,8 @@ type SlotId = u16;
 
 type FastIndexMap<K, V> = indexmap::IndexMap<K, V, ahash::RandomState>;
 pub type FastIndexSet<K> = indexmap::IndexSet<K, ahash::RandomState>;
+
+type SortedIndexUpdates = FastHashMap<HashBytes, (usize, usize)>;
 
 #[derive(Clone, Copy)]
 pub struct MessagesBufferLimits {
@@ -102,6 +104,23 @@ impl MessagesBuffer {
     }
 
     pub fn remove_messages_by_accounts(&mut self, addresses_to_remove: &FastHashSet<HashBytes>) {
+        // update sorted by count index
+        for account_id in addresses_to_remove {
+            if let Some(account_msgs) = self.msgs.get(account_id) {
+                let old = account_msgs.len();
+                if old > 0
+                    && let Some(set) = self.sorted_index.get_mut(&old)
+                {
+                    set.remove(account_id);
+                    if set.is_empty() {
+                        self.sorted_index.remove(&old);
+                    }
+                }
+            }
+        }
+
+        // remove messages
+        // NOTE: this method is called only for internal messages
         self.msgs.retain(|k, v| {
             if addresses_to_remove.contains(k) {
                 self.int_count -= v.len();
@@ -132,10 +151,9 @@ impl MessagesBuffer {
         let mut slots_info = std::mem::take(&mut msg_group.slots_info);
 
         // we will collect updates for slots index and apply them at the end
-        let mut slots_index_updates = BTreeMap::new();
-
-        // track collected queue messages
-        let mut collected_queue_msgs_keys = vec![];
+        // we will collect updates for sorted index and apply them at the end
+        // we will track collected queue messages
+        let mut fill_cx = FillMessageGroupContext::default();
 
         // track accounts whose messages were not used to fill group
         let mut buffer_accounts: VecDeque<HashBytes> = self.msgs.keys().copied().collect();
@@ -171,7 +189,11 @@ impl MessagesBuffer {
                 while let Some(account_id) = buffer_accounts.pop_front() {
                     if msg_group.msgs.contains_key(&account_id) {
                         // try skip messages from skipped account: maybe they expired
-                        self.try_skip_account_msgs(&account_id, &mut msg_filter);
+                        self.try_skip_account_msgs(
+                            &account_id,
+                            &mut fill_cx.sorted_index_updates,
+                            &mut msg_filter,
+                        );
 
                         continue;
                     }
@@ -181,7 +203,11 @@ impl MessagesBuffer {
                     ops_count.saturating_add_assign(check_ops_count);
                     if skip_account {
                         // try skip messages from skipped account: maybe they expired
-                        self.try_skip_account_msgs(&account_id, &mut msg_filter);
+                        self.try_skip_account_msgs(
+                            &account_id,
+                            &mut fill_cx.sorted_index_updates,
+                            &mut msg_filter,
+                        );
 
                         continue;
                     }
@@ -190,8 +216,7 @@ impl MessagesBuffer {
                         account_id,
                         msg_group,
                         &mut slot_cx,
-                        &mut collected_queue_msgs_keys,
-                        &mut slots_index_updates,
+                        &mut fill_cx,
                         &mut msg_filter,
                     );
                     ops_count.saturating_add_assign(move_ops_count);
@@ -263,7 +288,11 @@ impl MessagesBuffer {
                     ops_count.saturating_add_assign(check_ops_count);
                     if skip_account {
                         // try skip messages from skipped account: maybe they expired
-                        self.try_skip_account_msgs(&account_id, &mut msg_filter);
+                        self.try_skip_account_msgs(
+                            &account_id,
+                            &mut fill_cx.sorted_index_updates,
+                            &mut msg_filter,
+                        );
 
                         continue;
                     }
@@ -272,8 +301,7 @@ impl MessagesBuffer {
                         account_id,
                         msg_group,
                         &mut slot_cx,
-                        &mut collected_queue_msgs_keys,
-                        &mut slots_index_updates,
+                        &mut fill_cx,
                         &mut msg_filter,
                     );
                     ops_count.saturating_add_assign(move_ops_count);
@@ -293,7 +321,11 @@ impl MessagesBuffer {
                 while let Some(account_id) = buffer_accounts.pop_front() {
                     if msg_group.msgs.contains_key(&account_id) {
                         // try skip messages from skipped account: maybe they expired
-                        self.try_skip_account_msgs(&account_id, &mut msg_filter);
+                        self.try_skip_account_msgs(
+                            &account_id,
+                            &mut fill_cx.sorted_index_updates,
+                            &mut msg_filter,
+                        );
 
                         continue;
                     }
@@ -303,7 +335,11 @@ impl MessagesBuffer {
                     ops_count.saturating_add_assign(check_ops_count);
                     if skip_account {
                         // try skip messages from skipped account: maybe they expired
-                        self.try_skip_account_msgs(&account_id, &mut msg_filter);
+                        self.try_skip_account_msgs(
+                            &account_id,
+                            &mut fill_cx.sorted_index_updates,
+                            &mut msg_filter,
+                        );
 
                         continue;
                     }
@@ -312,8 +348,7 @@ impl MessagesBuffer {
                         account_id,
                         msg_group,
                         &mut slot_cx,
-                        &mut collected_queue_msgs_keys,
-                        &mut slots_index_updates,
+                        &mut fill_cx,
                         &mut msg_filter,
                     );
                     ops_count.saturating_add_assign(move_ops_count);
@@ -328,7 +363,11 @@ impl MessagesBuffer {
         // check and skip messages in remaning accounts if required
         if msg_filter.can_skip() {
             while let Some(account_id) = buffer_accounts.pop_front() {
-                self.try_skip_account_msgs(&account_id, &mut msg_filter);
+                self.try_skip_account_msgs(
+                    &account_id,
+                    &mut fill_cx.sorted_index_updates,
+                    &mut msg_filter,
+                );
             }
         }
 
@@ -338,7 +377,7 @@ impl MessagesBuffer {
 
         // 3. update slots index
         let mut remove_slot_ids = BTreeMap::<usize, FastHashSet<u16>>::new();
-        for (slot_id, index_update) in slots_index_updates {
+        for (slot_id, index_update) in fill_cx.slots_index_updates {
             // remove slot from old count basket
             if index_update.old_count() != 0 {
                 remove_slot_ids
@@ -368,8 +407,30 @@ impl MessagesBuffer {
         // put slots info into group
         std::mem::swap(&mut slots_info, &mut msg_group.slots_info);
 
+        // 4. update sorted index
+        for (account_id, (old_count, new_count)) in fill_cx.sorted_index_updates {
+            if old_count > 0
+                && let Some(set) = self.sorted_index.get_mut(&old_count)
+            {
+                set.remove(&account_id);
+                if set.is_empty() {
+                    self.sorted_index.remove(&old_count);
+                }
+            }
+            if new_count > 0 {
+                match self.sorted_index.entry(new_count) {
+                    btree_map::Entry::Vacant(vacant) => {
+                        vacant.insert([account_id].into_iter().collect());
+                    }
+                    btree_map::Entry::Occupied(mut occupied) => {
+                        occupied.get_mut().insert(account_id);
+                    }
+                }
+            }
+        }
+
         FillMessageGroupResult {
-            collected_queue_msgs_keys,
+            collected_queue_msgs_keys: fill_cx.collected_queue_msgs_keys,
             ops_count,
         }
     }
@@ -379,8 +440,7 @@ impl MessagesBuffer {
         account_id: HashBytes,
         msg_group: &mut MessageGroup,
         slot_cx: &mut SlotContext<'_>,
-        collected_queue_msgs_keys: &mut Vec<QueueKey>,
-        slots_index_updates: &mut BTreeMap<SlotId, SlotIndexUpdate>,
+        fill_cx: &mut FillMessageGroupContext,
         mut msg_filter: FM,
     ) -> u64
     where
@@ -400,6 +460,8 @@ impl MessagesBuffer {
 
         if let Some(account_msgs) = self.msgs.get_mut(&account_id) {
             ops_count.saturating_add_assign(1);
+
+            let prev_len = account_msgs.len();
 
             amount = account_msgs.len().min(slot_cx.remaning_capacity);
             if amount == 0 {
@@ -431,7 +493,7 @@ impl MessagesBuffer {
                 // collect message if it was not skipped
                 match &msg.info {
                     MsgInfo::Int(info) => {
-                        collected_queue_msgs_keys.push(QueueKey {
+                        fill_cx.collected_queue_msgs_keys.push(QueueKey {
                             lt: info.created_lt,
                             hash: *msg.cell.repr_hash(),
                         });
@@ -443,6 +505,17 @@ impl MessagesBuffer {
                     MsgInfo::ExtOut(_) => unreachable!("must contain only Int and ExtIn messages"),
                 }
                 slot_account_msgs.push(msg);
+            }
+
+            // accum sorted index updates
+            let new_len = prev_len - amount;
+            if new_len != prev_len {
+                note_sorted_index_update(
+                    &mut fill_cx.sorted_index_updates,
+                    account_id,
+                    prev_len,
+                    new_len,
+                );
             }
 
             if slot_account_msgs.is_empty() {
@@ -481,7 +554,8 @@ impl MessagesBuffer {
         }
 
         // collect slot index updates
-        slots_index_updates
+        fill_cx
+            .slots_index_updates
             .entry(slot_cx.slot_id)
             .and_modify(|index_update| {
                 index_update.new_int_count = slot_cx.slot.int_count;
@@ -497,8 +571,12 @@ impl MessagesBuffer {
         ops_count
     }
 
-    fn try_skip_account_msgs<FM>(&mut self, account_id: &HashBytes, mut filter: FM)
-    where
+    fn try_skip_account_msgs<FM>(
+        &mut self,
+        account_id: &HashBytes,
+        sorted_index_updates: &mut SortedIndexUpdates,
+        mut filter: FM,
+    ) where
         FM: MessageFilter,
     {
         if !filter.can_skip() {
@@ -506,6 +584,9 @@ impl MessagesBuffer {
         }
 
         if let Some(account_msgs) = self.msgs.get_mut(account_id) {
+            let prev_len = account_msgs.len();
+            let mut skip_count = 0;
+
             account_msgs.retain(|msg| {
                 let skip = filter.should_skip(msg);
                 debug_assert!(
@@ -513,10 +594,42 @@ impl MessagesBuffer {
                     "we should only skip external messages"
                 );
                 self.ext_count -= skip as usize;
+                if skip {
+                    skip_count += 1;
+                }
                 !skip
             });
+
+            let new_len = prev_len - skip_count;
+            if new_len != prev_len {
+                note_sorted_index_update(sorted_index_updates, *account_id, prev_len, new_len);
+            }
         }
     }
+}
+
+#[inline]
+fn note_sorted_index_update(
+    index_updates: &mut SortedIndexUpdates,
+    account_id: HashBytes,
+    old_count: usize,
+    new_count: usize,
+) {
+    match index_updates.entry(account_id) {
+        hash_map::Entry::Occupied(mut occupied) => {
+            occupied.get_mut().1 = new_count;
+        }
+        hash_map::Entry::Vacant(vacant) => {
+            vacant.insert((old_count, new_count));
+        }
+    }
+}
+
+#[derive(Default)]
+struct FillMessageGroupContext {
+    pub collected_queue_msgs_keys: Vec<QueueKey>,
+    pub slots_index_updates: BTreeMap<SlotId, SlotIndexUpdate>,
+    pub sorted_index_updates: SortedIndexUpdates,
 }
 
 pub struct FillMessageGroupResult {
@@ -636,8 +749,27 @@ impl MessagesBuffer {
             BufferFillStateByCount::NotFull
         };
 
-        // TODO: msgs-v3: check if we can already fill required slots
-        let by_slots = BufferFillStateBySlots::CanNotFill;
+        // check if we can already fill required slots count
+        let mut by_slots = BufferFillStateBySlots::CanNotFill;
+
+        if self.msgs.len() >= limits.slots_count {
+            let mut full_slots_count = 0;
+            let mut current_slot_msgs_count = 0;
+            for (&account_msgs_count, account_ids) in self.sorted_index.iter().rev() {
+                for _ in account_ids {
+                    current_slot_msgs_count += account_msgs_count;
+                    if current_slot_msgs_count >= limits.slot_vert_size {
+                        full_slots_count += 1;
+                        current_slot_msgs_count = 0;
+
+                        if full_slots_count >= limits.slots_count {
+                            by_slots = BufferFillStateBySlots::CanFill;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
         (by_count, by_slots)
     }
