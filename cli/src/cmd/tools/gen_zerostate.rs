@@ -801,6 +801,7 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
         download_peers: 2,
         download_tasks: 260,
         sync_support_rounds: 840,
+        broadcast_retry_attempts: 2,
     })?;
 
     // Param 31
