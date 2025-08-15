@@ -35,6 +35,18 @@ impl CellStorage {
         self.raw_cells_cache.validate_cache(&self.db)
     }
 
+    pub fn validate_cache_store(&self) -> Result<(), CellStorageError> {
+        self.raw_cells_cache.validate_cache_store(&self.db)
+    }
+
+    pub fn validate_cache_2(&self) -> Result<(), CellStorageError> {
+        self.raw_cells_cache.validate_cache_2(&self.db)
+    }
+
+    pub fn validate_cache_store_2(&self) -> Result<(), CellStorageError> {
+        self.raw_cells_cache.validate_cache_store_2(&self.db)
+    }
+
     pub fn new(db: CoreDb, cache_size_bytes: ByteSize) -> Arc<Self> {
         let cells_cache = Default::default();
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
@@ -1519,6 +1531,40 @@ impl RawCellsCache {
             let rc_cache = value.header.header.load(Ordering::Acquire);
 
             if rc_cache != Self::RC_NAN {
+                if let Some(value) = db.cells.get(hash.as_slice())? {
+                    let rc_db = refcount::decode_value_with_rc(&value).0;
+                    if rc_cache != rc_db {
+                        panic!("invalid cache: cache = {rc_cache} db = {rc_db}");
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_cache_store(&self, db: &CoreDb) -> Result<(), CellStorageError> {
+        for (hash, value) in self.inner.iter() {
+            let rc_cache = value.header.header.load(Ordering::Acquire);
+
+            if rc_cache != Self::RC_NAN {
+                if let Some(value) = db.cells.get(hash.as_slice())? {
+                    let rc_db = refcount::decode_value_with_rc(&value).0;
+                    if rc_cache != rc_db {
+                        panic!("invalid cache store: cache = {rc_cache} db = {rc_db}");
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_cache_2(&self, db: &CoreDb) -> Result<(), CellStorageError> {
+        for (hash, value) in self.inner.iter() {
+            let rc_cache = value.header.header.load(Ordering::Acquire);
+
+            if rc_cache != Self::RC_NAN {
                 let mut cnt = 0;
                 loop {
                     let value = db.cells.get(hash.as_slice())?.unwrap();
@@ -1526,12 +1572,45 @@ impl RawCellsCache {
 
                     if rc_cache != rc_db {
                         tracing::error!(
-                            "Cache is invalid: cache = {rc_cache} db = {rc_db}, cnt = {cnt}"
+                            "Cache is invalid 2: cache = {rc_cache} db = {rc_db}, cnt = {cnt}"
                         );
 
                         cnt += 1;
                         if cnt > 5 {
-                            panic!("invalid cache: cache = {rc_cache} db = {rc_db}");
+                            panic!("invalid cache 2: cache = {rc_cache} db = {rc_db}");
+                        }
+
+                        std::thread::sleep(Duration::from_secs(1));
+
+                        continue;
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_cache_store_2(&self, db: &CoreDb) -> Result<(), CellStorageError> {
+        for (hash, value) in self.inner.iter() {
+            let rc_cache = value.header.header.load(Ordering::Acquire);
+
+            if rc_cache != Self::RC_NAN {
+                let mut cnt = 0;
+                loop {
+                    let value = db.cells.get(hash.as_slice())?.unwrap();
+                    let rc_db = refcount::decode_value_with_rc(&value).0;
+
+                    if rc_cache != rc_db {
+                        tracing::error!(
+                            "Cache is invalid 2: cache = {rc_cache} db = {rc_db}, cnt = {cnt}"
+                        );
+
+                        cnt += 1;
+                        if cnt > 5 {
+                            panic!("invalid cache store 2: cache = {rc_cache} db = {rc_db}");
                         }
 
                         std::thread::sleep(Duration::from_secs(1));

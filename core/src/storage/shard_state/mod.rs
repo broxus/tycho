@@ -137,6 +137,8 @@ impl ShardStateStorage {
         let accounts_split_depth = self.accounts_split_depth;
         let background_drop_cell_tx = self.background_drop_cell_tx.clone();
 
+        self.cell_storage.validate_cache_store()?;
+
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
             let root_hash = *root_cell.repr_hash();
@@ -176,8 +178,8 @@ impl ShardStateStorage {
                 .record(estimated_update_size_bytes as f64);
 
             raw_db.write(batch)?;
-            raw_db.flush_cf(&cells_cf.bound())?;
 
+            // raw_db.flush_cf(&cells_cf.bound())?;
             // let bound = Option::<[u8; 0]>::None;
             // raw_db.compact_range_cf(&cells_cf.bound(), bound, bound);
 
@@ -193,6 +195,8 @@ impl ShardStateStorage {
             Ok::<_, anyhow::Error>((new_cell_count, updated))
         })
         .await??;
+
+        self.cell_storage.validate_cache_store_2()?;
 
         let count = if block_id.shard.is_masterchain() {
             &self.max_new_mc_cell_count
@@ -269,7 +273,7 @@ impl ShardStateStorage {
         let mut removed_cells = 0usize;
 
         loop {
-            const BATCH_SIZE: usize = 5;
+            const BATCH_SIZE: usize = 10;
 
             let mut current_batch = Vec::with_capacity(BATCH_SIZE);
             let mut current_batch_keys = Vec::with_capacity(BATCH_SIZE);
@@ -317,7 +321,7 @@ impl ShardStateStorage {
                 self.gc_lock.lock().await
             };
 
-            // self.cell_storage.validate_cache()?;
+            self.cell_storage.validate_cache()?;
 
             let db = self.db.clone();
             let cell_storage = self.cell_storage.clone();
@@ -355,10 +359,10 @@ impl ShardStateStorage {
                 db.raw()
                     .rocksdb()
                     .write_opt(batch, db.cells.write_config())?;
-                db.raw()
-                    .rocksdb()
-                    .flush_cf(&db.cells.get_unbounded_cf().bound())?;
 
+                // db.raw()
+                //     .rocksdb()
+                //     .flush_cf(&db.cells.get_unbounded_cf().bound())?;
                 // let bound = Option::<[u8; 0]>::None;
                 // db.raw().rocksdb().compact_range_cf(
                 //     &db.cells.get_unbounded_cf().bound(),
@@ -373,6 +377,8 @@ impl ShardStateStorage {
                 Ok::<_, anyhow::Error>((stats, alloc))
             })
             .await??;
+
+            self.cell_storage.validate_cache_2()?;
 
             drop(guard);
 
