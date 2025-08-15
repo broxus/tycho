@@ -23,6 +23,7 @@ pub fn default_test_config() -> MempoolMergedConfig {
         download_peers: 2,
         download_tasks: 1,
         sync_support_rounds: 15,
+        broadcast_retry_attempts: 2,
     };
 
     let node_config = MempoolNodeConfig {

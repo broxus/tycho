@@ -216,7 +216,7 @@ impl Broadcaster {
                     };
                     true
                 } else {
-                    if self.attempt > 2 // artificial delay for stable point rate
+                    if self.attempt > self.ctx.conf().consensus.broadcast_retry_attempts // artificial delay for stable point rate
                         && self.signatures.len() >= self.signers_count.majority_of_others()
                         && let Some(sender) = mem::take(&mut self.bcaster_signal)
                     {
