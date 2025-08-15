@@ -31,6 +31,14 @@ pub struct CellStorage {
 type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
 
 impl CellStorage {
+    pub fn validate_cache(&self) -> Result<(), CellStorageError> {
+        self.raw_cells_cache.validate_cache(&self.db)
+    }
+
+    pub fn validate_cache_2(&self) -> Result<(), CellStorageError> {
+        self.raw_cells_cache.validate_cache_2(&self.db)
+    }
+
     pub fn new(db: CoreDb, cache_size_bytes: ByteSize) -> Arc<Self> {
         let cells_cache = Default::default();
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
@@ -1582,6 +1590,40 @@ impl RawCellsCache {
                 RawCellsCacheItem::from_header_and_slice(AtomicI64::new(rc), data),
             ),
         }
+    }
+
+    fn validate_cache(&self, db: &CoreDb) -> Result<(), CellStorageError> {
+        for (hash, value) in self.inner.iter() {
+            let rc_cache = value.header.header.load(Ordering::Acquire);
+
+            if rc_cache != Self::RC_NAN {
+                if let Some(value) = db.cells.get(hash.as_slice())? {
+                    let rc_db = refcount::decode_value_with_rc(&value).0;
+                    if rc_cache != rc_db {
+                        panic!("invalid cache: cache = {rc_cache} db = {rc_db}");
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_cache_2(&self, db: &CoreDb) -> Result<(), CellStorageError> {
+        for (hash, value) in self.inner.iter() {
+            let rc_cache = value.header.header.load(Ordering::Acquire);
+
+            let value = db.cells.get(hash.as_slice())?.unwrap();
+            let rc_db = refcount::decode_value_with_rc(&value).0;
+
+            if rc_cache != Self::RC_NAN {
+                if rc_cache != rc_db {
+                    panic!("invalid cache 2: cache = {rc_cache} db = {rc_db}");
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn on_remove_cell(&self, key: &HashBytes, rc: i64) {

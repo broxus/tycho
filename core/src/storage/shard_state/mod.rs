@@ -123,6 +123,8 @@ impl ShardStateStorage {
         let handle = handle.clone();
         let accounts_split_depth = self.accounts_split_depth;
 
+        self.cell_storage.validate_cache()?;
+
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
             let root_hash = *root_cell.repr_hash();
@@ -175,6 +177,8 @@ impl ShardStateStorage {
             Ok::<_, anyhow::Error>((new_cell_count, updated))
         })
         .await??;
+
+        self.cell_storage.validate_cache_2()?;
 
         let count = if block_id.shard.is_masterchain() {
             &self.max_new_mc_cell_count
