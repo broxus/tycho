@@ -179,7 +179,8 @@ impl ShardStateStorage {
 
             raw_db.write(batch)?;
 
-            // raw_db.flush_cf(&cells_cf.bound())?;
+            raw_db.flush_cf(&cells_cf.bound())?;
+
             // let bound = Option::<[u8; 0]>::None;
             // raw_db.compact_range_cf(&cells_cf.bound(), bound, bound);
 
@@ -362,9 +363,10 @@ impl ShardStateStorage {
                     .rocksdb()
                     .write_opt(batch, db.cells.write_config())?;
 
-                // db.raw()
-                //     .rocksdb()
-                //     .flush_cf(&db.cells.get_unbounded_cf().bound())?;
+                db.raw()
+                    .rocksdb()
+                    .flush_cf(&db.cells.get_unbounded_cf().bound())?;
+
                 // let bound = Option::<[u8; 0]>::None;
                 // db.raw().rocksdb().compact_range_cf(
                 //     &db.cells.get_unbounded_cf().bound(),
