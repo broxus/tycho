@@ -17,7 +17,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
 use self::cell_storage::*;
-use self::store_state_raw::StoreStateContext;
+// use self::store_state_raw::StoreStateContext;
 use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CoreDb};
 
 mod cell_storage;
@@ -210,17 +210,19 @@ impl ShardStateStorage {
     }
 
     pub async fn store_state_file(&self, block_id: &BlockId, boc: File) -> Result<ShardStateStuff> {
-        let ctx = StoreStateContext {
-            db: self.db.clone(),
-            cell_storage: self.cell_storage.clone(),
-            temp_file_storage: self.temp_file_storage.clone(),
-            min_ref_mc_state: self.min_ref_mc_state.clone(),
-        };
+        todo!()
 
-        let block_id = *block_id;
-
-        let _gc_lock = self.gc_lock.lock().await;
-        tokio::task::spawn_blocking(move || ctx.store(&block_id, boc)).await?
+        // let ctx = StoreStateContext {
+        //     db: self.db.clone(),
+        //     cell_storage: self.cell_storage.clone(),
+        //     temp_file_storage: self.temp_file_storage.clone(),
+        //     min_ref_mc_state: self.min_ref_mc_state.clone(),
+        // };
+        //
+        // let block_id = *block_id;
+        //
+        // let _gc_lock = self.gc_lock.lock().await;
+        // tokio::task::spawn_blocking(move || ctx.store(&block_id, boc)).await?
     }
 
     pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
