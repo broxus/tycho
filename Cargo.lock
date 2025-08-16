@@ -3922,7 +3922,6 @@ dependencies = [
  "clap",
  "dashmap",
  "futures-util",
- "hex",
  "humantime",
  "itertools 0.12.1",
  "metrics",

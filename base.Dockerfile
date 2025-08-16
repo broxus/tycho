@@ -18,8 +18,8 @@ RUN git clone https://github.com/facebook/rocksdb.git && \
     mkdir build && cd build && \
     export CC=/usr/bin/clang && \
     export CXX=/usr/bin/clang++ && \
-    export PORTABLE=1 && \
-    cmake -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+    cmake -DPORTABLE=1 \
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_CXX_FLAGS="-Wno-nontrivial-memcall" \
           -DWITH_LZ4=ON \

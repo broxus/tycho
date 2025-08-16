@@ -17,8 +17,7 @@ pub trait Ctx {
 
 /// Root context for uninterrupted sequence of engine rounds
 pub struct EngineCtx(Arc<EngineCtxInner>);
-#[derive(Clone)]
-pub struct EngineCtxInner {
+struct EngineCtxInner {
     span: Span,
     conf: MempoolConfig,
     task_tracker: TaskTracker,
@@ -43,7 +42,11 @@ impl EngineCtx {
         }))
     }
     pub fn update(&mut self, since: Round) {
-        Arc::make_mut(&mut self.0).span = tracing::error_span!("rounds", "since" = since.0);
+        self.0 = Arc::new(EngineCtxInner {
+            span: tracing::error_span!("rounds", "since" = since.0),
+            conf: self.0.conf.clone(),
+            task_tracker: self.0.task_tracker.clone(),
+        });
     }
     pub fn meter_dag_len(len: usize) {
         metrics::gauge!("tycho_mempool_rounds_dag_length").set(len as u32);
