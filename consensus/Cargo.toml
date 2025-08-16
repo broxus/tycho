@@ -24,7 +24,6 @@ bumpalo = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
-hex = { workspace = true, optional = true }
 itertools = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
@@ -51,7 +50,6 @@ tycho-util = { workspace = true }
 tycho-storage = { workspace = true }
 
 [dev-dependencies]
-hex = { workspace = true }
 humantime = { workspace = true }
 parking_lot = { workspace = true, features = ["deadlock_detection"] }
 tempfile = { workspace = true }

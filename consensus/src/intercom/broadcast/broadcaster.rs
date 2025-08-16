@@ -86,7 +86,7 @@ impl Broadcaster {
             peer_updates,
             signers,
             signers_count,
-            removed_peers: Default::default(),
+            removed_peers: FastHashSet::from_iter([*point.info().author()]), // no loopback
             rejections: Default::default(),
             signatures: Default::default(),
             attempt: 0,
