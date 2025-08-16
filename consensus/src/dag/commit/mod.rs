@@ -147,7 +147,7 @@ impl Committer {
         let triggers = self.dag.triggers(RangeInclusive::new(
             self.anchor_chain
                 .top_proof_round()
-                .unwrap_or(self.dag.bottom_round()),
+                .unwrap_or_else(|| self.dag.bottom_round()),
             current_round,
         ))?;
 
@@ -195,8 +195,7 @@ impl Committer {
         conf: &MempoolConfig,
     ) -> Result<AnchorData, SyncError> {
         // in case previous anchor was triggered directly - rounds are already dropped
-        self.dag
-            .drop_upto(next.anchor.round() - conf.consensus.commit_history_rounds);
+        (self.dag).drop_upto(next.anchor.round() - conf.consensus.commit_history_rounds);
         let uncommitted =
             match (self.dag).gather_uncommitted(self.full_history_bottom, &next.anchor, conf) {
                 Ok(uncommitted) => uncommitted,
@@ -206,11 +205,7 @@ impl Committer {
                 }
             };
 
-        match self
-            .dag
-            .get(next.proof.round())
-            .and_then(|r| r.anchor_stage())
-        {
+        match (self.dag.get(next.proof.round())).and_then(|r| r.anchor_stage()) {
             Some(stage) if stage.role == AnchorStageRole::Proof => {
                 stage.is_used.store(true, Ordering::Relaxed);
             }
@@ -219,9 +214,7 @@ impl Committer {
 
         // Note a proof may be marked as used while it is fired by a future tigger, which
         //   may be left unmarked at the current run until upcoming points become ready
-        match next
-            .direct_trigger
-            .as_ref()
+        match (next.direct_trigger.as_ref())
             .map(|tr| self.dag.get(tr.round()).and_then(|r| r.anchor_stage()))
         {
             Some(Some(stage)) if stage.role == AnchorStageRole::Trigger => {

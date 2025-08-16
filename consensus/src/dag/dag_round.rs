@@ -160,20 +160,22 @@ impl DagRound {
             self.round(),
             "Coding error: point round does not match dag round"
         );
-        self.edit(point.info().author(), |loc| {
+        let mut is_unique = true;
+        let dag_point_future = self.edit(point.info().author(), |loc| {
             loc.versions
                 .entry(*point.info().digest())
-                .and_modify(|_| {
-                    panic!(
-                        "local point must be created only once. {:?}",
-                        point.info().id().alt()
-                    )
-                })
+                .and_modify(|_| is_unique = false)
                 .or_insert_with(|| {
                     DagPointFuture::new_local_valid(point, &loc.state, store, key_pair, round_ctx)
                 })
                 .clone()
-        })
+        });
+        assert!(
+            is_unique,
+            "local point must be created only once. {:?}",
+            point.info().id().alt()
+        );
+        dag_point_future
     }
 
     pub fn add_ill_formed_broadcast(
@@ -290,16 +292,12 @@ impl DagRound {
             self.round(),
             "Coding error: point restore round does not match dag round"
         );
-        let author = *point_restore.author();
-        self.edit(&author, |loc| {
+        let point_id = point_restore.id();
+        let mut is_unique = true;
+        let dag_point_future = self.edit(&point_id.author, |loc| {
             loc.versions
                 .entry(*point_restore.digest())
-                .and_modify(|_| {
-                    panic!(
-                        "points must be restored only once. {:?}",
-                        point_restore.alt()
-                    )
-                })
+                .and_modify(|_| is_unique = false)
                 .or_insert_with(|| {
                     DagPointFuture::new_restore(
                         self,
@@ -311,7 +309,13 @@ impl DagRound {
                     )
                 })
                 .clone()
-        })
+        });
+        assert!(
+            is_unique,
+            "points must be restored only once: {:?}",
+            point_id.alt()
+        );
+        dag_point_future
     }
 
     pub fn scan(&self, round: Round) -> Option<Self> {

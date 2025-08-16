@@ -18,8 +18,8 @@ pub struct CommitterTask {
 
 enum Inner {
     Uninit,
-    Ready(Committer),
-    Running(Task<Result<Committer, EngineError>>),
+    Ready(Box<Committer>),
+    Running(Task<Result<Box<Committer>, EngineError>>),
 }
 
 impl CommitterTask {
@@ -30,7 +30,7 @@ impl CommitterTask {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         Self {
-            inner: Inner::Ready(committer),
+            inner: Inner::Ready(Box::new(committer)),
             interval,
         }
     }
@@ -60,7 +60,7 @@ impl CommitterTask {
 }
 
 impl Inner {
-    async fn take_ready(&mut self) -> EngineResult<Option<Committer>> {
+    async fn take_ready(&mut self) -> EngineResult<Option<Box<Committer>>> {
         Ok(match mem::replace(self, Inner::Uninit) {
             Inner::Uninit => panic!("must be taken only once"),
             Inner::Ready(committer) => Some(committer),
@@ -76,7 +76,7 @@ impl Inner {
     }
 
     fn running(
-        mut committer: Committer,
+        mut committer: Box<Committer>,
         mut full_history_bottom: Option<Round>,
         anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
         round_ctx: &RoundCtx,

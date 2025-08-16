@@ -176,6 +176,8 @@ fn prepare_node_config(config: &SimulatorConfig, threads: u8) -> Result<String> 
         .context("no `root_dir` field in `storage` object in node config")?;
     *storage_root_dir = serde_json::json!(&config.pod.db_path);
 
+    node_config["core_storage"]["blob_db"]["pre_create_cas_tree"] = serde_json::json!(false);
+
     Ok(serde_json::to_string(&node_config)?)
 }
 
