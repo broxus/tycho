@@ -696,8 +696,6 @@ impl CellStorage {
         roots: &[HashBytes],
         split_at: FastHashSet<HashBytes>,
     ) -> Result<(usize, WriteBatch), CellStorageError> {
-        let root = &roots[0];
-
         type RemoveResult = Result<(), CellStorageError>;
 
         struct Alloc<'a> {
@@ -738,7 +736,7 @@ impl CellStorage {
                     herd,
                     split_at,
                     transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
-                        128,
+                        65536,
                         Default::default(),
                         512,
                     ),
@@ -933,10 +931,12 @@ impl CellStorage {
         let ctx = RemoveContext::new(&self.db, herd, &self.raw_cells_cache, split_at);
 
         std::thread::scope(|scope| {
-            scope.spawn(|| {
-                // TODO: Handle error properly.
-                ctx.traverse_cell(root, scope).unwrap();
-            });
+            for root in roots {
+                scope.spawn(|| {
+                    // TODO: Handle error properly.
+                    ctx.traverse_cell(root, scope).unwrap();
+                });
+            }
 
             Ok::<(), CellStorageError>(())
         })?;
