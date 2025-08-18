@@ -932,10 +932,7 @@ impl CellStorage {
 
         std::thread::scope(|scope| {
             for root in roots {
-                scope.spawn(|| {
-                    // TODO: Handle error properly.
-                    ctx.traverse_cell(root, scope).unwrap();
-                });
+                ctx.traverse_cell(root, scope)?;
             }
 
             Ok::<(), CellStorageError>(())
