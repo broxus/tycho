@@ -140,7 +140,8 @@ impl ShardStateStorage {
         if let Some(hash) = self.cell_storage.validate_cache_store()? {
             let cell = Cell::from(self.cell_storage.load_cell(hash)? as Arc<_>);
             let depth = cell.repr_depth();
-            panic!("invalid cache store: depth = {depth}");
+            let hash = cell.repr_hash().to_string();
+            panic!("invalid cache store: depth = {depth}, hash = {hash}");
         }
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
@@ -161,6 +162,10 @@ impl ShardStateStorage {
                 )?
             } else {
                 let split_at = split_shard_accounts(&root_cell, accounts_split_depth)?;
+
+                for hash in split_at.keys() {
+                    tracing::error!("split_at: {}", hash.to_string());
+                }
 
                 cell_storage.store_cell_mt(
                     root_cell.as_ref(),
@@ -203,7 +208,8 @@ impl ShardStateStorage {
         if let Some(hash) = self.cell_storage.validate_cache_store_2()? {
             let cell = Cell::from(self.cell_storage.load_cell(hash)? as Arc<_>);
             let depth = cell.repr_depth();
-            panic!("invalid cache store 2: depth = {depth}");
+            let hash = cell.repr_hash().to_string();
+            panic!("invalid cache store 2: depth = {depth}, hash = {hash}");
         }
 
         let count = if block_id.shard.is_masterchain() {
@@ -332,7 +338,8 @@ impl ShardStateStorage {
             if let Some(hash) = self.cell_storage.validate_cache()? {
                 let cell = Cell::from(self.cell_storage.load_cell(hash)? as Arc<_>);
                 let depth = cell.repr_depth();
-                panic!("invalid cache: depth = {depth}");
+                let hash = cell.repr_hash().to_string();
+                panic!("invalid cache: depth = {depth}, hash = {hash}");
             }
 
             let db = self.db.clone();
@@ -352,6 +359,10 @@ impl ShardStateStorage {
                             .collect::<FastHashSet<HashBytes>>();
                         split_at.extend(hashes);
                     }
+                }
+
+                for hash in &split_at {
+                    tracing::error!("split_at: {}", hash.to_string());
                 }
 
                 let roots = current_batch
@@ -393,7 +404,8 @@ impl ShardStateStorage {
             if let Some(hash) = self.cell_storage.validate_cache_2()? {
                 let cell = Cell::from(self.cell_storage.load_cell(hash)? as Arc<_>);
                 let depth = cell.repr_depth();
-                panic!("invalid cache 2: depth = {depth}");
+                let hash = cell.repr_hash().to_string();
+                panic!("invalid cache 2: depth = {depth}, hash = {hash}");
             }
 
             drop(guard);
