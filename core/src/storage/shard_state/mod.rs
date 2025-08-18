@@ -137,7 +137,11 @@ impl ShardStateStorage {
         let accounts_split_depth = self.accounts_split_depth;
         let background_drop_cell_tx = self.background_drop_cell_tx.clone();
 
-        self.cell_storage.validate_cache_store()?;
+        if let Some(hash) = self.cell_storage.validate_cache_store()? {
+            let cell = Cell::from(self.cell_storage.load_cell(hash)? as Arc<_>);
+            let depth = cell.repr_depth();
+            panic!("invalid cache store: depth = {depth}");
+        }
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
@@ -196,7 +200,11 @@ impl ShardStateStorage {
         })
         .await??;
 
-        self.cell_storage.validate_cache_store_2()?;
+        if let Some(hash) = self.cell_storage.validate_cache_store_2()? {
+            let cell = Cell::from(self.cell_storage.load_cell(hash)? as Arc<_>);
+            let depth = cell.repr_depth();
+            panic!("invalid cache store 2: depth = {depth}");
+        }
 
         let count = if block_id.shard.is_masterchain() {
             &self.max_new_mc_cell_count
@@ -273,7 +281,7 @@ impl ShardStateStorage {
         let mut removed_cells = 0usize;
 
         loop {
-            const BATCH_SIZE: usize = 5;
+            const BATCH_SIZE: usize = 1;
 
             let mut current_batch = Vec::with_capacity(BATCH_SIZE);
             let mut current_batch_keys = Vec::with_capacity(BATCH_SIZE);
@@ -321,7 +329,11 @@ impl ShardStateStorage {
                 self.gc_lock.lock().await
             };
 
-            self.cell_storage.validate_cache()?;
+            if let Some(hash) = self.cell_storage.validate_cache()? {
+                let cell = Cell::from(self.cell_storage.load_cell(hash)? as Arc<_>);
+                let depth = cell.repr_depth();
+                panic!("invalid cache: depth = {depth}");
+            }
 
             let db = self.db.clone();
             let cell_storage = self.cell_storage.clone();
@@ -378,7 +390,11 @@ impl ShardStateStorage {
             })
             .await??;
 
-            self.cell_storage.validate_cache_2()?;
+            if let Some(hash) = self.cell_storage.validate_cache_2()? {
+                let cell = Cell::from(self.cell_storage.load_cell(hash)? as Arc<_>);
+                let depth = cell.repr_depth();
+                panic!("invalid cache 2: depth = {depth}");
+            }
 
             drop(guard);
 

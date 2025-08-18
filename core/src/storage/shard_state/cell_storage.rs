@@ -31,19 +31,19 @@ pub struct CellStorage {
 type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
 
 impl CellStorage {
-    pub fn validate_cache(&self) -> Result<(), CellStorageError> {
+    pub fn validate_cache(&self) -> Result<Option<HashBytes>, CellStorageError> {
         self.raw_cells_cache.validate_cache(&self.db)
     }
 
-    pub fn validate_cache_store(&self) -> Result<(), CellStorageError> {
+    pub fn validate_cache_store(&self) -> Result<Option<HashBytes>, CellStorageError> {
         self.raw_cells_cache.validate_cache_store(&self.db)
     }
 
-    pub fn validate_cache_2(&self) -> Result<(), CellStorageError> {
+    pub fn validate_cache_2(&self) -> Result<Option<HashBytes>, CellStorageError> {
         self.raw_cells_cache.validate_cache_2(&self.db)
     }
 
-    pub fn validate_cache_store_2(&self) -> Result<(), CellStorageError> {
+    pub fn validate_cache_store_2(&self) -> Result<Option<HashBytes>, CellStorageError> {
         self.raw_cells_cache.validate_cache_store_2(&self.db)
     }
 
@@ -1523,7 +1523,7 @@ impl RawCellsCache {
         }
     }
 
-    fn validate_cache(&self, db: &CoreDb) -> Result<(), CellStorageError> {
+    fn validate_cache(&self, db: &CoreDb) -> Result<Option<HashBytes>, CellStorageError> {
         for (hash, value) in self.inner.iter() {
             let rc_cache = value.header.header.load(Ordering::Acquire);
 
@@ -1531,16 +1531,17 @@ impl RawCellsCache {
                 if let Some(value) = db.cells.get(hash.as_slice())? {
                     let rc_db = refcount::decode_value_with_rc(&value).0;
                     if rc_cache != rc_db {
-                        panic!("invalid cache: cache = {rc_cache} db = {rc_db}");
+                        tracing::error!("invalid cache: cache = {rc_cache} db = {rc_db}");
+                        return Ok(Some(hash));
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
-    fn validate_cache_store(&self, db: &CoreDb) -> Result<(), CellStorageError> {
+    fn validate_cache_store(&self, db: &CoreDb) -> Result<Option<HashBytes>, CellStorageError> {
         for (hash, value) in self.inner.iter() {
             let rc_cache = value.header.header.load(Ordering::Acquire);
 
@@ -1548,79 +1549,50 @@ impl RawCellsCache {
                 if let Some(value) = db.cells.get(hash.as_slice())? {
                     let rc_db = refcount::decode_value_with_rc(&value).0;
                     if rc_cache != rc_db {
-                        panic!("invalid cache store: cache = {rc_cache} db = {rc_db}");
+                        tracing::error!("invalid cache store: cache = {rc_cache} db = {rc_db}");
+                        return Ok(Some(hash));
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
-    fn validate_cache_2(&self, db: &CoreDb) -> Result<(), CellStorageError> {
+    fn validate_cache_2(&self, db: &CoreDb) -> Result<Option<HashBytes>, CellStorageError> {
         for (hash, value) in self.inner.iter() {
             let rc_cache = value.header.header.load(Ordering::Acquire);
 
             if rc_cache != Self::RC_NAN {
-                let mut cnt = 0;
-                loop {
-                    let value = db.cells.get(hash.as_slice())?.unwrap();
+                if let Some(value) = db.cells.get(hash.as_slice())? {
                     let rc_db = refcount::decode_value_with_rc(&value).0;
-
                     if rc_cache != rc_db {
-                        tracing::error!(
-                            "Cache is invalid 2: cache = {rc_cache} db = {rc_db}, cnt = {cnt}"
-                        );
-
-                        cnt += 1;
-                        if cnt > 5 {
-                            panic!("invalid cache 2: cache = {rc_cache} db = {rc_db}");
-                        }
-
-                        std::thread::sleep(Duration::from_secs(1));
-
-                        continue;
+                        tracing::error!("invalid cache 2: cache = {rc_cache} db = {rc_db}");
+                        return Ok(Some(hash));
                     }
-
-                    break;
                 }
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
-    fn validate_cache_store_2(&self, db: &CoreDb) -> Result<(), CellStorageError> {
+    fn validate_cache_store_2(&self, db: &CoreDb) -> Result<Option<HashBytes>, CellStorageError> {
         for (hash, value) in self.inner.iter() {
             let rc_cache = value.header.header.load(Ordering::Acquire);
 
             if rc_cache != Self::RC_NAN {
-                let mut cnt = 0;
-                loop {
-                    let value = db.cells.get(hash.as_slice())?.unwrap();
+                if let Some(value) = db.cells.get(hash.as_slice())? {
                     let rc_db = refcount::decode_value_with_rc(&value).0;
-
                     if rc_cache != rc_db {
-                        tracing::error!(
-                            "Cache is invalid 2: cache = {rc_cache} db = {rc_db}, cnt = {cnt}"
-                        );
-
-                        cnt += 1;
-                        if cnt > 5 {
-                            panic!("invalid cache store 2: cache = {rc_cache} db = {rc_db}");
-                        }
-
-                        std::thread::sleep(Duration::from_secs(1));
-
-                        continue;
+                        tracing::error!("invalid cache store 2: cache = {rc_cache} db = {rc_db}");
+                        return Ok(Some(hash));
                     }
-
-                    break;
                 }
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
     fn get_rc_for_delete(
