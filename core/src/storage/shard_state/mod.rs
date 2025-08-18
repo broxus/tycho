@@ -273,7 +273,7 @@ impl ShardStateStorage {
         let mut removed_cells = 0usize;
 
         loop {
-            const BATCH_SIZE: usize = 10;
+            const BATCH_SIZE: usize = 1;
 
             let mut current_batch = Vec::with_capacity(BATCH_SIZE);
             let mut current_batch_keys = Vec::with_capacity(BATCH_SIZE);
