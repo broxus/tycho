@@ -14,7 +14,7 @@
 //!
 //! ## Archive Lifecycle
 //!
-//! ```
+//! ```text
 //! [Building]    -> [Committing] -> [Committed] -> [GC Eligible]
 //!     |                  |              |              |
 //!     v                  v              v              v
