@@ -30,7 +30,7 @@ fmt: install_fmt
     cargo +nightly fmt --all
 
 # CI checks.
-ci: check_dev_docs check_format lint test
+ci: check_dev_docs check_format lint test test_docs
 
 # Checks links in the `/docs` directory.
 check_dev_docs:
@@ -52,6 +52,10 @@ docs:
 # Runs all tests.
 test:
     cargo nextest run --workspace --features test
+
+# Tests documentation examples.
+test_docs:
+    cargo test --doc --workspace
 
 test_cov:
     #!/usr/bin/env bash
