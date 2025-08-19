@@ -6,6 +6,7 @@ pub use tycho_util_proc::PartialConfig;
 ///
 /// By default all fields are "non-important", e.g.:
 /// ```
+/// # use tycho_util::config::PartialConfig;
 /// #[derive(Default, PartialConfig)]
 /// struct EmptyConfig {
 ///     field1: usize,
@@ -21,6 +22,7 @@ pub use tycho_util_proc::PartialConfig;
 ///
 /// Use `#[important]` to include some fields as is, e.g.:
 /// ```
+/// # use tycho_util::config::PartialConfig;
 /// #[derive(Default, PartialConfig)]
 /// struct SimpleConfig {
 ///     field1: usize,
@@ -42,6 +44,7 @@ pub use tycho_util_proc::PartialConfig;
 ///
 /// Partial configs can be nested, e.g.:
 /// ```
+/// # use tycho_util::config::PartialConfig;
 /// #[derive(Default, PartialConfig)]
 /// struct RootConfig {
 ///     field1: usize,
@@ -60,7 +63,8 @@ pub use tycho_util_proc::PartialConfig;
 /// ```
 /// will generate a partial config using new types:
 /// ```
-/// # #[derive(Default, PartialConfig)]
+/// # use tycho_util::config::PartialConfig;
+/// #[derive(Default, PartialConfig)]
 /// # struct ChildConfig {}
 /// struct PartialRootConfig {
 ///     field2: usize,
