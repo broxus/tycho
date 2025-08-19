@@ -1,0 +1,12 @@
+// Tries to read and parse an environment variable. Uses the provided value if not found.
+// Example: 1000000000 int_or_env ELECTOR_MSG_VALUE_UPDATE_VSET
+{
+    // Get next word as an env name
+    bl word getenv?
+    // Try to parse it if it exists.
+    { nip (number) 0= abort"not a valid msg value" } if
+    // Store parsed value as an int constant.
+    2 (') INT (execute)
+    // Continue execution.
+    1 'nop
+} :: int_or_env
