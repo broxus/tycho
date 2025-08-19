@@ -24,9 +24,6 @@ const ANSWER_TAG_ERROR = 0xffffffff
 
 const CONFIG_MSG_TAG_SET_NEXT_VSET = 0x4e565354
 
-const MSG_VALUE_UPDATE_VSET = 1 << 30 // ~1 token
-const MSG_VALUE_STAKE_ACCEPTED = ton("1")
-
 const STAKE_ERR_NO_ELECTION = 0
 const STAKE_ERR_INVALID_SIGNATURE = 1
 const STAKE_ERR_DIFF_TOO_SMALL = 2
@@ -34,6 +31,14 @@ const STAKE_ERR_ELECTION_ID_MISMATCH = 3
 const STAKE_ERR_ADDR_CHANGED = 4
 const STAKE_ERR_STAKE_TOO_SMALL = 5
 const STAKE_ERR_MAX_FACTOR_TOO_SMALL = 6
+
+@pure
+fun msg_value_update_vset(): coins
+    asm "1000000000 int_or_env ELECTOR_MSG_VALUE_UPDATE_VSET"
+
+@pure
+fun msg_value_stake_accepted(): coins
+    asm "1000000000 int_or_env ELECTOR_MSG_VALUE_STAKE_ACCEPTED"
 
 //
 // === Storage Models ===
@@ -209,14 +214,8 @@ fun onInternalMessage(in: InMessage) {
         }
         MSG_TAG_UPGRADE_CODE => {
             val ok = upgradeCode(in.senderAddress, body, queryId);
-            sendMessageBack(
-                in.senderAddress,
-                ok ? ANSWER_TAG_CODE_ACCEPTED : ANSWER_TAG_ERROR,
-                queryId,
-                op,
-                0,
-                SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE
-            );
+            val tag = ok ? ANSWER_TAG_CODE_ACCEPTED : ANSWER_TAG_ERROR;
+            sendMessageBack(in.senderAddress, tag, queryId, op);
         }
         MSG_TAG_VSET_CONFIRMED => {
             processConfigVsetResponse(in.senderAddress, queryId, true);
@@ -228,14 +227,7 @@ fun onInternalMessage(in: InMessage) {
             if ((op & (1 << 31)) == 0) {
                 // Operations without the highest bit are "queries".
                 // If the query is unknown we are answering with an error here.
-                sendMessageBack(
-                    in.senderAddress,
-                    ANSWER_TAG_ERROR,
-                    queryId,
-                    op,
-                    0,
-                    SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE
-                );
+                sendMessageBack(in.senderAddress, ANSWER_TAG_ERROR, queryId, op);
             }
         }
     }
@@ -251,14 +243,7 @@ fun onInternalMessage(in: InMessage) {
 /// it contained some arguments besides the code.
 @method_id(1666)
 fun afterCodeUpgrade(source: address, _args: slice, queryId: int) {
-    sendMessageBack(
-        source,
-        ANSWER_TAG_CODE_ACCEPTED,
-        queryId,
-        MSG_TAG_UPGRADE_CODE,
-        0,
-        SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE
-    );
+    sendMessageBack(source, ANSWER_TAG_CODE_ACCEPTED, queryId, MSG_TAG_UPGRADE_CODE);
 }
 
 //
@@ -450,7 +435,7 @@ fun conductElection(data: Storage, election: Election): bool {
     var configAddress = blockchain.configParam(0)!.beginParse().preloadUint(256);
     createMessage({
         bounce: true,
-        value: MSG_VALUE_UPDATE_VSET,
+        value: msg_value_update_vset(),
         dest: (MASTERCHAIN, configAddress),
         body: beginCell() //
             .storeUint(CONFIG_MSG_TAG_SET_NEXT_VSET, 32)
@@ -989,7 +974,7 @@ fun processNewStake(source: address, value: coins, body: slice, queryId: int) {
 
     // Parse current election data.
     var election = lazy data.currentElection.load();
-    value -= MSG_VALUE_STAKE_ACCEPTED; // deduct GR$1 for sending confirmation
+    value -= msg_value_stake_accepted(); // deduct GR$1 for sending confirmation
     if ((value << 12) < election.totalStake) {
         // Stake smaller than 1/4096 of the total accumulated stakes.
         returnStake(source, queryId, STAKE_ERR_DIFF_TOO_SMALL);
@@ -1050,26 +1035,18 @@ fun processNewStake(source: address, value: coins, body: slice, queryId: int) {
 
     // Return confirmation message.
     if (queryId != 0) {
-        sendMessageBack(
-            source,
-            ANSWER_TAG_STAKE_ACCEPTED,
-            queryId,
-            0,
-            MSG_VALUE_STAKE_ACCEPTED,
-            SEND_MODE_IGNORE_ERRORS
-        );
+        val reply = createMessage({
+            bounce: false,
+            value: msg_value_stake_accepted(),
+            dest: source,
+            body: (ANSWER_TAG_STAKE_ACCEPTED as uint32, queryId as uint64),
+        });
+        reply.send(SEND_MODE_IGNORE_ERRORS);
     }
 }
 
 fun returnStake(addr: address, queryId: int, reason: int) {
-    sendMessageBack(
-        addr,
-        ANSWER_TAG_STAKE_REJECTED,
-        queryId,
-        reason,
-        0,
-        SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE
-    );
+    sendMessageBack(addr, ANSWER_TAG_STAKE_REJECTED, queryId, reason);
 }
 
 /// Process stake withdrawal request from a participant.
@@ -1084,14 +1061,7 @@ fun recoverStake(source: address, queryId: int) {
     var (wc, addr) = source.getWorkchainAndHash();
     if (wc != MASTERCHAIN) {
         // Not from masterchain.
-        sendMessageBack(
-            source,
-            ANSWER_TAG_NO_STAKE_TO_RECOVER,
-            queryId,
-            MSG_TAG_RECOVER_STAKE,
-            0,
-            SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE
-        );
+        sendMessageBack(source, ANSWER_TAG_NO_STAKE_TO_RECOVER, queryId, MSG_TAG_RECOVER_STAKE);
         return;
     }
 
@@ -1099,14 +1069,7 @@ fun recoverStake(source: address, queryId: int) {
     var (creditsCs, found) = data.credits.uDictDeleteAndGet(256, addr);
     if (!found) {
         // No credit for sender.
-        sendMessageBack(
-            source,
-            ANSWER_TAG_NO_STAKE_TO_RECOVER,
-            queryId,
-            MSG_TAG_RECOVER_STAKE,
-            0,
-            SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE
-        );
+        sendMessageBack(source, ANSWER_TAG_NO_STAKE_TO_RECOVER, queryId, MSG_TAG_RECOVER_STAKE);
         return;
     }
 
@@ -1204,35 +1167,17 @@ fun processConfigVsetResponse(source: address, queryId: int, success: bool) {
     }
 }
 
-fun sendMessageBack(
-    dest: address,
-    functionTag: uint32,
-    queryId: uint64,
-    body: uint32,
-    grams: coins,
-    mode: int,
-) {
-    var outMessage: OutMessage;
-
-    if (body >= 0) {
-        outMessage = createMessage({
-            bounce: false,
-            value: grams,
-            dest,
-            body: (functionTag, queryId, body),
-        });
-    } else {
-        outMessage = createMessage({
-            bounce: false,
-            value: grams,
-            dest,
-            body: (functionTag, queryId),
-        });
-    }
-
-    outMessage.send(mode);
+fun sendMessageBack(dest: address, functionTag: uint32, queryId: uint64, body: uint32) {
+    val message = createMessage({
+        bounce: false,
+        value: 0,
+        dest,
+        body: (functionTag, queryId, body),
+    });
+    message.send(SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE);
 }
 
+@inline_ref
 fun Storage.unfreezeAll(mutate self, electionId: int) {
     var updated = unfreezeAll(self.credits, self.pastElections, electionId);
     self.credits = updated.credits;
@@ -1246,6 +1191,7 @@ struct UnfreezeAllResult {
     recovered: coins
 }
 
+@inline
 fun unfreezeAll(credits: dict, pastElections: dict, electionId: int): UnfreezeAllResult {
     var (cs, found) = pastElections.uDictDeleteAndGet(32, electionId);
     if (!found) {
@@ -1335,6 +1281,7 @@ fun creditTo(mutate credits: dict, addr: int, amount: coins) {
 fun maxInt(): int
     asm "256 PUSHPOW2DEC"
 
+@inline_ref
 fun cell?.hashEq(self, expectedVsetHash: int): bool {
     if (self == null) {
         return false;
