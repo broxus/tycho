@@ -645,13 +645,10 @@ impl CellStorage {
     ) -> Result<Arc<StorageCell>, CellStorageError> {
         let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
-        metrics::counter!("tycho_storage_load_cell_total").increment(1);
-
-        if let Some(cell) = self.cells_cache.get(&hash) {
-            if let Some(cell) = cell.upgrade() {
-                metrics::counter!("tycho_storage_load_cell_hit_total").increment(1);
-                return Ok(cell);
-            }
+        if let Some(cell) = self.cells_cache.get(&hash)
+            && let Some(cell) = cell.upgrade()
+        {
+            return Ok(cell);
         }
 
         let cell = match self.raw_cells_cache.get_raw(&self.db, &hash) {
@@ -799,8 +796,6 @@ impl CellStorage {
                 repr_hash: &HashBytes,
                 alloc: &mut Alloc<'a>,
             ) -> Result<Option<&'a [HashBytes]>, CellStorageError> {
-                metrics::counter!("tycho_remove_cell_total").increment(1);
-
                 use dashmap::mapref::entry::Entry;
 
                 // Fast path: cell is already presented in this transaction, just update refs.
@@ -929,6 +924,7 @@ impl CellStorage {
         Ok((ctx.finalize(&mut batch), batch))
     }
 
+    #[allow(unused)]
     pub fn remove_cell(
         &self,
         alloc: &Bump,
@@ -1300,6 +1296,52 @@ impl CellImpl for StorageCell {
         self.hashes[i as usize].1
     }
 
+    fn take_first_child(&mut self) -> Option<Cell> {
+        let state = self.reference_states[0].swap(Self::REF_EMPTY, Ordering::AcqRel);
+        let data = self.reference_data[0].get_mut();
+        match state {
+            Self::REF_STORAGE => Some(unsafe { data.take_storage_cell() }),
+            Self::REF_REPLACED => Some(unsafe { data.take_replaced_cell() }),
+            _ => None,
+        }
+    }
+
+    fn replace_first_child(&mut self, parent: Cell) -> std::result::Result<Cell, Cell> {
+        let state = self.reference_states[0].load(Ordering::Acquire);
+        if state < Self::REF_STORAGE {
+            return Err(parent);
+        }
+
+        self.reference_states[0].store(Self::REF_REPLACED, Ordering::Release);
+        let data = self.reference_data[0].get_mut();
+
+        let cell = match state {
+            Self::REF_STORAGE => unsafe { data.take_storage_cell() },
+            Self::REF_REPLACED => unsafe { data.take_replaced_cell() },
+            _ => return Err(parent),
+        };
+        data.replaced_cell = ManuallyDrop::new(parent);
+        Ok(cell)
+    }
+
+    fn take_next_child(&mut self) -> Option<Cell> {
+        while self.descriptor.reference_count() > 1 {
+            self.descriptor.d1 -= 1;
+            let idx = (self.descriptor.d1 & CellDescriptor::REF_COUNT_MASK) as usize;
+
+            let state = self.reference_states[idx].swap(Self::REF_EMPTY, Ordering::AcqRel);
+            let data = self.reference_data[idx].get_mut();
+
+            return Some(match state {
+                Self::REF_STORAGE => unsafe { data.take_storage_cell() },
+                Self::REF_REPLACED => unsafe { data.take_replaced_cell() },
+                _ => continue,
+            });
+        }
+
+        None
+    }
+
     fn stats(&self) -> CellTreeStats {
         // TODO: make real implementation
 
@@ -1336,6 +1378,16 @@ pub union StorageCellReferenceData {
     storage_cell: ManuallyDrop<Arc<StorageCell>>,
     /// Replaced state.
     replaced_cell: ManuallyDrop<Cell>,
+}
+
+impl StorageCellReferenceData {
+    unsafe fn take_storage_cell(&mut self) -> Cell {
+        Cell::from(unsafe { ManuallyDrop::take(&mut self.storage_cell) } as Arc<_>)
+    }
+
+    unsafe fn take_replaced_cell(&mut self) -> Cell {
+        unsafe { ManuallyDrop::take(&mut self.replaced_cell) }
+    }
 }
 
 struct RawCellsCache {
@@ -1385,7 +1437,7 @@ impl RawCellsCache {
 
         const MAX_CELL_SIZE: u64 = 192;
         const KEY_SIZE: u64 = 32;
-        const SHARDS: usize = 1024;
+        const SHARDS: usize = 512;
 
         let estimated_cell_cache_capacity = size_in_bytes / (KEY_SIZE + MAX_CELL_SIZE);
         tracing::info!(
@@ -1421,13 +1473,8 @@ impl RawCellsCache {
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
         use quick_cache::sync::GuardResult;
 
-        metrics::counter!("tycho_storage_load_raw_cell_total").increment(1);
-
         match self.inner.get_value_or_guard(key, None) {
-            GuardResult::Value(value) => {
-                metrics::counter!("tycho_storage_load_raw_cell_hit_total").increment(1);
-                Ok(Some(value))
-            }
+            GuardResult::Value(value) => Ok(Some(value)),
             GuardResult::Guard(g) => {
                 let value = {
                     let started_at = Instant::now();

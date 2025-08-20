@@ -125,6 +125,7 @@ impl ShardStateStorage {
         if handle.has_state() {
             return Ok(false);
         }
+
         let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
 
         let block_id = *handle.id();
@@ -176,9 +177,9 @@ impl ShardStateStorage {
 
             raw_db.write(batch)?;
 
-            hist.finish();
-
             background_drop_cell_tx.send(root_cell)?;
+
+            hist.finish();
 
             let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
             if updated {
@@ -237,11 +238,6 @@ impl ShardStateStorage {
 
     #[tracing::instrument(skip(self))]
     pub async fn remove_outdated_states(&self, mc_seqno: u32) -> Result<()> {
-        tracing::info!(
-            min_ref_mc_state = self.min_ref_mc_state.seqno(),
-            "remove_outdated_states"
-        );
-
         // Compute recent block ids for the specified masterchain seqno
         let Some(top_blocks) = self.compute_recent_blocks(mc_seqno).await? else {
             tracing::warn!("recent blocks edge not found");
@@ -336,6 +332,7 @@ impl ShardStateStorage {
                         let hashes = split_shard_accounts(root_cell, accounts_split_depth)?
                             .into_keys()
                             .collect::<FastHashSet<HashBytes>>();
+
                         split_at.extend(hashes);
                     }
                 }
@@ -366,18 +363,19 @@ impl ShardStateStorage {
             removed_cells += total;
             alloc = inner_alloc; // Reuse allocation without passing alloc by ref
 
-            // tracing::debug!(removed_cells = total, %block_id);
-
             removed_states += 1;
-            // iter.next();
 
             metrics::counter!("tycho_storage_state_gc_count").increment(1);
             metrics::histogram!("tycho_storage_state_gc_cells_count").record(total as f64);
 
-            for block_id in current_batch_blocks {
-                if block_id.is_masterchain() {
-                    metrics::gauge!("tycho_gc_states_seqno").set(block_id.seqno as f64);
-                }
+            let last_seqno = current_batch_blocks
+                .iter()
+                .filter(|x| x.is_masterchain())
+                .map(|x| x.seqno)
+                .max();
+
+            if let Some(seqno) = last_seqno {
+                metrics::gauge!("tycho_gc_states_seqno").set(seqno as f64);
             }
         }
 

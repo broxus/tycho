@@ -623,7 +623,7 @@ impl CollatorStdImpl {
 
         // update collation session info to refer to a correct subset in collated block
         self.collation_session = collation_session;
-        let working_state = if !reset {
+        let mut working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
 
             // update mc_data if newer
@@ -654,7 +654,7 @@ impl CollatorStdImpl {
                         // Process previous tasks until finding the finished one
                         while let Some(task) = self.store_new_state_tasks.pop() {
                             if !task.store_new_state_task.is_finished()
-                                && unfinished_tasks.len() < 5
+                                && unfinished_tasks.len() < 10
                             {
                                 unfinished_tasks.push(task);
                                 continue;
