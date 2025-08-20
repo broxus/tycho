@@ -109,6 +109,8 @@ impl CmdRun {
     }
 
     async fn run_impl(self, args: BaseArgs, node_config: NodeConfig) -> Result<()> {
+        let is_single_node = node_config.single_node;
+
         init_logger(&node_config.logger, self.logger_config)?;
         set_abort_with_tracing();
 
@@ -146,7 +148,9 @@ impl CmdRun {
             node.overwrite_cold_boot_type(cold_boot_type);
         }
 
-        node.wait_for_neighbours().await;
+        if !is_single_node {
+            node.wait_for_neighbours().await;
+        }
 
         let init_block_id = node
             .boot(self.import_zerostate)

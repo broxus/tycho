@@ -7,7 +7,7 @@ use tycho_types::models::MsgInfo;
 use tycho_types::prelude::Load;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::mempool::impls::std_impl::deduplicator::Deduplicator;
+use crate::mempool::impls::common::deduplicator::Deduplicator;
 use crate::mempool::{ExternalMessage, MempoolAnchorId};
 
 pub struct Parser {

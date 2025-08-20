@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::Bytes;
 use tycho_network::PeerId;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -13,11 +14,14 @@ pub use self::state_update_context::*;
 use crate::types::processed_upto::BlockSeqno;
 
 mod impls {
+    pub use self::single_node_impl::MempoolAdapterSingleNodeImpl;
     pub use self::std_impl::MempoolAdapterStdImpl;
     pub use self::stub_impl::MempoolAdapterStubImpl;
     #[cfg(test)]
     pub(crate) use self::stub_impl::{make_stub_anchor, make_stub_external};
 
+    mod common;
+    mod single_node_impl;
     mod std_impl;
     mod stub_impl;
 }
@@ -25,9 +29,7 @@ mod impls {
 // === Factory ===
 
 pub trait MempoolAdapterFactory {
-    type Adapter: MempoolAdapter;
-
-    fn create(&self, listener: Arc<dyn MempoolEventListener>) -> Arc<Self::Adapter>;
+    fn create(&self, listener: Arc<dyn MempoolEventListener>) -> Arc<dyn MempoolAdapter>;
 }
 
 impl<F, R> MempoolAdapterFactory for F
@@ -35,9 +37,7 @@ where
     F: Fn(Arc<dyn MempoolEventListener>) -> Arc<R>,
     R: MempoolAdapter,
 {
-    type Adapter = R;
-
-    fn create(&self, listener: Arc<dyn MempoolEventListener>) -> Arc<Self::Adapter> {
+    fn create(&self, listener: Arc<dyn MempoolEventListener>) -> Arc<dyn MempoolAdapter> {
         self(listener)
     }
 }
@@ -80,6 +80,22 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// We can do this for anchors that processed in blocks
     /// which included in signed master - we do not need them anymore
     fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()>;
+
+    fn send_external(&self, message: Bytes);
+
+    /// **Warning:** changes from `GlobalConfig` may be rewritten by applied mc state
+    /// only if applied mc state has greater time and GEQ round
+    async fn update_delayed_config(
+        &self,
+        consensus_config: Option<&ConsensusConfig>,
+        genesis_info: &GenesisInfo,
+    ) -> Result<()>;
+}
+
+impl MempoolAdapterFactory for Arc<dyn MempoolAdapter> {
+    fn create(&self, _listener: Arc<dyn MempoolEventListener>) -> Arc<dyn MempoolAdapter> {
+        self.clone()
+    }
 }
 
 // === Types ===
