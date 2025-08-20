@@ -1769,6 +1769,16 @@ impl MsgsExecutionParamsStuff {
         }
     }
 
+    #[cfg(test)]
+    pub fn with_current_and_new(
+        current: MsgsExecutionParams,
+        new: Option<MsgsExecutionParams>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(MsgsExecutionParamsStuffInner { current, new })),
+        }
+    }
+
     pub fn new_is_some(&self) -> bool {
         self.inner.read().new.is_some()
     }
