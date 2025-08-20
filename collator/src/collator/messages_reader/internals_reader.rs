@@ -283,11 +283,8 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         &mut self,
         seqno: BlockSeqno,
         reader: InternalsRangeReader<V>,
-    ) -> &mut InternalsRangeReader<V> {
+    ) {
         self.range_readers.insert(seqno, reader);
-        self.range_readers
-            .get_mut(&seqno)
-            .expect("just inserted range reader should exist")
     }
 
     pub fn get_last_range_reader(&self) -> Result<(&BlockSeqno, &InternalsRangeReader<V>)> {
