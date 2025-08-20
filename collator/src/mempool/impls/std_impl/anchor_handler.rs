@@ -7,8 +7,8 @@ use tycho_consensus::prelude::{AnchorData, MempoolAdapterStore, MempoolDb, Mempo
 use tycho_types::models::ConsensusConfig;
 use tycho_util::time::now_millis;
 
-use crate::mempool::impls::std_impl::cache::Cache;
-use crate::mempool::impls::std_impl::parser::{Parser, ParserOutput};
+use crate::mempool::impls::common::cache::Cache;
+use crate::mempool::impls::common::parser::{Parser, ParserOutput};
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
 
