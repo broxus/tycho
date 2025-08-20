@@ -121,7 +121,7 @@ impl ShardStateStorage {
             self.gc_lock.lock().await
         };
 
-        // Double check if the state is already stored
+        // Double-check if the state is already stored
         if handle.has_state() {
             return Ok(false);
         }
@@ -141,6 +141,10 @@ impl ShardStateStorage {
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
+            let snapshot = raw_db.snapshot();
+            let mut readopts = cell_storage.db.cells.new_read_config();
+            readopts.set_snapshot(&snapshot);
+
             let root_hash = *root_cell.repr_hash();
             let estimated_merkle_update_size = hint.estimate_cell_count();
 
@@ -154,6 +158,7 @@ impl ShardStateStorage {
                     &mut batch,
                     root_cell.as_ref(),
                     estimated_merkle_update_size,
+                    readopts,
                 )?
             } else {
                 let split_at = split_shard_accounts(&root_cell, accounts_split_depth)?;
@@ -163,6 +168,7 @@ impl ShardStateStorage {
                     &mut batch,
                     split_at,
                     estimated_merkle_update_size,
+                    readopts,
                 )?
             };
 
@@ -185,8 +191,11 @@ impl ShardStateStorage {
 
             // background_drop_cell_tx.send(root_cell)?;
 
+            tracing::info!("store_state_root finished: {}", handle.id().as_short_id());
+
             let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
             if updated {
+                tracing::info!("store_state_root updated: {}", handle.id().as_short_id());
                 block_handle_storage.store_handle(&handle, false);
             }
 

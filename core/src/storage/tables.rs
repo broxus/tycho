@@ -235,7 +235,7 @@ impl ColumnFamilyOptions<TableContext> for Cells {
         opts.set_allow_concurrent_memtable_write(false);
         opts.set_enable_pipelined_write(true);
         opts.set_inplace_update_support(false);
-        opts.set_unordered_write(true); // we don't use snapshots
+        opts.set_unordered_write(false); // we don't use snapshots
         opts.set_avoid_unnecessary_blocking_io(true); // schedule unnecessary IO in background;
 
         opts.set_auto_tuned_ratelimiter(

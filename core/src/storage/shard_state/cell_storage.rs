@@ -17,13 +17,13 @@ use tycho_storage::kv::refcount;
 use tycho_types::cell::*;
 use tycho_util::metrics::{HistogramGuard, spawn_metrics_loop};
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet, FastHasherState};
-use weedb::rocksdb::WriteBatch;
+use weedb::rocksdb::{ReadOptions, WriteBatch};
 use weedb::{BoundedCfHandle, rocksdb};
 
 use crate::storage::CoreDb;
 
 pub struct CellStorage {
-    db: CoreDb,
+    pub(crate) db: CoreDb,
     cells_cache: Arc<CellsIndex>,
     raw_cells_cache: Arc<RawCellsCache>,
 }
@@ -263,6 +263,7 @@ impl CellStorage {
         batch: &mut WriteBatch,
         split_at: FastHashMap<HashBytes, Cell>,
         capacity: usize,
+        readopts: ReadOptions,
     ) -> Result<usize, CellStorageError> {
         type StoreResult = Result<(), CellStorageError>;
 
@@ -323,13 +324,14 @@ impl CellStorage {
                 &'c self,
                 root: &'c DynCell,
                 scope: &'scope Scope<'scope, 'env>,
+                readopts: &'c ReadOptions,
             ) -> StoreResult {
                 let mut alloc = Alloc {
                     bump: self.herd.get(),
                     buffer: Vec::with_capacity(512),
                 };
 
-                if !self.insert_cell(root.as_ref(), &mut alloc, 0)? {
+                if !self.insert_cell(root.as_ref(), &mut alloc, 0, readopts)? {
                     return Ok(());
                 }
 
@@ -356,7 +358,9 @@ impl CellStorage {
 
                                     // Spawn processing.
                                     // TODO: Handle error properly.
-                                    scope.spawn(|| self.traverse_cell(child, scope).unwrap());
+                                    scope.spawn(|| {
+                                        self.traverse_cell(child, scope, readopts).unwrap();
+                                    });
                                 }
                                 hash_map::Entry::Occupied(mut entry) => {
                                     // Other thread will add this subtree only once,
@@ -368,7 +372,7 @@ impl CellStorage {
                             continue 'outer;
                         }
 
-                        if self.insert_cell(child, &mut alloc, depth)? {
+                        if self.insert_cell(child, &mut alloc, depth, readopts)? {
                             stack.push(child.references());
                             continue 'outer;
                         }
@@ -385,6 +389,7 @@ impl CellStorage {
                 cell: &DynCell,
                 alloc: &mut Alloc<'a>,
                 depth: usize,
+                readopts: &ReadOptions,
             ) -> Result<bool, CellStorageError> {
                 use dashmap::mapref::entry::Entry;
 
@@ -401,7 +406,9 @@ impl CellStorage {
                 // threads can do this job without blocking each other on the
                 // same shard (going to rocksdb might be slow).
 
-                let old_rc = self.raw_cache.get_rc_for_insert(self.db, key, depth)?;
+                let old_rc = self
+                    .raw_cache
+                    .get_rc_for_insert(self.db, key, depth, readopts)?;
 
                 // Prepare `alloc.buffer` if the cell is new (but not flush it to
                 // the bump allocator yet).
@@ -441,7 +448,7 @@ impl CellStorage {
                 })
             }
 
-            fn finalize(self, batch: &mut WriteBatch) -> usize {
+            fn finalize(self, batch: &mut WriteBatch, readops: &ReadOptions) -> usize {
                 std::thread::scope(|s| {
                     // Apply delayed additions before finalizing the transaction.
                     for (hash, additions) in self.delayed_additions.into_inner().unwrap() {
@@ -500,11 +507,17 @@ impl CellStorage {
                     let mut buffer = Vec::with_capacity(512);
                     let total = self.transaction.len();
                     let cells_cf = &self.db.cells.cf();
+                    let readopts = readops;
                     for kv in self.transaction.iter() {
                         let key = kv.key();
                         let item = kv.value();
 
-                        if let Some(value) = self.db.cells.get(key).unwrap() {
+                        if let Some(value) = self
+                            .db
+                            .rocksdb()
+                            .get_cf_opt(&self.db.cells.cf(), key.as_slice(), readopts)
+                            .unwrap()
+                        {
                             let (rc, _value) = refcount::decode_value_with_rc(value.as_ref());
                             assert_eq!(
                                 rc, item.old_rc,
@@ -525,9 +538,9 @@ impl CellStorage {
         let herd = Herd::new();
         let ctx = StoreContext::new(&self.db, &herd, &self.raw_cells_cache, split_at, capacity);
 
-        std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
+        std::thread::scope(|scope| ctx.traverse_cell(root, scope, &readopts))?;
 
-        Ok(ctx.finalize(batch))
+        Ok(ctx.finalize(batch, &readopts))
     }
 
     pub fn store_cell(
@@ -535,6 +548,7 @@ impl CellStorage {
         batch: &mut WriteBatch,
         root: &DynCell,
         estimated_cell_count: usize,
+        readopts: ReadOptions,
     ) -> Result<usize, CellStorageError> {
         struct AddedCell<'a> {
             old_rc: i64,
@@ -555,6 +569,7 @@ impl CellStorage {
                 &mut self,
                 cell: &'a DynCell,
                 depth: usize,
+                readopts: &'a ReadOptions,
             ) -> Result<bool, CellStorageError> {
                 let key = cell.repr_hash();
                 Ok(match self.transaction.entry(key) {
@@ -565,7 +580,7 @@ impl CellStorage {
                     hash_map::Entry::Vacant(entry) => {
                         let old_rc = self
                             .raw_cells_cache
-                            .get_rc_for_insert(self.db, key, depth)?;
+                            .get_rc_for_insert(self.db, key, depth, readopts)?;
 
                         let is_new = old_rc == 0;
                         let data = if is_new {
@@ -621,7 +636,7 @@ impl CellStorage {
 
         'visit: {
             // Check root cell
-            if !ctx.insert_cell(root.as_ref(), 0)? {
+            if !ctx.insert_cell(root.as_ref(), 0, &readopts)? {
                 break 'visit;
             }
             let mut stack = Vec::with_capacity(16);
@@ -635,7 +650,7 @@ impl CellStorage {
                 };
 
                 for child in &mut *iter {
-                    if ctx.insert_cell(child, depth)? {
+                    if ctx.insert_cell(child, depth, &readopts)? {
                         stack.push(child.references());
                         continue 'outer;
                     }
@@ -1526,6 +1541,7 @@ impl RawCellsCache {
         db: &CoreDb,
         key: &HashBytes,
         depth: usize,
+        readopts: &ReadOptions,
     ) -> Result<i64, CellStorageError> {
         // A constant which tells since which depth we should start to use cache.
         // This method is used mostly for inserting new states, so we can assume
@@ -1545,7 +1561,11 @@ impl RawCellsCache {
             }
         }
 
-        match db.cells.get(key).map_err(CellStorageError::Internal)? {
+        match db
+            .rocksdb()
+            .get_cf_opt(&db.cells.cf(), key, readopts)
+            .map_err(CellStorageError::Internal)?
+        {
             Some(value) => {
                 let (rc, value) = refcount::decode_value_with_rc(value.as_ref());
 
