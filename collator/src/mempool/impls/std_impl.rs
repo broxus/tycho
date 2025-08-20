@@ -1,9 +1,4 @@
 mod anchor_handler;
-mod cache;
-mod config;
-mod deduplicator;
-mod parser;
-mod state_update_queue;
 
 use std::sync::Arc;
 
@@ -17,13 +12,13 @@ use tycho_consensus::prelude::*;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver};
 use tycho_storage::StorageContext;
+use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
+use crate::mempool::impls::common::cache::Cache;
+use crate::mempool::impls::common::config::ConfigAdapter;
 use crate::mempool::impls::std_impl::anchor_handler::AnchorHandler;
-use crate::mempool::impls::std_impl::cache::Cache;
-use crate::mempool::impls::std_impl::config::ConfigAdapter;
 use crate::mempool::{
-    DebugStateUpdateContext, GetAnchorResult, MempoolAdapter, MempoolAdapterFactory,
-    MempoolAnchorId, MempoolEventListener, StateUpdateContext,
+    DebugStateUpdateContext, GetAnchorResult, MempoolAdapter, MempoolAnchorId, StateUpdateContext,
 };
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
@@ -68,16 +63,6 @@ impl MempoolAdapterStdImpl {
             input_buffer: InputBuffer::default(),
             top_known_anchor: RoundWatch::default(),
         })
-    }
-
-    /// **Warning:** changes from `GlobalConfig` may be rewritten by applied mc state
-    /// only if applied mc state has greater time and GEQ round
-    pub async fn set_config<F, R>(&self, fun: F) -> R
-    where
-        F: FnOnce(&mut MempoolConfigBuilder) -> R,
-    {
-        let mut config_guard = self.config.lock().await;
-        fun(&mut config_guard.builder)
     }
 
     async fn process_state_update(
@@ -250,18 +235,6 @@ impl MempoolAdapterStdImpl {
 
         Ok(session)
     }
-
-    pub fn send_external(&self, message: Bytes) {
-        self.input_buffer.push(message);
-    }
-}
-
-impl MempoolAdapterFactory for Arc<MempoolAdapterStdImpl> {
-    type Adapter = MempoolAdapterStdImpl;
-
-    fn create(&self, _listener: Arc<dyn MempoolEventListener>) -> Arc<Self::Adapter> {
-        self.clone()
-    }
 }
 
 #[async_trait]
@@ -332,5 +305,25 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
         self.cache.clear(before_anchor_id);
         Ok(())
+    }
+
+    fn send_external(&self, message: Bytes) {
+        self.input_buffer.push(message);
+    }
+
+    async fn update_delayed_config(
+        &self,
+        consensus_config: Option<&ConsensusConfig>,
+        genesis_info: &GenesisInfo,
+    ) -> Result<()> {
+        let mut config_guard = self.config.lock().await;
+        if let Some(consensus_config) = consensus_config {
+            config_guard
+                .builder
+                .set_consensus_config(consensus_config)?;
+        } // else: will be set from mc state after sync
+
+        config_guard.builder.set_genesis(*genesis_info);
+        Ok::<_, anyhow::Error>(())
     }
 }
