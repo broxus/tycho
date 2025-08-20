@@ -125,6 +125,9 @@ impl ShardStateStorage {
         if handle.has_state() {
             return Ok(false);
         }
+
+        tracing::info!("store_state_root: {}", handle.id().as_short_id());
+
         let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
 
         let block_id = *handle.id();
@@ -176,9 +179,11 @@ impl ShardStateStorage {
 
             raw_db.write(batch)?;
 
+            drop(root_cell);
+
             hist.finish();
 
-            background_drop_cell_tx.send(root_cell)?;
+            // background_drop_cell_tx.send(root_cell)?;
 
             let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
             if updated {
