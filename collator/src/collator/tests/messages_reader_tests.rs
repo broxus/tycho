@@ -141,7 +141,10 @@ async fn test_refill_messages() -> Result<()> {
 
     // test shard collator
     let sc_collator = TestCollator {
-        msgs_exec_params: msgs_exec_params_stuff.clone(),
+        msgs_exec_params: MsgsExecutionParamsStuff::with_current_and_new(
+            msgs_exec_params_stuff.current().clone(),
+            msgs_exec_params_stuff.new().clone(),
+        ),
 
         shard_id: sc_shard_id,
         block_seqno: 0,
@@ -166,7 +169,7 @@ async fn test_refill_messages() -> Result<()> {
 
     // test master collator
     let mc_collator = TestCollator {
-        msgs_exec_params: msgs_exec_params_stuff.clone(),
+        msgs_exec_params: msgs_exec_params_stuff,
 
         shard_id: ShardIdent::MASTERCHAIN,
         block_seqno: 0,
@@ -915,7 +918,10 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 for_shard_id: self.shard_id,
                 block_seqno: self.block_seqno,
                 next_chain_time,
-                msgs_exec_params: self.msgs_exec_params.clone(),
+                msgs_exec_params: MsgsExecutionParamsStuff::with_current_and_new(
+                    self.msgs_exec_params.current().clone(),
+                    self.msgs_exec_params.new().clone(),
+                ),
                 mc_state_gen_lt: mc_gen_lt,
                 prev_state_gen_lt: self.last_block_gen_lt,
                 mc_top_shards_end_lts,
