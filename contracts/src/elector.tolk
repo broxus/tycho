@@ -34,11 +34,11 @@ const STAKE_ERR_MAX_FACTOR_TOO_SMALL = 6
 
 @pure
 fun msg_value_update_vset(): coins
-    asm "1000000000 int_or_env ELECTOR_MSG_VALUE_UPDATE_VSET"
+    asm "1000000000 INT"
 
 @pure
 fun msg_value_stake_accepted(): coins
-    asm "1000000000 int_or_env ELECTOR_MSG_VALUE_STAKE_ACCEPTED"
+    asm "1000000000 INT"
 
 //
 // === Storage Models ===
