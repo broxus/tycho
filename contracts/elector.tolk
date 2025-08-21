@@ -591,7 +591,7 @@ fun ElectionResult.compute(
 
         // Lookup source address first.
         var (cs, memberExists) = participants.uDictGet(256, pubkey);
-        assert(memberExists, 61);
+        assert (memberExists, 61);
         var participant = lazy ElectionParticipant.fromSlice(cs!);
         val addr = participant.addr;
 
@@ -632,7 +632,7 @@ fun ElectionResult.compute(
         i += 1;
     } while (tail != null);
 
-    assert(totalStake == bestStake, 49);
+    assert (totalStake == bestStake, 49);
 
     return ElectionResult {
         credits,
@@ -702,8 +702,8 @@ fun syncElectionWithVset(data: Storage, election: Election): bool {
 
     // Find vset hash in config params (search in current or next vset).
     if (
-        blockchain.configParam(PARAM_IDX_CURRENT_VSET).hashEq(vsetHash) ||
-        blockchain.configParam(PARAM_IDX_NEXT_VSET).hashEq(vsetHash)
+    blockchain.configParam(PARAM_IDX_CURRENT_VSET).hashEq(vsetHash) ||
+    blockchain.configParam(PARAM_IDX_NEXT_VSET).hashEq(vsetHash)
     ) {
         // Reset `currentElection` since it is not needed anymore.
         data.currentElection = null;
@@ -808,7 +808,7 @@ fun updateActiveVsetId(data: Storage): bool {
         val (cs, found) = data.pastElections.uDictGet(32, data.activeId);
         if (found) {
             var pastElection = lazy PastElection.fromSlice(cs!);
-            assert(pastElection.vsetHash == data.activeHash, 57);
+            assert (pastElection.vsetHash == data.activeHash, 57);
 
             // Adjust unfreeze time of this validator set.
             pastElection.unfreezeAt = blockchain.now() + pastElection.stakeHeld;
@@ -1016,7 +1016,7 @@ fun processNewStake(source: address, value: coins, body: slice, queryId: int) {
         return;
     }
 
-    assert(value > 0, 44);
+    assert (value > 0, 44);
     setGasLimitToMaximum();
 
     // Store stake into the dictionary.
@@ -1205,8 +1205,8 @@ fun unfreezeAll(credits: dict, pastElections: dict, electionId: int): UnfreezeAl
 
     val pe = lazy PastElection.fromSlice(cs!);
     val recovered = pe.bonuses > 0
-         ? unfreezeWithBonuses(mutate credits, pe.frozenDict, pe.totalStake, pe.bonuses)
-         : unfreezeWithoutBonuses(mutate credits, pe.frozenDict, pe.totalStake);
+        ? unfreezeWithBonuses(mutate credits, pe.frozenDict, pe.totalStake, pe.bonuses)
+        : unfreezeWithoutBonuses(mutate credits, pe.frozenDict, pe.totalStake);
 
     return UnfreezeAllResult {
         credits,
@@ -1237,7 +1237,7 @@ fun unfreezeWithBonuses(mutate credits: dict, frozenDict: dict, totalStake: coin
         }
     } while (found);
 
-    assert((total == totalStake) && (returnedBonuses <= bonuses), 59);
+    assert ((total == totalStake) && (returnedBonuses <= bonuses), 59);
 
     return recovered + bonuses - returnedBonuses;
 }
@@ -1261,7 +1261,7 @@ fun unfreezeWithoutBonuses(mutate credits: dict, frozenDict: dict, totalStake: c
         }
     } while (found);
 
-    assert(total == totalStake, 59);
+    assert (total == totalStake, 59);
 
     return recovered;
 }
@@ -1272,20 +1272,4 @@ fun creditTo(mutate credits: dict, addr: int, amount: coins) {
         amount += cs!.loadCoins();
     }
     credits.uDictSetBuilder(256, addr, beginCell().storeCoins(amount));
-}
-
-//
-// === Stuff ===
-//
-@pure
-fun maxInt(): int
-    asm "256 PUSHPOW2DEC"
-
-@inline_ref
-fun cell?.hashEq(self, expectedVsetHash: int): bool {
-    if (self == null) {
-        return false;
-    } else {
-        return expectedVsetHash == self.hash();
-    }
 }

@@ -31,3 +31,4 @@ function compile() {
 export ELECTOR_MSG_VALUE_UPDATE_VSET=1000000000
 export ELECTOR_MSG_VALUE_STAKE_ACCEPTED=1000000000
 compile elector "$root_dir/cli/res/elector_code.boc"
+compile config "$root_dir/cli/res/config_code.boc"
