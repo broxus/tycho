@@ -31,13 +31,11 @@ const INSUFFICIENT_AMOUNT_ERROR = -0xf0617924;
 
 @pure
 fun msg_value_change_elector_code(): coins
-//asm "1000000000 int_or_env CONFIG_MSG_CHANGE_ELECTOR_CODE"
     asm "1000000000 INT"
 
 @pure
 fun price_threshold_value(): coins
     asm "1000000000 INT"
-//asm "1000000000 int_or_env CONFIG_PRICE_THRESHOLD_VALUE"
 
 struct ConfigContract {
     cfgDict: cell
