@@ -13,19 +13,23 @@ use tycho_storage::kv::StoredValue;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::sync::rayon_run;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
 use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CoreDb};
+use crate::storage::shard_state::db_worker::{DbHandle, DbWorker};
 
 mod cell_storage;
+mod db_worker;
 mod entries_buffer;
 mod store_state_raw;
 
 pub struct ShardStateStorage {
     db: CoreDb,
+    db_handle: DbHandle,
 
     block_handle_storage: Arc<BlockHandleStorage>,
     block_storage: Arc<BlockStorage>,
@@ -50,7 +54,19 @@ impl ShardStateStorage {
         temp_file_storage: TempFileStorage,
         cache_size_bytes: ByteSize,
     ) -> Result<Arc<Self>> {
-        let cell_storage = CellStorage::new(db.clone(), cache_size_bytes);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let db_worker = DbWorker {
+            db: db.clone(),
+            command_rx: rx,
+        };
+
+        let db_handle = DbHandle { command_tx: tx };
+
+        tokio::task::spawn_blocking(move || {
+            db_worker.run();
+        });
+
+        let cell_storage = CellStorage::new(db.clone(), db_handle.clone(), cache_size_bytes);
 
         let (background_drop_cell_tx, background_drop_cell_rx) = std::sync::mpsc::channel::<Cell>();
 
@@ -63,6 +79,7 @@ impl ShardStateStorage {
 
         Ok(Arc::new(Self {
             db,
+            db_handle,
             block_handle_storage,
             block_storage,
             temp_file_storage,
@@ -131,7 +148,7 @@ impl ShardStateStorage {
         let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
 
         let block_id = *handle.id();
-        let raw_db = self.db.rocksdb().clone();
+        let db_handle = self.db_handle.clone();
         let cf = self.db.shard_states.get_unbounded_cf();
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
@@ -140,7 +157,7 @@ impl ShardStateStorage {
         let background_drop_cell_tx = self.background_drop_cell_tx.clone();
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
-        let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
+        let (new_cell_count, updated) = rayon_run(move || {
             let root_hash = *root_cell.repr_hash();
             let estimated_merkle_update_size = hint.estimate_cell_count();
 
@@ -177,13 +194,11 @@ impl ShardStateStorage {
             metrics::histogram!("tycho_storage_state_update_size_predicted_bytes")
                 .record(estimated_update_size_bytes as f64);
 
-            raw_db.write(batch)?;
-
-            drop(root_cell);
+            db_handle.write_batch(batch)?;
 
             hist.finish();
 
-            // background_drop_cell_tx.send(root_cell)?;
+            background_drop_cell_tx.send(root_cell)?;
 
             let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
             if updated {
@@ -192,7 +207,7 @@ impl ShardStateStorage {
 
             Ok::<_, anyhow::Error>((new_cell_count, updated))
         })
-        .await??;
+        .await?;
 
         let count = if block_id.shard.is_masterchain() {
             &self.max_new_mc_cell_count
@@ -318,9 +333,10 @@ impl ShardStateStorage {
             };
 
             let db = self.db.clone();
+            let db_handle = self.db_handle.clone();
             let cell_storage = self.cell_storage.clone();
             let accounts_split_depth = self.accounts_split_depth;
-            let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
+            let (total, inner_alloc) = rayon_run(move || {
                 let in_mem_remove =
                     HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
 
@@ -350,9 +366,7 @@ impl ShardStateStorage {
                     batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
                 }
 
-                db.raw()
-                    .rocksdb()
-                    .write_opt(batch, db.cells.write_config())?;
+                db_handle.write_batch(batch)?;
 
                 db_remove.finish();
 
@@ -360,7 +374,7 @@ impl ShardStateStorage {
 
                 Ok::<_, anyhow::Error>((stats, alloc))
             })
-            .await??;
+            .await?;
 
             drop(guard);
 

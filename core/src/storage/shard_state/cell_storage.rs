@@ -21,9 +21,11 @@ use weedb::rocksdb::WriteBatch;
 use weedb::{BoundedCfHandle, rocksdb};
 
 use crate::storage::CoreDb;
+use crate::storage::shard_state::db_worker::DbHandle;
 
 pub struct CellStorage {
     db: CoreDb,
+    db_handle: DbHandle,
     cells_cache: Arc<CellsIndex>,
     raw_cells_cache: Arc<RawCellsCache>,
 }
@@ -31,7 +33,7 @@ pub struct CellStorage {
 type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
 
 impl CellStorage {
-    pub fn new(db: CoreDb, cache_size_bytes: ByteSize) -> Arc<Self> {
+    pub fn new(db: CoreDb, db_handle: DbHandle, cache_size_bytes: ByteSize) -> Arc<Self> {
         let cells_cache = Default::default();
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
 
@@ -43,6 +45,7 @@ impl CellStorage {
 
         Arc::new(Self {
             db,
+            db_handle,
             cells_cache,
             raw_cells_cache,
         })
@@ -279,6 +282,7 @@ impl CellStorage {
 
         struct StoreContext<'a> {
             db: &'a CoreDb,
+            db_handle: &'a DbHandle,
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
@@ -300,6 +304,7 @@ impl CellStorage {
         impl<'a> StoreContext<'a> {
             fn new(
                 db: &'a CoreDb,
+                db_handle: &'a DbHandle,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
                 split_accounts: FastHashMap<HashBytes, Cell>,
@@ -307,6 +312,7 @@ impl CellStorage {
             ) -> Self {
                 Self {
                     db,
+                    db_handle,
                     raw_cache,
                     herd,
                     split_at: split_accounts,
@@ -401,7 +407,9 @@ impl CellStorage {
                 // threads can do this job without blocking each other on the
                 // same shard (going to rocksdb might be slow).
 
-                let old_rc = self.raw_cache.get_rc_for_insert(self.db, key, depth)?;
+                let old_rc = self
+                    .raw_cache
+                    .get_rc_for_insert(self.db_handle, key, depth)?;
 
                 // Prepare `alloc.buffer` if the cell is new (but not flush it to
                 // the bump allocator yet).
@@ -504,14 +512,12 @@ impl CellStorage {
                         let key = kv.key();
                         let item = kv.value();
 
-                        if let Some(value) = self.db.cells.get(key).unwrap() {
-                            let (rc, _value) = refcount::decode_value_with_rc(value.as_ref());
-                            assert_eq!(
-                                rc, item.old_rc,
-                                "validate db: rc = {}, old_rc = {} ",
-                                rc, item.old_rc
-                            );
-                        }
+                        let rc = self.db_handle.get_rc(*key).unwrap();
+                        assert_eq!(
+                            rc, item.old_rc,
+                            "validate db: rc = {}, old_rc = {} ",
+                            rc, item.old_rc
+                        );
 
                         buffer.clear();
                         refcount::add_positive_refount(item.additions, item.data, &mut buffer);
@@ -523,7 +529,14 @@ impl CellStorage {
         }
 
         let herd = Herd::new();
-        let ctx = StoreContext::new(&self.db, &herd, &self.raw_cells_cache, split_at, capacity);
+        let ctx = StoreContext::new(
+            &self.db,
+            &self.db_handle,
+            &herd,
+            &self.raw_cells_cache,
+            split_at,
+            capacity,
+        );
 
         std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
 
@@ -544,6 +557,7 @@ impl CellStorage {
 
         struct Context<'a> {
             db: &'a CoreDb,
+            db_handle: &'a DbHandle,
             raw_cells_cache: &'a RawCellsCache,
             alloc: &'a Bump,
             transaction: FastHashMap<&'a HashBytes, AddedCell<'a>>,
@@ -563,9 +577,9 @@ impl CellStorage {
                         false
                     }
                     hash_map::Entry::Vacant(entry) => {
-                        let old_rc = self
-                            .raw_cells_cache
-                            .get_rc_for_insert(self.db, key, depth)?;
+                        let old_rc =
+                            self.raw_cells_cache
+                                .get_rc_for_insert(self.db_handle, key, depth)?;
 
                         let is_new = old_rc == 0;
                         let data = if is_new {
@@ -610,6 +624,7 @@ impl CellStorage {
         // Prepare context and handles
         let mut ctx = Context {
             db: &self.db,
+            db_handle: &self.db_handle,
             raw_cells_cache: &self.raw_cells_cache,
             alloc: &alloc,
             transaction: FastHashMap::with_capacity_and_hasher(
@@ -663,7 +678,7 @@ impl CellStorage {
             }
         }
 
-        let cell = match self.raw_cells_cache.get_raw(&self.db, &hash) {
+        let cell = match self.raw_cells_cache.get_raw(&self.db_handle, &hash) {
             Ok(Some(value)) => match StorageCell::deserialize(self.clone(), &value.slice) {
                 Some(cell) => Arc::new(cell),
                 None => return Err(CellStorageError::InvalidCell),
@@ -698,6 +713,7 @@ impl CellStorage {
 
         struct RemoveContext<'a> {
             db: &'a CoreDb,
+            db_handle: &'a DbHandle,
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
@@ -719,12 +735,14 @@ impl CellStorage {
         impl<'a> RemoveContext<'a> {
             fn new(
                 db: &'a CoreDb,
+                db_handle: &'a DbHandle,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
                 split_at: FastHashSet<HashBytes>,
             ) -> Self {
                 Self {
                     db,
+                    db_handle,
                     raw_cache,
                     herd,
                     split_at,
@@ -825,7 +843,7 @@ impl CellStorage {
                 let buffer = &mut alloc.buffer;
                 let old_rc = self
                     .raw_cache
-                    .get_rc_for_delete(self.db, repr_hash, buffer)?;
+                    .get_rc_for_delete(self.db_handle, repr_hash, buffer)?;
                 debug_assert!(old_rc > 0);
 
                 // Try to remove once more.
@@ -919,7 +937,13 @@ impl CellStorage {
             }
         }
 
-        let ctx = RemoveContext::new(&self.db, herd, &self.raw_cells_cache, split_at);
+        let ctx = RemoveContext::new(
+            &self.db,
+            &self.db_handle,
+            herd,
+            &self.raw_cells_cache,
+            split_at,
+        );
 
         std::thread::scope(|scope| {
             for root in roots {
@@ -965,7 +989,7 @@ impl CellStorage {
                     hash_map::Entry::Occupied(mut v) => v.get_mut().remove()?,
                     hash_map::Entry::Vacant(v) => {
                         let old_rc = self.raw_cells_cache.get_rc_for_delete(
-                            &self.db,
+                            &self.db_handle,
                             cell_id,
                             &mut buffer,
                         )?;
@@ -1481,7 +1505,7 @@ impl RawCellsCache {
 
     fn get_raw(
         &self,
-        db: &CoreDb,
+        db: &DbHandle,
         key: &HashBytes,
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
         use quick_cache::sync::GuardResult;
@@ -1500,19 +1524,16 @@ impl RawCellsCache {
                         self.rocksdb_access_histogram.record(started_at.elapsed());
                     }
 
-                    db.cells.get(key.as_slice())?
+                    db.get_raw(*key).unwrap()
                 };
 
                 Ok(if let Some(value) = value {
-                    let (_, data) = refcount::decode_value_with_rc(value.as_ref());
-                    data.map(|value| {
-                        let value = RawCellsCacheItem::from_header_and_slice(
-                            AtomicI64::new(Self::RC_NAN),
-                            value,
-                        );
-                        _ = g.insert(value.clone());
-                        value
-                    })
+                    let value = RawCellsCacheItem::from_header_and_slice(
+                        AtomicI64::new(Self::RC_NAN),
+                        &value,
+                    );
+                    _ = g.insert(value.clone());
+                    Some(value)
                 } else {
                     None
                 })
@@ -1523,7 +1544,7 @@ impl RawCellsCache {
 
     fn get_rc_for_insert(
         &self,
-        db: &CoreDb,
+        db: &DbHandle,
         key: &HashBytes,
         depth: usize,
     ) -> Result<i64, CellStorageError> {
@@ -1545,23 +1566,14 @@ impl RawCellsCache {
             }
         }
 
-        match db.cells.get(key).map_err(CellStorageError::Internal)? {
-            Some(value) => {
-                let (rc, value) = refcount::decode_value_with_rc(value.as_ref());
+        let rc = db.get_rc_for_insert(*key).unwrap();
 
-                // TODO: lower to `debug_assert` when sure
-                let has_value = value.is_some();
-                assert!(has_value && rc > 0 || !has_value && rc == 0);
-
-                Ok(rc)
-            }
-            None => Ok(0),
-        }
+        Ok(rc)
     }
 
     fn get_rc_for_delete(
         &self,
-        db: &CoreDb,
+        db: &DbHandle,
         key: &HashBytes,
         refs_buffer: &mut Vec<HashBytes>,
     ) -> Result<i64, CellStorageError> {
@@ -1579,20 +1591,11 @@ impl RawCellsCache {
             }
         }
 
-        match db.cells.get(key.as_slice()) {
-            Ok(value) => {
-                if let Some(value) = value
-                    && let (rc, Some(value)) = refcount::decode_value_with_rc(&value)
-                {
-                    return StorageCell::deserialize_references(value, refs_buffer)
-                        .then_some(rc)
-                        .ok_or(CellStorageError::InvalidCell);
-                }
+        let (rc, value) = db.get_rc_for_delete(*key).unwrap();
 
-                Err(CellStorageError::CellNotFound)
-            }
-            Err(e) => Err(CellStorageError::Internal(e)),
-        }
+        StorageCell::deserialize_references(&value, refs_buffer)
+            .then_some(rc)
+            .ok_or(CellStorageError::InvalidCell)
     }
 
     fn on_insert_cell(&self, key: &HashBytes, rc: i64, data: Option<&[u8]>) {

@@ -3990,6 +3990,7 @@ dependencies = [
  "cassadilia",
  "castaway",
  "crc32c",
+ "crossbeam-channel",
  "dashmap",
  "futures-util",
  "humantime",

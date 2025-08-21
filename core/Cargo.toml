@@ -38,6 +38,7 @@ bytesize = { workspace = true }
 castaway = { workspace = true }
 cassadilia = { workspace = true }
 crc32c = { workspace = true }
+crossbeam-channel = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
 humantime = { workspace = true }
