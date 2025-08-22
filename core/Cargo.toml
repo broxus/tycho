@@ -35,8 +35,9 @@ bumpalo = { workspace = true }
 bumpalo-herd = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 bytesize = { workspace = true }
-castaway = { workspace = true }
 cassadilia = { workspace = true }
+castaway = { workspace = true }
+clap = { workspace = true, optional = true }
 crc32c = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
@@ -80,6 +81,7 @@ similar-asserts = { workspace = true }
 
 [features]
 test = []
+cli = ["dep:clap", "clap/derive"]
 
 [lints]
 workspace = true

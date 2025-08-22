@@ -188,6 +188,10 @@ Run a Tycho node
 * `--logger-config <LOGGER_CONFIG>` — Path to the logger config
 * `--import-zerostate <IMPORT_ZEROSTATE>` — List of zerostate files to import
 * `--wu-tuner-config <WU_TUNER_CONFIG>` — Path to the work units tuner config
+* `--cold-boot <COLD_BOOT>` — Overwrite cold boot type. Default: `latest-persistent`
+
+  Possible values: `genesis`, `latest-persistent`
+
 
 
 

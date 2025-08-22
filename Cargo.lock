@@ -3989,6 +3989,7 @@ dependencies = [
  "bytesize",
  "cassadilia",
  "castaway",
+ "clap",
  "crc32c",
  "dashmap",
  "futures-util",

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use tycho_core::block_strider::ColdBootType;
 use tycho_core::global_config::GlobalConfig;
 use tycho_core::node::NodeKeys;
 use tycho_util::cli::logger::{init_logger, set_abort_with_tracing};
@@ -68,6 +69,10 @@ struct CmdRun {
     /// Path to the work units tuner config.
     #[clap(long)]
     wu_tuner_config: Option<PathBuf>,
+
+    /// Overwrite cold boot type. Default: `latest-persistent`
+    #[clap(long)]
+    cold_boot: Option<ColdBootType>,
 }
 
 impl CmdRun {
@@ -111,7 +116,7 @@ impl CmdRun {
             init_metrics(metrics_config)?;
         }
 
-        let node = {
+        let mut node = {
             let global_config =
                 GlobalConfig::from_file(args.global_config_path(self.global_config.as_ref()))
                     .context("failed to load global config")?;
@@ -136,6 +141,10 @@ impl CmdRun {
             )
             .await?
         };
+
+        if let Some(cold_boot_type) = self.cold_boot {
+            node.overwrite_cold_boot_type(cold_boot_type);
+        }
 
         node.wait_for_neighbours().await;
 

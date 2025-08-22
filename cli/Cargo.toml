@@ -1,13 +1,7 @@
 [package]
 name = "tycho-cli"
 description = "Node CLI."
-include = [
-    "src/**/*.rs",
-    "res/**/*.boc",
-    "./LICENSE-*",
-    "./README.md",
-    "build.rs",
-]
+include = ["src/**/*.rs", "res/**/*.boc", "./LICENSE-*", "./README.md", "build.rs"]
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -60,7 +54,7 @@ weedb = { workspace = true }
 tycho-block-util = { workspace = true }
 tycho-collator = { workspace = true }
 tycho-control = { workspace = true, features = ["full"] }
-tycho-core = { workspace = true }
+tycho-core = { workspace = true, features = ["cli"] }
 tycho-network = { workspace = true }
 tycho-rpc = { workspace = true, features = ["http2"] }
 tycho-storage = { workspace = true }
