@@ -24,6 +24,8 @@ impl DbWorker {
                         .write(batch)
                         .map_err(CellStorageError::Internal);
 
+                    self.db.rocksdb().flush_cf(&self.db.cells.cf()).unwrap();
+
                     response_tx.send(DbResponse::WriteBatch { result }).ok();
                 }
                 DbCommand::GetRcForInsert { key, response_tx } => {
