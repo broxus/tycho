@@ -699,7 +699,8 @@ impl Phase<FinalizeState> {
                 let new_mc_block_extra = McBlockExtra {
                     shards: mc_state_extra.shards.clone(),
                     fees: self.state.collation_data.shard_fees.clone(),
-                    // TODO: Signatures for previous blocks
+                    // NOTE: Intended to store signatures of the previous master block
+                    //      for validation purposes. Not used in the current implementation
                     prev_block_signatures: Default::default(),
                     mint_msg: self
                         .state
