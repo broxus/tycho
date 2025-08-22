@@ -15,10 +15,10 @@ use tycho_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Lazy};
 use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::{
     Block, BlockExtra, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig, ConsensusInfo,
-    IntAddr, IntMsgInfo, IntermediateAddr, McBlockExtra, McStateExtra, MsgEnvelope, MsgInfo,
-    OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, OwnedMessage, PrevBlockRef,
-    ShardDescription, ShardHashes, ShardIdent, ShardStateUnsplit, StdAddr, ValidatorInfo,
-    ValueFlow,
+    GlobalCapabilities, GlobalCapability, IntAddr, IntMsgInfo, IntermediateAddr, McBlockExtra,
+    McStateExtra, MsgEnvelope, MsgInfo, OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates,
+    OwnedMessage, PrevBlockRef, ShardDescription, ShardHashes, ShardIdent, ShardStateUnsplit,
+    StdAddr, ValidatorInfo, ValueFlow,
 };
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
@@ -31,9 +31,9 @@ use crate::internal_queue::types::{
     DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, PartitionRouter,
     QueueDiffWithMessages,
 };
-use crate::manager::McBlockSubgraphExtract;
 use crate::manager::blocks_cache::BlocksCache;
 use crate::manager::types::{CollationSyncState, NextCollationStep};
+use crate::manager::{GlobalCapabilitiesExt, McBlockSubgraphExtract};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{CollatorSyncContext, StateNodeAdapter};
 use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
@@ -2831,4 +2831,23 @@ fn build_out_msg_description<V: InternalMessageValue>(
     .build()?;
 
     Ok(res)
+}
+
+#[test]
+fn caps_subset_is_correct() {
+    let block_caps = GlobalCapabilities::from_iter([
+        GlobalCapability::CapBounceMsgBody,
+        GlobalCapability::CapFullBodyInBounced,
+    ]);
+    let supported = GlobalCapabilities::from_iter([
+        GlobalCapability::CapBounceMsgBody,
+        GlobalCapability::CapFullBodyInBounced,
+        GlobalCapability::CapReportVersion,
+    ]);
+    assert!(block_caps.is_subset_of(supported));
+    assert!(!supported.is_subset_of(block_caps));
+
+    // Some unknown caps.
+    let block_caps = GlobalCapabilities::new(block_caps.into_inner() | (1u64 << 63));
+    assert!(!block_caps.is_subset_of(supported));
 }

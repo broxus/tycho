@@ -14,7 +14,8 @@ use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_core::storage::ShardStateStorageError;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_types::models::{
-    BlockId, BlockIdShort, CollationConfig, ProcessedUptoInfo, ShardIdent, ValidatorDescription,
+    BlockId, BlockIdShort, CollationConfig, GlobalCapabilities, ProcessedUptoInfo, ShardIdent,
+    ValidatorDescription,
 };
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
@@ -2072,8 +2073,23 @@ where
         );
 
         if let ProcessMcStateUpdateMode::StartCollation { reset_collators } = mode {
-            self.refresh_collation_sessions(mc_data, reset_collators)
-                .await?;
+            let block_global = mc_data.config.get_global_version()?;
+            if self.config.supported_block_version >= block_global.version
+                && block_global
+                    .capabilities
+                    .is_subset_of(self.config.supported_capabilities)
+            {
+                self.refresh_collation_sessions(mc_data, reset_collators)
+                    .await?;
+            } else {
+                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                    collator_supported_block_version = self.config.supported_block_version,
+                    mc_block_version = block_global.version,
+                    collator_supported_capabilities = ?self.config.supported_capabilities,
+                    mc_block_capabilities = ?block_global.capabilities,
+                    "Refresh collation sessions is skipped: collator does not support mc block version or capabilities",
+                );
+            }
         }
 
         Ok(())
@@ -3144,4 +3160,19 @@ struct RestoreQueueResult {
     last_mc_state: Option<ShardStateStuff>,
     synced_to_blocks_keys: Vec<BlockCacheKey>,
     applied_diffs_ids: FastHashSet<BlockId>,
+}
+
+// TODO: Move into `tycho_types`.
+trait GlobalCapabilitiesExt {
+    /// Checks whether this capabilities set is fully
+    /// included into `other` (comparing raw bits to include unnamed variants).
+    fn is_subset_of(&self, other: GlobalCapabilities) -> bool;
+}
+
+impl GlobalCapabilitiesExt for GlobalCapabilities {
+    fn is_subset_of(&self, other: GlobalCapabilities) -> bool {
+        let this = self.into_inner();
+        let other = other.into_inner();
+        this & !other == 0
+    }
 }
