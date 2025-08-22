@@ -264,7 +264,6 @@ pub struct BlockCandidate {
     pub consensus_config_changed: Option<bool>,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,
-    pub collated_data: Vec<u8>,
     pub collated_file_hash: HashBytes,
     pub chain_time: u64,
     pub processed_to_anchor_id: u32,

@@ -3752,7 +3752,6 @@ where
                 .iter()
                 .map(|(block_id, _updated)| *block_id)
                 .collect(),
-            collated_data: vec![],
             chain_time: 0,
             processed_to_anchor_id: 0,
             created_by: HashBytes::default(),
