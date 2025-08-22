@@ -613,6 +613,9 @@ where
             ?cancel_reason,
             "start handle collation cancelled",
         );
+
+        // NOTE: when collation cancelled from collator it guarantees
+        //      that uncommitted queue diff was not saved
         match cancel_reason {
             CollationCancelReason::AnchorNotFound(_)
             | CollationCancelReason::NextAnchorNotFound(_)
@@ -671,6 +674,7 @@ where
         self.ready_to_sync.notified().await;
         scopeguard::defer!(self.ready_to_sync.notify_one());
 
+        // cancel collator if cancel was requested during active collation try
         let updated_collator_state = self.set_collator_state(&next_block_id_short.shard, |ac| {
             if ac.state == CollatorState::CancelPending {
                 ac.state = CollatorState::Cancelled;
@@ -830,6 +834,7 @@ where
             }
         };
 
+        // cancel collator now after produced block if cancel was requested during active collation
         let updated_collator_state = self.set_collator_state(&block_id.shard, |ac| {
             if ac.state == CollatorState::CancelPending {
                 ac.state = CollatorState::Cancelled;
@@ -843,9 +848,14 @@ where
                 "collator was cancelled before",
             );
 
+            // If collator was cancelled then should clear uncommitted queue diffs.
+            // E.g. the queue diff from just collated block is uncommitted at this point,
+            // so it will be deleted because we do not need this just collated block.
             let top_shards = self.blocks_cache.get_last_top_shards();
             self.mq_adapter.clear_uncommitted_state(&top_shards)?;
 
+            // we do not save just collated block,
+            // we take last existed info from cache to detect the next step
             let (last_collated_mc_block_id, applied_mc_queue_range) = self
                 .blocks_cache
                 .get_last_collated_block_and_applied_mc_queue_range();
@@ -865,6 +875,8 @@ where
 
             store_res
         } else {
+            // if collator ws not cancelled then we consider that just collated block
+            // should be correct and try store it to the cache
             let top_shard_blocks_info = collation_result
                 .mc_data
                 .as_ref()
@@ -904,6 +916,8 @@ where
                         .iter_mut()
                         .filter(|ac| ac.key() != &block_id.shard)
                     {
+                        // now we cannot cancel active collation directly
+                        // so we mark collators to be cancelled when they finish current active collation
                         ac.state = match ac.state {
                             CollatorState::Waiting | CollatorState::Cancelled => {
                                 CollatorState::Cancelled
@@ -913,6 +927,8 @@ where
                     }
                 }
 
+                // we clear uncommitted queue diffs, including one from just collated block
+                // because it is not correct
                 let top_shards = self.blocks_cache.get_last_top_shards();
                 self.mq_adapter.clear_uncommitted_state(&top_shards)?;
 
@@ -1261,6 +1277,8 @@ where
             let labels = [("workchain", block_id.shard.workchain().to_string())];
             metrics::counter!("tycho_collator_block_mismatch_count", &labels).increment(1);
 
+            // now we cannot cancel active collation directly
+            // so we mark collators to be cancelled when they finish current active collation
             self.set_collator_state(&block_id.shard, |ac| {
                 ac.state = match ac.state {
                     CollatorState::Waiting | CollatorState::Cancelled => CollatorState::Cancelled,
@@ -1284,6 +1302,10 @@ where
                 }
             }
 
+            // When received blokc mismatches with collated one
+            // then we should clear uncommitted queue diffs.
+            // The queue diff from last collated master and its shard blocks
+            // are uncommitted and will be removed because they are incorrect.
             let top_shards = self.blocks_cache.get_last_top_shards();
             self.mq_adapter.clear_uncommitted_state(&top_shards)?;
 
@@ -1547,6 +1569,12 @@ where
                     "will drop uncommitted internal messages from queue on new genesis",
                 );
 
+                // E.g. we have applied mc block MC100 and collated some shard blocks after it (SC701, SC702)
+                // so we have uncommitted queue diffs from these shard blocks SC701, SC702.
+                // On restart from genesis we will start to collate SC701* again because last validated
+                // and applied mc block is MC100. But mempool will not contain all old externals used collate
+                // the previous version of SC701. So the new diff will mismatch the old one and node will panic.
+                // So we need to remove all uncommitted queue diffs because we have new mismatched externals queue.
                 let top_shards = self.blocks_cache.get_last_top_shards();
                 self.mq_adapter.clear_uncommitted_state(&top_shards)?;
             }

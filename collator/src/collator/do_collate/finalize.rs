@@ -105,6 +105,7 @@ impl Phase<FinalizeState> {
                     .map(|(shard_ident, descr)| descr.get_block_id(*shard_ident))
                     .collect();
 
+                // when we collated shard block we should include last master block id
                 top_other_updated_shard_blocks_ids.push(self.state.mc_data.block_id);
 
                 top_other_updated_shard_blocks_ids
@@ -221,7 +222,7 @@ impl Phase<FinalizeState> {
 
         let queue_diff_messages_count = queue_diff_with_msgs.messages.len();
 
-        // create update queue task
+        // create update queue task but do not run it
         let update_queue_task = {
             let block_id_short = self.state.collation_data.block_id_short;
             let labels = labels.clone();
