@@ -858,9 +858,6 @@ impl Phase<FinalizeState> {
             }
         };
 
-        // TODO: build collated data from collation_data.shard_top_block_descriptors
-        let collated_data = vec![];
-
         let block_candidate = Box::new(BlockCandidate {
             ref_by_mc_seqno,
             block: new_block,
@@ -874,7 +871,6 @@ impl Phase<FinalizeState> {
                 .iter()
                 .map(|b| b.block_id)
                 .collect(),
-            collated_data,
             collated_file_hash: HashBytes::ZERO,
             chain_time: self.state.collation_data.get_gen_chain_time(),
             processed_to_anchor_id,
