@@ -145,7 +145,7 @@ impl ColumnFamilyOptions<TableContext> for Cells {
         let buffer_count = 8;
         opts.set_write_buffer_size(buffer_size.as_u64() as _);
         opts.set_max_write_buffer_number(buffer_count);
-        opts.set_min_write_buffer_number_to_merge(buffers_to_merge); // allow early flush
+        opts.set_min_write_buffer_number_to_merge(0); // allow early flush
         ctx.track_buffer_usage(
             ByteSize(buffer_size.as_u64() * buffers_to_merge as u64),
             ByteSize(buffer_size.as_u64() * buffer_count as u64),
@@ -160,9 +160,9 @@ impl ColumnFamilyOptions<TableContext> for Cells {
         // 1. Entries per memtable = 512MB / 244B ≈ 2.2M entries
         // 2. Target bucket load factor = 10-12 entries per bucket (RocksDB recommendation)
         // 3. Bucket count = entries / target_load = 2.2M / 11 ≈ 200K
-        opts.set_memtable_factory(MemtableFactory::HashLinkList {
-            bucket_count: 200_000,
-        });
+        // opts.set_memtable_factory(MemtableFactory::HashLinkList {
+        //     bucket_count: 200_000,
+        // });
 
         opts.set_memtable_prefix_bloom_ratio(0.1); // we use hash-based memtable so bloom filter is not that useful
         opts.set_bloom_locality(1); // Optimize bloom filter locality
@@ -231,12 +231,12 @@ impl ColumnFamilyOptions<TableContext> for Cells {
         );
 
         // single writer optimizations
-        opts.set_enable_write_thread_adaptive_yield(false);
+        opts.set_enable_write_thread_adaptive_yield(true);
         opts.set_allow_concurrent_memtable_write(false);
-        opts.set_enable_pipelined_write(true);
+        opts.set_enable_pipelined_write(false);
         opts.set_inplace_update_support(false);
-        opts.set_unordered_write(true); // we don't use snapshots
-        opts.set_avoid_unnecessary_blocking_io(true); // schedule unnecessary IO in background;
+        opts.set_unordered_write(false); // we don't use snapshots
+        opts.set_avoid_unnecessary_blocking_io(false); // schedule unnecessary IO in background;
 
         opts.set_auto_tuned_ratelimiter(
             256 * 1024 * 1024, // 256MB/s base rate

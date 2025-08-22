@@ -25,6 +25,14 @@ impl DbWorker {
                         .map_err(CellStorageError::Internal);
 
                     self.db.rocksdb().flush_cf(&self.db.cells.cf()).unwrap();
+                    self.db.rocksdb().flush_wal(true).unwrap();
+                    self.db.rocksdb().flush().unwrap();
+
+                    self.db.rocksdb().compact_range_cf(
+                        &self.db.cells.cf(),
+                        None::<&[u8]>,
+                        None::<&[u8]>,
+                    );
 
                     response_tx.send(DbResponse::WriteBatch { result }).ok();
                 }
