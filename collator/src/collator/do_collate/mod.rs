@@ -426,7 +426,7 @@ impl CollatorStdImpl {
                     block_serializer_cache,
                 })
             },
-            // wait update queue task before returning collation result
+            // run update queue task and wait before returning collation result
             // to be sure that queue was updated before block commit and next block collation
             update_queue_task,
         );
