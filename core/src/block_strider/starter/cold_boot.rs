@@ -42,9 +42,21 @@ impl StarterInner {
 
         let last_mc_block_id = match boot_type {
             ColdBootType::Genesis => {
-                let zerostates = zerostates.context("zerostate should be present")?;
-                let (genersis_handle, _) = self.import_zerostates(zerostates).await?;
-                *genersis_handle.id()
+                let node_state = self.storage.node_state();
+                if let Some(init_mc_block) = node_state.load_init_mc_block_id() {
+                    anyhow::ensure!(
+                        init_mc_block.seqno == 0,
+                        "cold boot type cannot be changed after partial boot, \
+                        you must reset node state for that",
+                    );
+                }
+
+                // Either import or download a zerostate.
+                let init_block = self.prepare_init_block(zerostates).await?;
+                assert_eq!(init_block.handle().id().seqno, 0);
+
+                // Always use zerostate id as an initial block id when doing sync from genesis.
+                *init_block.handle().id()
             }
             ColdBootType::LatestPersistent => {
                 // Find the last known key block (or zerostate)

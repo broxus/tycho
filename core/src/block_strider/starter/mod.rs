@@ -160,6 +160,8 @@ impl Starter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum ColdBootType {
     Genesis,
     LatestPersistent,

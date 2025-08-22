@@ -42,6 +42,7 @@ mod config;
 
 pub struct Node {
     base: NodeBase,
+    overwrite_cold_boot_type: Option<ColdBootType>,
 
     queue_state_factory: QueueStateImplFactory,
     rpc_mempool_adapter: RpcMempoolAdapter,
@@ -59,6 +60,7 @@ pub struct Node {
 }
 
 impl Node {
+    // TODO: Move args into a new `NodeParams` structure.
     pub async fn new(
         public_addr: SocketAddr,
         keys: NodeKeys,
@@ -92,6 +94,7 @@ impl Node {
 
         Ok(Self {
             base,
+            overwrite_cold_boot_type: None,
             queue_state_factory,
             rpc_mempool_adapter,
             rpc_config: node_config.rpc,
@@ -105,6 +108,10 @@ impl Node {
         })
     }
 
+    pub fn overwrite_cold_boot_type(&mut self, cold_boot_type: ColdBootType) {
+        self.overwrite_cold_boot_type = Some(cold_boot_type);
+    }
+
     pub async fn wait_for_neighbours(&self) {
         // Ensure that there are some neighbours
         self.base.wait_for_neighbours(1).await;
@@ -112,9 +119,13 @@ impl Node {
 
     /// Initialize the node and return the init block id.
     pub async fn boot(&self, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
+        let boot_type = self
+            .overwrite_cold_boot_type
+            .unwrap_or(ColdBootType::LatestPersistent);
+
         self.base
             .boot(
-                ColdBootType::LatestPersistent,
+                boot_type,
                 zerostates,
                 Some(Box::new(QueueStateHandler {
                     storage: self.queue_state_factory.storage.clone(),
