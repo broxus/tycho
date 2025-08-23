@@ -231,7 +231,7 @@ impl ColumnFamilyOptions<TableContext> for Cells {
         );
 
         // single writer optimizations
-        opts.set_enable_write_thread_adaptive_yield(true);
+        opts.set_enable_write_thread_adaptive_yield(false);
         opts.set_allow_concurrent_memtable_write(false);
         opts.set_enable_pipelined_write(false);
         opts.set_inplace_update_support(false);
