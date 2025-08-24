@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use do_collate::is_first_block_after_prev_master;
 use error::CollatorError;
 use futures_util::future::Future;
 use messages_reader::{
@@ -47,7 +46,7 @@ mod messages_buffer;
 mod messages_reader;
 mod types;
 
-pub use do_collate::work_units;
+pub use do_collate::{is_first_block_after_prev_master, work_units};
 pub use error::CollationCancelReason;
 pub use types::{ForceMasterCollation, ShardDescriptionExt};
 
