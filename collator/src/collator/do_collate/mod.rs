@@ -53,6 +53,16 @@ mod phase;
 mod prepare;
 pub mod work_units;
 
+pub struct FinalizeCollationCtx {
+    pub has_unprocessed_messages: bool,
+    pub finalized: FinalizeBlockResult,
+    pub reader_state: ReaderState,
+    pub tracker: MinRefMcStateTracker,
+    pub force_next_mc_block: ForceMasterCollation,
+    pub resume_collation_elapsed: Duration,
+    pub is_first_block_after_prev_master: bool,
+}
+
 impl CollatorStdImpl {
     /// [`force_next_mc_block`] - should force next master block collation after this block
     #[tracing::instrument(
@@ -235,14 +245,15 @@ impl CollatorStdImpl {
         let FinalizeCollationResult {
             handle_block_candidate_elapsed,
         } = self
-            .finalize_collation(
-                final_result.has_unprocessed_messages,
+            .finalize_collation(FinalizeCollationCtx {
+                has_unprocessed_messages: final_result.has_unprocessed_messages,
                 finalized,
                 reader_state,
                 tracker,
                 force_next_mc_block,
                 resume_collation_elapsed,
-            )
+                is_first_block_after_prev_master,
+            })
             .await?;
 
         let collation_total_elapsed = total_collation_histogram.finish();
@@ -895,14 +906,19 @@ impl CollatorStdImpl {
 
     async fn finalize_collation(
         &mut self,
-        has_unprocessed_messages: bool,
-        finalized: FinalizeBlockResult,
-        reader_state: ReaderState,
-        tracker: MinRefMcStateTracker,
-        force_next_mc_block: ForceMasterCollation,
-        resume_collation_elapsed: Duration,
+        ctx: FinalizeCollationCtx,
     ) -> Result<FinalizeCollationResult> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
+
+        let FinalizeCollationCtx {
+            has_unprocessed_messages,
+            finalized,
+            reader_state,
+            tracker,
+            force_next_mc_block,
+            resume_collation_elapsed,
+            is_first_block_after_prev_master,
+        } = ctx;
 
         let block_id = *finalized.block_candidate.block.id();
         let is_key_block = finalized.block_candidate.is_key_block;
@@ -960,6 +976,8 @@ impl CollatorStdImpl {
                     mc_data: finalized.mc_data.clone(),
                     collation_config: collation_config.clone(),
                     force_next_mc_block,
+                    is_first_block_after_prev_master: !self.shard_id.is_masterchain()
+                        && is_first_block_after_prev_master,
                 })
                 .await?;
 
