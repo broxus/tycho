@@ -62,21 +62,31 @@ pub(super) struct CollationSyncState {
 #[derive(Debug)]
 pub(super) struct CollationState {
     pub status: CollationStatus,
-    pub last_imported_chain_times: Vec<(u64, bool)>,
+    pub last_imported_samples: Vec<AnchorSample>,
+    pub last_seen_seqno: Option<u32>,
+}
+#[derive(Default, Clone, Debug)]
+pub(super) struct AnchorSample {
+    pub ct: u64,
+    pub forced: bool,
+    // true only if a new shard block was observed (seqno advanced),
+    // false if we only imported an anchor
+    pub real_block: bool,
 }
 
 impl Default for CollationState {
     fn default() -> Self {
         Self {
-            status: CollationStatus::AttemptsInProgress,
-            last_imported_chain_times: vec![],
+            status: CollationStatus::Attempting,
+            last_imported_samples: vec![],
+            last_seen_seqno: None,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CollationStatus {
-    AttemptsInProgress,
+    Attempting,
     WaitForMasterStatus,
 }
 
