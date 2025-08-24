@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
 use tokio::sync::Semaphore;
-use tycho_util::futures::{JoinTask, Shared, WeakShared};
+use tycho_util::futures::{JoinTask, Shared, WeakSharedHandle};
 use tycho_util::sync::{rayon_run, yield_on_complex};
 use tycho_util::time::now_sec;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
@@ -107,7 +107,7 @@ impl<R> Default for QueryCache<R> {
     }
 }
 
-type WeakSpawnedFut<T> = WeakShared<JoinTask<T>>;
+type WeakSpawnedFut<T> = WeakSharedHandle<JoinTask<T>>;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum DhtQueryMode {
