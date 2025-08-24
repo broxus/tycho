@@ -9,12 +9,14 @@ use tokio::sync::{mpsc, oneshot};
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
-use tycho_util::futures::Shared;
+use tycho_util::futures::{Shared, WeakShared};
 use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, IllFormedReason, ValidateResult, Verifier};
-use crate::effects::{AltFormat, Ctx, DownloadCtx, RoundCtx, SpawnLimit, TaskResult, ValidateCtx};
+use crate::effects::{
+    AltFormat, Cancelled, Ctx, DownloadCtx, RoundCtx, SpawnLimit, TaskResult, ValidateCtx,
+};
 use crate::engine::NodeConfig;
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::{
@@ -528,6 +530,30 @@ impl DagPointFuture {
         match &self.0 {
             DagPointFutureType::Validate { cert, .. }
             | DagPointFutureType::Download { cert, .. } => cert.downgrade(),
+        }
+    }
+
+    pub fn downgrade(&self) -> WeakDagPointFuture {
+        let maybe_consumed = match &self.0 {
+            DagPointFutureType::Validate { task, .. }
+            | DagPointFutureType::Download { task, .. } => task.weak_future(),
+        };
+        WeakDagPointFuture(maybe_consumed.expect("shared dag point task cannot be consumed"))
+    }
+}
+
+pub struct WeakDagPointFuture(WeakShared<BoxFuture<'static, TaskResult<DagPoint>>>);
+
+impl future::Future for WeakDagPointFuture {
+    type Output = TaskResult<Option<DagPoint>>;
+
+    #[inline]
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.0.poll_unpin(cx) {
+            Poll::Ready(Some((Ok(result), _))) => Poll::Ready(Ok(Some(result))),
+            Poll::Ready(Some((Err(Cancelled()), _))) => Poll::Ready(Err(Cancelled())),
+            Poll::Ready(None) => Poll::Ready(Ok(None)),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

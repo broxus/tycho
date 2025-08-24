@@ -9,7 +9,7 @@ use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::dag_location::DagLocation;
-use crate::dag::dag_point_future::DagPointFuture;
+use crate::dag::dag_point_future::WeakDagPointFuture;
 use crate::dag::{AnchorStage, DagRound, WeakDagRound};
 use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
@@ -86,6 +86,8 @@ pub enum IllFormedReason {
 pub enum InvalidReason {
     #[error("cannot validate point, no {0:?} round in DAG")]
     NoRoundInDag(PointMap),
+    #[error("cannot validate point, dependency was dropped with its round")]
+    DependencyRoundDropped,
     #[error("time is not greater than in prev point")]
     TimeNotGreaterThanInPrevPoint,
     #[error("anchor proof does not inherit time from its candidate")]
@@ -195,10 +197,8 @@ impl Verifier {
             // point well-formedness is enough to act as a carrier for the majority of signatures
             let weak_cert =
                 (cert_deps.includes.get(prev_digest)).expect("prev cert must be included");
-            // cannot be dropped because futures keep strong refs to Cert, but nevertheless
-            if let Some(cert) = weak_cert.upgrade() {
-                cert.certify();
-            }
+            let cert = weak_cert.upgrade().expect("we hold a strong ref to round");
+            cert.certify();
         }
         cert.set_deps(cert_deps);
 
@@ -290,13 +290,13 @@ impl Verifier {
     fn other_versions(
         dag_location: &DagLocation,
         excluded: Option<&Digest>,
-    ) -> Vec<DagPointFuture> {
+    ) -> Vec<WeakDagPointFuture> {
         let mut others = Vec::with_capacity(
             (dag_location.versions.len()).saturating_sub(excluded.is_some() as usize),
         );
         for (digest, shared) in &dag_location.versions {
             if excluded != Some(digest) {
-                others.push(shared.clone());
+                others.push(shared.downgrade());
             }
         }
         others
@@ -309,7 +309,7 @@ impl Verifier {
         downloader: &Downloader,
         store: &MempoolStore,
         ctx: &ValidateCtx,
-    ) -> (FuturesUnordered<DagPointFuture>, CertDirectDeps) {
+    ) -> (FuturesUnordered<WeakDagPointFuture>, CertDirectDeps) {
         let direct_deps = FuturesUnordered::new();
 
         // allocate a bit more so it's unlikely to grow during certify procedure
@@ -326,16 +326,16 @@ impl Verifier {
         });
 
         for (dag_round, is_includes, author, digest) in includes.chain(witness) {
-            let shared =
+            let (dep, cert) =
                 dag_round.add_dependency(author, digest, info.author(), downloader, store, ctx);
 
             if is_includes {
-                cert_deps.includes.insert(*digest, shared.weak_cert());
+                cert_deps.includes.insert(*digest, cert);
             } else {
-                cert_deps.witness.insert(*digest, shared.weak_cert());
+                cert_deps.witness.insert(*digest, cert);
             }
 
-            direct_deps.push(shared);
+            direct_deps.push(dep);
         }
 
         (direct_deps, cert_deps)
@@ -344,7 +344,7 @@ impl Verifier {
     /// check only direct dependencies and location for previous point (let it jump over round)
     async fn is_valid(
         info: PointInfo,
-        mut deps_and_prev: FuturesUnordered<DagPointFuture>,
+        mut deps_and_prev: FuturesUnordered<WeakDagPointFuture>,
         conf: &MempoolConfig,
     ) -> TaskResult<Option<InvalidReason>> {
         // point is well-formed if we got here, so point.proof matches point.includes
@@ -365,7 +365,9 @@ impl Verifier {
             info.time() + UnixTime::from_millis(conf.consensus.clock_skew_millis as _);
 
         while let Some(task_result) = deps_and_prev.next().await {
-            let dag_point = task_result?;
+            let Some(dag_point) = task_result? else {
+                return Ok(Some(InvalidReason::DependencyRoundDropped));
+            };
             if dag_point.round() == prev_round && dag_point.author() == info.author() {
                 match prev_digest_in_point {
                     Some(prev_digest_in_point) if prev_digest_in_point == dag_point.digest() => {

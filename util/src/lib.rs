@@ -20,7 +20,7 @@ pub mod tl;
 pub mod futures {
     pub use self::box_future_or_noop::BoxFutureOrNoop;
     pub use self::join_task::JoinTask;
-    pub use self::shared::{Shared, WeakShared};
+    pub use self::shared::{Shared, WeakShared, WeakSharedHandle};
 
     mod box_future_or_noop;
     mod join_task;

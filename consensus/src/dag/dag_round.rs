@@ -8,12 +8,12 @@ use tycho_util::FastDashMap;
 use crate::dag::IllFormedReason;
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::DagLocation;
-use crate::dag::dag_point_future::DagPointFuture;
+use crate::dag::dag_point_future::{DagPointFuture, WeakDagPointFuture};
 use crate::dag::threshold::Threshold;
 use crate::effects::{AltFmt, AltFormat, Ctx, RoundCtx, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, PointRestore, Round};
+use crate::models::{Digest, PeerCount, Point, PointRestore, Round, WeakCert};
 use crate::storage::MempoolStore;
 
 #[derive(Clone)]
@@ -255,9 +255,10 @@ impl DagRound {
         downloader: &Downloader,
         store: &MempoolStore,
         validate_ctx: &ValidateCtx,
-    ) -> DagPointFuture {
+    ) -> (WeakDagPointFuture, WeakCert) {
         self.edit(author, |loc| {
-            loc.versions
+            let first = loc
+                .versions
                 .entry(*digest)
                 .and_modify(|first| first.add_depender(depender))
                 .or_insert_with(|| {
@@ -271,8 +272,8 @@ impl DagRound {
                         store,
                         validate_ctx,
                     )
-                })
-                .clone()
+                });
+            (first.downgrade(), first.weak_cert())
         })
     }
 
