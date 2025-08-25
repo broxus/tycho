@@ -67,9 +67,6 @@ weedb::tables! {
         pub block_handles: tables::BlockHandles,
         pub key_blocks: tables::KeyBlocks,
         pub full_block_ids: tables::FullBlockIds,
-        // pub shard_states: tables::ShardStates,
-        // pub cells: tables::Cells,
-        // pub temp_cells: tables::TempCells,
         pub block_connections: tables::BlockConnections,
     }
 }
@@ -120,6 +117,7 @@ impl WithMigrations for CellsTables {
 
 weedb::tables! {
     pub struct CellsTables<TableContext> {
+        pub state: tables::State,
         pub shard_states: tables::ShardStates,
         pub cells: tables::Cells,
         pub temp_cells: tables::TempCells,

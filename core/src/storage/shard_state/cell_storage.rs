@@ -579,7 +579,7 @@ impl CellStorage {
                         false
                     }
                     hash_map::Entry::Vacant(entry) => {
-                        let (old_rc, old_version) =
+                        let (old_rc, _) =
                             self.raw_cells_cache
                                 .get_rc_for_insert(self.db_handle, key, depth)?;
 

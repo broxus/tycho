@@ -198,7 +198,8 @@ impl ShardStateStorage {
             metrics::histogram!("tycho_storage_state_update_size_predicted_bytes")
                 .record(estimated_update_size_bytes as f64);
 
-            db_handle.write_batch(batch)?;
+            let (before, after) = db_handle.write_batch(batch)?;
+            tracing::info!(before, after, "write_batch");
 
             hist.finish();
 
