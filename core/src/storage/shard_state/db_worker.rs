@@ -16,6 +16,8 @@ impl DbWorker {
         while let Ok(command) = self.command_rx.recv() {
             match command {
                 DbCommand::WriteBatch { data, response_tx } => {
+                    let before_sn = self.db.rocksdb().latest_sequence_number();
+
                     let batch = WriteBatch::from_data(&data);
 
                     let result = self
@@ -24,19 +26,19 @@ impl DbWorker {
                         .write(batch)
                         .map_err(CellStorageError::Internal);
 
-                    self.db.rocksdb().flush_cf(&self.db.cells.cf()).unwrap();
-                    self.db.rocksdb().flush_wal(true).unwrap();
-                    self.db.rocksdb().flush().unwrap();
+                    let after_sn = self.db.rocksdb().latest_sequence_number();
 
-                    self.db.rocksdb().compact_range_cf(
-                        &self.db.cells.cf(),
-                        None::<&[u8]>,
-                        None::<&[u8]>,
-                    );
-
-                    response_tx.send(DbResponse::WriteBatch { result }).ok();
+                    response_tx
+                        .send(DbResponse::WriteBatch {
+                            before_sn,
+                            after_sn,
+                            result,
+                        })
+                        .ok();
                 }
                 DbCommand::GetRcForInsert { key, response_tx } => {
+                    let sn = self.db.rocksdb().latest_sequence_number();
+
                     let result = match self.db.cells.get(key.as_slice()) {
                         Ok(Some(value)) => {
                             let (rc, value) = refcount::decode_value_with_rc(value.as_ref());
@@ -51,9 +53,13 @@ impl DbWorker {
                         Err(e) => Err(CellStorageError::Internal(e)),
                     };
 
-                    response_tx.send(DbResponse::GetRcForInsert { result }).ok();
+                    response_tx
+                        .send(DbResponse::GetRcForInsert { sn, result })
+                        .ok();
                 }
                 DbCommand::GetRcForDelete { key, response_tx } => {
+                    // let sn = self.db.rocksdb().latest_sequence_number();
+
                     let result = match self.db.cells.get(key.as_slice()) {
                         Ok(value) => {
                             if let Some(value) = value
@@ -70,6 +76,8 @@ impl DbWorker {
                     response_tx.send(DbResponse::GetRcForDelete { result }).ok();
                 }
                 DbCommand::GetRc { key, response_tx } => {
+                    let sn = self.db.rocksdb().latest_sequence_number();
+
                     let result = match self.db.cells.get(key) {
                         Ok(Some(value)) => {
                             let (rc, _value) = refcount::decode_value_with_rc(value.as_ref());
@@ -79,9 +87,11 @@ impl DbWorker {
                         Err(e) => Err(CellStorageError::Internal(e)),
                     };
 
-                    response_tx.send(DbResponse::GetRc { result }).ok();
+                    response_tx.send(DbResponse::GetRc { sn, result }).ok();
                 }
                 DbCommand::GetRaw { key, response_tx } => {
+                    // let sn = self.db.rocksdb().latest_sequence_number();
+
                     let result = self
                         .db
                         .cells
@@ -128,15 +138,19 @@ pub enum DbCommand {
 
 pub enum DbResponse {
     WriteBatch {
+        before_sn: u64,
+        after_sn: u64,
         result: Result<(), CellStorageError>,
     },
     GetRcForInsert {
+        sn: u64,
         result: Result<i64, CellStorageError>,
     },
     GetRcForDelete {
         result: Result<(i64, Vec<u8>), CellStorageError>,
     },
     GetRc {
+        sn: u64,
         result: Result<i64, CellStorageError>,
     },
     GetRaw {
@@ -150,7 +164,7 @@ pub struct DbHandle {
 }
 
 impl DbHandle {
-    pub fn write_batch(&self, batch: WriteBatch) -> Result<(), anyhow::Error> {
+    pub fn write_batch(&self, batch: WriteBatch) -> Result<(u64, u64), anyhow::Error> {
         // oneshot
         let (response_tx, response_rx) = crossbeam_channel::bounded(1);
 
@@ -160,12 +174,19 @@ impl DbHandle {
         })?;
 
         match response_rx.recv()? {
-            DbResponse::WriteBatch { result } => Ok(result?),
+            DbResponse::WriteBatch {
+                before_sn,
+                after_sn,
+                result,
+            } => {
+                result?;
+                Ok((before_sn, after_sn))
+            }
             _ => unreachable!(),
         }
     }
 
-    pub fn get_rc_for_insert(&self, key: HashBytes) -> Result<i64, anyhow::Error> {
+    pub fn get_rc_for_insert(&self, key: HashBytes) -> Result<(i64, u64), anyhow::Error> {
         // oneshot
         let (response_tx, response_rx) = crossbeam_channel::bounded(1);
 
@@ -173,7 +194,10 @@ impl DbHandle {
             .send(DbCommand::GetRcForInsert { key, response_tx })?;
 
         match response_rx.recv()? {
-            DbResponse::GetRcForInsert { result } => Ok(result?),
+            DbResponse::GetRcForInsert { sn, result } => {
+                let rc = result?;
+                Ok((rc, sn))
+            }
             _ => unreachable!(),
         }
     }
@@ -191,7 +215,7 @@ impl DbHandle {
         }
     }
 
-    pub fn get_rc(&self, key: HashBytes) -> Result<i64, anyhow::Error> {
+    pub fn get_rc(&self, key: HashBytes) -> Result<(i64, u64), anyhow::Error> {
         // oneshot
         let (response_tx, response_rx) = crossbeam_channel::bounded(1);
 
@@ -199,7 +223,10 @@ impl DbHandle {
             .send(DbCommand::GetRc { key, response_tx })?;
 
         match response_rx.recv()? {
-            DbResponse::GetRc { result } => Ok(result?),
+            DbResponse::GetRc { sn, result } => {
+                let rc = result?;
+                Ok((rc, sn))
+            }
             _ => unreachable!(),
         }
     }

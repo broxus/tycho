@@ -271,6 +271,7 @@ impl CellStorage {
 
         struct AddedCell<'a> {
             old_rc: i64,
+            old_version: u64,
             additions: u32,
             data: Option<&'a [u8]>,
         }
@@ -407,9 +408,9 @@ impl CellStorage {
                 // threads can do this job without blocking each other on the
                 // same shard (going to rocksdb might be slow).
 
-                let old_rc = self
-                    .raw_cache
-                    .get_rc_for_insert(self.db_handle, key, depth)?;
+                let (old_rc, old_version) =
+                    self.raw_cache
+                        .get_rc_for_insert(self.db_handle, key, depth)?;
 
                 // Prepare `alloc.buffer` if the cell is new (but not flush it to
                 // the bump allocator yet).
@@ -441,6 +442,7 @@ impl CellStorage {
                         // Add a new transaction entry.
                         entry.insert(AddedCell {
                             old_rc,
+                            old_version,
                             additions: 1,
                             data,
                         });
@@ -512,11 +514,11 @@ impl CellStorage {
                         let key = kv.key();
                         let item = kv.value();
 
-                        let rc = self.db_handle.get_rc(*key).unwrap();
+                        let (rc, sn) = self.db_handle.get_rc(*key).unwrap();
                         assert_eq!(
                             rc, item.old_rc,
-                            "validate db: rc = {}, old_rc = {} ",
-                            rc, item.old_rc
+                            "validate db: rc = {}, old_rc = {}, version = {}, old_version = {}",
+                            rc, item.old_rc, sn, item.old_version
                         );
 
                         buffer.clear();
@@ -577,7 +579,7 @@ impl CellStorage {
                         false
                     }
                     hash_map::Entry::Vacant(entry) => {
-                        let old_rc =
+                        let (old_rc, old_version) =
                             self.raw_cells_cache
                                 .get_rc_for_insert(self.db_handle, key, depth)?;
 
@@ -1547,28 +1549,28 @@ impl RawCellsCache {
         db: &DbHandle,
         key: &HashBytes,
         depth: usize,
-    ) -> Result<i64, CellStorageError> {
+    ) -> Result<(i64, u64), CellStorageError> {
         // A constant which tells since which depth we should start to use cache.
         // This method is used mostly for inserting new states, so we can assume
         // that first N levels will mostly be new.
         //
         // This value was chosen empirically.
-        const NEW_CELLS_DEPTH_THRESHOLD: usize = 4;
+        // const NEW_CELLS_DEPTH_THRESHOLD: usize = 4;
+        //
+        // if depth >= NEW_CELLS_DEPTH_THRESHOLD {
+        //     // NOTE: `get` here is used to affect a "hotness" of the value, because
+        //     // there is a big chance that we will need it soon during state processing
+        //     if let Some(entry) = self.inner.get(key) {
+        //         let rc = entry.header.header.load(Ordering::Acquire);
+        //         if rc != Self::RC_NAN {
+        //             return Ok(rc);
+        //         }
+        //     }
+        // }
 
-        if depth >= NEW_CELLS_DEPTH_THRESHOLD {
-            // NOTE: `get` here is used to affect a "hotness" of the value, because
-            // there is a big chance that we will need it soon during state processing
-            if let Some(entry) = self.inner.get(key) {
-                let rc = entry.header.header.load(Ordering::Acquire);
-                if rc != Self::RC_NAN {
-                    return Ok(rc);
-                }
-            }
-        }
+        let (rc, sn) = db.get_rc_for_insert(*key).unwrap();
 
-        let rc = db.get_rc_for_insert(*key).unwrap();
-
-        Ok(rc)
+        Ok((rc, sn))
     }
 
     fn get_rc_for_delete(

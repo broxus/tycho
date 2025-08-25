@@ -164,7 +164,7 @@ impl ColumnFamilyOptions<TableContext> for Cells {
         //     bucket_count: 200_000,
         // });
 
-        opts.set_memtable_prefix_bloom_ratio(0.1); // we use hash-based memtable so bloom filter is not that useful
+        // opts.set_memtable_prefix_bloom_ratio(0.1); // we use hash-based memtable so bloom filter is not that useful
         opts.set_bloom_locality(1); // Optimize bloom filter locality
 
         let mut block_factory = BlockBasedOptions::default();
