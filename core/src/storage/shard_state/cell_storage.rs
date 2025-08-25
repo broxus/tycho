@@ -20,11 +20,11 @@ use tycho_util::{FastDashMap, FastHashMap, FastHashSet, FastHasherState};
 use weedb::rocksdb::WriteBatch;
 use weedb::{BoundedCfHandle, rocksdb};
 
-use crate::storage::CoreDb;
+use crate::storage::db::CellsDb;
 use crate::storage::shard_state::db_worker::DbHandle;
 
 pub struct CellStorage {
-    db: CoreDb,
+    db: CellsDb,
     db_handle: DbHandle,
     cells_cache: Arc<CellsIndex>,
     raw_cells_cache: Arc<RawCellsCache>,
@@ -33,7 +33,7 @@ pub struct CellStorage {
 type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
 
 impl CellStorage {
-    pub fn new(db: CoreDb, db_handle: DbHandle, cache_size_bytes: ByteSize) -> Arc<Self> {
+    pub fn new(db: CellsDb, db_handle: DbHandle, cache_size_bytes: ByteSize) -> Arc<Self> {
         let cells_cache = Default::default();
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
 
@@ -96,7 +96,7 @@ impl CellStorage {
 
         struct Context<'a> {
             cells_cf: BoundedCfHandle<'a>,
-            db: &'a CoreDb,
+            db: &'a CellsDb,
             buffer: Vec<u8>,
             transaction: FastHashMap<HashBytes, TempCell>,
             new_cells_batch: rocksdb::WriteBatch,
@@ -105,7 +105,7 @@ impl CellStorage {
         }
 
         impl<'a> Context<'a> {
-            fn new(db: &'a CoreDb, raw_cache: &'a RawCellsCache) -> Self {
+            fn new(db: &'a CellsDb, raw_cache: &'a RawCellsCache) -> Self {
                 Self {
                     cells_cf: db.cells.cf(),
                     db,
@@ -282,7 +282,7 @@ impl CellStorage {
         }
 
         struct StoreContext<'a> {
-            db: &'a CoreDb,
+            db: &'a CellsDb,
             db_handle: &'a DbHandle,
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
@@ -304,7 +304,7 @@ impl CellStorage {
 
         impl<'a> StoreContext<'a> {
             fn new(
-                db: &'a CoreDb,
+                db: &'a CellsDb,
                 db_handle: &'a DbHandle,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
@@ -558,7 +558,7 @@ impl CellStorage {
         }
 
         struct Context<'a> {
-            db: &'a CoreDb,
+            db: &'a CellsDb,
             db_handle: &'a DbHandle,
             raw_cells_cache: &'a RawCellsCache,
             alloc: &'a Bump,
@@ -714,7 +714,7 @@ impl CellStorage {
         }
 
         struct RemoveContext<'a> {
-            db: &'a CoreDb,
+            db: &'a CellsDb,
             db_handle: &'a DbHandle,
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
@@ -736,7 +736,7 @@ impl CellStorage {
 
         impl<'a> RemoveContext<'a> {
             fn new(
-                db: &'a CoreDb,
+                db: &'a CellsDb,
                 db_handle: &'a DbHandle,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,

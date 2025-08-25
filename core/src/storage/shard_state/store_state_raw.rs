@@ -16,12 +16,13 @@ use weedb::{BoundedCfHandle, rocksdb};
 
 use super::cell_storage::*;
 use super::entries_buffer::*;
-use crate::storage::{BriefBocHeader, CoreDb, ShardStateReader};
+use crate::storage::db::CellsDb;
+use crate::storage::{BriefBocHeader, ShardStateReader};
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
 pub struct StoreStateContext {
-    pub db: CoreDb,
+    pub db: CellsDb,
     pub cell_storage: Arc<CellStorage>,
     pub temp_file_storage: TempFileStorage,
     pub min_ref_mc_state: MinRefMcStateTracker,
@@ -247,7 +248,7 @@ struct FinalizationContext<'a> {
 }
 
 impl<'a> FinalizationContext<'a> {
-    fn new(db: &'a CoreDb) -> Self {
+    fn new(db: &'a CellsDb) -> Self {
         Self {
             pruned_branches: Default::default(),
             cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
@@ -258,7 +259,7 @@ impl<'a> FinalizationContext<'a> {
         }
     }
 
-    fn clear_temp_cells(&self, db: &CoreDb) -> std::result::Result<(), rocksdb::Error> {
+    fn clear_temp_cells(&self, db: &CellsDb) -> std::result::Result<(), rocksdb::Error> {
         let from = &[0x00; 32];
         let to = &[0xff; 32];
         db.rocksdb().delete_range_cf(&self.temp_cells_cf, from, to)
@@ -622,7 +623,7 @@ mod test {
         Ok(())
     }
 
-    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CoreDb) -> Result<()> {
+    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CellsDb) -> Result<()> {
         let states_iterator = db.shard_states.iterator(IteratorMode::Start);
         let bump = bumpalo::Bump::new();
 

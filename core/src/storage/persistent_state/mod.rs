@@ -23,9 +23,8 @@ pub use self::queue_state::reader::{QueueDiffReader, QueueStateReader};
 pub use self::queue_state::writer::QueueStateWriter;
 pub use self::shard_state::reader::{BriefBocHeader, ShardStateReader};
 pub use self::shard_state::writer::ShardStateWriter;
-use super::{
-    BlockHandle, BlockHandleStorage, BlockStorage, CoreDb, KeyBlocksDirection, ShardStateStorage,
-};
+use super::{BlockHandle, BlockHandleStorage, BlockStorage, KeyBlocksDirection, ShardStateStorage};
+use crate::storage::db::CellsDb;
 
 mod queue_state {
     pub mod reader;
@@ -84,7 +83,7 @@ pub struct PersistentStateStorage {
 
 impl PersistentStateStorage {
     pub fn new(
-        db: CoreDb,
+        cells_db: CellsDb,
         files_dir: &Dir,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
@@ -96,7 +95,7 @@ impl PersistentStateStorage {
 
         Ok(Self {
             inner: Arc::new(Inner {
-                db,
+                cells_db,
                 storage_dir,
                 block_handles: block_handle_storage,
                 blocks: block_storage,
@@ -337,7 +336,7 @@ impl PersistentStateStorage {
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
-            let cell_writer = ShardStateWriter::new(&this.db, &states_dir, handle.id());
+            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
             match cell_writer.write(&root_hash, Some(&cancelled)) {
                 Ok(()) => {
                     this.block_handles.set_has_persistent_shard_state(&handle);
@@ -390,7 +389,7 @@ impl PersistentStateStorage {
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
-            let cell_writer = ShardStateWriter::new(&this.db, &states_dir, handle.id());
+            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
             cell_writer.write_file(file, Some(&cancelled))?;
             this.block_handles.set_has_persistent_shard_state(&handle);
             this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
@@ -635,7 +634,7 @@ impl PersistentStateStorage {
 }
 
 struct Inner {
-    db: CoreDb,
+    cells_db: CellsDb,
     storage_dir: Dir,
     block_handles: Arc<BlockHandleStorage>,
     blocks: Arc<BlockStorage>,

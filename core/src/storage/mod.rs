@@ -26,6 +26,7 @@ pub use self::persistent_state::{
 pub use self::shard_state::{
     ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics, StoreStateHint,
 };
+use crate::storage::db::{CellsDb, CellsDbExt};
 
 pub mod tables;
 
@@ -47,6 +48,7 @@ mod util {
 }
 
 const BASE_DB_SUBDIR: &str = "base";
+const CELLS_DB_SUBDIR: &str = "cells";
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -59,6 +61,10 @@ impl CoreStorage {
         let db: CoreDb = ctx.open_preconfigured(BASE_DB_SUBDIR)?;
         db.normalize_version()?;
         db.apply_migrations().await?;
+
+        let cells_db: CellsDb = ctx.open_preconfigured(CELLS_DB_SUBDIR)?;
+        cells_db.normalize_version()?;
+        cells_db.apply_migrations().await?;
 
         let blocks_storage_config = BlockStorageConfig {
             blocks_cache: config.blocks_cache,
@@ -77,13 +83,14 @@ impl CoreStorage {
         let block_storage = Arc::new(block_storage);
         let shard_state_storage = ShardStateStorage::new(
             db.clone(),
+            cells_db.clone(),
             block_handle_storage.clone(),
             block_storage.clone(),
             ctx.temp_files().clone(),
             config.cells_cache_size,
         )?;
         let persistent_state_storage = PersistentStateStorage::new(
-            db.clone(),
+            cells_db,
             ctx.files_dir(),
             block_handle_storage.clone(),
             block_storage.clone(),

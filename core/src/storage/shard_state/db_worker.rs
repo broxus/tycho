@@ -2,12 +2,12 @@ use tycho_storage::kv::refcount;
 use tycho_types::cell::HashBytes;
 use weedb::rocksdb::WriteBatch;
 
-use crate::storage::CoreDb;
+use crate::storage::db::CellsDb;
 use crate::storage::shard_state::cell_storage::CellStorageError;
 
 #[derive(Clone)]
 pub struct DbWorker {
-    pub db: CoreDb,
+    pub db: CellsDb,
     pub command_rx: crossbeam_channel::Receiver<DbCommand>,
 }
 
