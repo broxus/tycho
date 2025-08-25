@@ -13,6 +13,7 @@ use tycho_types::models::{
 };
 use tycho_util::{FastHashMap, FastHashSet};
 
+use crate::collator::ForceMasterCollation;
 use crate::mempool::MempoolAnchorId;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use crate::types::{
@@ -62,13 +63,13 @@ pub(super) struct CollationSyncState {
 #[derive(Debug)]
 pub(super) struct CollationState {
     pub status: CollationStatus,
-    pub last_imported_samples: Vec<AnchorSample>,
+    pub last_imported_anchor_events: Vec<ImportedAnchorEvent>,
     pub last_seen_seqno: Option<u32>,
 }
 #[derive(Default, Clone, Debug)]
-pub(super) struct AnchorSample {
+pub(super) struct ImportedAnchorEvent {
     pub ct: u64,
-    pub forced: bool,
+    pub mc_forced: bool,
     // true only if a new shard block was observed (seqno advanced),
     // false if we only imported an anchor
     pub real_block: bool,
@@ -77,8 +78,8 @@ pub(super) struct AnchorSample {
 impl Default for CollationState {
     fn default() -> Self {
         Self {
-            status: CollationStatus::Attempting,
-            last_imported_samples: vec![],
+            status: CollationStatus::AttemptsInProgress,
+            last_imported_anchor_events: vec![],
             last_seen_seqno: None,
         }
     }
@@ -86,7 +87,7 @@ impl Default for CollationState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CollationStatus {
-    Attempting,
+    AttemptsInProgress,
     WaitForMasterStatus,
 }
 
@@ -439,4 +440,69 @@ impl std::fmt::Display for McBlockSubgraphExtract {
 pub struct HandledBlockFromBcCtx {
     pub state: ShardStateStuff,
     pub processed_upto: ProcessedUptoInfo,
+}
+
+pub struct CollationStepContext {
+    pub prev_mc_block_id: BlockId,
+    pub shard_id: ShardIdent,
+    pub chain_time: u64,
+    pub force_mc_block: ForceMasterCollation,
+    pub trigger_shard_block_id_opt: Option<BlockId>,
+    pub mc_block_min_interval_ms: u64,
+    pub mc_block_max_interval_ms: u64,
+}
+
+impl CollationStepContext {
+    pub fn new(
+        prev_mc_block_id: BlockId,
+        shard_id: ShardIdent,
+        chain_time: u64,
+        force_mc_block: ForceMasterCollation,
+        trigger_shard_block_id_opt: Option<BlockId>,
+        mc_block_min_interval_ms: u64,
+        mc_block_max_interval_ms: u64,
+    ) -> Self {
+        Self {
+            prev_mc_block_id,
+            shard_id,
+            chain_time,
+            force_mc_block,
+            trigger_shard_block_id_opt,
+            mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct DetectCollationCtx {
+    pub active_shards: Vec<ShardIdent>,
+    pub shard_id: ShardIdent,
+    pub last_imported_anchor_ct: u64,
+    pub force_mc_block: ForceMasterCollation,
+    pub observed_seqno: Option<u32>,
+    pub mc_block_min_interval_ms: u64,
+    pub mc_block_max_interval_ms: u64,
+}
+
+impl DetectCollationCtx {
+    pub fn new(
+        active_shards: Vec<ShardIdent>,
+        shard_id: ShardIdent,
+        last_imported_anchor_ct: u64,
+        force_mc_block: ForceMasterCollation,
+        observed_seqno: Option<u32>,
+        mc_block_min_interval_ms: u64,
+        mc_block_max_interval_ms: u64,
+    ) -> Self {
+        Self {
+            active_shards,
+            shard_id,
+            last_imported_anchor_ct,
+            force_mc_block,
+            observed_seqno,
+            mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
+        }
+    }
 }
