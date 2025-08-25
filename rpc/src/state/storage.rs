@@ -615,7 +615,7 @@ impl RpcStorage {
         );
 
         // Split on virtual shards
-        let (_state_guard, virtual_shards) = {
+        let split = {
             let guard = shard_state.ref_mc_state_handle().clone();
 
             let mut virtual_shards = FastHashMap::default();
@@ -645,6 +645,9 @@ impl RpcStorage {
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         tokio::task::spawn_blocking(move || {
             let _span = span.enter();
+
+            // NOTE: Ensure that guard is captured by the spawned thread.
+            let (_state_guard, virtual_shards) = split;
 
             let guard = scopeguard::guard((), |_| {
                 tracing::warn!("cancelled");

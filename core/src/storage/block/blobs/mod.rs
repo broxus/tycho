@@ -686,6 +686,8 @@ impl BlobStorage {
         handle: &BlockHandle,
         id: &PackageEntryKey,
     ) -> Result<Bytes> {
+        // NOTE: Lock here can be dropped if the future is cancelled.
+        //       There is no need for exclusive read.
         let _lock = lock_block_handle(handle, id.ty).await;
 
         let id = *id;

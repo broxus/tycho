@@ -124,7 +124,7 @@ impl ShardStateStorage {
         let accounts_split_depth = self.accounts_split_depth;
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
-        let (new_cell_count, updated, _gc_lock) = tokio::task::spawn_blocking(move || {
+        let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
             let root_hash = *root_cell.repr_hash();
             let estimated_merkle_update_size = hint.estimate_cell_count();
 
@@ -172,7 +172,10 @@ impl ShardStateStorage {
                 block_handle_storage.store_handle(&handle, false);
             }
 
-            Ok::<_, anyhow::Error>((new_cell_count, updated, gc_lock))
+            // NOTE: Ensure that GC lock is dropped only after storing the state.
+            drop(gc_lock);
+
+            Ok::<_, anyhow::Error>((new_cell_count, updated))
         })
         .await??;
 
@@ -197,8 +200,14 @@ impl ShardStateStorage {
 
         let block_id = *block_id;
 
-        let _gc_lock = self.gc_lock.lock().await;
-        tokio::task::spawn_blocking(move || ctx.store(&block_id, boc)).await?
+        let gc_lock = self.gc_lock.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            // NOTE: Ensure that GC lock is captured by the spawned thread.
+            let _gc_lock = gc_lock;
+
+            ctx.store(&block_id, boc)
+        })
+        .await?
     }
 
     pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
@@ -271,7 +280,7 @@ impl ShardStateStorage {
             let cell_storage = self.cell_storage.clone();
             let key = key.to_vec();
             let accounts_split_depth = self.accounts_split_depth;
-            let (total, inner_alloc, guard) = tokio::task::spawn_blocking(move || {
+            let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
                 let in_mem_remove =
                     HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
 
@@ -293,11 +302,12 @@ impl ShardStateStorage {
                     .rocksdb()
                     .write_opt(batch, db.cells.write_config())?;
 
-                Ok::<_, anyhow::Error>((stats, alloc, guard))
+                // NOTE: Ensure that guard is dropped only after writing the batch.
+                drop(guard);
+
+                Ok::<_, anyhow::Error>((stats, alloc))
             })
             .await??;
-
-            drop(guard);
 
             removed_cells += total;
             alloc = inner_alloc; // Reuse allocation without passing alloc by ref

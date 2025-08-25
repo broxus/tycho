@@ -103,7 +103,7 @@ impl PersistentStateStorage {
                 shard_states: shard_state_storage,
                 descriptor_cache: Default::default(),
                 mc_seqno_to_block_ids: Default::default(),
-                chunks_semaphore: Semaphore::new(MAX_PARALLEL_CHUNK_READS),
+                chunks_semaphore: Arc::new(Semaphore::new(MAX_PARALLEL_CHUNK_READS)),
                 handles_queue: Default::default(),
                 oldest_ps_changed: Default::default(),
                 oldest_ps_handle: Default::default(),
@@ -277,7 +277,10 @@ impl PersistentStateStorage {
             return None;
         }
 
-        let _permit = self.inner.chunks_semaphore.acquire().await.ok()?;
+        let permit = {
+            let semaphore = self.inner.chunks_semaphore.clone();
+            semaphore.acquire_owned().await.ok()?
+        };
 
         let key = CacheKey {
             block_id: *block_id,
@@ -292,6 +295,9 @@ impl PersistentStateStorage {
         // NOTE: `spawn_blocking` is called here because it is mostly IO-bound operation.
         // TODO: Add semaphore to limit the number of concurrent operations.
         tokio::task::spawn_blocking(move || {
+            // Ensure that permit is dropped only after cached state is used.
+            let _permit = permit;
+
             let end = std::cmp::min(offset.saturating_add(chunk_size), cached.file.length());
             cached.file.as_slice()[offset..end].to_vec()
         })
@@ -642,7 +648,7 @@ struct Inner {
     shard_states: Arc<ShardStateStorage>,
     descriptor_cache: DashMap<CacheKey, Arc<CachedState>>,
     mc_seqno_to_block_ids: Mutex<BTreeMap<u32, FastHashSet<BlockId>>>,
-    chunks_semaphore: Semaphore,
+    chunks_semaphore: Arc<Semaphore>,
     handles_queue: Mutex<HandlesQueue>,
     oldest_ps_changed: Notify,
     oldest_ps_handle: ArcSwapAny<Option<BlockHandle>>,
