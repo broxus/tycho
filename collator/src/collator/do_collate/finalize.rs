@@ -387,8 +387,6 @@ impl Phase<FinalizeState> {
         self.extra.finalize_metrics.build_in_msgs_elapsed = build_in_msgs_elapsed;
         self.extra.finalize_metrics.build_out_msgs_elapsed = build_out_msgs_elapsed;
 
-        // TODO: update new_config_opt from hard fork
-
         // Compute value flow.
         let value_flow = self.state.collation_data.finalize_value_flow(
             &processed_accounts.account_blocks,
@@ -620,13 +618,13 @@ impl Phase<FinalizeState> {
                 global_id: self.state.mc_data.global_id,
                 shard_ident: new_block_info.shard,
                 seqno: new_block_info.seqno,
-                vert_seqno: 0,
+                vert_seqno: 0, // not used in the current implementation
                 gen_utime: new_block_info.gen_utime,
                 gen_utime_ms: new_block_info.gen_utime_ms,
                 gen_lt: new_block_info.end_lt,
                 min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
                 processed_upto: Lazy::new(&processed_upto.clone().try_into()?)?,
-                before_split: new_block_info.before_split,
+                before_split: new_block_info.before_split, // not used in the current implementation
                 accounts: Lazy::new(&processed_accounts.shard_accounts)?,
                 overload_history: new_wu_used_from_last_anchor,
                 underload_history: shard_accounts_count,
@@ -647,8 +645,6 @@ impl Phase<FinalizeState> {
             if is_masterchain {
                 new_observable_state.libraries = public_libraries.clone();
             }
-
-            // TODO: update config smc on hard fork
 
             new_state_root = CellBuilder::build_from(&new_observable_state)?;
 
