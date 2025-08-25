@@ -705,7 +705,6 @@ impl CollatorStdImpl {
                 // we skip it for now and will rework mechanism in the future
                 // shard_descr.proof_chain = Some(sh_bd.top_block_descr().chain().clone());
             }
-            // TODO: Check may update shard block info
 
             // update shards and collation data
             collation_data_builder.update_shards_max_end_lt(new_shard_descr.end_lt);
@@ -733,14 +732,13 @@ impl CollatorStdImpl {
                 collation_data_builder.store_shard_fees(shard_id, proof_funds)?;
             }
 
-            let top_shard_block_info = TopShardBlockInfo {
-                block_id,
-                processed_to_by_partitions,
-            };
-
             collation_data_builder
                 .top_shard_blocks
-                .push(top_shard_block_info);
+                .push(TopShardBlockInfo {
+                    block_id,
+                    processed_to_by_partitions,
+                });
+
             #[cfg(feature = "block-creator-stats")]
             collation_data_builder.register_shard_block_creators(creators)?;
         }

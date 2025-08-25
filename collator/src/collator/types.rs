@@ -86,8 +86,7 @@ impl PrevData {
         prev_states: Vec<ShardStateStuff>,
         prev_queue_diff_hashes: Vec<HashBytes>,
     ) -> Result<(Self, UsageTree)> {
-        // TODO: make real implementation
-        // consider split/merge logic
+        // TODO: consider split/merge logic
         //  Collator::prepare_data()
         //  Collator::unpack_last_state()
 
@@ -414,7 +413,6 @@ pub(super) struct BlockCollationData {
 
     shards: Option<FastHashMap<ShardIdent, Box<ShardDescription>>>,
 
-    // TODO: setup update logic when ShardFees would be implemented
     pub shard_fees: ShardFees,
 
     pub mint_msg: Option<InMsg>,
@@ -436,7 +434,6 @@ pub(super) struct BlockCollationData {
 
     #[cfg(feature = "block-creator-stats")]
     pub block_create_count: FastHashMap<HashBytes, u64>,
-    // TODO: try remove
     pub diff_tail_len: u32,
 }
 
@@ -1035,17 +1032,17 @@ impl ShardDescriptionExt for ShardDescription {
             end_lt: block_info.end_lt,
             root_hash: block_id.root_hash,
             file_hash: block_id.file_hash,
-            before_split: block_info.before_split,
-            before_merge: false, // TODO: by t-node, needs to review
-            want_split: block_info.want_split,
-            want_merge: block_info.want_merge,
-            nx_cc_updated: false, // TODO: by t-node, needs to review
+            before_split: block_info.before_split, // not used in the current implementation
+            before_merge: false,                   // not used in the current implementation
+            want_split: block_info.want_split,     // not used in the current implementation
+            want_merge: block_info.want_merge,     // not used in the current implementation
+            nx_cc_updated: false,                  // not used in the current implementation
             next_catchain_seqno: block_info.gen_catchain_seqno,
             ext_processed_to_anchor_id,
-            top_sc_block_updated: false,
+            top_sc_block_updated: false, // initially set false, will be updated further
             min_ref_mc_seqno: block_info.min_ref_mc_seqno,
             gen_utime: block_info.gen_utime,
-            split_merge_at: None, // TODO: check if we really should not use it here
+            split_merge_at: None, // not used in the current implementation
             fees_collected: value_flow.fees_collected.clone(),
             funds_created: value_flow.created.clone(),
         }
