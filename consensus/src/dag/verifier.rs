@@ -15,8 +15,8 @@ use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, Link, PeerCount, PointInfo, Round,
-    UnixTime,
+    AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, Link, PeerCount, PointId, PointInfo,
+    Round, UnixTime,
 };
 use crate::storage::MempoolStore;
 // Note on equivocation.
@@ -56,8 +56,6 @@ pub enum ValidateResult {
 
 #[derive(thiserror::Error, Debug)]
 pub enum VerifyFailReason {
-    #[error("point before genesis cannot be verified")]
-    BeforeGenesis,
     #[error("uninit {:?} peer set of {} len at round {}", .0.2, .0.0, .0.1.0)]
     Uninit((usize, Round, PointMap)),
     #[error("author is not scheduled: outdated peer schedule or author out of nowhere")]
@@ -68,6 +66,8 @@ pub enum VerifyFailReason {
 pub enum IllFormedReason {
     #[error("ill-formed after load from DB")]
     AfterLoadFromDb, // TODO describe all reasons and save them to DB, then remove this stub
+    #[error("point before genesis cannot exist in this overlay")]
+    BeforeGenesis,
     #[error("too large payload: {0} bytes")]
     TooLargePayload(u32),
     #[error("links anchor across genesis")]
@@ -99,24 +99,24 @@ pub enum InvalidReason {
     NoRoundInDag(PointMap),
     #[error("cannot validate point, dependency was dropped with its round")]
     DependencyRoundDropped,
-    #[error("time is not greater than in prev point")]
-    TimeNotGreaterThanInPrevPoint,
-    #[error("anchor proof does not inherit time from its candidate")]
-    AnchorProofDoesntInheritAnchorTime,
-    #[error("anchor candidate's time is not inherited from its proof")]
-    AnchorTimeNotInheritedFromProof,
-    #[error("must have referenced prev point digest {}", .0.alt())]
-    MustHaveReferencedPrevPoint(Digest),
-    #[error("must have skipped round")]
-    MustHaveSkippedRound,
-    #[error("invalid dependency")]
-    InvalidDependency,
-    #[error("dependency time too far in future")]
-    DependencyTimeTooFarInFuture,
-    #[error("dependency has newer anchor {0:?}")]
-    NewerAnchorInDependency(AnchorStageRole),
-    #[error("anchor {0:?} link leads to other destination")]
-    AnchorLinkBadPath(AnchorStageRole),
+    #[error("time is not greater than in prev point {:?}", .0.alt())]
+    TimeNotGreaterThanInPrevPoint(PointId),
+    #[error("anchor proof does not inherit time from its candidate {:?}", .0.alt())]
+    AnchorProofDoesntInheritAnchorTime(PointId),
+    #[error("anchor candidate's time is not inherited from its proof {:?}", .0.alt())]
+    AnchorTimeNotInheritedFromProof(PointId),
+    #[error("must have referenced prev point {:?}", .0.alt())]
+    MustHaveReferencedPrevPoint(PointId),
+    #[error("must have skipped round after {:?}", .0.alt())]
+    MustHaveSkippedRound(PointId),
+    #[error("invalid dependency {:?}", .0.alt())]
+    InvalidDependency(PointId),
+    #[error("dependency time too far in future: {:?}", .0.alt())]
+    DependencyTimeTooFarInFuture(PointId),
+    #[error("newer anchor {:?} in dependency {:?}", .0.0, .0.1.alt())]
+    NewerAnchorInDependency((AnchorStageRole, PointId)),
+    #[error("anchor {:?} link leads to other destination through {:?}", .0.0, .0.1.alt())]
+    AnchorLinkBadPath((AnchorStageRole, PointId)),
 }
 
 // If any round exceeds dag rounds, the arg point @ r+0 is considered valid by itself.
@@ -381,7 +381,7 @@ impl Verifier {
                             "prev point was not marked as certified, Cert is broken"
                         );
                         let Some(proven) = dag_point.trusted() else {
-                            return Ok(Some(InvalidReason::InvalidDependency));
+                            return Ok(Some(InvalidReason::InvalidDependency(dag_point.id())));
                         };
                         if let Some(reason) = Self::is_proof_ok(&info, proven) {
                             return Ok(Some(reason));
@@ -393,17 +393,17 @@ impl Verifier {
                                 // a requirement to reference the first resolved is reproducible
                                 if valid.is_first_valid() {
                                     return Ok(Some(InvalidReason::MustHaveReferencedPrevPoint(
-                                        *valid.info().digest(),
+                                        valid.info().id(),
                                     )));
                                 } // else: will not throw err only when first valid is referenced
                             }
-                            DagPoint::Invalid(_) | DagPoint::IllFormed(_) => {
-                                return Ok(Some(InvalidReason::MustHaveSkippedRound));
+                            bad @ (DagPoint::Invalid(_) | DagPoint::IllFormed(_)) => {
+                                return Ok(Some(InvalidReason::MustHaveSkippedRound(bad.id())));
                             }
                             DagPoint::NotFound(not_found) => {
                                 if not_found.is_certified() {
                                     return Ok(Some(InvalidReason::MustHaveReferencedPrevPoint(
-                                        not_found.id().digest,
+                                        *not_found.id(),
                                     )));
                                 } // else: skip, because it may be some other point's dependency
                             }
@@ -412,18 +412,19 @@ impl Verifier {
                 }
             } else {
                 let Some(dep) = dag_point.trusted() else {
-                    return Ok(Some(InvalidReason::InvalidDependency));
+                    return Ok(Some(InvalidReason::InvalidDependency(dag_point.id())));
                 };
                 if dep.time() > max_allowed_dep_time {
                     // dependency time may exceed those in point only by a small value from config
-                    return Ok(Some(InvalidReason::DependencyTimeTooFarInFuture));
+                    return Ok(Some(InvalidReason::DependencyTimeTooFarInFuture(dep.id())));
                 }
                 for (anchor_role, anchor_role_round) in [
                     (AnchorStageRole::Trigger, anchor_trigger_id.round),
                     (AnchorStageRole::Proof, anchor_proof_id.round),
                 ] {
                     if dep.anchor_round(anchor_role) > anchor_role_round {
-                        return Ok(Some(InvalidReason::NewerAnchorInDependency(anchor_role)));
+                        let tuple = (anchor_role, dep.id());
+                        return Ok(Some(InvalidReason::NewerAnchorInDependency(tuple)));
                     }
                 }
 
@@ -431,19 +432,17 @@ impl Verifier {
                 if dep_id == anchor_trigger_link_id
                     && dep.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
                 {
-                    return Ok(Some(InvalidReason::AnchorLinkBadPath(
-                        AnchorStageRole::Trigger,
-                    )));
+                    let tuple = (AnchorStageRole::Trigger, dep_id);
+                    return Ok(Some(InvalidReason::AnchorLinkBadPath(tuple)));
                 }
                 if dep_id == anchor_proof_link_id {
                     if dep.anchor_id(AnchorStageRole::Proof) != anchor_proof_id {
-                        return Ok(Some(InvalidReason::AnchorLinkBadPath(
-                            AnchorStageRole::Proof,
-                        )));
+                        let tuple = (AnchorStageRole::Proof, dep_id);
+                        return Ok(Some(InvalidReason::AnchorLinkBadPath(tuple)));
                     }
                     if dep.anchor_time() != info.anchor_time() {
                         // anchor candidate's time is not inherited from its proof
-                        return Ok(Some(InvalidReason::AnchorTimeNotInheritedFromProof));
+                        return Ok(Some(InvalidReason::AnchorTimeNotInheritedFromProof(dep_id)));
                     }
                 }
             }
@@ -470,7 +469,7 @@ impl Verifier {
             includes_peers,   // @ r-1
             witness_peers,    // @ r-2
         ) = match (info.round() - conf.genesis_round.prev().0).0 {
-            0 => return Some(VerifyError::Fail(VerifyFailReason::BeforeGenesis)),
+            0 => return Some(VerifyError::IllFormed(IllFormedReason::BeforeGenesis)),
             1 => {
                 let a = peer_schedule.atomic().peers_for(info.round()).clone();
                 ((peer_count_genesis(a.len(), info.round()), a), None, None)
@@ -697,11 +696,13 @@ impl Verifier {
         );
         if info.time() <= proven.time() {
             // time must be increasing by the same author until it stops referencing previous points
-            return Some(InvalidReason::TimeNotGreaterThanInPrevPoint);
+            return Some(InvalidReason::TimeNotGreaterThanInPrevPoint(proven.id()));
         }
         if info.anchor_proof() == &Link::ToSelf && info.anchor_time() != proven.time() {
             // anchor proof must inherit its candidate's time
-            return Some(InvalidReason::AnchorProofDoesntInheritAnchorTime);
+            return Some(InvalidReason::AnchorProofDoesntInheritAnchorTime(
+                proven.id(),
+            ));
         }
         None
     }
