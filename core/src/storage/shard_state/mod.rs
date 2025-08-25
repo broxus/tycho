@@ -32,7 +32,7 @@ pub struct ShardStateStorage {
     cell_storage: Arc<CellStorage>,
     temp_file_storage: TempFileStorage,
 
-    gc_lock: tokio::sync::Mutex<()>,
+    gc_lock: Arc<tokio::sync::Mutex<()>>,
     min_ref_mc_state: MinRefMcStateTracker,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
@@ -104,9 +104,9 @@ impl ShardStateStorage {
             return Ok(false);
         }
 
-        let _gc_lock = {
+        let gc_lock = {
             let _hist = HistogramGuard::begin("tycho_storage_cell_gc_lock_store_time_high");
-            self.gc_lock.lock().await
+            self.gc_lock.clone().lock_owned().await
         };
 
         // Double check if the state is already stored
@@ -124,7 +124,7 @@ impl ShardStateStorage {
         let accounts_split_depth = self.accounts_split_depth;
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
-        let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
+        let (new_cell_count, updated, _gc_lock) = tokio::task::spawn_blocking(move || {
             let root_hash = *root_cell.repr_hash();
             let estimated_merkle_update_size = hint.estimate_cell_count();
 
@@ -172,7 +172,7 @@ impl ShardStateStorage {
                 block_handle_storage.store_handle(&handle, false);
             }
 
-            Ok::<_, anyhow::Error>((new_cell_count, updated))
+            Ok::<_, anyhow::Error>((new_cell_count, updated, gc_lock))
         })
         .await??;
 
@@ -264,14 +264,14 @@ impl ShardStateStorage {
 
             let guard = {
                 let _h = HistogramGuard::begin("tycho_storage_cell_gc_lock_remove_time_high");
-                self.gc_lock.lock().await
+                self.gc_lock.clone().lock_owned().await
             };
 
             let db = self.db.clone();
             let cell_storage = self.cell_storage.clone();
             let key = key.to_vec();
             let accounts_split_depth = self.accounts_split_depth;
-            let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
+            let (total, inner_alloc, guard) = tokio::task::spawn_blocking(move || {
                 let in_mem_remove =
                     HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
 
@@ -293,7 +293,7 @@ impl ShardStateStorage {
                     .rocksdb()
                     .write_opt(batch, db.cells.write_config())?;
 
-                Ok::<_, anyhow::Error>((stats, alloc))
+                Ok::<_, anyhow::Error>((stats, alloc, guard))
             })
             .await??;
 
