@@ -1,4 +1,4 @@
-use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -33,176 +33,193 @@ pub struct AnchorConsumer {
 }
 
 impl AnchorConsumer {
-    pub fn add(&mut self, committer: PeerId, committed: UnboundedReceiver<MempoolOutput>) {
+    pub fn add(&mut self, peer_id: PeerId, committed: UnboundedReceiver<MempoolOutput>) {
         self.streams
-            .insert(committer, UnboundedReceiverStream::new(committed));
+            .insert(peer_id, UnboundedReceiverStream::new(committed));
     }
 
     pub async fn drain(mut self, mut file: LastAnchorFile) {
         loop {
-            let (_, commit_result) = self
-                .streams
-                .next()
-                .await
-                .expect("committed anchor reader must be alive");
-            let round = match commit_result {
-                MempoolOutput::Running | MempoolOutput::Paused => continue,
-                MempoolOutput::NewStartAfterGap(round) => {
-                    tracing::warn!("gap in anchor chain, next to commit: {}", round.0);
-                    round
-                }
-                MempoolOutput::NextAnchor(anchor_data) => {
-                    let round = anchor_data.anchor.round();
-                    tracing::info!("committed anchor {}", round.0);
-                    round
-                }
-            };
-            self.top_known_anchor.set_max(round);
-            self.commit_round.set_max(round);
-            file.update(round.0).expect("update last anchor file");
+            let (_, commit_result) = self.next_event().await;
+            self.drain_anchor(&mut file, commit_result);
         }
     }
 
     pub async fn check(mut self, merged_conf: &MempoolMergedConfig) {
-        let mut next_expected_history_round = None;
+        // Genesis point is excluded from commit, points only reference it
+        let mut next_expected_history_round = merged_conf.conf.genesis_round.next();
         loop {
-            let (peer_id, commit_result) = self
-                .streams
-                .next()
-                .await
-                .expect("committed anchor reader must be alive");
+            let (peer_id, commit_result) = self.next_event().await;
+            self.check_anchor(&mut next_expected_history_round, peer_id, commit_result);
+        }
+    }
 
-            let (anchor, history) = match commit_result {
-                MempoolOutput::Running | MempoolOutput::Paused => {
-                    continue;
-                }
-                MempoolOutput::NewStartAfterGap(round) => {
-                    tracing::warn!("unrecoverable gap at {} for {}", round.0, peer_id.alt());
-                    continue;
-                }
-                MempoolOutput::NextAnchor(data) => (data.anchor, data.history),
-            };
+    async fn next_event(&mut self) -> (PeerId, MempoolOutput) {
+        let maybe_anchor = self.streams.next().await;
+        let (peer_id, commit_result) = maybe_anchor.expect("committed anchor reader must be alive");
+        (peer_id, commit_result)
+    }
 
-            let anchor_id = anchor.id();
-
-            if next_expected_history_round.is_none() {
-                // Genesis point is excluded from commit, points only reference it
-                next_expected_history_round = Some(merged_conf.conf.genesis_round.next());
+    fn drain_anchor(&mut self, file: &mut LastAnchorFile, commit_result: MempoolOutput) {
+        let round = match commit_result {
+            MempoolOutput::Running | MempoolOutput::Paused => return,
+            MempoolOutput::NewStartAfterGap(round) => {
+                tracing::warn!("gap in anchor chain, next to commit: {}", round.0);
+                round
             }
+            MempoolOutput::NextAnchor(anchor_data) => {
+                let round = anchor_data.anchor.round();
+                tracing::info!("committed anchor {}", round.0);
+                round
+            }
+            MempoolOutput::CommitFinished(round) => {
+                // while MempoolAdapter sets commit_round at this event,
+                // here in simulation we check that every NextAnchor is followed by CommitFinished
+                assert_eq!(self.commit_round.get(), round, "anchor was not received");
+                return;
+            }
+        };
+        self.commit_round.set_max(round);
+        self.top_known_anchor.set_max(round);
+        file.update(round.0).expect("update last anchor file");
+    }
 
-            let anchor_round = anchor.round();
+    fn check_anchor(
+        &mut self,
+        next_expected_history_round: &mut Round,
+        peer_id: PeerId,
+        commit_result: MempoolOutput,
+    ) {
+        let (anchor, history) = match commit_result {
+            MempoolOutput::Running | MempoolOutput::Paused => {
+                return;
+            }
+            MempoolOutput::NewStartAfterGap(round) => {
+                tracing::warn!("unrecoverable gap at {} for {}", round.0, peer_id.alt());
+                return;
+            }
+            MempoolOutput::NextAnchor(data) => (data.anchor, data.history),
+            MempoolOutput::CommitFinished(round) => {
+                // while MempoolAdapter sets commit_round at this event,
+                // here in simulation we check that every NextAnchor is followed by CommitFinished
+                assert_eq!(self.commit_round.get(), round, "anchor was not received");
+                return;
+            }
+        };
 
-            // get last previous anchor round and check if we don't have previous
-            for (prev_anchor_round, committers) in self
-                .anchors
-                .iter()
-                .filter(|(prev_anchor_round, _)| **prev_anchor_round < anchor_round)
-            {
+        let anchor_id = anchor.id();
+
+        let anchor_round = anchor.round();
+
+        // get last previous anchor round and check if we don't have previous
+        for (prev_anchor_round, committers) in (self.anchors.iter())
+            .filter(|(prev_anchor_round, _)| **prev_anchor_round < anchor_round)
+        {
+            assert!(
+                committers.get(&peer_id).is_some(),
+                "Missing anchor for node {} at {:?}, it committed {:?}",
+                peer_id.alt(),
+                prev_anchor_round,
+                anchor_id.alt(),
+            );
+        }
+
+        match self.anchors.entry(anchor_round) {
+            Entry::Occupied(mut stored_anchor) => {
+                let committers = stored_anchor.get_mut();
                 assert!(
-                    committers.get(&peer_id).is_some(),
-                    "Missing anchor for node {} at {:?}, it committed {:?}",
+                    committers.len() < self.streams.len(),
+                    "Broken test: we can't store {} committers for total {} peers at round {}",
+                    committers.len(),
+                    self.streams.len(),
+                    anchor_round.0,
+                );
+                assert!(
+                    committers.get(&peer_id).is_none(),
+                    "Peer {} already committed {:?}, now committed {:?}",
                     peer_id.alt(),
-                    prev_anchor_round,
-                    anchor_id.alt(),
+                    committers.get(&peer_id).map(|old_anchor| old_anchor.alt()),
+                    anchor_id.alt()
                 );
+
+                committers.insert(peer_id, anchor_id);
             }
-
-            match self.anchors.entry(anchor_round) {
-                Occupied(mut stored_anchor) => {
-                    let committers = stored_anchor.get_mut();
-                    assert!(
-                        committers.len() < self.streams.len(),
-                        "Broken test: we can't store {} committers for total {} peers at round {}",
-                        committers.len(),
-                        self.streams.len(),
-                        anchor_round.0,
-                    );
-                    assert!(
-                        committers.get(&peer_id).is_none(),
-                        "Peer {} already committed {:?}, now committed {:?}",
-                        peer_id.alt(),
-                        committers.get(&peer_id).map(|old_anchor| old_anchor.alt()),
-                        anchor_id.alt()
-                    );
-
-                    committers.insert(peer_id, anchor_id);
-                }
-                Vacant(entry) => {
-                    let mut peer_map = FastHashMap::default();
-                    peer_map.insert(peer_id, anchor_id);
-                    entry.insert(peer_map);
-                }
+            Entry::Vacant(entry) => {
+                let mut peer_map = FastHashMap::default();
+                peer_map.insert(peer_id, anchor_id);
+                entry.insert(peer_map);
             }
+        }
 
-            match self.history.get(&anchor_round) {
-                Some(stored_history) => {
+        match self.history.get(&anchor_round) {
+            Some(stored_history) => {
+                assert_eq!(
+                    stored_history.len(),
+                    history.len(),
+                    "Commited points size differs for {} at round: {}",
+                    peer_id.alt(),
+                    anchor_round.0,
+                );
+
+                for (left, right) in stored_history.iter().zip(history.iter()) {
                     assert_eq!(
-                        stored_history.len(),
-                        history.len(),
-                        "Commited points size differs for {} at round: {}",
-                        peer_id.alt(),
-                        anchor_round.0,
+                        &left.digest,
+                        right.digest(),
+                        "Points are not equal or order is different for round {anchor_round:?}"
                     );
-
-                    for (left, right) in stored_history.iter().zip(history.iter()) {
-                        assert_eq!(
-                            &left.digest,
-                            right.digest(),
-                            "Points are not equal or order is different for round {anchor_round:?}"
-                        );
-                    }
-                }
-                None => {
-                    let point_refs = history.iter().map(|x| x.id()).collect::<Vec<_>>();
-                    self.history.insert(anchor_round, point_refs);
                 }
             }
-
-            let mut common_anchors = vec![];
-            let mut common_history = vec![];
-            self.anchors.retain(|anchor_round, value| {
-                if value.len() == self.streams.len() {
-                    let history = self
-                        .history
-                        .remove(anchor_round)
-                        .expect("anchor must have history");
-                    assert!(!history.is_empty(), "anchor history cannot be empty");
-                    common_anchors.push(anchor_round.0);
-                    common_history.extend(history);
-                    false
-                } else {
-                    true
-                }
-            });
-
-            let minmax_history_round = common_history
-                .iter()
-                .map(|point_id| point_id.round)
-                .minmax()
-                .into_option();
-
-            if let Some((min, max)) = minmax_history_round {
-                assert!(
-                    next_expected_history_round.unwrap() >= min,
-                    "anchor history must be contiguous; has a gap between \
-                     expected {next_expected_history_round:?} and new oldest {min:?}",
-                );
-                next_expected_history_round = Some(max.next());
+            None => {
+                let point_refs = history.iter().map(|x| x.id()).collect::<Vec<_>>();
+                self.history.insert(anchor_round, point_refs);
             }
+        }
 
-            self.common_anchor_count
-                .fetch_add(common_anchors.len(), Ordering::Relaxed);
-            common_anchors.sort_unstable();
-            tracing::debug!("Anchor hashmap len: {}", self.anchors.len());
-            tracing::trace!("History hashmap len: {}", self.history.len());
-            if let Some(top_common_anchor) = common_anchors.last() {
-                self.top_known_anchor.set_max_raw(*top_common_anchor);
-                self.commit_round.set_max_raw(*top_common_anchor);
-                tracing::info!(
-                    "all nodes committed anchors for rounds {:?}",
-                    common_anchors
-                );
+        let mut common_anchors = vec![];
+        let mut common_history = vec![];
+        self.anchors.retain(|anchor_round, value| {
+            if value.len() == self.streams.len() {
+                let history = self
+                    .history
+                    .remove(anchor_round)
+                    .expect("anchor must have history");
+                assert!(!history.is_empty(), "anchor history cannot be empty");
+                common_anchors.push(anchor_round.0);
+                common_history.extend(history);
+                false
+            } else {
+                true
             }
+        });
+
+        let minmax_history_round = common_history
+            .iter()
+            .map(|point_id| point_id.round)
+            .minmax()
+            .into_option();
+
+        if let Some((min, max)) = minmax_history_round {
+            assert!(
+                *next_expected_history_round >= min,
+                "anchor history must be contiguous; has a gap between \
+                 expected {next_expected_history_round:?} and new oldest {min:?}",
+            );
+            *next_expected_history_round = max.next();
+        }
+
+        self.common_anchor_count
+            .fetch_add(common_anchors.len(), Ordering::Relaxed);
+        common_anchors.sort_unstable();
+        tracing::debug!("Anchor hashmap len: {}", self.anchors.len());
+        tracing::trace!("History hashmap len: {}", self.history.len());
+
+        self.commit_round.set_max(anchor_round);
+        if let Some(top_common_anchor) = common_anchors.last() {
+            self.top_known_anchor.set_max_raw(*top_common_anchor);
+            tracing::info!(
+                "all nodes committed anchors for rounds {:?}",
+                common_anchors
+            );
         }
     }
 }
