@@ -2662,6 +2662,10 @@ where
         ctx: DetectCollationCtx,
     ) -> NextCollationStep {
         let _histogram = HistogramGuard::begin("detect_next_collation_step_time");
+        assert!(
+            ctx.active_shards.contains(&ctx.shard_id),
+            "active_shards must include current shard"
+        );
 
         let mc_block_latest_chain_time = guard.mc_block_latest_chain_time;
 
@@ -2720,15 +2724,12 @@ where
             max_ct: Option<u64>,               // first ct >= max interval
             after_mc_ct: Option<u64>,          // first ct > latest masterchain ct
             has_collated_block_after_mc: bool, // shard produced a real block after mc
-            has_any_anchor_event: bool,        // shard imported any anchor at all
         }
 
         fn calc_facts(state: &CollationState, mc_ct: u64, min_ms: u64, max_ms: u64) -> ShardFacts {
             let mut fact = ShardFacts::default();
 
             for s in &state.last_imported_anchor_events {
-                fact.has_any_anchor_event = true;
-
                 if s.mc_forced && fact.forced_ct.is_none() {
                     fact.forced_ct = Some(s.ct);
                 }
@@ -2754,75 +2755,44 @@ where
         }
 
         // Collect facts for all active shards
-        let mut facts: Vec<(ShardIdent, ShardFacts)> = Vec::with_capacity(ctx.active_shards.len());
-        let mut should_collate_by_another_shards = true;
-
+        let mut facts = Vec::with_capacity(ctx.active_shards.len());
         for sid in &ctx.active_shards {
-            let Some(st) = guard.states.get(sid) else {
-                // missing shard state -> cannot collate master
-                should_collate_by_another_shards = false;
-                break;
-            };
-            let f = calc_facts(
-                st,
-                mc_block_latest_chain_time,
-                ctx.mc_block_min_interval_ms,
-                ctx.mc_block_max_interval_ms,
-            );
-            if !f.has_any_anchor_event {
-                // shard has no anchors yet → cannot collate
-                should_collate_by_another_shards = false;
-                break;
-            }
-            facts.push((*sid, f));
-        }
-
-        let any_collated_block_somewhere = facts.iter().any(|(_, f)| f.has_collated_block_after_mc);
-
-        let should_collate_by_current_shard = {
-            let st = guard.states.get(&ctx.shard_id).unwrap();
-            let current_shard_facts = calc_facts(
-                st,
-                mc_block_latest_chain_time,
-                ctx.mc_block_min_interval_ms,
-                ctx.mc_block_max_interval_ms,
-            );
-            hard_forced_for_all
-                || current_shard_facts.forced_ct.is_some()
-                || current_shard_facts.max_ct.is_some()
-                || (current_shard_facts.min_ct.is_some() && any_collated_block_somewhere)
-        };
-
-        should_collate_by_another_shards &= should_collate_by_current_shard;
-
-        // Collect candidate chain times for MC block
-        let mut candidates: Vec<u64> = Vec::with_capacity(ctx.active_shards.len());
-
-        for (_, f) in &facts {
-            // Select best candidate for this shard by priority:
-            // forced > max interval > min interval (if real block exists elsewhere) > hard-forced
-            let chosen = f
-                .forced_ct
-                .or(f.max_ct)
-                .or(if any_collated_block_somewhere {
-                    f.min_ct
-                } else {
-                    None
-                })
-                .or(if hard_forced_for_all {
-                    f.after_mc_ct
-                } else {
-                    None
-                });
-
-            if let Some(ct) = chosen {
-                candidates.push(ct);
+            if let Some(st) = guard.states.get(sid) {
+                let f = calc_facts(
+                    st,
+                    mc_block_latest_chain_time,
+                    ctx.mc_block_min_interval_ms,
+                    ctx.mc_block_max_interval_ms,
+                );
+                facts.push((*sid, f));
             } else {
-                // If at least one shard has no suitable candidate -> cannot collate
-                should_collate_by_another_shards = false;
-                break;
+                facts.push((*sid, ShardFacts::default()));
             }
         }
+
+        let any_collated = facts.iter().any(|(_, f)| f.has_collated_block_after_mc);
+
+        fn choose_candidate(f: &ShardFacts, any: bool, hard_all: bool) -> Option<u64> {
+            f.forced_ct
+                .or(f.max_ct)
+                .or(if any { f.min_ct } else { None })
+                .or(if hard_all { f.after_mc_ct } else { None })
+        }
+
+        // calc ct for all actives candidates
+        let candidates: Vec<_> = facts
+            .iter()
+            .map(|(_, f)| choose_candidate(f, any_collated, hard_forced_for_all))
+            .collect();
+
+        let should_collate_by_another_shards =
+            candidates.iter().all(|c| c.is_some()) && !candidates.is_empty();
+
+        let should_collate_by_current_shard = facts
+            .iter()
+            .find(|(sid, _)| *sid == ctx.shard_id)
+            .and_then(|(_, f)| choose_candidate(f, any_collated, hard_forced_for_all))
+            .is_some();
 
         // If collation is not possible, resume attempts instead
         if !should_collate_by_another_shards {
@@ -2856,7 +2826,7 @@ where
         }
 
         // Otherwise: collate MC block using max candidate ct
-        let next_mc_block_chain_time = candidates.into_iter().max().unwrap();
+        let next_mc_block_chain_time = candidates.into_iter().flatten().max().unwrap();
 
         // Mark all shards as "running" (attempts in progress)
         for st in guard.states.values_mut() {
