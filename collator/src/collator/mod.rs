@@ -653,32 +653,32 @@ impl CollatorStdImpl {
 
                         // Process previous tasks until finding the finished one
                         while let Some(task) = self.store_new_state_tasks.pop() {
+                            // collect all unfinished tasks
                             if !task.store_new_state_task.is_finished()
-                                && unfinished_tasks.len() < 10
+                                && unfinished_tasks.len() < self.config.merkle_chain_limit
                             {
                                 unfinished_tasks.push(task);
                                 continue;
                             }
 
-                            // Check sequence continuity
-                            let is_sequence_valid = {
-                                let is_sequence_valid = unfinished_tasks
-                                    .windows(2)
-                                    .all(|w| w[1].block_id.seqno + 1 == w[0].block_id.seqno);
+                            unfinished_tasks.sort_by(|left, right| {
+                                right.block_id.seqno.cmp(&left.block_id.seqno)
+                            });
 
-                                let is_connected_to_finished_task = match unfinished_tasks.last() {
-                                    Some(last) => task.block_id.seqno + 1 == last.block_id.seqno,
-                                    None => false,
-                                };
+                            // Verify tasks are sequential when processed in reverse order (last -> first)
+                            let is_sequential =
+                                unfinished_tasks.iter().rev().enumerate().all(|(i, ctx)| {
+                                    ctx.block_id.seqno == task.block_id.seqno + (i + 1) as u32
+                                });
 
-                                is_sequence_valid && is_connected_to_finished_task
-                            };
+                            if !is_sequential {
+                                assert!(
+                                    !unfinished_tasks.is_empty(),
+                                    "there is one unfinished `StoreState` task is exist at least"
+                                );
 
-                            if !is_sequence_valid {
-                                assert!(!unfinished_tasks.is_empty());
-
-                                let last_task = unfinished_tasks.remove(0);
-
+                                // just wait for storing the last known state (skip Merkle applies)
+                                let last_task = unfinished_tasks.swap_remove(0);
                                 last_task.store_new_state_task.await?;
 
                                 // and reload pure prev state in the working state
@@ -700,7 +700,7 @@ impl CollatorStdImpl {
                                 .await
                                 .context("failed to load prev shard state")?;
 
-                            assert_eq!(prev_state, task._root);
+                            tracing::info!("unfinished_tasks: {}", unfinished_tasks.len());
 
                             while let Some(task) = unfinished_tasks.pop() {
                                 let split_at = {
