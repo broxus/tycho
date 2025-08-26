@@ -26,6 +26,7 @@ use types::{
 use self::blocks_cache::BlocksCache;
 use self::types::{BlockCacheKey, CandidateStatus, CollationSyncState, McBlockSubgraphExtract};
 use self::utils::find_us_in_collators_set;
+use crate::collator::do_collate::is_first_block_after_prev_master;
 use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
     ForceMasterCollation,
@@ -686,15 +687,16 @@ where
             return Ok(());
         }
 
-        self.run_next_collation_step(CollationStepContext::new(
+        self.run_next_collation_step(CollationStepContext {
             prev_mc_block_id,
-            next_block_id_short.shard,
-            anchor_chain_time,
+            shard_id: next_block_id_short.shard,
+            chain_time: anchor_chain_time,
             force_mc_block,
-            None,
-            collation_config.mc_block_min_interval_ms as _,
-            collation_config.mc_block_max_interval_ms as _,
-        ))
+            trigger_shard_block_id_opt: None,
+            has_collated_block_after_prev_master: false, //???
+            mc_block_min_interval_ms: collation_config.mc_block_min_interval_ms as _,
+            mc_block_max_interval_ms: collation_config.mc_block_max_interval_ms as _,
+        })
         .await
     }
 
@@ -713,7 +715,7 @@ where
                 ctx.shard_id,
                 ctx.chain_time,
                 ctx.force_mc_block,
-                None, // TODO: use collated block seqno
+                ctx.has_collated_block_after_prev_master,
                 ctx.mc_block_min_interval_ms,
                 ctx.mc_block_max_interval_ms,
             ),
@@ -1098,15 +1100,25 @@ where
             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                 "will run next collation step",
             );
-            self.run_next_collation_step(CollationStepContext::new(
-                collation_result.prev_mc_block_id,
-                block_id.shard,
-                candidate_chain_time,
-                collation_result.force_next_mc_block,
-                Some(block_id),
-                collation_result.collation_config.mc_block_min_interval_ms as _,
-                collation_result.collation_config.mc_block_max_interval_ms as _,
-            ))
+            let has_collated_block_after_prev_master =
+                if let Some(ref mc_data) = collation_result.mc_data {
+                    is_first_block_after_prev_master(block_id, &mc_data.shards)
+                } else {
+                    false
+                };
+
+            self.run_next_collation_step(CollationStepContext {
+                prev_mc_block_id: collation_result.prev_mc_block_id,
+                shard_id: block_id.shard,
+                chain_time: candidate_chain_time,
+                force_mc_block: collation_result.force_next_mc_block,
+                trigger_shard_block_id_opt: Some(block_id),
+                has_collated_block_after_prev_master,
+                mc_block_min_interval_ms: collation_result.collation_config.mc_block_min_interval_ms
+                    as _,
+                mc_block_max_interval_ms: collation_result.collation_config.mc_block_max_interval_ms
+                    as _,
+            })
             .await?;
         }
 
@@ -2690,20 +2702,7 @@ where
         // Add new anchor event for current shard
         let current_collation_state = guard.states.entry(ctx.shard_id).or_default();
 
-        let mut real_block = false;
-        if let Some(observed_seqno) = ctx.observed_seqno {
-            match current_collation_state.last_seen_seqno {
-                Some(prev) if observed_seqno > prev => {
-                    real_block = true;
-                    current_collation_state.last_seen_seqno = Some(observed_seqno);
-                }
-                None => {
-                    real_block = true;
-                    current_collation_state.last_seen_seqno = Some(observed_seqno);
-                }
-                _ => {}
-            }
-        }
+        let real_block = ctx.has_collated_block_after_prev_master;
 
         current_collation_state
             .last_imported_anchor_events

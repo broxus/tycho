@@ -40,7 +40,7 @@ use crate::utils::async_queued_dispatcher::{
 use crate::{method_to_queued_async_closure, tracing_targets};
 
 mod debug_info;
-mod do_collate;
+pub mod do_collate;
 mod error;
 mod execution_manager;
 mod messages_buffer;

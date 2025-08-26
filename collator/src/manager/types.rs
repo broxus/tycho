@@ -64,7 +64,6 @@ pub(super) struct CollationSyncState {
 pub(super) struct CollationState {
     pub status: CollationStatus,
     pub last_imported_anchor_events: Vec<ImportedAnchorEvent>,
-    pub last_seen_seqno: Option<u32>,
 }
 #[derive(Default, Clone, Debug)]
 pub(super) struct ImportedAnchorEvent {
@@ -80,7 +79,6 @@ impl Default for CollationState {
         Self {
             status: CollationStatus::AttemptsInProgress,
             last_imported_anchor_events: vec![],
-            last_seen_seqno: None,
         }
     }
 }
@@ -448,30 +446,9 @@ pub struct CollationStepContext {
     pub chain_time: u64,
     pub force_mc_block: ForceMasterCollation,
     pub trigger_shard_block_id_opt: Option<BlockId>,
+    pub has_collated_block_after_prev_master: bool,
     pub mc_block_min_interval_ms: u64,
     pub mc_block_max_interval_ms: u64,
-}
-
-impl CollationStepContext {
-    pub fn new(
-        prev_mc_block_id: BlockId,
-        shard_id: ShardIdent,
-        chain_time: u64,
-        force_mc_block: ForceMasterCollation,
-        trigger_shard_block_id_opt: Option<BlockId>,
-        mc_block_min_interval_ms: u64,
-        mc_block_max_interval_ms: u64,
-    ) -> Self {
-        Self {
-            prev_mc_block_id,
-            shard_id,
-            chain_time,
-            force_mc_block,
-            trigger_shard_block_id_opt,
-            mc_block_min_interval_ms,
-            mc_block_max_interval_ms,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -480,7 +457,7 @@ pub struct DetectCollationCtx {
     pub shard_id: ShardIdent,
     pub last_imported_anchor_ct: u64,
     pub force_mc_block: ForceMasterCollation,
-    pub observed_seqno: Option<u32>,
+    pub has_collated_block_after_prev_master: bool,
     pub mc_block_min_interval_ms: u64,
     pub mc_block_max_interval_ms: u64,
 }
@@ -491,7 +468,7 @@ impl DetectCollationCtx {
         shard_id: ShardIdent,
         last_imported_anchor_ct: u64,
         force_mc_block: ForceMasterCollation,
-        observed_seqno: Option<u32>,
+        has_collated_block_after_prev_master: bool,
         mc_block_min_interval_ms: u64,
         mc_block_max_interval_ms: u64,
     ) -> Self {
@@ -500,7 +477,7 @@ impl DetectCollationCtx {
             shard_id,
             last_imported_anchor_ct,
             force_mc_block,
-            observed_seqno,
+            has_collated_block_after_prev_master,
             mc_block_min_interval_ms,
             mc_block_max_interval_ms,
         }
