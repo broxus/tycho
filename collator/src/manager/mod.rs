@@ -686,7 +686,7 @@ where
         }
 
         self.run_next_collation_step(
-            prev_mc_block_id,
+            &prev_mc_block_id,
             next_block_id_short.shard,
             None,
             DetectNextCollationStepContext::new(
@@ -1109,7 +1109,7 @@ where
             };
 
             self.run_next_collation_step(
-                collation_result.prev_mc_block_id,
+                &collation_result.prev_mc_block_id,
                 block_id.shard,
                 Some(block_id),
                 DetectNextCollationStepContext::new(
@@ -2805,7 +2805,7 @@ where
             .iter()
             .map(|(sid, f)| {
                 let ct = choose_candidate(f, any_shard_has_collated, hard_forced_for_all);
-                if sid == shard_id && ct.is_some() {
+                if *sid == shard_id && ct.is_some() {
                     should_collate_by_current_shard = true;
                 }
                 ct

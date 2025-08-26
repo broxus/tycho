@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use do_collate::is_first_block_after_prev_master;
 use error::CollatorError;
 use futures_util::future::Future;
 use messages_reader::{
