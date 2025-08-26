@@ -143,9 +143,13 @@ impl Inner {
             if let Some(committed) = committed {
                 round_ctx.log_committed(&committed);
                 for data in committed {
+                    let anchor_round = data.anchor.round();
                     round_ctx.commit_metrics(&data.anchor);
                     anchors_tx
                         .send(MempoolOutput::NextAnchor(data))
+                        .map_err(|_closed| Cancelled())?;
+                    anchors_tx
+                        .send(MempoolOutput::CommitFinished(anchor_round))
                         .map_err(|_closed| Cancelled())?;
                 }
             }

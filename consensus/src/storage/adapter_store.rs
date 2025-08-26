@@ -9,7 +9,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{ReadOptions, WriteBatch};
 
 use crate::effects::AltFormat;
-use crate::models::{Point, PointInfo, PointStatus, PointStatusValidated};
+use crate::models::{Point, PointInfo, PointStatus, PointStatusValidated, Round};
 use crate::storage::MempoolDb;
 
 #[derive(Clone)]
@@ -26,6 +26,7 @@ impl MempoolAdapterStore {
         self.0.commit_finished.set_max_raw(next_expected_anchor);
     }
 
+    /// Next must call [`Self::set_committed`] for GC as watch notification is deferred
     pub fn expand_anchor_history<'b>(
         &self,
         anchor: &PointInfo,
@@ -56,13 +57,17 @@ impl MempoolAdapterStore {
                 .expect("DB expand anchor history")
         };
         // may skip expand part, but never skip set committed - let it write what it should
-        self.set_committed(anchor, history)
+        self.set_committed_db(anchor, history)
             .with_context(|| context(anchor, history))
             .expect("DB set committed");
+        payloads
+    }
+
+    /// may skip [`Self::expand_anchor_history`] part, but never skip this one
+    pub fn set_committed(&self, anchor_round: Round) {
         // commit is finished when history payloads is read from DB and marked committed,
         // so that data may be removed consistently with any settings
-        self.0.commit_finished.set_max(anchor.round());
-        payloads
+        self.0.commit_finished.set_max(anchor_round);
     }
 
     pub fn expand_anchor_history_arena_size(&self, history: &[PointInfo]) -> usize {
@@ -147,7 +152,7 @@ impl MempoolAdapterStore {
         Ok(result)
     }
 
-    fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()> {
+    fn set_committed_db(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_set_committed_status_time");
 
         let mut buf = [0_u8; super::KEY_LEN];
