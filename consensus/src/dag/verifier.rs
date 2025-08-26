@@ -9,7 +9,7 @@ use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::dag_location::DagLocation;
-use crate::dag::dag_point_future::DagPointFuture;
+use crate::dag::dag_point_future::WeakDagPointFuture;
 use crate::dag::{AnchorStage, DagRound, WeakDagRound};
 use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
@@ -46,6 +46,14 @@ pub enum VerifyError {
     #[error("ill-formed: {0}")]
     IllFormed(IllFormedReason),
 }
+
+#[derive(Debug)]
+pub enum ValidateResult {
+    IllFormed(IllFormedReason),
+    Invalid(InvalidReason),
+    Valid,
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum VerifyFailReason {
     #[error("point before genesis cannot be verified")]
@@ -55,9 +63,10 @@ pub enum VerifyFailReason {
     #[error("author is not scheduled: outdated peer schedule or author out of nowhere")]
     UnknownAuthor,
 }
+
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum IllFormedReason {
-    #[error("unknown after load from DB")]
+    #[error("ill-formed after load from DB")]
     AfterLoadFromDb, // TODO describe all reasons and save them to DB, then remove this stub
     #[error("too large payload: {0} bytes")]
     TooLargePayload(u32),
@@ -84,8 +93,12 @@ pub enum IllFormedReason {
 
 #[derive(thiserror::Error, Debug)]
 pub enum InvalidReason {
+    #[error("invalid after load from DB")]
+    AfterLoadFromDb, // TODO describe all reasons and save them to DB, then remove this stub
     #[error("cannot validate point, no {0:?} round in DAG")]
     NoRoundInDag(PointMap),
+    #[error("cannot validate point, dependency was dropped with its round")]
+    DependencyRoundDropped,
     #[error("time is not greater than in prev point")]
     TimeNotGreaterThanInPrevPoint,
     #[error("anchor proof does not inherit time from its candidate")]
@@ -104,13 +117,6 @@ pub enum InvalidReason {
     NewerAnchorInDependency(AnchorStageRole),
     #[error("anchor {0:?} link leads to other destination")]
     AnchorLinkBadPath(AnchorStageRole),
-}
-
-#[derive(Debug)]
-pub enum ValidateResult {
-    Valid,
-    Invalid(InvalidReason),
-    IllFormed(IllFormedReason),
 }
 
 // If any round exceeds dag rounds, the arg point @ r+0 is considered valid by itself.
@@ -143,7 +149,7 @@ impl Verifier {
         ctx: ValidateCtx,
     ) -> TaskResult<ValidateResult> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
-        let span_guard = ctx.span().enter();
+        let entered_span = ctx.span().clone().entered();
         let peer_schedule = downloader.peer_schedule();
 
         match info.round().cmp(&ctx.conf().genesis_round) {
@@ -181,45 +187,42 @@ impl Verifier {
             let reason = InvalidReason::NoRoundInDag(PointMap::Includes);
             return ctx.validated(&cert, ValidateResult::Invalid(reason));
         };
-
         let r_2_opt = r_1.prev().upgrade();
-        if r_2_opt.is_none() && !info.witness().is_empty() {
-            let reason = InvalidReason::NoRoundInDag(PointMap::Witness);
-            return ctx.validated(&cert, ValidateResult::Invalid(reason));
-        }
 
-        let (deps_and_prev, cert_deps) =
-            Self::spawn_direct_deps(&info, &r_1, r_2_opt, &downloader, &store, &ctx);
+        let (mut deps_and_prev, cert_deps) =
+            Self::spawn_direct_deps(&info, &r_1, r_2_opt.as_ref(), &downloader, &store, &ctx);
 
         if let Some(prev_digest) = info.prev_digest() {
             // point well-formedness is enough to act as a carrier for the majority of signatures
             let weak_cert =
                 (cert_deps.includes.get(prev_digest)).expect("prev cert must be included");
-            // cannot be dropped because futures keep strong refs to Cert, but nevertheless
-            if let Some(cert) = weak_cert.upgrade() {
-                cert.certify();
-            }
+            let cert = weak_cert.upgrade().expect("we hold a strong ref to round");
+            cert.certify();
         }
         cert.set_deps(cert_deps);
 
-        for prev_other_versions in r_1
-            .view(info.author(), |loc| {
+        if r_2_opt.is_none() && !info.witness().is_empty() {
+            // to catch history conflict earlier we've spawned deps and certified the prev one
+            let reason = InvalidReason::NoRoundInDag(PointMap::Witness);
+            return ctx.validated(&cert, ValidateResult::Invalid(reason));
+        }
+
+        deps_and_prev.extend(
+            // peer has to jump over a round if it could not produce valid point in prev loc
+            r_1.view(info.author(), |loc| {
                 // do not add same prev_digest twice - it is added as one of 'includes'
                 Self::other_versions(loc, info.prev_digest())
             })
-            .unwrap_or_default()
-        {
-            // peer has to jump over a round if it could not produce valid point in prev loc
-            deps_and_prev.push(prev_other_versions);
-        }
+            .unwrap_or_default(),
+        );
 
         let is_valid_fut =
-            Self::is_valid(info.clone(), deps_and_prev, ctx.conf()).instrument(ctx.span().clone());
+            Self::is_valid(info, deps_and_prev, ctx.conf()).instrument(entered_span.exit());
 
         // drop strong links before await
         drop(r_0);
         drop(r_1);
-        drop(span_guard);
+        drop(r_2_opt);
 
         ctx.validated(&cert, match is_valid_fut.await? {
             Some(reason) => ValidateResult::Invalid(reason),
@@ -290,26 +293,26 @@ impl Verifier {
     fn other_versions(
         dag_location: &DagLocation,
         excluded: Option<&Digest>,
-    ) -> Vec<DagPointFuture> {
+    ) -> Vec<WeakDagPointFuture> {
         let mut others = Vec::with_capacity(
             (dag_location.versions.len()).saturating_sub(excluded.is_some() as usize),
         );
         for (digest, shared) in &dag_location.versions {
             if excluded != Some(digest) {
-                others.push(shared.clone());
+                others.push(shared.downgrade());
             }
         }
         others
     }
 
     fn spawn_direct_deps(
-        info: &PointInfo,          // @ r+0
-        r_1: &DagRound,            // r-1
-        r_2_opt: Option<DagRound>, // r-2
+        info: &PointInfo,           // @ r+0
+        r_1: &DagRound,             // r-1
+        r_2_opt: Option<&DagRound>, // r-2
         downloader: &Downloader,
         store: &MempoolStore,
         ctx: &ValidateCtx,
-    ) -> (FuturesUnordered<DagPointFuture>, CertDirectDeps) {
+    ) -> (FuturesUnordered<WeakDagPointFuture>, CertDirectDeps) {
         let direct_deps = FuturesUnordered::new();
 
         // allocate a bit more so it's unlikely to grow during certify procedure
@@ -321,21 +324,21 @@ impl Verifier {
         // integrity check passed, so includes contain author's prev point proof
         let includes = (info.includes().iter()).map(|(author, digest)| (r_1, true, author, digest));
 
-        let witness = r_2_opt.iter().flat_map(|r_2| {
+        let witness = r_2_opt.into_iter().flat_map(|r_2| {
             (info.witness().iter()).map(move |(author, digest)| (r_2, false, author, digest))
         });
 
         for (dag_round, is_includes, author, digest) in includes.chain(witness) {
-            let shared =
+            let (dep, cert) =
                 dag_round.add_dependency(author, digest, info.author(), downloader, store, ctx);
 
             if is_includes {
-                cert_deps.includes.insert(*digest, shared.weak_cert());
+                cert_deps.includes.insert(*digest, cert);
             } else {
-                cert_deps.witness.insert(*digest, shared.weak_cert());
+                cert_deps.witness.insert(*digest, cert);
             }
 
-            direct_deps.push(shared);
+            direct_deps.push(dep);
         }
 
         (direct_deps, cert_deps)
@@ -344,7 +347,7 @@ impl Verifier {
     /// check only direct dependencies and location for previous point (let it jump over round)
     async fn is_valid(
         info: PointInfo,
-        mut deps_and_prev: FuturesUnordered<DagPointFuture>,
+        mut deps_and_prev: FuturesUnordered<WeakDagPointFuture>,
         conf: &MempoolConfig,
     ) -> TaskResult<Option<InvalidReason>> {
         // point is well-formed if we got here, so point.proof matches point.includes
@@ -365,7 +368,9 @@ impl Verifier {
             info.time() + UnixTime::from_millis(conf.consensus.clock_skew_millis as _);
 
         while let Some(task_result) = deps_and_prev.next().await {
-            let dag_point = task_result?;
+            let Some(dag_point) = task_result? else {
+                return Ok(Some(InvalidReason::DependencyRoundDropped));
+            };
             if dag_point.round() == prev_round && dag_point.author() == info.author() {
                 match prev_digest_in_point {
                     Some(prev_digest_in_point) if prev_digest_in_point == dag_point.digest() => {

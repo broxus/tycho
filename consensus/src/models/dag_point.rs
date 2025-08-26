@@ -4,7 +4,7 @@ use std::sync::{Arc, atomic};
 
 use tycho_network::PeerId;
 
-use crate::dag::IllFormedReason;
+use crate::dag::{IllFormedReason, InvalidReason};
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::cert::Cert;
 use crate::models::point::{Digest, PointId};
@@ -31,22 +31,30 @@ pub enum DagPoint {
 }
 
 impl DagPoint {
-    pub fn new_validated(info: PointInfo, cert: Cert, status: &PointStatusValidated) -> Self {
-        if status.is_valid {
-            DagPoint::Valid(ValidPoint(Arc::new(ValidPointInner {
-                info,
-                first_valid: status.is_first_valid,
-                is_first_resolved: status.is_first_resolved,
-                cert,
-                is_committed: AtomicBool::new(false), // ignore status to repeat commit after reboot
-            })))
-        } else {
-            DagPoint::Invalid(InvalidPoint(Arc::new(InvalidPointInner {
-                info,
-                is_first_resolved: status.is_first_resolved,
-                cert,
-            })))
-        }
+    pub fn new_valid(info: PointInfo, cert: Cert, status: &PointStatusValidated) -> Self {
+        assert!(status.is_valid, "used as valid: {status:?}");
+        DagPoint::Valid(ValidPoint(Arc::new(ValidPointInner {
+            info,
+            first_valid: status.is_first_valid,
+            is_first_resolved: status.is_first_resolved,
+            cert,
+            is_committed: AtomicBool::new(false), // ignore status to repeat commit after reboot
+        })))
+    }
+
+    pub fn new_invalid(
+        info: PointInfo,
+        cert: Cert,
+        status: &PointStatusValidated,
+        reason: InvalidReason,
+    ) -> Self {
+        assert!(!status.is_valid, "used as invalid: {status:?}");
+        DagPoint::Invalid(InvalidPoint(Arc::new(InvalidPointInner {
+            info,
+            is_first_resolved: status.is_first_resolved,
+            cert,
+            reason,
+        })))
     }
 
     pub fn new_ill_formed(
@@ -183,6 +191,7 @@ struct InvalidPointInner {
     info: PointInfo,
     is_first_resolved: bool,
     cert: Cert,
+    reason: InvalidReason,
 }
 impl InvalidPoint {
     pub fn info(&self) -> &PointInfo {
@@ -280,6 +289,7 @@ impl Display for AltFmt<'_, InvalidPoint> {
         if invalid.0.cert.is_certified() {
             tuple.field(&"certified");
         }
+        tuple.field(&format!("{}", &invalid.0.reason));
         tuple.finish()
     }
 }

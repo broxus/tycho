@@ -8,12 +8,12 @@ use tycho_util::FastDashMap;
 use crate::dag::IllFormedReason;
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::DagLocation;
-use crate::dag::dag_point_future::DagPointFuture;
+use crate::dag::dag_point_future::{DagPointFuture, WeakDagPointFuture};
 use crate::dag::threshold::Threshold;
 use crate::effects::{AltFmt, AltFormat, Ctx, RoundCtx, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, PointRestore, Round};
+use crate::models::{Digest, PeerCount, Point, PointRestore, Round, WeakCert};
 use crate::storage::MempoolStore;
 
 #[derive(Clone)]
@@ -160,20 +160,22 @@ impl DagRound {
             self.round(),
             "Coding error: point round does not match dag round"
         );
-        self.edit(point.info().author(), |loc| {
+        let mut is_unique = true;
+        let dag_point_future = self.edit(point.info().author(), |loc| {
             loc.versions
                 .entry(*point.info().digest())
-                .and_modify(|_| {
-                    panic!(
-                        "local point must be created only once. {:?}",
-                        point.info().id().alt()
-                    )
-                })
+                .and_modify(|_| is_unique = false)
                 .or_insert_with(|| {
                     DagPointFuture::new_local_valid(point, &loc.state, store, key_pair, round_ctx)
                 })
                 .clone()
-        })
+        });
+        assert!(
+            is_unique,
+            "local point must be created only once. {:?}",
+            point.info().id().alt()
+        );
+        dag_point_future
     }
 
     pub fn add_ill_formed_broadcast(
@@ -255,9 +257,10 @@ impl DagRound {
         downloader: &Downloader,
         store: &MempoolStore,
         validate_ctx: &ValidateCtx,
-    ) -> DagPointFuture {
+    ) -> (WeakDagPointFuture, WeakCert) {
         self.edit(author, |loc| {
-            loc.versions
+            let first = loc
+                .versions
                 .entry(*digest)
                 .and_modify(|first| first.add_depender(depender))
                 .or_insert_with(|| {
@@ -271,8 +274,8 @@ impl DagRound {
                         store,
                         validate_ctx,
                     )
-                })
-                .clone()
+                });
+            (first.downgrade(), first.weak_cert())
         })
     }
 
@@ -289,16 +292,12 @@ impl DagRound {
             self.round(),
             "Coding error: point restore round does not match dag round"
         );
-        let author = *point_restore.author();
-        self.edit(&author, |loc| {
+        let point_id = point_restore.id();
+        let mut is_unique = true;
+        let dag_point_future = self.edit(&point_id.author, |loc| {
             loc.versions
                 .entry(*point_restore.digest())
-                .and_modify(|_| {
-                    panic!(
-                        "points must be restored only once. {:?}",
-                        point_restore.alt()
-                    )
-                })
+                .and_modify(|_| is_unique = false)
                 .or_insert_with(|| {
                     DagPointFuture::new_restore(
                         self,
@@ -310,7 +309,13 @@ impl DagRound {
                     )
                 })
                 .clone()
-        })
+        });
+        assert!(
+            is_unique,
+            "points must be restored only once: {:?}",
+            point_id.alt()
+        );
+        dag_point_future
     }
 
     pub fn scan(&self, round: Round) -> Option<Self> {
