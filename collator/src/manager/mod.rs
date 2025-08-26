@@ -26,10 +26,9 @@ use types::{
 use self::blocks_cache::BlocksCache;
 use self::types::{BlockCacheKey, CandidateStatus, CollationSyncState, McBlockSubgraphExtract};
 use self::utils::find_us_in_collators_set;
-use crate::collator::do_collate::is_first_block_after_prev_master;
 use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
-    ForceMasterCollation,
+    ForceMasterCollation, is_first_block_after_prev_master,
 };
 use crate::internal_queue::types::{
     DiffStatistics, DiffZone, EnqueuedMessage, QueueDiffWithMessages,
@@ -706,7 +705,7 @@ where
     /// 3. Or schedule next collation attempt in current shard
     async fn run_next_collation_step(
         &self,
-        prev_mc_block_id: BlockId,
+        prev_mc_block_id: &BlockId,
         shard_id: ShardIdent,
         trigger_shard_block_id_opt: Option<BlockId>,
         ctx: DetectNextCollationStepContext,
@@ -2708,6 +2707,8 @@ where
 
         // Determine if the current shard collation is explicitly forced
         let mut forced_in_current_shard = force_mc_block.is_forced();
+
+        // consider master collation forced when no pending messages after block in any shard
         if shard_id.is_masterchain() && mc_forced_by_no_pending_msgs {
             forced_in_current_shard = true;
         }
@@ -2821,6 +2822,7 @@ where
 
             // Current shard resumes attempts if it cannot trigger MC block
             if !should_collate_by_current_shard {
+                // wait for master collation status if it not exist yet
                 let current_collation_state = guard.states.entry(shard_id).or_default();
                 if !mc_collation_state_exist {
                     current_collation_state.status = CollationStatus::WaitForMasterStatus;
@@ -2833,6 +2835,8 @@ where
 
             // Masterchain shard resumes all dependent shard attempts
             if shard_id.is_masterchain() {
+                // when we check master collation status and consider to resume attempts
+                // then we should resume for all shards that have been waiting for master
                 for (shard_ident, shard_collation_state) in
                     guard.states.iter_mut().filter(|(s, _)| !s.is_masterchain())
                 {
@@ -2849,6 +2853,16 @@ where
         // Otherwise: collate MC block using max candidate ct
         let next_mc_block_chain_time = candidates.into_iter().flatten().max().unwrap();
 
+        tracing::info!(
+            target: tracing_targets::COLLATION_MANAGER,
+            hard_forced_for_all,
+            forced_in_current_shard,
+            mc_block_min_interval_ms,
+            next_mc_block_chain_time,
+            "Master block collation forced or interval exceeded in every shard - \
+            will collate next master block",
+        );
+
         // Mark all shards as "running" (attempts in progress)
         for st in guard.states.values_mut() {
             st.status = CollationStatus::AttemptsInProgress;
@@ -2857,6 +2871,8 @@ where
         // Update MC block time and reset force flags
         Self::renew_mc_block_latest_chain_time(guard, next_mc_block_chain_time);
 
+        // drop "forced for all" and "forced by no pending messages" flags
+        // if we decided to collate master
         guard.mc_collation_forced_for_all = false;
         guard.mc_forced_by_no_pending_msgs = false;
 

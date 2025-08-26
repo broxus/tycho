@@ -40,14 +40,14 @@ use crate::utils::async_queued_dispatcher::{
 use crate::{method_to_queued_async_closure, tracing_targets};
 
 mod debug_info;
-pub mod do_collate;
+mod do_collate;
 mod error;
 mod execution_manager;
 mod messages_buffer;
 mod messages_reader;
 mod types;
 
-pub use do_collate::work_units;
+pub use do_collate::{is_first_block_after_prev_master, work_units};
 pub use error::CollationCancelReason;
 pub use types::{ForceMasterCollation, ShardDescriptionExt};
 
