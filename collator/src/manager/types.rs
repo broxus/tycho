@@ -13,7 +13,6 @@ use tycho_types::models::{
 };
 use tycho_util::{FastHashMap, FastHashSet};
 
-use crate::collator::ForceMasterCollation;
 use crate::mempool::MempoolAnchorId;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use crate::types::{
@@ -426,7 +425,7 @@ pub(super) enum McBlockSubgraphExtract {
     AlreadyExtracted,
 }
 
-impl std::fmt::Display for McBlockSubgraphExtract {
+impl Display for McBlockSubgraphExtract {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Extracted(_) => write!(f, "Extracted"),
@@ -438,48 +437,4 @@ impl std::fmt::Display for McBlockSubgraphExtract {
 pub struct HandledBlockFromBcCtx {
     pub state: ShardStateStuff,
     pub processed_upto: ProcessedUptoInfo,
-}
-
-pub struct CollationStepContext {
-    pub prev_mc_block_id: BlockId,
-    pub shard_id: ShardIdent,
-    pub chain_time: u64,
-    pub force_mc_block: ForceMasterCollation,
-    pub trigger_shard_block_id_opt: Option<BlockId>,
-    pub has_collated_block_after_prev_master: bool,
-    pub mc_block_min_interval_ms: u64,
-    pub mc_block_max_interval_ms: u64,
-}
-
-#[derive(Debug)]
-pub struct DetectCollationCtx {
-    pub active_shards: Vec<ShardIdent>,
-    pub shard_id: ShardIdent,
-    pub last_imported_anchor_ct: u64,
-    pub force_mc_block: ForceMasterCollation,
-    pub has_collated_block_after_prev_master: bool,
-    pub mc_block_min_interval_ms: u64,
-    pub mc_block_max_interval_ms: u64,
-}
-
-impl DetectCollationCtx {
-    pub fn new(
-        active_shards: Vec<ShardIdent>,
-        shard_id: ShardIdent,
-        last_imported_anchor_ct: u64,
-        force_mc_block: ForceMasterCollation,
-        has_collated_block_after_prev_master: bool,
-        mc_block_min_interval_ms: u64,
-        mc_block_max_interval_ms: u64,
-    ) -> Self {
-        Self {
-            active_shards,
-            shard_id,
-            last_imported_anchor_ct,
-            force_mc_block,
-            has_collated_block_after_prev_master,
-            mc_block_min_interval_ms,
-            mc_block_max_interval_ms,
-        }
-    }
 }

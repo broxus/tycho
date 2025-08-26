@@ -35,8 +35,7 @@ use crate::internal_queue::types::{
     DiffStatistics, DiffZone, EnqueuedMessage, QueueDiffWithMessages,
 };
 use crate::manager::types::{
-    BlockCacheStoreResult, CollationState, CollationStepContext, DetectCollationCtx,
-    HandledBlockFromBcCtx, ImportedAnchorEvent,
+    BlockCacheStoreResult, CollationState, HandledBlockFromBcCtx, ImportedAnchorEvent,
 };
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
@@ -693,7 +692,7 @@ where
             chain_time: anchor_chain_time,
             force_mc_block,
             trigger_shard_block_id_opt: None,
-            has_collated_block_after_prev_master: false, //???
+            has_collated_block_after_prev_master: false,
             mc_block_min_interval_ms: collation_config.mc_block_min_interval_ms as _,
             mc_block_max_interval_ms: collation_config.mc_block_max_interval_ms as _,
         })
@@ -704,6 +703,7 @@ where
     /// 2. And schedule master block collation
     /// 3. Or schedule next collation attempt in current shard
     async fn run_next_collation_step(&self, ctx: CollationStepContext) -> Result<()> {
+        let CollationStepContext { shard_id, .. } = ctx;
         let next_step = Self::detect_next_collation_step(
             &mut self.collation_sync_state.lock(),
             DetectCollationCtx::new(
@@ -712,7 +712,7 @@ where
                     .keys()
                     .cloned()
                     .collect(),
-                ctx.shard_id,
+                shard_id,
                 ctx.chain_time,
                 ctx.force_mc_block,
                 ctx.has_collated_block_after_prev_master,
@@ -727,9 +727,9 @@ where
 
         match next_step {
             NextCollationStep::CollateMaster(next_mc_block_chain_time) => {
-                if !ctx.shard_id.is_masterchain() {
+                if !shard_id.is_masterchain() {
                     // shard collator will wait and master collator will work
-                    self.set_collator_state(&ctx.shard_id, |ac| ac.state = CollatorState::Waiting);
+                    self.set_collator_state(&shard_id, |ac| ac.state = CollatorState::Waiting);
                 }
 
                 self.set_collator_state(&ShardIdent::MASTERCHAIN, |ac| {
@@ -745,7 +745,7 @@ where
             }
             NextCollationStep::WaitForMasterStatus => {
                 // current shard collator will wait
-                self.set_collator_state(&ctx.shard_id, |ac| ac.state = CollatorState::Waiting);
+                self.set_collator_state(&shard_id, |ac| ac.state = CollatorState::Waiting);
             }
             NextCollationStep::ResumeAttemptsIn(shards_to_resume_attempts) => {
                 // if should not collate master block
@@ -754,14 +754,14 @@ where
                 // - in workchain: run next attempt to collate shard block
                 let mut current_shard_should_wait = true;
                 for shard_ident in shards_to_resume_attempts {
-                    if shard_ident == ctx.shard_id {
+                    if shard_ident == shard_id {
                         current_shard_should_wait = false;
                     }
                     self.set_collator_state(&shard_ident, |ac| ac.state = CollatorState::Active);
                     self.enqueue_try_collate(&shard_ident).await?;
                 }
                 if current_shard_should_wait {
-                    self.set_collator_state(&ctx.shard_id, |ac| ac.state = CollatorState::Waiting);
+                    self.set_collator_state(&shard_id, |ac| ac.state = CollatorState::Waiting);
                 }
             }
         }
@@ -2729,7 +2729,7 @@ where
             for s in &state.last_imported_anchor_events {
                 fact.has_any_anchor_event = true;
 
-                if s.mc_forced {
+                if s.mc_forced && fact.forced_ct.is_none() {
                     fact.forced_ct = Some(s.ct);
                 }
 
@@ -3169,4 +3169,48 @@ struct RestoreQueueResult {
     last_mc_state: Option<ShardStateStuff>,
     synced_to_blocks_keys: Vec<BlockCacheKey>,
     applied_diffs_ids: FastHashSet<BlockId>,
+}
+
+pub struct CollationStepContext {
+    pub prev_mc_block_id: BlockId,
+    pub shard_id: ShardIdent,
+    pub chain_time: u64,
+    pub force_mc_block: ForceMasterCollation,
+    pub trigger_shard_block_id_opt: Option<BlockId>,
+    pub has_collated_block_after_prev_master: bool,
+    pub mc_block_min_interval_ms: u64,
+    pub mc_block_max_interval_ms: u64,
+}
+
+#[derive(Debug)]
+pub struct DetectCollationCtx {
+    pub active_shards: Vec<ShardIdent>,
+    pub shard_id: ShardIdent,
+    pub last_imported_anchor_ct: u64,
+    pub force_mc_block: ForceMasterCollation,
+    pub has_collated_block_after_prev_master: bool,
+    pub mc_block_min_interval_ms: u64,
+    pub mc_block_max_interval_ms: u64,
+}
+
+impl DetectCollationCtx {
+    pub fn new(
+        active_shards: Vec<ShardIdent>,
+        shard_id: ShardIdent,
+        last_imported_anchor_ct: u64,
+        force_mc_block: ForceMasterCollation,
+        has_collated_block_after_prev_master: bool,
+        mc_block_min_interval_ms: u64,
+        mc_block_max_interval_ms: u64,
+    ) -> Self {
+        Self {
+            active_shards,
+            shard_id,
+            last_imported_anchor_ct,
+            force_mc_block,
+            has_collated_block_after_prev_master,
+            mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
+        }
+    }
 }

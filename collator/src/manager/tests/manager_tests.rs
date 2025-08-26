@@ -22,7 +22,7 @@ use tycho_types::models::{
 };
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
-use super::{BlockCacheStoreResult, BlockSeqno, CollationManager};
+use super::{BlockCacheStoreResult, BlockSeqno, CollationManager, DetectCollationCtx};
 use crate::collator::{
     CollatorStdImplFactory, ForceMasterCollation, ShardDescriptionExt as _, TestInternalMessage,
     TestMessageFactory,
@@ -33,7 +33,7 @@ use crate::internal_queue::types::{
 };
 use crate::manager::McBlockSubgraphExtract;
 use crate::manager::blocks_cache::BlocksCache;
-use crate::manager::types::{CollationSyncState, DetectCollationCtx, NextCollationStep};
+use crate::manager::types::{CollationSyncState, NextCollationStep};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{CollatorSyncContext, StateNodeAdapter};
 use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
