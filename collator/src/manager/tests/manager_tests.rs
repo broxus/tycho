@@ -22,7 +22,7 @@ use tycho_types::models::{
 };
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
-use super::{BlockCacheStoreResult, BlockSeqno, CollationManager, DetectCollationCtx};
+use super::{BlockCacheStoreResult, BlockSeqno, CollationManager, DetectNextCollationStepContext};
 use crate::collator::{
     CollatorStdImplFactory, ForceMasterCollation, ShardDescriptionExt as _, TestInternalMessage,
     TestMessageFactory,
@@ -69,9 +69,9 @@ fn test_detect_next_collation_step() {
     // master collator ready to collate master, but should wait for shards
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -85,9 +85,9 @@ fn test_detect_next_collation_step() {
     // when shard collator imported the same anchor then we should collate master
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -108,9 +108,9 @@ fn test_detect_next_collation_step() {
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -126,9 +126,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -146,9 +146,9 @@ fn test_detect_next_collation_step() {
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -166,9 +166,9 @@ fn test_detect_next_collation_step() {
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -184,9 +184,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -205,9 +205,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -229,9 +229,9 @@ fn test_detect_next_collation_step() {
 
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -247,9 +247,9 @@ fn test_detect_next_collation_step() {
     // and we will run master collation right now because shard is already waiting
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::ByUnprocessedMessages,
             false,
@@ -268,9 +268,9 @@ fn test_detect_next_collation_step() {
     // then we should wait for shard
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::ByUnprocessedMessages,
             false,
@@ -287,9 +287,9 @@ fn test_detect_next_collation_step() {
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -308,9 +308,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -328,9 +328,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -348,9 +348,9 @@ fn test_detect_next_collation_step() {
     // then it will force master block collation
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::ByUncommittedChain,
             false,
@@ -366,9 +366,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -386,9 +386,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -407,9 +407,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -433,9 +433,9 @@ fn test_detect_next_collation_step() {
     sc_anchor_ct += 1000; // 21
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -451,9 +451,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -471,9 +471,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -492,9 +492,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -513,9 +513,9 @@ fn test_detect_next_collation_step() {
     // 1. No forcing collation master block
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -532,9 +532,9 @@ fn test_detect_next_collation_step() {
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::NoPendingMessagesAfterShardBlocks,
             false,
@@ -550,9 +550,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1100;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -571,9 +571,9 @@ fn test_detect_next_collation_step() {
     // 1. No forcing collation master block
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -590,9 +590,9 @@ fn test_detect_next_collation_step() {
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::NoPendingMessagesAfterShardBlocks,
             false,
@@ -608,9 +608,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 3000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -630,9 +630,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 3000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -647,9 +647,9 @@ fn test_detect_next_collation_step() {
     // 2. Shard without reached interval - forces master block collation
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::NoPendingMessagesAfterShardBlocks,
             false,
@@ -668,9 +668,9 @@ fn test_detect_next_collation_step() {
     // 1. Shard without reached interval - forces master block collation
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::NoPendingMessagesAfterShardBlocks,
             false,
@@ -687,9 +687,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 3000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -710,9 +710,9 @@ fn test_detect_next_collation_step() {
     sc_anchor_ct += 1200;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::NoPendingMessagesAfterShardBlocks,
             false,
@@ -728,9 +728,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -750,9 +750,9 @@ fn test_detect_next_collation_step() {
     mc_anchor_ct += 1100;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            mc_shard_id,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
             mc_anchor_ct,
             ForceMasterCollation::No,
             false,
@@ -769,9 +769,9 @@ fn test_detect_next_collation_step() {
     sc_anchor_ct += 1100;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
-        DetectCollationCtx::new(
-            active_shards.clone(),
-            sc_shard_id,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
             sc_anchor_ct,
             ForceMasterCollation::No,
             true,

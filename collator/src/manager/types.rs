@@ -68,9 +68,9 @@ pub(super) struct CollationState {
 pub(super) struct ImportedAnchorEvent {
     pub ct: u64,
     pub mc_forced: bool,
-    // true only if a new shard block was observed (seqno advanced),
-    // false if we only imported an anchor
-    pub real_block: bool,
+    // true only if the first shard block was collated
+    // after previous master block with this anchor
+    pub is_first_block_after_prev_mc: bool,
 }
 
 impl Default for CollationState {
