@@ -2751,11 +2751,10 @@ where
                     if fact.after_mc_ct.is_none() {
                         fact.after_mc_ct = Some(s.ct);
                     }
-
-                    if fact.min_ct.is_none() && s.ct.saturating_sub(mc_ct) >= min_interval_ms {
+                    if s.ct.saturating_sub(mc_ct) >= min_interval_ms {
                         fact.min_ct = Some(s.ct);
                     }
-                    if fact.max_ct.is_none() && s.ct.saturating_sub(mc_ct) >= max_interval_ms {
+                    if s.ct.saturating_sub(mc_ct) >= max_interval_ms {
                         fact.max_ct = Some(s.ct);
                     }
 

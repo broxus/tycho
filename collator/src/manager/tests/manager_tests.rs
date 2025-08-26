@@ -53,6 +53,9 @@ fn test_detect_next_collation_step() {
 
     let mc_shard_id = ShardIdent::MASTERCHAIN;
     let sc_shard_id = ShardIdent::new_full(0);
+
+    // TODO add second shard after multisharding implementation and check ct calculation (CollateMaster)
+
     let active_shards = vec![mc_shard_id, sc_shard_id];
 
     let mc_block_min_interval_ms = 1000;
@@ -788,7 +791,7 @@ fn test_detect_next_collation_step() {
     CM::renew_mc_block_latest_chain_time(&mut guard, mc_anchor_ct);
 
     // 1. Master reached min interval but it doesn't have collated blocks
-    mc_anchor_ct += 1100;
+    mc_anchor_ct += 1200;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
         active_shards.clone(),
@@ -840,7 +843,7 @@ fn test_detect_next_collation_step() {
         ),
     );
     println!("39 shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
-    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct));
+    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == sc_anchor_ct));
 
     // test cases with min interval reach №3
     mc_anchor_ct = 60000;
