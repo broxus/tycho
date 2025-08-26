@@ -13,6 +13,8 @@ pub enum MempoolOutput {
     // (it's no harm to use it for deduplication - it will be evicted after buffer is refilled)
     NewStartAfterGap(Round),
     NextAnchor(AnchorData),
+    // must be sent after NextAnchor to make data available for GC
+    CommitFinished(Round),
     Running,
     Paused,
 }
