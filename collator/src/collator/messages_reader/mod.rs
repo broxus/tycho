@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, get_short_addr_string};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{MsgsExecutionParams, ShardIdent};
 use tycho_util::{FastHashMap, FastHashSet};
@@ -127,7 +127,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             let previous_cumulative_statistics = cx.reader_state.internals.cumulative_statistics;
 
             // get cumulative internals stats
-            let mut inner_cumulative_statistics = if cx.is_first_block_after_prev_master {
+            let inner_cumulative_statistics = if cx.is_first_block_after_prev_master {
                 // if cumulative statistics are already present, then we should
                 // enrich it using a diff from the previous master block and diffs
                 // from another shard between the previous master block and previous master block - 1
@@ -444,9 +444,19 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             .unwrap_or_default();
 
         if let Some(internal_queue_statistics) = self.internal_queue_statistics.as_mut() {
+            log_cumulative_remaining_msgs_stats(
+                internal_queue_statistics,
+                "cumulative remaning_msgs_stats before handle_processed_to_update",
+            );
+
             // reduce stats of processed diffs
             internal_queue_statistics
                 .handle_processed_to_update(self.for_shard_id, shard_processed_to_by_partitions);
+
+            log_cumulative_remaining_msgs_stats(
+                internal_queue_statistics,
+                "cumulative remaning_msgs_stats after handle_processed_to_update",
+            );
 
             let mut aggregated_stats = internal_queue_statistics.get_aggregated_result();
 
@@ -525,11 +535,20 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         );
 
         if let Some(internal_queue_statistics) = self.internal_queue_statistics.as_mut() {
+            tracing::trace!(target: tracing_targets::COLLATOR,
+                queue_diff_msgs_stats = ?DebugDiffStatistics(&queue_diff_msgs_stats)
+            );
+
             // add new diff stats to cumulative stats
             internal_queue_statistics.add_diff_stats(
                 self.for_shard_id,
                 *queue_diff_msgs_stats.max_message(),
                 queue_diff_msgs_stats,
+            );
+
+            log_cumulative_remaining_msgs_stats(
+                internal_queue_statistics,
+                "cumulative remaning_msgs_stats after add_diff_stats",
             );
         }
 
@@ -814,6 +833,14 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         // so we need to reset flags and states that control the read flow
         self.reset_read_state();
 
+        for par_reader in self.internals_partition_readers.values() {
+            log_remaining_msgs_stats(
+                par_reader,
+                false,
+                "internals partition reader remaning_msgs_stats after refill",
+            );
+        }
+
         tracing::debug!(target: tracing_targets::COLLATOR,
             "finished: refill messages buffer and skip groups upto",
         );
@@ -973,7 +1000,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             let CollectMessageForPartitionResult {
                 metrics,
                 msg_group,
-                collected_queue_msgs_keys,
+                collected_new_msgs,
                 can_drop_processing_offset,
             } = Self::collect_messages_for_partition(
                 read_mode,
@@ -995,7 +1022,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
             // remove collected new messages
             self.new_messages
-                .remove_collected_messages(&collected_queue_msgs_keys);
+                .remove_collected_messages(&collected_new_msgs);
 
             partitions_readers.insert(*par_id, par_reader);
         }
@@ -1104,6 +1131,11 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                             let limits = internals.get(par_id).unwrap();
                             par.set_buffer_limits_by_partition(limits.target, limits.max);
                         });
+
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        new_msgs_exec_params = ?new,
+                        "messages exec params updated when all existing ranges read and collected",
+                    );
                 }
             }
 
@@ -1333,9 +1365,10 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         if !ext_prev_processed_offsets_reached_on_refill {
             all_read_externals_collected_before = externals_reader.all_read_externals_collected();
 
-            let CollectExternalsResult { metrics } = externals_reader.collect_messages(
+            let CollectExternalsResult { metrics, .. } = externals_reader.collect_messages(
                 par_reader.partition_id,
                 &mut res.msg_group,
+                Some(par_reader),
                 prev_partitions_readers,
                 prev_msg_groups,
             )?;
@@ -1351,7 +1384,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
             let CollectInternalsResult {
                 metrics,
-                mut collected_queue_msgs_keys,
+                mut collected_int_msgs,
             } = par_reader.collect_messages(
                 par_reader_stage,
                 &mut res.msg_group,
@@ -1359,8 +1392,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 prev_msg_groups,
             )?;
             res.metrics.append(&metrics);
-            res.collected_queue_msgs_keys
-                .append(&mut collected_queue_msgs_keys);
+            res.collected_new_msgs.append(&mut collected_int_msgs);
 
             // set skip and processed offset to current offset
             // because we will not save collected new messages to the queue
@@ -1539,6 +1571,37 @@ impl<V: InternalMessageValue> MessagesReader<V> {
     }
 }
 
+fn log_cumulative_remaining_msgs_stats(stats: &CumulativeStatistics, msg: &str) {
+    for (par_id, par_stats) in stats.result() {
+        tracing::trace!(target: tracing_targets::COLLATOR,
+            partition_id = %par_id,
+            remaning_msgs_stats = ?DebugIter(par_stats.remaning_stats.statistics().iter().map(|item| {
+                let (addr, count) = item.pair();
+                (get_short_addr_string(addr), *count)
+            })),
+            "{}", msg,
+        );
+    }
+}
+
+pub(crate) struct DebugDiffStatistics<'a>(pub &'a DiffStatistics);
+impl std::fmt::Debug for DebugDiffStatistics<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(par_id, stats)| {
+                (
+                    par_id,
+                    DebugIter(
+                        stats
+                            .iter()
+                            .map(|(addr, count)| (get_short_addr_string(addr), *count)),
+                    ),
+                )
+            }))
+            .finish()
+    }
+}
+
 struct CurrentMessagesBufferLimits {
     pub externals: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
     pub internals: BTreeMap<QueuePartitionIdx, BufferLimits>,
@@ -1553,7 +1616,7 @@ struct BufferLimits {
 struct CollectMessageForPartitionResult {
     metrics: MessagesReaderMetrics,
     msg_group: MessageGroup,
-    collected_queue_msgs_keys: Vec<QueueKey>,
+    collected_new_msgs: Vec<QueueKey>,
     can_drop_processing_offset: bool,
 }
 

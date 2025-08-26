@@ -175,6 +175,7 @@ pub struct ExternalsReaderStateByPartition {
 
     /// Actual current processed offset
     /// during the messages reading.
+    /// Is incremented before collect.
     pub curr_processed_offset: u32,
 }
 
@@ -375,6 +376,7 @@ pub struct InternalsPartitionReaderState {
 
     /// Actual current processed offset
     /// during the messages reading.
+    /// Is incremented before collect.
     pub curr_processed_offset: u32,
 }
 
@@ -414,7 +416,7 @@ pub struct InternalsRangeReaderState {
 
     /// Statistics shows all messages in current range
     pub msgs_stats: Option<QueueStatistics>,
-    /// Statistics shows remaining not read messages from currebt range.
+    /// Statistics shows remaining not read messages from current range.
     /// We reduce initial statistics by the number of messages that were read.
     pub remaning_msgs_stats: Option<QueueStatistics>,
     /// Statistics shows read messages in current range

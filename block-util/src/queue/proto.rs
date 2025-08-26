@@ -418,7 +418,7 @@ impl tycho_storage_traits::StoredValue for RouterAddr {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct QueuePartitionIdx(pub u16);
 
@@ -464,6 +464,13 @@ impl std::fmt::Display for QueuePartitionIdx {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::fmt::Debug for QueuePartitionIdx {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
     }
 }
 

@@ -94,22 +94,13 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         }
     }
 
-    pub fn take_messages_for_current_shard(
+    pub fn messages_for_current_shard(
         &mut self,
         partition_id: QueuePartitionIdx,
-    ) -> Option<BinaryHeap<Reverse<MessageExt<V>>>> {
-        self.messages_for_current_shard.remove(&partition_id)
-    }
-
-    pub fn set_messages_for_current_shard(
-        &mut self,
-        partition_id: QueuePartitionIdx,
-        messages: BinaryHeap<Reverse<MessageExt<V>>>,
-    ) {
-        if !messages.is_empty() {
-            self.messages_for_current_shard
-                .insert(partition_id, messages);
-        }
+    ) -> &mut BinaryHeap<Reverse<MessageExt<V>>> {
+        self.messages_for_current_shard
+            .get_mut(&partition_id)
+            .unwrap()
     }
 
     pub fn remove_collected_messages(&mut self, collected_messages: &[QueueKey]) {
@@ -131,6 +122,7 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
 }
 
 impl<V: InternalMessageValue> InternalsPartitionReader<V> {
+    /// Returns range reader for new messages, creates it if not yet exist
     pub fn get_new_messages_range_reader(
         &mut self,
         current_next_lt: u64,
@@ -138,65 +130,69 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         let (_, last_range_reader) = self.get_last_range_reader()?;
 
         // create range reader for new messages if it does not exist
-        match last_range_reader.kind {
-            InternalsRangeReaderKind::NewMessages => self.get_last_range_reader_mut(),
-            InternalsRangeReaderKind::Existing | InternalsRangeReaderKind::Next => {
-                let mut new_shard_reader_states = BTreeMap::new();
-                for (shard_id, prev_shard_reader_state) in &last_range_reader.reader_state.shards {
-                    let shard_range_to = if shard_id == &self.for_shard_id {
-                        current_next_lt
-                    } else {
-                        prev_shard_reader_state.to
-                    };
-                    new_shard_reader_states.insert(*shard_id, ShardReaderState {
-                        from: prev_shard_reader_state.to,
-                        to: shard_range_to,
-                        current_position: QueueKey::max_for_lt(prev_shard_reader_state.to),
-                    });
-                }
-
-                let reader = InternalsRangeReader {
-                    partition_id: last_range_reader.partition_id,
-                    for_shard_id: last_range_reader.for_shard_id,
-                    seqno: last_range_reader.seqno,
-                    kind: InternalsRangeReaderKind::NewMessages,
-                    buffer_limits: self.target_limits(),
-                    reader_state: InternalsRangeReaderState {
-                        buffer: Default::default(),
-
-                        // we do not use messages satistics when reading new messages
-                        msgs_stats: None,
-                        remaning_msgs_stats: None,
-                        read_stats: Default::default(),
-
-                        shards: new_shard_reader_states,
-                        skip_offset: 0,
-                        processed_offset: 0,
-                    },
-                    fully_read: false,
-                    mq_adapter: last_range_reader.mq_adapter.clone(),
-                    iterator_opt: None,
-                    // we do not need to additionally initialize new messages reader
-                    initialized: true,
+        if !matches!(
+            last_range_reader.kind,
+            InternalsRangeReaderKind::NewMessages
+        ) {
+            let mut new_shard_reader_states = BTreeMap::new();
+            for (shard_id, prev_shard_reader_state) in &last_range_reader.reader_state.shards {
+                let shard_range_to = if shard_id == &self.for_shard_id {
+                    current_next_lt
+                } else {
+                    prev_shard_reader_state.to
                 };
-
-                // drop flag when we add new messages range reader
-                self.all_ranges_fully_read = false;
-
-                let reader = self.insert_range_reader(reader.seqno, reader);
-
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    partition_id = %reader.partition_id,
-                    for_shard_id = %reader.for_shard_id,
-                    seqno = reader.seqno,
-                    fully_read = reader.fully_read,
-                    reader_state = ?DebugInternalsRangeReaderState(&reader.reader_state),
-                    "created new messages reader",
-                );
-
-                Ok(reader)
+                new_shard_reader_states.insert(*shard_id, ShardReaderState {
+                    from: prev_shard_reader_state.to,
+                    to: shard_range_to,
+                    current_position: QueueKey::max_for_lt(prev_shard_reader_state.to),
+                });
             }
+
+            let reader = InternalsRangeReader {
+                partition_id: last_range_reader.partition_id,
+                for_shard_id: last_range_reader.for_shard_id,
+                seqno: last_range_reader.seqno,
+                kind: InternalsRangeReaderKind::NewMessages,
+                buffer_limits: self.target_limits(),
+                reader_state: InternalsRangeReaderState {
+                    buffer: Default::default(),
+
+                    // we do not use messages satistics when reading new messages
+                    msgs_stats: None,
+                    remaning_msgs_stats: None,
+                    read_stats: Default::default(),
+
+                    shards: new_shard_reader_states,
+                    skip_offset: 0,
+                    processed_offset: 0,
+                },
+                fully_read: false,
+                mq_adapter: last_range_reader.mq_adapter.clone(),
+                iterator_opt: None,
+                // we do not need to additionally initialize new messages reader
+                initialized: true,
+            };
+
+            // drop flag when we add new messages range reader
+            self.all_ranges_fully_read = false;
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                partition_id = %reader.partition_id,
+                for_shard_id = %reader.for_shard_id,
+                seqno = reader.seqno,
+                fully_read = reader.fully_read,
+                reader_state = ?DebugInternalsRangeReaderState(&reader.reader_state),
+                "created new messages reader",
+            );
+
+            self.insert_range_reader(reader.seqno, reader);
+        } else {
+            // otherwise update new messages reader "to" boundary on current next lt
+            self.update_new_messages_reader_to_boundary(current_next_lt)?;
         }
+
+        // and return the mutable ref
+        self.get_last_range_reader_mut()
     }
 
     pub(super) fn update_new_messages_reader_to_boundary(
@@ -215,6 +211,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                 .context("new messages range reader should have current shard reader state")?;
             if current_shard_reader_state.to < current_next_lt {
                 current_shard_reader_state.to = current_next_lt;
+
                 last_range_reader.fully_read = false;
                 self.all_ranges_fully_read = false;
             }
@@ -246,33 +243,17 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         new_messages: &mut NewMessagesState<V>,
         current_next_lt: u64,
     ) -> Result<ReadNewMessagesResult> {
-        // update new messages reader "to" boundary on current next lt
-        self.update_new_messages_reader_to_boundary(current_next_lt)?;
-
         // if no new messages for current partition then return earlier
         if !new_messages.has_pending_messages_from_partition(self.partition_id) {
             self.set_new_messages_range_reader_fully_read()?;
-            return Ok(ReadNewMessagesResult {
-                taken_messages: vec![],
-                has_pending_new_messages: false,
-                metrics: MessagesReaderMetrics::default(),
-            });
+            return Ok(ReadNewMessagesResult::default());
         }
-
-        // take new messages from state
-        let mut new_messages_for_current_shard = new_messages
-            .take_messages_for_current_shard(self.partition_id)
-            .unwrap_or_default();
 
         // read new messages to buffer
         let res = self.read_new_messages_into_buffer_impl(
-            &mut new_messages_for_current_shard,
+            new_messages.messages_for_current_shard(self.partition_id),
             current_next_lt,
         )?;
-
-        // return new messages to state
-        new_messages
-            .set_messages_for_current_shard(self.partition_id, new_messages_for_current_shard);
 
         Ok(res)
     }

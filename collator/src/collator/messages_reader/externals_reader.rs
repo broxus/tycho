@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::{Context, Result};
-use tycho_block_util::queue::QueuePartitionIdx;
+use tycho_block_util::queue::{QueuePartitionIdx, get_short_addr_string, get_short_hash_string};
 use tycho_types::models::{IntAddr, MsgInfo, ShardIdent};
 
 use super::{
@@ -14,6 +14,7 @@ use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
     MessagesBufferLimits, SaturatingAddAssign, SkipExpiredExternals,
 };
+use crate::collator::messages_reader::{DebugInternalsRangeReaderState, InternalsRangeReaderKind};
 use crate::collator::types::{
     AnchorsCache, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff, ParsedMessage,
 };
@@ -675,6 +676,7 @@ impl ExternalsReader {
         &mut self,
         par_id: QueuePartitionIdx,
         msg_group: &mut MessageGroup,
+        curr_partition_reader: Option<&InternalsPartitionReader<V>>,
         prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
     ) -> Result<CollectExternalsResult> {
@@ -716,81 +718,172 @@ impl ExternalsReader {
             // skip up to skip offset
             if curr_processed_offset > range_reader_state_by_partition.skip_offset {
                 res.metrics.add_to_message_groups_timer.start();
-                let FillMessageGroupResult { ops_count, .. } =
-                    range_reader_state_by_partition.buffer.fill_message_group(
-                        msg_group,
-                        buffer_limits.slots_count,
-                        buffer_limits.slot_vert_size,
-                        |account_id| {
-                            let mut check_ops_count = 0;
+                let FillMessageGroupResult {
+                    ops_count,
+                    collected_count,
+                    ..
+                } = range_reader_state_by_partition.buffer.fill_message_group(
+                    msg_group,
+                    buffer_limits.slots_count,
+                    buffer_limits.slot_vert_size,
+                    |account_id| {
+                        let mut check_ops_count = 0;
 
-                            let dst_addr =
-                                IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
+                        let dst_addr =
+                            IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
 
-                            for msg_group in prev_msg_groups.values() {
-                                if msg_group.messages_count() > 0 {
-                                    check_ops_count.saturating_add_assign(1);
-                                    if msg_group.contains_account(account_id) {
-                                        return (true, check_ops_count);
-                                    }
-                                }
-                            }
-
-                            // check by previous partitions
-                            for prev_par_reader in prev_partitions_readers.values() {
-                                for prev_par_range_reader in
-                                    prev_par_reader.range_readers().values()
-                                {
-                                    if prev_par_range_reader.reader_state.buffer.msgs_count() > 0 {
-                                        check_ops_count.saturating_add_assign(1);
-                                        if prev_par_range_reader
-                                            .reader_state
-                                            .buffer
-                                            .account_messages_count(account_id)
-                                            > 0
-                                        {
-                                            return (true, check_ops_count);
-                                        }
-                                    }
-                                }
-                                // check stats in previous partition
+                        // check by msg group from previous partition (e.g. from partition 0 when collecting from 1)
+                        for msg_group in prev_msg_groups.values() {
+                            if msg_group.messages_count() > 0 {
                                 check_ops_count.saturating_add_assign(1);
-
-                                if let Some(remaning_msgs_stats) =
-                                    &prev_par_reader.remaning_msgs_stats
-                                    && remaning_msgs_stats.statistics().contains_key(&dst_addr)
-                                {
+                                if msg_group.contains_account(account_id) {
+                                    tracing::trace!(target: tracing_targets::COLLATOR,
+                                        partition_id = %par_id,
+                                        account_id = %get_short_hash_string(account_id),
+                                        "external messages skipped for account - msg_group of prev partition",
+                                    );
                                     return (true, check_ops_count);
                                 }
                             }
+                        }
 
-                            // check by previous ranges
-                            for prev_reader in range_readers.values() {
-                                let buffer = &prev_reader
-                                    .reader_state
-                                    .get_state_by_partition(par_id)
-                                    .unwrap()
-                                    .buffer;
-                                if buffer.msgs_count() > 0 {
+                        // check by previous partitions
+                        // NOTE: we can consider all readers and full stats from previous partitions
+                        //      (e.g. from 0 when processing 1) even on refill because when account A
+                        //      is moved from partition 0 to 1 all remaning messages for account A
+                        //      always a from previous blocks so we cannot wrongly read in advance
+                        for prev_par_reader in prev_partitions_readers.values() {
+                            // check buffers in previous partition
+                            for prev_par_range_reader in prev_par_reader.range_readers().values() {
+                                if prev_par_range_reader.reader_state.buffer.msgs_count() > 0 {
                                     check_ops_count.saturating_add_assign(1);
-                                    if buffer.account_messages_count(account_id) > 0 {
+                                    if prev_par_range_reader
+                                        .reader_state
+                                        .buffer
+                                        .account_messages_count(account_id)
+                                        > 0
+                                    {
+                                        tracing::trace!(target: tracing_targets::COLLATOR,
+                                            partition_id = %par_id,
+                                            account_id = %get_short_hash_string(account_id),
+                                            "external messages skipped for account - prev partition range reader buffer",
+                                        );
                                         return (true, check_ops_count);
                                     }
                                 }
                             }
 
-                            (false, check_ops_count)
-                        },
-                        SkipExpiredExternals {
-                            chain_time_threshold_ms: next_chain_time
-                                .saturating_sub(externals_expire_timeout_ms),
-                            total_skipped: &mut expired_msgs_count,
-                        },
-                    );
+                            // check stats in previous partition
+                            check_ops_count.saturating_add_assign(1);
+                            if let Some(remaning_msgs_stats) = &prev_par_reader.remaning_msgs_stats
+                                && remaning_msgs_stats.statistics().contains_key(&dst_addr)
+                            {
+                                tracing::trace!(target: tracing_targets::COLLATOR,
+                                    partition_id = %par_id,
+                                    account_id = %get_short_hash_string(account_id),
+                                    "external messages skipped for account - prev partition reader remaning stats",
+                                );
+                                return (true, check_ops_count);
+                            }
+                        }
+
+                        // check by previous externals ranges
+                        for prev_reader in range_readers.values() {
+                            // check buffer
+                            let buffer = &prev_reader
+                                .reader_state
+                                .get_state_by_partition(par_id)
+                                .unwrap()
+                                .buffer;
+                            if buffer.msgs_count() > 0 {
+                                check_ops_count.saturating_add_assign(1);
+                                if buffer.account_messages_count(account_id) > 0 {
+                                    tracing::trace!(target: tracing_targets::COLLATOR,
+                                        partition_id = %par_id,
+                                        account_id = %get_short_hash_string(account_id),
+                                        "external messages skipped for account - prev externals range reader buffer",
+                                    );
+                                    return (true, check_ops_count);
+                                }
+                            }
+                        }
+
+                        // check by current partition internals reader
+                        if let Some(curr_partition_reader) = curr_partition_reader {
+                            // check current partition internals range readers
+                            for curr_par_range_reader in curr_partition_reader.range_readers().values()
+                            {
+                                // we omit internals range reader for new messages
+                                if matches!(curr_par_range_reader.kind, InternalsRangeReaderKind::NewMessages) {
+                                    break;
+                                }
+
+                                // NOTE: we use only range readers which skip offset is below current offset.
+                                //      It is required on refill not to take into account messages from next ranges.
+                                //      E.g. we collated blocks 10, 11, 12. Then on refill, when current offset corresponds
+                                //      to block 11 we should not take into account messages from block 12.
+                                if curr_processed_offset <= curr_par_range_reader.reader_state.skip_offset {
+                                    break;
+                                }
+
+                                // check buffer
+                                if curr_par_range_reader.reader_state.buffer.msgs_count() > 0 {
+                                    check_ops_count.saturating_add_assign(1);
+                                    if curr_par_range_reader
+                                        .reader_state
+                                        .buffer
+                                        .account_messages_count(account_id)
+                                        > 0
+                                    {
+                                        tracing::trace!(target: tracing_targets::COLLATOR,
+                                            partition_id = %par_id,
+                                            account_id = %get_short_hash_string(account_id),
+                                            rr_seqno = curr_par_range_reader.seqno,
+                                            rr_kind = ?curr_par_range_reader.kind,
+                                            reader_state = ?DebugInternalsRangeReaderState(&curr_par_range_reader.reader_state),
+                                            "external messages skipped for account - current partition range reader buffer",
+                                        );
+                                        return (true, check_ops_count);
+                                    }
+                                }
+
+                                // check in remaning stats
+                                check_ops_count.saturating_add_assign(1);
+                                if curr_par_range_reader
+                                    .reader_state.contains_account_addr_in_remaning_msgs_stats(&dst_addr)
+                                {
+                                    tracing::trace!(target: tracing_targets::COLLATOR,
+                                        partition_id = %par_id,
+                                        account_id = %get_short_hash_string(account_id),
+                                        rr_seqno = curr_par_range_reader.seqno,
+                                        rr_kind = ?curr_par_range_reader.kind,
+                                        reader_state = ?DebugInternalsRangeReaderState(&curr_par_range_reader.reader_state),
+                                        remaming_msgs_stats = ?curr_par_range_reader
+                                            .reader_state
+                                            .remaning_msgs_stats.as_ref()
+                                            .map(|stats| DebugIter(stats.statistics().iter().map(|(addr, count)|
+                                                (get_short_addr_string(addr), *count)
+                                            ))),
+                                        "external messages skipped for account - current partition range reader remaning stats",
+                                    );
+                                    return (true, check_ops_count);
+                                }
+                            }
+                        }
+
+                        (false, check_ops_count)
+                    },
+                    SkipExpiredExternals {
+                        chain_time_threshold_ms: next_chain_time
+                            .saturating_sub(externals_expire_timeout_ms),
+                        total_skipped: &mut expired_msgs_count,
+                    },
+                );
                 res.metrics
                     .add_to_msgs_groups_ops_count
                     .saturating_add_assign(ops_count);
                 res.metrics.add_to_message_groups_timer.stop();
+                res.collected_count.saturating_add_assign(collected_count);
             }
 
             let range_reader_processed_offset = range_reader_state_by_partition.processed_offset;
@@ -812,7 +905,7 @@ impl ExternalsReader {
         tracing::debug!(target: tracing_targets::COLLATOR,
             partition_id = %par_id,
             ext_curr_processed_offset = curr_processed_offset,
-            read_ext_msgs_count = res.metrics.read_ext_msgs_count,
+            ext_msgs_collected_count = res.collected_count,
             expired_ext_msgs_count = res.metrics.expired_ext_msgs_count,
             "external messages collected",
         );
@@ -828,6 +921,7 @@ impl ExternalsReader {
 #[derive(Default)]
 pub(super) struct CollectExternalsResult {
     pub metrics: MessagesReaderMetrics,
+    pub collected_count: usize,
 }
 
 pub(super) struct ExternalsRangeReader {
