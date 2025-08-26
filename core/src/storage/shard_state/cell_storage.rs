@@ -908,13 +908,20 @@ impl CellStorage {
         let ctx = RemoveContext::new(&self.db, herd, &self.raw_cells_cache, split_at);
 
         std::thread::scope(|scope| {
+            let mut results = Vec::with_capacity(roots.len());
+
             for root in roots {
-                scope.spawn(|| {
-                    // TODO: Handle error properly.
-                    ctx.traverse_cell(root, scope).unwrap();
-                });
+                let res = scope.spawn(|| -> RemoveResult { ctx.traverse_cell(root, scope) });
+                results.push(res);
             }
-        });
+
+            results
+                .into_iter()
+                .flat_map(|x| x.join())
+                .collect::<Result<Vec<_>, CellStorageError>>()?;
+
+            Ok::<(), CellStorageError>(())
+        })?;
 
         // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
         //       and a bit more just in case.

@@ -38,8 +38,7 @@ pub struct ShardStateStorage {
     max_new_sc_cell_count: AtomicUsize,
 
     accounts_split_depth: u8,
-
-    background_drop_cell_tx: std::sync::mpsc::Sender<Cell>,
+    states_gc_batch_size: usize,
 }
 
 impl ShardStateStorage {
@@ -52,15 +51,6 @@ impl ShardStateStorage {
     ) -> Result<Arc<Self>> {
         let cell_storage = CellStorage::new(db.clone(), cache_size_bytes);
 
-        let (background_drop_cell_tx, background_drop_cell_rx) = std::sync::mpsc::channel::<Cell>();
-
-        std::thread::spawn(move || {
-            while let Ok(cell) = background_drop_cell_rx.recv() {
-                let _hist = HistogramGuard::begin("tycho_storage_cell_drop_time_high");
-                drop(cell);
-            }
-        });
-
         Ok(Arc::new(Self {
             db,
             block_handle_storage,
@@ -72,7 +62,7 @@ impl ShardStateStorage {
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
             accounts_split_depth: 4,
-            background_drop_cell_tx,
+            states_gc_batch_size: 1,
         }))
     }
 
@@ -135,7 +125,6 @@ impl ShardStateStorage {
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
         let accounts_split_depth = self.accounts_split_depth;
-        let background_drop_cell_tx = self.background_drop_cell_tx.clone();
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
@@ -177,7 +166,7 @@ impl ShardStateStorage {
 
             raw_db.write(batch)?;
 
-            background_drop_cell_tx.send(root_cell)?;
+            drop(root_cell);
 
             hist.finish();
 
@@ -268,15 +257,15 @@ impl ShardStateStorage {
         let mut removed_states = 0usize;
         let mut removed_cells = 0usize;
 
-        loop {
-            const BATCH_SIZE: usize = 2;
+        let batch_size = self.states_gc_batch_size;
 
-            let mut current_batch = Vec::with_capacity(BATCH_SIZE);
-            let mut current_batch_keys = Vec::with_capacity(BATCH_SIZE);
-            let mut current_batch_blocks = Vec::with_capacity(BATCH_SIZE);
+        loop {
+            let mut current_batch = Vec::with_capacity(batch_size);
+            let mut current_batch_keys = Vec::with_capacity(batch_size);
+            let mut current_batch_blocks = Vec::with_capacity(batch_size);
 
             // Collect states for batch processing
-            while current_batch.len() < BATCH_SIZE {
+            while current_batch.len() < batch_size {
                 let (key, value) = match iter.item() {
                     Some(item) => item,
                     None => match iter.status() {
@@ -370,7 +359,7 @@ impl ShardStateStorage {
 
             let last_seqno = current_batch_blocks
                 .iter()
-                .filter(|x| x.is_masterchain())
+                .filter(|&x| x.is_masterchain())
                 .map(|x| x.seqno)
                 .max();
 
