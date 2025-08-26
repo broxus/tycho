@@ -1,0 +1,19 @@
+const ELECTOR_OP_NEW_STAKE = 0x4e73744b
+const ELECTOR_OP_RECOVER_STAKE = 0x47657424
+const ELECTOR_OP_UPGRADE_CODE = 0x4e436f64
+const ELECTOR_OP_CONFIRM_VSET = 0xee764f4b
+const ELECTOR_OP_REJECT_VSET = 0xee764f6f
+
+const ANSWER_TAG_STAKE_REJECTED = 0xee6f454c
+const ANSWER_TAG_STAKE_ACCEPTED = 0xf374484c
+const ANSWER_TAG_STAKE_RECOVERED = 0xf96f7324
+const ANSWER_TAG_CODE_ACCEPTED = 0xce436f64
+const ANSWER_TAG_NO_STAKE_TO_RECOVER = 0xfffffffe
+const ANSWER_TAG_ERROR = 0xffffffff
+
+struct (0x654c5074) SignedStake {
+    stakeAt: uint32
+    maxFactor: uint32
+    addr: uint256
+    adnlAddr: uint256
+}
