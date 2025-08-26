@@ -2,28 +2,16 @@ import "@stdlib/gas-payments"
 import "@stdlib/lisp-lists"
 import "@stdlib/tvm-dicts"
 import "@stdlib/tvm-lowlevel"
+import "interface/config"
+import "interface/elector"
 import "lib/config-params"
+import "lib/util"
 
 tolk 1.0
 
 //
 // === Constants ===
 //
-const MSG_TAG_NEW_STAKE = 0x4e73744b
-const MSG_TAG_RECOVER_STAKE = 0x47657424
-const MSG_TAG_UPGRADE_CODE = 0x4e436f64
-const MSG_TAG_VSET_CONFIRMED = 0xee764f4b
-const MSG_TAG_VSET_REJECTED = 0xee764f6f
-
-const ANSWER_TAG_STAKE_REJECTED = 0xee6f454c
-const ANSWER_TAG_STAKE_ACCEPTED = 0xf374484c
-const ANSWER_TAG_STAKE_RECOVERED = 0xf96f7324
-const ANSWER_TAG_CODE_ACCEPTED = 0xce436f64
-const ANSWER_TAG_NO_STAKE_TO_RECOVER = 0xfffffffe
-const ANSWER_TAG_ERROR = 0xffffffff
-
-const CONFIG_MSG_TAG_SET_NEXT_VSET = 0x4e565354
-
 const STAKE_ERR_NO_ELECTION = 0
 const STAKE_ERR_INVALID_SIGNATURE = 1
 const STAKE_ERR_DIFF_TOO_SMALL = 2
@@ -32,13 +20,8 @@ const STAKE_ERR_ADDR_CHANGED = 4
 const STAKE_ERR_STAKE_TOO_SMALL = 5
 const STAKE_ERR_MAX_FACTOR_TOO_SMALL = 6
 
-@pure
-fun msg_value_update_vset(): coins
-    asm "1000000000 INT"
-
-@pure
-fun msg_value_stake_accepted(): coins
-    asm "1000000000 INT"
+const MSG_VALUE_UPDATE_VSET = 1 << 30
+const MSG_VALUE_STAKE_ACCEPTED = ton("1")
 
 //
 // === Storage Models ===
@@ -206,21 +189,21 @@ fun onInternalMessage(in: InMessage) {
 
     val queryId = body.loadUint(64);
     match (op) {
-        MSG_TAG_NEW_STAKE => {
+        ELECTOR_OP_NEW_STAKE => {
             processNewStake(in.senderAddress, in.valueCoins, body, queryId);
         }
-        MSG_TAG_RECOVER_STAKE => {
+        ELECTOR_OP_RECOVER_STAKE => {
             recoverStake(in.senderAddress, queryId);
         }
-        MSG_TAG_UPGRADE_CODE => {
+        ELECTOR_OP_UPGRADE_CODE => {
             val ok = upgradeCode(in.senderAddress, body, queryId);
             val tag = ok ? ANSWER_TAG_CODE_ACCEPTED : ANSWER_TAG_ERROR;
             sendMessageBack(in.senderAddress, tag, queryId, op);
         }
-        MSG_TAG_VSET_CONFIRMED => {
+        ELECTOR_OP_CONFIRM_VSET => {
             processConfigVsetResponse(in.senderAddress, queryId, true);
         }
-        MSG_TAG_VSET_REJECTED => {
+        ELECTOR_OP_REJECT_VSET => {
             processConfigVsetResponse(in.senderAddress, queryId, false);
         }
         else => {
@@ -243,7 +226,7 @@ fun onInternalMessage(in: InMessage) {
 /// it contained some arguments besides the code.
 @method_id(1666)
 fun afterCodeUpgrade(source: address, _args: slice, queryId: int) {
-    sendMessageBack(source, ANSWER_TAG_CODE_ACCEPTED, queryId, MSG_TAG_UPGRADE_CODE);
+    sendMessageBack(source, ANSWER_TAG_CODE_ACCEPTED, queryId, ELECTOR_OP_UPGRADE_CODE);
 }
 
 //
@@ -435,12 +418,9 @@ fun conductElection(data: Storage, election: Election): bool {
     var configAddress = blockchain.configParam(0)!.beginParse().preloadUint(256);
     createMessage({
         bounce: true,
-        value: msg_value_update_vset(),
+        value: MSG_VALUE_UPDATE_VSET,
         dest: (MASTERCHAIN, configAddress),
-        body: beginCell() //
-            .storeUint(CONFIG_MSG_TAG_SET_NEXT_VSET, 32)
-            .storeUint(election.electAt, 64)
-            .storeRef(vset),
+        body: ConfigSetNextValidatorSet { queryId: election.electAt as uint64, vset },
     })
         .send(SEND_MODE_PAY_FEES_SEPARATELY);
 
@@ -591,7 +571,7 @@ fun ElectionResult.compute(
 
         // Lookup source address first.
         var (cs, memberExists) = participants.uDictGet(256, pubkey);
-        assert (memberExists, 61);
+        assert(memberExists, 61);
         var participant = lazy ElectionParticipant.fromSlice(cs!);
         val addr = participant.addr;
 
@@ -632,7 +612,7 @@ fun ElectionResult.compute(
         i += 1;
     } while (tail != null);
 
-    assert (totalStake == bestStake, 49);
+    assert(totalStake == bestStake, 49);
 
     return ElectionResult {
         credits,
@@ -702,8 +682,8 @@ fun syncElectionWithVset(data: Storage, election: Election): bool {
 
     // Find vset hash in config params (search in current or next vset).
     if (
-    blockchain.configParam(PARAM_IDX_CURRENT_VSET).hashEq(vsetHash) ||
-    blockchain.configParam(PARAM_IDX_NEXT_VSET).hashEq(vsetHash)
+        blockchain.configParam(PARAM_IDX_CURRENT_VSET).hashEq(vsetHash) ||
+        blockchain.configParam(PARAM_IDX_NEXT_VSET).hashEq(vsetHash)
     ) {
         // Reset `currentElection` since it is not needed anymore.
         data.currentElection = null;
@@ -808,7 +788,7 @@ fun updateActiveVsetId(data: Storage): bool {
         val (cs, found) = data.pastElections.uDictGet(32, data.activeId);
         if (found) {
             var pastElection = lazy PastElection.fromSlice(cs!);
-            assert (pastElection.vsetHash == data.activeHash, 57);
+            assert(pastElection.vsetHash == data.activeHash, 57);
 
             // Adjust unfreeze time of this validator set.
             pastElection.unfreezeAt = blockchain.now() + pastElection.stakeHeld;
@@ -916,13 +896,6 @@ fun processSimpleTransfer(source: address, value: coins) {
     data.save();
 }
 
-struct (0x654c5074) SignedStake {
-    stakeAt: uint32
-    maxFactor: uint32
-    addr: uint256
-    adnlAddr: uint256
-}
-
 /// Processes a stake from participant.
 ///
 /// Validates stake info and sends back either a confirmation
@@ -932,12 +905,31 @@ struct (0x654c5074) SignedStake {
 /// Mutates persistent storage fields:
 /// - currentElection
 fun processNewStake(source: address, value: coins, body: slice, queryId: int) {
+    val res = processNewStakeImpl(source, value, body);
+    if (res < 0) {
+        // Return confirmation message if success.
+        if (queryId != 0) {
+            val reply = createMessage({
+                bounce: false,
+                value: MSG_VALUE_STAKE_ACCEPTED,
+                dest: source,
+                body: (ANSWER_TAG_STAKE_ACCEPTED as uint32, queryId as uint64),
+            });
+            reply.send(SEND_MODE_IGNORE_ERRORS);
+        }
+    } else {
+        // Return stake if error.
+        returnStake(source, queryId, res);
+    }
+}
+
+/// See `processNewStake`. Returns either -1 in case of success and a status otherwise.
+fun processNewStakeImpl(source: address, value: coins, body: slice): int {
     val (wc, addr) = source.getWorkchainAndHash();
     var data = lazy Storage.load();
     if (data.currentElection == null || wc != MASTERCHAIN) {
         // No election active, or source is not in masterchain.
-        returnStake(source, queryId, STAKE_ERR_NO_ELECTION);
-        return;
+        return STAKE_ERR_NO_ELECTION;
     }
 
     // Parse the remainder of a new stake message.
@@ -949,8 +941,7 @@ fun processNewStake(source: address, value: coins, body: slice, queryId: int) {
     var signature = body.loadRef().beginParse();
     if (signature.remainingBitsCount() != 512 || signature.remainingRefsCount() != 0) {
         // Invalid signature slice.
-        returnStake(source, queryId, STAKE_ERR_INVALID_SIGNATURE);
-        return;
+        return STAKE_ERR_INVALID_SIGNATURE;
     }
     body.assertEnd();
 
@@ -962,35 +953,30 @@ fun processNewStake(source: address, value: coins, body: slice, queryId: int) {
     }.toCell();
     if (!isSliceSignatureValid(signedData.beginParse(), signature, pubkey)) {
         // Invalid signature.
-        returnStake(source, queryId, STAKE_ERR_INVALID_SIGNATURE);
-        return;
+        return STAKE_ERR_INVALID_SIGNATURE;
     }
 
     if (maxFactor < 0x10000) {
         // Factor must be >= 1. = 65536/65536.
-        returnStake(source, queryId, STAKE_ERR_MAX_FACTOR_TOO_SMALL);
-        return;
+        return STAKE_ERR_MAX_FACTOR_TOO_SMALL;
     }
 
     // Parse current election data.
     var election = lazy data.currentElection.load();
-    value -= msg_value_stake_accepted(); // deduct GR$1 for sending confirmation
+    value -= MSG_VALUE_STAKE_ACCEPTED; // deduct GR$1 for sending confirmation
     if ((value << 12) < election.totalStake) {
         // Stake smaller than 1/4096 of the total accumulated stakes.
-        returnStake(source, queryId, STAKE_ERR_DIFF_TOO_SMALL);
-        return;
+        return STAKE_ERR_DIFF_TOO_SMALL;
     }
 
     election.totalStake += value; // (provisionally) increase total stake
     if (stakeAt != election.electAt) {
         // Stake for some other election.
-        returnStake(source, queryId, STAKE_ERR_ELECTION_ID_MISMATCH);
-        return;
+        return STAKE_ERR_ELECTION_ID_MISMATCH;
     }
     if (election.finished) {
         // Election already finished.
-        returnStake(source, queryId, STAKE_ERR_NO_ELECTION);
-        return;
+        return STAKE_ERR_NO_ELECTION;
     }
 
     var (cs, found) = election.participants.uDictGet(256, pubkey);
@@ -1003,8 +989,7 @@ fun processNewStake(source: address, value: coins, body: slice, queryId: int) {
     }
     if (found) {
         // Can make stakes for a public key from one address only.
-        returnStake(source, queryId, STAKE_ERR_ADDR_CHANGED);
-        return;
+        return STAKE_ERR_ADDR_CHANGED;
     }
 
     if (value < election.minStake) {
@@ -1012,11 +997,10 @@ fun processNewStake(source: address, value: coins, body: slice, queryId: int) {
         // NOTE: At this point the value could be increased by `participant.stake`
         //       so after that branch code will never go here because only
         //       entries with `stake >= election.minStake` were stored.
-        returnStake(source, queryId, STAKE_ERR_STAKE_TOO_SMALL);
-        return;
+        return STAKE_ERR_STAKE_TOO_SMALL;
     }
 
-    assert (value > 0, 44);
+    assert(value > 0, 44);
     setGasLimitToMaximum();
 
     // Store stake into the dictionary.
@@ -1033,16 +1017,7 @@ fun processNewStake(source: address, value: coins, body: slice, queryId: int) {
     data.currentElection = election.toCell();
     data.save();
 
-    // Return confirmation message.
-    if (queryId != 0) {
-        val reply = createMessage({
-            bounce: false,
-            value: msg_value_stake_accepted(),
-            dest: source,
-            body: (ANSWER_TAG_STAKE_ACCEPTED as uint32, queryId as uint64),
-        });
-        reply.send(SEND_MODE_IGNORE_ERRORS);
-    }
+    return -1;
 }
 
 fun returnStake(addr: address, queryId: int, reason: int) {
@@ -1061,7 +1036,7 @@ fun recoverStake(source: address, queryId: int) {
     var (wc, addr) = source.getWorkchainAndHash();
     if (wc != MASTERCHAIN) {
         // Not from masterchain.
-        sendMessageBack(source, ANSWER_TAG_NO_STAKE_TO_RECOVER, queryId, MSG_TAG_RECOVER_STAKE);
+        sendMessageBack(source, ANSWER_TAG_NO_STAKE_TO_RECOVER, queryId, ELECTOR_OP_RECOVER_STAKE);
         return;
     }
 
@@ -1069,7 +1044,7 @@ fun recoverStake(source: address, queryId: int) {
     var (creditsCs, found) = data.credits.uDictDeleteAndGet(256, addr);
     if (!found) {
         // No credit for sender.
-        sendMessageBack(source, ANSWER_TAG_NO_STAKE_TO_RECOVER, queryId, MSG_TAG_RECOVER_STAKE);
+        sendMessageBack(source, ANSWER_TAG_NO_STAKE_TO_RECOVER, queryId, ELECTOR_OP_RECOVER_STAKE);
         return;
     }
 
@@ -1167,12 +1142,15 @@ fun processConfigVsetResponse(source: address, queryId: int, success: bool) {
     }
 }
 
-fun sendMessageBack(dest: address, functionTag: uint32, queryId: uint64, body: uint32) {
+/// Sends message back to the query source.
+///
+/// Attaches all remaining message value.
+fun sendMessageBack(dest: address, answerTag: uint32, queryId: uint64, body: uint32) {
     val message = createMessage({
         bounce: false,
         value: 0,
         dest,
-        body: (functionTag, queryId, body),
+        body: (answerTag, queryId, body),
     });
     message.send(SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE);
 }
@@ -1205,8 +1183,8 @@ fun unfreezeAll(credits: dict, pastElections: dict, electionId: int): UnfreezeAl
 
     val pe = lazy PastElection.fromSlice(cs!);
     val recovered = pe.bonuses > 0
-        ? unfreezeWithBonuses(mutate credits, pe.frozenDict, pe.totalStake, pe.bonuses)
-        : unfreezeWithoutBonuses(mutate credits, pe.frozenDict, pe.totalStake);
+         ? unfreezeWithBonuses(mutate credits, pe.frozenDict, pe.totalStake, pe.bonuses)
+         : unfreezeWithoutBonuses(mutate credits, pe.frozenDict, pe.totalStake);
 
     return UnfreezeAllResult {
         credits,
@@ -1237,7 +1215,7 @@ fun unfreezeWithBonuses(mutate credits: dict, frozenDict: dict, totalStake: coin
         }
     } while (found);
 
-    assert ((total == totalStake) && (returnedBonuses <= bonuses), 59);
+    assert((total == totalStake) && (returnedBonuses <= bonuses), 59);
 
     return recovered + bonuses - returnedBonuses;
 }
@@ -1261,7 +1239,7 @@ fun unfreezeWithoutBonuses(mutate credits: dict, frozenDict: dict, totalStake: c
         }
     } while (found);
 
-    assert (total == totalStake, 59);
+    assert(total == totalStake, 59);
 
     return recovered;
 }

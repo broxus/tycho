@@ -1,5 +1,72 @@
 import "@stdlib/common"
 import "@stdlib/tvm-dicts"
+
+const PARAM_KEY_LEN = 32
+
+const PARAM_IDX_ELECTOR_ADDRESS = 1
+const PARAM_IDX_MANDATORY_PARAMS = 9
+const PARAM_IDX_CRITICAL_PARAMS = 10
+
+// === Vote config ===
+const PARAM_IDX_VOTE_CONFIG = 11
+
+struct (0x91) ConfigVotingSetup {
+    normalParams: Cell<ConfigProposalSetup>
+    criticalParams: Cell<ConfigProposalSetup>
+}
+
+@inline
+fun ConfigVotingSetup.load(): ConfigVotingSetup {
+    val param = blockchain.configParam(PARAM_IDX_VOTE_CONFIG)!;
+    return ConfigVotingSetup.fromCell(param!);
+}
+
+@inline
+fun ConfigVotingSetup.getMinWins(self, critical: bool): int {
+    var raw = null as Cell<ConfigProposalSetup>?;
+    if (critical) {
+        raw = self.criticalParams;
+    } else {
+        raw = self.normalParams;
+    }
+    var config = lazy raw.load();
+    return config.minWins;
+}
+
+@inline
+fun ConfigVotingSetup.getMaxLosses(self, critical: bool): int {
+    var raw = null as Cell<ConfigProposalSetup>?;
+    if (critical) {
+        raw = self.criticalParams;
+    } else {
+        raw = self.normalParams;
+    }
+    var config = lazy raw.load();
+    return config.maxLosses;
+}
+
+@inline
+fun ConfigVotingSetup.get(self, critical: bool): ConfigProposalSetup {
+    var raw = null as Cell<ConfigProposalSetup>?;
+    if (critical) {
+        raw = self.criticalParams;
+    } else {
+        raw = self.normalParams;
+    }
+    return ConfigProposalSetup.fromCell(raw);
+}
+
+struct (0x36) ConfigProposalSetup {
+    minTotalRounds: uint8
+    maxTotalRounds: uint8
+    minWins: uint8
+    maxLosses: uint8
+    minStoreSec: uint32
+    maxStoreSec: uint32
+    bitPrice: uint32
+    cellPrice: uint32
+}
+
 // === Validator set params ===
 const PARAM_IDX_VSET_TIMINGS = 15
 
@@ -10,6 +77,7 @@ struct ValidatorSetTimingsConfig {
     stakeHeldFor: uint32
 }
 
+@inline
 fun ValidatorSetTimingsConfig.load(): ValidatorSetTimingsConfig {
     val param = blockchain.configParam(PARAM_IDX_VSET_TIMINGS);
     return ValidatorSetTimingsConfig.fromCell(param!);
@@ -24,13 +92,14 @@ struct ValidatorSetSizeConfig {
     minValidators: uint16
 }
 
+@inline
 fun ValidatorSetSizeConfig.load(): ValidatorSetSizeConfig {
     val param = blockchain.configParam(PARAM_IDX_VSET_COUNT);
     return ValidatorSetSizeConfig.fromCell(param!);
 }
 
 // === Validator set stake params ===
-const PARAM_IDX_VSET_STAKE = 17;
+const PARAM_IDX_VSET_STAKE = 17
 
 struct ValidatorSetStakeConfig {
     minStake: coins
@@ -39,6 +108,7 @@ struct ValidatorSetStakeConfig {
     maxStakeFactor: uint32
 }
 
+@inline
 fun ValidatorSetStakeConfig.load(): ValidatorSetStakeConfig {
     val param = blockchain.configParam(PARAM_IDX_VSET_STAKE);
     return ValidatorSetStakeConfig.fromCell(param!);
@@ -81,8 +151,8 @@ fun ValidatorDescr.packToBuilder(self, mutate b: builder) {
 
 fun ValidatorDescr.unpackFromSlice(mutate s: slice): ValidatorDescr {
     val tag = s.loadUint(8);
-    assert ((tag & ~0x20) == VALIDATOR_DESCR_TAG_SIMPLE, ERROR_INVALID_VALIDATOR_DESCR);
-    assert (s.loadUint(32) == PUBKEY_TAG_ED25519, ERROR_INVALID_VALIDATOR_DESCR);
+    assert((tag & ~0x20) == VALIDATOR_DESCR_TAG_SIMPLE, ERROR_INVALID_VALIDATOR_DESCR);
+    assert(s.loadUint(32) == PUBKEY_TAG_ED25519, ERROR_INVALID_VALIDATOR_DESCR);
     val pubkey = s.loadUint(256);
     val weight = s.loadUint(64);
     val adnlAddr = (tag & 0x20) != 0 ? s.loadUint(256) : 0;
@@ -93,83 +163,32 @@ fun ValidatorDescr.unpackFromSlice(mutate s: slice): ValidatorDescr {
     };
 }
 
-struct (0x36) VoteConfig {
-    minTotRounds: uint8,
-    maxTotRounds: uint8,
-    minWins: uint8,
-    maxLosses: uint8,
-    minStoreSec: uint32,
-    maxStoreSec: uint32,
-    bitPrice: uint32,
-    cellPrice: uint32
-}
-
-fun VoteConfig.get(critical: bool): VoteConfig {
-    val param = blockchain.configParam(11)!;
-    return VoteConfig.get_internal(critical, param);
-}
-
-fun VoteConfig.get_internal(critical: bool, param11 : cell): VoteConfig {
-    var cs = param11.beginParse();
-    val tag = cs.loadUint(8);
-    assert (tag == 0x91, 44);
-    if (critical) {
-        cs.loadRef();
-    }
-    val config = lazy VoteConfig.fromCell(cs.preloadRef(), {
-        assertEndAfterReading: true
-    });
-
-    return config;
-}
-
 struct CurrentVset {
     vset: Cell<ValidatorSet>
     totalWeight: uint64
     list: dict
 }
+
+@inline
 fun CurrentVset.load() {
-    val vset = blockchain.configParam(34)! as Cell<ValidatorSet>;
-    var cs: ValidatorSet = lazy vset.load();
+    val vset = blockchain.configParam(PARAM_IDX_CURRENT_VSET)! as Cell<ValidatorSet>;
+    var parsed = lazy vset.load();
     return CurrentVset {
         vset,
-        totalWeight: cs.totalWeight,
-        list: cs.list,
+        totalWeight: parsed.totalWeight,
+        list: parsed.list,
     };
 }
 
+@inline
 fun CurrentVset.getValidatorDescription(idx: int): slice? {
-    val vset = CurrentVset.load();
+    val param = blockchain.configParam(PARAM_IDX_CURRENT_VSET);
+    var vset = lazy ValidatorSet.fromCell(param!);
     val (validator, _) = vset.list.uDictGet(16, idx);
     return validator;
 }
-
-const PARAM_IDX_ELECTOR_ADDRESS = 1;
-const PARAM_IDX_MANDATORY_PARAMS = 9;
-const PARAM_IDX_CRITICAL_PARAMS = 10;
-
-
-
 
 const PUBKEY_TAG_ED25519 = 0x8e81278a
 
 // TODO: Move into separate file?
 const ERROR_INVALID_VALIDATOR_DESCR = 41
-
-
-//
-// === Stuff ===
-//
-@pure
-fun maxInt(): int
-    asm "256 PUSHPOW2DEC"
-
-
-@inline_ref
-fun cell?.hashEq(self, expectedVsetHash: int): bool {
-    if (self == null) {
-        return false;
-    } else {
-        return expectedVsetHash == self.hash();
-    }
-}
