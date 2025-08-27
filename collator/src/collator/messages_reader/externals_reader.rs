@@ -577,10 +577,10 @@ impl ExternalsReader {
                 } else if seqno == self.block_seqno {
                     // if current range is a last one and fully read
                     // then set current position to the end of the last imported anchor
-                    if let Some(last_imported_anchor) = self.anchors_cache.last_imported_anchor() {
+                    if let Some(anchor_info) = self.anchors_cache.last_imported_anchor_info() {
                         range_reader.reader_state.range.current_position = ExternalKey {
-                            anchor_id: last_imported_anchor.id,
-                            msgs_offset: last_imported_anchor.all_exts_count as u64,
+                            anchor_id: anchor_info.id,
+                            msgs_offset: anchor_info.all_exts_count as u64,
                         };
                         range_reader.reader_state.range.to =
                             range_reader.reader_state.range.current_position;
@@ -660,12 +660,6 @@ impl ExternalsReader {
             // update last read to anchor chain time only from the last range read result
             if let Some(ct) = read_res.last_read_to_anchor_chain_time {
                 self.reader_state.last_read_to_anchor_chain_time = Some(ct);
-            }
-
-            // update the pending externals flag from the actual range (created in current block)
-            if last_seqno == self.block_seqno {
-                self.anchors_cache
-                    .set_has_pending_externals(read_res.has_pending_externals);
             }
         }
 
@@ -1021,11 +1015,9 @@ impl ExternalsRangeReader {
             (BufferFillStateByCount::IsFull, _) | (_, BufferFillStateBySlots::CanFill)
         );
 
-        let mut last_read_anchor_id_opt = None;
         let mut last_read_to_anchor_chain_time = None;
         let mut msgs_read_offset_in_last_anchor;
         let mut has_pending_externals_in_last_read_anchor = false;
-        let mut last_anchor_removed = false;
 
         let mut total_msgs_imported = 0;
 
@@ -1052,7 +1044,7 @@ impl ExternalsRangeReader {
             // skip and remove already read anchor from cache
             if anchor_id < was_read_to.anchor_id {
                 assert_eq!(next_idx, 0);
-                anchors_cache.remove(next_idx);
+                anchors_cache.pop_front();
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     anchor_id,
                     "anchor already read, removed from anchors cache",
@@ -1061,7 +1053,6 @@ impl ExternalsRangeReader {
                 continue;
             }
 
-            last_read_anchor_id_opt = Some(anchor_id);
             last_read_to_anchor_chain_time = Some(anchor.chain_time);
             tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                 last_read_anchor_id = anchor_id,
@@ -1120,8 +1111,8 @@ impl ExternalsRangeReader {
 
                 // skip and remove expired anchor
                 assert_eq!(next_idx, 0);
-                anchors_cache.remove(next_idx);
-                last_anchor_removed = true;
+                anchors_cache.pop_front();
+
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     anchor_id,
                     anchor_chain_time = anchor.chain_time,
@@ -1253,8 +1244,8 @@ impl ExternalsRangeReader {
             // remove fully read anchor
             if anchor.externals.len() == msgs_read_offset_in_last_anchor as usize {
                 assert_eq!(next_idx, 0);
-                anchors_cache.remove(next_idx);
-                last_anchor_removed = true;
+                anchors_cache.pop_front();
+
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     anchor_id,
                     "anchor just fully read, removed from anchors cache",
@@ -1290,38 +1281,30 @@ impl ExternalsRangeReader {
             );
         }
 
-        // check if we still have pending externals
-        let has_pending_externals =
+        // check if we still have pending externals in range
+        let has_pending_externals_in_range =
             if read_mode == ReadNextExternalsMode::ToPreviuosReadTo && prev_to_reached {
-                // TODO: msgs-v3: here we should check the remanining anchors in cache
-
                 // when was reading to prev_to and reached it we consider then
                 // we do not have pending externals in the range
                 false
             } else if has_pending_externals_in_last_read_anchor {
                 // when we stopped reading and has pending externals in last anchor
                 true
-            }
-            // TODO: msgs-v3: here we should check not the full anchors cache but
-            //      an exact range that we are reading now
-            else if last_read_anchor_id_opt.is_none() || last_anchor_removed {
-                // when no any anchor was read or last read anchor was removed
-                // then we have pending externals if we still have 1+ anchor in cache
-                // because every anchor in cache has externals
-                anchors_cache.len() > 0
+            } else if read_mode == ReadNextExternalsMode::ToPreviuosReadTo {
+                // when was reading to prev_to and not reached it
+                // then check by cache in the range
+                anchors_cache.check_has_pending_externals_in_range(&prev_to)
             } else {
-                // when last read anchor was not removed
-                // and it does not have pending externals
-                // it means that we have more externals
-                // only if we have more anchors in cache except the last one
-                anchors_cache.len() > 1
+                // when was reading to the end then get from cache
+                anchors_cache.has_pending_externals()
             };
 
         tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
             total_msgs_imported,
             count_expired_messages,
             has_pending_externals_in_last_read_anchor,
-            has_pending_externals,
+            has_pending_externals_in_range,
+            ?read_mode,
         );
 
         // accumulate time metrics
@@ -1338,7 +1321,6 @@ impl ExternalsRangeReader {
         }
 
         Ok(ReadExternalsRangeResult {
-            has_pending_externals,
             last_read_to_anchor_chain_time,
             max_fill_state_by_count,
             max_fill_state_by_slots,
@@ -1355,9 +1337,6 @@ enum ReadNextExternalsMode {
 
 #[derive(Default)]
 struct ReadExternalsRangeResult {
-    /// `true` - when pending externals exist in cache after reading
-    has_pending_externals: bool,
-
     /// The chain time of the last read anchor.
     /// Used to calc externals time diff.
     last_read_to_anchor_chain_time: Option<u64>,
