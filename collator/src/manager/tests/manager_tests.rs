@@ -564,7 +564,7 @@ fn test_detect_next_collation_step() {
         ),
     );
     println!("25: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
-    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct));
+    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == sc_anchor_ct));
 
     // Test behavior: NoPendingMessagesAfterShardBlocks with interval reach + master collation first
     mc_anchor_ct = 30000;
@@ -912,7 +912,7 @@ fn test_detect_next_collation_step() {
     CM::renew_mc_block_latest_chain_time(&mut guard, mc_anchor_ct);
 
     // 1. Master didn't reach max interval
-    mc_anchor_ct += 600;
+    mc_anchor_ct += 500;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
         active_shards.clone(),
@@ -947,7 +947,7 @@ fn test_detect_next_collation_step() {
     println!("42 shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
     assert!(matches!(next_step, NextCollationStep::ResumeAttemptsIn(s) if s.is_empty()));
 
-    mc_anchor_ct += 2000;
+    mc_anchor_ct += 400;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
         active_shards.clone(),
@@ -961,7 +961,7 @@ fn test_detect_next_collation_step() {
         ),
     );
     println!("43 shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
-    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct));
+    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == sc_anchor_ct));
 }
 
 #[tokio::test]

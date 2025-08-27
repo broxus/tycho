@@ -2808,13 +2808,41 @@ where
         // get next mc block ct candidates from all shards
         // and detect if should collate by current shard
         let mut should_collate_by_current_shard = false;
+
         let candidates: Vec<_> = facts
             .iter()
             .map(|(sid, f)| {
-                let ct = choose_candidate(f, any_shard_has_collated, hard_forced_for_all);
+                let mut ct = choose_candidate(f, any_shard_has_collated, hard_forced_for_all);
                 if *sid == shard_id && ct.is_some() {
                     should_collate_by_current_shard = true;
                 }
+
+                // specific choosing candidate for masterchain
+                if shard_id.is_masterchain() && sid.is_masterchain() {
+                    ct = f
+                        .max_ct
+                        .or(if any_shard_has_collated {
+                            f.min_ct
+                        } else {
+                            None
+                        })
+                        .or(if !mc_forced_by_no_pending_msgs {
+                            f.mc_forced_ct
+                        } else {
+                            None
+                        })
+                        .or(if mc_forced_by_no_pending_msgs {
+                            Some(0)
+                        } else {
+                            None
+                        })
+                        .or(if hard_forced_for_all {
+                            f.after_mc_ct
+                        } else {
+                            None
+                        })
+                }
+
                 ct
             })
             .collect();
