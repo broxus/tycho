@@ -2751,13 +2751,21 @@ where
                     if fact.after_mc_ct.is_none() {
                         fact.after_mc_ct = Some(s.ct);
                     }
-                    if s.ct.saturating_sub(mc_ct) >= min_interval_ms {
+
+                    // we take only first ct that exceed min interval
+                    // or the next that goes with the first shard block after prev master
+                    if (fact.min_ct.is_none() || s.is_first_block_after_prev_mc)
+                        && s.ct.saturating_sub(mc_ct) >= min_interval_ms
+                    {
                         fact.min_ct = Some(s.ct);
                     }
-                    if s.ct.saturating_sub(mc_ct) >= max_interval_ms {
+
+                    // we take only first ct that exceed max interval
+                    if fact.max_ct.is_none() && s.ct.saturating_sub(mc_ct) >= max_interval_ms {
                         fact.max_ct = Some(s.ct);
                     }
 
+                    // remember if there was the first shard block after prev master
                     if s.is_first_block_after_prev_mc {
                         fact.has_collated_block_after_prev_mc = true;
                     }

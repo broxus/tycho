@@ -828,7 +828,7 @@ fn test_detect_next_collation_step() {
         matches!(next_step, NextCollationStep::ResumeAttemptsIn(s) if s.contains(&sc_shard_id))
     );
 
-    // 3. Shard reached min interval and have collared block - forces master block collation
+    // 3. Shard reached min interval and have collated block - forces master block collation
     sc_anchor_ct += 1000;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
