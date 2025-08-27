@@ -2924,8 +2924,16 @@ where
         );
 
         // Mark all shards as "running" (attempts in progress)
-        for st in guard.states.values_mut() {
+        for (sid, st) in guard.states.iter_mut() {
             st.status = CollationStatus::AttemptsInProgress;
+
+            // we may use not last imported chain time to collate master
+            // so we prune all cached chain times for master above next chain time
+            // so next anchors will be imported again
+            if sid.is_masterchain() {
+                st.last_imported_anchor_events
+                    .retain(|s| s.ct <= next_mc_block_chain_time);
+            }
         }
 
         // Update MC block time and reset force flags

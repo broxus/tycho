@@ -579,7 +579,7 @@ impl ExternalsReader {
                     if let Some(last_imported_anchor) = self.anchors_cache.last_imported_anchor() {
                         range_reader.reader_state.range.current_position = ExternalKey {
                             anchor_id: last_imported_anchor.id,
-                            msgs_offset: last_imported_anchor.all_exts_count as u64,
+                            msgs_offset: last_imported_anchor.externals.len() as u64,
                         };
                         range_reader.reader_state.range.to =
                             range_reader.reader_state.range.current_position;

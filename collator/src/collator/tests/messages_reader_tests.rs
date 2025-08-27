@@ -827,8 +827,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
         self.block_seqno += 1;
         let next_chain_time = anchors_cache
-            .last_imported_anchor()
-            .map(|a| a.ct)
+            .get_last_imported_anchor_id_and_ct()
+            .map(|(_, ct)| ct)
             .unwrap_or_default();
 
         let mc_top_shards_end_lts: Vec<_> = mc_top_shards_blocks_info

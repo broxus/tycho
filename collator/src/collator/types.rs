@@ -638,6 +638,7 @@ pub(super) struct CollatorStats {
 pub(super) struct AnchorInfo {
     pub id: MempoolAnchorId,
     pub ct: u64,
+    #[allow(dead_code)]
     pub all_exts_count: usize,
     #[allow(dead_code)]
     pub our_exts_count: usize,
@@ -645,7 +646,7 @@ pub(super) struct AnchorInfo {
 }
 
 impl AnchorInfo {
-    pub fn from_anchor(anchor: Arc<MempoolAnchor>, our_exts_count: usize) -> AnchorInfo {
+    pub fn from_anchor(anchor: &MempoolAnchor, our_exts_count: usize) -> AnchorInfo {
         Self {
             id: anchor.id,
             ct: anchor.chain_time,
@@ -1136,11 +1137,17 @@ pub enum SpecialOrigin {
     Mint,
 }
 
+#[derive(Clone)]
+pub struct CachedAnchor {
+    pub anchor: Arc<MempoolAnchor>,
+    pub our_exts_count: usize,
+}
+
 #[derive(Default, Clone)]
 pub struct AnchorsCache {
     /// The cache of imported from mempool anchors that were not processed yet.
     /// Anchor is removed from the cache when all its externals are processed.
-    cache: VecDeque<(MempoolAnchorId, Arc<MempoolAnchor>)>,
+    cache: VecDeque<(MempoolAnchorId, CachedAnchor)>, // TODO: do not need to store our_exts_count
 
     last_imported_anchor: Option<AnchorInfo>,
 
@@ -1148,12 +1155,13 @@ pub struct AnchorsCache {
 }
 
 impl AnchorsCache {
+    // TODO: try to remove this method
     pub fn set_last_imported_anchor_info(&mut self, anchor_info: AnchorInfo) {
         self.last_imported_anchor = Some(anchor_info);
     }
 
-    pub fn last_imported_anchor(&self) -> Option<&AnchorInfo> {
-        self.last_imported_anchor.as_ref()
+    pub fn last_imported_anchor(&self) -> Option<&Arc<MempoolAnchor>> {
+        self.cache.back().map(|(_, ac)| &ac.anchor)
     }
 
     pub fn get_last_imported_anchor_id_and_ct(&self) -> Option<(u32, u64)> {
@@ -1163,19 +1171,45 @@ impl AnchorsCache {
     }
 
     pub fn insert(&mut self, anchor: Arc<MempoolAnchor>, our_exts_count: usize) {
+        self.last_imported_anchor = Some(AnchorInfo::from_anchor(&anchor, our_exts_count));
         if our_exts_count > 0 {
             self.has_pending_externals = true;
-            self.cache.push_back((anchor.id, anchor.clone()));
+            self.cache.push_back((anchor.id, CachedAnchor {
+                anchor,
+                our_exts_count,
+            }));
         }
-        self.last_imported_anchor = Some(AnchorInfo::from_anchor(anchor, our_exts_count));
     }
 
+    // TODO: check usage and update return type
     pub fn remove(&mut self, index: usize) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
         if index == 0 {
-            self.cache.pop_front()
+            self.cache.pop_front().map(|(id, ca)| (id, ca.anchor))
         } else {
-            self.cache.remove(index)
+            self.cache.remove(index).map(|(id, ca)| (id, ca.anchor))
         }
+
+        // TODO: update has_pending_externals
+    }
+
+    pub fn remove_above_ct_and_get_last_anchor_info(&mut self, ct: u64) -> Option<AnchorInfo> {
+        let mut last;
+        loop {
+            last = self.cache.back().map(|(_, ca)| ca);
+            if let Some(ca) = last {
+                if ca.anchor.chain_time > ct {
+                    self.cache.pop_back();
+                }
+            } else {
+                break;
+            }
+        }
+
+        // cache contains only anchors with our externals
+        // so it has pending messages if it has almost one anchor
+        self.has_pending_externals = !self.cache.is_empty();
+
+        last.map(|ca| AnchorInfo::from_anchor(&ca.anchor, ca.our_exts_count))
     }
 
     pub fn clear(&mut self) {
@@ -1188,8 +1222,11 @@ impl AnchorsCache {
         self.cache.len()
     }
 
+    // TODO: check usage and update return type
     pub fn get(&self, index: usize) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
-        self.cache.get(index).cloned()
+        self.cache
+            .get(index)
+            .map(|(id, ca)| (*id, ca.anchor.clone()))
     }
 
     pub fn has_pending_externals(&self) -> bool {

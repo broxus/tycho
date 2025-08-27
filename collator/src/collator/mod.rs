@@ -1210,7 +1210,7 @@ impl CollatorStdImpl {
                 total_our_exts_count = total_our_exts_count.saturating_add(our_exts_count);
                 res.anchors_info
                     .push(InitAnchorSource::FromCache(AnchorInfo::from_anchor(
-                        anchor.clone(),
+                        &anchor,
                         our_exts_count,
                     )));
 
@@ -1273,7 +1273,7 @@ impl CollatorStdImpl {
                 anchors_cache.insert(anchor.clone(), our_exts_count);
                 res.anchors_info
                     .push(InitAnchorSource::Imported(AnchorInfo::from_anchor(
-                        anchor,
+                        &anchor,
                         our_exts_count,
                     )));
 
@@ -1534,6 +1534,7 @@ impl CollatorStdImpl {
         self.do_collate(
             working_state,
             Some(top_shard_blocks_info),
+            next_chain_time,
             ForceMasterCollation::No,
         )
         .await
@@ -2048,8 +2049,14 @@ impl CollatorStdImpl {
                 };
 
                 drop(histogram);
-                self.do_collate(working_state, None, force_next_mc_block)
-                    .await?;
+
+                self.do_collate(
+                    working_state,
+                    None,
+                    last_imported_chain_time,
+                    force_next_mc_block,
+                )
+                .await?;
             }
             TryCollateCheck::NoPendingMessages
             | TryCollateCheck::ForceMcBlockByUncommittedChainLength => {
