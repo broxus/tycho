@@ -88,8 +88,8 @@ async fn test_import_init_anchors() {
 
     assert_eq!(anchors_info.len(), 4);
     assert_eq!(anchors_info[0].id, 9);
-    let (anchor_id, _) = anchors_cache.get(0).unwrap();
-    assert_eq!(anchor_id, processed_to_anchor_id);
+    let anchor = anchors_cache.first_with_our_externals().unwrap();
+    assert_eq!(anchor.id, processed_to_anchor_id);
     let (last_imported_id, last_imported_ct) =
         anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
     assert_eq!(last_imported_id, 12);
@@ -131,10 +131,10 @@ async fn test_import_init_anchors() {
         anchors_info.as_slice(),
     );
 
-    assert_eq!(anchors_info.len(), 4);
-    assert_eq!(anchors_info[0].id, 9);
-    let (anchor_id, _) = anchors_cache.get(0).unwrap();
-    assert_eq!(anchor_id, 11);
+    assert_eq!(anchors_info.len(), 3);
+    assert_eq!(anchors_info[0].id, 10);
+    let anchor = anchors_cache.first_with_our_externals().unwrap();
+    assert_eq!(anchor.id, 11);
     let (last_imported_id, last_imported_ct) =
         anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
     assert_eq!(last_imported_id, 12);
@@ -177,8 +177,8 @@ async fn test_import_init_anchors() {
 
     assert_eq!(anchors_info.len(), 2);
     assert_eq!(anchors_info[0].id, 13);
-    let (anchor_id, _) = anchors_cache.get(0).unwrap();
-    assert_eq!(anchor_id, 11);
+    let anchor = anchors_cache.first_with_our_externals().unwrap();
+    assert_eq!(anchor.id, 11);
     let (last_imported_id, last_imported_ct) =
         anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
     assert_eq!(last_imported_id, 14);
@@ -220,8 +220,8 @@ async fn test_import_init_anchors() {
     );
 
     assert_eq!(anchors_info.len(), 0);
-    let (anchor_id, _) = anchors_cache.get(0).unwrap();
-    assert_eq!(anchor_id, 11);
+    let anchor = anchors_cache.first_with_our_externals().unwrap();
+    assert_eq!(anchor.id, 11);
     let (last_imported_id, last_imported_ct) =
         anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
     assert_eq!(last_imported_id, 14);
@@ -234,6 +234,7 @@ async fn test_import_init_anchors() {
     // processed_to anchor is before all anchors in cache, should clear cache and load all required from mempool
     // =========================================================================
 
+    anchors_cache.pop_front();
     let processed_to_anchor_id = 9;
     let processed_to_msgs_offset = 2;
     let last_block_chain_time = 20832;
@@ -264,8 +265,8 @@ async fn test_import_init_anchors() {
 
     assert_eq!(anchors_info.len(), 4);
     assert_eq!(anchors_info[0].id, 9);
-    let (anchor_id, _) = anchors_cache.get(0).unwrap();
-    assert_eq!(anchor_id, processed_to_anchor_id);
+    let anchor = anchors_cache.first_with_our_externals().unwrap();
+    assert_eq!(anchor.id, processed_to_anchor_id);
     let (last_imported_id, last_imported_ct) =
         anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
     assert_eq!(last_imported_id, 12);
@@ -308,8 +309,8 @@ async fn test_import_init_anchors() {
 
     assert_eq!(anchors_info.len(), 5);
     assert_eq!(anchors_info[0].id, 13);
-    let (anchor_id, _) = anchors_cache.get(0).unwrap();
-    assert_eq!(anchor_id, processed_to_anchor_id);
+    let anchor = anchors_cache.first_with_our_externals().unwrap();
+    assert_eq!(anchor.id, processed_to_anchor_id);
     let (last_imported_id, last_imported_ct) =
         anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
     assert_eq!(last_imported_id, 17);
