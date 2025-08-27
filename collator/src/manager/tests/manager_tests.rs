@@ -869,7 +869,7 @@ fn test_detect_next_collation_step() {
         matches!(next_step, NextCollationStep::ResumeAttemptsIn(s) if s.contains(&mc_shard_id))
     );
 
-    // 2. Shard doesn't reached min interval and have have collated block
+    // 2. Shard didn't reach min interval and have have collated block
     sc_anchor_ct += 100;
     let next_step = CM::detect_next_collation_step(
         &mut guard,
@@ -904,6 +904,64 @@ fn test_detect_next_collation_step() {
     );
     println!("42 shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
     assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == sc_anchor_ct));
+
+    //
+
+    mc_anchor_ct = 65000;
+    sc_anchor_ct = 65000;
+    CM::renew_mc_block_latest_chain_time(&mut guard, mc_anchor_ct);
+
+    // 1. Master didn't reach max interval
+    mc_anchor_ct += 600;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
+            mc_anchor_ct,
+            ForceMasterCollation::No,
+            false,
+            mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
+        ),
+    );
+    println!("41: shard_id: {mc_shard_id}, ct: {mc_anchor_ct}, next_step: {next_step:?}");
+    assert!(
+        matches!(next_step, NextCollationStep::ResumeAttemptsIn(s) if s.contains(&mc_shard_id))
+    );
+
+    // 2. Shard didn't reach intervals but don't have messages
+    sc_anchor_ct += 500;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        sc_shard_id,
+        DetectNextCollationStepContext::new(
+            sc_anchor_ct,
+            ForceMasterCollation::NoPendingMessagesAfterShardBlocks,
+            true,
+            mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
+        ),
+    );
+    println!("42 shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
+    assert!(matches!(next_step, NextCollationStep::ResumeAttemptsIn(s) if s.is_empty()));
+
+    mc_anchor_ct += 2000;
+    let next_step = CM::detect_next_collation_step(
+        &mut guard,
+        active_shards.clone(),
+        mc_shard_id,
+        DetectNextCollationStepContext::new(
+            mc_anchor_ct,
+            ForceMasterCollation::No,
+            false,
+            mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
+        ),
+    );
+    println!("43 shard_id: {sc_shard_id}, ct: {sc_anchor_ct}, next_step: {next_step:?}");
+    assert!(matches!(next_step, NextCollationStep::CollateMaster(ct) if ct == mc_anchor_ct));
 }
 
 #[tokio::test]
