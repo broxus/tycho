@@ -70,13 +70,14 @@ impl CollatorStdImpl {
         skip_all,
         fields(
             block_id = %self.next_block_info,
-            ct = self.anchors_cache.last_imported_anchor().map(|a| a.ct).unwrap_or_default(),
+            ct = next_chain_time,
         )
     )]
     pub(super) async fn do_collate(
         &mut self,
         working_state: Box<WorkingState>,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
+        next_chain_time: u64,
         force_next_mc_block: ForceMasterCollation,
     ) -> Result<()> {
         let labels: [(&str, String); 1] = [("workchain", self.shard_id.workchain().to_string())];
@@ -109,14 +110,35 @@ impl CollatorStdImpl {
             )),
         );
 
-        let Some(&AnchorInfo {
-            ct: next_chain_time,
+        // We should remove all previously imported anchors above next chain time.
+        // We have cases when some shard can force master block collation (e.g. no pending messages after sc block)
+        // but it is not clear how many anchors were already imported by master. So we take next chain time
+        // from shard and should use anchors only up to choosen next chain time.
+        let Some(AnchorInfo {
+            ct: last_imported_chain_time,
             author,
             ..
-        }) = self.anchors_cache.last_imported_anchor()
+        }) = self
+            .anchors_cache
+            .remove_last_imported_above(next_chain_time)
         else {
-            bail!("last_imported_anchor should exist when we collating block")
+            bail!(
+                "last_imported_anchor should exist when we collating block \
+                    even after removing anchors above the next chain time"
+            )
         };
+
+        // TODO: needs to update metrics
+        // metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels).decrement(our_exts_count as f64);
+
+        assert!(
+            *last_imported_chain_time >= next_chain_time,
+            "all anchors upto next chain time {} should be imported before collation, \
+            but last imported chain time is {}",
+            next_chain_time,
+            last_imported_chain_time,
+        );
+
         let created_by = author.to_bytes().into();
 
         let is_first_block_after_prev_master = is_first_block_after_prev_master(

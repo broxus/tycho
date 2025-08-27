@@ -3003,16 +3003,25 @@ where
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
             hard_forced_for_all,
-            forced_in_current_shard,
+            mc_forced_by_no_pending_msgs_on_ct,
             mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
             next_mc_block_chain_time,
             "Master block collation forced or interval exceeded in every shard - \
             will collate next master block",
         );
 
         // Mark all shards as "running" (attempts in progress)
-        for st in guard.states.values_mut() {
+        for (sid, st) in guard.states.iter_mut() {
             st.status = CollationStatus::AttemptsInProgress;
+
+            // we may use not last imported chain time to collate master
+            // so we prune all cached chain times for master above next chain time
+            // so next anchors will be imported again
+            if sid.is_masterchain() {
+                st.last_imported_anchor_events
+                    .retain(|s| s.ct <= next_mc_block_chain_time);
+            }
         }
 
         // Update MC block time and reset force flags
