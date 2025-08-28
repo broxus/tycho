@@ -52,7 +52,7 @@ impl CommitArchiveTask {
                 let raw_block_ids = db
                     .archive_block_ids
                     .get(archive_id.to_be_bytes())?
-                    .ok_or(BlockStorageError::ArchiveNotFound)?;
+                    .ok_or(BlockStorageError::ArchiveNotFound(archive_id))?;
 
                 if raw_block_ids.is_empty() {
                     tracing::info!("no blocks to commit for archive {}", archive_id);
@@ -86,9 +86,12 @@ impl CommitArchiveTask {
 
                         // Check handle flags (only for the first type).
                         if ty == ArchiveEntryType::Block {
-                            let handle = block_handle_storage
-                                .load_handle(&block_id)
-                                .ok_or(BlockStorageError::BlockHandleNotFound)?;
+                            let handle =
+                                block_handle_storage.load_handle(&block_id).ok_or_else(|| {
+                                    BlockStorageError::BlockHandleNotFound(Box::new(
+                                        block_id.as_short_id(),
+                                    ))
+                                })?;
 
                             let flags = handle.meta().flags();
                             anyhow::ensure!(
@@ -103,7 +106,11 @@ impl CommitArchiveTask {
 
                         let key = PackageEntryKey::from((block_id, ty));
                         let Some(data) = blocks.get(&key).unwrap() else {
-                            return Err(BlockStorageError::BlockDataNotFound.into());
+                            return Err(BlockStorageError::BlockDataNotFound(Box::new((
+                                block_id.as_short_id(),
+                                ty,
+                            )))
+                            .into());
                         };
 
                         tycho_util::compression::ZstdDecompress::begin(&data)?
@@ -256,7 +263,7 @@ mod tests {
 
         assert!(
             err.downcast_ref::<BlockStorageError>()
-                .is_some_and(|e| matches!(e, BlockStorageError::ArchiveNotFound))
+                .is_some_and(|e| matches!(e, BlockStorageError::ArchiveNotFound(_)))
         );
         Ok(())
     }

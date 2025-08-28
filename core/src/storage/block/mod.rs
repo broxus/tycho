@@ -186,7 +186,10 @@ impl BlockStorage {
         let _histogram = HistogramGuard::begin("tycho_storage_load_block_data_time");
 
         if !handle.has_data() {
-            return Err(BlockStorageError::BlockDataNotFound.into());
+            return Err(BlockStorageError::BlockDataNotFound(Box::new(
+                handle.id().as_short_id(),
+            ))
+            .into());
         }
 
         // Fast path - lookup in cache
@@ -210,7 +213,10 @@ impl BlockStorage {
 
     pub async fn load_block_data_decompressed(&self, handle: &BlockHandle) -> Result<Bytes> {
         if !handle.has_data() {
-            return Err(BlockStorageError::BlockDataNotFound.into());
+            return Err(BlockStorageError::BlockDataNotFound(Box::new(
+                handle.id().as_short_id(),
+            ))
+            .into());
         }
 
         self.blob_storage
@@ -236,7 +242,10 @@ impl BlockStorage {
         length: u64,
     ) -> Result<Option<Bytes>> {
         if !handle.has_data() {
-            return Err(BlockStorageError::BlockDataNotFound.into());
+            return Err(BlockStorageError::BlockDataNotFound(Box::new(
+                handle.id().as_short_id(),
+            ))
+            .into());
         }
         self.blob_storage
             .get_block_data_range(handle, offset, length)
@@ -260,8 +269,14 @@ impl BlockStorage {
         handle: MaybeExistingHandle,
     ) -> Result<StoreBlockResult> {
         let block_id = proof.id();
-        if matches!(&handle, MaybeExistingHandle::Existing(handle) if handle.id() != block_id) {
-            return Err(BlockStorageError::BlockHandleIdMismatch.into());
+        if let MaybeExistingHandle::Existing(handle) = &handle
+            && handle.id() != block_id
+        {
+            return Err(BlockStorageError::BlockHandleIdMismatch {
+                expected: Box::new(block_id.as_short_id()),
+                actual: Box::new(handle.id().as_short_id()),
+            }
+            .into());
         }
 
         let (handle, status) = match handle {
@@ -300,7 +315,10 @@ impl BlockStorage {
 
     pub async fn load_block_proof_raw(&self, handle: &BlockHandle) -> Result<Bytes> {
         if !handle.has_proof() {
-            return Err(BlockStorageError::BlockProofNotFound.into());
+            return Err(BlockStorageError::BlockProofNotFound(Box::new(
+                handle.id().as_short_id(),
+            ))
+            .into());
         }
 
         self.blob_storage
@@ -316,8 +334,14 @@ impl BlockStorage {
         handle: MaybeExistingHandle,
     ) -> Result<StoreBlockResult> {
         let block_id = queue_diff.block_id();
-        if matches!(&handle, MaybeExistingHandle::Existing(handle) if handle.id() != block_id) {
-            return Err(BlockStorageError::BlockHandleIdMismatch.into());
+        if let MaybeExistingHandle::Existing(handle) = &handle
+            && handle.id() != block_id
+        {
+            return Err(BlockStorageError::BlockHandleIdMismatch {
+                expected: Box::new(block_id.as_short_id()),
+                actual: Box::new(handle.id().as_short_id()),
+            }
+            .into());
         }
 
         let (handle, status) = match handle {
@@ -356,7 +380,10 @@ impl BlockStorage {
 
     pub async fn load_queue_diff_raw(&self, handle: &BlockHandle) -> Result<Bytes> {
         if !handle.has_queue_diff() {
-            return Err(BlockStorageError::QueueDiffNotFound.into());
+            return Err(BlockStorageError::QueueDiffNotFound(Box::new(
+                handle.id().as_short_id(),
+            ))
+            .into());
         }
 
         self.blob_storage
@@ -521,14 +548,17 @@ type BlocksCache = moka::sync::Cache<BlockId, BlockStuff, FastHasherState>;
 
 #[derive(thiserror::Error, Debug)]
 enum BlockStorageError {
-    #[error("Block data not found")]
-    BlockDataNotFound,
-    #[error("Block proof not found")]
-    BlockProofNotFound,
-    #[error("Queue diff not found")]
-    QueueDiffNotFound,
-    #[error("Block handle id mismatch")]
-    BlockHandleIdMismatch,
+    #[error("Block data not found for block: {0}")]
+    BlockDataNotFound(Box<BlockIdShort>),
+    #[error("Block proof not found for block: {0}")]
+    BlockProofNotFound(Box<BlockIdShort>),
+    #[error("Queue diff not found for block: {0}")]
+    QueueDiffNotFound(Box<BlockIdShort>),
+    #[error("Block handle id mismatch: expected {expected}, got {actual}")]
+    BlockHandleIdMismatch {
+        expected: Box<BlockIdShort>,
+        actual: Box<BlockIdShort>,
+    },
 }
 
 #[cfg(test)]

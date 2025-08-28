@@ -87,7 +87,11 @@ impl ShardStateStorage {
         hint: StoreStateHint,
     ) -> Result<bool> {
         if handle.id() != state.block_id() {
-            return Err(ShardStateStorageError::BlockHandleIdMismatch.into());
+            return Err(ShardStateStorageError::BlockHandleIdMismatch {
+                expected: Box::new(state.block_id().as_short_id()),
+                actual: Box::new(handle.id().as_short_id()),
+            }
+            .into());
         }
 
         self.store_state_root(handle, state.root_cell().clone(), hint)
@@ -401,7 +405,10 @@ impl ShardStateStorage {
         let shard_state = shard_states.get(block_id.to_vec())?;
         match shard_state {
             Some(root) => Ok(HashBytes::from_slice(&root[..32])),
-            None => Err(ShardStateStorageError::NotFound.into()),
+            None => Err(ShardStateStorageError::NotFound(Box::new(
+                block_id.as_short_id(),
+            ))
+            .into()),
         }
     }
 
@@ -460,10 +467,13 @@ pub struct ShardStateStorageMetrics {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ShardStateStorageError {
-    #[error("Not found")]
-    NotFound,
-    #[error("Block handle id mismatch")]
-    BlockHandleIdMismatch,
+    #[error("Shard state not found for block: {0}")]
+    NotFound(Box<BlockIdShort>),
+    #[error("Block handle id mismatch: expected {expected}, got {actual}")]
+    BlockHandleIdMismatch {
+        expected: Box<BlockIdShort>,
+        actual: Box<BlockIdShort>,
+    },
 }
 
 fn split_shard_accounts(

@@ -296,6 +296,9 @@ impl BlobStorage {
             elapsed = %humantime::format_duration(started_at.elapsed()),
             archive_count,
             building_count = state.building_archives.len(),
+            current_archive_id = ?state.current_archive_id,
+            building_archives  = ?state.building_archives,
+            last_committed_id = state.last_committed_id,
             "finished preloading archive ids"
         );
 
@@ -575,14 +578,18 @@ impl BlobStorage {
     /// Get a chunk of the archive at the specified offset.
     pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<Bytes> {
         if offset % DEFAULT_CHUNK_SIZE != 0 {
-            return Err(BlockStorageError::InvalidOffset.into());
+            return Err(BlockStorageError::InvalidOffset {
+                offset,
+                chunk_size: DEFAULT_CHUNK_SIZE,
+            }
+            .into());
         }
 
         let archives = self.archives.clone();
         tokio::task::spawn_blocking(move || {
             archives
                 .get_range(&id, offset, offset + DEFAULT_CHUNK_SIZE)?
-                .ok_or(BlockStorageError::ArchiveNotFound.into())
+                .ok_or(BlockStorageError::ArchiveNotFound(id).into())
         })
         .await?
     }
@@ -698,7 +705,11 @@ impl BlobStorage {
                 ZstdDecompress::begin(&compressed_data)?.decompress(&mut output)?;
                 Ok(Bytes::from(output))
             }
-            None => Err(BlockStorageError::PackageEntryNotFound.into()),
+            None => Err(BlockStorageError::PackageEntryNotFound(Box::new((
+                id.block_id.as_short_id(),
+                id.ty,
+            )))
+            .into()),
         })
         .await?
     }
