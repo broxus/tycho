@@ -1014,7 +1014,10 @@ impl<'a> RemovedCell<'a> {
         if self.removes as i64 <= self.old_rc {
             Ok(self.next_refs())
         } else {
-            Err(CellStorageError::CounterMismatch)
+            Err(CellStorageError::CounterMismatch {
+                expected: self.old_rc,
+                actual: self.removes,
+            })
         }
     }
 
@@ -1033,8 +1036,8 @@ pub enum CellStorageError {
     CellNotFound,
     #[error("Invalid cell")]
     InvalidCell,
-    #[error("Cell counter mismatch")]
-    CounterMismatch,
+    #[error("Cell counter mismatch: expected refcount {expected}, got {actual} removes")]
+    CounterMismatch { expected: i64, actual: u32 },
     #[error("Internal rocksdb error")]
     Internal(#[from] rocksdb::Error),
 }
