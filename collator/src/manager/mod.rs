@@ -3125,7 +3125,7 @@ where
             None => {
                 let state = match state_node_adapter.load_state(mc_block_id).await {
                     Err(err) => match err.downcast_ref::<ShardStateStorageError>() {
-                        Some(ShardStateStorageError::NotFound) => {
+                        Some(ShardStateStorageError::NotFound(_)) => {
                             tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
                                 %mc_block_id,
                                 "master state not found in get_top_blocks_seqno",

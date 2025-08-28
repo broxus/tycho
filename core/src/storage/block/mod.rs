@@ -179,9 +179,10 @@ impl BlockStorage {
 
         let _histogram = HistogramGuard::begin("tycho_storage_load_block_data_time");
 
-        if !handle.has_data() {
-            return Err(BlockStorageError::BlockDataNotFound.into());
-        }
+        anyhow::ensure!(
+            handle.has_data(),
+            BlockStorageError::BlockDataNotFound(handle.id().as_short_id())
+        );
 
         // Fast path - lookup in cache
         if let Some(block) = self.blocks_cache.get(handle.id()) {
@@ -203,9 +204,10 @@ impl BlockStorage {
     }
 
     pub async fn load_block_data_decompressed(&self, handle: &BlockHandle) -> Result<Bytes> {
-        if !handle.has_data() {
-            return Err(BlockStorageError::BlockDataNotFound.into());
-        }
+        anyhow::ensure!(
+            handle.has_data(),
+            BlockStorageError::BlockDataNotFound(handle.id().as_short_id())
+        );
 
         self.blob_storage
             .get_block_data_decompressed(handle, &PackageEntryKey::block(handle.id()))
@@ -229,9 +231,10 @@ impl BlockStorage {
         offset: u64,
         length: u64,
     ) -> Result<Option<Bytes>> {
-        if !handle.has_data() {
-            return Err(BlockStorageError::BlockDataNotFound.into());
-        }
+        anyhow::ensure!(
+            handle.has_data(),
+            BlockStorageError::BlockDataNotFound(handle.id().as_short_id())
+        );
         self.blob_storage
             .get_block_data_range(handle, offset, length)
             .await
@@ -254,8 +257,13 @@ impl BlockStorage {
         handle: MaybeExistingHandle,
     ) -> Result<StoreBlockResult> {
         let block_id = proof.id();
-        if matches!(&handle, MaybeExistingHandle::Existing(handle) if handle.id() != block_id) {
-            return Err(BlockStorageError::BlockHandleIdMismatch.into());
+        if let MaybeExistingHandle::Existing(handle) = &handle
+            && handle.id() != block_id
+        {
+            anyhow::bail!(BlockStorageError::BlockHandleIdMismatch {
+                expected: block_id.as_short_id(),
+                actual: handle.id().as_short_id(),
+            });
         }
 
         let (handle, status) = match handle {
@@ -293,9 +301,10 @@ impl BlockStorage {
     }
 
     pub async fn load_block_proof_raw(&self, handle: &BlockHandle) -> Result<Bytes> {
-        if !handle.has_proof() {
-            return Err(BlockStorageError::BlockProofNotFound.into());
-        }
+        anyhow::ensure!(
+            handle.has_proof(),
+            BlockStorageError::BlockProofNotFound(handle.id().as_short_id())
+        );
 
         self.blob_storage
             .get_block_data_decompressed(handle, &PackageEntryKey::proof(handle.id()))
@@ -310,8 +319,13 @@ impl BlockStorage {
         handle: MaybeExistingHandle,
     ) -> Result<StoreBlockResult> {
         let block_id = queue_diff.block_id();
-        if matches!(&handle, MaybeExistingHandle::Existing(handle) if handle.id() != block_id) {
-            return Err(BlockStorageError::BlockHandleIdMismatch.into());
+        if let MaybeExistingHandle::Existing(handle) = &handle
+            && handle.id() != block_id
+        {
+            anyhow::bail!(BlockStorageError::BlockHandleIdMismatch {
+                expected: block_id.as_short_id(),
+                actual: handle.id().as_short_id(),
+            });
         }
 
         let (handle, status) = match handle {
@@ -349,9 +363,10 @@ impl BlockStorage {
     }
 
     pub async fn load_queue_diff_raw(&self, handle: &BlockHandle) -> Result<Bytes> {
-        if !handle.has_queue_diff() {
-            return Err(BlockStorageError::QueueDiffNotFound.into());
-        }
+        anyhow::ensure!(
+            handle.has_queue_diff(),
+            BlockStorageError::QueueDiffNotFound(handle.id().as_short_id())
+        );
 
         self.blob_storage
             .get_block_data_decompressed(handle, &PackageEntryKey::queue_diff(handle.id()))
@@ -515,14 +530,17 @@ type BlocksCache = moka::sync::Cache<BlockId, BlockStuff, FastHasherState>;
 
 #[derive(thiserror::Error, Debug)]
 enum BlockStorageError {
-    #[error("Block data not found")]
-    BlockDataNotFound,
-    #[error("Block proof not found")]
-    BlockProofNotFound,
-    #[error("Queue diff not found")]
-    QueueDiffNotFound,
-    #[error("Block handle id mismatch")]
-    BlockHandleIdMismatch,
+    #[error("Block data not found for block: {0}")]
+    BlockDataNotFound(BlockIdShort),
+    #[error("Block proof not found for block: {0}")]
+    BlockProofNotFound(BlockIdShort),
+    #[error("Queue diff not found for block: {0}")]
+    QueueDiffNotFound(BlockIdShort),
+    #[error("Block handle id mismatch: expected {expected}, got {actual}")]
+    BlockHandleIdMismatch {
+        expected: BlockIdShort,
+        actual: BlockIdShort,
+    },
 }
 
 #[cfg(test)]

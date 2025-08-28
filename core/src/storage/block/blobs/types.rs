@@ -1,3 +1,6 @@
+use tycho_block_util::archive::ArchiveEntryType;
+use tycho_types::models::BlockIdShort;
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ArchiveId {
     Found(u32),
@@ -7,16 +10,18 @@ pub enum ArchiveId {
 
 #[derive(thiserror::Error, Debug)]
 pub enum BlockStorageError {
-    #[error("Archive not found")]
-    ArchiveNotFound,
-    #[error("Block data not found")]
-    BlockDataNotFound,
-    #[error("Block handle not found")]
-    BlockHandleNotFound,
-    #[error("Package entry not found")]
-    PackageEntryNotFound,
-    #[error("Offset is outside of the archive slice")]
-    InvalidOffset,
+    #[error("Archive not found: id={0}")]
+    ArchiveNotFound(u32),
+    #[error("Block data not found: {0:?}, {1:?}")]
+    BlockDataNotFound(BlockIdShort, ArchiveEntryType),
+    #[error("Block handle not found: {0}")]
+    BlockHandleNotFound(BlockIdShort),
+    #[error("Package entry not found: {0:?}, {1:?}")]
+    PackageEntryNotFound(BlockIdShort, ArchiveEntryType),
+    #[error(
+        "Offset {offset} is not aligned to chunk size {chunk_size} (must be multiple of {chunk_size})"
+    )]
+    InvalidOffset { offset: u64, chunk_size: u64 },
 }
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
