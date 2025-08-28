@@ -1,3 +1,4 @@
+import assert from "assert";
 import {
   Address,
   beginCell,
@@ -7,7 +8,15 @@ import {
   ContractProvider,
   Dictionary,
   Slice,
+  TupleReader,
 } from "@ton/core";
+
+export const ELECTOR_OP_NEW_STAKE = 0x4e73744b;
+export const ELECTOR_OP_UPGRADE_CODE = 0x4e436f64;
+
+export const ANSWER_TAG_STAKE_REJECTED = 0xee6f454c;
+export const ANSWER_TAG_CODE_ACCEPTED = 0xce436f64;
+export const ANSWER_TAG_ERROR = 0xffffffff;
 
 /// Contract state.
 export type ElectorData = {
@@ -267,10 +276,21 @@ export class Elector implements Contract {
     return null;
   }
 
+  async getCodeHash(provider: ContractProvider): Promise<Buffer | null> {
+    const state = await provider.getState();
+    if (state.state.type == "active") {
+      if (state.state.code != null) {
+        return Cell.fromBoc(state.state.code)[0].hash();
+      }
+    }
+
+    return null;
+  }
+
   async getActiveElectionId(provider: ContractProvider) {
     const { stack } = await provider.get("active_election_id", []);
     return {
-      electionId: stack.readBigNumber(),
+      electionId: stack.readNumber(),
     };
   }
 
@@ -282,4 +302,70 @@ export class Elector implements Contract {
       value: stack.readBigNumber(),
     };
   }
+
+  async getPastElectionIds(provider: ContractProvider): Promise<number[]> {
+    const res = await provider.get("past_election_ids", []);
+    let head = res.stack.readLispList();
+    return head.map((x) => {
+      assert(x.type === "int");
+      return Number(x.value);
+    });
+  }
+
+  async getParticipantListExtended(
+    provider: ContractProvider
+  ): Promise<ParticipantListExtended> {
+    const { stack } = await provider.get("participant_list_extended", []);
+    let head = stack.readTuple();
+
+    return {
+      electAt: head.readNumber(),
+      electClose: head.readNumber(),
+      minStake: head.readBigNumber(),
+      totalStake: head.readBigNumber(),
+      participants: readParticipants(head),
+      failed: head.readBoolean(),
+      finished: head.readBoolean(),
+    };
+  }
+}
+
+export type ParticipantInfo = {
+  pubkey: bigint;
+  stake: bigint;
+  maxFactor: number;
+  address: bigint;
+  adnlAddress: bigint;
+};
+
+export type ParticipantListExtended = {
+  electAt: number;
+  electClose: number;
+  minStake: bigint;
+  totalStake: bigint;
+  participants: ParticipantInfo[];
+  failed: boolean;
+  finished: boolean;
+};
+
+function readParticipants(reader: TupleReader): ParticipantInfo[] {
+  let participants: ParticipantInfo[] = [];
+
+  for (let value of reader.readLispList()) {
+    assert(value.type === "tuple");
+    let [pubkey, info] = value.items;
+    assert(pubkey.type === "int");
+    assert(info.type === "tuple");
+
+    const infoReader = new TupleReader(info.items);
+    participants.push({
+      pubkey: pubkey.value,
+      stake: infoReader.readBigNumber(),
+      maxFactor: infoReader.readNumber(),
+      address: infoReader.readBigNumber(),
+      adnlAddress: infoReader.readBigNumber(),
+    });
+  }
+
+  return participants;
 }

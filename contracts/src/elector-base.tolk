@@ -709,7 +709,6 @@ fun updateActiveVsetId<T>(data: Storage<T>): bool {
         if (found) {
             iterNext = id!;
             var pastElection = lazy PastElection.fromSlice(cs!);
-
             if (pastElection.vsetHash == currentVsetHash) {
                 // Transfer 1/8 of accumulated everybody's grams to this validator set as bonuses.
                 var amount = (data.grams >> 3);

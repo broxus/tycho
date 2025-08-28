@@ -8,7 +8,15 @@ import {
   Dictionary,
   Slice,
 } from "@ton/core";
+
 import { ElectorData, loadElectorData, storeElectorData } from "./Elector";
+
+export const ELECTOR_POA_OP_ADD_ADDRESS = 0x206491de;
+export const ELECTOR_POA_OP_REMOVE_ADDRESS = 0x56efd52d;
+
+export const ANSWER_TAG_POA_WHITELIST_UPDATED = 0xbc06677e;
+
+export const STAKE_ERR_NOT_IN_WHITELIST = 100;
 
 /// PoA elector data.
 export type ElectorPoAData = ElectorData & {

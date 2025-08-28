@@ -1,24 +1,36 @@
-import { Blockchain, createShardAccount } from "@ton/sandbox";
+import assert from "assert";
+import "@ton/test-utils";
 import {
-  Address,
   address,
   beginCell,
   BitString,
   Cell,
   Dictionary,
-  Message,
   SendMode,
   toNano,
 } from "@ton/core";
+import { compile } from "@ton/blueprint";
+import { Blockchain, createShardAccount } from "@ton/sandbox";
 import { TychoExecutor } from "@tychosdk/emulator";
-import { loadElectorData, storeElectorData } from "../wrappers/Elector";
+
 import {
+  ELECTOR_OP_NEW_STAKE,
+  ELECTOR_OP_UPGRADE_CODE,
+  ANSWER_TAG_STAKE_REJECTED,
+  ANSWER_TAG_CODE_ACCEPTED,
+  ANSWER_TAG_ERROR,
+  loadElectorData,
+  storeElectorData,
+} from "../wrappers/Elector";
+import {
+  ANSWER_TAG_POA_WHITELIST_UPDATED,
+  ELECTOR_POA_OP_ADD_ADDRESS,
+  ELECTOR_POA_OP_REMOVE_ADDRESS,
+  STAKE_ERR_NOT_IN_WHITELIST,
   loadElectorPoAData,
   storeElectorPoAData,
 } from "../wrappers/ElectorPoA";
-import { compile } from "@ton/blueprint";
-import "@ton/test-utils";
-import assert from "assert";
+import { simpleInternal } from "../wrappers/util";
 
 const ELECTOR_ADDR = address(
   "-1:3333333333333333333333333333333333333333333333333333333333333333"
@@ -26,19 +38,6 @@ const ELECTOR_ADDR = address(
 const CONFIG_ADDR = address(
   "-1:5555555555555555555555555555555555555555555555555555555555555555"
 );
-
-const ELECTOR_OP_NEW_STAKE = 0x4e73744b;
-const ELECTOR_OP_UPGRADE_CODE = 0x4e436f64;
-
-const ELECTOR_POA_OP_ADD_ADDRESS = 0x206491de;
-const ELECTOR_POA_OP_REMOVE_ADDRESS = 0x56efd52d;
-
-const ANSWER_TAG_STAKE_REJECTED = 0xee6f454c;
-const ANSWER_TAG_CODE_ACCEPTED = 0xce436f64;
-const ANSWER_TAG_POA_WHITELIST_UPDATED = 0xbc06677e;
-const ANSWER_TAG_ERROR = 0xffffffff;
-
-const STAKE_ERR_NOT_IN_WHITELIST = 100;
 
 describe("ElectorPoA", () => {
   let oldCode: Cell;
@@ -339,32 +338,3 @@ describe("ElectorPoA", () => {
     expect(whitelist.size).toEqual(0);
   });
 });
-
-function simpleInternal(m: {
-  src: Address;
-  dest: Address;
-  bounce?: boolean;
-  bounced?: boolean;
-  value: bigint;
-  body: Cell;
-}): Message {
-  return {
-    info: {
-      type: "internal",
-      ihrDisabled: true,
-      bounce: m.bounce || false,
-      bounced: m.bounced || false,
-      src: m.src,
-      dest: m.dest,
-      value: {
-        coins: m.value,
-        other: null,
-      },
-      ihrFee: 0n,
-      forwardFee: 0n,
-      createdLt: 0n,
-      createdAt: 0,
-    },
-    body: m.body,
-  };
-}
