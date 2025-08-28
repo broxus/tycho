@@ -55,8 +55,9 @@ pub(super) struct CollationSyncState {
     pub last_received_mc_block_seqno: Option<BlockSeqno>,
     /// Last received applied master block id we have synced to
     pub last_synced_to_mc_block_id: Option<BlockId>,
-    /// Master block collation forced by no pending messages after block in any shard
-    pub mc_forced_by_no_pending_msgs: bool,
+    /// Master block collation forced by no pending messages after block
+    /// in any shard on chain time
+    pub mc_forced_by_no_pending_msgs_on_ct: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -84,8 +85,17 @@ impl Default for CollationState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CollationStatus {
+    /// Collator is trying to collate current shard,
+    /// may import next anchor
     AttemptsInProgress,
+    /// Shard collator is waiting for master collator status,
+    /// and not trying to collate current shard,
+    /// will not import next anchor
     WaitForMasterStatus,
+    /// Current shard is ready for master collation,
+    /// collator is not trying to collate current shard,
+    /// will not import next anchor
+    ReadyToCollateMaster,
 }
 
 #[derive(Debug)]
