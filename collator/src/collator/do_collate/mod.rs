@@ -60,7 +60,7 @@ impl CollatorStdImpl {
         skip_all,
         fields(
             block_id = %self.next_block_info,
-            ct = self.anchors_cache.get_last_imported_anchor_id_and_ct().map(|(_, ct)| ct).unwrap_or_default(),
+            ct = next_chain_time,
         )
     )]
     pub(super) async fn do_collate(

@@ -1196,10 +1196,10 @@ impl AnchorsCache {
         let mut last;
         loop {
             last = self.cache.back().map(|(_, ca)| ca);
-            if let Some(ca) = last {
-                if ca.anchor.chain_time > ct {
-                    self.cache.pop_back();
-                }
+            if let Some(ca) = last
+                && ca.anchor.chain_time > ct
+            {
+                self.cache.pop_back();
             } else {
                 break;
             }
