@@ -1,6 +1,7 @@
-import {Address, beginCell, Builder, Cell, Dictionary, Message} from "@ton/core";
+import {Address, beginCell, Builder, Cell, Dictionary, Message, ShardAccount, toNano, address} from "@ton/core";
 import {cryptoWithSignatureId} from "@tychosdk/emulator";
 import {KeyPair} from "@ton/crypto";
+import {createShardAccount} from "@ton/sandbox";
 
 const crypto = cryptoWithSignatureId(2000);
 const {getSecureRandomBytes, keyPairFromSeed, sign} = crypto;
@@ -107,4 +108,32 @@ export class Stake {
         let cell = builder.endCell();
         return cell.asSlice().loadBuffer(4 + 4 + 4 + 32 + 32)
     }
+}
+
+export class Account {
+    public keyPair: KeyPair;
+    public address: Address;
+    public shardAccount: ShardAccount
+
+    private constructor(address: Address, keyPair: KeyPair, shard: ShardAccount) {
+        this.address = address;
+        this.keyPair = keyPair;
+        this.shardAccount = shard;
+    }
+
+    public static async generate(addrStr: string, balance: number) {
+        let addr = address(addrStr);
+        let keyPair = await generateRandomKeyPair();
+        let shard = createShardAccount({
+            address: addr,
+            balance: toNano(balance),
+            code: Cell.fromBase64("te6ccgEBAQEABAAABPgA"),
+            data: beginCell()
+                .storeInt(1n, 32)
+                .endCell(),
+            workchain: -1,
+        })
+        return new Account(addr, keyPair, shard);
+    }
+
 }
