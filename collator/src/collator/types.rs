@@ -31,7 +31,7 @@ use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::{MessagesReaderMetrics, ReaderState};
 use crate::collator::do_collate::work_units::{DoCollateWu, ExecuteWu, FinalizeWu};
-use crate::collator::messages_reader::MetricsTimer;
+use crate::collator::messages_reader::{ExternalKey, MetricsTimer};
 use crate::internal_queue::types::{
     AccountStatistics, Bound, DiffStatistics, InternalMessageValue, QueueShardBoundedRange,
     QueueStatistics, SeparatedStatisticsByPartitions,
@@ -1149,75 +1149,85 @@ pub struct AnchorsCache {
     /// Anchor is removed from the cache when all its externals are processed.
     cache: VecDeque<(MempoolAnchorId, CachedAnchor)>, // TODO: do not need to store our_exts_count
 
-    last_imported_anchor: Option<AnchorInfo>,
+    last_imported_anchor_info: Option<AnchorInfo>,
 
-    has_pending_externals: bool,
+    has_pending_externals: usize,
 }
 
 impl AnchorsCache {
-    // TODO: try to remove this method
     pub fn set_last_imported_anchor_info(&mut self, anchor_info: AnchorInfo) {
-        self.last_imported_anchor = Some(anchor_info);
+        self.last_imported_anchor_info = Some(anchor_info);
     }
 
-    pub fn last_imported_anchor(&self) -> Option<&Arc<MempoolAnchor>> {
-        self.cache.back().map(|(_, ac)| &ac.anchor)
+    pub fn last_imported_anchor_info(&self) -> Option<&AnchorInfo> {
+        self.last_imported_anchor_info.as_ref()
     }
 
     pub fn get_last_imported_anchor_id_and_ct(&self) -> Option<(u32, u64)> {
-        self.last_imported_anchor
-            .as_ref()
-            .map(|anchor| (anchor.id, anchor.ct))
+        self.last_imported_anchor_info().map(|a| (a.id, a.ct))
     }
 
     pub fn insert(&mut self, anchor: Arc<MempoolAnchor>, our_exts_count: usize) {
-        self.last_imported_anchor = Some(AnchorInfo::from_anchor(&anchor, our_exts_count));
-        if our_exts_count > 0 {
-            self.has_pending_externals = true;
-            self.cache.push_back((anchor.id, CachedAnchor {
-                anchor,
-                our_exts_count,
-            }));
-        }
+        self.set_last_imported_anchor_info(AnchorInfo::from_anchor(&anchor, our_exts_count));
+
+        self.cache.push_back((anchor.id, CachedAnchor {
+            anchor,
+            our_exts_count,
+        }));
+
+        // count anchors with our pending externals
+        self.has_pending_externals += (our_exts_count > 0) as usize;
     }
 
     // TODO: check usage and update return type
     pub fn remove(&mut self, index: usize) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
-        if index == 0 {
-            self.cache.pop_front().map(|(id, ca)| (id, ca.anchor))
+        let removed = if index == 0 {
+            self.cache.pop_front()
         } else {
-            self.cache.remove(index).map(|(id, ca)| (id, ca.anchor))
+            self.cache.remove(index)
+        };
+
+        if let Some((_, ca)) = &removed {
+            // count anchors with our pending externals
+            self.has_pending_externals -= (ca.our_exts_count > 0) as usize;
         }
 
-        // TODO: update has_pending_externals
+        removed.map(|(id, ca)| (id, ca.anchor))
     }
 
-    pub fn remove_above_ct_and_get_last_anchor_info(&mut self, ct: u64) -> Option<AnchorInfo> {
-        let mut last;
-        loop {
-            last = self.cache.back().map(|(_, ca)| ca);
-            if let Some(ca) = last
-                && ca.anchor.chain_time > ct
-            {
-                self.cache.pop_back();
+    /// Removes anchors from cache above specified chain time,
+    /// and updates the last imported anchor info.
+    pub fn remove_last_imported_above(&mut self, ct: u64) -> Option<&AnchorInfo> {
+        let mut was_removed = false;
+
+        while let Some(last) = self.cache.back().map(|(_, ca)| ca) {
+            if last.anchor.chain_time > ct {
+                let (_, removed) = self.cache.pop_back().expect("should exist here");
+                self.has_pending_externals -= (removed.our_exts_count > 0) as usize;
+                was_removed = true;
             } else {
                 break;
             }
         }
 
-        // cache contains only anchors with our externals
-        // so it has pending messages if it has almost one anchor
-        self.has_pending_externals = !self.cache.is_empty();
+        if was_removed {
+            // update last imported anchor info when remove the last one
+            self.last_imported_anchor_info = self
+                .cache
+                .back()
+                .map(|(_, ca)| AnchorInfo::from_anchor(&ca.anchor, ca.our_exts_count));
+        }
 
-        last.map(|ca| AnchorInfo::from_anchor(&ca.anchor, ca.our_exts_count))
+        self.last_imported_anchor_info()
     }
 
     pub fn clear(&mut self) {
         self.cache.clear();
-        self.last_imported_anchor = None;
-        self.has_pending_externals = false;
+        self.last_imported_anchor_info = None;
+        self.has_pending_externals = 0;
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.cache.len()
     }
@@ -1230,11 +1240,13 @@ impl AnchorsCache {
     }
 
     pub fn has_pending_externals(&self) -> bool {
-        self.has_pending_externals
+        self.has_pending_externals > 0
     }
 
-    pub fn set_has_pending_externals(&mut self, has_pending_externals: bool) {
-        self.has_pending_externals = has_pending_externals;
+    pub fn check_has_pending_externals_in_range(&self, up_to: &ExternalKey) -> bool {
+        self.cache
+            .iter()
+            .any(|(id, ca)| id <= &up_to.anchor_id && ca.our_exts_count > 0)
     }
 }
 

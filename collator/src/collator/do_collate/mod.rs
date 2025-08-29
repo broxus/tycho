@@ -110,7 +110,7 @@ impl CollatorStdImpl {
             ..
         }) = self
             .anchors_cache
-            .remove_above_ct_and_get_last_anchor_info(next_chain_time)
+            .remove_last_imported_above(next_chain_time)
         else {
             bail!(
                 "last_imported_anchor should exist when we collating block \
@@ -118,8 +118,11 @@ impl CollatorStdImpl {
             )
         };
 
+        // TODO: needs to update metrics
+        // metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels).decrement(our_exts_count as f64);
+
         assert!(
-            last_imported_chain_time >= next_chain_time,
+            *last_imported_chain_time >= next_chain_time,
             "all anchors upto next chain time {} should be imported before collation, \
             but last imported chain time is {}",
             next_chain_time,
