@@ -4,7 +4,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use tycho_network::PeerId;
 use tycho_types::models::ConsensusConfig;
-use tycho_util::time::now_millis;
+use tycho_util::time::{MonotonicClock, now_millis};
 
 use crate::mempool::impls::common::cache::Cache;
 use crate::mempool::impls::common::parser::{Parser, ParserOutput};
@@ -12,66 +12,58 @@ use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
 
 pub const ANCHOR_ID_STEP: u32 = 4;
-pub const ANCHOR_ID_DEFAULT: u32 = 5;
 
 pub struct AnchorSingleNodeHandler {
-    deduplicate_rounds: u16,
+    cache: Arc<Cache>,
+    parser: Parser,
     peer_id: PeerId,
-    anchor_id: MempoolAnchorId,
+    prev_anchor_id: Option<MempoolAnchorId>,
 }
 
 impl AnchorSingleNodeHandler {
-    pub fn new(config: &ConsensusConfig, peer_id: PeerId, anchor_id: MempoolAnchorId) -> Self {
+    pub fn new(
+        cache: Arc<Cache>,
+        peer_id: PeerId,
+        top_processed_to_anchor_id: MempoolAnchorId,
+        config: &ConsensusConfig,
+    ) -> Self {
+        let prev_anchor_id = top_processed_to_anchor_id.saturating_sub(ANCHOR_ID_STEP);
         Self {
-            deduplicate_rounds: config.deduplicate_rounds,
+            cache,
+            parser: Parser::new(config.deduplicate_rounds),
             peer_id,
-            anchor_id,
+            prev_anchor_id: (prev_anchor_id > 1).then_some(prev_anchor_id),
         }
     }
 
-    pub async fn run(self, cache: Arc<Cache>, external_messages: Vec<Bytes>) {
-        scopeguard::defer!(tracing::warn!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            "handle anchors task stopped"
-        ));
-
-        let mut parser = Parser::new(self.deduplicate_rounds);
-        let anchor_id = self.anchor_id;
-
+    pub async fn handle(mut self, payloads: Vec<Bytes>) -> Self {
+        let prev_anchor_id = self.prev_anchor_id.take();
+        let anchor_id = prev_anchor_id.unwrap_or(1) + ANCHOR_ID_STEP;
         metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor_id);
 
-        let chain_time = tycho_util::time::now_millis();
+        let chain_time = MonotonicClock::now_millis();
 
         let task = tokio::task::spawn_blocking(move || {
-            let total_messages = external_messages.len();
-            let total_bytes: usize = external_messages
-                .iter()
-                .fold(0, |acc, bytes| acc + bytes.len());
+            let total_messages = payloads.len();
+            let total_bytes: usize = payloads.iter().fold(0, |acc, bytes| acc + bytes.len());
 
             let ParserOutput {
                 unique_messages,
                 unique_payload_bytes,
-            } = parser.parse_unique(
-                anchor_id,
-                external_messages.iter().map(AsRef::as_ref).collect(),
-            );
+            } = (self.parser).parse_unique(anchor_id, payloads);
 
             let unique_messages_len = unique_messages.len();
 
-            cache.push(Arc::new(MempoolAnchor {
+            self.cache.push(Arc::new(MempoolAnchor {
                 id: anchor_id,
-                prev_id: if anchor_id != ANCHOR_ID_DEFAULT {
-                    // @todo not stable
-                    Some(anchor_id - ANCHOR_ID_STEP)
-                } else {
-                    None
-                },
+                prev_id: prev_anchor_id,
                 chain_time,
                 author: self.peer_id,
                 externals: unique_messages,
             }));
 
-            parser.clean(anchor_id);
+            self.prev_anchor_id = Some(anchor_id);
+            self.parser.clean(anchor_id);
 
             metrics::counter!("tycho_mempool_msgs_unique_count")
                 .increment(unique_messages_len as _);
@@ -95,10 +87,12 @@ impl AnchorSingleNodeHandler {
                 externals_skipped = total_messages - unique_messages_len,
                 "new anchor"
             );
+
+            self
         });
 
         match task.await {
-            Ok(_) => {}
+            Ok(this) => this,
             Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
             Err(_) => {
                 tracing::warn!(
@@ -116,10 +110,5 @@ impl AnchorSingleNodeHandler {
                 futures_util::future::pending().await
             }
         }
-
-        tracing::warn!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            "anchor channel from mempool is closed"
-        );
     }
 }

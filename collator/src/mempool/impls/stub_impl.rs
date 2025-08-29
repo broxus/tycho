@@ -351,14 +351,16 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         Ok(())
     }
 
-    fn send_external(&self, _message: bytes::Bytes) {}
+    fn accept_external(&self, _message: bytes::Bytes) {
+        panic!("accept_external not implemented for stub");
+    }
 
     async fn update_delayed_config(
         &self,
         _consensus_config: Option<&ConsensusConfig>,
         _genesis_info: &GenesisInfo,
     ) -> Result<()> {
-        Ok(())
+        panic!("update_delayed_config not implemented for stub");
     }
 }
 

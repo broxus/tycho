@@ -444,7 +444,7 @@ impl BroadcastListener for RpcMempoolAdapter {
         _: Arc<InboundRequestMeta>,
         message: Bytes,
     ) -> Self::HandleMessageFut<'_> {
-        self.inner.send_external(message);
+        self.inner.accept_external(message);
         futures_util::future::ready(())
     }
 }
@@ -452,7 +452,7 @@ impl BroadcastListener for RpcMempoolAdapter {
 #[async_trait::async_trait]
 impl SelfBroadcastListener for RpcMempoolAdapter {
     async fn handle_message(&self, message: Bytes) {
-        self.inner.send_external(message);
+        self.inner.accept_external(message);
     }
 }
 
