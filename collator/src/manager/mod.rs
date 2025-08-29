@@ -2692,6 +2692,10 @@ where
             && matches!(force_mc_block, ForceMasterCollation::ByUnprocessedMessages)
         {
             guard.mc_collation_forced_for_all = true;
+            tracing::debug!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "MC force for all enabled by unprocessed messages"
+            );
         }
 
         // Another forcing rule: no pending messages after shard blocks
@@ -2700,6 +2704,11 @@ where
             ForceMasterCollation::NoPendingMessagesAfterShardBlocks
         ) {
             guard.mc_forced_by_no_pending_msgs_on_ct = Some(last_imported_anchor_ct);
+            tracing::debug!(
+                target: tracing_targets::COLLATION_MANAGER,
+                mc_forced_by_no_pending_msgs_on_ct=?guard.mc_forced_by_no_pending_msgs_on_ct,
+                "MC force by no pending messages"
+            );
         }
 
         let hard_forced_for_all = guard.mc_collation_forced_for_all;
@@ -2717,6 +2726,15 @@ where
                 mc_forced: forced_in_current_shard,
                 is_first_block_after_prev_mc,
             });
+
+        tracing::trace!(
+            target: tracing_targets::COLLATION_MANAGER,
+            shard_id=?shard_id,
+            last_imported_anchor_ct,
+            forced_in_current_shard,
+            is_first_block_after_prev_mc,
+            "anchor event appended"
+        );
 
         // Per-shard facts to simplify decision-making
         #[derive(Debug, Clone)]
@@ -2801,6 +2819,14 @@ where
                 ));
             }
         }
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            mc_block_latest_chain_time,
+            mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
+            ?facts,
+            "calculated shard facts"
+        );
 
         let any_shard_has_collated = facts.iter().any(|f| f.has_collated_block_after_prev_mc);
 
@@ -2815,7 +2841,8 @@ where
                 f.status == CollationStatus::ReadyToCollateMaster || f.shard_id == *curr_sid;
 
             // chain time on which master was forced
-            f.mc_forced_ct
+            let ct = f
+                .mc_forced_ct
                 // first ct if master was forced for all
                 .or(if hard_forced_for_all {
                     f.first_ct
@@ -2844,7 +2871,24 @@ where
                     else {
                         f.max_ct
                     },
-                )
+                );
+
+            tracing::trace!(
+                target: tracing_targets::COLLATION_MANAGER,
+                shard_id=?f.shard_id,
+                status=?f.status,
+                f_first_ct=?f.first_ct,
+                f_mc_forced_ct=?f.mc_forced_ct,
+                f_min_ct=?f.min_ct,
+                f_max_ct=?f.max_ct,
+                hard_forced_for_all,
+                mc_forced_by_shard_on_ct,
+                any_has_first_collated,
+                chosen_ct=?ct,
+                "choose_candidate decision"
+            );
+
+            ct
         }
 
         // get next mc block ct candidates from all shards
@@ -2868,6 +2912,17 @@ where
             })
             .collect();
 
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            shard_id=?shard_id,
+            ?candidates,
+            should_collate_by_current_shard,
+            any_shard_has_collated,
+            hard_forced_for_all,
+            mc_forced_by_no_pending_msgs_on_ct,
+            "candidates collected"
+        );
+
         // check if should collate by every shard
         let should_collate_by_every_shard =
             !candidates.is_empty() && candidates.iter().all(|c| c.is_some());
@@ -2882,7 +2937,17 @@ where
                 // wait for master collation status if it not exist yet
                 if !mc_collation_state_exist {
                     current_collation_state.status = CollationStatus::WaitForMasterStatus;
-                    return NextCollationStep::WaitForMasterStatus;
+                    let res = NextCollationStep::WaitForMasterStatus;
+
+                    tracing::info!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        shard_id=?shard_id,
+                        ?facts,
+                        ?candidates,
+                        decision=?res,
+                        "step decision"
+                    );
+                    return res;
                 } else {
                     // or resume attempts right now
                     current_collation_state.status = CollationStatus::AttemptsInProgress;
@@ -2907,7 +2972,17 @@ where
                 }
             }
 
-            return NextCollationStep::ResumeAttemptsIn(shards_to_resume_attempts);
+            let res = NextCollationStep::ResumeAttemptsIn(shards_to_resume_attempts);
+            tracing::info!(
+                target: tracing_targets::COLLATION_MANAGER,
+                shard_id=?shard_id,
+                ?facts,
+                ?candidates,
+                decision=?res,
+                "step decision"
+            );
+
+            return res;
         }
 
         // Otherwise: collate MC block using max candidate ct
