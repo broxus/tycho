@@ -114,6 +114,7 @@ impl BlobStorage {
         };
 
         storage.open_stats = storage.cleanup_orphaned_metadata()?;
+        tracing::info!("Open stats: {:?}", storage.open_stats);
 
         Ok(storage)
     }
@@ -135,7 +136,6 @@ impl BlobStorage {
             .next_back()
             .map(|(id, _)| *id)
             .or(archive_min_id);
-        drop(archives_index);
 
         let blocks_index = self.blocks.read_index_state();
         let package_entries_count = blocks_index.len();
@@ -208,9 +208,42 @@ impl BlobStorage {
         iter.status()?;
         raw.write(batch)?;
 
+        // Clean up orphaned archive metadata
+        let mut archive_batch = rocksdb::WriteBatch::default();
+        let mut orphaned_archives_count = 0u32;
+        let archive_block_ids_cf = self.db.archive_block_ids.cf();
+
+        let mut archive_iter = raw.raw_iterator_cf_opt(
+            &archive_block_ids_cf,
+            self.db.archive_block_ids.new_read_config(),
+        );
+        archive_iter.seek_to_first();
+
+        while let Some((key, _)) = archive_iter.item() {
+            assert_eq!(key.len(), 4);
+            let archive_id = u32::from_be_bytes(key[..4].try_into()?);
+
+            // If archive is already committed in Cassadilia, this metadata is orphaned
+            if archives_index.contains_key(&archive_id) {
+                tracing::debug!(
+                    archive_id,
+                    "found orphaned archive_block_ids entry for committed archive, cleaning up"
+                );
+                archive_batch.delete_cf(&archive_block_ids_cf, key);
+                orphaned_archives_count += 1;
+            }
+            archive_iter.next();
+        }
+        archive_iter.status()?;
+
+        if orphaned_archives_count > 0 {
+            raw.write(archive_batch)?;
+        }
+
         tracing::info!(
             orphaned_metadata_cleaned = orphaned_flags_count,
             orphaned_data_restored = restored_flags_count,
+            orphaned_archives_cleaned = orphaned_archives_count,
             elapsed = %humantime::format_duration(started_at.elapsed()),
             "fix_metadata_consistency completed"
         );
@@ -218,6 +251,7 @@ impl BlobStorage {
         Ok(OpenStats {
             orphaned_flags_count,
             restored_flags_count,
+            orphaned_archives_count,
             archive_count,
             archive_min_id,
             archive_max_id,
@@ -243,11 +277,10 @@ impl BlobStorage {
         iter.seek_to_first();
 
         while let Some((key, _)) = iter.item() {
-            if key.len() >= 4 {
-                let archive_id = u32::from_be_bytes(key[..4].try_into()?);
-                if !committed_archives.contains(&archive_id) {
-                    building_archives.push(archive_id);
-                }
+            assert_eq!(key.len(), 4);
+            let archive_id = u32::from_be_bytes(key[..4].try_into()?);
+            if !committed_archives.contains(&archive_id) {
+                building_archives.push(archive_id);
             }
             iter.next();
         }
@@ -470,6 +503,14 @@ impl BlobStorage {
     /// If the node crashes or something goes wrong, the block IDs will still be in `RocksDB`.
     /// On restart, a recovery process will find these incomplete archives and automatically resume
     /// the commit process.
+    #[tracing::instrument(
+        skip(self, handle),
+        fields(
+            block_id = %handle.id(),
+            mc_seqno = handle.ref_by_mc_seqno(),
+            mc_is_key_block = mc_is_key_block,
+        )
+    )]
     pub async fn move_into_archive(
         &self,
         handle: &BlockHandle,
@@ -487,6 +528,11 @@ impl BlobStorage {
         let archive_id = self.prepare_archive_id(
             handle.ref_by_mc_seqno(),
             mc_is_key_block || handle.is_key_block(),
+        );
+        tracing::debug!(
+            "archive_id for {} is {:?}",
+            handle.id().as_short_id(),
+            &archive_id
         );
         let archive_id_bytes = archive_id.id.to_be_bytes();
 
@@ -810,7 +856,7 @@ async fn lock_block_handle(handle: &BlockHandle, ty: ArchiveEntryType) -> BlockD
     .await
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct PreparedArchiveId {
     id: u32,
     to_commit: Option<u32>,
