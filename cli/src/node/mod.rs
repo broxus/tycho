@@ -59,8 +59,6 @@ pub struct Node {
 
     /// Path to the work units tuner config.
     wu_tuner_config_path: PathBuf,
-
-    is_single_node: bool,
 }
 
 impl Node {
@@ -72,21 +70,18 @@ impl Node {
         global_config: GlobalConfig,
         control_socket: PathBuf,
         wu_tuner_config_path: PathBuf,
+        is_single_node: bool,
     ) -> Result<Self> {
-        let is_single_node = node_config.single_node;
-
         let base = NodeBase::builder(&node_config.base, &global_config)
             .init_network(public_addr, &keys.as_secret())?
             .init_storage()
             .await?;
 
-        let rpc_mempool_adapter = if node_config.single_node {
-            let local_peer_id = base.network().peer_id();
-
+        let rpc_mempool_adapter = if is_single_node {
             RpcMempoolAdapter {
                 inner: Arc::new(MempoolAdapterSingleNodeImpl::new(
                     &node_config.mempool,
-                    local_peer_id,
+                    *base.network().peer_id(),
                 )?),
             }
         } else {
@@ -122,7 +117,6 @@ impl Node {
             internal_queue_config: node_config.internal_queue,
             mempool_config_override: global_config.mempool,
             wu_tuner_config_path,
-            is_single_node,
         })
     }
 
@@ -137,12 +131,9 @@ impl Node {
 
     /// Initialize the node and return the init block id.
     pub async fn boot(&self, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
-        let boot_type = if self.is_single_node {
-            ColdBootType::Genesis
-        } else {
-            self.overwrite_cold_boot_type
-                .unwrap_or(ColdBootType::LatestPersistent)
-        };
+        let boot_type = self
+            .overwrite_cold_boot_type
+            .unwrap_or(ColdBootType::LatestPersistent);
 
         self.base
             .boot(
