@@ -38,6 +38,11 @@ if ! is_number "$N" || ((N < 1)); then
     exit 1
 fi
 
+v_set_size=$(jq '.validators | length' "${base_dir}/zerostate.json")
+if [[ "$v_set_size" -eq 1 ]]; then
+    single_node="--single-node"
+fi
+
 tycho_bin=$(/usr/bin/env bash "${script_dir}/build-node.sh")
 
 $tycho_bin node run \
@@ -47,4 +52,5 @@ $tycho_bin node run \
     --import-zerostate "${base_dir}/zerostate.boc" \
     --logger-config "${root_dir}/logger.json" \
     --control-socket "${base_dir}/control${N}.sock" \
-    --wu-tuner-config "${base_dir}/wu-tuner-config${N}.json"
+    --wu-tuner-config "${base_dir}/wu-tuner-config${N}.json" \
+    ${single_node}

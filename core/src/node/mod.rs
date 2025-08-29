@@ -58,9 +58,7 @@ impl NodeBase {
         import_zerostate: Option<Vec<PathBuf>>,
         queue_state_handler: Option<Box<dyn QueueStateHandler>>,
     ) -> Result<BlockId> {
-        if !self.base_config.single_node {
-            self.wait_for_neighbours(3).await;
-        }
+        self.wait_for_neighbours(3).await;
 
         let init_block_id = self
             .boot(boot_type, import_zerostate, queue_state_handler)
