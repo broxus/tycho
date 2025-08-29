@@ -33,18 +33,17 @@ impl Parser {
         rayon::join(|| blake.clean(anchor_id), || sha.clean(anchor_id));
     }
 
-    pub fn parse_unique(
-        &mut self,
-        anchor_id: MempoolAnchorId,
-        payloads: Vec<&[u8]>,
-    ) -> ParserOutput {
+    pub fn parse_unique<T>(&mut self, anchor_id: MempoolAnchorId, payloads: Vec<T>) -> ParserOutput
+    where
+        T: AsRef<[u8]> + Send,
+    {
         let _guard = HistogramGuard::begin("tycho_mempool_adapter_parse_anchor_history_time");
 
         let all_bytes_blake = payloads
             .into_par_iter()
             .filter_map(|bytes| {
-                (bytes.len() <= ExtMsgRepr::MAX_BOC_SIZE)
-                    .then(|| (<[u8; 32]>::from(blake3::hash(bytes)), bytes))
+                (bytes.as_ref().len() <= ExtMsgRepr::MAX_BOC_SIZE)
+                    .then(|| (<[u8; 32]>::from(blake3::hash(bytes.as_ref())), bytes))
             })
             .collect::<Vec<_>>();
 
@@ -56,7 +55,9 @@ impl Parser {
 
         let uniq_messages_blake = uniq_bytes_blake
             .into_par_iter()
-            .filter_map(|bytes| Self::parse_message_bytes(bytes).map(|cell| (cell, bytes.len())))
+            .filter_map(|bytes| {
+                Self::parse_message_bytes(bytes.as_ref()).map(|cell| (cell, bytes.as_ref().len()))
+            })
             .collect::<Vec<_>>();
 
         let mut unique_payload_bytes = 0;

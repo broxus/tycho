@@ -318,12 +318,10 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     ) -> Result<()> {
         let mut config_guard = self.config.lock().await;
         if let Some(consensus_config) = consensus_config {
-            config_guard
-                .builder
-                .set_consensus_config(consensus_config)?;
+            (config_guard.builder).set_consensus_config(consensus_config)?;
         } // else: will be set from mc state after sync
 
         config_guard.builder.set_genesis(*genesis_info);
-        Ok::<_, anyhow::Error>(())
+        Ok(())
     }
 }
