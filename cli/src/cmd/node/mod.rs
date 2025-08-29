@@ -73,6 +73,10 @@ struct CmdRun {
     /// Overwrite cold boot type. Default: `latest-persistent`
     #[clap(long)]
     cold_boot: Option<ColdBootType>,
+
+    /// Pass this flag if you used `just gen_network 1` for manual tests
+    #[clap(long, action)]
+    single_node: bool,
 }
 
 impl CmdRun {
@@ -108,14 +112,24 @@ impl CmdRun {
             })
     }
 
-    async fn run_impl(self, args: BaseArgs, node_config: NodeConfig) -> Result<()> {
-        let is_single_node = node_config.single_node;
-
+    async fn run_impl(self, args: BaseArgs, mut node_config: NodeConfig) -> Result<()> {
         init_logger(&node_config.logger, self.logger_config)?;
         set_abort_with_tracing();
 
         if let Some(metrics_config) = &node_config.metrics {
             init_metrics(metrics_config)?;
+        }
+
+        if self.single_node {
+            let too_new_archive_threshold =
+                &mut node_config.blockchain_rpc_client.too_new_archive_threshold;
+            if *too_new_archive_threshold > 0 {
+                tracing::warn!(
+                    ?too_new_archive_threshold,
+                    "blockchain rpc client setting was ignored due to single-node mode"
+                );
+                *too_new_archive_threshold = 0;
+            }
         }
 
         let mut node = {
@@ -140,6 +154,7 @@ impl CmdRun {
                 global_config,
                 control_socket,
                 wu_tuner_config_path,
+                self.single_node,
             )
             .await?
         };
@@ -148,7 +163,17 @@ impl CmdRun {
             node.overwrite_cold_boot_type(cold_boot_type);
         }
 
-        if !is_single_node {
+        if self.single_node {
+            if let Some(cold_boot_type) = self.cold_boot
+                && cold_boot_type != ColdBootType::Genesis
+            {
+                tracing::warn!(
+                    ?cold_boot_type,
+                    "cold boot type settings was ignored due to single-node mode"
+                );
+            }
+            node.overwrite_cold_boot_type(ColdBootType::Genesis);
+        } else {
             node.wait_for_neighbours().await;
         }
 
@@ -159,7 +184,7 @@ impl CmdRun {
 
         tracing::info!(%init_block_id, "node initialized");
 
-        node.run(&init_block_id).await?;
+        node.run(&init_block_id, self.single_node).await?;
 
         Ok(())
     }
