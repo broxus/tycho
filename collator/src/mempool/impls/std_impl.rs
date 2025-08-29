@@ -202,12 +202,19 @@ impl MempoolAdapterStdImpl {
             ctx.mc_block_id,
         );
 
+        let init_peers = ConfigAdapter::init_peers(ctx)?;
+        if init_peers.curr_v_set.len() == 1 {
+            anyhow::bail!("pass `single-node` cli flag to run network of 1 node");
+        } else if init_peers.curr_v_set.len() == 2 {
+            anyhow::bail!("cannot run mempool with 2 nodes, gen network with either 1 or 3 nodes");
+        };
+
         let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
         let session = EngineSession::new(
             bind,
             &self.net_args,
             merged_conf,
-            ConfigAdapter::init_peers(ctx)?,
+            init_peers,
             engine_stop_tx,
         );
 
@@ -307,7 +314,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         Ok(())
     }
 
-    fn send_external(&self, message: Bytes) {
+    fn accept_external(&self, message: Bytes) {
         self.input_buffer.push(message);
     }
 
@@ -318,12 +325,10 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     ) -> Result<()> {
         let mut config_guard = self.config.lock().await;
         if let Some(consensus_config) = consensus_config {
-            config_guard
-                .builder
-                .set_consensus_config(consensus_config)?;
+            (config_guard.builder).set_consensus_config(consensus_config)?;
         } // else: will be set from mc state after sync
 
         config_guard.builder.set_genesis(*genesis_info);
-        Ok::<_, anyhow::Error>(())
+        Ok(())
     }
 }

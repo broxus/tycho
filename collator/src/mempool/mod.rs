@@ -81,7 +81,8 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// which included in signed master - we do not need them anymore
     fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()>;
 
-    fn send_external(&self, message: Bytes);
+    /// Enqueue external message to be consumed and processed by mempool
+    fn accept_external(&self, message: Bytes);
 
     /// **Warning:** changes from `GlobalConfig` may be rewritten by applied mc state
     /// only if applied mc state has greater time and GEQ round
