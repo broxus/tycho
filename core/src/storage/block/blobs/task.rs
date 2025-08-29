@@ -25,6 +25,7 @@ pub(super) struct CommitArchiveTask {
 }
 
 impl CommitArchiveTask {
+    #[tracing::instrument(skip_all, name = "commit_archive_task", fields(archive_id = %archive_id))]
     pub(super) fn new(
         db: CoreDb,
         block_handle_storage: Arc<BlockHandleStorage>,
@@ -32,8 +33,17 @@ impl CommitArchiveTask {
         blocks: Cas<PackageEntryKey>,
         archives: Cas<u32>,
     ) -> Self {
-        let span = tracing::Span::current();
         let cancelled = CancellationFlag::new();
+        let span = tracing::Span::current();
+
+        if archives.read_index_state().contains_key(&archive_id) {
+            tracing::warn!("Attempted to commit an already committed archive, skipping");
+            return Self {
+                archive_id,
+                cancelled,
+                handle: None,
+            };
+        }
 
         let handle = tokio::task::spawn_blocking({
             let cancelled = cancelled.clone();

@@ -29,6 +29,7 @@ pub struct BlockGcStats {
 pub struct OpenStats {
     pub orphaned_flags_count: u32,
     pub restored_flags_count: u32,
+    pub orphaned_archives_count: u32,
     pub archive_count: usize,
     pub archive_min_id: Option<u32>,
     pub archive_max_id: Option<u32>,
