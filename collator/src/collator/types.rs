@@ -1239,6 +1239,18 @@ impl AnchorsCache {
             .map(|(id, ca)| (*id, ca.anchor.clone()))
     }
 
+    #[cfg(test)]
+    pub fn get_first_with_our_externals(&self) -> Option<&Arc<MempoolAnchor>> {
+        let mut idx = 0;
+        while let Some((_, ca)) = self.cache.get(idx) {
+            if ca.our_exts_count > 0 {
+                return Some(&ca.anchor);
+            }
+            idx += 1;
+        }
+        None
+    }
+
     pub fn has_pending_externals(&self) -> bool {
         self.has_pending_externals > 0
     }

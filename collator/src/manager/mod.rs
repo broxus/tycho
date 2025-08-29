@@ -2916,8 +2916,9 @@ where
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
             hard_forced_for_all,
-            forced_in_current_shard,
+            mc_forced_by_no_pending_msgs_on_ct,
             mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
             next_mc_block_chain_time,
             "Master block collation forced or interval exceeded in every shard - \
             will collate next master block",

@@ -1221,7 +1221,7 @@ impl CollatorStdImpl {
 
         // return if we have all required anchors in cache
         if all_anchors_are_taken_from_cache {
-            let Some(InitAnchorSource::FromCache(anchor_info)) = res.anchors_info.last() else {
+            let Some(InitAnchorSource::FromCache(_)) = res.anchors_info.last() else {
                 return Err(CollatorError::Anyhow(anyhow::anyhow!(
                     "`anchors_info` should contain almost one `FromCache` here"
                 )));
