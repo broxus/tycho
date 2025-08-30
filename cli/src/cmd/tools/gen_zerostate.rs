@@ -730,7 +730,8 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
     params.set_collation_config(&CollationConfig {
         shuffle_mc_validators: true,
 
-        mc_block_min_interval_ms: 2500,
+        mc_block_min_interval_ms: 1000,
+        mc_block_max_interval_ms: 5000,
         empty_sc_block_interval_ms: 60_000,
 
         max_uncommitted_chain_length: 31,

@@ -55,29 +55,47 @@ pub(super) struct CollationSyncState {
     pub last_received_mc_block_seqno: Option<BlockSeqno>,
     /// Last received applied master block id we have synced to
     pub last_synced_to_mc_block_id: Option<BlockId>,
-    /// Master block collation forced by no pending messages after block in any shard
-    pub mc_forced_by_no_pending_msgs: bool,
+    /// Master block collation forced by no pending messages after block
+    /// in any shard on chain time
+    pub mc_forced_by_no_pending_msgs_on_ct: Option<u64>,
 }
 
 #[derive(Debug)]
 pub(super) struct CollationState {
     pub status: CollationStatus,
-    pub last_imported_chain_times: Vec<(u64, bool)>,
+    pub last_imported_anchor_events: Vec<ImportedAnchorEvent>,
+}
+#[derive(Default, Clone, Debug)]
+pub(super) struct ImportedAnchorEvent {
+    pub ct: u64,
+    pub mc_forced: bool,
+    // true only if the first shard block was collated
+    // after previous master block with this anchor
+    pub is_first_block_after_prev_master: bool,
 }
 
 impl Default for CollationState {
     fn default() -> Self {
         Self {
             status: CollationStatus::AttemptsInProgress,
-            last_imported_chain_times: vec![],
+            last_imported_anchor_events: vec![],
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CollationStatus {
+    /// Collator is trying to collate current shard,
+    /// may import next anchor
     AttemptsInProgress,
+    /// Shard collator is waiting for master collator status,
+    /// and not trying to collate current shard,
+    /// will not import next anchor
     WaitForMasterStatus,
+    /// Current shard is ready for master collation,
+    /// collator is not trying to collate current shard,
+    /// will not import next anchor
+    ReadyToCollateMaster,
 }
 
 #[derive(Debug)]
@@ -417,7 +435,7 @@ pub(super) enum McBlockSubgraphExtract {
     AlreadyExtracted,
 }
 
-impl std::fmt::Display for McBlockSubgraphExtract {
+impl Display for McBlockSubgraphExtract {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Extracted(_) => write!(f, "Extracted"),
