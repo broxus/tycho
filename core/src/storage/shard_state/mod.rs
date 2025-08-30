@@ -159,17 +159,18 @@ impl ShardStateStorage {
 
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
-            let hist = HistogramGuard::begin("tycho_storage_state_update_time_high");
             metrics::histogram!("tycho_storage_state_update_size_bytes")
                 .record(batch.size_in_bytes() as f64);
             metrics::histogram!("tycho_storage_state_update_size_predicted_bytes")
                 .record(estimated_update_size_bytes as f64);
 
+            let hist = HistogramGuard::begin("tycho_storage_state_update_time_high");
             raw_db.write(batch)?;
-
-            drop(root_cell);
-
             hist.finish();
+
+            let drop_hist = HistogramGuard::begin("tycho_storage_drop_cell_time_high");
+            drop(root_cell);
+            drop_hist.finish();
 
             let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
             if updated {
