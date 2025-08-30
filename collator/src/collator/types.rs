@@ -1147,7 +1147,7 @@ pub struct CachedAnchor {
 pub struct AnchorsCache {
     /// The cache of imported from mempool anchors that were not processed yet.
     /// Anchor is removed from the cache when all its externals are processed.
-    cache: VecDeque<(MempoolAnchorId, CachedAnchor)>, // TODO: do not need to store our_exts_count
+    cache: VecDeque<(MempoolAnchorId, CachedAnchor)>,
 
     imported_anchors_info_history: VecDeque<AnchorInfo>,
 
@@ -1187,7 +1187,7 @@ impl AnchorsCache {
         self.last_imported_anchor_info().map(|a| (a.id, a.ct))
     }
 
-    pub fn insert(&mut self, anchor: Arc<MempoolAnchor>, our_exts_count: usize) {
+    pub fn add(&mut self, anchor: Arc<MempoolAnchor>, our_exts_count: usize) {
         self.add_imported_anchor_info(AnchorInfo::from_anchor(&anchor, our_exts_count));
 
         if our_exts_count > 0 {
@@ -1199,21 +1199,11 @@ impl AnchorsCache {
         }
     }
 
-    // TODO: check usage and update return type
-    pub fn remove(&mut self, index: usize) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
-        assert_eq!(index, 0);
+    pub fn pop_front(&mut self) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
+        let removed = self.cache.pop_front();
 
-        let removed = if index == 0 {
-            let removed = self.cache.pop_front();
-            if let Some((_, ca)) = &removed {
-                self.remove_imported_anchors_info_before(ca.anchor.chain_time);
-            }
-            removed
-        } else {
-            self.cache.remove(index)
-        };
-
-        if removed.is_some() {
+        if let Some((_, ca)) = &removed {
+            self.remove_imported_anchors_info_before(ca.anchor.chain_time);
             self.has_pending_externals = !self.cache.is_empty();
         }
 
@@ -1255,7 +1245,6 @@ impl AnchorsCache {
         self.cache.len()
     }
 
-    // TODO: check usage and update return type
     pub fn get(&self, index: usize) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
         self.cache
             .get(index)
@@ -1263,7 +1252,7 @@ impl AnchorsCache {
     }
 
     #[cfg(test)]
-    pub fn get_first_with_our_externals(&self) -> Option<&Arc<MempoolAnchor>> {
+    pub fn first_with_our_externals(&self) -> Option<&Arc<MempoolAnchor>> {
         let mut idx = 0;
         while let Some((_, ca)) = self.cache.get(idx) {
             if ca.our_exts_count > 0 {

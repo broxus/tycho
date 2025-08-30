@@ -46,7 +46,7 @@ pub(crate) fn fill_test_anchors_cache(
                 DisplayIter(curr_dst_addrs.iter().map(|addr| addr.to_string())),
             );
         }
-        anchors_cache.insert(anchor, our_exts_count);
+        anchors_cache.add(anchor, our_exts_count);
         dst_addrs.append(&mut curr_dst_addrs);
     }
 

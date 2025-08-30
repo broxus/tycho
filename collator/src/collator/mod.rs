@@ -1110,7 +1110,7 @@ impl CollatorStdImpl {
         let has_our_externals = match &get_anchor_result {
             GetAnchorResult::Exist(next_anchor) => {
                 let our_exts_count = next_anchor.count_externals_for(&shard_id, 0);
-                anchors_cache.insert(next_anchor.clone(), our_exts_count);
+                anchors_cache.add(next_anchor.clone(), our_exts_count);
 
                 let has_externals = our_exts_count > 0;
 
@@ -1263,7 +1263,7 @@ impl CollatorStdImpl {
                     && anchor.externals.len() == processed_to_msgs_offset as usize)
                 {
                     let our_exts_count = anchor.count_externals_for(&shard_id, 0);
-                    anchors_cache.insert(anchor.clone(), our_exts_count);
+                    anchors_cache.add(anchor.clone(), our_exts_count);
                     res.anchors_info
                         .push(InitAnchorSource::Imported(AnchorInfo::from_anchor(
                             &anchor,

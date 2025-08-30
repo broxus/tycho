@@ -921,11 +921,9 @@ impl ExternalsRangeReader {
             (BufferFillStateByCount::IsFull, _) | (_, BufferFillStateBySlots::CanFill)
         );
 
-        let mut last_read_anchor_id_opt = None;
         let mut last_read_to_anchor_chain_time = None;
         let mut msgs_read_offset_in_last_anchor;
         let mut has_pending_externals_in_last_read_anchor = false;
-        let mut last_anchor_removed = false;
 
         let mut total_msgs_imported = 0;
 
@@ -952,7 +950,7 @@ impl ExternalsRangeReader {
             // skip and remove already read anchor from cache
             if anchor_id < was_read_to.anchor_id {
                 assert_eq!(next_idx, 0);
-                anchors_cache.remove(next_idx);
+                anchors_cache.pop_front();
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     anchor_id,
                     "anchor already read, removed from anchors cache",
@@ -961,7 +959,6 @@ impl ExternalsRangeReader {
                 continue;
             }
 
-            last_read_anchor_id_opt = Some(anchor_id);
             last_read_to_anchor_chain_time = Some(anchor.chain_time);
             tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                 last_read_anchor_id = anchor_id,
@@ -1020,8 +1017,8 @@ impl ExternalsRangeReader {
 
                 // skip and remove expired anchor
                 assert_eq!(next_idx, 0);
-                anchors_cache.remove(next_idx);
-                last_anchor_removed = true;
+                anchors_cache.pop_front();
+
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     anchor_id,
                     anchor_chain_time = anchor.chain_time,
@@ -1153,8 +1150,8 @@ impl ExternalsRangeReader {
             // remove fully read anchor
             if anchor.externals.len() == msgs_read_offset_in_last_anchor as usize {
                 assert_eq!(next_idx, 0);
-                anchors_cache.remove(next_idx);
-                last_anchor_removed = true;
+                anchors_cache.pop_front();
+
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     anchor_id,
                     "anchor just fully read, removed from anchors cache",

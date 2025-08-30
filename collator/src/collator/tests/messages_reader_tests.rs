@@ -1265,7 +1265,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
         working_state
             .anchors_cache
-            .insert(anchor.clone(), our_exts_count);
+            .add(anchor.clone(), our_exts_count);
     }
 
     fn update_msgs_exec_params(&mut self, msgs_exec_params: MsgsExecutionParamsStuff) {
@@ -1743,7 +1743,7 @@ where
             };
             let our_exts_count = anchor.count_externals_for(shard_id, msgs_offset as usize);
             if anchor.chain_time <= self.last_anchor_ct {
-                anchors_cache.insert(anchor.clone(), our_exts_count);
+                anchors_cache.add(anchor.clone(), our_exts_count);
             } else {
                 break;
             }
