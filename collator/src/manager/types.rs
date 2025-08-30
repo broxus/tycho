@@ -71,7 +71,7 @@ pub(super) struct ImportedAnchorEvent {
     pub mc_forced: bool,
     // true only if the first shard block was collated
     // after previous master block with this anchor
-    pub is_first_block_after_prev_mc: bool,
+    pub is_first_block_after_prev_master: bool,
 }
 
 impl Default for CollationState {

@@ -28,7 +28,7 @@ use self::types::{BlockCacheKey, CandidateStatus, CollationSyncState, McBlockSub
 use self::utils::find_us_in_collators_set;
 use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
-    ForceMasterCollation, is_first_block_after_prev_master,
+    ForceMasterCollation,
 };
 use crate::internal_queue::types::{
     DiffStatistics, DiffZone, EnqueuedMessage, QueueDiffWithMessages,
@@ -1102,12 +1102,6 @@ where
                 "will run next collation step",
             );
 
-            let is_first_block_after_prev_mc = if let Some(ref mc_data) = collation_result.mc_data {
-                is_first_block_after_prev_master(block_id, &mc_data.shards)
-            } else {
-                false
-            };
-
             self.run_next_collation_step(
                 &collation_result.prev_mc_block_id,
                 block_id.shard,
@@ -1115,7 +1109,7 @@ where
                 DetectNextCollationStepContext::new(
                     candidate_chain_time,
                     collation_result.force_next_mc_block,
-                    is_first_block_after_prev_mc,
+                    collation_result.is_first_block_after_prev_master,
                     collation_result.collation_config.mc_block_min_interval_ms as _,
                     collation_result.collation_config.mc_block_max_interval_ms as _,
                 ),
@@ -2667,7 +2661,7 @@ where
         let DetectNextCollationStepContext {
             last_imported_anchor_ct,
             force_mc_block,
-            is_first_block_after_prev_mc,
+            is_first_block_after_prev_master,
             mc_block_min_interval_ms,
             mc_block_max_interval_ms,
         } = ctx;
@@ -2724,7 +2718,7 @@ where
             .push(ImportedAnchorEvent {
                 ct: last_imported_anchor_ct,
                 mc_forced: forced_in_current_shard,
-                is_first_block_after_prev_mc,
+                is_first_block_after_prev_master,
             });
 
         tracing::trace!(
@@ -2732,7 +2726,7 @@ where
             shard_id=?shard_id,
             last_imported_anchor_ct,
             forced_in_current_shard,
-            is_first_block_after_prev_mc,
+            is_first_block_after_prev_master,
             "anchor event appended"
         );
 
@@ -2778,13 +2772,13 @@ where
                     }
 
                     // remember if there was the first shard block after prev master
-                    if s.is_first_block_after_prev_mc {
+                    if s.is_first_block_after_prev_master {
                         fact.has_collated_block_after_prev_mc = true;
                     }
 
                     // we take only first ct that exceed min interval
                     // or the next that goes with the first shard block after prev master
-                    if (fact.min_ct.is_none() || s.is_first_block_after_prev_mc)
+                    if (fact.min_ct.is_none() || s.is_first_block_after_prev_master)
                         && s.ct.saturating_sub(mc_ct) >= min_interval_ms
                     {
                         fact.min_ct = Some(s.ct);
@@ -3328,7 +3322,7 @@ struct RestoreQueueResult {
 struct DetectNextCollationStepContext {
     pub last_imported_anchor_ct: u64,
     pub force_mc_block: ForceMasterCollation,
-    pub is_first_block_after_prev_mc: bool,
+    pub is_first_block_after_prev_master: bool,
     pub mc_block_min_interval_ms: u64,
     pub mc_block_max_interval_ms: u64,
 }
@@ -3337,14 +3331,14 @@ impl DetectNextCollationStepContext {
     pub fn new(
         last_imported_anchor_ct: u64,
         force_mc_block: ForceMasterCollation,
-        is_first_block_after_prev_mc: bool,
+        is_first_block_after_prev_master: bool,
         mc_block_min_interval_ms: u64,
         mc_block_max_interval_ms: u64,
     ) -> Self {
         Self {
             last_imported_anchor_ct,
             force_mc_block,
-            is_first_block_after_prev_mc,
+            is_first_block_after_prev_master,
             mc_block_min_interval_ms,
             mc_block_max_interval_ms,
         }
