@@ -88,13 +88,13 @@ async fn test_import_init_anchors() {
 
     assert_eq!(anchors_info.len(), 4);
     assert_eq!(anchors_info[0].id, 9);
-    let (anchor_id, _) = anchors_cache.get(0).unwrap();
-    assert_eq!(anchor_id, processed_to_anchor_id);
+    let anchor = anchors_cache.get_first_with_our_externals().unwrap();
+    assert_eq!(anchor.id, processed_to_anchor_id);
     let (last_imported_id, last_imported_ct) =
         anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
     assert_eq!(last_imported_id, 12);
     assert_eq!(last_imported_ct, 20832);
-    assert_eq!(anchors_cache.len(), 4); // cache may contain anchors without our externals
+    assert_eq!(anchors_cache.len(), 3);
     assert!(anchors_cache.has_pending_externals());
     assert_eq!(anchors_count_above_last_imported_in_current_shard, 1);
 
@@ -131,15 +131,15 @@ async fn test_import_init_anchors() {
         anchors_info.as_slice(),
     );
 
-    assert_eq!(anchors_info.len(), 4);
-    assert_eq!(anchors_info[0].id, 9);
+    assert_eq!(anchors_info.len(), 3);
+    assert_eq!(anchors_info[0].id, 10);
     let anchor = anchors_cache.get_first_with_our_externals().unwrap();
     assert_eq!(anchor.id, 11);
     let (last_imported_id, last_imported_ct) =
         anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
     assert_eq!(last_imported_id, 12);
     assert_eq!(last_imported_ct, 20832);
-    assert_eq!(anchors_cache.len(), 4); // cache may contain anchors without our externals
+    assert_eq!(anchors_cache.len(), 2);
     assert!(anchors_cache.has_pending_externals());
     assert_eq!(anchors_count_above_last_imported_in_current_shard, 0);
 
@@ -183,7 +183,7 @@ async fn test_import_init_anchors() {
         anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
     assert_eq!(last_imported_id, 14);
     assert_eq!(last_imported_ct, 24304);
-    assert_eq!(anchors_cache.len(), 6); // cache may contain anchors without our externals
+    assert_eq!(anchors_cache.len(), 4);
     assert!(anchors_cache.has_pending_externals());
     assert_eq!(anchors_count_above_last_imported_in_current_shard, 2);
 
@@ -226,7 +226,7 @@ async fn test_import_init_anchors() {
         anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
     assert_eq!(last_imported_id, 14);
     assert_eq!(last_imported_ct, 24304);
-    assert_eq!(anchors_cache.len(), 6); // cache may contain anchors without our externals
+    assert_eq!(anchors_cache.len(), 4);
     assert!(anchors_cache.has_pending_externals());
     assert_eq!(anchors_count_above_last_imported_in_current_shard, 0);
 
@@ -271,7 +271,7 @@ async fn test_import_init_anchors() {
         anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
     assert_eq!(last_imported_id, 12);
     assert_eq!(last_imported_ct, 20832);
-    assert_eq!(anchors_cache.len(), 4); // cache may contain anchors without our externals
+    assert_eq!(anchors_cache.len(), 3);
     assert!(anchors_cache.has_pending_externals());
     assert_eq!(anchors_count_above_last_imported_in_current_shard, 3);
 
@@ -315,7 +315,7 @@ async fn test_import_init_anchors() {
         anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
     assert_eq!(last_imported_id, 17);
     assert_eq!(last_imported_ct, 29512);
-    assert_eq!(anchors_cache.len(), 5); // cache may contain anchors without our externals
+    assert_eq!(anchors_cache.len(), 4);
     assert!(anchors_cache.has_pending_externals());
     assert_eq!(anchors_count_above_last_imported_in_current_shard, 2);
 }

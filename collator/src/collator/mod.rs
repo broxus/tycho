@@ -568,8 +568,7 @@ impl CollatorStdImpl {
                 our_exts_count: 0,
                 author: PeerId(created_by.0),
             };
-            self.anchors_cache
-                .set_last_imported_anchor_info(anchor_info);
+            self.anchors_cache.add_imported_anchor_info(anchor_info);
 
             Ok(Default::default())
         }
@@ -1164,10 +1163,6 @@ impl CollatorStdImpl {
         let mut last_anchor = None;
         let mut all_anchors_are_taken_from_cache = false;
         let mut processed_to_anchor_exists_in_cache = false;
-        let mut total_our_exts_count: usize = 0;
-
-        // we count our messages for processed_to with existing offset
-        let mut offset = processed_to_msgs_offset as usize;
 
         // remove all anchors above last_block_chain_time
         anchors_cache.remove_last_imported_above(last_block_chain_time);
@@ -1182,6 +1177,11 @@ impl CollatorStdImpl {
                 // check if processed_to anchor exists in cache
                 if anchor.id == processed_to_anchor_id {
                     processed_to_anchor_exists_in_cache = true;
+
+                    // skip fully read processed_to anchor
+                    if anchor.externals.len() == processed_to_msgs_offset as usize {
+                        continue;
+                    }
                 }
 
                 // NOTE: in case when we collated block 1 and now collating block 2
@@ -1203,16 +1203,12 @@ impl CollatorStdImpl {
                 }
 
                 // collect required anchors
-                let our_exts_count = anchor.count_externals_for(&shard_id, offset);
-                total_our_exts_count = total_our_exts_count.saturating_add(our_exts_count);
+                let our_exts_count = anchor.count_externals_for(&shard_id, 0);
                 res.anchors_info
                     .push(InitAnchorSource::FromCache(AnchorInfo::from_anchor(
                         &anchor,
                         our_exts_count,
                     )));
-
-                // in the next anchors after processed_to will count our externals from 0
-                offset = 0;
 
                 last_anchor = Some(anchor);
             }
@@ -1262,23 +1258,24 @@ impl CollatorStdImpl {
         loop {
             // add loaded anchor to cache
             if let Some(anchor) = next_anchor {
-                let our_exts_count = anchor.count_externals_for(&shard_id, offset);
-                total_our_exts_count = total_our_exts_count.saturating_add(our_exts_count);
-                anchors_cache.insert(anchor.clone(), our_exts_count);
-                res.anchors_info
-                    .push(InitAnchorSource::Imported(AnchorInfo::from_anchor(
-                        &anchor,
-                        our_exts_count,
-                    )));
+                // skip fully read processed_to anchor
+                if !(anchor.id == processed_to_anchor_id
+                    && anchor.externals.len() == processed_to_msgs_offset as usize)
+                {
+                    let our_exts_count = anchor.count_externals_for(&shard_id, 0);
+                    anchors_cache.insert(anchor.clone(), our_exts_count);
+                    res.anchors_info
+                        .push(InitAnchorSource::Imported(AnchorInfo::from_anchor(
+                            &anchor,
+                            our_exts_count,
+                        )));
 
-                metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
-                    .increment(our_exts_count as u64);
-                metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-                    .increment(our_exts_count as f64);
+                    metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
+                        .increment(our_exts_count as u64);
+                    metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
+                        .increment(our_exts_count as f64);
+                }
             }
-
-            // in next anchors after processed_to will count from 0
-            offset = 0;
 
             // count number of anchors imported above last chain time for current shard
             if last_imported_anchor_ct > current_shard_last_imported_chain_time {
@@ -2192,9 +2189,9 @@ enum ImportNextAnchor {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum InitAnchorSource {
     FromCache(AnchorInfo),
-    #[allow(dead_code)]
     Imported(AnchorInfo),
 }
 
