@@ -20,6 +20,12 @@ while [[ $# -gt 0 ]]; do
           exit 1
         fi
       ;;
+      --single-node)
+        single_node="--single-node"
+        shift # past argument
+        if [ "$#" -gt 0 ]; then shift;
+        fi
+      ;;
       *) # positional
         if ! [ -z "$N" ]; then
             echo "ERROR: Too many args"
@@ -47,4 +53,5 @@ $tycho_bin node run \
     --import-zerostate "${base_dir}/zerostate.boc" \
     --logger-config "${root_dir}/logger.json" \
     --control-socket "${base_dir}/control${N}.sock" \
-    --wu-tuner-config "${base_dir}/wu-tuner-config${N}.json"
+    --wu-tuner-config "${base_dir}/wu-tuner-config${N}.json" \
+    ${single_node}

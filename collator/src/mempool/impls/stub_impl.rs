@@ -350,6 +350,18 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         anchors_cache.retain(|anchor_id, _| anchor_id >= &before_anchor_id);
         Ok(())
     }
+
+    fn send_external(&self, _message: bytes::Bytes) {
+        panic!("send_external not implemented for stub");
+    }
+
+    async fn update_delayed_config(
+        &self,
+        _consensus_config: Option<&ConsensusConfig>,
+        _genesis_info: &GenesisInfo,
+    ) -> Result<()> {
+        panic!("update_delayed_config not implemented for stub");
+    }
 }
 
 pub(crate) fn make_empty_anchor(

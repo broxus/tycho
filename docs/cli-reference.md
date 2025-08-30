@@ -192,6 +192,7 @@ Run a Tycho node
 
   Possible values: `genesis`, `latest-persistent`
 
+* `--single-node` — Pass this flag if you used `just gen_network 1` for manual tests
 
 
 
