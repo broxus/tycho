@@ -14,7 +14,9 @@ use tycho_types::models::{
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::mempool::MempoolAnchorId;
-use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
+use crate::types::processed_upto::{
+    BlockSeqno, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff,
+};
 use crate::types::{
     ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ShardDescriptionShortExt,
     ShardHashesExt,
@@ -22,7 +24,6 @@ use crate::types::{
 use crate::utils::block::detect_top_processed_to_anchor;
 
 pub(super) type BlockCacheKey = BlockIdShort;
-pub(super) type BlockSeqno = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CollatorState {
@@ -60,18 +61,32 @@ pub(super) struct CollationSyncState {
     pub mc_forced_by_no_pending_msgs_on_ct: Option<u64>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub(super) struct ImportedAnchorEvent {
+    pub ct: u64,
+    pub mc_forced: bool,
+    pub collated_block_info: Option<CollatedBlockInfo>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CollatedBlockInfo {
+    pub prev_mc_block_seqno: BlockSeqno,
+    pub has_processed_externals: bool,
+}
+
+impl CollatedBlockInfo {
+    pub fn new(prev_mc_block_seqno: BlockSeqno, has_processed_externals: bool) -> Self {
+        Self {
+            prev_mc_block_seqno,
+            has_processed_externals,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct CollationState {
     pub status: CollationStatus,
     pub last_imported_anchor_events: Vec<ImportedAnchorEvent>,
-}
-#[derive(Default, Clone, Debug)]
-pub(super) struct ImportedAnchorEvent {
-    pub ct: u64,
-    pub mc_forced: bool,
-    // true only if the first shard block was collated
-    // after previous master block with this anchor
-    pub is_first_block_after_prev_master: bool,
 }
 
 impl Default for CollationState {

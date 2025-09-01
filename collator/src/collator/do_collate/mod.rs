@@ -54,13 +54,14 @@ mod prepare;
 pub mod work_units;
 
 pub struct FinalizeCollationCtx {
+    /// Do we have unprocessed messages in internals
+    /// or externals queue after block collation
     pub has_unprocessed_messages: bool,
     pub finalized: FinalizeBlockResult,
     pub reader_state: ReaderState,
     pub tracker: MinRefMcStateTracker,
     pub force_next_mc_block: ForceMasterCollation,
     pub resume_collation_elapsed: Duration,
-    pub is_first_block_after_prev_master: bool,
 }
 
 impl CollatorStdImpl {
@@ -274,7 +275,6 @@ impl CollatorStdImpl {
                 tracker,
                 force_next_mc_block,
                 resume_collation_elapsed,
-                is_first_block_after_prev_master,
             })
             .await?;
 
@@ -939,7 +939,6 @@ impl CollatorStdImpl {
             tracker,
             force_next_mc_block,
             resume_collation_elapsed,
-            is_first_block_after_prev_master,
         } = ctx;
 
         let block_id = *finalized.block_candidate.block.id();
@@ -998,8 +997,7 @@ impl CollatorStdImpl {
                     mc_data: finalized.mc_data.clone(),
                     collation_config: collation_config.clone(),
                     force_next_mc_block,
-                    is_first_block_after_prev_master: !self.shard_id.is_masterchain()
-                        && is_first_block_after_prev_master,
+                    has_processed_externals: finalized.collation_data.execute_count_ext > 0,
                 })
                 .await?;
 

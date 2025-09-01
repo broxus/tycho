@@ -115,7 +115,8 @@ pub struct BlockCollationResult {
     pub mc_data: Option<Arc<McData>>,
     pub collation_config: Arc<CollationConfig>,
     pub force_next_mc_block: ForceMasterCollation,
-    pub is_first_block_after_prev_master: bool,
+    /// Whether any external has been executed in this block
+    pub has_processed_externals: bool,
 }
 
 #[derive(Debug)]
