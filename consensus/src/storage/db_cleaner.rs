@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use futures_util::never::Never;
 
+use super::{POINT_KEY_LEN, fill_point_prefix};
 use crate::effects::{Cancelled, Ctx, RoundCtx, Task};
 use crate::engine::round_watch::{Consensus, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
@@ -78,10 +79,10 @@ impl DbCleaner {
                 if prev_least_to_keep < new_least_to_keep {
                     let db = self.0.clone();
                     let task = round_ctx.task().spawn_blocking(move || {
-                        let mut up_to_exclusive = [0_u8; super::KEY_LEN];
-                        super::fill_prefix(new_least_to_keep.0, &mut up_to_exclusive);
+                        let mut up_to_exclusive = [0_u8; POINT_KEY_LEN];
+                        fill_point_prefix(new_least_to_keep.0, &mut up_to_exclusive);
 
-                        match db.clean(&up_to_exclusive) {
+                        match db.clean_points(&up_to_exclusive) {
                             Ok(Some((first, last))) => {
                                 const CLEANED: &str = "tycho_mempool_rounds_db_cleaned";
                                 metrics::gauge!(CLEANED, "kind" => "lower").set(first);

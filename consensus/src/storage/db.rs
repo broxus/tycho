@@ -6,6 +6,7 @@ use tycho_util::metrics::HistogramGuard;
 use weedb::WeeDb;
 use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
 
+use super::{POINT_KEY_LEN, format_point_key};
 use crate::engine::round_watch::{Commit, RoundWatch};
 use crate::storage::tables::MempoolTables;
 
@@ -36,13 +37,13 @@ impl MempoolDb {
 
     /// delete all stored data up to provided value (exclusive);
     /// returns range of logically deleted keys
-    pub(super) fn clean(
+    pub(super) fn clean_points(
         &self,
-        up_to_exclusive: &[u8; super::KEY_LEN],
+        up_to_exclusive: &[u8; POINT_KEY_LEN],
     ) -> anyhow::Result<Option<(u32, u32)>> {
-        let _call_duration = HistogramGuard::begin("tycho_mempool_store_clean_time");
-        let zero = [0_u8; super::KEY_LEN];
-        let none = None::<[u8; super::KEY_LEN]>;
+        let _call_duration = HistogramGuard::begin("tycho_mempool_store_clean_points_time");
+        let zero = [0_u8; POINT_KEY_LEN];
+        let none = None::<[u8; POINT_KEY_LEN]>;
 
         let status_cf = self.db.tables().points_status.cf();
         let info_cf = self.db.tables().points_info.cf();
@@ -59,7 +60,7 @@ impl MempoolDb {
             super::parse_round(first_key).unwrap_or_else(|| {
                 tracing::error!(
                     "mempool lower clean bound will be shown as 0: {}",
-                    super::format_key(first_key)
+                    format_point_key(first_key)
                 );
                 0
             })
@@ -73,7 +74,7 @@ impl MempoolDb {
                 super::parse_round(last_key).unwrap_or_else(|| {
                     tracing::error!(
                         "mempool upper clean bound will be shown as 0: {}",
-                        super::format_key(last_key)
+                        format_point_key(last_key)
                     );
                     0
                 })
