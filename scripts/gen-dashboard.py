@@ -2815,8 +2815,8 @@ def mempool_storage() -> RowPanel:
             "Get info",
         ),
         create_heatmap_panel(
-            "tycho_mempool_store_clean_time",
-            "Clean task",
+            "tycho_mempool_store_clean_points_time",
+            "Clean points task",
         ),
     ]
     return create_row("Mempool storage", metrics)

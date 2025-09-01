@@ -23,8 +23,8 @@ weedb::tables! {
 }
 
 /// Stores mempool point data
-/// - Key: `round: u32, digest: [u8; 32]`
-/// - Value: `Point`
+/// - Key: `round: u32, digest: [u8; 32]` in big-endian encoding
+/// - Value: [`crate::models::Point`]
 pub struct Points;
 
 impl ColumnFamily for Points {
@@ -44,8 +44,8 @@ impl ColumnFamilyOptions<TableContext> for Points {
 }
 
 /// Stores truncated mempool point data
-/// - Key: `round: u32, digest: [u8; 32]`
-/// - Value: `PointInfo`
+/// - Key: `round: u32, digest: [u8; 32]` as in [`Points`]
+/// - Value: [`crate::models::PointInfo`]
 pub struct PointsInfo;
 
 impl ColumnFamily for PointsInfo {
@@ -61,10 +61,8 @@ impl ColumnFamilyOptions<TableContext> for PointsInfo {
 
 /// Stores mempool point flags
 /// - Key: `round: u32, digest: [u8; 32]` as in [`Points`]
-/// - Value: [`PointStatusStored`]
-///   - also see  [`crate::point_status::StatusFlags::try_from_stored`]
-///
-/// [`PointStatusStored`]: crate::storage::PointStatusStored
+/// - Value: [`crate::models::PointStatusStored`]
+///   - also see  [`crate::models::point_status::StatusFlags::try_from_stored`]
 pub struct PointsStatus;
 
 impl ColumnFamily for PointsStatus {

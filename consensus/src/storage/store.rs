@@ -10,6 +10,7 @@ use tycho_network::OverlayId;
 use tycho_util::metrics::HistogramGuard;
 use weedb::rocksdb::{DBRawIterator, IteratorMode, ReadOptions, WriteBatch};
 
+use super::{POINT_KEY_LEN, fill_point_key, fill_point_prefix, format_point_key};
 use crate::effects::AltFormat;
 use crate::models::{
     Digest, Point, PointInfo, PointRestore, PointRestoreSelect, PointStatusStored,
@@ -135,8 +136,8 @@ impl MempoolStore {
 impl MempoolStoreImpl for MempoolDb {
     fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_insert_point_time");
-        let mut key = [0_u8; super::KEY_LEN];
-        super::fill_key(
+        let mut key = [0_u8; POINT_KEY_LEN];
+        fill_point_key(
             point.info().round().0,
             point.info().digest().inner(),
             &mut key,
@@ -176,8 +177,8 @@ impl MempoolStoreImpl for MempoolDb {
         status: PointStatusStoredRef<'_>,
     ) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_set_status_time");
-        let mut key = [0_u8; super::KEY_LEN];
-        super::fill_key(round.0, digest.inner(), &mut key);
+        let mut key = [0_u8; POINT_KEY_LEN];
+        fill_point_key(round.0, digest.inner(), &mut key);
 
         let db = self.db.rocksdb();
         let status_cf = self.db.points_status.cf();
@@ -188,8 +189,8 @@ impl MempoolStoreImpl for MempoolDb {
     fn get_point(&self, round: Round, digest: &Digest) -> Result<Option<Point>> {
         metrics::counter!("tycho_mempool_store_get_point_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_point_time");
-        let mut key = [0_u8; super::KEY_LEN];
-        super::fill_key(round.0, digest.inner(), &mut key);
+        let mut key = [0_u8; POINT_KEY_LEN];
+        fill_point_key(round.0, digest.inner(), &mut key);
 
         let points = &self.db.points;
         points
@@ -202,9 +203,9 @@ impl MempoolStoreImpl for MempoolDb {
     fn multi_get_info(&self, keys: &[(Round, Digest)]) -> Result<Vec<PointInfo>> {
         let key_bytes = {
             let mut b_keys = Vec::with_capacity(keys.len());
-            let mut buf = [0_u8; super::KEY_LEN];
+            let mut buf = [0_u8; POINT_KEY_LEN];
             for (round, digest) in keys {
-                super::fill_key(round.0, digest.inner(), &mut buf);
+                fill_point_key(round.0, digest.inner(), &mut buf);
                 b_keys.push(buf);
             }
             b_keys
@@ -232,8 +233,8 @@ impl MempoolStoreImpl for MempoolDb {
     fn get_point_raw(&self, round: Round, digest: &Digest) -> Result<Option<Bytes>> {
         metrics::counter!("tycho_mempool_store_get_point_raw_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_point_raw_time");
-        let mut key = [0_u8; super::KEY_LEN];
-        super::fill_key(round.0, digest.inner(), &mut key);
+        let mut key = [0_u8; POINT_KEY_LEN];
+        fill_point_key(round.0, digest.inner(), &mut key);
 
         let points = &self.db.points;
         let point = points.get_owned(key.as_slice()).context("db get")?;
@@ -243,8 +244,8 @@ impl MempoolStoreImpl for MempoolDb {
     fn get_info(&self, round: Round, digest: &Digest) -> Result<Option<PointInfo>> {
         metrics::counter!("tycho_mempool_store_get_info_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_info_time");
-        let mut key = [0_u8; super::KEY_LEN];
-        super::fill_key(round.0, digest.inner(), &mut key);
+        let mut key = [0_u8; POINT_KEY_LEN];
+        fill_point_key(round.0, digest.inner(), &mut key);
 
         let table = &self.db.points_info;
         table
@@ -257,8 +258,8 @@ impl MempoolStoreImpl for MempoolDb {
     fn get_status(&self, round: Round, digest: &Digest) -> Result<Option<PointStatusStored>> {
         metrics::counter!("tycho_mempool_store_get_status_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_status_time");
-        let mut key = [0_u8; super::KEY_LEN];
-        super::fill_key(round.0, digest.inner(), &mut key);
+        let mut key = [0_u8; POINT_KEY_LEN];
+        fill_point_key(round.0, digest.inner(), &mut key);
 
         let table = &self.db.points_status;
         table
@@ -290,11 +291,11 @@ impl MempoolStoreImpl for MempoolDb {
         let status_t = &self.db.tables().points_status;
         let db = self.db.rocksdb();
 
-        let mut start = [0_u8; super::KEY_LEN];
-        super::fill_prefix(range.start().0, &mut start);
+        let mut start = [0_u8; POINT_KEY_LEN];
+        fill_point_prefix(range.start().0, &mut start);
 
-        let mut end_excl = [0_u8; super::KEY_LEN];
-        super::fill_prefix(range.end().next().0, &mut end_excl);
+        let mut end_excl = [0_u8; POINT_KEY_LEN];
+        fill_point_prefix(range.end().next().0, &mut end_excl);
 
         let mut conf = status_t.new_read_config();
         conf.set_iterate_lower_bound(start);
@@ -307,7 +308,7 @@ impl MempoolStoreImpl for MempoolDb {
             let Some(kv) = iter.next() else { break };
             let (k, v) = kv.context("status iter next")?;
             let new_v =
-                match StatusFlags::try_from_stored(&v).with_context(|| super::format_key(&k))? {
+                match StatusFlags::try_from_stored(&v).with_context(|| format_point_key(&k))? {
                     Some(flags) if !flags.contains(StatusFlags::Found) => &*v,
                     _ => &[],
                 };
@@ -324,10 +325,10 @@ impl MempoolStoreImpl for MempoolDb {
     fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestoreSelect>> {
         fn opts(range: &RangeInclusive<Round>) -> ReadOptions {
             let mut opts = ReadOptions::default();
-            let mut buf = [0; super::KEY_LEN];
-            super::fill_prefix(range.start().0, &mut buf);
+            let mut buf = [0; POINT_KEY_LEN];
+            fill_point_prefix(range.start().0, &mut buf);
             opts.set_iterate_lower_bound(buf);
-            super::fill_prefix(range.end().next().0, &mut buf);
+            fill_point_prefix(range.end().next().0, &mut buf);
             opts.set_iterate_upper_bound(buf);
             opts
         }
@@ -342,13 +343,13 @@ impl MempoolStoreImpl for MempoolDb {
             let (f_key, value) = iter.item().context("iter exhausted")?;
             match key.cmp(f_key) {
                 cmp::Ordering::Less => {
-                    anyhow::bail!("iter did not seek, found key {}", super::format_key(f_key),)
+                    anyhow::bail!("iter did not seek, found key {}", format_point_key(f_key),)
                 }
                 cmp::Ordering::Equal => {
                     Ok(tl_proto::deserialize::<T>(value).context("deserialize")?)
                 }
                 cmp::Ordering::Greater => {
-                    anyhow::bail!("no record found, next key {}", super::format_key(f_key),)
+                    anyhow::bail!("no record found, next key {}", format_point_key(f_key),)
                 }
             }
         }
@@ -368,7 +369,7 @@ impl MempoolStoreImpl for MempoolDb {
         for item in status_iter {
             let (key, status_bytes) = item.context("get point status")?;
             anyhow::ensure!(
-                key.len() == super::KEY_LEN,
+                key.len() == POINT_KEY_LEN,
                 "unexpected key len {}",
                 key.len()
             );
@@ -409,7 +410,7 @@ impl MempoolStoreImpl for MempoolDb {
 
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()> {
         if !self.has_compatible_data(overlay_id.as_bytes())? {
-            match self.clean(&[u8::MAX; super::KEY_LEN])? {
+            match self.clean_points(&[u8::MAX; POINT_KEY_LEN])? {
                 Some((first, last)) => {
                     tracing::info!("mempool DB cleaned on init, rounds: [{first}..{last}]");
                 }
