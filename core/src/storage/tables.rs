@@ -50,6 +50,29 @@ impl ColumnFamilyOptions<TableContext> for ArchiveBlockIds {
     }
 }
 
+/// Stores archive lifetime events.
+/// - Key: `u32 (BE)` (archive id) + `32 (BE)` (event id)
+/// - Value: event data
+pub struct ArchiveEvents;
+
+impl ArchiveEvents {
+    pub const KEY_LEN: usize = 4 + 4;
+}
+
+impl ColumnFamily for ArchiveEvents {
+    const NAME: &'static str = "archive_events";
+
+    fn read_options(opts: &mut rocksdb::ReadOptions) {
+        opts.set_verify_checksums(false);
+    }
+}
+
+impl ColumnFamilyOptions<TableContext> for ArchiveEvents {
+    fn options(opts: &mut rocksdb::Options, ctx: &mut TableContext) {
+        default_block_based_table_factory(opts, ctx);
+    }
+}
+
 /// Maps block root hash to block meta
 /// - Key: `[u8; 32]`
 /// - Value: `BlockMeta`

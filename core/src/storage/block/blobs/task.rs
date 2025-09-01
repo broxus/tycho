@@ -25,7 +25,7 @@ pub(super) struct CommitArchiveTask {
 }
 
 impl CommitArchiveTask {
-    #[tracing::instrument(skip_all, name = "commit_archive_task", fields(archive_id = %archive_id))]
+    #[tracing::instrument(skip_all, name = "commit_archive", fields(archive_id = %archive_id))]
     pub(super) fn new(
         db: CoreDb,
         block_handle_storage: Arc<BlockHandleStorage>,
@@ -37,7 +37,7 @@ impl CommitArchiveTask {
         let span = tracing::Span::current();
 
         if archives.read_index_state().contains_key(&archive_id) {
-            tracing::warn!("Attempted to commit an already committed archive, skipping");
+            tracing::warn!("attempted to commit an already committed archive, skipping");
             return Self {
                 archive_id,
                 cancelled,
@@ -63,11 +63,10 @@ impl CommitArchiveTask {
                     .archive_block_ids
                     .get(archive_id.to_be_bytes())?
                     .ok_or(BlockStorageError::ArchiveNotFound)?;
-
-                if raw_block_ids.is_empty() {
-                    tracing::info!("no blocks to commit for archive {}", archive_id);
-                    return Ok(());
-                }
+                anyhow::ensure!(
+                    !raw_block_ids.is_empty(),
+                    "cannot commit empty archive, archive_id={archive_id}"
+                );
 
                 assert_eq!(raw_block_ids.len() % BlockId::SIZE_HINT, 0);
 
@@ -118,7 +117,9 @@ impl CommitArchiveTask {
 
                         tycho_util::compression::ZstdDecompress::begin(&data)?
                             .decompress(&mut decompressed_buffer)?;
-                        let data = &decompressed_buffer;
+                        let data = decompressed_buffer.as_slice();
+
+                        anyhow::ensure!(!cancelled.check(), "task aborted");
 
                         // Serialize entry header
                         header_buffer.clear();
@@ -131,7 +132,7 @@ impl CommitArchiveTask {
 
                         // Write entry header and data
                         writer.write(&header_buffer)?;
-                        writer.write(data.as_ref())?;
+                        writer.write(data)?;
                     }
 
                     unique_ids.clear();
@@ -243,7 +244,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_commit_task_empty_archive() -> Result<()> {
+    async fn cannot_commit_empty_archive() -> Result<()> {
         let (db, handles, blocks, archives, _temp_dir) = create_test_storage_components().await?;
         let archive_id = 3u32;
 
@@ -251,7 +252,9 @@ mod tests {
             .insert(archive_id.to_be_bytes(), vec![])?;
         CommitArchiveTask::new(db, handles, archive_id, blocks, archives)
             .finish()
-            .await?;
+            .await
+            .unwrap_err();
+
         Ok(())
     }
 

@@ -44,7 +44,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use cassadilia::Cas;
 use parking_lot::RwLock;
@@ -59,11 +59,11 @@ use tycho_util::metrics::HistogramGuard;
 use weedb::rocksdb;
 
 use self::task::CommitArchiveTask;
-pub use self::types::{ArchiveId, ArchiveState, BlockGcStats, BlockStorageError, OpenStats};
+pub use self::types::{ArchiveId, BlockGcStats, BlockStorageError, OpenStats};
 pub use self::util::remove_blocks;
 use super::package_entry::{PackageEntryKey, PartialBlockId};
 use crate::storage::block_handle::BlockDataGuard;
-use crate::storage::{BlockFlags, BlockHandle, BlockHandleStorage, BlockMeta, CoreDb};
+use crate::storage::{BlockFlags, BlockHandle, BlockHandleStorage, BlockMeta, CoreDb, tables};
 
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 
@@ -83,7 +83,7 @@ pub struct BlobStorage {
 }
 
 impl BlobStorage {
-    pub fn new(
+    pub async fn new(
         db: CoreDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         blobdb_path: &Path,
@@ -101,7 +101,7 @@ impl BlobStorage {
         let blocks = Cas::open(blobdb_path.join("packages"), config.clone())?;
         let archives = Cas::open(blobdb_path.join("archives"), config)?;
 
-        let mut storage = Self {
+        let storage = Self {
             db,
             block_handle_storage,
             archive_ids_tx,
@@ -113,257 +113,245 @@ impl BlobStorage {
             archives,
         };
 
-        storage.open_stats = storage.cleanup_orphaned_metadata()?;
-        tracing::info!("Open stats: {:?}", storage.open_stats);
+        let storage = storage
+            .sync_state_after_init()
+            .await
+            .context("failed to sync blob storage state on init")?;
 
         Ok(storage)
     }
 
-    /// Fixes consistency between metadata flags and actual data presence in CAS.
-    /// Handles both cases:
+    /// Ensures consistency between data stored in `RocksDB` and `CAS`.
+    ///
+    /// For archives we sync events and check `CAS` to contain all committed data:
+    /// - Add all "started" archives to the runtime map.
+    /// - Compute the latest "override next" id.
+    /// - Find all archives that are needed to commit.
+    /// - Ensure that `CAS` stored these committed archives.
+    ///
+    /// For block metadata handles both cases:
     /// - Blob is absent but the flag is still set (removes flag). In case of interrupted gc.
     /// - Blob exists but the flag is not set (restores flag). In case of interrupted block save.
-    pub(crate) fn cleanup_orphaned_metadata(&self) -> Result<OpenStats> {
+    async fn sync_state_after_init(mut self) -> Result<Self> {
         let started_at = Instant::now();
-        tracing::info!("started fixing block metadata consistency");
+        tracing::info!("started blob storage sync");
 
-        // Collect archive statistics
-        let archives_index = self.archives.read_index_state();
-        let archive_count = archives_index.len();
-        let mut archives_iter = archives_index.iter();
-        let archive_min_id = archives_iter.next().map(|(id, _)| *id);
-        let archive_max_id = archives_iter
-            .next_back()
-            .map(|(id, _)| *id)
-            .or(archive_min_id);
+        let (this, to_commit) = tokio::task::spawn_blocking(move || {
+            // Collect committed archive ids.
+            let committed_archives = self
+                .archives
+                .read_index_state()
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<BTreeSet<u32>>();
 
-        let blocks_index = self.blocks.read_index_state();
-        let package_entries_count = blocks_index.len();
+            // Process archive events.
+            let mut iter = self.db.archive_events.raw_iterator();
+            iter.seek_to_first();
 
-        let raw = self.db.rocksdb().as_ref();
-        let block_handles_cf = self.db.block_handles.cf();
-        let full_block_ids_cf = self.db.full_block_ids.cf();
+            let mut archive_ids = BTreeSet::new();
+            let mut archives_to_commit = Vec::new();
+            let mut override_next_id = None;
+            while let Some((key, value)) = iter.item() {
+                let archive_id = u32::from_be_bytes(key[..4].try_into().unwrap());
+                let event = u32::from_be_bytes(key[4..].try_into().unwrap());
 
-        let mut batch = rocksdb::WriteBatch::default();
-        let mut orphaned_flags_count = 0u32;
-        let mut restored_flags_count = 0u32;
+                const _: () = const {
+                    // Rely on the specific order of these constants
+                    assert!(ARCHIVE_EVENT_STARTED < ARCHIVE_EVENT_OVERRIDE_NEXT);
+                    assert!(ARCHIVE_EVENT_OVERRIDE_NEXT < ARCHIVE_EVENT_TO_COMMIT);
+                };
 
-        let mut iter =
-            raw.raw_iterator_cf_opt(&full_block_ids_cf, self.db.full_block_ids.new_read_config());
-        iter.seek_to_first();
-
-        while let Some((key, _)) = iter.item() {
-            let block_id = PartialBlockId::from_slice(key);
-            let root_hash = *block_id.root_hash.as_array();
-
-            // Get metadata
-            let meta_bytes = self
-                .db
-                .block_handles
-                .get(root_hash)?
-                .expect("all 3 tables are written in 1 transaction");
-
-            let calculated = BlockMeta::deserialize(&mut meta_bytes.as_ref());
-            let before_flags = calculated.flags();
-
-            // Always recompute flags from actual stored data
-            for (ty, flag) in [
-                (ArchiveEntryType::Block, BlockFlags::HAS_DATA),
-                (ArchiveEntryType::Proof, BlockFlags::HAS_PROOF),
-                (ArchiveEntryType::QueueDiff, BlockFlags::HAS_QUEUE_DIFF),
-            ] {
-                let key = PackageEntryKey { block_id, ty };
-
-                // in cas, not in flags
-                if blocks_index.contains_key(&key) {
-                    calculated.add_flags(flag);
-                } else {
-                    calculated.remove_flags(flag);
+                if let Some(next_id) = override_next_id {
+                    // Reset override when it is not needed.
+                    if archive_id > next_id {
+                        override_next_id = None;
+                    }
                 }
+
+                // Chunk keys are sorted by offset.
+                match event {
+                    // "Started" event comes first, and indicates that the archive exists.
+                    ARCHIVE_EVENT_STARTED => {
+                        archive_ids.insert(archive_id);
+                    }
+                    // "Override" event comes next, and sets the next archive id if was finished earlier.
+                    ARCHIVE_EVENT_OVERRIDE_NEXT => {
+                        override_next_id = Some(u32::from_le_bytes(value[..4].try_into().unwrap()));
+                    }
+                    // "To commit" event comes next, commit should have been started.
+                    ARCHIVE_EVENT_TO_COMMIT => {
+                        anyhow::ensure!(
+                            archive_ids.contains(&archive_id),
+                            "invalid archive TO_COMMIT entry"
+                        );
+                        archives_to_commit.push(archive_id);
+                    }
+                    // "Committed" event indicates that the archive must be stored in CAS.
+                    ARCHIVE_EVENT_COMMITTED => {
+                        // Last archive is already committed
+                        let last = archives_to_commit.pop();
+                        anyhow::ensure!(
+                            last == Some(archive_id),
+                            "invalid archive COMMITTED entry"
+                        );
+
+                        // Require only contiguous uncommited archives list
+                        anyhow::ensure!(archives_to_commit.is_empty(), "skipped archive commit");
+
+                        // Require CAS to contain the committed archive.
+                        anyhow::ensure!(
+                            committed_archives.contains(&archive_id),
+                            "archive has COMMITTED event but is not present in CAS, \
+                            archive_id={archive_id}"
+                        );
+                    }
+                    // Log unknown events.
+                    _ => tracing::warn!(archive_id, event, "skipping unknown archive event"),
+                }
+
+                iter.next();
+            }
+            iter.status()?;
+            drop(iter);
+
+            let archive_count = archive_ids.len();
+            let archive_min_id = archive_ids.first().copied();
+            let archive_max_id = archive_ids.last().copied();
+            {
+                let mut ids = self.archive_ids.write();
+                anyhow::ensure!(ids.items.is_empty(), "invalid initial blob storage state");
+                ids.items.extend(archive_ids);
+                ids.override_next_id = override_next_id;
             }
 
-            // If changed, save and update counters
-            if calculated.flags() != before_flags {
-                batch.put_cf(&block_handles_cf, root_hash, calculated.to_vec());
-                let removed_flags = before_flags - calculated.flags();
-                let added_flags = calculated.flags() - before_flags;
+            tracing::info!(
+                archive_count,
+                archive_min_id,
+                archive_max_id,
+                ?override_next_id,
+                ?archives_to_commit,
+                elapsed = %humantime::format_duration(started_at.elapsed()),
+                "preloaded archive ids"
+            );
 
-                tracing::debug!(
-                    ?block_id,
-                    ?added_flags,
-                    ?removed_flags,
-                    "Correcting block metadata inconsistency"
-                );
+            // Sync block ids.
+            let started_at = Instant::now();
+            let blocks_index = self.blocks.read_index_state();
+            let package_entries_count = blocks_index.len();
 
-                if removed_flags.intersects(BlockFlags::HAS_ALL_BLOCK_PARTS) {
-                    orphaned_flags_count += 1;
+            let mut batch = rocksdb::WriteBatch::default();
+            let mut orphaned_flags_count = 0u32;
+            let mut restored_flags_count = 0u32;
+
+            let raw = self.db.rocksdb().as_ref();
+            let block_handles_cf = self.db.block_handles.cf();
+            let mut iter = raw.raw_iterator_cf_opt(
+                &self.db.full_block_ids.cf(),
+                self.db.full_block_ids.new_read_config(),
+            );
+            iter.seek_to_first();
+
+            while let Some((key, _)) = iter.item() {
+                let block_id = PartialBlockId::from_slice(key);
+                let root_hash = *block_id.root_hash.as_array();
+
+                // Get metadata
+                let meta_bytes = self
+                    .db
+                    .block_handles
+                    .get(root_hash)?
+                    .expect("all 3 tables are written in 1 transaction");
+
+                let calculated = BlockMeta::deserialize(&mut meta_bytes.as_ref());
+                let before_flags = calculated.flags();
+
+                // Always recompute flags from actual stored data
+                for (ty, flag) in [
+                    (ArchiveEntryType::Block, BlockFlags::HAS_DATA),
+                    (ArchiveEntryType::Proof, BlockFlags::HAS_PROOF),
+                    (ArchiveEntryType::QueueDiff, BlockFlags::HAS_QUEUE_DIFF),
+                ] {
+                    let key = PackageEntryKey { block_id, ty };
+
+                    // in cas, not in flags
+                    if blocks_index.contains_key(&key) {
+                        calculated.add_flags(flag);
+                    } else {
+                        calculated.remove_flags(flag);
+                    }
                 }
-                if added_flags.intersects(BlockFlags::HAS_ALL_BLOCK_PARTS) {
-                    restored_flags_count += 1;
+
+                // If changed, save and update counters
+                if calculated.flags() != before_flags {
+                    batch.put_cf(&block_handles_cf, root_hash, calculated.to_vec());
+                    let removed_flags = before_flags - calculated.flags();
+                    let added_flags = calculated.flags() - before_flags;
+
+                    tracing::debug!(
+                        ?block_id,
+                        ?added_flags,
+                        ?removed_flags,
+                        "Correcting block metadata inconsistency"
+                    );
+
+                    if removed_flags.intersects(BlockFlags::HAS_ALL_BLOCK_PARTS) {
+                        orphaned_flags_count += 1;
+                    }
+                    if added_flags.intersects(BlockFlags::HAS_ALL_BLOCK_PARTS) {
+                        restored_flags_count += 1;
+                    }
                 }
+
+                iter.next();
             }
+            iter.status()?;
+            drop(iter);
 
-            iter.next();
-        }
-        iter.status()?;
-        raw.write(batch)?;
+            raw.write(batch)?;
 
-        // Clean up orphaned archive metadata
-        let mut archive_batch = rocksdb::WriteBatch::default();
-        let mut orphaned_archives_count = 0u32;
-        let archive_block_ids_cf = self.db.archive_block_ids.cf();
+            drop(blocks_index);
 
-        let mut archive_iter = raw.raw_iterator_cf_opt(
-            &archive_block_ids_cf,
-            self.db.archive_block_ids.new_read_config(),
-        );
-        archive_iter.seek_to_first();
+            tracing::info!(
+                package_entries_count,
+                orphaned_flags_count,
+                restored_flags_count,
+                elapsed = %humantime::format_duration(started_at.elapsed()),
+                "updated block metadata flags"
+            );
 
-        while let Some((key, _)) = archive_iter.item() {
-            assert_eq!(key.len(), 4);
-            let archive_id = u32::from_be_bytes(key[..4].try_into()?);
+            self.open_stats = OpenStats {
+                orphaned_flags_count,
+                restored_flags_count,
+                archive_count,
+                archive_min_id,
+                archive_max_id,
+                package_entries_count,
+            };
 
-            // If archive is already committed in Cassadilia, this metadata is orphaned
-            if archives_index.contains_key(&archive_id) {
-                tracing::debug!(
-                    archive_id,
-                    "found orphaned archive_block_ids entry for committed archive, cleaning up"
-                );
-                archive_batch.delete_cf(&archive_block_ids_cf, key);
-                orphaned_archives_count += 1;
-            }
-            archive_iter.next();
-        }
-        archive_iter.status()?;
+            Ok::<_, anyhow::Error>((self, archives_to_commit))
+        })
+        .await??;
 
-        if orphaned_archives_count > 0 {
-            raw.write(archive_batch)?;
+        for archive_id in to_commit {
+            tracing::info!(archive_id, "commit archive");
+            let mut task = this.spawn_commit_archive(archive_id);
+            task.finish().await?;
+
+            // Notify archive subscribers
+            this.archive_ids_tx.send(task.archive_id).ok();
         }
 
         tracing::info!(
-            orphaned_metadata_cleaned = orphaned_flags_count,
-            orphaned_data_restored = restored_flags_count,
-            orphaned_archives_cleaned = orphaned_archives_count,
             elapsed = %humantime::format_duration(started_at.elapsed()),
-            "fix_metadata_consistency completed"
+            "blob storage sync finished"
         );
 
-        Ok(OpenStats {
-            orphaned_flags_count,
-            restored_flags_count,
-            orphaned_archives_count,
-            archive_count,
-            archive_min_id,
-            archive_max_id,
-            package_entries_count,
-        })
+        Ok(this)
     }
 
     pub fn open_stats(&self) -> &OpenStats {
         &self.open_stats
-    }
-
-    /// Recover archive state from Cassadilia index and `archive_block_ids`
-    fn recover_archive_state(&self) -> Result<ArchiveState> {
-        let committed_archives = self
-            .archives
-            .read_index_state()
-            .iter()
-            .map(|(id, _)| *id)
-            .collect::<BTreeSet<u32>>();
-
-        let mut building_archives = Vec::new();
-        let mut iter = self.db.archive_block_ids.raw_iterator();
-        iter.seek_to_first();
-
-        while let Some((key, _)) = iter.item() {
-            assert_eq!(key.len(), 4);
-            let archive_id = u32::from_be_bytes(key[..4].try_into()?);
-            if !committed_archives.contains(&archive_id) {
-                building_archives.push(archive_id);
-            }
-            iter.next();
-        }
-
-        if let Err(e) = iter.status() {
-            return Err(anyhow::anyhow!(
-                "Failed to iterate archive_block_ids: {e:?}"
-            ));
-        }
-
-        building_archives.sort();
-        building_archives.dedup();
-
-        let current_archive_id = building_archives.last().copied();
-        let last_committed_id = committed_archives.iter().max().copied().unwrap_or(0);
-
-        Ok(ArchiveState {
-            committed_archives,
-            building_archives,
-            current_archive_id,
-            last_committed_id,
-        })
-    }
-
-    /// Preloads archive IDs from Cassadilia and handles incomplete archives.
-    ///
-    /// This method uses the new recovery function to:
-    /// 1. Load all committed archives from Cassadilia
-    /// 2. Detect incomplete archives in `archive_block_ids`
-    /// 3. Resume or cleanup incomplete archives
-    pub async fn preload_archive_ids(&self) -> Result<()> {
-        let started_at = Instant::now();
-
-        tracing::info!("started preloading archive ids");
-
-        let state = self.recover_archive_state()?;
-        let archive_count = state.committed_archives.len();
-
-        // Update in-memory structures
-        {
-            let mut ids = self.archive_ids.write();
-            ids.items = state.committed_archives.clone();
-        }
-
-        tracing::info!(
-            elapsed = %humantime::format_duration(started_at.elapsed()),
-            archive_count,
-            building_count = state.building_archives.len(),
-            "finished preloading archive ids"
-        );
-
-        // Handle any incomplete archives
-        for archive_id in state.building_archives {
-            if self.should_resume_archive(archive_id)? {
-                tracing::info!(archive_id, "resuming incomplete archive");
-                let mut task = self.spawn_commit_archive(archive_id);
-                task.finish().await?;
-                self.archive_ids_tx.send(task.archive_id).ok();
-            } else {
-                tracing::info!(archive_id, "cleaning up stale building archive");
-                self.cleanup_archive_block_ids(archive_id)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Determine if an archive should be resumed based on its state
-    fn should_resume_archive(&self, archive_id: u32) -> Result<bool> {
-        // Check if there are actually block IDs for this archive
-        match self.db.archive_block_ids.get(archive_id.to_be_bytes())? {
-            Some(block_ids) => Ok(!block_ids.is_empty()),
-            None => Ok(false),
-        }
-    }
-
-    /// Clean up `archive_block_ids` for a specific archive
-    fn cleanup_archive_block_ids(&self, archive_id: u32) -> Result<()> {
-        let mut batch = rocksdb::WriteBatch::default();
-        let archive_block_ids_cf = self.db.archive_block_ids.cf();
-        batch.delete_cf(&archive_block_ids_cf, archive_id.to_be_bytes());
-        self.db.rocksdb().write(batch)?;
-        Ok(())
     }
 
     pub async fn list_blocks(
@@ -523,6 +511,7 @@ impl BlobStorage {
 
         // Prepare cf
         let archive_block_ids_cf = self.db.archive_block_ids.cf();
+        let archive_events_cf = self.db.archive_events.cf();
 
         // Prepare archive
         let archive_id = self.prepare_archive_id(
@@ -536,13 +525,32 @@ impl BlobStorage {
         );
         let archive_id_bytes = archive_id.id.to_be_bytes();
 
-        // Create transaction
+        // 0. Create transaction
         let mut batch = rocksdb::WriteBatch::default();
-
-        // Append archive block id (this implicitly marks archive as "building")
+        // 1. Append archive block id.
         batch.merge_cf(&archive_block_ids_cf, archive_id_bytes, &block_id_bytes);
-
-        // Execute transaction
+        // 2. Store info that new archive was started
+        if archive_id.is_new {
+            let mut key = [0u8; tables::ArchiveEvents::KEY_LEN];
+            key[..4].copy_from_slice(&archive_id_bytes);
+            key[4..].copy_from_slice(&ARCHIVE_EVENT_STARTED.to_be_bytes());
+            batch.put_cf(&archive_events_cf, key, []);
+        }
+        // 3. Store info about overriding next archive id
+        if let Some(next_id) = archive_id.override_next_id {
+            let mut key = [0u8; tables::ArchiveEvents::KEY_LEN];
+            key[..4].copy_from_slice(&archive_id_bytes);
+            key[4..].copy_from_slice(&ARCHIVE_EVENT_OVERRIDE_NEXT.to_be_bytes());
+            batch.put_cf(&archive_events_cf, key, next_id.to_le_bytes());
+        }
+        // 4. Store info that we should start committing PREVIOUS archive.
+        if let Some(to_commit) = archive_id.to_commit {
+            let mut key = [0u8; tables::ArchiveEvents::KEY_LEN];
+            key[..4].copy_from_slice(&to_commit.to_be_bytes());
+            key[4..].copy_from_slice(&ARCHIVE_EVENT_TO_COMMIT.to_be_bytes());
+            batch.put_cf(&archive_events_cf, key, []);
+        }
+        // 4. Execute transaction
         self.db.rocksdb().write(batch)?;
 
         tracing::debug!(block_id = %handle.id(), "saved block id into archive");
@@ -643,22 +651,15 @@ impl BlobStorage {
         let (len, first, last) = {
             let mut archive_ids = self.archive_ids.write();
 
-            let retained_ids = match archive_ids
-                .items
-                .iter()
-                .rev()
-                .find(|&id| *id < until_id)
-                .cloned()
-            {
-                // Splits `archive_ids` into two parts - [..until_id] and [until_id..]
-                // `archive_ids` will now contain [..until_id]
+            let retained_ids = match archive_ids.items.range(..until_id).next_back().cloned() {
+                // Splits `archive_ids` into two parts, `archive_ids` will now contain `..until_id`.
                 Some(until_id) => archive_ids.items.split_off(&until_id),
                 None => {
                     tracing::trace!("nothing to remove");
                     return Ok(());
                 }
             };
-            // so we must swap maps to retain [until_id..] and get ids to remove
+            // so we must swap maps to retain [until_id..) and get ids to remove
             let removed_ids = std::mem::replace(&mut archive_ids.items, retained_ids);
 
             // Print removed range bounds and compute real `until_id`
@@ -680,22 +681,25 @@ impl BlobStorage {
         let db = self.db.clone();
 
         tokio::task::spawn_blocking(move || {
-            archives.remove_range(0..until_id)?;
-
-            // Clean up archive_block_ids entries for deleted archives
-            let archive_block_ids_cf = db.archive_block_ids.cf();
+            // Clean up events first.
+            let archive_events_cf = db.archive_events.cf();
             let write_options = db.archive_block_ids.write_config();
 
-            // Remove all archive_block_ids entries for archives in range [0, until_id)
-            let start_key = 0u32.to_be_bytes();
-            let end_key = until_id.to_be_bytes();
+            let start_key = [0u8; tables::ArchiveEvents::KEY_LEN];
+            // NOTE: End key points to the first entry of the `until_id` archive,
+            // because `delete_range` removes all entries in range ["from", "to").
+            let mut end_key = [0u8; tables::ArchiveEvents::KEY_LEN];
+            end_key[..4].copy_from_slice(&until_id.to_be_bytes());
 
             db.rocksdb().delete_range_cf_opt(
-                &archive_block_ids_cf,
+                &archive_events_cf,
                 start_key,
                 end_key,
                 write_options,
             )?;
+
+            // Only after removing events, remove committed archives.
+            archives.remove_range(0..until_id)?;
 
             tracing::info!(archive_count = len, first, last, "finished archives GC");
             Ok(())
@@ -783,22 +787,22 @@ impl BlobStorage {
     fn prepare_archive_id(&self, mc_seqno: u32, force_split_archive: bool) -> PreparedArchiveId {
         let mut archive_ids = self.archive_ids.write();
 
-        // Handle force split by setting override for next block
+        // Get the closest archive id
+        let prev_id = archive_ids.items.range(..=mc_seqno).next_back().cloned();
+
         if force_split_archive {
             archive_ids.override_next_id = Some(mc_seqno + 1);
         } else if let Some(next_id) = archive_ids.override_next_id {
             // Check if we've reached the override point
             match mc_seqno.cmp(&next_id) {
-                std::cmp::Ordering::Less => {
-                    // Not yet at override point, continue with current logic
-                }
+                std::cmp::Ordering::Less => {}
                 std::cmp::Ordering::Equal => {
                     // Start new archive at override point
                     let is_new = archive_ids.items.insert(mc_seqno);
-                    archive_ids.override_next_id = None;
-                    let prev_id = archive_ids.items.range(..mc_seqno).next_back().cloned();
                     return PreparedArchiveId {
                         id: mc_seqno,
+                        is_new,
+                        override_next_id: None,
                         to_commit: if is_new { prev_id } else { None },
                     };
                 }
@@ -809,12 +813,10 @@ impl BlobStorage {
             }
         }
 
-        // Get the closest archive id
-        let prev_id = archive_ids.items.range(..=mc_seqno).next_back().cloned();
-
         let mut archive_id = PreparedArchiveId {
             id: prev_id.unwrap_or_default(),
-            to_commit: None,
+            override_next_id: archive_ids.override_next_id,
+            ..Default::default()
         };
 
         let is_first_archive = prev_id.is_none();
@@ -822,6 +824,8 @@ impl BlobStorage {
             let is_new = archive_ids.items.insert(mc_seqno);
             archive_id = PreparedArchiveId {
                 id: mc_seqno,
+                is_new,
+                override_next_id: None,
                 to_commit: if is_new { prev_id } else { None },
             };
         }
@@ -859,6 +863,8 @@ async fn lock_block_handle(handle: &BlockHandle, ty: ArchiveEntryType) -> BlockD
 #[derive(Default, Debug)]
 struct PreparedArchiveId {
     id: u32,
+    is_new: bool,
+    override_next_id: Option<u32>,
     to_commit: Option<u32>,
 }
 
@@ -869,6 +875,17 @@ struct ArchiveIds {
 }
 
 type ArchiveIdsTx = broadcast::Sender<u32>;
+
+/// New archive was started (does not imply that is was committed yet).
+const ARCHIVE_EVENT_STARTED: u32 = 100;
+/// Force split current archive.
+///
+/// Next archive id must be stored as event data (u32 LE).
+const ARCHIVE_EVENT_OVERRIDE_NEXT: u32 = 200;
+/// Archive commit should have started.
+const ARCHIVE_EVENT_TO_COMMIT: u32 = 300;
+/// Archive was committed to CAS.
+const ARCHIVE_EVENT_COMMITTED: u32 = 400;
 
 #[cfg(test)]
 mod test {
@@ -906,7 +923,7 @@ mod test {
 
     pub async fn create_test_storage() -> Result<(BlobStorage, TempDir)> {
         let (db, handles, temp_dir) = create_temp_db_and_handles().await?;
-        let storage = BlobStorage::new(db, handles, temp_dir.path(), false)?;
+        let storage = BlobStorage::new(db, handles, temp_dir.path(), false).await?;
         Ok((storage, temp_dir))
     }
 
@@ -990,26 +1007,6 @@ mod test {
         check(10, false, 10, None);
         check(11, false, 11, Some(10));
         check(12, false, 11, None);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_should_resume() -> Result<()> {
-        let (storage, _temp_dir) = create_test_storage().await?;
-
-        storage
-            .db
-            .archive_block_ids
-            .insert(1u32.to_be_bytes(), create_test_block_id(100).to_vec())?;
-        storage
-            .db
-            .archive_block_ids
-            .insert(2u32.to_be_bytes(), vec![])?;
-
-        assert!(storage.should_resume_archive(1)?);
-        assert!(!storage.should_resume_archive(2)?);
-        assert!(!storage.should_resume_archive(999)?);
 
         Ok(())
     }

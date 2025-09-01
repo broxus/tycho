@@ -70,9 +70,8 @@ impl BlockStorage {
             block_handle_storage.clone(),
             &config.blobs_root,
             config.blob_db_config.pre_create_cas_tree,
-        )?;
-
-        blob_storage.preload_archive_ids().await?;
+        )
+        .await?;
 
         Ok(Self {
             blocks_cache,
@@ -86,11 +85,6 @@ impl BlockStorage {
 
     pub fn open_stats(&self) -> &OpenStats {
         self.blob_storage.open_stats()
-    }
-
-    /// Iterates over all archives and preloads their ids into memory.
-    pub async fn preload_archive_ids(&self) -> Result<()> {
-        self.blob_storage.preload_archive_ids().await
     }
 
     // === Subscription stuff ===

@@ -64,6 +64,7 @@ weedb::tables! {
     pub struct CoreTables<TableContext> {
         pub state: tables::State,
         pub archive_block_ids: tables::ArchiveBlockIds,
+        pub archive_events: tables::ArchiveEvents,
         pub block_handles: tables::BlockHandles,
         pub key_blocks: tables::KeyBlocks,
         pub full_block_ids: tables::FullBlockIds,

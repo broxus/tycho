@@ -29,17 +29,8 @@ pub struct BlockGcStats {
 pub struct OpenStats {
     pub orphaned_flags_count: u32,
     pub restored_flags_count: u32,
-    pub orphaned_archives_count: u32,
     pub archive_count: usize,
     pub archive_min_id: Option<u32>,
     pub archive_max_id: Option<u32>,
     pub package_entries_count: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ArchiveState {
-    pub committed_archives: std::collections::BTreeSet<u32>,
-    pub building_archives: Vec<u32>,
-    pub current_archive_id: Option<u32>,
-    pub last_committed_id: u32,
 }

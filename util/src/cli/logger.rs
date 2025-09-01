@@ -286,8 +286,6 @@ pub fn init_logger(config: &LoggerConfig, logger_targets: Option<PathBuf>) -> Re
             .unwrap();
     }
 
-    tracing::info!("logger initialized with config: {config:?}");
-
     Ok(())
 }
 

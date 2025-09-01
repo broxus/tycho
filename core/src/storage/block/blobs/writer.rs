@@ -3,7 +3,8 @@ use cassadilia::{Cas, Transaction};
 use tycho_util::compression::ZstdCompressStream;
 use weedb::rocksdb;
 
-use crate::storage::CoreDb;
+use super::ARCHIVE_EVENT_COMMITTED;
+use crate::storage::{CoreDb, tables};
 
 pub(super) struct ArchiveWriter<'a> {
     db: &'a CoreDb,
@@ -47,18 +48,30 @@ impl<'a> ArchiveWriter<'a> {
     pub(super) fn finalize(mut self) -> Result<()> {
         // Finish compression stream to flush any remaining data
         self.zstd_compressor.finish(&mut self.compress_buffer)?;
-
         if !self.compress_buffer.is_empty() {
             self.transaction.write(&self.compress_buffer)?;
         }
 
+        // Store the committed data to CAS first.
         self.transaction.finish()?;
-        let block_ids_cf = self.db.archive_block_ids.cf();
+
+        // Only after that we remove the entry and
+        // at the same time adding a "COMMITTED" event.
         let mut batch = rocksdb::WriteBatch::default();
 
-        // Remove related block ids
-        batch.delete_cf(&block_ids_cf, self.archive_id.to_be_bytes());
+        // Write a special entry with the total size of the archive
+        let mut key = [0u8; tables::ArchiveEvents::KEY_LEN];
+        key[..4].copy_from_slice(&self.archive_id.to_be_bytes());
+        key[4..].copy_from_slice(&ARCHIVE_EVENT_COMMITTED.to_be_bytes());
+        batch.put_cf(&self.db.archive_events.cf(), key.as_slice(), []);
 
+        // Remove related block ids.
+        batch.delete_cf(
+            &self.db.archive_block_ids.cf(),
+            self.archive_id.to_be_bytes(),
+        );
+
+        // Done
         self.db.rocksdb().write(batch)?;
         Ok(())
     }
