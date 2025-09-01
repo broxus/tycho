@@ -1,6 +1,7 @@
 use weedb::rocksdb::MergeOperands;
 
 use crate::effects::AltFormat;
+use crate::storage::format_point_key;
 
 const MEMPOOL_DB_STATUS_MERGE: &str = "MEMPOOL_DB_STATUS_MERGE";
 
@@ -50,7 +51,7 @@ impl StatusFlags {
     }
 }
 
-pub(crate) fn merge(
+pub(super) fn merge(
     key: &[u8],
     stored: Option<&[u8]>,
     new_status_queue: &MergeOperands,
@@ -59,7 +60,7 @@ pub(crate) fn merge(
         StatusFlags::try_from_stored(value).unwrap_or_else(|msg| {
             tracing::error!(
                 target: MEMPOOL_DB_STATUS_MERGE,
-                "ignore {msg}, key: {}", super::format_key(key)
+                "ignore {msg}, key: {}", format_point_key(key)
             );
             None
         })
@@ -91,7 +92,7 @@ pub(crate) fn merge(
                             "cannot merge NOT_FOUND author: use {} ignore {}, key {}",
                             (&a[1..]).alt(),
                             (&b[1..]).alt(),
-                            super::format_key(key)
+                            format_point_key(key)
                         );
                     }
                     return a.max(b); // max by u8 for common length, else the longest
