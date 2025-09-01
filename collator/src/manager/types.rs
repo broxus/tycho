@@ -92,6 +92,10 @@ pub(super) enum CollationStatus {
     /// and not trying to collate current shard,
     /// will not import next anchor
     WaitForMasterStatus,
+    /// Master collator is waiting for shard status,
+    /// and not trying to collate master,
+    /// will not import next anchor
+    WaitForShardStatus,
     /// Current shard is ready for master collation,
     /// collator is not trying to collate current shard,
     /// will not import next anchor
@@ -101,6 +105,7 @@ pub(super) enum CollationStatus {
 #[derive(Debug)]
 pub(super) enum NextCollationStep {
     WaitForMasterStatus,
+    WaitForShardStatus,
     ResumeAttemptsIn(Vec<ShardIdent>),
     CollateMaster(u64),
 }
