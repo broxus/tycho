@@ -133,14 +133,19 @@ struct (0x12) ValidatorSet {
 
 struct ValidatorDescr {
     pubkey: uint256
-    weight: uint64
+    // NOTE: It is not uint64 because we need to prevent
+    // compiler from generating auto pack/unpack
+    weight: int
     adnlAddr: uint256
 }
 
 const VALIDATOR_DESCR_TAG_SIMPLE = 0x53
 const VALIDATOR_DESCR_TAG_WITH_ADDR = 0x73
 
-fun ValidatorDescr.packToBuilder(self, mutate b: builder) {
+// NOTE: We cannot use `packToBuilder` here since it will
+// NOT override a custom serialization.
+fun ValidatorDescr.toBuilder(self) {
+    var b = beginCell();
     val withAddr = self.adnlAddr != 0;
     b.storeUint(withAddr ? VALIDATOR_DESCR_TAG_WITH_ADDR : VALIDATOR_DESCR_TAG_SIMPLE, 8);
     b.storeUint(PUBKEY_TAG_ED25519, 32);
@@ -149,9 +154,12 @@ fun ValidatorDescr.packToBuilder(self, mutate b: builder) {
     if (withAddr) {
         b.storeUint(self.adnlAddr, 256);
     }
+    return b;
 }
 
-fun ValidatorDescr.unpackFromSlice(mutate s: slice): ValidatorDescr {
+// NOTE: We cannot use `unpackFromSlice` here since it will
+// NOT override a custom deserialization.
+fun ValidatorDescr.readFromSlice(mutate s: slice): ValidatorDescr {
     val tag = s.loadUint(8);
     assert((tag & ~0x20) == VALIDATOR_DESCR_TAG_SIMPLE, ERROR_INVALID_VALIDATOR_DESCR);
     assert(s.loadUint(32) == PUBKEY_TAG_ED25519, ERROR_INVALID_VALIDATOR_DESCR);

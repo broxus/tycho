@@ -218,7 +218,7 @@ fun onExternalMessage(body: slice) {
 
         // Get validator pubkey by index and use it to check message signature.
         var validatorCs = CurrentVset.getValidatorDescription(validatorIdx);
-        val validator = ValidatorDescr.unpackFromSlice(mutate validatorCs!);
+        val validator = ValidatorDescr.readFromSlice(mutate validatorCs!);
         assert(isSliceSignatureValid(body, signature, validator.pubkey), 34);
         acceptExternalMessage();
 
@@ -834,7 +834,7 @@ fun processVoteForProposal(sender: address, queryId: int, body: slice) {
 
     // Verify message signature.
     var validatorCs = CurrentVset.getValidatorDescription(signed.validatorIdx);
-    val validator = ValidatorDescr.fromSlice(validatorCs!);
+    val validator = ValidatorDescr.readFromSlice(mutate validatorCs!);
     assert(isSliceSignatureValid(signedCs, signature, validator.pubkey), 34);
 
     // Handle vote.

@@ -494,7 +494,7 @@ fun ElectionResult.compute(
                 weight,
                 adnlAddr,
             };
-            validators.uDictSetBuilder(16, i, beginCell().storeAny(validatorDescr));
+            validators.uDictSetBuilder(16, i, validatorDescr.toBuilder());
 
             // Add frozen stakes item.
             var frozenStakeDescr = FrozenStake {
