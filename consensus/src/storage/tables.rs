@@ -4,7 +4,7 @@ use tycho_storage::kv::{
 use weedb::rocksdb::{DBCompressionType, Options};
 use weedb::{ColumnFamily, ColumnFamilyOptions};
 
-use super::status_flags;
+use super::{journal_store, status_flags};
 
 impl NamedTables for MempoolTables {
     const NAME: &'static str = "mempool";
@@ -19,6 +19,9 @@ weedb::tables! {
         pub points: Points,
         pub points_info: PointsInfo,
         pub points_status: PointsStatus,
+        pub journal: Journal,
+        pub journal_points: JournalPoints,
+        pub journal_round_time: JournalRoundTime,
     }
 }
 
@@ -75,5 +78,63 @@ impl ColumnFamilyOptions<TableContext> for PointsStatus {
         opts.set_disable_auto_compactions(true);
 
         opts.set_merge_operator_associative("points_status_merge", status_flags::merge);
+    }
+}
+
+/// Stores mempool moderation-related events
+/// - Key: [`crate::storage::RecordKey`]
+/// - Value: [`crate::storage::RecordValue`]
+pub struct Journal;
+
+impl ColumnFamily for Journal {
+    const NAME: &'static str = "journal";
+}
+
+impl ColumnFamilyOptions<TableContext> for Journal {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        optimize_for_point_lookup(opts, ctx);
+        opts.set_disable_auto_compactions(true);
+    }
+}
+
+/// Mempool points linked to events are stored across versions
+/// - Key: `round: u32, digest: [u8; 32]` as in [`Points`]
+/// - Value: [`crate::models::Point`]
+pub struct JournalPoints;
+
+impl ColumnFamily for JournalPoints {
+    const NAME: &'static str = "journal_points";
+}
+
+impl ColumnFamilyOptions<TableContext> for JournalPoints {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        optimize_for_point_lookup(opts, ctx);
+        opts.set_disable_auto_compactions(true);
+
+        opts.set_enable_blob_files(true);
+        opts.set_enable_blob_gc(false);
+        opts.set_min_blob_size(DEFAULT_MIN_BLOB_SIZE);
+        opts.set_blob_compression_type(DBCompressionType::None);
+    }
+}
+
+/// A narrow index to remove outdated points from event store
+/// - Key: [`crate::models::Round`] as in [`crate::storage::RecordKey`]
+/// - Value: [`crate::models::UnixTime`] as in [`Points`] key
+pub struct JournalRoundTime;
+
+impl ColumnFamily for JournalRoundTime {
+    const NAME: &'static str = "journal_round_time";
+}
+
+impl ColumnFamilyOptions<TableContext> for JournalRoundTime {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        optimize_for_point_lookup(opts, ctx);
+        opts.set_disable_auto_compactions(true);
+
+        opts.set_merge_operator_associative(
+            "journal_round_time_merge_max_value",
+            journal_store::merge_max_value,
+        );
     }
 }
