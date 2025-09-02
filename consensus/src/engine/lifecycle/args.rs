@@ -10,6 +10,7 @@ use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
 use crate::engine::{InputBuffer, MempoolMergedConfig};
 use crate::intercom::{Dispatcher, InitPeers, PeerSchedule, Responder};
 use crate::models::MempoolOutput;
+use crate::moderator::Moderator;
 use crate::storage::MempoolDb;
 
 #[derive(Clone)]
@@ -27,10 +28,12 @@ pub struct EngineNetworkArgs {
     pub network: Network,
     pub peer_resolver: PeerResolver,
     pub overlay_service: OverlayService,
+    pub moderator: Moderator,
 }
 
 // private to crate, do not impl `Clone`
 pub struct EngineNetwork {
+    pub moderator: Moderator,
     pub peer_schedule: PeerSchedule,
     pub dispatcher: Dispatcher,
     /// dropped at full restart
@@ -66,6 +69,7 @@ impl EngineNetwork {
         peer_schedule.init(merged_conf, init_peers);
 
         Self {
+            moderator: net_args.moderator.clone(),
             peer_schedule,
             dispatcher,
             responder,

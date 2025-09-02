@@ -108,3 +108,37 @@ intercom.queryRequest {X:Type} tag:intercom.QueryTag body:X = intercom.QueryRequ
 intercom.queryTag.broadcast                                 = intercom.QueryTag;
 intercom.queryTag.pointById                                 = intercom.QueryTag;
 intercom.queryTag.signature                                 = intercom.QueryTag;
+
+/*
+* Stored event
+*/
+consensus.storedEvent
+    tag:consensus.EventTag
+    severity:consensus.EventSeverity
+    peer_id:int256
+    point_keys:bytes
+    message:bytes
+    = consensus.StoredEvent;
+
+/*
+* Stored event severity
+*/
+consensus.eventSeverity.info                                = consensus.EventSeverity;
+consensus.eventSeverity.warn                                = consensus.EventSeverity;
+
+/*
+* Stored event type tag
+*/
+consensus.eventTag.nodeStarted                              = consensus.EventTag;
+consensus.eventTag.banned                                   = consensus.EventTag;
+consensus.eventTag.unbanned                                 = consensus.EventTag;
+consensus.eventTag.unknownQuery                             = consensus.EventTag;
+consensus.eventTag.queryLimitReached                        = consensus.EventTag;
+consensus.eventTag.badRequest                               = consensus.EventTag;
+consensus.eventTag.badResponse                              = consensus.EventTag;
+consensus.eventTag.badPoint                                 = consensus.EventTag;
+consensus.eventTag.senderNotAuthor                          = consensus.EventTag;
+consensus.eventTag.equivocated                              = consensus.EventTag;
+consensus.eventTag.evidenceNoInclusion                      = consensus.EventTag;
+consensus.eventTag.illFormed                                = consensus.EventTag;
+consensus.eventTag.invalid                                  = consensus.EventTag;

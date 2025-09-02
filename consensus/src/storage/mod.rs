@@ -1,20 +1,26 @@
 pub use adapter_store::*;
 pub use db::*;
 pub use db_cleaner::*;
+pub use event::*;
+pub use event_store::*;
 pub use status_flags::*;
 pub use store::*;
 
 mod adapter_store;
 mod db;
 mod db_cleaner;
+mod event;
+mod event_store;
 mod status_flags;
 mod store;
 mod tables;
 
 use crate::effects::AltFormat;
-use crate::models::{Digest, Round};
+use crate::models::{Digest, Round, UnixTime};
 
 const POINT_KEY_LEN: usize = Round::MAX_TL_SIZE + Digest::MAX_TL_BYTES;
+
+const EVENT_KEY_LEN: usize = UnixTime::MAX_TL_BYTES + size_of::<u32>();
 
 fn fill_point_key(round: u32, digest: &[u8; 32], key: &mut [u8; POINT_KEY_LEN]) {
     fill_point_prefix(round, key);
