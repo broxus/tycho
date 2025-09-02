@@ -118,7 +118,7 @@ def handle_ordinary_tx(tx: nt.Transaction):
 
             case 0x4E436F64:
                 code = body.load_reference()
-                print(f">>> upgrade code\n    code_hash: {code.repr_hash}")
+                print(f">>> upgrade code\n    code_hash: {code.repr_hash.hex()}")
 
             case 0xEE764F4B | 0xEE764F6F:
                 print(">>> config set confirmed")

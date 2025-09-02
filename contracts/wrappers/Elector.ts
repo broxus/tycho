@@ -47,9 +47,9 @@ export function loadElectorData(cs: Slice): ElectorData {
         return res;
       },
     }),
-    grams: 0n,
-    activeId: 0,
-    activeHash: 0n,
+    grams: cs.loadCoins(),
+    activeId: cs.loadUint(32),
+    activeHash: cs.loadUintBig(256),
   };
 }
 
