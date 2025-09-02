@@ -93,15 +93,7 @@ impl Engine {
             }
         });
 
-        let round_task = RoundTaskReady::new(
-            &net.dispatcher,
-            net.peer_schedule.clone(),
-            store,
-            &consensus_round,
-            bind.top_known_anchor.clone(),
-            net.responder.clone(),
-            bind.input_buffer.clone(),
-        );
+        let round_task = RoundTaskReady::new(&store, bind, &consensus_round, net);
 
         let peer_schedule_updater = engine_ctx.task().spawn({
             let peer_schedule = net.peer_schedule.clone();
