@@ -708,6 +708,10 @@ impl MessageGroup {
         self.msgs.len()
     }
 
+    pub fn account_ids(&self) -> impl Iterator<Item = &HashBytes> {
+        self.msgs.keys()
+    }
+
     pub fn messages_count(&self) -> usize {
         self.slots_info.msgs_count()
     }

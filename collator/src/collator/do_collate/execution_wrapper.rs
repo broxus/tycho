@@ -60,6 +60,9 @@ impl ExecutorWrapper {
             }
 
             collation_data.inserted_new_msgs_count += 1;
+            // Count only created internal out messages towards total items
+            collation_data.block_limit.total_items =
+                collation_data.block_limit.total_items.saturating_add(1);
             new_messages.push(Arc::new(EnqueuedMessage::from((
                 int_msg_info,
                 out_msg.cell,

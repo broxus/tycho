@@ -125,6 +125,9 @@ impl MessagesExecutor {
         let config = self.config.clone();
         let params = self.params.clone();
 
+        // collect touched account ids before consuming the group
+        let touched_account_ids: Vec<HashBytes> = msg_group.account_ids().cloned().collect();
+
         let accounts_cache = Arc::new(&self.accounts_cache);
         let result = msg_group
             .into_par_iter()
@@ -197,6 +200,7 @@ impl MessagesExecutor {
             items,
             ext_msgs_error_count,
             ext_msgs_skipped,
+            touched_account_ids,
         })
     }
 
@@ -418,6 +422,7 @@ pub struct ExecutedGroup {
     pub items: Vec<ExecutedTickItem>,
     pub ext_msgs_error_count: u64,
     pub ext_msgs_skipped: u64,
+    pub touched_account_ids: Vec<HashBytes>,
 }
 
 pub struct ExecutedTickItem {
