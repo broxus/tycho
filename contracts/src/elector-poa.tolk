@@ -8,10 +8,10 @@ tolk 1.0
 
 const STAKE_ERR_NOT_IN_WHITELIST = 100
 
-const ELECTOR_POA_OP_ADD_ADDRESS = stringCrc16("op::poa_add_address")
-const ELECTOR_POA_OP_REMOVE_ADDRESS = stringCrc16("op::poa_remove_address")
+const ELECTOR_POA_OP_ADD_ADDRESS = 0x6e764f6f
+const ELECTOR_POA_OP_REMOVE_ADDRESS = 0x56efd52d
 
-const ANSWER_TAG_POA_WHITELIST_UPDATED = stringCrc16("answer::poa_whitelist_updated")
+const ANSWER_TAG_POA_WHITELIST_UPDATED = 0xbc06677e
 
 const WHITELIST_KEY_LEN = 256
 
