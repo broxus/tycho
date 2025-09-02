@@ -122,6 +122,9 @@ impl Service<ServiceRequest> for Responder {
     }
 }
 
+#[derive(Debug)]
+pub enum QueryLimitError {}
+
 impl ResponderInner {
     async fn handle_query(self: Arc<Self>, req: ServiceRequest) -> Option<Response> {
         let task_start = Instant::now();

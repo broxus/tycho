@@ -1,5 +1,5 @@
-pub use core::Responder;
 pub use core::dispatcher::*;
+pub use core::{QueryLimitError, QueryRequestTag, Responder};
 
 pub use broadcast::*;
 pub use dependency::*;

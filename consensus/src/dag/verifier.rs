@@ -65,7 +65,7 @@ pub enum VerifyFailReason {
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum IllFormedReason {
     #[error("ill-formed after load from DB")]
-    AfterLoadFromDb, // TODO describe all reasons and save them to DB, then remove this stub
+    AfterLoadFromDb, // reason is kept in separate DB table, use control server to inspect it
     #[error("point before genesis cannot exist in this overlay")]
     BeforeGenesis,
     #[error("too large payload: {0} bytes")]
@@ -94,7 +94,7 @@ pub enum IllFormedReason {
 #[derive(thiserror::Error, Debug)]
 pub enum InvalidReason {
     #[error("invalid after load from DB")]
-    AfterLoadFromDb, // TODO describe all reasons and save them to DB, then remove this stub
+    AfterLoadFromDb, // reason is kept in separate DB table, use control server to inspect it
     #[error("cannot validate point, no {0:?} round in DAG")]
     NoRoundInDag(PointMap),
     #[error("cannot validate point, dependency was dropped with its round")]

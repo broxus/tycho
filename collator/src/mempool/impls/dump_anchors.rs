@@ -36,7 +36,7 @@ impl DumpAnchors {
              got top_processed_to_anchor={top_processed_to_anchor} and {genesis_info:?}",
         );
 
-        let mut config_builder = MempoolConfigBuilder::new(mempool_node_config);
+        let mut config_builder = MempoolConfigBuilder::new(mempool_node_config)?;
         config_builder.set_consensus_config(consensus_config)?;
         config_builder.set_genesis(genesis_info);
 

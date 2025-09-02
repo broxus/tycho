@@ -1,18 +1,20 @@
 use std::sync::Arc;
 
+use anyhow::Context;
 use tycho_storage::StorageContext;
 use tycho_storage::kv::NamedTables;
 use tycho_util::metrics::HistogramGuard;
 use weedb::WeeDb;
 use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
 
-use super::{POINT_KEY_LEN, format_point_key};
 use crate::engine::round_watch::{Commit, RoundWatch};
+use crate::models::{Round, UnixTime};
+use crate::moderator::RecordKey;
 use crate::storage::tables::MempoolTables;
+use crate::storage::{POINT_KEY_LEN, format_point_key};
 
 pub struct MempoolDb {
-    // NOTE: Context should have at least the lifetime of the created DB.
-    #[allow(unused)]
+    #[allow(unused, reason = "context must have at least the lifetime of the DB")]
     pub(super) ctx: StorageContext,
     pub(super) db: WeeDb<MempoolTables>,
     pub(super) commit_finished: RoundWatch<Commit>,
@@ -99,6 +101,55 @@ impl MempoolDb {
         rocksdb.compact_range_cf(&points_cf, none, Some(up_to_exclusive));
 
         Ok(first.zip(last))
+    }
+
+    /// delete all stored event data up to provided time (exclusive);
+    /// returns range of logically deleted keys
+    pub(super) fn clean_events(&self, up_to_exclusive: UnixTime) -> anyhow::Result<()> {
+        let _call_duration = HistogramGuard::begin("tycho_mempool_store_clean_events_time");
+
+        let max_time = up_to_exclusive.millis().to_be_bytes();
+
+        let round_none: Option<[u8; Round::MAX_TL_SIZE]> = None;
+        let round_zero: [u8; Round::MAX_TL_SIZE] = 0_u32.to_be_bytes();
+        let mut max_round = u32::MAX.to_be_bytes().to_vec().into_boxed_slice();
+
+        let time_scan = self.db.event_round_time.iterator(IteratorMode::Start);
+        for result in time_scan {
+            let (k, v) = result.context("event round time scan")?;
+            if *v <= max_time[..] {
+                max_round = k;
+            } else {
+                break;
+            }
+        }
+
+        let event_key_none: Option<[u8; RecordKey::MAX_TL_BYTES]> = None;
+        let event_key_zero: [u8; RecordKey::MAX_TL_BYTES] = [0; _];
+        let mut event_key_max_excl: [u8; RecordKey::MAX_TL_BYTES] = [0; _];
+        event_key_max_excl[..UnixTime::MAX_TL_BYTES].copy_from_slice(&max_time);
+
+        let point_key_none: Option<[u8; POINT_KEY_LEN]> = None;
+        let point_key_zero: [u8; POINT_KEY_LEN] = [0; _];
+        let mut point_key_max_excl: [u8; POINT_KEY_LEN] = [0; _];
+        point_key_max_excl[..Round::MAX_TL_SIZE].copy_from_slice(&max_round);
+
+        let journal_cf = self.db.tables().journal.cf();
+        let event_points_cf = self.db.tables().event_points.cf();
+        let event_round_time_cf = self.db.tables().event_round_time.cf();
+        let rocksdb = self.db.rocksdb();
+
+        let mut batch = WriteBatch::default();
+        batch.delete_range_cf(&journal_cf, &event_key_zero, &event_key_max_excl);
+        batch.delete_range_cf(&event_points_cf, &point_key_zero, &point_key_max_excl);
+        batch.delete_range_cf(&event_round_time_cf, &round_zero[..], &max_round[..]);
+        rocksdb.write(batch)?;
+
+        rocksdb.compact_range_cf(&journal_cf, event_key_none, Some(event_key_max_excl));
+        rocksdb.compact_range_cf(&event_points_cf, point_key_none, Some(point_key_max_excl));
+        rocksdb.compact_range_cf(&event_round_time_cf, round_none, Some(max_round));
+
+        Ok(())
     }
 
     /// Use when no reads/writes are possible, and this should finish prior other ops

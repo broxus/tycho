@@ -148,7 +148,7 @@ macro_rules! impl_round_add_sub {
 }
 impl_round_add_sub! { u8, u16, u32 }
 
-#[derive(Copy, Clone, TlRead, TlWrite, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, TlRead, TlWrite)]
 pub struct UnixTime(u64);
 
 impl UnixTime {

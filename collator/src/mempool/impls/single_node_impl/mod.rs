@@ -33,7 +33,7 @@ struct SingleNodeConfigAdapter {
 
 impl MempoolAdapterSingleNodeImpl {
     pub fn new(mempool_node_config: &MempoolNodeConfig, local_peer_id: PeerId) -> Result<Self> {
-        let config_builder = MempoolConfigBuilder::new(mempool_node_config);
+        let config_builder = MempoolConfigBuilder::new(mempool_node_config)?;
 
         Ok(Self {
             cache: Default::default(),

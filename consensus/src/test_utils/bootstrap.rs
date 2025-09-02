@@ -31,7 +31,7 @@ pub fn default_test_config() -> MempoolMergedConfig {
         ..Default::default()
     };
 
-    let mut builder = MempoolConfigBuilder::new(&node_config);
+    let mut builder = MempoolConfigBuilder::new(&node_config).unwrap();
     builder.set_genesis(GenesisInfo::default());
     builder
         .set_consensus_config(&consensus_config)
