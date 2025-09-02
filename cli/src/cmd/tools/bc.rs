@@ -55,6 +55,10 @@ pub struct GetParamCmd {
     /// parameter index
     param: i32,
 
+    /// show value as a raw base64-encoded BOC
+    #[clap(long)]
+    raw_value: bool,
+
     /// RPC url
     #[clap(long)]
     rpc: Url,
@@ -64,8 +68,18 @@ impl GetParamCmd {
     async fn run(self) -> Result<()> {
         let client = JrpcClient::new(self.rpc)?;
         let res = client.get_config().await?;
-        let params = serde_json::to_value(res.config.params)?;
-        let item = &params.get(self.param.to_string());
+
+        let item = if self.raw_value {
+            res.config
+                .params
+                .get_raw_cell(self.param as u32)
+                .context("invalid config")?
+                .map(Boc::encode_base64)
+                .map(serde_json::Value::String)
+        } else {
+            let params = serde_json::to_value(res.config.params)?;
+            params.get(self.param.to_string()).cloned()
+        };
 
         let output = serde_json::json!({
             "global_id": res.global_id,
@@ -85,6 +99,10 @@ pub struct SetParamCmd {
     /// parameter value
     value: String,
 
+    /// treat value as a raw base64-encoded BOC
+    #[clap(long)]
+    raw_value: bool,
+
     /// RPC url
     #[clap(long)]
     rpc: Url,
@@ -99,7 +117,9 @@ impl SetParamCmd {
 
         let index = self.param as u32;
 
-        let value = {
+        let value = if self.raw_value {
+            Boc::decode_base64(self.value).context("invalid param")?
+        } else {
             let value =
                 serde_json::from_str::<serde_json::Value>(&self.value).context("invalid value")?;
 

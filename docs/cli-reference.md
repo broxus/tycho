@@ -642,7 +642,7 @@ Blockchain stuff
 
 Get blockchain config parameter
 
-**Usage:** `tycho tool bc get-param --rpc <RPC> <PARAM>`
+**Usage:** `tycho tool bc get-param [OPTIONS] --rpc <RPC> <PARAM>`
 
 ###### **Arguments:**
 
@@ -650,6 +650,7 @@ Get blockchain config parameter
 
 ###### **Options:**
 
+* `--raw-value` — show value as a raw base64-encoded BOC
 * `--rpc <RPC>` — RPC url
 
 
@@ -667,6 +668,7 @@ Set blockchain config parameter
 
 ###### **Options:**
 
+* `--raw-value` — treat value as a raw base64-encoded BOC
 * `--rpc <RPC>` — RPC url
 * `--ttl <TTL>` — message ttl
 
