@@ -10,6 +10,7 @@ use crate::dag::{
 };
 use crate::effects::{AltFormat, CollectCtx, Ctx, RoundCtx, Task, TaskResult, ValidateCtx};
 use crate::engine::input_buffer::InputBuffer;
+use crate::engine::lifecycle::{EngineBinding, EngineNetwork};
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
@@ -19,13 +20,13 @@ use crate::models::{Cert, Link, Point, PointInfo};
 use crate::storage::MempoolStore;
 
 pub struct RoundTaskState {
-    pub peer_schedule: PeerSchedule,
     pub store: MempoolStore,
-    pub responder: Responder,
+    input_buffer: InputBuffer,
     pub top_known_anchor: RoundWatch<TopKnownAnchor>,
     pub consensus_round: RoundWatch<Consensus>,
-    input_buffer: InputBuffer,
+    pub peer_schedule: PeerSchedule,
     dispatcher: Dispatcher,
+    pub responder: Responder,
     pub broadcast_filter: BroadcastFilter,
     pub downloader: Downloader,
 }
@@ -41,25 +42,26 @@ pub struct RoundTaskReady {
 
 impl RoundTaskReady {
     pub fn new(
-        dispatcher: &Dispatcher,
-        peer_schedule: PeerSchedule,
-        store: MempoolStore,
+        store: &MempoolStore,
+        bind: &EngineBinding,
         consensus_round: &RoundWatch<Consensus>,
-        top_known_anchor: RoundWatch<TopKnownAnchor>,
-        responder: Responder,
-        input_buffer: InputBuffer,
+        net: &EngineNetwork,
     ) -> Self {
-        let broadcast_filter = BroadcastFilter::new(&peer_schedule, consensus_round);
-        let downloader = Downloader::new(dispatcher, &peer_schedule, consensus_round.receiver());
+        let broadcast_filter = BroadcastFilter::new(&net.peer_schedule, consensus_round);
+        let downloader = Downloader::new(
+            &net.dispatcher,
+            &net.peer_schedule,
+            consensus_round.receiver(),
+        );
         Self {
             state: RoundTaskState {
-                peer_schedule,
-                store,
-                responder,
-                top_known_anchor,
+                store: store.clone(),
+                input_buffer: bind.input_buffer.clone(),
+                top_known_anchor: bind.top_known_anchor.clone(),
                 consensus_round: consensus_round.clone(),
-                input_buffer,
-                dispatcher: dispatcher.clone(),
+                peer_schedule: net.peer_schedule.clone(),
+                dispatcher: net.dispatcher.clone(),
+                responder: net.responder.clone(),
                 broadcast_filter,
                 downloader,
             },
@@ -187,10 +189,10 @@ impl RoundTaskReady {
         // Signer must stop making new signatures for witness round before new point is produced
         // own point future must do nothing until polled (must not be spawned)
         self.state.responder.update(
-            &self.state.broadcast_filter,
-            head,
-            &self.state.downloader,
             &self.state.store,
+            &self.state.broadcast_filter,
+            &self.state.downloader,
+            head,
             round_ctx,
         );
 
