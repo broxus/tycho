@@ -108,3 +108,35 @@ intercom.queryRequest {X:Type} tag:intercom.QueryTag body:X = intercom.QueryRequ
 intercom.queryTag.broadcast                                 = intercom.QueryTag;
 intercom.queryTag.pointById                                 = intercom.QueryTag;
 intercom.queryTag.signature                                 = intercom.QueryTag;
+
+/*
+* Stored event
+*/
+consensus.storedEvent
+    kind:consensus.EventKind
+    severity:consensus.EventSeverity
+    peer_id:int256
+    point_keys:bytes
+    message:bytes
+    = consensus.StoredEvent;
+
+/*
+* Stored event severity
+*/
+consensus.eventSeverity.debug                               = consensus.EventSeverity;
+consensus.eventSeverity.warn                                = consensus.EventSeverity;
+
+/*
+* Stored event kind
+*/
+consensus.eventKind.nodeStarted                             = consensus.EventKind;
+consensus.eventKind.unknownQuery                            = consensus.EventKind;
+consensus.eventKind.broadcastLimitReached                   = consensus.EventKind;
+consensus.eventKind.sigRequestLimitReached                  = consensus.EventKind;
+consensus.eventKind.uploadLimitReached                      = consensus.EventKind;
+consensus.eventKind.illegalPoint                            = consensus.EventKind;
+consensus.eventKind.senderNotAuthor                         = consensus.EventKind;
+consensus.eventKind.equivocated                             = consensus.EventKind;
+consensus.eventKind.evidenceNoInclusion                     = consensus.EventKind;
+consensus.eventKind.illFormed                               = consensus.EventKind;
+consensus.eventKind.invalid                                 = consensus.EventKind;

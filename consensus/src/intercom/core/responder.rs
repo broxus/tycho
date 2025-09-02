@@ -14,14 +14,29 @@ use crate::intercom::core::{
     SignatureResponse,
 };
 use crate::intercom::{BroadcastFilter, Downloader, Uploader};
+use crate::moderator::Moderator;
 use crate::storage::MempoolStore;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Responder(Arc<ResponderInner>);
 
-#[derive(Default)]
+impl Responder {
+    pub fn new(moderator: &Moderator) -> Self {
+        Self(Arc::new(ResponderInner {
+            current: ArcSwapOption::empty(),
+            moderator: moderator.clone(),
+            #[cfg(feature = "mock-feedback")]
+            top_known_anchor: std::sync::OnceLock::new(),
+        }))
+    }
+    pub fn moderator(&self) -> &Moderator {
+        &self.0.moderator
+    }
+}
+
 struct ResponderInner {
     current: ArcSwapOption<ResponderCurrent>,
+    moderator: Moderator,
     #[cfg(feature = "mock-feedback")]
     top_known_anchor: std::sync::OnceLock<
         crate::engine::round_watch::RoundWatch<crate::engine::round_watch::TopKnownAnchor>,

@@ -9,6 +9,7 @@ use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
 use crate::dag::AnchorStage;
 use crate::models::{Link, Point, PointData, Round, UnixTime};
+use crate::moderator::{BanConfig, BanConfigDuration};
 
 // replace with `ArcSwapOption` + copy on get() if need to change in runtime
 static NODE_CONFIG: OnceLock<MempoolNodeConfig> = OnceLock::new();
@@ -181,6 +182,13 @@ pub struct MempoolNodeConfig {
 
     /// Limits amount of unique points being simultaneously downloaded from all peers.
     pub max_download_tasks: NonZeroU16,
+
+    /// Time to keep mempool events before deletion. Should be greater than any duration
+    /// in ban config, otherwise bans cannot be reproduced after node restart.
+    pub event_journal_ttl: BanConfigDuration,
+
+    /// Ban durations and tolerations for mempool events
+    pub bans: BanConfig,
 }
 
 impl Default for MempoolNodeConfig {
@@ -192,6 +200,8 @@ impl Default for MempoolNodeConfig {
             max_blocking_tasks: 250.try_into().unwrap(),
             max_upload_tasks: 50.try_into().unwrap(),
             max_download_tasks: 250.try_into().unwrap(),
+            event_journal_ttl: BanConfigDuration::default(),
+            bans: BanConfig::default(),
         }
     }
 }

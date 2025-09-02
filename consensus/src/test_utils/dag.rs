@@ -19,6 +19,7 @@ use crate::models::{
     AnchorStageRole, Cert, Digest, Link, PeerCount, Point, PointData, PointId, Round, Signature,
     Through, UnixTime,
 };
+use crate::moderator::Moderator;
 use crate::storage::MempoolStore;
 
 pub fn make_engine_parts<const PEER_COUNT: usize>(
@@ -30,8 +31,8 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
         .build("0.0.0.0:0", Router::builder().build())
         .expect("network with unused stub socket");
 
-    let private_overlay =
-        PrivateOverlay::builder(*OverlayId::wrap(&[0; 32])).build(Responder::default());
+    let private_overlay = PrivateOverlay::builder(*OverlayId::wrap(&[0; 32]))
+        .build(Responder::new(&Moderator::new_stub()));
 
     let dispatcher = Dispatcher::new(&network, &private_overlay);
 

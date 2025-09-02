@@ -37,6 +37,7 @@ pub struct MempoolAdapterStdImpl {
 }
 
 impl MempoolAdapterStdImpl {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         key_pair: Arc<KeyPair>,
         network: &Network,
@@ -45,8 +46,14 @@ impl MempoolAdapterStdImpl {
         storage_context: &StorageContext,
         stats_tx: Arc<dyn MempoolEventsListener>,
         mempool_node_config: &MempoolNodeConfig,
+        version: &'static str,
     ) -> Result<Self> {
         let config_builder = MempoolConfigBuilder::new(mempool_node_config);
+
+        let mempool_db = MempoolDb::open(storage_context.clone(), RoundWatch::default())
+            .context("failed to create mempool db")?;
+
+        let moderator = Moderator::new(network, mempool_db.clone(), version);
 
         Ok(Self {
             cache: Default::default(),
@@ -55,14 +62,14 @@ impl MempoolAdapterStdImpl {
                 network: network.clone(),
                 peer_resolver: peer_resolver.clone(),
                 overlay_service: overlay_service.clone(),
+                moderator,
             },
             config: Mutex::new(ConfigAdapter {
                 builder: config_builder,
                 state_update_queue: Default::default(),
                 engine_session: None,
             }),
-            mempool_db: MempoolDb::open(storage_context.clone(), RoundWatch::default())
-                .context("failed to create mempool adapter storage")?,
+            mempool_db,
             input_buffer: InputBuffer::default(),
 
             stats_tx,
@@ -176,6 +183,8 @@ impl MempoolAdapterStdImpl {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Starting mempool engine...");
 
         let (anchors_tx, anchors_rx) = mpsc::unbounded_channel();
+
+        self.net_args.moderator.apply_config(&merged_conf.conf);
 
         self.input_buffer.apply_config(&merged_conf.conf.consensus);
 
