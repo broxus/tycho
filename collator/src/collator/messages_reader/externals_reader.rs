@@ -12,7 +12,7 @@ use super::{
 };
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
-    MessagesBufferLimits, SaturatingAddAssign, SkipExpiredExternals,
+    MessagesBufferLimits, SkipExpiredExternals,
 };
 use crate::collator::messages_reader::{DebugInternalsRangeReaderState, InternalsRangeReaderKind};
 use crate::collator::types::{
@@ -20,8 +20,8 @@ use crate::collator::types::{
 };
 use crate::internal_queue::types::{InternalMessageValue, PartitionRouter};
 use crate::tracing_targets;
-use crate::types::DebugIter;
 use crate::types::processed_upto::BlockSeqno;
+use crate::types::{DebugIter, SaturatingAddAssign};
 
 #[cfg(test)]
 #[path = "../tests/externals_reader_tests.rs"]
