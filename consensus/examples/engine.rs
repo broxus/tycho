@@ -10,7 +10,7 @@ use futures_util::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tycho_consensus::prelude::{
-    EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolDb,
+    EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolDb, Moderator,
 };
 use tycho_consensus::test_utils::*;
 use tycho_crypto::ed25519::{KeyPair, SecretKey};
@@ -188,6 +188,7 @@ fn make_network(
 
                         let bind = EngineBinding {
                             mempool_db: MempoolDb::open(ctx, commit_round).unwrap(),
+                            moderator: Moderator::new_stub(),
                             input_buffer: InputBuffer::new_stub(
                                 cli.payload_step,
                                 cli.steps_until_full,

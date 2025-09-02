@@ -100,6 +100,7 @@ impl Node {
                     base.storage_context(),
                     slasher.mempool_events_listener(),
                     &node_config.mempool,
+                    crate::version_string(),
                 )?),
             }
         };

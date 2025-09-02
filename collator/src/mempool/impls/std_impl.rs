@@ -31,12 +31,14 @@ pub struct MempoolAdapterStdImpl {
     config: Mutex<ConfigAdapter>,
 
     mempool_db: Arc<MempoolDb>,
+    moderator: Moderator,
     input_buffer: InputBuffer,
     stats_tx: Arc<dyn MempoolEventsListener>,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
 }
 
 impl MempoolAdapterStdImpl {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         key_pair: Arc<KeyPair>,
         network: &Network,
@@ -45,8 +47,14 @@ impl MempoolAdapterStdImpl {
         storage_context: &StorageContext,
         stats_tx: Arc<dyn MempoolEventsListener>,
         mempool_node_config: &MempoolNodeConfig,
+        version: &'static str,
     ) -> Result<Self> {
         let config_builder = MempoolConfigBuilder::new(mempool_node_config);
+
+        let mempool_db = MempoolDb::open(storage_context.clone(), RoundWatch::default())
+            .context("failed to create mempool db")?;
+
+        let moderator = Moderator::new(network, mempool_db.clone(), version);
 
         Ok(Self {
             cache: Default::default(),
@@ -61,8 +69,8 @@ impl MempoolAdapterStdImpl {
                 state_update_queue: Default::default(),
                 engine_session: None,
             }),
-            mempool_db: MempoolDb::open(storage_context.clone(), RoundWatch::default())
-                .context("failed to create mempool adapter storage")?,
+            mempool_db,
+            moderator,
             input_buffer: InputBuffer::default(),
 
             stats_tx,
@@ -177,6 +185,8 @@ impl MempoolAdapterStdImpl {
 
         let (anchors_tx, anchors_rx) = mpsc::unbounded_channel();
 
+        self.moderator.apply_config(&merged_conf.conf);
+
         self.input_buffer.apply_config(&merged_conf.conf.consensus);
 
         // Note: mempool is always run from applied mc block
@@ -185,6 +195,7 @@ impl MempoolAdapterStdImpl {
 
         let bind = EngineBinding {
             mempool_db: self.mempool_db.clone(),
+            moderator: self.moderator.clone(),
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: self.top_known_anchor.clone(),
             anchors_tx,

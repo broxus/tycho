@@ -4,7 +4,7 @@ use tycho_storage::kv::{
 use weedb::rocksdb::{DBCompressionType, Options};
 use weedb::{ColumnFamily, ColumnFamilyOptions};
 
-use super::status_flags;
+use super::{event_store, status_flags};
 
 impl NamedTables for MempoolTables {
     const NAME: &'static str = "mempool";
@@ -19,6 +19,9 @@ weedb::tables! {
         pub points: Points,
         pub points_info: PointsInfo,
         pub points_status: PointsStatus,
+        pub event_points: EventPoints,
+        pub events: Events,
+        pub event_round_time: EventRoundTime,
     }
 }
 
@@ -75,5 +78,63 @@ impl ColumnFamilyOptions<TableContext> for PointsStatus {
         opts.set_disable_auto_compactions(true);
 
         opts.set_merge_operator_associative("points_status_merge", status_flags::merge);
+    }
+}
+
+/// Stores mempool moderation-related events
+/// - Key: [`crate::storage::EventKey`]
+/// - Value: [`crate::storage::StoredEventData`]
+pub struct Events;
+
+impl ColumnFamily for Events {
+    const NAME: &'static str = "events";
+}
+
+impl ColumnFamilyOptions<TableContext> for Events {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        optimize_for_point_lookup(opts, ctx);
+        opts.set_disable_auto_compactions(true);
+    }
+}
+
+/// Mempool points linked to events are stored across versions
+/// - Key: `round: u32, digest: [u8; 32]` as in [`Points`]
+/// - Value: [`crate::models::Point`]
+pub struct EventPoints;
+
+impl ColumnFamily for EventPoints {
+    const NAME: &'static str = "event_points";
+}
+
+impl ColumnFamilyOptions<TableContext> for EventPoints {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        optimize_for_point_lookup(opts, ctx);
+        opts.set_disable_auto_compactions(true);
+
+        opts.set_enable_blob_files(true);
+        opts.set_enable_blob_gc(false);
+        opts.set_min_blob_size(DEFAULT_MIN_BLOB_SIZE);
+        opts.set_blob_compression_type(DBCompressionType::None);
+    }
+}
+
+/// A narrow index to remove outdated points from event store
+/// - Key: [`crate::models::Round`] as in [`crate::storage::EventKey`]
+/// - Value: [`crate::models::UnixTime`] as in [`Points`] key
+pub struct EventRoundTime;
+
+impl ColumnFamily for EventRoundTime {
+    const NAME: &'static str = "event_round_time";
+}
+
+impl ColumnFamilyOptions<TableContext> for EventRoundTime {
+    fn options(opts: &mut Options, ctx: &mut TableContext) {
+        optimize_for_point_lookup(opts, ctx);
+        opts.set_disable_auto_compactions(true);
+
+        opts.set_merge_operator_associative(
+            "event_round_time_merge_max_value",
+            event_store::merge_max_value,
+        );
     }
 }

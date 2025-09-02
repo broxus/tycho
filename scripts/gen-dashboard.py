@@ -2840,6 +2840,10 @@ def mempool_storage() -> RowPanel:
             "Clean points task",
         ),
         create_heatmap_panel(
+            "tycho_mempool_store_clean_events_time",
+            "Clean events task",
+        ),
+        create_heatmap_panel(
             "tycho_mempool_db_wait_for_compact_time",
             "Wait for compact",
         ),

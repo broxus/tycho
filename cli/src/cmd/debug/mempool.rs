@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::{
     EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolConfigBuilder,
-    MempoolDb, MempoolMergedConfig,
+    MempoolDb, MempoolMergedConfig, Moderator,
 };
 use tycho_consensus::test_utils::{AnchorConsumer, LastAnchorFile, StatsSender, test_logger};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
@@ -313,6 +313,7 @@ impl Mempool {
                 self.storage.context().clone(),
                 anchor_consumer.commit_round.clone(),
             )?,
+            moderator: Moderator::new_stub(),
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: anchor_consumer.top_known_anchor.clone(),
             anchors_tx,

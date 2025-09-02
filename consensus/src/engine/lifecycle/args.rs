@@ -10,11 +10,13 @@ use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
 use crate::engine::{InputBuffer, MempoolMergedConfig};
 use crate::intercom::{Dispatcher, InitPeers, PeerSchedule, Responder};
 use crate::models::MempoolOutput;
+use crate::moderator::Moderator;
 use crate::storage::MempoolDb;
 
 #[derive(Clone)]
 pub struct EngineBinding {
     pub mempool_db: Arc<MempoolDb>,
+    pub moderator: Moderator,
     pub input_buffer: InputBuffer,
     pub top_known_anchor: RoundWatch<TopKnownAnchor>,
     pub anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
