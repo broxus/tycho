@@ -666,3 +666,21 @@ impl ShardIdentExt for ShardIdent {
         false
     }
 }
+
+pub trait SaturatingAddAssign {
+    fn saturating_add_assign(&mut self, rhs: Self);
+}
+
+macro_rules! impl_saturating_add_assign {
+    ($($t:ty),+ $(,)?) => {
+        $(
+            impl SaturatingAddAssign for $t {
+                fn saturating_add_assign(&mut self, rhs: Self) {
+                    *self = self.saturating_add(rhs);
+                }
+            }
+        )+
+    };
+}
+
+impl_saturating_add_assign!(u32, u64, usize);

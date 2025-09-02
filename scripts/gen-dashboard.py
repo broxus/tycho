@@ -1292,6 +1292,33 @@ def collation_metrics() -> RowPanel:
             "Diff tail length",
             labels=['workchain=~"$workchain"'],
         ),
+        timeseries_panel(
+            targets=[
+                target(
+                    Expr(
+                        metric="tycho_do_collate_total_items_current",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="current",
+                ),
+                target(
+                    Expr(
+                        metric="tycho_do_collate_total_items_soft_limit",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="soft limit",
+                ),
+                target(
+                    Expr(
+                        metric="tycho_do_collate_total_items_hard_limit",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="hard limit",
+                ),
+            ],
+            title="Total items vs limits",
+            unit=UNITS.NUMBER_FORMAT,
+        ),
         create_gauge_panel(
             "tycho_blocks_count_in_collation_manager_cache",
             "Blocks count in collation manager cache",

@@ -17,7 +17,7 @@ use crate::collator::types::{
 };
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
-use crate::types::ShardIdentExt;
+use crate::types::{SaturatingAddAssign, ShardIdentExt};
 
 pub struct ExecutorWrapper {
     pub executor: MessagesExecutor,
@@ -336,6 +336,11 @@ fn new_transaction(
         }
     }
 
+    collation_data
+        .block_limit
+        .total_items
+        .saturating_add_assign(1);
+
     Ok(out_messages)
 }
 
@@ -425,6 +430,7 @@ fn process_in_message(
                     exported_value,
                     new_tx: None,
                 });
+
             }
             collation_data.int_dequeue_count += 1;
 
@@ -480,6 +486,11 @@ fn process_in_message(
             )
         }
     };
+
+    collation_data
+        .block_limit
+        .total_items
+        .saturating_add_assign(1);
 
     collation_data.in_msgs.insert(in_msg_hash, PreparedInMsg {
         in_msg,

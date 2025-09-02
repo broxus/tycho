@@ -1047,6 +1047,18 @@ impl CollatorStdImpl {
         metrics::gauge!("tycho_do_collate_block_diff_tail_len", &labels)
             .set(collation_data.diff_tail_len);
 
+        // Report total_items limits (current value vs configured soft/hard limits)
+        let lt_delta = &collation_data.block_limit.block_limits.lt_delta;
+        let BlockParamLimits {
+            soft_limit,
+            hard_limit,
+            ..
+        } = lt_delta;
+        metrics::gauge!("tycho_do_collate_total_items_current", &labels)
+            .set(collation_data.block_limit.total_items as f64);
+        metrics::gauge!("tycho_do_collate_total_items_soft_limit", &labels).set(*soft_limit as f64);
+        metrics::gauge!("tycho_do_collate_total_items_hard_limit", &labels).set(*hard_limit as f64);
+
         labels.push(("src", "03_collated".to_string()));
         metrics::gauge!("tycho_last_block_seqno", &labels).set(collation_data.block_id_short.seqno);
     }
