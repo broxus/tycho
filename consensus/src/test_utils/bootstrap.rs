@@ -9,6 +9,7 @@ use tycho_types::models::{ConsensusConfig, GenesisInfo};
 use tycho_util::time::now_sec;
 
 use crate::engine::{MempoolConfigBuilder, MempoolMergedConfig, MempoolNodeConfig};
+use crate::moderator::BanConfig;
 
 pub fn default_test_config() -> MempoolMergedConfig {
     let consensus_config = ConsensusConfig {
@@ -28,10 +29,11 @@ pub fn default_test_config() -> MempoolMergedConfig {
 
     let node_config = MempoolNodeConfig {
         clean_db_period_rounds: NonZeroU16::new(10).unwrap(),
+        bans: BanConfig::test_default(),
         ..Default::default()
     };
 
-    let mut builder = MempoolConfigBuilder::new(&node_config);
+    let mut builder = MempoolConfigBuilder::new(&node_config).unwrap();
     builder.set_genesis(GenesisInfo::default());
     builder
         .set_consensus_config(&consensus_config)

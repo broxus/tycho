@@ -95,9 +95,11 @@ impl Engine {
         let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();
             let overlay_id = merged_conf.overlay_id;
+            let moderator = net.moderator.clone();
             move || {
                 store.init_storage(&overlay_id);
                 store.insert_point(&genesis, PointStatusStoredRef::Exists);
+                moderator.init_blocking();
                 fix_history // just pass further
             }
         });

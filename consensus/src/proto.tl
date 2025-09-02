@@ -108,3 +108,63 @@ intercom.queryRequest {X:Type} tag:intercom.QueryTag body:X = intercom.QueryRequ
 intercom.queryTag.broadcast                                 = intercom.QueryTag;
 intercom.queryTag.download                                  = intercom.QueryTag;
 intercom.queryTag.signature                                 = intercom.QueryTag;
+
+/*
+* Stored journal record key
+*/
+journal.recordKey
+   time:int
+   seqNo:int
+   = journal.RecordKey;
+
+/*
+* Stored journal record value
+*/
+journal.recordValue
+    kind:journal.RecordKind
+    action:journal.RecordAction
+    peer_id:int256
+    point_keys:bytes
+    message:bytes
+    = journal.RecordValue;
+
+/*
+* Stored journal record kind
+*/
+journal.recordKind.nodeStarted                              = journal.RecordKind;
+journal.recordKind.banned
+    until:int
+    origin:journal.recordOrigin
+    = journal.RecordKind;
+journal.recordKind.unbanned   origin:journal.RecordOrigin   = journal.RecordKind;
+journal.recordKind.event      tag:journal.EventTag          = journal.RecordKind;
+
+/*
+* Stored journal record action
+*/
+journal.recordAction.store                                  = journal.RecordAction;
+journal.recordAction.countPenalty                           = journal.RecordAction;
+journal.recordAction.storeAndCountPenalty                   = journal.RecordAction;
+
+/*
+* Stored journal record origin
+*/
+journal.recordOrigin.manual                                 = journal.RecordOrigin;
+journal.recordOrigin.parentKey     key:journal.RecordKey    = journal.RecordOrigin;
+journal.recordOrigin.parentKeyTag
+   key:journal.RecordKey
+   tag:journal.EventTag
+   = journal.RecordOrigin;
+
+/*
+* Stored journal event type tag
+*/
+journal.eventTag.badQuery                                   = journal.EventTag;
+journal.eventTag.queryLimitReached                          = journal.EventTag;
+journal.eventTag.senderNotAuthor                            = journal.EventTag;
+journal.eventTag.pointIntegrityError                        = journal.EventTag;
+journal.eventTag.replacedPoint                              = journal.EventTag;
+journal.eventTag.equivocated                                = journal.EventTag;
+journal.eventTag.evidenceNoInclusion                        = journal.EventTag;
+journal.eventTag.illFormed                                  = journal.EventTag;
+journal.eventTag.invalid                                    = journal.EventTag;

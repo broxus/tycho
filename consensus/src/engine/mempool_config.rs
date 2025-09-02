@@ -9,6 +9,7 @@ use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
 use crate::dag::AnchorStage;
 use crate::models::{Link, Point, PointData, Round, UnixTime};
+use crate::moderator::{BanConfig, JournalTtl};
 
 // replace with `ArcSwapOption` + copy on get() if need to change in runtime
 static NODE_CONFIG: OnceLock<MempoolNodeConfig> = OnceLock::new();
@@ -71,7 +72,8 @@ pub struct MempoolConfigBuilder {
 }
 
 impl MempoolConfigBuilder {
-    pub fn new(node_config: &MempoolNodeConfig) -> Self {
+    pub fn new(node_config: &MempoolNodeConfig) -> Result<Self> {
+        node_config.bans.validate(node_config.event_journal_ttl)?;
         if NODE_CONFIG.get_or_init(|| node_config.clone()) != node_config {
             tracing::error!(
                 "mempool node config was not changed; using prev {:?} ignored new {:?}",
@@ -79,10 +81,10 @@ impl MempoolConfigBuilder {
                 node_config,
             );
         };
-        Self {
+        Ok(Self {
             genesis_info: None,
             consensus_config: None,
-        }
+        })
     }
 
     pub fn set_consensus_config(&mut self, consensus_config: &ConsensusConfig) -> Result<()> {
@@ -181,6 +183,13 @@ pub struct MempoolNodeConfig {
 
     /// Limits amount of unique points being simultaneously downloaded from all peers.
     pub max_download_tasks: NonZeroU16,
+
+    /// Time to keep mempool events before deletion. Should be greater than any duration
+    /// in ban config, otherwise bans cannot be reproduced after node restart.
+    pub event_journal_ttl: JournalTtl,
+
+    /// Ban durations and tolerations for mempool events
+    pub bans: BanConfig,
 }
 
 impl Default for MempoolNodeConfig {
@@ -192,6 +201,8 @@ impl Default for MempoolNodeConfig {
             max_blocking_tasks: 250.try_into().unwrap(),
             max_upload_tasks: 50.try_into().unwrap(),
             max_download_tasks: 250.try_into().unwrap(),
+            event_journal_ttl: JournalTtl::default(),
+            bans: BanConfig::default(),
         }
     }
 }

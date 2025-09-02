@@ -6,7 +6,7 @@ use super::{POINT_KEY_LEN, fill_point_prefix};
 use crate::effects::{Cancelled, Ctx, RoundCtx, Task};
 use crate::engine::round_watch::{Commit, Consensus, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
-use crate::models::Round;
+use crate::models::{Round, UnixTime};
 use crate::storage::MempoolDb;
 
 pub struct DbCleaner {
@@ -117,6 +117,16 @@ impl DbCleaner {
                                 );
                             }
                         }
+                        let upto_time = UnixTime::now() - NodeConfig::get().event_journal_ttl.0.to_time();
+                        match db.clean_events(upto_time) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                metrics::gauge!(DB_CLEAN_ERRORS, "kind" => "events").increment(1);
+                                tracing::error!(
+                                    "delete range of mempool events before time {upto_time} failed: {e}",
+                                );
+                            }
+                        };
                         match db.wait_for_compact() {
                             Ok(()) => {}
                             Err(e) => {
