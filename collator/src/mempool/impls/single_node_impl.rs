@@ -55,15 +55,12 @@ impl MempoolAdapterSingleNodeImpl {
         config_guard: &mut SingleNodeConfigAdapter,
         ctx: &StateUpdateContext,
     ) -> Result<()> {
-        let consensus_config = config_guard
-            .builder
-            .get_consensus_config()
-            .expect("There is no consensus config.");
+        let merged_conf = config_guard.builder.build()?;
 
-        self.input_buffer.apply_config(consensus_config);
+        self.input_buffer.apply_config(&merged_conf.conf.consensus);
 
-        let timeout = consensus_config.broadcast_retry_millis as u64
-            * consensus_config.broadcast_retry_attempts as u64
+        let timeout = merged_conf.conf.consensus.broadcast_retry_millis as u64
+            * merged_conf.conf.consensus.broadcast_retry_attempts as u64
             * ANCHOR_ID_STEP as u64;
 
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(timeout));
@@ -75,7 +72,7 @@ impl MempoolAdapterSingleNodeImpl {
             self.cache.clone(),
             self.local_peer_id,
             ctx.top_processed_to_anchor_id,
-            consensus_config,
+            &merged_conf.conf.consensus,
         );
 
         let v_set_len = ConfigAdapter::init_peers(ctx)?.curr_v_set.len();
@@ -123,9 +120,10 @@ impl MempoolAdapter for MempoolAdapterSingleNodeImpl {
             "handle_mc_state_update: consensus config={:?}", cfg
         );
 
-        config_guard
-            .builder
-            .set_consensus_config(&new_cx.consensus_config)?;
+        // we don't use state update queue and assume every block is signed by ourselves
+
+        (config_guard.builder).set_genesis(new_cx.consensus_info.genesis_info);
+        (config_guard.builder).set_consensus_config(&new_cx.consensus_config)?;
 
         if config_guard.inner_process.is_none() {
             self.process_start(&mut config_guard, &new_cx)?;
