@@ -1,0 +1,40 @@
+{
+  "ABI version": 2,
+  "version": "2.3",
+  "header": [],
+  "functions": [
+    {
+      "name": "addAddress",
+      "inputs": [
+        {
+          "name": "queryId",
+          "type": "uint64"
+        },
+        {
+          "name": "address",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "id": "0x206491DE"
+    },
+    {
+      "name": "removeAddress",
+      "inputs": [
+        {
+          "name": "queryId",
+          "type": "uint64"
+        },
+        {
+          "name": "address",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "id": "0x56EFD52D"
+    }
+  ],
+  "data": [],
+  "events": [],
+  "fields": []
+}
