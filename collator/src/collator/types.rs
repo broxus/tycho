@@ -1331,7 +1331,7 @@ pub enum ForceMasterCollation {
 }
 impl ForceMasterCollation {
     pub fn is_forced(&self) -> bool {
-        !matches!(self, Self::No)
+        !matches!(self, Self::No | Self::NoPendingMessagesAfterShardBlocks)
     }
 }
 

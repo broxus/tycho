@@ -2859,6 +2859,8 @@ where
             mc_block_latest_chain_time,
             mc_block_min_interval_ms,
             mc_block_max_interval_ms,
+            hard_forced_for_all,
+            mc_forced_by_no_pending_msgs_on_ct,
             ?facts,
             "calculated shard facts"
         );
@@ -2891,20 +2893,17 @@ where
                 } else {
                     None
                 })
-                // chain time when master was forced by shard
-                // if shard is ready to detect next step
-                .or(if ready_to_detect_next_step {
-                    mc_forced_by_shard_on_ct
-                } else {
-                    None
-                })
                 .or(
-                    // chain time that exceed min interval
+                    // chain time that exceed min interval or when was forced by shard
                     // when any shard has collated shard block with externals
+                    // or any shard has forced master block (e.g. by no more pending messages)
                     // if shard is ready to detect next step
-                    if any_has_shard_block_with_externals {
+                    if any_has_shard_block_with_externals || mc_forced_by_shard_on_ct.is_some() {
                         if ready_to_detect_next_step {
-                            f.min_ct
+                            f.min_ct.map(|min_ct| {
+                                mc_forced_by_shard_on_ct
+                                    .map_or(min_ct, |forced_ct| min_ct.max(forced_ct))
+                            })
                         } else {
                             None
                         }
