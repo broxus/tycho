@@ -43,7 +43,7 @@ impl EngineRecoverLoop {
             tracing::info!(
                 peer_id = %self.net_args.network.peer_id().alt(),
                 overlay_id = %self.merged_conf.overlay_id,
-                genesis_info = ?self.merged_conf.genesis_info(),
+                genesis_info = ?self.merged_conf.genesis_info,
                 conf = ?self.merged_conf.conf,
                 "mempool run"
             );
