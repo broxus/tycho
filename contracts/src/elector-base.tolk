@@ -189,7 +189,7 @@ get fun participant_list(): tuple {
 get fun participant_list_extended(): tuple {
     val data = lazy Storage<()>.load();
     if (data.currentElection == null) {
-        return [0, 0, 0, 0, [], 0, 0] as tuple;
+        return [0, 0, 0, 0, createEmptyList(), 0, 0] as tuple;
     }
 
     val election = lazy data.currentElection.load();
