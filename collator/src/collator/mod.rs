@@ -2069,10 +2069,12 @@ impl CollatorStdImpl {
                     TryCollateCheck::ForceMcBlockByUncommittedChainLength => {
                         ForceMasterCollation::ByUncommittedChain
                     }
+                    TryCollateCheck::NoPendingMessages if anchor_import_skipped => {
+                        ForceMasterCollation::ByAnchorImportSkipped
+                    }
                     TryCollateCheck::NoPendingMessages if uncommitted_chain_length >= 1 => {
                         ForceMasterCollation::NoPendingMessagesAfterShardBlocks
                     }
-                    _ if anchor_import_skipped => ForceMasterCollation::ByAnchorImportSkipped,
                     _ => ForceMasterCollation::No,
                 };
 
