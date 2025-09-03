@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import asyncio
 import argparse
 from datetime import datetime
