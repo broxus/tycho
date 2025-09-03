@@ -241,7 +241,7 @@ pub struct CollatorStdImpl {
 
     delayed_working_state: DelayedWorkingState,
     store_new_state_tasks: Vec<StateUpdateContext>,
-    background_store_new_state_tx: std::sync::mpsc::Sender<StateUpdateContext>,
+    background_store_new_state_tx: tokio::sync::mpsc::UnboundedSender<StateUpdateContext>,
 
     anchors_cache: AnchorsCache,
     block_serializer_cache: BlockSerializerCache,
@@ -286,8 +286,8 @@ impl CollatorStdImpl {
 
         let (working_state_tx, working_state_rx) = oneshot::channel::<Result<Box<WorkingState>>>();
 
-        let (background_store_new_state_tx, background_store_new_state_rx) =
-            std::sync::mpsc::channel::<StateUpdateContext>();
+        let (background_store_new_state_tx, mut background_store_new_state_rx) =
+            tokio::sync::mpsc::unbounded_channel::<StateUpdateContext>();
 
         let processor = Self {
             next_block_info,
@@ -319,7 +319,7 @@ impl CollatorStdImpl {
 
         // finalize new state store tasks in background
         tokio::spawn(async move {
-            while let Ok(cx) = background_store_new_state_rx.recv() {
+            while let Some(cx) = background_store_new_state_rx.recv().await {
                 if let Err(err) = cx.store_new_state_task.await {
                     tracing::error!(target: tracing_targets::COLLATOR,
                         "Error when store new state: {:?}", err,
