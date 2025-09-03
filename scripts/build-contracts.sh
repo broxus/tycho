@@ -16,4 +16,5 @@ function copy_code() {
 cd "${contracts_dir}"
 yarn build --all
 
-copy_code Elector "$root_dir/cli/res/elector_code.boc"
+copy_code Elector
+copy_code ElectorPoA
