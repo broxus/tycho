@@ -131,7 +131,6 @@ describe("ElectorPoA", () => {
         const callback = tx.outMessages.get(0)!;
         assert(callback.info.type === "internal");
         expect(callback.info.dest).toEqualAddress(addr);
-
         expect(callback.body).toEqualCell(
           beginCell()
             .storeUint(ANSWER_TAG_ERROR, 32)
@@ -177,7 +176,6 @@ describe("ElectorPoA", () => {
       const callback = tx.outMessages.get(0)!;
       assert(callback.info.type === "internal");
       expect(callback.info.dest).toEqualAddress(MANAGER_ADDR);
-
       expect(callback.body).toEqualCell(
         beginCell()
           .storeUint(ANSWER_TAG_POA_WHITELIST_UPDATED, 32)
@@ -190,7 +188,6 @@ describe("ElectorPoA", () => {
       const data = loadElectorPoAData(
         elector.accountState.state.data!.asSlice()
       );
-      console.log(data);
       check(data.whitelist);
     }
   });

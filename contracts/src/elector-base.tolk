@@ -168,11 +168,11 @@ get fun participates_in(validatorPubkey: int): coins {
 get fun participant_list(): tuple {
     val data = lazy Storage<()>.load();
     if (data.currentElection == null) {
-        return createEmptyTuple();
+        return createEmptyList();
     }
 
     val election = lazy data.currentElection.load();
-    var l = createEmptyTuple();
+    var l = createEmptyList();
     var iterNext = maxInt();
     do {
         var (id, cs, found) = election.participants.uDictGetPrev(256, iterNext);
@@ -193,7 +193,7 @@ get fun participant_list_extended(): tuple {
     }
 
     val election = lazy data.currentElection.load();
-    var l = createEmptyTuple();
+    var l = createEmptyList();
     var iterNext = maxInt();
     do {
         var (id, cs, found) = election.participants.uDictGetPrev(256, iterNext);
@@ -232,7 +232,7 @@ get fun compute_returned_stake(walletAddr: int): coins {
 get fun past_election_ids(): tuple {
     val data = lazy Storage<()>.load();
     var iterNext = (1 << 32);
-    var l = createEmptyTuple();
+    var l = createEmptyList();
     do {
         var (id, _, found) = data.pastElections.uDictGetPrev(32, iterNext);
         if (found) {

@@ -313,7 +313,7 @@ get fun get_proposal(proposalHash: int) {
 get fun list_proposals() {
     val data = lazy Storage.load();
     var iterNext = maxInt();
-    var list = createEmptyTuple();
+    var list = createEmptyList();
     do {
         var (proposalHash, proposal, found) = data.proposals.uDictGetPrev(256, iterNext);
         if (found) {
@@ -865,7 +865,7 @@ fun sendMessageBack(dest: address | (int8, uint256), answerTag: uint32, queryId:
 fun proposalToTuple(cs: slice) {
     val proposal = ConfigProposal.fromSlice(cs);
 
-    var votersList = createEmptyTuple();
+    var votersList = createEmptyList();
     var iterNext = 1 << VOTES_KEY_LEN;
     do {
         val (voterId, _, found) = proposal.voters.uDictGetPrev(VOTES_KEY_LEN, iterNext);
