@@ -184,5 +184,6 @@ fun manageWhitelist(source: address, body: slice, add: bool): bool {
     } else {
         data.customData.whitelist.sDictDelete(WHITELIST_KEY_LEN, whitelistedAddr);
     }
+    data.save();
     return true;
 }

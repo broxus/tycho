@@ -1,16 +1,24 @@
 import { Blockchain, createShardAccount } from "@ton/sandbox";
 import {
+  Address,
   address,
   beginCell,
+  BitString,
   Cell,
   Dictionary,
+  Message,
   SendMode,
   toNano,
 } from "@ton/core";
 import { TychoExecutor } from "@tychosdk/emulator";
 import { loadElectorData, storeElectorData } from "../wrappers/Elector";
+import {
+  loadElectorPoAData,
+  storeElectorPoAData,
+} from "../wrappers/ElectorPoA";
 import { compile } from "@ton/blueprint";
 import "@ton/test-utils";
+import assert from "assert";
 
 const ELECTOR_ADDR = address(
   "-1:3333333333333333333333333333333333333333333333333333333333333333"
@@ -18,6 +26,19 @@ const ELECTOR_ADDR = address(
 const CONFIG_ADDR = address(
   "-1:5555555555555555555555555555555555555555555555555555555555555555"
 );
+
+const ELECTOR_OP_NEW_STAKE = 0x4e73744b;
+const ELECTOR_OP_UPGRADE_CODE = 0x4e436f64;
+
+const ELECTOR_POA_OP_ADD_ADDRESS = 0x206491de;
+const ELECTOR_POA_OP_REMOVE_ADDRESS = 0x56efd52d;
+
+const ANSWER_TAG_STAKE_REJECTED = 0xee6f454c;
+const ANSWER_TAG_CODE_ACCEPTED = 0xce436f64;
+const ANSWER_TAG_POA_WHITELIST_UPDATED = 0xbc06677e;
+const ANSWER_TAG_ERROR = 0xffffffff;
+
+const STAKE_ERR_NOT_IN_WHITELIST = 100;
 
 describe("ElectorPoA", () => {
   let oldCode: Cell;
@@ -37,10 +58,211 @@ describe("ElectorPoA", () => {
       config: TychoExecutor.defaultConfig,
       executor,
     });
+
+    await blockchain.setShardAccount(
+      ELECTOR_ADDR,
+      createShardAccount({
+        address: ELECTOR_ADDR,
+        balance: toNano(500),
+        code: newCode,
+        data: beginCell()
+          .store(
+            storeElectorPoAData({
+              currentElection: null,
+              credits: Dictionary.empty(),
+              pastElections: Dictionary.empty(),
+              grams: 0n,
+              activeId: 0,
+              activeHash: 0n,
+              whitelist: Dictionary.empty(),
+            })
+          )
+          .endCell(),
+        workchain: -1,
+      })
+    );
+  });
+
+  it("should allow only manager to update whitelist", async () => {
+    const MANAGER_ADDR = address(
+      "-1:b0bab0bab0bab0bab0bab0bab0bab0bab0bab0bab0bab0bab0bab0bab0bab0ba"
+    );
+
+    // Update config to enable PoA manager
+    const params = blockchain.config
+      .asSlice()
+      .loadDictDirect(Dictionary.Keys.Int(32), Dictionary.Values.Cell());
+    params.set(101, beginCell().storeBuffer(MANAGER_ADDR.hash, 32).endCell());
+    blockchain.setConfig(beginCell().storeDictDirect(params).endCell());
+
+    //
+    const elector = await blockchain.getContract(ELECTOR_ADDR);
+    const queryId = Date.now();
+
+    // Try to add/remove validator from an unknown address
+    for (const addrStr of [
+      // Just a random shardchain address
+      "0:cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
+      // Same hash as manager but in shardchain
+      "0:b0bab0bab0bab0bab0bab0bab0bab0bab0bab0bab0bab0bab0bab0bab0bab0ba",
+      // Masterchain address but different from the manager
+      "-1:cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe",
+    ]) {
+      const addr = address(addrStr);
+      for (const op of [
+        ELECTOR_POA_OP_ADD_ADDRESS,
+        ELECTOR_POA_OP_REMOVE_ADDRESS,
+      ]) {
+        let tx = await elector.receiveMessage(
+          simpleInternal({
+            bounce: true,
+            src: addr,
+            dest: ELECTOR_ADDR,
+            value: toNano(1),
+            body: beginCell()
+              .storeUint(op, 32)
+              .storeUint(queryId, 64)
+              .storeUint(123, 256)
+              .endCell(),
+          })
+        );
+        expect(tx.outMessagesCount).toEqual(1);
+
+        const callback = tx.outMessages.get(0)!;
+        assert(callback.info.type === "internal");
+        expect(callback.info.dest).toEqualAddress(addr);
+
+        expect(callback.body).toEqualCell(
+          beginCell()
+            .storeUint(ANSWER_TAG_ERROR, 32)
+            .storeUint(queryId, 64)
+            .storeUint(op, 32)
+            .endCell()
+        );
+      }
+    }
+
+    // Add/remove address as a manager
+    const validator = 123n;
+    for (const [op, check] of [
+      [
+        ELECTOR_POA_OP_ADD_ADDRESS,
+        (whitelist: Dictionary<bigint, BitString>) => {
+          expect(whitelist.size).toEqual(1);
+          expect(whitelist.get(validator)).toBeDefined();
+        },
+      ] as const,
+      [
+        ELECTOR_POA_OP_REMOVE_ADDRESS,
+        (whitelist: Dictionary<bigint, BitString>) => {
+          expect(whitelist.size).toEqual(0);
+        },
+      ] as const,
+    ]) {
+      let tx = await elector.receiveMessage(
+        simpleInternal({
+          bounce: true,
+          src: MANAGER_ADDR,
+          dest: ELECTOR_ADDR,
+          value: toNano(1),
+          body: beginCell()
+            .storeUint(op, 32)
+            .storeUint(queryId, 64)
+            .storeUint(validator, 256)
+            .endCell(),
+        })
+      );
+      expect(tx.outMessagesCount).toEqual(1);
+
+      const callback = tx.outMessages.get(0)!;
+      assert(callback.info.type === "internal");
+      expect(callback.info.dest).toEqualAddress(MANAGER_ADDR);
+
+      expect(callback.body).toEqualCell(
+        beginCell()
+          .storeUint(ANSWER_TAG_POA_WHITELIST_UPDATED, 32)
+          .storeUint(queryId, 64)
+          .storeUint(op, 32)
+          .endCell()
+      );
+
+      assert(elector.accountState?.type === "active");
+      const data = loadElectorPoAData(
+        elector.accountState.state.data!.asSlice()
+      );
+      console.log(data);
+      check(data.whitelist);
+    }
+  });
+
+  it("should block accounts not from whitelist", async () => {
+    const VALIDATOR_ADDR = address(
+      "-1:abababababababababababababababababababababababababababababababab"
+    );
+
+    // Reset elector state with a custom whitelist
+    const whitelist = Dictionary.empty(
+      Dictionary.Keys.BigUint(256),
+      Dictionary.Values.BitString(0)
+    );
+    whitelist.set(123n, BitString.EMPTY);
+
+    await blockchain.setShardAccount(
+      ELECTOR_ADDR,
+      createShardAccount({
+        address: ELECTOR_ADDR,
+        balance: toNano(500),
+        code: newCode,
+        data: beginCell()
+          .store(
+            storeElectorPoAData({
+              currentElection: null,
+              credits: Dictionary.empty(),
+              pastElections: Dictionary.empty(),
+              grams: 0n,
+              activeId: 0,
+              activeHash: 0n,
+              whitelist,
+            })
+          )
+          .endCell(),
+        workchain: -1,
+      })
+    );
+    const elector = await blockchain.getContract(ELECTOR_ADDR);
+
+    const queryId = Date.now();
+    const tx = await elector.receiveMessage(
+      simpleInternal({
+        bounce: true,
+        src: VALIDATOR_ADDR,
+        dest: ELECTOR_ADDR,
+        value: toNano(1000),
+
+        body: beginCell()
+          .storeUint(ELECTOR_OP_NEW_STAKE, 32)
+          .storeUint(queryId, 64)
+          .endCell(),
+      })
+    );
+    expect(tx.outMessagesCount).toEqual(1);
+
+    const callback = tx.outMessages.get(0)!;
+    assert(callback.info.type === "internal");
+    expect(callback.info.dest).toEqualAddress(VALIDATOR_ADDR);
+
+    expect(callback.body).toEqualCell(
+      beginCell()
+        .storeUint(ANSWER_TAG_STAKE_REJECTED, 32)
+        .storeUint(queryId, 64)
+        .storeUint(STAKE_ERR_NOT_IN_WHITELIST, 32)
+        .endCell()
+    );
   });
 
   it("should migrate data on code update", async () => {
-    blockchain.setShardAccount(
+    // Reset elector state with an old contract
+    await blockchain.setShardAccount(
       ELECTOR_ADDR,
       createShardAccount({
         address: ELECTOR_ADDR,
@@ -61,38 +283,28 @@ describe("ElectorPoA", () => {
         workchain: -1,
       })
     );
+    const elector = await blockchain.getContract(ELECTOR_ADDR);
+    assert(elector.accountState?.type === "active");
+    expect(elector.accountState.state.code).toEqualCell(oldCode);
 
     const queryId = Date.now();
-
-    const elector = await blockchain.getContract(ELECTOR_ADDR);
-    const tx = await elector.receiveMessage({
-      info: {
-        type: "internal",
-        ihrDisabled: true,
-        bounce: false,
-        bounced: false,
+    const tx = await elector.receiveMessage(
+      simpleInternal({
         src: CONFIG_ADDR,
         dest: ELECTOR_ADDR,
-        value: {
-          coins: toNano(1),
-          other: null,
-        },
-        ihrFee: 0n,
-        forwardFee: 0n,
-        createdLt: 0n,
-        createdAt: 0,
-      },
-      body: beginCell()
-        .storeUint(0x4e436f64, 32)
-        .storeUint(queryId, 64)
-        .storeUint(0, 32)
-        .storeRef(newCode)
-        .endCell(),
-    });
+        value: toNano(1),
+        body: beginCell()
+          .storeUint(ELECTOR_OP_UPGRADE_CODE, 32)
+          .storeUint(queryId, 64)
+          .storeUint(0, 32)
+          .storeRef(newCode)
+          .endCell(),
+      })
+    );
     expect(Array.isArray(tx.outActions)).toBe(true);
 
     let updatedCode = undefined;
-    let sentCallback = undefined;
+    let callback = undefined;
     for (const outAction of tx.outActions || []) {
       switch (outAction.type) {
         case "setCode": {
@@ -100,7 +312,7 @@ describe("ElectorPoA", () => {
           break;
         }
         case "sendMsg": {
-          sentCallback = outAction.outMsg;
+          callback = outAction.outMsg;
           expect(outAction.mode).toEqual(
             SendMode.CARRY_ALL_REMAINING_INCOMING_VALUE
           );
@@ -109,17 +321,15 @@ describe("ElectorPoA", () => {
     }
 
     expect(updatedCode).toEqualCell(newCode);
-    expect(sentCallback?.body).toEqualCell(
+    expect(callback?.body).toEqualCell(
       beginCell()
-        .storeUint(0xce436f64, 32)
+        .storeUint(ANSWER_TAG_CODE_ACCEPTED, 32)
         .storeUint(queryId, 64)
-        .storeUint(0x4e436f64, 32)
+        .storeUint(ELECTOR_OP_UPGRADE_CODE, 32)
         .endCell()
     );
 
-    if (elector.accountState?.type != "active") {
-      throw new Error("elector must be active");
-    }
+    assert(elector.accountState?.type === "active");
     const cs = elector.accountState.state.data!.asSlice();
     loadElectorData(cs);
 
@@ -132,3 +342,32 @@ describe("ElectorPoA", () => {
     expect(whitelist.size).toEqual(0);
   });
 });
+
+function simpleInternal(m: {
+  src: Address;
+  dest: Address;
+  bounce?: boolean;
+  bounced?: boolean;
+  value: bigint;
+  body: Cell;
+}): Message {
+  return {
+    info: {
+      type: "internal",
+      ihrDisabled: true,
+      bounce: m.bounce || false,
+      bounced: m.bounced || false,
+      src: m.src,
+      dest: m.dest,
+      value: {
+        coins: m.value,
+        other: null,
+      },
+      ihrFee: 0n,
+      forwardFee: 0n,
+      createdLt: 0n,
+      createdAt: 0,
+    },
+    body: m.body,
+  };
+}
