@@ -78,7 +78,7 @@ impl EngineSession {
         ));
 
         Self {
-            genesis_info: merged_conf.genesis_info(),
+            genesis_info: merged_conf.genesis_info,
             span_fields,
             stop_tx: engine_stop_tx,
             run_attrs,

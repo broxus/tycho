@@ -31,19 +31,12 @@ pub struct MempoolConfig {
 /// visible outside crate and used as DTO
 #[derive(Clone, Debug)]
 pub struct MempoolMergedConfig {
-    genesis_info: GenesisInfo,
-    pub(crate) conf: MempoolConfig,
+    pub genesis_info: GenesisInfo,
+    pub conf: MempoolConfig,
     pub(crate) overlay_id: OverlayId,
 }
 
 impl MempoolMergedConfig {
-    pub fn genesis_info(&self) -> GenesisInfo {
-        self.genesis_info
-    }
-    pub fn consensus(&self) -> &ConsensusConfig {
-        &self.conf.consensus
-    }
-
     pub(crate) fn genesis_author(&self) -> PeerId {
         let key_pair = KeyPair::from(&SecretKey::from_bytes(self.overlay_id.0));
         key_pair.public_key.into()

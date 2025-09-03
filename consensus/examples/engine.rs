@@ -190,7 +190,7 @@ fn make_network(
                             input_buffer: InputBuffer::new_stub(
                                 cli.payload_step,
                                 cli.steps_until_full,
-                                merged_conf.consensus(),
+                                &merged_conf.conf.consensus,
                             ),
                             output: committed_tx,
                             top_known_anchor,

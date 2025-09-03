@@ -280,7 +280,7 @@ impl Mempool {
         let input_buffer = InputBuffer::new_stub(
             cmd.payload_step,
             cmd.steps_until_full,
-            merged_conf.consensus(),
+            &merged_conf.conf.consensus,
         );
 
         Ok(Mempool {
@@ -289,7 +289,7 @@ impl Mempool {
 
             storage,
             input_buffer,
-            merged_conf: config_builder.build()?,
+            merged_conf,
         })
     }
 
