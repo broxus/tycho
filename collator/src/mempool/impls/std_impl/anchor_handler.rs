@@ -60,6 +60,9 @@ impl AnchorHandler {
     async fn handle_mempool_output(&self, mut shuttle: Shuttle, output: MempoolOutput) -> Shuttle {
         match output {
             MempoolOutput::NextAnchor(committed) => return shuttle.handle(committed).await,
+            MempoolOutput::CommitFinished(round) => {
+                shuttle.store.set_committed(round);
+            }
             MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
                 shuttle.reset(self.deduplicate_rounds, anchors_full_bottom.0);
             }

@@ -8,8 +8,9 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{ReadOptions, WriteBatch};
 
+use super::{POINT_KEY_LEN, fill_point_key, fill_point_prefix, format_point_key};
 use crate::effects::AltFormat;
-use crate::models::{Point, PointInfo, PointStatus, PointStatusValidated};
+use crate::models::{Point, PointInfo, PointStatus, PointStatusValidated, Round};
 use crate::storage::MempoolDb;
 
 #[derive(Clone)]
@@ -26,6 +27,7 @@ impl MempoolAdapterStore {
         self.0.commit_finished.set_max_raw(next_expected_anchor);
     }
 
+    /// Next must call [`Self::set_committed`] for GC as watch notification is deferred
     pub fn expand_anchor_history<'b>(
         &self,
         anchor: &PointInfo,
@@ -56,29 +58,33 @@ impl MempoolAdapterStore {
                 .expect("DB expand anchor history")
         };
         // may skip expand part, but never skip set committed - let it write what it should
-        self.set_committed(anchor, history)
+        self.set_committed_db(anchor, history)
             .with_context(|| context(anchor, history))
             .expect("DB set committed");
+        payloads
+    }
+
+    /// may skip [`Self::expand_anchor_history`] part, but never skip this one
+    pub fn set_committed(&self, anchor_round: Round) {
         // commit is finished when history payloads is read from DB and marked committed,
         // so that data may be removed consistently with any settings
-        self.0.commit_finished.set_max(anchor.round());
-        payloads
+        self.0.commit_finished.set_max(anchor_round);
     }
 
     pub fn expand_anchor_history_arena_size(&self, history: &[PointInfo]) -> usize {
         let payload_bytes =
             (history.iter()).fold(0, |acc, info| acc + info.payload_bytes() as usize);
-        let keys_bytes = history.len() * super::KEY_LEN;
+        let keys_bytes = history.len() * POINT_KEY_LEN;
         payload_bytes + keys_bytes
     }
 
     fn load_payload<'b>(&self, history: &[PointInfo], bump: &'b Bump) -> Result<Vec<&'b [u8]>> {
         let _call_duration =
             HistogramGuard::begin("tycho_mempool_store_expand_anchor_history_time");
-        let mut buf = [0_u8; super::KEY_LEN];
+        let mut buf = [0_u8; POINT_KEY_LEN];
         let mut keys = FastHashSet::<&'b [u8]>::with_capacity(history.len());
         for info in history {
-            super::fill_key(info.round().0, info.digest().inner(), &mut buf);
+            fill_point_key(info.round().0, info.digest().inner(), &mut buf);
             keys.insert(bump.alloc_slice_copy(&buf));
         }
         buf.fill(0);
@@ -86,11 +92,11 @@ impl MempoolAdapterStore {
         let mut opt = ReadOptions::default();
 
         let first = (history.first()).context("anchor history must not be empty")?;
-        super::fill_prefix(first.round().0, &mut buf);
+        fill_point_prefix(first.round().0, &mut buf);
         opt.set_iterate_lower_bound(buf);
 
         let last = history.last().context("anchor history must not be empty")?;
-        super::fill_prefix(last.round().next().0, &mut buf);
+        fill_point_prefix(last.round().next().0, &mut buf);
         opt.set_iterate_upper_bound(buf);
 
         let db = self.0.db.rocksdb();
@@ -128,16 +134,16 @@ impl MempoolAdapterStore {
             keys.is_empty(),
             "{} history points were not found id db:\n{}",
             keys.len(),
-            keys.iter().map(|key| super::format_key(key)).join(",\n")
+            keys.iter().map(|key| format_point_key(key)).join(",\n")
         );
         anyhow::ensure!(found.len() == history.len(), "stored point key collision");
 
         let mut result = Vec::with_capacity(total_payload_items);
         for info in history {
-            super::fill_key(info.round().0, info.digest().inner(), &mut buf);
+            fill_point_key(info.round().0, info.digest().inner(), &mut buf);
             let payload = found
                 .remove(buf.as_slice())
-                .with_context(|| super::format_key(&buf))
+                .with_context(|| format_point_key(&buf))
                 .context("key was searched in db but was not found")?;
             for msg in payload {
                 result.push(msg);
@@ -147,10 +153,10 @@ impl MempoolAdapterStore {
         Ok(result)
     }
 
-    fn set_committed(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()> {
+    fn set_committed_db(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_set_committed_status_time");
 
-        let mut buf = [0_u8; super::KEY_LEN];
+        let mut buf = [0_u8; POINT_KEY_LEN];
 
         let db = self.0.db.rocksdb();
         let status_cf = self.0.db.points_status.cf();
@@ -161,7 +167,7 @@ impl MempoolAdapterStore {
         let status_encoded = status.encode();
 
         for info in history {
-            super::fill_key(info.round().0, info.digest().inner(), &mut buf);
+            fill_point_key(info.round().0, info.digest().inner(), &mut buf);
             batch.merge_cf(&status_cf, buf.as_slice(), &status_encoded);
         }
 

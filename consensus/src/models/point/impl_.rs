@@ -23,9 +23,9 @@ pub enum PointIntegrityError {
     #[error("signature does not match author")]
     BadSig,
     #[error("bad signature in evidence map")]
-    EvidenceSig,
+    EvidenceSig(Point),
     #[error("unusable due to some maps issue")]
-    BadMaps, // TODO: separate error for each violation
+    BadMaps(Point), // TODO: separate error for each violation
 }
 
 #[derive(Clone)]
@@ -150,11 +150,11 @@ impl Point {
         let point = Self::from_bytes(serialized)?;
 
         if !point.info().has_well_formed_maps() {
-            return Ok(Err(PointIntegrityError::BadMaps));
+            return Ok(Err(PointIntegrityError::BadMaps(point)));
         }
 
         if !is_evidence_ok(point.info()) {
-            return Ok(Err(PointIntegrityError::EvidenceSig));
+            return Ok(Err(PointIntegrityError::EvidenceSig(point)));
         }
 
         Ok(Ok(point))

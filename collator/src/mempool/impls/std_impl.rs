@@ -172,7 +172,7 @@ impl MempoolAdapterStdImpl {
 
         let (anchor_tx, anchor_rx) = mpsc::unbounded_channel();
 
-        self.input_buffer.apply_config(merged_conf.consensus());
+        self.input_buffer.apply_config(&merged_conf.conf.consensus);
 
         // Note: mempool is always run from applied mc block
         self.top_known_anchor
@@ -188,8 +188,8 @@ impl MempoolAdapterStdImpl {
         // actual oldest sync round will be not less than this
         let estimated_sync_bottom = ctx
             .top_processed_to_anchor_id
-            .saturating_sub(merged_conf.consensus().reset_rounds())
-            .max(merged_conf.genesis_info().start_round);
+            .saturating_sub(merged_conf.conf.consensus.reset_rounds())
+            .max(merged_conf.genesis_info.start_round);
         anyhow::ensure!(
             estimated_sync_bottom >= ctx.consensus_info.prev_vset_switch_round,
             "cannot start from outdated peer sets (too short mempool epoch(s)): \
@@ -197,7 +197,7 @@ impl MempoolAdapterStdImpl {
                  is older than prev vset switch round {}; \
                  start round {}, top processed to anchor {} in block {}",
             ctx.consensus_info.prev_vset_switch_round,
-            merged_conf.genesis_info().start_round,
+            merged_conf.genesis_info.start_round,
             ctx.top_processed_to_anchor_id,
             ctx.mc_block_id,
         );
@@ -218,7 +218,7 @@ impl MempoolAdapterStdImpl {
             engine_stop_tx,
         );
 
-        let mut anchor_task = AnchorHandler::new(merged_conf.consensus(), anchor_rx)
+        let mut anchor_task = AnchorHandler::new(&merged_conf.conf.consensus, anchor_rx)
             .run(self.cache.clone(), self.mempool_db.clone())
             .boxed();
 

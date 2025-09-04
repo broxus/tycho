@@ -12,15 +12,16 @@ mod store;
 mod tables;
 
 use crate::effects::AltFormat;
+use crate::models::{Digest, Round};
 
-const KEY_LEN: usize = 4 + 32;
+const POINT_KEY_LEN: usize = Round::MAX_TL_SIZE + Digest::MAX_TL_BYTES;
 
-fn fill_key(round: u32, digest: &[u8; 32], key: &mut [u8; KEY_LEN]) {
-    fill_prefix(round, key);
+fn fill_point_key(round: u32, digest: &[u8; 32], key: &mut [u8; POINT_KEY_LEN]) {
+    fill_point_prefix(round, key);
     key[4..].copy_from_slice(&digest[..]);
 }
 
-fn fill_prefix(round: u32, key: &mut [u8; KEY_LEN]) {
+fn fill_point_prefix(round: u32, key: &mut [u8; POINT_KEY_LEN]) {
     key[..4].copy_from_slice(&round.to_be_bytes()[..]);
 }
 
@@ -37,9 +38,9 @@ fn parse_round(bytes: &[u8]) -> Option<u32> {
     }
 }
 
-fn format_key(bytes: &[u8]) -> String {
+fn format_point_key(bytes: &[u8]) -> String {
     if let Some(round) = parse_round(bytes) {
-        if bytes.len() == KEY_LEN {
+        if bytes.len() == POINT_KEY_LEN {
             format!("round {round} digest {}", (&bytes[4..]).alt())
         } else {
             format!("unknown {} bytes: {:.12}", bytes.len(), bytes.alt())

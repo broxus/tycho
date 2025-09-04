@@ -167,13 +167,13 @@ impl PointInfo {
     pub fn anchor_id(&self, link_field: AnchorStageRole) -> PointId {
         (self.0.data)
             .anchor_id(link_field, self.0.round)
-            .unwrap_or(self.id())
+            .unwrap_or_else(|| self.id())
     }
 
     /// next point in path from `&self` to the anchor
     pub fn anchor_link_id(&self, link_field: AnchorStageRole) -> PointId {
         (self.0.data)
             .anchor_link_id(link_field, self.0.round)
-            .unwrap_or(self.id())
+            .unwrap_or_else(|| self.id())
     }
 }

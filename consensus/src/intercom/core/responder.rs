@@ -30,10 +30,10 @@ struct ResponderInner {
 
 struct ResponderCurrent {
     // state and storage components go here
-    broadcast_filter: BroadcastFilter,
-    head: DagHead,
-    downloader: Downloader,
     store: MempoolStore,
+    broadcast_filter: BroadcastFilter,
+    downloader: Downloader,
+    head: DagHead,
     round_ctx: RoundCtx,
 }
 
@@ -58,10 +58,10 @@ impl Responder {
 
     pub fn update(
         &self,
-        broadcast_filter: &BroadcastFilter,
-        head: &DagHead,
-        downloader: &Downloader,
         store: &MempoolStore,
+        broadcast_filter: &BroadcastFilter,
+        downloader: &Downloader,
+        head: &DagHead,
         round_ctx: &RoundCtx,
     ) {
         broadcast_filter.flush_to_dag(head, downloader, store, round_ctx);
@@ -73,10 +73,10 @@ impl Responder {
         //  will not find cached point and will ask to repeat broadcast once more, and local
         //  BroadcastFilter may account such repeated broadcast as malicious.
         self.0.current.store(Some(Arc::new(ResponderCurrent {
-            broadcast_filter: broadcast_filter.clone(),
-            head: head.clone(),
-            downloader: downloader.clone(),
             store: store.clone(),
+            broadcast_filter: broadcast_filter.clone(),
+            downloader: downloader.clone(),
+            head: head.clone(),
             round_ctx: round_ctx.clone(),
         })));
     }

@@ -143,7 +143,7 @@ impl CmdRun {
             let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
 
             let (session, anchor_consumer) =
-                mempool.boot(engine_stop_tx).await.context("init mempool")?;
+                mempool.boot(engine_stop_tx).context("init mempool")?;
 
             let mut last_anchor_file = LastAnchorFile::reopen_in(&file_storage)?;
             (anchor_consumer.top_known_anchor).set_max_raw(last_anchor_file.read()?);
@@ -280,7 +280,7 @@ impl Mempool {
         let input_buffer = InputBuffer::new_stub(
             cmd.payload_step,
             cmd.steps_until_full,
-            merged_conf.consensus(),
+            &merged_conf.conf.consensus,
         );
 
         Ok(Mempool {
@@ -289,7 +289,7 @@ impl Mempool {
 
             storage,
             input_buffer,
-            merged_conf: config_builder.build()?,
+            merged_conf,
         })
     }
 
@@ -297,7 +297,7 @@ impl Mempool {
         storage.context().root_dir().create_subdir("mempool_files")
     }
 
-    pub async fn boot(
+    pub fn boot(
         &self,
         engine_stop_tx: oneshot::Sender<()>,
     ) -> Result<(EngineSession, AnchorConsumer)> {
