@@ -1091,17 +1091,25 @@ impl Phase<FinalizeState> {
             file_hash: prev_state.block_id().file_hash,
         };
 
-        prev_blocks.set(
-            prev_state.block_id().seqno,
-            KeyMaxLt {
-                has_key_block: prev_is_key_block,
-                max_end_lt: prev_state.state().gen_lt,
-            },
-            &KeyBlockRef {
-                is_key_block: prev_is_key_block,
-                block_ref: prev_blk_ref.clone(),
-            },
-        )?;
+        if prev_is_key_block
+            || !prev_state_extra
+                .config
+                .get_global_version()?
+                .capabilities
+                .contains(GlobalCapability::CapOmitMasterBlockHistory)
+        {
+            prev_blocks.set(
+                prev_state.block_id().seqno,
+                KeyMaxLt {
+                    has_key_block: prev_is_key_block,
+                    max_end_lt: prev_state.state().gen_lt,
+                },
+                &KeyBlockRef {
+                    is_key_block: prev_is_key_block,
+                    block_ref: prev_blk_ref.clone(),
+                },
+            )?;
+        }
 
         // 7. update last_key_block
         let last_key_block = if prev_state_extra.after_key_block {

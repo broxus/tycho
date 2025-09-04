@@ -53,6 +53,17 @@ mod phase;
 mod prepare;
 pub mod work_units;
 
+pub struct FinalizeCollationCtx {
+    /// Do we have unprocessed messages in internals
+    /// or externals queue after block collation
+    pub has_unprocessed_messages: bool,
+    pub finalized: FinalizeBlockResult,
+    pub reader_state: ReaderState,
+    pub tracker: MinRefMcStateTracker,
+    pub force_next_mc_block: ForceMasterCollation,
+    pub resume_collation_elapsed: Duration,
+}
+
 impl CollatorStdImpl {
     /// [`force_next_mc_block`] - should force next master block collation after this block
     #[tracing::instrument(
@@ -60,13 +71,14 @@ impl CollatorStdImpl {
         skip_all,
         fields(
             block_id = %self.next_block_info,
-            ct = self.anchors_cache.last_imported_anchor().map(|a| a.ct).unwrap_or_default(),
+            ct = next_chain_time,
         )
     )]
     pub(super) async fn do_collate(
         &mut self,
         working_state: Box<WorkingState>,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
+        next_chain_time: u64,
         force_next_mc_block: ForceMasterCollation,
     ) -> Result<()> {
         let labels: [(&str, String); 1] = [("workchain", self.shard_id.workchain().to_string())];
@@ -99,14 +111,35 @@ impl CollatorStdImpl {
             )),
         );
 
-        let Some(&AnchorInfo {
-            ct: next_chain_time,
+        // We should remove all previously imported anchors above next chain time.
+        // We have cases when some shard can force master block collation (e.g. no pending messages after sc block)
+        // but it is not clear how many anchors were already imported by master. So we take next chain time
+        // from shard and should use anchors only up to choosen next chain time.
+        let Some(AnchorInfo {
+            ct: last_imported_chain_time,
             author,
             ..
-        }) = self.anchors_cache.last_imported_anchor()
+        }) = self
+            .anchors_cache
+            .remove_last_imported_above(next_chain_time)
         else {
-            bail!("last_imported_anchor should exist when we collating block")
+            bail!(
+                "last_imported_anchor should exist when we collating block \
+                    even after removing anchors above the next chain time"
+            )
         };
+
+        // TODO: needs to update metrics
+        // metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels).decrement(our_exts_count as f64);
+
+        assert!(
+            *last_imported_chain_time >= next_chain_time,
+            "all anchors upto next chain time {} should be imported before collation, \
+            but last imported chain time is {}",
+            next_chain_time,
+            last_imported_chain_time,
+        );
+
         let created_by = author.to_bytes().into();
 
         let is_first_block_after_prev_master = is_first_block_after_prev_master(
@@ -235,14 +268,14 @@ impl CollatorStdImpl {
         let FinalizeCollationResult {
             handle_block_candidate_elapsed,
         } = self
-            .finalize_collation(
-                final_result.has_unprocessed_messages,
+            .finalize_collation(FinalizeCollationCtx {
+                has_unprocessed_messages: final_result.has_unprocessed_messages,
                 finalized,
                 reader_state,
                 tracker,
                 force_next_mc_block,
                 resume_collation_elapsed,
-            )
+            })
             .await?;
 
         let collation_total_elapsed = total_collation_histogram.finish();
@@ -895,14 +928,18 @@ impl CollatorStdImpl {
 
     async fn finalize_collation(
         &mut self,
-        has_unprocessed_messages: bool,
-        finalized: FinalizeBlockResult,
-        reader_state: ReaderState,
-        tracker: MinRefMcStateTracker,
-        force_next_mc_block: ForceMasterCollation,
-        resume_collation_elapsed: Duration,
+        ctx: FinalizeCollationCtx,
     ) -> Result<FinalizeCollationResult> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
+
+        let FinalizeCollationCtx {
+            has_unprocessed_messages,
+            finalized,
+            reader_state,
+            tracker,
+            force_next_mc_block,
+            resume_collation_elapsed,
+        } = ctx;
 
         let block_id = *finalized.block_candidate.block.id();
         let is_key_block = finalized.block_candidate.is_key_block;
@@ -943,6 +980,14 @@ impl CollatorStdImpl {
                 None => finalized.collation_config,
             };
 
+            // force next master block if there are no pending messages after current shard block
+            let force_next_mc_block =
+                if !self.shard_id.is_masterchain() && !has_unprocessed_messages {
+                    ForceMasterCollation::NoPendingMessagesAfterShardBlocks
+                } else {
+                    force_next_mc_block
+                };
+
             // return collation result
             self.listener
                 .on_block_candidate(BlockCollationResult {
@@ -952,6 +997,7 @@ impl CollatorStdImpl {
                     mc_data: finalized.mc_data.clone(),
                     collation_config: collation_config.clone(),
                     force_next_mc_block,
+                    has_processed_externals: finalized.collation_data.execute_count_ext > 0,
                 })
                 .await?;
 
