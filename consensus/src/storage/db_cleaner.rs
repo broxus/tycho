@@ -82,6 +82,8 @@ impl DbCleaner {
                         let mut up_to_exclusive = [0_u8; POINT_KEY_LEN];
                         fill_point_prefix(new_least_to_keep.0, &mut up_to_exclusive);
 
+                        const DB_CLEAN_ERRORS: &str = "tycho_mempool_db_clean_error_count";
+
                         match db.clean_points(&up_to_exclusive) {
                             Ok(Some((first, last))) => {
                                 const CLEANED: &str = "tycho_mempool_rounds_db_cleaned";
@@ -99,12 +101,20 @@ impl DbCleaner {
                                 );
                             }
                             Err(e) => {
+                                metrics::gauge!(DB_CLEAN_ERRORS, "kind" => "points").increment(1);
                                 tracing::error!(
                                     "delete range of mempool data before round {} failed: {e}",
                                     new_least_to_keep.0
                                 );
                             }
                         }
+                        match db.wait_for_compact() {
+                            Ok(()) => {}
+                            Err(e) => {
+                                metrics::gauge!(DB_CLEAN_ERRORS, "kind" => "compact").increment(1);
+                                tracing::error!("wait compaction of mempool DB failed: {e}");
+                            }
+                        };
                     });
                     task.await.inspect_err(|Cancelled()| {
                         tracing::warn!("mempool clean DB task cancelled");

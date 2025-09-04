@@ -103,6 +103,7 @@ impl MempoolDb {
 
     /// Use when no reads/writes are possible, and this should finish prior other ops
     pub(super) fn wait_for_compact(&self) -> anyhow::Result<()> {
+        let _call_duration = HistogramGuard::begin("tycho_mempool_db_wait_for_compact_time");
         let mut opt = WaitForCompactOptions::default();
         opt.set_flush(true);
         self.db.rocksdb().wait_for_compact(&opt)?;
