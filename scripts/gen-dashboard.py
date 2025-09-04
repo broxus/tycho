@@ -2813,6 +2813,15 @@ def mempool_storage() -> RowPanel:
             "tycho_mempool_store_clean_points_time",
             "Clean points task",
         ),
+        create_heatmap_panel(
+            "tycho_mempool_db_wait_for_compact_time",
+            "Wait for compact",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_db_clean_error_count",
+            "Clean task errors",
+            legend_format="{{instance}} - {{kind}}",
+        ),
     ]
     return create_row("Mempool storage", metrics)
 
