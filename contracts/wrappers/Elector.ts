@@ -278,10 +278,8 @@ export class Elector implements Contract {
 
   async getCodeHash(provider: ContractProvider): Promise<Buffer | null> {
     const state = await provider.getState();
-    if (state.state.type == "active") {
-      if (state.state.code != null) {
-        return Cell.fromBoc(state.state.code)[0].hash();
-      }
+    if (state.state.type == "active" && state.state.code != null) {
+      return Cell.fromBoc(state.state.code)[0].hash();
     }
 
     return null;
@@ -296,7 +294,7 @@ export class Elector implements Contract {
 
   async getStake(provider: ContractProvider, address: Address) {
     const { stack } = await provider.get("compute_returned_stake", [
-      { type: "int", value: BigInt("0x" + address.hash.toString("hex")) },
+      { type: "int", value: BigInt(`0x${address.hash.toString("hex")}`) },
     ]);
     return {
       value: stack.readBigNumber(),
