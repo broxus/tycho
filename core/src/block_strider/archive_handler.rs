@@ -10,19 +10,16 @@ use crate::block_strider::{
     ArchiveSubscriber, ArchiveSubscriberContext, BlockSubscriber, BlockSubscriberContext,
 };
 use crate::storage::CoreStorage;
-
 #[repr(transparent)]
 pub struct ArchiveHandler<S> {
     inner: Arc<Inner<S>>,
 }
-
 impl<S> ArchiveHandler<S>
 where
     S: ArchiveSubscriber,
 {
     pub fn new(storage: CoreStorage, archive_subscriber: S) -> Result<Self> {
         let rx = storage.block_storage().subscribe_to_archive_ids();
-
         Ok(Self {
             inner: Arc::new(Inner {
                 storage,
@@ -31,11 +28,13 @@ where
             }),
         })
     }
-
     async fn handle_block_impl(&self, _cx: &BlockSubscriberContext, _prepared: ()) -> Result<()> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(handle_block_impl)),
+            file!(),
+            line!(),
+        );
         let _histogram = HistogramGuard::begin("tycho_core_archive_handler_handle_block_time");
-
-        // Process all available archive
         loop {
             let archive_id = {
                 let mut rx = self.inner.archive_listener.rx.lock();
@@ -44,23 +43,22 @@ where
                     Err(_) => break,
                 }
             };
-
             let _histogram = HistogramGuard::begin("tycho_core_subscriber_handle_archive_time");
-
             let cx = ArchiveSubscriberContext {
                 archive_id,
                 storage: &self.inner.storage,
             };
-
             tracing::info!(id = cx.archive_id, "handling archive");
-            self.inner.archive_subscriber.handle_archive(&cx).await?;
+            {
+                __guard.end_section(line!());
+                let __result = self.inner.archive_subscriber.handle_archive(&cx).await;
+                __guard.start_section(line!());
+                __result
+            }?;
         }
-
-        // Done
         Ok(())
     }
 }
-
 impl<S> Clone for ArchiveHandler<S> {
     #[inline]
     fn clone(&self) -> Self {
@@ -69,21 +67,17 @@ impl<S> Clone for ArchiveHandler<S> {
         }
     }
 }
-
 impl<S> BlockSubscriber for ArchiveHandler<S>
 where
     S: ArchiveSubscriber,
 {
     type Prepared = ();
-
     type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
     type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
-
     #[inline]
     fn prepare_block<'a>(&'a self, _cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
         futures_util::future::ready(Ok(()))
     }
-
     fn handle_block<'a>(
         &'a self,
         cx: &'a BlockSubscriberContext,
@@ -92,17 +86,14 @@ where
         Box::pin(self.handle_block_impl(cx, prepared))
     }
 }
-
 struct Inner<S> {
     storage: CoreStorage,
     archive_subscriber: S,
     archive_listener: ArchiveListener,
 }
-
 struct ArchiveListener {
     rx: Mutex<broadcast::Receiver<u32>>,
 }
-
 impl ArchiveListener {
     fn new(rx: broadcast::Receiver<u32>) -> Self {
         Self { rx: Mutex::new(rx) }

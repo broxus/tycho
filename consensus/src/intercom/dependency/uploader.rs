@@ -9,12 +9,9 @@ use crate::engine::NodeConfig;
 use crate::intercom::core::PointByIdResponse;
 use crate::models::{PointId, PointStatusStored};
 use crate::storage::MempoolStore;
-
 static LIMIT: LazyLock<SpawnLimit> =
     LazyLock::new(|| SpawnLimit::new(NodeConfig::get().max_upload_tasks.get() as usize));
-
 pub struct Uploader;
-
 impl Uploader {
     pub async fn find(
         peer_id: &PeerId,
@@ -23,6 +20,11 @@ impl Uploader {
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) -> PointByIdResponse<Bytes> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(find)),
+            file!(),
+            line!(),
+        );
         let (status_opt, result) = if point_id.round > head.current().round() {
             (None, PointByIdResponse::TryLater)
         } else {
@@ -48,10 +50,8 @@ impl Uploader {
                         }
                         Some(PointStatusStored::Exists) | None => {
                             if last_back_bottom <= point_id.round {
-                                // may be downloading, unknown or resolving - dag may be incomplete
                                 PointByIdResponse::TryLater
                             } else {
-                                // must have been stored and committed, may be too old and deleted
                                 PointByIdResponse::DefinedNone
                             }
                         }
@@ -65,22 +65,21 @@ impl Uploader {
                 }
             });
             match task_opt {
-                Some(task) => task
-                    .await
-                    .unwrap_or_else(|Cancelled()| (None, PointByIdResponse::TryLater)),
+                Some(task) => {
+                    __guard.end_section(line!());
+                    let __result = task.await;
+                    __guard.start_section(line!());
+                    __result
+                }
+                .unwrap_or_else(|Cancelled()| (None, PointByIdResponse::TryLater)),
                 None => (None, PointByIdResponse::TryLater),
             }
         };
         tracing::debug!(
-            parent: round_ctx.span(),
-            result = display(result.alt()),
-            not_found = status_opt.is_none().then_some(true),
-            found = status_opt.map(display),
-            peer = display(peer_id.alt()),
-            author = display(point_id.author.alt()),
-            round = point_id.round.0,
-            digest = display(point_id.digest.alt()),
-            "upload",
+            parent : round_ctx.span(), result = display(result.alt()), not_found =
+            status_opt.is_none().then_some(true), found = status_opt.map(display), peer =
+            display(peer_id.alt()), author = display(point_id.author.alt()), round =
+            point_id.round.0, digest = display(point_id.digest.alt()), "upload",
         );
         result
     }

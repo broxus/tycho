@@ -4,12 +4,15 @@ use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
 use tycho_core::overlay_client::{Neighbour, Neighbours};
 use tycho_network::PeerId;
-
 #[tokio::test]
 pub async fn test() {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(test)),
+        file!(),
+        line!(),
+    );
     let max_neighbours = 5;
     let default_roundtrip = Duration::from_millis(300);
-
     let initial_peers = vec![
         PeerId([0u8; 32]),
         PeerId([1u8; 32]),
@@ -20,18 +23,14 @@ pub async fn test() {
     .into_iter()
     .map(|peer_id| Neighbour::new(peer_id, u32::MAX, &default_roundtrip))
     .collect::<Vec<_>>();
-
     println!("{}", initial_peers.len());
-
     let neighbours = Neighbours::new(initial_peers.clone(), max_neighbours);
     println!("{}", neighbours.get_active_neighbours().len());
-
     let first_success_rate = [0.2, 0.8];
     let second_success_rate = [1.0, 0.0];
     let third_success_rate = [0.5, 0.5];
     let fourth_success_rate = [0.8, 0.2];
     let fifth_success_rate = [0.0, 1.0];
-
     let indices = vec![
         WeightedIndex::new(first_success_rate).unwrap(),
         WeightedIndex::new(second_success_rate).unwrap(),
@@ -39,15 +38,11 @@ pub async fn test() {
         WeightedIndex::new(fourth_success_rate).unwrap(),
         WeightedIndex::new(fifth_success_rate).unwrap(),
     ];
-
     let mut i = 0;
     let mut rng = rand::rng();
     let slice = initial_peers.as_slice();
     while i < 1000 {
-        // let start = Instant::now();
         let n_opt = neighbours.choose();
-        // let end = Instant::now();
-
         if let Some(n) = n_opt {
             let index = slice
                 .iter()
@@ -61,12 +56,10 @@ pub async fn test() {
                 println!("Failed request to peer: {}", n.peer_id());
                 n.track_request(&Duration::from_millis(200), false);
             }
-
             neighbours.try_apply_score(0);
         }
         i += 1;
     }
-
     let new_neighbours = vec![
         PeerId([5u8; 32]),
         PeerId([6u8; 32]),
@@ -78,7 +71,6 @@ pub async fn test() {
     .map(|peer_id| Neighbour::new(peer_id, u32::MAX, &default_roundtrip))
     .collect::<Vec<_>>();
     neighbours.update(new_neighbours);
-
     let active = neighbours.get_active_neighbours();
     println!("active neighbours {}", active.len());
     for i in active.iter() {

@@ -20,43 +20,61 @@ use tycho_types::boc::Boc;
 use tycho_types::cell::Cell;
 use tycho_types::models::{Block, BlockId, ShardIdent, ShardStateUnsplit};
 use tycho_util::test::init_logger;
-
 struct MockEventListener {
     accepted_count: Arc<AtomicUsize>,
 }
-
 #[async_trait]
 impl StateNodeEventListener for MockEventListener {
     async fn on_block_accepted(&self, _block_id: &ShardStateStuff) -> Result<()> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(on_block_accepted)),
+            file!(),
+            line!(),
+        );
         self.accepted_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
     async fn on_block_accepted_external(&self, _state: &ShardStateStuff) -> Result<()> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(on_block_accepted_external)),
+            file!(),
+            line!(),
+        );
         Ok(())
     }
 }
-
 #[tokio::test]
 async fn test_add_and_get_block() {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(test_add_and_get_block)),
+        file!(),
+        line!(),
+    );
     init_logger("test_add_and_get_block", "debug");
-    let (ctx, _tmp_dir) = StorageContext::new_temp().await.unwrap();
-    let mock_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato())
-        .await
-        .unwrap();
+    let (ctx, _tmp_dir) = {
+        __guard.end_section(line!());
+        let __result = StorageContext::new_temp().await;
+        __guard.start_section(line!());
+        __result
+    }
+    .unwrap();
+    let mock_storage = {
+        __guard.end_section(line!());
+        let __result = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await;
+        __guard.start_section(line!());
+        __result
+    }
+    .unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
     let adapter =
         StateNodeAdapterStdImpl::new(listener, mock_storage, CollatorSyncContext::Historical);
-
-    // Test adding a block
-
     let empty_block = BlockStuff::new_empty(ShardIdent::BASECHAIN, 1);
     let block_id = *empty_block.id();
     let block_stuff_aug = BlockStuffAug::loaded(empty_block);
     let queue_diff_aug = QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(&block_id));
-
     let block = Arc::new(BlockStuffForSync {
         ref_by_mc_seqno: 1,
         block_stuff_aug,
@@ -68,22 +86,33 @@ async fn test_add_and_get_block() {
         consensus_info: Default::default(),
     });
     adapter.accept_block(block).unwrap();
-
-    tracing::info!(id = ?block_id, "Waiting for block");
-    // Test getting the next block (which should be the one just added)
-    let next_block = adapter.wait_for_block(&block_id).await;
+    tracing::info!(id = ? block_id, "Waiting for block");
+    let next_block = {
+        __guard.end_section(line!());
+        let __result = adapter.wait_for_block(&block_id).await;
+        __guard.start_section(line!());
+        __result
+    };
     assert!(
         next_block.is_some(),
         "Block should be retrieved after being added"
     );
 }
-
 #[tokio::test]
 async fn test_storage_accessors() {
-    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
-
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(test_storage_accessors)),
+        file!(),
+        line!(),
+    );
+    let (storage, _tmp_dir) = {
+        __guard.end_section(line!());
+        let __result = prepare_test_storage().await;
+        __guard.start_section(line!());
+        __result
+    }
+    .unwrap();
     let zerostate_id = BlockId::default();
-
     let block_strider = BlockStrider::builder()
         .with_provider(EmptyBlockProvider)
         .with_state(PersistentBlockStriderState::new(
@@ -92,46 +121,67 @@ async fn test_storage_accessors() {
         ))
         .with_state_subscriber(storage.clone(), PrintSubscriber)
         .build();
-
-    block_strider.run().await.unwrap();
-
+    {
+        __guard.end_section(line!());
+        let __result = block_strider.run().await;
+        __guard.start_section(line!());
+        __result
+    }
+    .unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
     let adapter =
         StateNodeAdapterStdImpl::new(listener, storage.clone(), CollatorSyncContext::Historical);
-
     let last_mc_block_id = adapter.load_last_applied_mc_block_id().unwrap();
-
-    storage
-        .shard_state_storage()
-        .load_state(&last_mc_block_id)
-        .await
-        .unwrap();
+    {
+        __guard.end_section(line!());
+        let __result = storage
+            .shard_state_storage()
+            .load_state(&last_mc_block_id)
+            .await;
+        __guard.start_section(line!());
+        __result
+    }
+    .unwrap();
 }
-
 #[tokio::test]
 async fn test_add_and_get_next_block() {
-    let (ctx, _tmp_dir) = StorageContext::new_temp().await.unwrap();
-    let mock_storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato())
-        .await
-        .unwrap();
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(
+            module_path!(),
+            "::",
+            stringify!(test_add_and_get_next_block)
+        ),
+        file!(),
+        line!(),
+    );
+    let (ctx, _tmp_dir) = {
+        __guard.end_section(line!());
+        let __result = StorageContext::new_temp().await;
+        __guard.start_section(line!());
+        __result
+    }
+    .unwrap();
+    let mock_storage = {
+        __guard.end_section(line!());
+        let __result = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await;
+        __guard.start_section(line!());
+        __result
+    }
+    .unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
     let adapter =
         StateNodeAdapterStdImpl::new(listener, mock_storage, CollatorSyncContext::Historical);
-
-    // Test adding a block
     let prev_block = BlockStuff::new_empty(ShardIdent::MASTERCHAIN, 1);
     let prev_block_id = prev_block.id();
-
     let empty_block = BlockStuff::new_empty(ShardIdent::MASTERCHAIN, 2);
     let block_stuff_aug = BlockStuffAug::loaded(empty_block);
     let queue_diff_aug = QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(block_stuff_aug.id()));
-
     let block = Arc::new(BlockStuffForSync {
         ref_by_mc_seqno: 2,
         block_stuff_aug,
@@ -143,23 +193,38 @@ async fn test_add_and_get_next_block() {
         consensus_info: Default::default(),
     });
     adapter.accept_block(block).unwrap();
-
-    let next_block = adapter.wait_for_block_next(prev_block_id).await;
+    let next_block = {
+        __guard.end_section(line!());
+        let __result = adapter.wait_for_block_next(prev_block_id).await;
+        __guard.start_section(line!());
+        __result
+    };
     assert!(
         next_block.is_some(),
         "Block should be retrieved after being added"
     );
 }
-
 #[tokio::test]
 async fn test_add_read_handle_1000_blocks_parallel() {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(
+            module_path!(),
+            "::",
+            stringify!(test_add_read_handle_1000_blocks_parallel)
+        ),
+        file!(),
+        line!(),
+    );
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
     tycho_util::test::init_logger("test_add_read_handle_100000_blocks_parallel", "debug");
-
-    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
-
+    let (storage, _tmp_dir) = {
+        __guard.end_section(line!());
+        let __result = prepare_test_storage().await;
+        __guard.start_section(line!());
+        __result
+    }
+    .unwrap();
     let zerostate_id = BlockId::default();
-
     let block_strider = BlockStrider::builder()
         .with_provider(EmptyBlockProvider)
         .with_state(PersistentBlockStriderState::new(
@@ -168,9 +233,13 @@ async fn test_add_read_handle_1000_blocks_parallel() {
         ))
         .with_state_subscriber(storage.clone(), PrintSubscriber)
         .build();
-
-    block_strider.run().await.unwrap();
-
+    {
+        __guard.end_section(line!());
+        let __result = block_strider.run().await;
+        __guard.start_section(line!());
+        __result
+    }
+    .unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
@@ -180,13 +249,15 @@ async fn test_add_read_handle_1000_blocks_parallel() {
         storage.clone(),
         CollatorSyncContext::Historical,
     ));
-
     let empty_block = get_empty_block();
-
-    // Task 1: Adding 1000 blocks
     let add_blocks = {
         let adapter = adapter.clone();
         tokio::spawn(async move {
+            let mut __guard = crate::__async_profile_guard__::Guard::new(
+                concat!(module_path!(), "::async_block"),
+                file!(),
+                line!(),
+            );
             for i in 1..=1000 {
                 let block_id = BlockId {
                     shard: ShardIdent::new_full(0),
@@ -202,7 +273,6 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                 ));
                 let queue_diff_aug =
                     QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(&block_id));
-
                 let block = Arc::new(BlockStuffForSync {
                     ref_by_mc_seqno: i,
                     block_stuff_aug,
@@ -218,13 +288,15 @@ async fn test_add_read_handle_1000_blocks_parallel() {
             }
         })
     };
-
     adapter.set_sync_context(CollatorSyncContext::Recent);
-
-    // Task 2: Retrieving and handling 1000 blocks
     let handle_blocks = {
         let adapter = adapter.clone();
         tokio::spawn(async move {
+            let mut __guard = crate::__async_profile_guard__::Guard::new(
+                concat!(module_path!(), "::async_block"),
+                file!(),
+                line!(),
+            );
             for i in 1..=1000 {
                 let block_id = BlockId {
                     shard: ShardIdent::new_full(0),
@@ -232,19 +304,22 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     root_hash: Default::default(),
                     file_hash: Default::default(),
                 };
-                let next_block = adapter.wait_for_block(&block_id).await;
+                let next_block = {
+                    __guard.end_section(line!());
+                    let __result = adapter.wait_for_block(&block_id).await;
+                    __guard.start_section(line!());
+                    __result
+                };
                 assert!(
                     next_block.is_some(),
                     "Block {i} should be retrieved after being added",
                 );
-
                 let mcstate_tracker = MinRefMcStateTracker::new();
                 let shard_state = ShardStateUnsplit {
                     shard_ident: block_id.shard,
                     seqno: block_id.seqno,
                     ..Default::default()
                 };
-
                 let state = ShardStateStuff::from_state_and_root(
                     &block_id,
                     Box::new(shard_state),
@@ -252,8 +327,12 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     &mcstate_tracker,
                 )
                 .unwrap();
-
-                let handle_block = adapter.handle_state(&state).await;
+                let handle_block = {
+                    __guard.end_section(line!());
+                    let __result = adapter.handle_state(&state).await;
+                    __guard.start_section(line!());
+                    __result
+                };
                 assert!(
                     handle_block.is_ok(),
                     "Block {i} should be handled after being added",
@@ -261,27 +340,26 @@ async fn test_add_read_handle_1000_blocks_parallel() {
             }
         })
     };
-
-    // Await both tasks to complete
-    let _ = tokio::join!(handle_blocks, add_blocks);
-
+    let _ = {
+        __guard.end_section(line!());
+        let __result = tokio::join!(handle_blocks, add_blocks);
+        __guard.start_section(line!());
+        __result
+    };
     assert_eq!(
         counter.load(Ordering::SeqCst),
         1000,
         "1000 blocks should be accepted"
     );
 }
-
 pub fn get_empty_block() -> BlockStuffAug {
     let block_data = include_bytes!("../../core/tests/data/empty_block.bin");
     let root = Boc::decode(block_data).unwrap();
     let block = root.parse::<Block>().unwrap();
-
     let block_id = BlockId {
         root_hash: *root.repr_hash(),
         ..Default::default()
     };
-
     BlockStuff::from_block_and_root(&block_id, block, root, block_data.len())
         .with_archive_data(block_data.as_slice())
 }

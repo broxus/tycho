@@ -15,10 +15,8 @@ use crate::intercom::core::{
 };
 use crate::intercom::{BroadcastFilter, Downloader, Uploader};
 use crate::storage::MempoolStore;
-
 #[derive(Clone, Default)]
 pub struct Responder(Arc<ResponderInner>);
-
 #[derive(Default)]
 struct ResponderInner {
     current: ArcSwapOption<ResponderCurrent>,
@@ -27,16 +25,13 @@ struct ResponderInner {
         crate::engine::round_watch::RoundWatch<crate::engine::round_watch::TopKnownAnchor>,
     >,
 }
-
 struct ResponderCurrent {
-    // state and storage components go here
     broadcast_filter: BroadcastFilter,
     head: DagHead,
     downloader: Downloader,
     store: MempoolStore,
     round_ctx: RoundCtx,
 }
-
 impl Responder {
     #[cfg(feature = "mock-feedback")]
     pub fn set_top_known_anchor(
@@ -47,15 +42,13 @@ impl Responder {
     ) {
         if (self.0.top_known_anchor.set(top_known_anchor.clone())).is_err() {
             panic!("top known anchor in responder is already initialized")
-        };
+        }
     }
-
     /// as `Self` is passed to Overlay as a `Service` and may be cloned there,
     /// free `DagHead` and other resources upon `Engine` termination
     pub fn dispose(&self) {
         self.0.current.store(None);
     }
-
     pub fn update(
         &self,
         broadcast_filter: &BroadcastFilter,
@@ -65,13 +58,6 @@ impl Responder {
         round_ctx: &RoundCtx,
     ) {
         broadcast_filter.flush_to_dag(head, downloader, store, round_ctx);
-        // Note that `next_dag_round` for Signer should be advanced _after_ new points
-        //  are moved from BroadcastFilter into DAG. Then Signer will look for points
-        //  (of rounds greater than local engine round, including top dag round exactly)
-        //  first in BroadcastFilter, then in DAG.
-        //  Otherwise local Signer will skip BroadcastFilter check and search in DAG directly,
-        //  will not find cached point and will ask to repeat broadcast once more, and local
-        //  BroadcastFilter may account such repeated broadcast as malicious.
         self.0.current.store(Some(Arc::new(ResponderCurrent {
             broadcast_filter: broadcast_filter.clone(),
             head: head.clone(),
@@ -81,17 +67,14 @@ impl Responder {
         })));
     }
 }
-
 impl Service<ServiceRequest> for Responder {
     type QueryResponse = Response;
     type OnQueryFuture = BoxFuture<'static, Option<Self::QueryResponse>>;
     type OnMessageFuture = future::Ready<()>;
-
     #[inline]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
         self.clone().handle_query(req).boxed()
     }
-
     #[inline]
     fn on_message(&self, _req: ServiceRequest) -> Self::OnMessageFuture {
         #[cfg(feature = "mock-feedback")]
@@ -106,43 +89,43 @@ impl Service<ServiceRequest> for Responder {
         future::ready(())
     }
 }
-
 impl Responder {
     async fn handle_query(self, req: ServiceRequest) -> Option<Response> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(handle_query)),
+            file!(),
+            line!(),
+        );
         let task_start = Instant::now();
-
         let raw_query = match QueryRequestRaw::new(req.body) {
             Ok(wrapper) => wrapper,
             Err(error) => {
                 tracing::error!(
-                    peer_id = display(req.metadata.peer_id.alt()),
-                    %error,
+                    peer_id = display(req.metadata.peer_id.alt()), % error,
                     "unexpected query",
                 );
                 return None;
             }
         };
-
         let raw_query_tag = raw_query.tag;
-        let query = match raw_query.parse().await {
+        let query = match {
+            __guard.end_section(line!());
+            let __result = raw_query.parse().await;
+            __guard.start_section(line!());
+            __result
+        } {
             Ok(query) => query,
             Err(error) => {
                 tracing::error!(
-                    tag = ?raw_query_tag,
-                    peer_id = display(req.metadata.peer_id.alt()),
-                    %error,
-                    "bad query",
+                    tag = ? raw_query_tag, peer_id = display(req.metadata.peer_id.alt()),
+                    % error, "bad query",
                 );
                 return None;
             }
         };
-
         let Some(inner) = self.0.current.load_full() else {
             return Some(match raw_query_tag {
-                QueryRequestTag::Broadcast => {
-                    // do nothing: sender has retry loop via signature request
-                    QueryResponse::broadcast(task_start)
-                }
+                QueryRequestTag::Broadcast => QueryResponse::broadcast(task_start),
                 QueryRequestTag::PointById => {
                     QueryResponse::point_by_id::<&[u8]>(task_start, PointByIdResponse::TryLater)
                 }
@@ -151,7 +134,6 @@ impl Responder {
                 }
             });
         };
-
         Some(match query {
             QueryRequest::Broadcast(point) => {
                 inner.broadcast_filter.add(
@@ -164,17 +146,19 @@ impl Responder {
                 );
                 QueryResponse::broadcast(task_start)
             }
-            QueryRequest::PointById(point_id) => QueryResponse::point_by_id(
-                task_start,
-                Uploader::find(
+            QueryRequest::PointById(point_id) => QueryResponse::point_by_id(task_start, {
+                __guard.end_section(line!());
+                let __result = Uploader::find(
                     &req.metadata.peer_id,
                     point_id,
                     &inner.head,
                     &inner.store,
                     &inner.round_ctx,
                 )
-                .await,
-            ),
+                .await;
+                __guard.start_section(line!());
+                __result
+            }),
             QueryRequest::Signature(round) => QueryResponse::signature(
                 task_start,
                 Signer::signature_response(

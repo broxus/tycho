@@ -14,37 +14,34 @@ use crate::engine::MempoolMergedConfig;
 use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
 use crate::models::{MempoolOutput, PointId, Round};
 use crate::test_utils::last_anchor_file::LastAnchorFile;
-
 #[derive(Default)]
 pub struct AnchorConsumer {
     streams: StreamMap<PeerId, UnboundedReceiverStream<MempoolOutput>>,
-    // all committers must share the same sequence of anchor points
     anchors: FastHashMap<Round, FastHashMap<PeerId, PointId>>,
-    // all committers must share the same anchor history (linearized inclusion dag) for each anchor
     history: FastHashMap<Round, Vec<PointId>>,
-    // simulates feedback from collator, as if anchor committed by all peers
-    // is immediately confirmed by a top known block
     pub top_known_anchor: RoundWatch<TopKnownAnchor>,
-    // Simulates mempool adapter that commits right after collator feedback (may occur in practice
-    // if local collation is a bit lagging and the top known block is received from network)
-    // Just because it does not require much code and keeps sender alive to avoid panic
     pub commit_round: RoundWatch<Commit>,
     pub common_anchor_count: Arc<AtomicUsize>,
 }
-
 impl AnchorConsumer {
     pub fn add(&mut self, committer: PeerId, committed: UnboundedReceiver<MempoolOutput>) {
         self.streams
             .insert(committer, UnboundedReceiverStream::new(committed));
     }
-
     pub async fn drain(mut self, mut file: LastAnchorFile) {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(drain)),
+            file!(),
+            line!(),
+        );
         loop {
-            let (_, commit_result) = self
-                .streams
-                .next()
-                .await
-                .expect("committed anchor reader must be alive");
+            let (_, commit_result) = {
+                __guard.end_section(line!());
+                let __result = self.streams.next().await;
+                __guard.start_section(line!());
+                __result
+            }
+            .expect("committed anchor reader must be alive");
             let round = match commit_result {
                 MempoolOutput::Running | MempoolOutput::Paused => continue,
                 MempoolOutput::NewStartAfterGap(round) => {
@@ -62,16 +59,21 @@ impl AnchorConsumer {
             file.update(round.0).expect("update last anchor file");
         }
     }
-
     pub async fn check(mut self, merged_conf: &MempoolMergedConfig) {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(check)),
+            file!(),
+            line!(),
+        );
         let mut next_expected_history_round = None;
         loop {
-            let (peer_id, commit_result) = self
-                .streams
-                .next()
-                .await
-                .expect("committed anchor reader must be alive");
-
+            let (peer_id, commit_result) = {
+                __guard.end_section(line!());
+                let __result = self.streams.next().await;
+                __guard.start_section(line!());
+                __result
+            }
+            .expect("committed anchor reader must be alive");
             let (anchor, history) = match commit_result {
                 MempoolOutput::Running | MempoolOutput::Paused => {
                     continue;
@@ -82,17 +84,11 @@ impl AnchorConsumer {
                 }
                 MempoolOutput::NextAnchor(data) => (data.anchor, data.history),
             };
-
             let anchor_id = anchor.id();
-
             if next_expected_history_round.is_none() {
-                // Genesis point is excluded from commit, points only reference it
                 next_expected_history_round = Some(merged_conf.conf.genesis_round.next());
             }
-
             let anchor_round = anchor.round();
-
-            // get last previous anchor round and check if we don't have previous
             for (prev_anchor_round, committers) in self
                 .anchors
                 .iter()
@@ -106,7 +102,6 @@ impl AnchorConsumer {
                     anchor_id.alt(),
                 );
             }
-
             match self.anchors.entry(anchor_round) {
                 Occupied(mut stored_anchor) => {
                     let committers = stored_anchor.get_mut();
@@ -124,7 +119,6 @@ impl AnchorConsumer {
                         committers.get(&peer_id).map(|old_anchor| old_anchor.alt()),
                         anchor_id.alt()
                     );
-
                     committers.insert(peer_id, anchor_id);
                 }
                 Vacant(entry) => {
@@ -133,7 +127,6 @@ impl AnchorConsumer {
                     entry.insert(peer_map);
                 }
             }
-
             match self.history.get(&anchor_round) {
                 Some(stored_history) => {
                     assert_eq!(
@@ -143,7 +136,6 @@ impl AnchorConsumer {
                         peer_id.alt(),
                         anchor_round.0,
                     );
-
                     for (left, right) in stored_history.iter().zip(history.iter()) {
                         assert_eq!(
                             &left.digest,
@@ -157,7 +149,6 @@ impl AnchorConsumer {
                     self.history.insert(anchor_round, point_refs);
                 }
             }
-
             let mut common_anchors = vec![];
             let mut common_history = vec![];
             self.anchors.retain(|anchor_round, value| {
@@ -174,13 +165,11 @@ impl AnchorConsumer {
                     true
                 }
             });
-
             let minmax_history_round = common_history
                 .iter()
                 .map(|point_id| point_id.round)
                 .minmax()
                 .into_option();
-
             if let Some((min, max)) = minmax_history_round {
                 assert!(
                     next_expected_history_round.unwrap() >= min,
@@ -189,7 +178,6 @@ impl AnchorConsumer {
                 );
                 next_expected_history_round = Some(max.next());
             }
-
             self.common_anchor_count
                 .fetch_add(common_anchors.len(), Ordering::Relaxed);
             common_anchors.sort_unstable();

@@ -26,9 +26,6 @@ pub use self::persistent_state::{
 pub use self::shard_state::{
     ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics, StoreStateHint,
 };
-
-pub mod tables;
-
 pub(crate) mod block;
 mod block_connection;
 mod block_handle;
@@ -37,29 +34,34 @@ mod db;
 mod node_state;
 mod persistent_state;
 mod shard_state;
-
+pub mod tables;
 mod util {
     pub use self::slot_subscriptions::*;
     pub use self::stored_value::*;
-
     mod slot_subscriptions;
     mod stored_value;
 }
-
 const BASE_DB_SUBDIR: &str = "base";
-
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct CoreStorage {
     inner: Arc<Inner>,
 }
-
 impl CoreStorage {
     pub async fn open(ctx: StorageContext, config: CoreStorageConfig) -> Result<Self> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(open)),
+            file!(),
+            line!(),
+        );
         let db: CoreDb = ctx.open_preconfigured(BASE_DB_SUBDIR)?;
         db.normalize_version()?;
-        db.apply_migrations().await?;
-
+        {
+            __guard.end_section(line!());
+            let __result = db.apply_migrations().await;
+            __guard.start_section(line!());
+            __result
+        }?;
         let blocks_storage_config = BlockStorageConfig {
             blocks_cache: config.blocks_cache,
             blobs_root: ctx.root_dir().path().join("blobs"),
@@ -67,13 +69,18 @@ impl CoreStorage {
         };
         let block_handle_storage = Arc::new(BlockHandleStorage::new(db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(db.clone()));
-        let block_storage = BlockStorage::new(
-            db.clone(),
-            blocks_storage_config,
-            block_handle_storage.clone(),
-            block_connection_storage.clone(),
-        )
-        .await?;
+        let block_storage = {
+            __guard.end_section(line!());
+            let __result = BlockStorage::new(
+                db.clone(),
+                blocks_storage_config,
+                block_handle_storage.clone(),
+                block_connection_storage.clone(),
+            )
+            .await;
+            __guard.start_section(line!());
+            __result
+        }?;
         let block_storage = Arc::new(block_storage);
         let shard_state_storage = ShardStateStorage::new(
             db.clone(),
@@ -89,11 +96,13 @@ impl CoreStorage {
             block_storage.clone(),
             shard_state_storage.clone(),
         )?;
-
-        persistent_state_storage.preload().await?;
-
+        {
+            __guard.end_section(line!());
+            let __result = persistent_state_storage.preload().await;
+            __guard.start_section(line!());
+            __result
+        }?;
         let node_state_storage = NodeStateStorage::new(db.clone());
-
         Ok(Self {
             inner: Arc::new(Inner {
                 ctx,
@@ -108,53 +117,41 @@ impl CoreStorage {
             }),
         })
     }
-
     pub fn context(&self) -> &StorageContext {
         &self.inner.ctx
     }
-
     pub fn db(&self) -> &CoreDb {
         &self.inner.db
     }
-
     pub fn config(&self) -> &CoreStorageConfig {
         &self.inner.config
     }
-
     pub fn persistent_state_storage(&self) -> &PersistentStateStorage {
         &self.inner.persistent_state_storage
     }
-
     pub fn block_handle_storage(&self) -> &BlockHandleStorage {
         &self.inner.block_handle_storage
     }
-
     pub fn block_storage(&self) -> &BlockStorage {
         &self.inner.block_storage
     }
-
     pub fn block_connection_storage(&self) -> &BlockConnectionStorage {
         &self.inner.block_connection_storage
     }
-
     pub fn shard_state_storage(&self) -> &ShardStateStorage {
         &self.inner.shard_state_storage
     }
-
     pub fn node_state(&self) -> &NodeStateStorage {
         &self.inner.node_state_storage
     }
-
     pub fn open_stats(&self) -> &OpenStats {
         self.inner.block_storage.open_stats()
     }
 }
-
 struct Inner {
     ctx: StorageContext,
     db: CoreDb,
     config: CoreStorageConfig,
-
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
     block_storage: Arc<BlockStorage>,
