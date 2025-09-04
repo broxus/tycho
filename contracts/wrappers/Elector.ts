@@ -296,7 +296,7 @@ export class Elector implements Contract {
 
   async getStake(provider: ContractProvider, address: Address) {
     const { stack } = await provider.get("compute_returned_stake", [
-      { type: "int", value: BigInt("0x" + address.hash.toString("hex")) },
+      { type: "int", value: BigInt(`0x${address.hash.toString("hex")}`) },
     ]);
     return {
       value: stack.readBigNumber(),
