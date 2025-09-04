@@ -2684,6 +2684,13 @@ where
             collated_block_info,
         } = ctx;
 
+        // backward compatibility: if max interval is not defined take it equal to min interval
+        let mc_block_max_interval_ms = if mc_block_max_interval_ms == 0 {
+            mc_block_min_interval_ms
+        } else {
+            mc_block_max_interval_ms
+        };
+
         let _histogram = HistogramGuard::begin("detect_next_collation_step_time");
         assert!(
             active_shards.contains(&shard_id),
