@@ -131,8 +131,8 @@ async fn test_import_init_anchors() {
         anchors_info.as_slice(),
     );
 
-    assert_eq!(anchors_info.len(), 3);
-    assert_eq!(anchors_info[0].id, 10);
+    assert_eq!(anchors_info.len(), 4);
+    assert_eq!(anchors_info[0].id, 9);
     let anchor = anchors_cache.first_with_our_externals().unwrap();
     assert_eq!(anchor.id, 11);
     let (last_imported_id, last_imported_ct) =
