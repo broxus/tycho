@@ -11,7 +11,7 @@ use base64::prelude::{BASE64_STANDARD, Engine as _};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use tycho_control::ControlClient;
-use tycho_network::OverlayId;
+use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockId, StdAddr};
 use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
@@ -42,6 +42,8 @@ pub enum CmdControl {
     MemProfiler(CmdMemProfiler),
     #[clap(subcommand)]
     Overlay(CmdOverlay),
+    #[clap(subcommand)]
+    Dht(CmdDht),
 }
 
 impl CmdControl {
@@ -65,6 +67,7 @@ impl CmdControl {
             Self::WaitSync(cmd) => cmd.run(args),
             Self::MemProfiler(cmd) => cmd.run(args),
             Self::Overlay(cmd) => cmd.run(args),
+            Self::Dht(cmd) => cmd.run(args),
         }
     }
 }
@@ -772,6 +775,41 @@ pub enum CmdOverlay {
 
 impl CmdOverlay {
     pub fn run(self, args: BaseArgs) -> Result<()> {
+        struct TableRow(tycho_control::proto::OverlayPeer);
+
+        impl tabled::Tabled for TableRow {
+            const LENGTH: usize = 5;
+
+            fn fields(&self) -> Vec<Cow<'_, str>> {
+                match &self.0.info {
+                    Some(info) => vec![
+                        Cow::from(self.0.peer_id.to_string()),
+                        Cow::from(info.score.to_string()),
+                        Cow::from(info.failed_requests.to_string()),
+                        Cow::from(info.total_requests.to_string()),
+                        Cow::from(info.roundtrip_ms.to_string()),
+                    ],
+                    None => vec![
+                        Cow::from(self.0.peer_id.to_string()),
+                        Cow::from("N/A"),
+                        Cow::from("N/A"),
+                        Cow::from("N/A"),
+                        Cow::from("N/A"),
+                    ],
+                }
+            }
+
+            fn headers() -> Vec<Cow<'static, str>> {
+                vec![
+                    Cow::from("peer_id"),
+                    Cow::from("score"),
+                    Cow::from("failed_requests"),
+                    Cow::from("total_requests"),
+                    Cow::from("roundtrip_ms"),
+                ]
+            }
+        }
+
         let control = match &self {
             Self::List(cmd) => &cmd.args,
             Self::Info(cmd) => &cmd.args,
@@ -785,8 +823,17 @@ impl CmdOverlay {
                     print_json(res)
                 }
                 Self::Info(info) => {
-                    let res = client.overlay_info(OverlayId::from_str(&info.id)?).await?;
-                    print_json(res)
+                    let res = client.overlay_info(HashBytes::from_str(&info.id)?).await?;
+
+                    if info.human_readable {
+                        let mut table = tabled::Table::new(res.peers.into_iter().map(TableRow));
+                        table.with(tabled::settings::Style::psql());
+                        println!("{table}");
+
+                        Ok(())
+                    } else {
+                        print_json(res)
+                    }
                 }
             }
         })
@@ -802,6 +849,7 @@ pub struct CmdOverlayList {
 
 /// Get overlay info.
 #[derive(Parser)]
+#[clap(disable_help_flag = true)]
 pub struct CmdOverlayInfo {
     #[clap(flatten)]
     args: ControlArgs,
@@ -809,6 +857,69 @@ pub struct CmdOverlayInfo {
     /// overlay id
     #[clap(long)]
     id: String,
+
+    #[clap(short, long)]
+    human_readable: bool,
+
+    #[clap(long, action = clap::ArgAction::HelpLong)]
+    help: Option<bool>,
+}
+
+/// DHT.
+#[derive(Subcommand)]
+pub enum CmdDht {
+    Info(CmdDhtInfo),
+}
+
+impl CmdDht {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        let control = match &self {
+            Self::Info(cmd) => &cmd.args,
+        }
+        .clone();
+
+        control.rt(args, |client| async move {
+            match self {
+                Self::Info(info) => {
+                    let node_id = HashBytes::from_str(&info.id)?;
+
+                    let res = match (info.at, info.k, info.local) {
+                        (Some(at), Some(k), false) => {
+                            let at = HashBytes::from_str(&at)?;
+                            client.dht_node_info(node_id, at, k).await?
+                        }
+                        (None, Some(k), true) => client.dht_local_info(node_id, k).await?,
+                        _ => anyhow::bail!("invalid argument"),
+                    };
+
+                    print_json(res)
+                }
+            }
+        })
+    }
+}
+
+/// Get DHT info.
+#[derive(Parser)]
+pub struct CmdDhtInfo {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// `PeerId` to search
+    #[clap(long)]
+    id: String,
+
+    /// Target `PeerId`
+    #[clap(long)]
+    at: Option<String>,
+
+    /// Maximum number of nodes to return
+    #[clap(short)]
+    k: Option<u32>,
+
+    /// Target is a local node
+    #[clap(long)]
+    local: bool,
 }
 
 #[derive(Parser)]

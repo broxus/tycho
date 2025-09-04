@@ -3,8 +3,6 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tycho_core::overlay_client::NeighbourStats;
-use tycho_network::{OverlayId, PeerId};
 use tycho_types::models::{
     BlockId, BlockIdShort, BlockchainConfig, GlobalVersion, ShardAccount, StdAddr,
 };
@@ -77,6 +75,12 @@ pub trait ControlServer {
 
     /// Returns Overlay info.
     async fn get_overlay_info(req: OverlayInfoRequest) -> ServerResult<OverlayInfoResponse>;
+
+    /// TODO
+    async fn get_dht_node_info(req: DhtInfoRequest) -> ServerResult<DhtInfoResponse>;
+
+    /// TODO
+    async fn get_dht_local_info(req: DhtLocalInfoRequest) -> ServerResult<DhtInfoResponse>;
 
     /// Signs an elections payload.
     async fn sign_elections_payload(
@@ -297,7 +301,7 @@ pub struct NeighbourInfo {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OverlayListResponse {
-    pub overlays: Vec<(OverlayId, OverlayType)>,
+    pub overlays: Vec<(HashBytes, OverlayType)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,7 +312,7 @@ pub enum OverlayType {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OverlayInfoRequest {
-    pub id: OverlayId,
+    pub id: HashBytes,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -319,6 +323,24 @@ pub struct OverlayInfoResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OverlayPeer {
-    pub peer_id: PeerId,
-    pub stats: Option<NeighbourStats>,
+    pub peer_id: HashBytes,
+    pub info: Option<NeighbourInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DhtInfoRequest {
+    pub search_id: HashBytes,
+    pub target_id: HashBytes,
+    pub k: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DhtLocalInfoRequest {
+    pub id: HashBytes,
+    pub k: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DhtInfoResponse {
+    pub nodes: Vec<HashBytes>,
 }

@@ -22,7 +22,8 @@ use tycho_core::block_strider::{
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::storage::{ArchiveId, BlockHandle, BlockStorage, CoreStorage};
 use tycho_crypto::ed25519;
-use tycho_network::{Network, OverlayService};
+use tycho_network::proto::dht::{NodeResponse, rpc};
+use tycho_network::{DhtClient, Network, NetworkExt, OverlayService, PeerId, Request};
 use tycho_types::cell::Lazy;
 use tycho_types::models::{
     AccountState, DepthBalanceInfo, Message, OptionalAccount, ShardAccount, ShardIdent, StdAddr,
@@ -34,7 +35,7 @@ use tycho_util::FastHashMap;
 use crate::collator::Collator;
 use crate::error::{ServerError, ServerResult};
 use crate::profiler::{MemoryProfiler, StubMemoryProfiler};
-use crate::proto::{self, ArchiveInfo, ControlServer as _, OverlayPeer, OverlayType};
+use crate::proto::{self, ArchiveInfo, ControlServer as _};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlServerVersion {
@@ -158,6 +159,7 @@ pub struct ControlServerBuilder<
     memory_profiler: Option<Arc<dyn MemoryProfiler>>,
     validator_keypair: Option<Arc<ed25519::KeyPair>>,
     collator: Option<Arc<dyn Collator>>,
+    dht_client: Option<DhtClient>,
     overlay_service: Option<OverlayService>,
 }
 
@@ -215,6 +217,7 @@ impl ControlServerBuilder {
                 manual_compaction,
                 memory_profiler,
                 validator_keypair: self.validator_keypair,
+                dht_client: self.dht_client,
                 overlay_service: self.overlay_service,
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
@@ -231,6 +234,7 @@ impl<T2, T3, T4> ControlServerBuilder<((), T2, T3, T4)> {
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
+            dht_client: self.dht_client,
             overlay_service: self.overlay_service,
         }
     }
@@ -247,6 +251,7 @@ impl<T1, T3, T4> ControlServerBuilder<(T1, (), T3, T4)> {
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
+            dht_client: self.dht_client,
             overlay_service: self.overlay_service,
         }
     }
@@ -263,6 +268,7 @@ impl<T1, T2, T4> ControlServerBuilder<(T1, T2, (), T4)> {
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
+            dht_client: self.dht_client,
             overlay_service: self.overlay_service,
         }
     }
@@ -279,6 +285,7 @@ impl<T1, T2, T3> ControlServerBuilder<(T1, T2, T3, ())> {
             memory_profiler: self.memory_profiler,
             validator_keypair: self.validator_keypair,
             collator: self.collator,
+            dht_client: self.dht_client,
             overlay_service: self.overlay_service,
         }
     }
@@ -297,6 +304,11 @@ impl<T> ControlServerBuilder<T> {
 
     pub fn with_validator_keypair(mut self, keypair: Arc<ed25519::KeyPair>) -> Self {
         self.validator_keypair = Some(keypair);
+        self
+    }
+
+    pub fn with_dht_client(mut self, client: DhtClient) -> Self {
+        self.dht_client = Some(client);
         self
     }
 
@@ -319,6 +331,7 @@ impl ControlServer {
             memory_profiler: None,
             validator_keypair: None,
             collator: None,
+            dht_client: None,
             overlay_service: None,
         }
     }
@@ -729,16 +742,67 @@ impl proto::ControlServer for ControlServer {
         let overlays = overlay_service
             .public_overlays()
             .into_keys()
-            .map(|id| (id, OverlayType::Public))
+            .map(|id| (HashBytes(id.to_bytes()), proto::OverlayType::Public))
             .chain(
                 overlay_service
                     .private_overlays()
                     .into_keys()
-                    .map(|id| (id, OverlayType::Private)),
+                    .map(|id| (HashBytes(id.to_bytes()), proto::OverlayType::Private)),
             )
-            .collect();
+            .collect::<_>();
 
         Ok(proto::OverlayListResponse { overlays })
+    }
+
+    async fn get_dht_node_info(
+        self,
+        _: tarpc::context::Context,
+        req: proto::DhtInfoRequest,
+    ) -> ServerResult<proto::DhtInfoResponse> {
+        let dht_client = self
+            .inner
+            .dht_client
+            .as_ref()
+            .ok_or_else(|| ServerError::new("control server was created without DHT client"))?;
+
+        let request = Request::from_tl(rpc::FindNode {
+            key: req.search_id.0,
+            k: req.k,
+        });
+
+        let response = dht_client
+            .network()
+            .query(&PeerId(req.target_id.0), request)
+            .await?;
+
+        let NodeResponse { nodes } = response.parse_tl().unwrap();
+
+        Ok(proto::DhtInfoResponse {
+            nodes: nodes
+                .into_iter()
+                .map(|x| HashBytes(x.id.to_bytes()))
+                .collect(),
+        })
+    }
+
+    async fn get_dht_local_info(
+        self,
+        _: tarpc::context::Context,
+        req: proto::DhtLocalInfoRequest,
+    ) -> ServerResult<proto::DhtInfoResponse> {
+        let dht_client = self
+            .inner
+            .dht_client
+            .as_ref()
+            .ok_or_else(|| ServerError::new("control server was created without DHT client"))?;
+
+        let nodes = dht_client
+            .service()
+            .peers(&PeerId(req.id.0), req.k as usize);
+
+        Ok(proto::DhtInfoResponse {
+            nodes: nodes.into_iter().map(|x| HashBytes(x.to_bytes())).collect(),
+        })
     }
 
     async fn get_overlay_info(
@@ -747,18 +811,33 @@ impl proto::ControlServer for ControlServer {
         req: proto::OverlayInfoRequest,
     ) -> ServerResult<proto::OverlayInfoResponse> {
         let overlay_client = self.inner.blockchain_rpc_client.overlay_client();
-        if req.id == *overlay_client.overlay().overlay_id() {
+
+        if req.id == overlay_client.overlay().overlay_id().to_bytes() {
             return Ok(proto::OverlayInfoResponse {
-                kind: OverlayType::Public,
+                kind: proto::OverlayType::Public,
                 peers: overlay_client
                     .neighbours()
-                    .get_sorted_neighbours()
+                    .get_active_neighbours()
                     .iter()
-                    .map(|(neighbour, _)| OverlayPeer {
-                        peer_id: *neighbour.peer_id(),
-                        stats: Some(neighbour.get_stats()),
+                    .map(|x| {
+                        let stats = x.get_stats();
+
+                        let info = proto::NeighbourInfo {
+                            id: HashBytes(x.peer_id().to_bytes()),
+                            expires_at: x.expires_at_secs(),
+                            score: stats.score,
+                            failed_requests: stats.failed_requests,
+                            total_requests: stats.total_requests,
+                            roundtrip_ms: stats.avg_roundtrip.unwrap_or_default().as_millis()
+                                as u64,
+                        };
+
+                        proto::OverlayPeer {
+                            peer_id: HashBytes(x.peer_id().to_bytes()),
+                            info: Some(info),
+                        }
                     })
-                    .collect(),
+                    .collect::<_>(),
             });
         }
 
@@ -766,29 +845,29 @@ impl proto::ControlServer for ControlServer {
             ServerError::new("control server was created without a overlay service")
         })?;
 
-        if let Some(public) = overlay_service.public_overlays().get(&req.id) {
+        if let Some(public) = overlay_service.public_overlays().get(&req.id.0) {
             return Ok(proto::OverlayInfoResponse {
-                kind: OverlayType::Public,
+                kind: proto::OverlayType::Public,
                 peers: public
                     .read_entries()
                     .iter()
-                    .map(|x| OverlayPeer {
-                        peer_id: x.entry.peer_id,
-                        stats: None,
+                    .map(|x| proto::OverlayPeer {
+                        peer_id: HashBytes(x.entry.peer_id.to_bytes()),
+                        info: None,
                     })
                     .collect(),
             });
         }
 
-        if let Some(private) = overlay_service.private_overlays().get(&req.id) {
+        if let Some(private) = overlay_service.private_overlays().get(&req.id.0) {
             return Ok(proto::OverlayInfoResponse {
-                kind: OverlayType::Private,
+                kind: proto::OverlayType::Private,
                 peers: private
                     .read_entries()
                     .iter()
-                    .map(|x| OverlayPeer {
-                        peer_id: x.peer_id,
-                        stats: None,
+                    .map(|x| proto::OverlayPeer {
+                        peer_id: HashBytes(x.peer_id.to_bytes()),
+                        info: None,
                     })
                     .collect(),
             });
@@ -849,6 +928,7 @@ struct Inner {
     manual_compaction: ManualCompaction,
     memory_profiler: Arc<dyn MemoryProfiler>,
     validator_keypair: Option<Arc<ed25519::KeyPair>>,
+    dht_client: Option<DhtClient>,
     overlay_service: Option<OverlayService>,
     mc_accounts: RwLock<Option<CachedAccounts>>,
     sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,

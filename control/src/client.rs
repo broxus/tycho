@@ -7,9 +7,8 @@ use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
 use tokio::sync::mpsc;
 use tracing::Instrument;
-use tycho_network::OverlayId;
 use tycho_types::boc::{Boc, BocRepr};
-use tycho_types::cell::DynCell;
+use tycho_types::cell::{DynCell, HashBytes};
 use tycho_types::models::{BlockId, BlockIdShort, OwnedMessage, StdAddr};
 use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
@@ -279,9 +278,32 @@ impl ControlClient {
             .map_err(Into::into)
     }
 
-    pub async fn overlay_info(&self, id: OverlayId) -> ClientResult<OverlayInfoResponse> {
+    pub async fn overlay_info(&self, id: HashBytes) -> ClientResult<OverlayInfoResponse> {
         self.inner
             .get_overlay_info(current_context(), OverlayInfoRequest { id })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn dht_node_info(
+        &self,
+        id: HashBytes,
+        at: HashBytes,
+        k: u32,
+    ) -> ClientResult<DhtInfoResponse> {
+        self.inner
+            .get_dht_node_info(current_context(), DhtInfoRequest {
+                search_id: id,
+                target_id: at,
+                k,
+            })
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn dht_local_info(&self, id: HashBytes, k: u32) -> ClientResult<DhtInfoResponse> {
+        self.inner
+            .get_dht_local_info(current_context(), DhtLocalInfoRequest { id, k })
             .await?
             .map_err(Into::into)
     }
