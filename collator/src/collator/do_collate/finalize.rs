@@ -670,7 +670,7 @@ impl Phase<FinalizeState> {
                 &shard,
                 self.state.prev_shard_data.pure_state_root(),
                 &new_state_root,
-                &usage_tree,
+                usage_tree,
                 old_split_at,
                 new_split_at,
             )?;
@@ -1636,7 +1636,7 @@ fn create_merkle_update(
     shard_id: &ShardIdent,
     old_state_root: &Cell,
     new_state_root: &Cell,
-    usage_tree: &UsageTree,
+    usage_tree: UsageTree,
     old_split_at: ahash::HashSet<HashBytes>,
     new_split_at: ahash::HashSet<HashBytes>,
 ) -> Result<MerkleUpdate> {
