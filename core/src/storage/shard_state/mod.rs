@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -226,8 +226,16 @@ impl ShardStateStorage {
         ref_by_mc_seqno: u32,
         block_id: &BlockId,
     ) -> Result<ShardStateStuff> {
+        // NOTE: only for metrics.
+        static MAX_KNOWN_EPOCH: AtomicU32 = AtomicU32::new(0);
+
         let cell_id = self.load_state_root(block_id)?;
         let cell = self.cell_storage.load_cell(&cell_id, ref_by_mc_seqno)?;
+
+        let max_known_epoch = MAX_KNOWN_EPOCH
+            .fetch_max(ref_by_mc_seqno, Ordering::Relaxed)
+            .max(ref_by_mc_seqno);
+        metrics::gauge!("tycho_storage_state_max_epoch").set(max_known_epoch);
 
         ShardStateStuff::from_root(block_id, Cell::from(cell as Arc<_>), &self.min_ref_mc_state)
     }
@@ -302,6 +310,8 @@ impl ShardStateStorage {
                 let (stats, mut batch) = if block_id.is_masterchain() {
                     cell_storage.remove_cell(alloc.get().as_bump(), &root_hash)?
                 } else {
+                    // NOTE: We use epoch `0` here so that cells of old states
+                    // will not be used by recent loads.
                     let root_cell = Cell::from(cell_storage.load_cell(&root_hash, 0)? as Arc<_>);
 
                     let split_at = split_shard_accounts(&root_cell, accounts_split_depth)?

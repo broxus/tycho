@@ -874,6 +874,11 @@ def storage() -> RowPanel:
             unit=UNITS.PERCENT_FORMAT,
         ),
         create_gauge_panel(
+            "tycho_storage_state_max_epoch",
+            "Max known state root cell epoch",
+            unit_format="Seqno"
+        ),
+        create_gauge_panel(
             "tycho_storage_raw_cells_cache_size",
             "Raw cells cache size",
             UNITS.BYTES_IEC,
