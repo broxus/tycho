@@ -700,6 +700,11 @@ impl CollatorStdImpl {
                                 .await
                                 .context("failed to load prev shard state")?;
 
+                            let histogram_apply_merkles = HistogramGuard::begin_with_labels(
+                                "tycho_collator_resume_collation_apply_merkles_time_high",
+                                &labels,
+                            );
+
                             while let Some(task) = unfinished_tasks.pop() {
                                 let split_at = {
                                     let shard_accounts = prev_state
@@ -725,6 +730,8 @@ impl CollatorStdImpl {
                                 // finalize last store task in background
                                 self.background_store_new_state_tx.send(task)?;
                             }
+
+                            drop(histogram_apply_merkles);
 
                             // and update pure prev state in working state
                             Self::update_prev_data(&mut working_state, prev_state).await?;
