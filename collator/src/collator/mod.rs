@@ -626,6 +626,11 @@ impl CollatorStdImpl {
         let mut working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
 
+            tracing::info!(target: tracing_targets::COLLATOR,
+                mc_data_block_id = %working_state.mc_data.block_id.as_short_id(),
+                "resume collation without reset",
+            );
+
             // update mc_data if newer
             if working_state.mc_data.block_id.seqno < mc_data.block_id.seqno {
                 working_state.collation_config = Arc::new(mc_data.config.get_collation_config()?);
@@ -640,6 +645,10 @@ impl CollatorStdImpl {
                 if !self.shard_id.is_masterchain() && !self.store_new_state_tasks.is_empty() {
                     // get last store task
                     let last_task = self.store_new_state_tasks.pop().expect("shouldn't happen");
+
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        last_store_new_state_task_is_finished = last_task.store_new_state_task.is_finished()
+                    );
 
                     // if it is finished, then we can just reload prev state
                     if last_task.store_new_state_task.is_finished() {
@@ -754,18 +763,13 @@ impl CollatorStdImpl {
                             break;
                         }
                     }
-
-                    // finalize all remaining state store tasks in background
-                    for cx in self.store_new_state_tasks.drain(..) {
-                        self.background_store_new_state_tx.send(cx)?;
-                    }
                 }
             }
 
-            tracing::info!(target: tracing_targets::COLLATOR,
-                mc_data_block_id = %working_state.mc_data.block_id.as_short_id(),
-                "resume collation without reset",
-            );
+            // finalize all remaining state store tasks in background
+            for cx in self.store_new_state_tasks.drain(..) {
+                self.background_store_new_state_tx.send(cx)?;
+            }
 
             working_state
         } else {
