@@ -657,6 +657,13 @@ impl CollatorStdImpl {
                         // and reload pure prev state in the working state
                         Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
                             .await?;
+
+                        let root_hash = last_task._root.repr_hash();
+                        tracing::debug!(target: tracing_targets::COLLATOR,
+                            block_id = %last_task.block_id.as_short_id(),
+                            %root_hash,
+                            "prev state reloaded",
+                        );
                     } else {
                         let mut unfinished_tasks: Vec<StateUpdateContext> = vec![last_task];
 
