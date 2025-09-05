@@ -642,97 +642,126 @@ impl CollatorStdImpl {
                     // get last store task
                     let last_task = self.store_new_state_tasks.pop().expect("shouldn't happen");
 
-                    // if it is finished, then we can just reload prev state
-                    if last_task.store_new_state_task.is_finished() {
-                        last_task.store_new_state_task.await?;
+                    let mut prev_state = last_task._prev_root.clone();
 
-                        // and reload pure prev state in the working state
-                        Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
-                            .await?;
-                    } else {
-                        let mut unfinished_tasks: Vec<StateUpdateContext> = vec![last_task];
+                    let split_at = {
+                        let shard_accounts = prev_state
+                            .as_ref()
+                            .reference_cloned(1)
+                            .context("invalid shard state")?
+                            .parse::<ShardAccounts>()
+                            .context("failed to load shard accounts")?;
 
-                        // Process previous tasks until finding the finished one
-                        while let Some(task) = self.store_new_state_tasks.pop() {
-                            // collect all unfinished tasks
-                            if !task.store_new_state_task.is_finished()
-                                && unfinished_tasks.len() < self.config.merkle_chain_limit
-                            {
-                                unfinished_tasks.push(task);
-                                continue;
-                            }
+                        split_aug_dict_raw(shard_accounts, 5)
+                            .context("failed to split shard accounts")?
+                            .into_keys()
+                            .collect::<ahash::HashSet<_>>()
+                    };
 
-                            unfinished_tasks.sort_by(|left, right| {
-                                right.block_id.seqno.cmp(&left.block_id.seqno)
-                            });
+                    prev_state = rayon_run({
+                        let state_update = last_task.state_update.clone();
+                        move || state_update.par_apply(&prev_state, &split_at)
+                    })
+                    .await
+                    .context("Failed to apply state update")?;
 
-                            // Verify tasks are sequential when processed in reverse order (last -> first)
-                            let is_sequential =
-                                unfinished_tasks.iter().rev().enumerate().all(|(i, ctx)| {
-                                    ctx.block_id.seqno == task.block_id.seqno + (i + 1) as u32
-                                });
+                    // finalize last store task in background
+                    self.background_store_new_state_tx.send(last_task)?;
 
-                            if !is_sequential {
-                                assert!(
-                                    !unfinished_tasks.is_empty(),
-                                    "there is one unfinished `StoreState` task is exist at least"
-                                );
+                    // and update pure prev state in working state
+                    Self::update_prev_data(&mut working_state, prev_state).await?;
 
-                                // just wait for storing the last known state (skip Merkle applies)
-                                let last_task = unfinished_tasks.swap_remove(0);
-                                last_task.store_new_state_task.await?;
-
-                                // and reload pure prev state in the working state
-                                Self::reload_prev_data(
-                                    &mut working_state,
-                                    self.state_node_adapter.clone(),
-                                )
-                                .await?;
-
-                                break;
-                            }
-
-                            task.store_new_state_task.await?;
-
-                            // load stored state
-                            let mut prev_state = self
-                                .state_node_adapter
-                                .load_state_root(&task.block_id)
-                                .await
-                                .context("failed to load prev shard state")?;
-
-                            while let Some(task) = unfinished_tasks.pop() {
-                                let split_at = {
-                                    let shard_accounts = prev_state
-                                        .as_ref()
-                                        .reference_cloned(1)
-                                        .context("invalid shard state")?
-                                        .parse::<ShardAccounts>()
-                                        .context("failed to load shard accounts")?;
-
-                                    split_aug_dict_raw(shard_accounts, 5)
-                                        .context("failed to split shard accounts")?
-                                        .into_keys()
-                                        .collect::<ahash::HashSet<_>>()
-                                };
-
-                                prev_state = rayon_run({
-                                    let state_update = task.state_update.clone();
-                                    move || state_update.par_apply(&prev_state, &split_at)
-                                })
-                                .await
-                                .context("Failed to apply state update")?;
-
-                                // finalize last store task in background
-                                self.background_store_new_state_tx.send(task)?;
-                            }
-
-                            // and update pure prev state in working state
-                            Self::update_prev_data(&mut working_state, prev_state).await?;
-
-                            break;
-                        }
-                    }
+                    // // if it is finished, then we can just reload prev state
+                    // if last_task.store_new_state_task.is_finished() {
+                    //     last_task.store_new_state_task.await?;
+                    //
+                    //     // and reload pure prev state in the working state
+                    //     Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
+                    //         .await?;
+                    // } else {
+                    //     let mut unfinished_tasks: Vec<StateUpdateContext> = vec![last_task];
+                    //
+                    //     // Process previous tasks until finding the finished one
+                    //     while let Some(task) = self.store_new_state_tasks.pop() {
+                    //         // collect all unfinished tasks
+                    //         if !task.store_new_state_task.is_finished()
+                    //             && unfinished_tasks.len() < self.config.merkle_chain_limit
+                    //         {
+                    //             unfinished_tasks.push(task);
+                    //             continue;
+                    //         }
+                    //
+                    //         unfinished_tasks.sort_by(|left, right| {
+                    //             right.block_id.seqno.cmp(&left.block_id.seqno)
+                    //         });
+                    //
+                    //         // Verify tasks are sequential when processed in reverse order (last -> first)
+                    //         let is_sequential =
+                    //             unfinished_tasks.iter().rev().enumerate().all(|(i, ctx)| {
+                    //                 ctx.block_id.seqno == task.block_id.seqno + (i + 1) as u32
+                    //             });
+                    //
+                    //         if !is_sequential {
+                    //             assert!(
+                    //                 !unfinished_tasks.is_empty(),
+                    //                 "there is one unfinished `StoreState` task is exist at least"
+                    //             );
+                    //
+                    //             // just wait for storing the last known state (skip Merkle applies)
+                    //             let last_task = unfinished_tasks.swap_remove(0);
+                    //             last_task.store_new_state_task.await?;
+                    //
+                    //             // and reload pure prev state in the working state
+                    //             Self::reload_prev_data(
+                    //                 &mut working_state,
+                    //                 self.state_node_adapter.clone(),
+                    //             )
+                    //             .await?;
+                    //
+                    //             break;
+                    //         }
+                    //
+                    //         task.store_new_state_task.await?;
+                    //
+                    //         // load stored state
+                    //         let mut prev_state = self
+                    //             .state_node_adapter
+                    //             .load_state_root(&task.block_id)
+                    //             .await
+                    //             .context("failed to load prev shard state")?;
+                    //
+                    //         while let Some(task) = unfinished_tasks.pop() {
+                    //             let split_at = {
+                    //                 let shard_accounts = prev_state
+                    //                     .as_ref()
+                    //                     .reference_cloned(1)
+                    //                     .context("invalid shard state")?
+                    //                     .parse::<ShardAccounts>()
+                    //                     .context("failed to load shard accounts")?;
+                    //
+                    //                 split_aug_dict_raw(shard_accounts, 5)
+                    //                     .context("failed to split shard accounts")?
+                    //                     .into_keys()
+                    //                     .collect::<ahash::HashSet<_>>()
+                    //             };
+                    //
+                    //             prev_state = rayon_run({
+                    //                 let state_update = task.state_update.clone();
+                    //                 move || state_update.par_apply(&prev_state, &split_at)
+                    //             })
+                    //             .await
+                    //             .context("Failed to apply state update")?;
+                    //
+                    //             // finalize last store task in background
+                    //             self.background_store_new_state_tx.send(task)?;
+                    //         }
+                    //
+                    //         // and update pure prev state in working state
+                    //         Self::update_prev_data(&mut working_state, prev_state).await?;
+                    //
+                    //         break;
+                    //     }
+                    // }
 
                     // finalize all remaining state store tasks in background
                     for cx in self.store_new_state_tasks.drain(..) {
@@ -980,6 +1009,7 @@ impl CollatorStdImpl {
         &mut self,
         block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
+        prev_observable_state_root: Cell,
         new_observable_state_root: Cell,
         state_update: MerkleUpdate,
         store_new_state_task: JoinTask<Result<bool>>,
@@ -1011,6 +1041,7 @@ impl CollatorStdImpl {
                     store_new_state_task,
                     state_update,
                     _root: new_observable_state_root.clone(),
+                    _prev_root: prev_observable_state_root.clone(),
                 });
 
                 // build state stuff from new observable state after collation
@@ -2330,6 +2361,7 @@ struct StateUpdateContext {
     state_update: MerkleUpdate,
     // hold the root state to avoid it being dropped
     _root: Cell,
+    _prev_root: Cell,
 }
 
 struct AnchorsProcessingInfo {

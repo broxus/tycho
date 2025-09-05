@@ -495,6 +495,7 @@ impl Phase<FinalizeState> {
             new_block_info.set_gen_software(Some(bc_global_version));
         }
 
+        let prev_state_root;
         let new_state_root;
         let total_validator_fees;
         let (state_update, new_observable_state) = {
@@ -665,10 +666,12 @@ impl Phase<FinalizeState> {
 
             total_validator_fees = new_observable_state.total_validator_fees.clone();
 
+            prev_state_root = self.state.prev_shard_data.pure_state_root().clone();
+
             // calc merkle update
             let merkle_update = create_merkle_update(
                 &shard,
-                self.state.prev_shard_data.pure_state_root(),
+                &prev_state_root,
                 &new_state_root,
                 usage_tree,
                 old_split_at,
@@ -896,6 +899,7 @@ impl Phase<FinalizeState> {
                 block_candidate,
                 mc_data: new_mc_data,
                 state_update,
+                prev_state_root,
                 new_state_root,
                 new_observable_state,
                 finalize_wu: self.extra.finalize_wu,

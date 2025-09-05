@@ -956,6 +956,7 @@ impl CollatorStdImpl {
             self.prepare_working_state_update(
                 block_id,
                 finalized.new_observable_state,
+                finalized.prev_state_root,
                 finalized.new_state_root,
                 finalized.state_update,
                 store_new_state_task,
