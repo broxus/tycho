@@ -82,6 +82,7 @@ similar-asserts = { workspace = true }
 [features]
 test = []
 cli = ["dep:clap", "clap/derive"]
+cells-metrics = []
 
 [lints]
 workspace = true
