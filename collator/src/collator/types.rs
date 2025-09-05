@@ -327,6 +327,7 @@ impl BlockCollationDataBuilder {
             start_lt,
             next_lt: start_lt + 1,
             tx_count: 0,
+            touched_accounts: Default::default(),
             shard_accounts_count: 0,
             updated_accounts_count: 0,
             added_accounts_count: 0,
@@ -366,6 +367,7 @@ pub(super) struct BlockCollationData {
     pub gen_utime_ms: u16,
 
     pub tx_count: u64,
+    pub touched_accounts: FastHashSet<HashBytes>,
 
     pub shard_accounts_count: u64,
     pub updated_accounts_count: u64,
@@ -507,8 +509,8 @@ pub struct PartialValueFlow {
 pub struct BlockLimitStats {
     pub gas_used: u64,
     pub lt_current: u64,
-    pub lt_start: u64,
     pub cells_bits: u32,
+    pub total_items: u32,
     pub block_limits: BlockLimits,
 }
 
@@ -517,8 +519,8 @@ impl BlockLimitStats {
         Self {
             gas_used: 0,
             lt_current: lt_start,
-            lt_start,
             cells_bits: 0,
+            total_items: 0,
             block_limits,
         }
     }
@@ -563,11 +565,11 @@ impl BlockLimitStats {
             ..
         } = lt_delta;
 
-        let delta_lt = u32::try_from(self.lt_current - self.lt_start).unwrap_or(u32::MAX);
-        if delta_lt >= *hard_limit {
+        // touched accounts + created transactions + created out messages
+        if self.total_items >= *hard_limit {
             return true;
         }
-        if delta_lt >= *soft_limit && level == BlockLimitsLevel::Soft {
+        if self.total_items >= *soft_limit && level == BlockLimitsLevel::Soft {
             return true;
         }
         false

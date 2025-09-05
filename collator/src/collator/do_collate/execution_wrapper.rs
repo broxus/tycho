@@ -17,7 +17,7 @@ use crate::collator::types::{
 };
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
-use crate::types::ShardIdentExt;
+use crate::types::{SaturatingAddAssign, ShardIdentExt};
 
 pub struct ExecutorWrapper {
     pub executor: MessagesExecutor,
@@ -308,6 +308,11 @@ fn new_transaction(
                         new_tx: Some(executed.transaction.clone()),
                     });
 
+                collation_data
+                    .block_limit
+                    .total_items
+                    .saturating_add_assign(1);
+
                 out_messages.push(Box::new(ParsedMessage {
                     info: out_msg_info,
                     dst_in_current_shard,
@@ -331,6 +336,11 @@ fn new_transaction(
                         exported_value: out_msg.compute_exported_value()?,
                         new_tx: None,
                     });
+
+                collation_data
+                    .block_limit
+                    .total_items
+                    .saturating_add_assign(1);
             }
             MsgInfo::ExtIn(_) => bail!("External inbound message cannot be an output"),
         }
@@ -371,6 +381,7 @@ fn process_in_message(
             }
 
             import_fees = in_msg.compute_fees()?;
+            collation_data.block_limit.total_items.saturating_add_assign(1);
             Lazy::new(&in_msg)?
         }
         // External messages are added as is
@@ -378,6 +389,7 @@ fn process_in_message(
             collation_data.execute_count_ext += 1;
 
             import_fees = ImportFees::default();
+            collation_data.block_limit.total_items.saturating_add_assign(1);
             Lazy::new(&InMsg::External(InMsgExternal {
                 in_msg: Lazy::from_raw(in_msg.cell)?,
                 transaction,
@@ -425,7 +437,9 @@ fn process_in_message(
                     exported_value,
                     new_tx: None,
                 });
+
             }
+            collation_data.block_limit.total_items.saturating_add_assign(1);
             collation_data.int_dequeue_count += 1;
 
             in_msg
@@ -470,6 +484,8 @@ fn process_in_message(
                 new_tx: None,
             });
             collation_data.int_enqueue_count -= 1;
+
+            collation_data.block_limit.total_items.saturating_add_assign(1);
 
             in_msg
         }

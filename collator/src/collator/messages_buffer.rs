@@ -7,7 +7,7 @@ use tycho_types::models::{ExtInMsgInfo, IntMsgInfo, MsgInfo};
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::types::ParsedMessage;
-use crate::types::{DebugIter, DisplayIter};
+use crate::types::{DebugIter, DisplayIter, SaturatingAddAssign};
 
 #[cfg(test)]
 #[path = "tests/messages_buffer_tests.rs"]
@@ -591,20 +591,6 @@ impl MessageFilter for SkipExpiredExternals<'_> {
     }
 }
 
-pub trait SaturatingAddAssign {
-    fn saturating_add_assign(&mut self, rhs: Self);
-}
-impl SaturatingAddAssign for u64 {
-    fn saturating_add_assign(&mut self, rhs: Self) {
-        *self = self.saturating_add(rhs);
-    }
-}
-impl SaturatingAddAssign for usize {
-    fn saturating_add_assign(&mut self, rhs: Self) {
-        *self = self.saturating_add(rhs);
-    }
-}
-
 #[cfg(test)]
 pub(super) struct DebugMessagesBuffer<'a>(pub &'a MessagesBuffer);
 #[cfg(test)]
@@ -706,6 +692,10 @@ impl MessageGroup {
 
     pub fn accounts_count(&self) -> usize {
         self.msgs.len()
+    }
+
+    pub fn account_ids(&self) -> impl Iterator<Item = &HashBytes> {
+        self.msgs.keys()
     }
 
     pub fn messages_count(&self) -> usize {
