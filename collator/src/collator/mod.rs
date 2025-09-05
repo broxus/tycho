@@ -35,7 +35,7 @@ use crate::state_node::StateNodeAdapter;
 use crate::types::processed_upto::ProcessedUptoInfoExtension;
 use crate::types::{
     BlockCollationResult, CollationSessionId, CollationSessionInfo, CollatorConfig, DebugDisplay,
-    DisplayBlockIdsIntoIter, McData, TopBlockDescription,
+    DebugIter, DisplayBlockIdsIntoIter, McData, TopBlockDescription,
 };
 use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE,
@@ -661,9 +661,19 @@ impl CollatorStdImpl {
                                 continue;
                             }
 
+                            tracing::debug!(target: tracing_targets::COLLATOR,
+                                unfinished_tasks = ?DebugIter(unfinished_tasks.iter().map(|cx| cx.block_id.seqno)),
+                                "unfinished_tasks before sort",
+                            );
+
                             unfinished_tasks.sort_by(|left, right| {
                                 right.block_id.seqno.cmp(&left.block_id.seqno)
                             });
+
+                            tracing::debug!(target: tracing_targets::COLLATOR,
+                                unfinished_tasks = ?DebugIter(unfinished_tasks.iter().map(|cx| cx.block_id.seqno)),
+                                "unfinished_tasks after sort",
+                            );
 
                             // Verify tasks are sequential when processed in reverse order (last -> first)
                             let is_sequential =
@@ -675,6 +685,11 @@ impl CollatorStdImpl {
                                 assert!(
                                     !unfinished_tasks.is_empty(),
                                     "there is one unfinished `StoreState` task is exist at least"
+                                );
+
+                                tracing::debug!(target: tracing_targets::COLLATOR,
+                                    unfinished_tasks = ?DebugIter(unfinished_tasks.iter().map(|cx| cx.block_id.seqno)),
+                                    "unfinished_tasks are not sequential",
                                 );
 
                                 // just wait for storing the last known state (skip Merkle applies)
