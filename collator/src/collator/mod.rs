@@ -670,8 +670,13 @@ impl CollatorStdImpl {
                                 continue;
                             }
 
+                            let unsorted_seqnoes: Vec<_> = unfinished_tasks
+                                .iter()
+                                .map(|cx| cx.block_id.seqno)
+                                .collect();
+
                             tracing::debug!(target: tracing_targets::COLLATOR,
-                                unfinished_tasks = ?DebugIter(unfinished_tasks.iter().map(|cx| cx.block_id.seqno)),
+                                unfinished_tasks = ?DebugIter(unsorted_seqnoes.iter()),
                                 "unfinished_tasks before sort",
                             );
 
@@ -679,10 +684,23 @@ impl CollatorStdImpl {
                                 right.block_id.seqno.cmp(&left.block_id.seqno)
                             });
 
+                            let sorted_seqnoes: Vec<_> = unfinished_tasks
+                                .iter()
+                                .map(|cx| cx.block_id.seqno)
+                                .collect();
+
                             tracing::debug!(target: tracing_targets::COLLATOR,
-                                unfinished_tasks = ?DebugIter(unfinished_tasks.iter().map(|cx| cx.block_id.seqno)),
+                                unfinished_tasks = ?DebugIter(sorted_seqnoes.iter()),
                                 "unfinished_tasks after sort",
                             );
+
+                            if unsorted_seqnoes != sorted_seqnoes {
+                                tracing::debug!(target: tracing_targets::COLLATOR,
+                                    unfinished_tasks_unsorted = ?DebugIter(unsorted_seqnoes.iter()),
+                                    unfinished_tasks_sorted = ?DebugIter(sorted_seqnoes.iter()),
+                                    "unfinished_tasks were not sorted",
+                                );
+                            }
 
                             // Verify tasks are sequential when processed in reverse order (last -> first)
                             let is_sequential =
@@ -697,7 +715,7 @@ impl CollatorStdImpl {
                                 );
 
                                 tracing::debug!(target: tracing_targets::COLLATOR,
-                                    unfinished_tasks = ?DebugIter(unfinished_tasks.iter().map(|cx| cx.block_id.seqno)),
+                                    unfinished_tasks = ?DebugIter(sorted_seqnoes.iter()),
                                     "unfinished_tasks are not sequential",
                                 );
 
