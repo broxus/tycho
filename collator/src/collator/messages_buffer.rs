@@ -7,7 +7,7 @@ use tycho_types::models::{ExtInMsgInfo, IntMsgInfo, MsgInfo};
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::types::ParsedMessage;
-use crate::types::{DebugIter, DisplayIter};
+use crate::types::{DebugIter, DisplayIter, SaturatingAddAssign};
 
 #[cfg(test)]
 #[path = "tests/messages_buffer_tests.rs"]
@@ -588,20 +588,6 @@ impl MessageFilter for SkipExpiredExternals<'_> {
                 < self.chain_time_threshold_ms;
         *self.total_skipped += res as u64;
         res
-    }
-}
-
-pub trait SaturatingAddAssign {
-    fn saturating_add_assign(&mut self, rhs: Self);
-}
-impl SaturatingAddAssign for u64 {
-    fn saturating_add_assign(&mut self, rhs: Self) {
-        *self = self.saturating_add(rhs);
-    }
-}
-impl SaturatingAddAssign for usize {
-    fn saturating_add_assign(&mut self, rhs: Self) {
-        *self = self.saturating_add(rhs);
     }
 }
 

@@ -16,6 +16,7 @@ use crate::collator::messages_reader::{
 use crate::collator::types::{BlockLimitsLevel, ExecuteMetrics, ExecuteResult};
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
+use crate::types::SaturatingAddAssign;
 
 pub struct ExecuteState {
     pub messages_reader: MessagesReader<EnqueuedMessage>,
@@ -128,20 +129,13 @@ impl Phase<ExecuteState> {
                 // Increment touched accounts only for first-time-seen accounts in this block
                 for acc in group_result.touched_account_ids {
                     if self.state.collation_data.touched_accounts.insert(acc) {
-                        self.state.collation_data.block_limit.total_items = self
-                            .state
+                        self.state
                             .collation_data
                             .block_limit
                             .total_items
-                            .saturating_add(1);
+                            .saturating_add_assign(1);
                     }
                 }
-                self.state.collation_data.block_limit.total_items = self
-                    .state
-                    .collation_data
-                    .block_limit
-                    .total_items
-                    .saturating_add(group_tx_count as u32);
 
                 self.state.collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
                 self.state.collation_data.ext_msgs_skipped_count += group_result.ext_msgs_skipped;

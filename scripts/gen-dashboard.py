@@ -1287,6 +1287,21 @@ def collation_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
+            "tycho_do_collate_total_items_current",
+            "Total items (current)",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_total_items_soft_limit",
+            "Total items soft limit",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_total_items_hard_limit",
+            "Total items hard limit",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
             "tycho_blocks_count_in_collation_manager_cache",
             "Blocks count in collation manager cache",
         ),

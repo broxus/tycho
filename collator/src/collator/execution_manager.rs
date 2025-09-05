@@ -125,8 +125,8 @@ impl MessagesExecutor {
         let config = self.config.clone();
         let params = self.params.clone();
 
-        // collect touched account ids before consuming the group
-        let touched_account_ids: Vec<HashBytes> = msg_group.account_ids().cloned().collect();
+        // collect touched account ids for accounts with executed transactions only
+        let mut touched_account_ids: Vec<HashBytes> = Vec::new();
 
         let accounts_cache = Arc::new(&self.accounts_cache);
         let result = msg_group
@@ -153,6 +153,7 @@ impl MessagesExecutor {
                     &mut group_max_vert_size,
                     &mut group_gas,
                     &mut items,
+                    &mut touched_account_ids,
                     executed?,
                 )?;
             }
@@ -227,6 +228,7 @@ impl MessagesExecutor {
         group_max_vert_size: &mut usize,
         group_gas: &mut u128,
         items: &mut Vec<ExecutedTickItem>,
+        touched_account_ids: &mut Vec<HashBytes>,
         executed: ExecutedTransactions,
     ) -> Result<()> {
         *ext_msgs_skipped += executed.ext_msgs_skipped;
@@ -235,6 +237,7 @@ impl MessagesExecutor {
         *total_exec_time += executed.exec_time;
         *group_max_vert_size = cmp::max(*group_max_vert_size, executed.transactions.len());
 
+        let mut has_executed = false;
         for tx in executed.transactions {
             match tx.result {
                 TransactionResult::Executed(executed) => {
@@ -245,6 +248,7 @@ impl MessagesExecutor {
                         in_message: tx.in_message,
                         executed,
                     });
+                    has_executed = true;
                 }
                 TransactionResult::Skipped(skipped) => {
                     tracing::trace!(
@@ -258,6 +262,11 @@ impl MessagesExecutor {
                     *ext_msgs_error_count += 1;
                 }
             }
+        }
+
+        let account_addr = executed.account_state.account_addr;
+        if has_executed {
+            touched_account_ids.push(account_addr);
         }
 
         self.accounts_cache
