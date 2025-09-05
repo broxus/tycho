@@ -687,27 +687,27 @@ impl CollatorStdImpl {
                                 "unfinished_tasks before sort",
                             );
 
-                            unfinished_tasks.sort_by(|left, right| {
-                                right.block_id.seqno.cmp(&left.block_id.seqno)
-                            });
+                            // unfinished_tasks.sort_by(|left, right| {
+                            //     right.block_id.seqno.cmp(&left.block_id.seqno)
+                            // });
 
-                            let sorted_seqnoes: Vec<_> = unfinished_tasks
-                                .iter()
-                                .map(|cx| cx.block_id.seqno)
-                                .collect();
+                            // let sorted_seqnoes: Vec<_> = unfinished_tasks
+                            //     .iter()
+                            //     .map(|cx| cx.block_id.seqno)
+                            //     .collect();
 
-                            tracing::debug!(target: tracing_targets::COLLATOR,
-                                unfinished_tasks = ?DebugIter(sorted_seqnoes.iter()),
-                                "unfinished_tasks after sort",
-                            );
+                            // tracing::debug!(target: tracing_targets::COLLATOR,
+                            //     unfinished_tasks = ?DebugIter(sorted_seqnoes.iter()),
+                            //     "unfinished_tasks after sort",
+                            // );
 
-                            if unsorted_seqnoes != sorted_seqnoes {
-                                tracing::debug!(target: tracing_targets::COLLATOR,
-                                    unfinished_tasks_unsorted = ?DebugIter(unsorted_seqnoes.iter()),
-                                    unfinished_tasks_sorted = ?DebugIter(sorted_seqnoes.iter()),
-                                    "unfinished_tasks were not sorted",
-                                );
-                            }
+                            // if unsorted_seqnoes != sorted_seqnoes {
+                            //     tracing::debug!(target: tracing_targets::COLLATOR,
+                            //         unfinished_tasks_unsorted = ?DebugIter(unsorted_seqnoes.iter()),
+                            //         unfinished_tasks_sorted = ?DebugIter(sorted_seqnoes.iter()),
+                            //         "unfinished_tasks were not sorted",
+                            //     );
+                            // }
 
                             // Verify tasks are sequential when processed in reverse order (last -> first)
                             let is_sequential =
@@ -715,30 +715,30 @@ impl CollatorStdImpl {
                                     ctx.block_id.seqno == task.block_id.seqno + (i + 1) as u32
                                 });
 
-                            if !is_sequential {
-                                assert!(
-                                    !unfinished_tasks.is_empty(),
-                                    "there is one unfinished `StoreState` task is exist at least"
-                                );
+                            // if !is_sequential {
+                            //     assert!(
+                            //         !unfinished_tasks.is_empty(),
+                            //         "there is one unfinished `StoreState` task is exist at least"
+                            //     );
 
-                                tracing::debug!(target: tracing_targets::COLLATOR,
-                                    unfinished_tasks = ?DebugIter(sorted_seqnoes.iter()),
-                                    "unfinished_tasks are not sequential",
-                                );
+                            //     tracing::debug!(target: tracing_targets::COLLATOR,
+                            //         unfinished_tasks = ?DebugIter(unfinished_tasks.iter().map(|cx| cx.block_id.seqno)),
+                            //         "unfinished_tasks are not sequential",
+                            //     );
 
-                                // just wait for storing the last known state (skip Merkle applies)
-                                let last_task = unfinished_tasks.swap_remove(0);
-                                last_task.store_new_state_task.await?;
+                            //     // just wait for storing the last known state (skip Merkle applies)
+                            //     let last_task = unfinished_tasks.swap_remove(0);
+                            //     last_task.store_new_state_task.await?;
 
-                                // and reload pure prev state in the working state
-                                Self::reload_prev_data(
-                                    &mut working_state,
-                                    self.state_node_adapter.clone(),
-                                )
-                                .await?;
+                            //     // and reload pure prev state in the working state
+                            //     Self::reload_prev_data(
+                            //         &mut working_state,
+                            //         self.state_node_adapter.clone(),
+                            //     )
+                            //     .await?;
 
-                                break;
-                            }
+                            //     break;
+                            // }
 
                             task.store_new_state_task.await?;
 
