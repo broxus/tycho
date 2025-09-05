@@ -1707,7 +1707,9 @@ where
                         FastHashMap::default()
                     } else {
                         // get from state
-                        let state = state_node_adapter.load_state(&top_block_id).await?;
+                        let state = state_node_adapter
+                            .load_state(mc_block_key.seqno, &top_block_id)
+                            .await?;
                         let processed_upto = state.state().processed_upto.load()?;
                         let processed_upto = ProcessedUptoInfoStuff::try_from(processed_upto)?;
                         processed_upto.get_internals_processed_to_by_partitions()
@@ -3123,7 +3125,10 @@ where
 
         match top_shard_blocks {
             None => {
-                let state = match state_node_adapter.load_state(mc_block_id).await {
+                let state = match state_node_adapter
+                    .load_state(mc_block_id.seqno, mc_block_id)
+                    .await
+                {
                     Err(err) => match err.downcast_ref::<ShardStateStorageError>() {
                         Some(ShardStateStorageError::NotFound(_)) => {
                             tracing::warn!(target: tracing_targets::COLLATION_MANAGER,

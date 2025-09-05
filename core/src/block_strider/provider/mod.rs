@@ -492,7 +492,7 @@ impl ProofChecker {
 
                     let shard_states = self.storage.shard_state_storage();
                     let zerostate = shard_states
-                        .load_state(handle.id())
+                        .load_state(0, handle.id())
                         .await
                         .context("failed to load mc zerostate")?;
 
