@@ -624,6 +624,11 @@ impl CollatorStdImpl {
         let mut working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
 
+            tracing::info!(target: tracing_targets::COLLATOR,
+                mc_data_block_id = %working_state.mc_data.block_id.as_short_id(),
+                "resume collation without reset",
+            );
+
             // update mc_data if newer
             let prev_mc_seqno = working_state.mc_data.block_id.seqno;
             if prev_mc_seqno < mc_data.block_id.seqno {
@@ -662,37 +667,6 @@ impl CollatorStdImpl {
                             {
                                 unfinished_tasks.push(task);
                                 continue;
-                            }
-
-                            unfinished_tasks.sort_by(|left, right| {
-                                right.block_id.seqno.cmp(&left.block_id.seqno)
-                            });
-
-                            // Verify tasks are sequential when processed in reverse order (last -> first)
-                            let is_sequential =
-                                unfinished_tasks.iter().rev().enumerate().all(|(i, ctx)| {
-                                    ctx.block_id.seqno == task.block_id.seqno + (i + 1) as u32
-                                });
-
-                            if !is_sequential {
-                                assert!(
-                                    !unfinished_tasks.is_empty(),
-                                    "there is one unfinished `StoreState` task is exist at least"
-                                );
-
-                                // just wait for storing the last known state (skip Merkle applies)
-                                let last_task = unfinished_tasks.swap_remove(0);
-                                last_task.store_new_state_task.await?;
-
-                                // and reload pure prev state in the working state
-                                Self::reload_prev_data(
-                                    prev_mc_seqno,
-                                    &mut working_state,
-                                    self.state_node_adapter.clone(),
-                                )
-                                .await?;
-
-                                break;
                             }
 
                             task.store_new_state_task.await?;
@@ -736,18 +710,13 @@ impl CollatorStdImpl {
                             break;
                         }
                     }
-
-                    // finalize all remaining state store tasks in background
-                    for cx in self.store_new_state_tasks.drain(..) {
-                        self.background_store_new_state_tx.send(cx)?;
-                    }
                 }
             }
 
-            tracing::info!(target: tracing_targets::COLLATOR,
-                mc_data_block_id = %working_state.mc_data.block_id.as_short_id(),
-                "resume collation without reset",
-            );
+            // finalize all remaining state store tasks in background
+            for cx in self.store_new_state_tasks.drain(..) {
+                self.background_store_new_state_tx.send(cx)?;
+            }
 
             working_state
         } else {
@@ -912,19 +881,21 @@ impl CollatorStdImpl {
         working_state: &mut WorkingState,
         pure_state_root: Cell,
     ) -> Result<()> {
-        // drop prev shard data and usage tree
-        let prev_queue_diff_hashes;
-        let prev_blocks_ids;
-        let tracker;
+        // drop prev usage tree
         {
             working_state.usage_tree.take();
-
-            let prev_shard_data = working_state.prev_shard_data.take().unwrap();
-            prev_queue_diff_hashes = prev_shard_data.prev_queue_diff_hashes().clone();
-            prev_blocks_ids = prev_shard_data.blocks_ids().clone();
-            tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
         }
 
+        // get prev shard data
+        let prev_shard_data = working_state
+            .prev_shard_data
+            .as_ref()
+            .expect("should exist here");
+        let prev_queue_diff_hashes = prev_shard_data.prev_queue_diff_hashes().clone();
+        let prev_blocks_ids = prev_shard_data.blocks_ids().clone();
+        let tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
+
+        // rebuild prev state
         let prev_state =
             ShardStateStuff::from_root(&prev_blocks_ids[0], pure_state_root, &tracker)?;
         let prev_states = vec![prev_state];
@@ -946,23 +917,26 @@ impl CollatorStdImpl {
         working_state: &mut WorkingState,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
     ) -> Result<()> {
-        // drop prev shard data and usage tree
-        let prev_queue_diff_hashes;
-        let prev_blocks_ids;
+        // drop prev usage tree
         {
             working_state.usage_tree.take();
-
-            let prev_shard_data = working_state.prev_shard_data.take().unwrap();
-            prev_queue_diff_hashes = prev_shard_data.prev_queue_diff_hashes().clone();
-            prev_blocks_ids = prev_shard_data.blocks_ids().clone();
         }
 
+        // get prev shard data
+        let prev_shard_data = working_state
+            .prev_shard_data
+            .as_ref()
+            .expect("should exist here");
+        let prev_queue_diff_hashes = prev_shard_data.prev_queue_diff_hashes().clone();
+        let prev_blocks_ids = prev_shard_data.blocks_ids();
+
+        // reload prev state
         tracing::debug!(target: tracing_targets::COLLATOR,
-            prev_blocks_ids = %DisplayBlockIdsIntoIter(&prev_blocks_ids),
+            prev_blocks_ids = %DisplayBlockIdsIntoIter(prev_blocks_ids),
             "loading prev states...",
         );
         let prev_states =
-            Self::load_prev_states(prev_mc_seqno, state_node_adapter.as_ref(), &prev_blocks_ids)
+            Self::load_prev_states(prev_mc_seqno, state_node_adapter.as_ref(), prev_blocks_ids)
                 .await?;
 
         // update working state
