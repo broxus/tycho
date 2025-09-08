@@ -3833,6 +3833,7 @@ dependencies = [
  "hex",
  "humantime",
  "num-bigint",
+ "num-traits",
  "parking_lot",
  "rand 0.9.1",
  "rayon",
@@ -3860,6 +3861,7 @@ dependencies = [
  "tycho-storage",
  "tycho-types",
  "tycho-util",
+ "tycho-vm",
  "tycho-wu-tuner",
  "weedb",
 ]
@@ -4205,7 +4207,7 @@ dependencies = [
 [[package]]
 name = "tycho-types"
 version = "0.2.1"
-source = "git+https://github.com/broxus/tycho-types.git?rev=83e3f566d1129779166bcdfc4513b0a5c5449ee7#83e3f566d1129779166bcdfc4513b0a5c5449ee7"
+source = "git+https://github.com/broxus/tycho-types.git?rev=715769a16fc4497a60865948eb15be928f974446#715769a16fc4497a60865948eb15be928f974446"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4236,7 +4238,7 @@ dependencies = [
 [[package]]
 name = "tycho-types-abi-proc"
 version = "0.2.0"
-source = "git+https://github.com/broxus/tycho-types.git?rev=83e3f566d1129779166bcdfc4513b0a5c5449ee7#83e3f566d1129779166bcdfc4513b0a5c5449ee7"
+source = "git+https://github.com/broxus/tycho-types.git?rev=715769a16fc4497a60865948eb15be928f974446#715769a16fc4497a60865948eb15be928f974446"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -4247,7 +4249,7 @@ dependencies = [
 [[package]]
 name = "tycho-types-proc"
 version = "0.2.0"
-source = "git+https://github.com/broxus/tycho-types.git?rev=83e3f566d1129779166bcdfc4513b0a5c5449ee7#83e3f566d1129779166bcdfc4513b0a5c5449ee7"
+source = "git+https://github.com/broxus/tycho-types.git?rev=715769a16fc4497a60865948eb15be928f974446#715769a16fc4497a60865948eb15be928f974446"
 dependencies = [
  "proc-macro2",
  "quote",
