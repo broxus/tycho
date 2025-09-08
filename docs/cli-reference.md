@@ -45,12 +45,20 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho tool bc set-master-key`↴](#tycho-tool-bc-set-master-key)
 * [`tycho tool bc set-elector-code`↴](#tycho-tool-bc-set-elector-code)
 * [`tycho tool bc set-config-code`↴](#tycho-tool-bc-set-config-code)
+* [`tycho tool bc list-proposals`↴](#tycho-tool-bc-list-proposals)
+* [`tycho tool bc gen-proposal`↴](#tycho-tool-bc-gen-proposal)
+* [`tycho tool bc gen-proposal set-param`↴](#tycho-tool-bc-gen-proposal-set-param)
+* [`tycho tool bc gen-proposal set-master-key`↴](#tycho-tool-bc-gen-proposal-set-master-key)
+* [`tycho tool bc gen-proposal set-elector-code`↴](#tycho-tool-bc-gen-proposal-set-elector-code)
+* [`tycho tool bc gen-proposal set-config-code`↴](#tycho-tool-bc-gen-proposal-set-config-code)
+* [`tycho tool bc gen-proposal-vote`↴](#tycho-tool-bc-gen-proposal-vote)
 * [`tycho elect`↴](#tycho-elect)
 * [`tycho elect run`↴](#tycho-elect-run)
 * [`tycho elect once`↴](#tycho-elect-once)
 * [`tycho elect recover`↴](#tycho-elect-recover)
 * [`tycho elect withdraw`↴](#tycho-elect-withdraw)
 * [`tycho elect get-state`↴](#tycho-elect-get-state)
+* [`tycho elect vote`↴](#tycho-elect-vote)
 * [`tycho util`↴](#tycho-util)
 * [`tycho util markdown-help`↴](#tycho-util-markdown-help)
 
@@ -636,6 +644,9 @@ Blockchain stuff
 * `set-master-key` — Set blockchain config key
 * `set-elector-code` — Set elector contract code
 * `set-config-code` — Set config contract code
+* `list-proposals` — List active config proposals
+* `gen-proposal` — Create proposal payload and compute the required amount
+* `gen-proposal-vote` — Create proposal voting payload
 
 
 
@@ -744,6 +755,141 @@ Set config contract code
 
 
 
+## `tycho tool bc list-proposals`
+
+List active config proposals
+
+**Usage:** `tycho tool bc list-proposals [OPTIONS] --rpc <RPC>`
+
+###### **Options:**
+
+* `--rpc <RPC>` — RPC url
+* `--raw` — do not parse proposals
+
+
+
+## `tycho tool bc gen-proposal`
+
+Create proposal payload and compute the required amount
+
+**Usage:** `tycho tool bc gen-proposal <COMMAND>`
+
+###### **Subcommands:**
+
+* `set-param` — Set blockchain config parameter
+* `set-master-key` — Set blockchain config key
+* `set-elector-code` — Set elector contract code
+* `set-config-code` — Set config contract code
+
+
+
+## `tycho tool bc gen-proposal set-param`
+
+Set blockchain config parameter
+
+**Usage:** `tycho tool bc gen-proposal set-param [OPTIONS] --rpc <RPC> <PARAM> <VALUE>`
+
+###### **Arguments:**
+
+* `<PARAM>` — parameter index
+* `<VALUE>` — parameter value
+
+###### **Options:**
+
+* `--raw-value` — treat value as a raw base64-encoded BOC
+* `--ignore-prev-value` — do not require the exact value to be changed
+* `--rpc <RPC>` — RPC url
+* `--allow-duplicate` — skip existing proposal check
+* `--no-send-gas` — compute price without additional send gas
+* `--ttl <TTL>` — proposal TTL. Default: lower bound from the blockchain config
+* `--query-id <QUERY_ID>` — query ID. Default: current timestamp in milliseconds
+
+
+
+## `tycho tool bc gen-proposal set-master-key`
+
+Set blockchain config key
+
+**Usage:** `tycho tool bc gen-proposal set-master-key [OPTIONS] --rpc <RPC> <PUBKEY>`
+
+###### **Arguments:**
+
+* `<PUBKEY>` — new public key
+
+###### **Options:**
+
+* `--rpc <RPC>` — RPC url
+* `--allow-duplicate` — skip existing proposal check
+* `--no-send-gas` — compute price without additional send gas
+* `--ttl <TTL>` — proposal TTL. Default: lower bound from the blockchain config
+* `--query-id <QUERY_ID>` — query ID. Default: current timestamp in milliseconds
+
+
+
+## `tycho tool bc gen-proposal set-elector-code`
+
+Set elector contract code
+
+**Usage:** `tycho tool bc gen-proposal set-elector-code [OPTIONS] --rpc <RPC> <CODE_PATH>`
+
+###### **Arguments:**
+
+* `<CODE_PATH>` — path to the elector code BOC
+
+###### **Options:**
+
+* `--upgrade-args <UPGRADE_ARGS>` — optional parameters for `after_code_upgrade`
+* `--rpc <RPC>` — RPC url
+* `--allow-duplicate` — skip existing proposal check
+* `--no-send-gas` — compute price without additional send gas
+* `--ttl <TTL>` — proposal TTL. Default: lower bound from the blockchain config
+* `--query-id <QUERY_ID>` — query ID. Default: current timestamp in milliseconds
+
+
+
+## `tycho tool bc gen-proposal set-config-code`
+
+Set config contract code
+
+**Usage:** `tycho tool bc gen-proposal set-config-code [OPTIONS] --rpc <RPC> <CODE_PATH>`
+
+###### **Arguments:**
+
+* `<CODE_PATH>` — path to the config code BOC
+
+###### **Options:**
+
+* `--upgrade-args <UPGRADE_ARGS>` — optional parameters for `after_code_upgrade`
+* `--rpc <RPC>` — RPC url
+* `--allow-duplicate` — skip existing proposal check
+* `--no-send-gas` — compute price without additional send gas
+* `--ttl <TTL>` — proposal TTL. Default: lower bound from the blockchain config
+* `--query-id <QUERY_ID>` — query ID. Default: current timestamp in milliseconds
+
+
+
+## `tycho tool bc gen-proposal-vote`
+
+Create proposal voting payload
+
+**Usage:** `tycho tool bc gen-proposal-vote [OPTIONS] --rpc <RPC> <HASH>`
+
+###### **Arguments:**
+
+* `<HASH>` — Proposal hash
+
+###### **Options:**
+
+* `--rpc <RPC>` — RPC url
+* `--ttl <TTL>` — message ttl
+
+  Default value: `40`
+* `--key <KEY>` — secret key (reads from stdin if only flag is provided)
+* `-r`, `--raw-key` — expect a raw key input (32 bytes)
+* `--query-id <QUERY_ID>` — query ID. Default: current timestamp in milliseconds
+
+
+
 ## `tycho elect`
 
 Participate in validator elections
@@ -757,6 +903,7 @@ Participate in validator elections
 * `recover` — Recover stake
 * `withdraw` — Withdraw funds from the validator wallet
 * `get-state` — Get elector contract state
+* `vote` — Vote for config proposal
 
 
 
@@ -877,6 +1024,31 @@ Get elector contract state
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
 * `--rpc <RPC>` — RPC url
 * `--force-rpc` — Use rpc even when the control socket file exists
+
+
+
+## `tycho elect vote`
+
+Vote for config proposal
+
+**Usage:** `tycho elect vote [OPTIONS] <HASH>`
+
+###### **Arguments:**
+
+* `<HASH>` — Proposal hash
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `--rpc <RPC>` — RPC url
+* `--force-rpc` — Use rpc even when the control socket file exists
+* `-c`, `--config <CONFIG>` — Path to elections config. Default: `$TYCHO_HOME/elections.json`
+* `--node-keys <NODE_KEYS>` — Path to node keys. Default: `$TYCHO_HOME/node_keys.json`
+* `--wait-balance` — Wait for the account balance to be enough
+* `-i`, `--ignore-delivery` — Skip waiting for the message delivery
+* `--ttl <TTL>` — Message TTL
+
+  Default value: `40s`
 
 
 

@@ -27,6 +27,8 @@ ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
 hex = { workspace = true }
 humantime = { workspace = true }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
@@ -48,6 +50,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tycho-crypto = { workspace = true }
 tycho-types = { workspace = true, features = ["abi"] }
+tycho-vm = { workspace = true }
 weedb = { workspace = true }
 
 # local deps
@@ -64,7 +67,6 @@ tycho-consensus = { workspace = true }
 
 [dev-dependencies]
 tycho-collator = { workspace = true, features = ["test"] }
-num-bigint = { workspace = true }
 
 [build-dependencies]
 anyhow = { workspace = true }
