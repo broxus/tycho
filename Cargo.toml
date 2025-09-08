@@ -65,6 +65,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
 moka = { version = "0.12", features = ["sync"] }
 num-bigint = "0.4.6"
+num-traits = "0.2.19"
 parking_lot = { version = "0.12.1" }
 parking_lot_core = "0.9.9"
 pin-project-lite = "0.2"
@@ -152,7 +153,7 @@ tycho-wu-tuner = { path = "./wu-tuner", version = "0.2.12" }
 
 [patch.crates-io]
 # patches here
-tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "83e3f566d1129779166bcdfc4513b0a5c5449ee7" }
+tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "715769a16fc4497a60865948eb15be928f974446" }
 tycho-executor = { git = "https://github.com/broxus/tycho-vm.git", rev = "985a350d83385b9f90e69a77073e6cbb1071fa93" }
 tycho-vm = { git = "https://github.com/broxus/tycho-vm.git", rev = "985a350d83385b9f90e69a77073e6cbb1071fa93" }
 

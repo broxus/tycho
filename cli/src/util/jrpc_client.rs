@@ -108,6 +108,18 @@ pub enum AccountStateResponse {
     },
 }
 
+impl AccountStateResponse {
+    pub fn expect_existing(self) -> Result<(Box<Account>, GenTimings)> {
+        match self {
+            Self::NotExists { .. } => anyhow::bail!("account does not exist"),
+            Self::Exists {
+                account, timings, ..
+            } => Ok((account, timings)),
+            Self::Unchanged { .. } => anyhow::bail!("unexpected `Unchanged` response"),
+        }
+    }
+}
+
 fn deserialize_account<'de, D>(deserializer: D) -> Result<Box<Account>, D::Error>
 where
     D: serde::Deserializer<'de>,

@@ -30,6 +30,7 @@ use tycho_util::time::{now_millis, now_sec};
 
 use crate::BaseArgs;
 use crate::node::ElectionsConfig;
+use crate::util::config::ConfigContract;
 use crate::util::elector::data::Ref;
 use crate::util::elector::methods::ParticiateInElectionsInput;
 use crate::util::jrpc_client::{self, JrpcClient};
@@ -50,6 +51,7 @@ impl Cmd {
             SubCmd::Recover(cmd) => cmd.run(args),
             SubCmd::Withdraw(cmd) => cmd.run(args),
             SubCmd::GetState(cmd) => cmd.run(args),
+            SubCmd::Vote(cmd) => cmd.run(args),
         }
     }
 }
@@ -61,6 +63,7 @@ enum SubCmd {
     Recover(CmdRecover),
     Withdraw(CmdWithdraw),
     GetState(CmdGetState),
+    Vote(CmdVote),
 }
 
 /// Participate in validator elections.
@@ -632,6 +635,86 @@ impl CmdGetState {
             let config = client.get_blockchain_config().await?;
             let (_, elector_data) = client.get_elector_data(&config.elector_addr).await?;
             print_json(elector_data)
+        })
+    }
+}
+
+/// Vote for config proposal.
+#[derive(Parser)]
+struct CmdVote {
+    #[clap(flatten)]
+    control: ControlArgs,
+
+    /// Path to elections config. Default: `$TYCHO_HOME/elections.json`
+    #[clap(short, long)]
+    config: Option<PathBuf>,
+
+    /// Path to node keys. Default: `$TYCHO_HOME/node_keys.json`
+    #[clap(long)]
+    node_keys: Option<PathBuf>,
+
+    /// Proposal hash.
+    hash: HashBytes,
+
+    #[clap(flatten)]
+    transfer: TransferArgs,
+}
+
+impl CmdVote {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        // Prepare keys
+        let ElectionsConfig::Simple(simple) = {
+            let path = args.elections_config_path(self.config.as_ref());
+            ElectionsConfig::from_file(path).context("failed to load elections config")?
+        };
+
+        let node_keys = {
+            let path = args.node_keys_path(self.node_keys.as_ref());
+            let keys = NodeKeys::from_file(path).context("failed to load node keys")?;
+            Arc::new(ed25519::KeyPair::from(&keys.as_secret()))
+        };
+
+        self.control.rt(args, move |client| async move {
+            let res = client.get_blockchain_config().await?;
+
+            let config_address = StdAddr::new(-1, res.config.address);
+            let (_, Some(account)) = client.get_account_state(&config_address).await? else {
+                anyhow::bail!("config account does not exist");
+            };
+
+            let Some(proposal) = ConfigContract(&account).get_proposal(&self.hash)? else {
+                anyhow::bail!("no active proposal found with hash {}", self.hash);
+            };
+
+            let validator_idx =
+                proposal.resolve_validator_idx(&res.config.params, &node_keys.public_key)?;
+            anyhow::ensure!(!proposal.voters.contains(&validator_idx), "already voted");
+
+            let query_id = tycho_util::time::now_millis();
+            let payload = ConfigContract::create_vote_payload(
+                query_id,
+                validator_idx,
+                &self.hash,
+                &node_keys,
+                res.signature_id,
+            );
+
+            let price_factor = res.compute_price_factor(true)?;
+            let wallet = Wallet::new(&client, &simple.as_secret(), res.signature_id);
+
+            let internal = InternalMessage {
+                to: config_address,
+                amount: Amount::Exact(apply_price_factor(ONE_CC, price_factor)),
+                bounce: true,
+                payload,
+            };
+            let message = wallet
+                .transfer(internal, self.transfer.into_params(price_factor))
+                .await?;
+
+            print_json(serde_json::json!({
+                "message": message,
+            }))
         })
     }
 }

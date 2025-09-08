@@ -13,7 +13,9 @@ use tycho_types::prelude::*;
 
 #[cfg(feature = "jemalloc")]
 pub mod alloc;
+pub mod config;
 pub mod elector;
+pub mod getter;
 pub mod jrpc_client;
 pub mod rpc_wu_updater;
 pub mod wallet;
@@ -160,10 +162,12 @@ impl std::fmt::Display for FpTokens {
 
         int.fmt(f)?;
         if frac > 0 {
+            let mut len = 9usize;
             while frac % 10 == 0 && frac > 0 {
+                len -= 1;
                 frac /= 10;
             }
-            f.write_fmt(format_args!(".{frac}"))?;
+            f.write_fmt(format_args!(".{frac:0len$}"))?;
         }
         Ok(())
     }
@@ -331,5 +335,17 @@ mod tests {
         assert!("0.000000000000".parse::<FpTokens>().is_err());
         assert!("test".parse::<FpTokens>().is_err());
         assert!("123.deafbeaf".parse::<FpTokens>().is_err());
+
+        assert_eq!(FpTokens(0).to_string(), "0");
+        assert_eq!(FpTokens(1).to_string(), "0.000000001");
+        assert_eq!(FpTokens(10).to_string(), "0.00000001");
+        assert_eq!(FpTokens(100).to_string(), "0.0000001");
+        assert_eq!(FpTokens(1000).to_string(), "0.000001");
+        assert_eq!(FpTokens(10000).to_string(), "0.00001");
+        assert_eq!(FpTokens(100000).to_string(), "0.0001");
+        assert_eq!(FpTokens(1000000).to_string(), "0.001");
+        assert_eq!(FpTokens(10000000).to_string(), "0.01");
+        assert_eq!(FpTokens(100000000).to_string(), "0.1");
+        assert_eq!(FpTokens(1000000000).to_string(), "1");
     }
 }
