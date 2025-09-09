@@ -1259,16 +1259,16 @@ mod test {
             .build("127.0.0.1:0", echo_service())
     }
 
-    #[allow(dead_code)]
     fn get_block() -> BlockStuffAug {
         let block_data = include_bytes!("../../../core/tests/data/block.bin");
 
         let root = Boc::decode(block_data).unwrap();
         let block = root.parse::<Block>().unwrap();
 
-        let block_id = BlockId {
-            root_hash: *root.repr_hash(),
-            ..Default::default()
+        let block_id = {
+            let block_id_str = include_str!("../../../core/tests/data/block_id.txt");
+            let block_id_str = block_id_str.trim_end();
+            BlockId::from_str(block_id_str).unwrap()
         };
 
         BlockStuff::from_block_and_root(&block_id, block, root, block_data.len())
@@ -1290,9 +1290,8 @@ mod test {
             .with_archive_data(block_data.as_slice())
     }
 
-    // TODO: needs to change contract code for some account in devnet and dump block that included this
-    //#[tokio::test]
-    async fn _rpc_state_handle_block() -> Result<()> {
+    #[tokio::test]
+    async fn rpc_state_handle_block() -> Result<()> {
         tycho_util::test::init_logger("rpc_state_handle_block", "debug");
 
         let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
@@ -1344,11 +1343,11 @@ mod test {
         delayed_handle.join().await?;
 
         let account = HashBytes::from_str(
-            "d7ce76fcf11423e3eb332e72c5f10e4b2cd45a8f356161c930e391e4023784d3",
+            "b06c29df56964af1aeb3bbda73ea5685bc54f4131c1c8559ba2c6f971976cd2b",
         )?;
 
         let new_code_hash = HashBytes::from_str(
-            "d66d198766abdbe1253f3415826c946c371f5112552408625aeb0b31e0ef2df3",
+            "fc42205fe8c1c08846c1222c81eb416bdbf403253f6079691e04d52ce4400f8f",
         )?;
 
         let account_by_code_hash = rpc_state
