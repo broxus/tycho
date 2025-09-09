@@ -432,7 +432,6 @@ fn process_in_message(
                     exported_value,
                     new_tx: None,
                 });
-
             }
             collation_data.int_dequeue_count += 1;
 
