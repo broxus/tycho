@@ -6,15 +6,14 @@ import {
   Cell,
   Dictionary,
   Message,
-  ShardAccount,
+  Slice,
   toNano,
 } from "@ton/core";
-import { KeyPair, keyPairFromSeed } from "@ton/crypto";
-import { createShardAccount } from "@ton/sandbox";
+import { getSecureRandomBytes, KeyPair, keyPairFromSeed } from "@ton/crypto";
 
 import { ELECTOR_OP_NEW_STAKE } from "./Elector";
 
-export class CustomConfig {
+export class ConfigParams {
   dict: Dictionary<number, Cell>;
 
   constructor(root: Cell | string) {
@@ -89,17 +88,156 @@ export class CustomConfig {
     };
   }
 
-  setCurrentVset(vset: Cell) {
-    this.dict.set(34, vset);
+  getCurrentVset(): ValidatorSet | null {
+    return this.getVsetParam(34);
   }
 
-  setNextVset(vset: Cell) {
-    this.dict.set(36, vset);
+  setCurrentVset(vset: ValidatorSet | Cell) {
+    this.setVsetParam(34, vset);
   }
 
-  clearNextVset() {
-    this.dict.delete(36);
+  getNextVset(): ValidatorSet | null {
+    return this.getVsetParam(36);
   }
+
+  setNextVset(vset: ValidatorSet | Cell | null) {
+    this.setVsetParam(36, vset);
+  }
+
+  private getVsetParam(idx: number): ValidatorSet | null {
+    const param = this.dict.get(idx);
+    if (param == null) {
+      return null;
+    }
+    return loadValidatorSet(param.asSlice());
+  }
+
+  private setVsetParam(idx: number, vset: ValidatorSet | Cell | null) {
+    if (vset == null) {
+      this.dict.delete(idx);
+      return;
+    }
+    if (!(vset instanceof Cell)) {
+      vset = beginCell().store(storeValidatorSet(vset)).endCell();
+    }
+    this.dict.set(idx, vset);
+  }
+}
+
+const VALIDATOR_SET_TAG = 0x12;
+
+export type ValidatorSet = {
+  utimeSince: number;
+  utimeUntil: number;
+  main: number;
+  totalWeight: bigint;
+  validators: Dictionary<number, ValidatorDescr>;
+};
+
+export async function makeStubValidatorSet(args: {
+  utimeSince: number;
+  utimeUntil: number;
+  validatorCount: number;
+}): Promise<ValidatorSet> {
+  let validators = Dictionary.empty(Dictionary.Keys.Uint(16), {
+    parse: loadValidatorDescr,
+    serialize: storeValidatorDescr,
+  });
+
+  for (let i = 0; i < args.validatorCount; i++) {
+    validators.set(i, {
+      pubkey: await getSecureRandomBytes(32).then(bufferToBigInt),
+      weight: 1n,
+      adnlAddr: null,
+    });
+  }
+
+  return {
+    utimeSince: args.utimeSince,
+    utimeUntil: args.utimeUntil,
+    main: args.validatorCount,
+    totalWeight: BigInt(args.validatorCount),
+    validators,
+  };
+}
+
+export function loadValidatorSet(cs: Slice): ValidatorSet {
+  const tag = cs.loadUint(8);
+  if (tag != VALIDATOR_SET_TAG) {
+    throw new UnknownTagError({ tag, bits: 8 });
+  }
+
+  return {
+    utimeSince: cs.loadUint(32),
+    utimeUntil: cs.loadUint(32),
+    main: cs.loadUint(16),
+    totalWeight: cs.loadUintBig(64),
+    validators: cs.loadDict(Dictionary.Keys.Uint(16), {
+      parse: loadValidatorDescr,
+      serialize: storeValidatorDescr,
+    }),
+  };
+}
+
+export function storeValidatorSet(
+  vset: ValidatorSet
+): (builder: Builder) => void {
+  return (builder: Builder) => {
+    builder.storeUint(VALIDATOR_SET_TAG, 8);
+    builder.storeUint(vset.utimeSince, 32);
+    builder.storeUint(vset.utimeUntil, 32);
+    builder.storeUint(vset.validators.size, 16);
+    builder.storeUint(vset.main, 16);
+    builder.storeUint(vset.totalWeight, 64);
+    builder.storeDict(vset.validators);
+  };
+}
+
+const VALIDATOR_DESCR_TAG_SIMPLE = 0x53;
+const VALIDATOR_DESCR_TAG_WITH_ADDR = 0x53;
+const PUBKEY_TAG_ED25519 = 0x8e81278a;
+
+export type ValidatorDescr = {
+  pubkey: bigint;
+  weight: bigint;
+  adnlAddr: bigint | null;
+};
+
+export function loadValidatorDescr(cs: Slice): ValidatorDescr {
+  const tag = cs.loadUint(8);
+  switch (tag) {
+    case VALIDATOR_DESCR_TAG_SIMPLE:
+    case VALIDATOR_DESCR_TAG_WITH_ADDR:
+      break;
+    default:
+      throw new UnknownTagError({ tag, bits: 8 });
+  }
+
+  const withAddr = tag === VALIDATOR_DESCR_TAG_WITH_ADDR;
+  return {
+    pubkey: cs.loadUintBig(256),
+    weight: cs.loadUintBig(64),
+    adnlAddr: withAddr ? cs.loadUintBig(256) : null,
+  };
+}
+
+export function storeValidatorDescr(
+  d: ValidatorDescr
+): (builder: Builder) => void {
+  return (builder: Builder) => {
+    builder.storeUint(
+      d.adnlAddr != null
+        ? VALIDATOR_DESCR_TAG_WITH_ADDR
+        : VALIDATOR_DESCR_TAG_SIMPLE,
+      8
+    );
+    builder.storeUint(PUBKEY_TAG_ED25519, 32);
+    builder.storeUint(d.pubkey, 256);
+    builder.storeUint(d.weight, 64);
+    if (d.adnlAddr != null) {
+      builder.storeUint(d.adnlAddr!, 256);
+    }
+  };
 }
 
 export type VsetInfo = {
@@ -225,4 +363,14 @@ export function simpleInternal(m: {
     },
     body: m.body,
   };
+}
+
+export class UnknownTagError extends Error {
+  constructor(args: { tag: number; bits: number }) {
+    super(
+      `unknown tag 0x${args.tag
+        .toString(16)
+        .padStart(Math.ceil(args.bits / 8), "0")}`
+    );
+  }
 }
