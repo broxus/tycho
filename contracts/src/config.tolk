@@ -658,6 +658,7 @@ fun processSetNextVset(sender: uint256, queryId: int, body: slice) {
 
 /// Checks whether the validator set cell is well-formed.
 fun checkValidatorSet(vset: cell): bool {
+    //NOTE: we dont use lazy here to check whether vset contains unexpected data
     val parsed = ValidatorSet.fromCell(vset);
     assert(parsed.main > 0, 9);
     assert(parsed.total >= parsed.main, 9);

@@ -13,6 +13,7 @@ import {
 
 export const ELECTOR_OP_NEW_STAKE = 0x4e73744b;
 export const ELECTOR_OP_UPGRADE_CODE = 0x4e436f64;
+export const ELECTOR_OP_CONFIRM_VSET = 0xee764f4b;
 
 export const ANSWER_TAG_STAKE_REJECTED = 0xee6f454c;
 export const ANSWER_TAG_CODE_ACCEPTED = 0xce436f64;
