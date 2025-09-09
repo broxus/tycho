@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use tycho_types::models::ShardIdent;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,7 +25,12 @@ pub fn calc_split_merge_actions(
     from_current_shards: &[ShardIdent],
     to_new_shards: Vec<&ShardIdent>,
 ) -> Result<Vec<SplitMergeAction>> {
-    let full_shard_id = ShardIdent::new_full(0);
+    let workchain = to_new_shards
+        .first()
+        .map(|sid| sid.workchain())
+        .or_else(|| from_current_shards.first().map(|sid| sid.workchain()))
+        .context("`from_current_shards` or `to_new_shards` must not be empty")?;
+    let full_shard_id = ShardIdent::new_full(workchain);
     let mut planned_actions = VecDeque::new();
     if from_current_shards.is_empty() {
         planned_actions.push_back(CalcSplitMergeStep::CheckAction(full_shard_id, None, None));
@@ -117,46 +122,112 @@ mod tests {
     use tycho_types::models::ShardIdent;
 
     use super::calc_split_merge_actions;
+    use crate::utils::shard::SplitMergeAction;
 
     #[test]
     fn test_calc_split_merge_actions() {
+        // BASECHAIN 0:80
         let shard_80 = ShardIdent::new_full(0);
 
         // split on 4 shards
         let (shard_40, shard_c0) = shard_80.split().unwrap();
-        let (shard_20, shard_60) = shard_40.split().unwrap();
-        let (shard_a0, shard_e0) = shard_c0.split().unwrap();
-
         println!("full shard {shard_80}");
-        println!("shard split 1 {shard_40}");
-        println!("shard split 1 {shard_c0}");
-        println!("shard split 2 {shard_20}");
-        println!("shard split 2 {shard_60}");
-        println!("shard split 2 {shard_a0}");
-        println!("shard split 2 {shard_e0}");
+        println!("shard {shard_80} split l {shard_40}");
+        println!("shard {shard_80} split r {shard_c0}");
+
+        let (shard_20, shard_60) = shard_40.split().unwrap();
+        println!("shard {shard_40} split l {shard_20}");
+        println!("shard {shard_40} split r {shard_60}");
+
+        let (shard_a0, shard_e0) = shard_c0.split().unwrap();
+        println!("shard {shard_c0} split l {shard_a0}");
+        println!("shard {shard_c0} split r {shard_e0}");
 
         let shards_1_r = vec![&shard_80];
         let shards_1_l = &[shard_80];
         let actions = calc_split_merge_actions(&[], shards_1_r.clone()).unwrap();
         println!("split/merge actions from [] to [1]: {actions:?}");
+        assert!(actions.contains(&SplitMergeAction::Add(shard_80)));
 
+        let shards_4_l = &[shard_20, shard_60, shard_a0, shard_e0];
         let shards_4_r = vec![&shard_20, &shard_60, &shard_a0, &shard_e0];
         let actions = calc_split_merge_actions(&[], shards_4_r.clone()).unwrap();
         println!("split/merge actions from [] to [4]: {actions:?}");
+        assert!(actions.contains(&SplitMergeAction::Add(shard_20)));
+        assert!(actions.contains(&SplitMergeAction::Add(shard_60)));
+        assert!(actions.contains(&SplitMergeAction::Add(shard_a0)));
+        assert!(actions.contains(&SplitMergeAction::Add(shard_e0)));
 
         let actions = calc_split_merge_actions(shards_1_l, shards_4_r.clone()).unwrap();
         println!("split/merge actions from [1] to [4]: {actions:?}");
+        assert!(actions.contains(&SplitMergeAction::Split(shard_80)));
+        assert!(actions.contains(&SplitMergeAction::Split(shard_40)));
+        assert!(actions.contains(&SplitMergeAction::Split(shard_c0)));
 
         let shards_2_l = &[shard_40, shard_c0];
         let actions = calc_split_merge_actions(shards_2_l, shards_4_r.clone()).unwrap();
         println!("split/merge actions from [2] to [4]: {actions:?}");
+        assert!(actions.contains(&SplitMergeAction::Split(shard_40)));
+        assert!(actions.contains(&SplitMergeAction::Split(shard_c0)));
 
         let shards_3_r = vec![&shard_40, &shard_a0, &shard_e0];
         let shards_3_l = &[shard_40, shard_a0, shard_e0];
         let actions = calc_split_merge_actions(shards_2_l, shards_3_r.clone()).unwrap();
         println!("split/merge actions from [2] to [3]: {actions:?}");
+        assert!(actions.contains(&SplitMergeAction::Split(shard_c0)));
 
         let actions = calc_split_merge_actions(shards_3_l, shards_4_r.clone()).unwrap();
         println!("split/merge actions from [3] to [4]: {actions:?}");
+        assert!(actions.contains(&SplitMergeAction::Split(shard_40)));
+
+        let actions = calc_split_merge_actions(shards_4_l, shards_4_r.clone()).unwrap();
+        println!("split/merge actions from [4] to [4]: {actions:?}");
+        assert!(actions.is_empty());
+
+        // BASECHAIN 1:80
+        let shard_80 = ShardIdent::new_full(1);
+
+        // split on 4 shards
+        let (shard_40, shard_c0) = shard_80.split().unwrap();
+        println!("full shard {shard_80}");
+        println!("shard {shard_80} split l {shard_40}");
+        println!("shard {shard_80} split r {shard_c0}");
+
+        let (shard_20, shard_60) = shard_40.split().unwrap();
+        println!("shard {shard_40} split l {shard_20}");
+        println!("shard {shard_40} split r {shard_60}");
+
+        let (shard_a0, shard_e0) = shard_c0.split().unwrap();
+        println!("shard {shard_c0} split l {shard_a0}");
+        println!("shard {shard_c0} split r {shard_e0}");
+
+        let shards_1_r = vec![&shard_80];
+        let shards_1_l = &[shard_80];
+        let actions = calc_split_merge_actions(&[], shards_1_r.clone()).unwrap();
+        println!("split/merge actions from [] to [1]: {actions:?}");
+        assert!(actions.contains(&SplitMergeAction::Add(shard_80)));
+
+        let shards_4_l = &[shard_20, shard_60, shard_a0, shard_e0];
+        let shards_4_r = vec![&shard_20, &shard_60, &shard_a0, &shard_e0];
+        let actions = calc_split_merge_actions(&[], shards_4_r.clone()).unwrap();
+        println!("split/merge actions from [] to [4]: {actions:?}");
+        assert!(actions.contains(&SplitMergeAction::Add(shard_20)));
+        assert!(actions.contains(&SplitMergeAction::Add(shard_60)));
+        assert!(actions.contains(&SplitMergeAction::Add(shard_a0)));
+        assert!(actions.contains(&SplitMergeAction::Add(shard_e0)));
+
+        let actions = calc_split_merge_actions(shards_1_l, shards_4_r.clone()).unwrap();
+        println!("split/merge actions from [1] to [4]: {actions:?}");
+        assert!(actions.contains(&SplitMergeAction::Split(shard_80)));
+        assert!(actions.contains(&SplitMergeAction::Split(shard_40)));
+        assert!(actions.contains(&SplitMergeAction::Split(shard_c0)));
+
+        let actions = calc_split_merge_actions(shards_4_l, shards_4_r.clone()).unwrap();
+        println!("split/merge actions from [4] to [4]: {actions:?}");
+        assert!(actions.is_empty());
+
+        // should error on empty input
+        let res = calc_split_merge_actions(&[], vec![]);
+        assert!(res.is_err());
     }
 }

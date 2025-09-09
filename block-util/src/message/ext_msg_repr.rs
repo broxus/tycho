@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::sync::OnceLock;
 
 use tycho_types::cell::CellTreeStats;
 use tycho_types::error::Error;
@@ -6,6 +7,7 @@ use tycho_types::models::{ExtInMsgInfo, IntAddr, MsgType, StateInit};
 use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
 
+/// Should run `ExtMsgRepr::set_allowed_workchains()` with expected workchains ids before usage
 pub async fn validate_external_message(body: &bytes::Bytes) -> Result<(), InvalidExtMsg> {
     if body.len() > ExtMsgRepr::BOUNDARY_BOC_SIZE {
         let body = body.clone();
@@ -16,6 +18,7 @@ pub async fn validate_external_message(body: &bytes::Bytes) -> Result<(), Invali
     }
 }
 
+/// Should run `ExtMsgRepr::set_allowed_workchains()` with expected workchains ids before usage
 pub async fn parse_external_message(body: &bytes::Bytes) -> Result<Cell, InvalidExtMsg> {
     if body.len() > ExtMsgRepr::BOUNDARY_BOC_SIZE {
         let body = body.clone();
@@ -78,6 +81,8 @@ pub fn build_normalized_external_message(dst: &IntAddr, body: Cell) -> Result<Ce
     b.build_ext(cx)
 }
 
+static ALLOWED_WORKCHAINS: OnceLock<Vec<i8>> = OnceLock::new();
+
 pub struct ExtMsgRepr;
 
 impl ExtMsgRepr {
@@ -88,10 +93,20 @@ impl ExtMsgRepr {
     pub const MAX_MSG_CELLS: u64 = 1 << 13;
     pub const BOUNDARY_BOC_SIZE: usize = 1 << 12;
 
-    pub const ALLOWED_WORKCHAINS: std::ops::RangeInclusive<i8> = -1..=0;
+    pub fn set_allowed_workchains(workchains: Vec<i8>) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            ALLOWED_WORKCHAINS.set(workchains).is_ok(),
+            "should run `set_allowed_workchains()` only once",
+        );
+        Ok(())
+    }
+    fn allowed_workchains() -> Option<&'static Vec<i8>> {
+        ALLOWED_WORKCHAINS.get()
+    }
 
     // === General methods ===
 
+    /// Should run `ExtMsgRepr::set_allowed_workchains()` with expected workchains ids before usage
     pub fn validate<T: AsRef<[u8]>>(bytes: T) -> Result<Cell, InvalidExtMsg> {
         // Apply limits to the encoded BOC.
         if bytes.as_ref().len() > Self::MAX_BOC_SIZE {
@@ -125,7 +140,10 @@ impl ExtMsgRepr {
                 let info = ExtInMsgInfo::load_from(&mut cs)?;
                 if let IntAddr::Std(std_addr) = &info.dst {
                     // Only `addr_std` (without anycast) to existing workchains is allowed.
-                    if Self::ALLOWED_WORKCHAINS.contains(&std_addr.workchain)
+                    let Some(allowed_workchains) = Self::allowed_workchains() else {
+                        return Err(InvalidExtMsg::AllowedWorkchainsNotInitialized);
+                    };
+                    if allowed_workchains.contains(&std_addr.workchain)
                         && std_addr.anycast.is_none()
                     {
                         break 'info;
@@ -215,6 +233,10 @@ pub enum InvalidExtMsg {
     InvalidMessage(#[from] Error),
     #[error("message size limits exceeded")]
     MsgSizeExceeded,
+    #[error(
+        "first should run `ExtMsgRepr::set_allowed_workchains()` to set up expected workchains ids"
+    )]
+    AllowedWorkchainsNotInitialized,
 }
 
 pub struct MsgStorageStat<'a> {
@@ -316,6 +338,8 @@ mod test {
 
     #[test]
     fn fits_into_limits() -> anyhow::Result<()> {
+        let _ = ExtMsgRepr::set_allowed_workchains(vec![-1, 0]);
+
         #[track_caller]
         fn unwrap_msg(cell: Cell) {
             let boc = Boc::encode(cell);
@@ -370,6 +394,8 @@ mod test {
 
     #[test]
     fn dont_fit_into_limits() -> anyhow::Result<()> {
+        let _ = ExtMsgRepr::set_allowed_workchains(vec![-1, 0]);
+
         #[track_caller]
         fn expect_err(cell: Cell) -> InvalidExtMsg {
             let boc = Boc::encode(cell);

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tycho_block_util::block::{BlockProofStuff, BlockStuff};
+use tycho_block_util::message::ExtMsgRepr;
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::blockchain_rpc::{
@@ -27,6 +28,8 @@ mod utils;
 #[tokio::test]
 async fn overlay_server_msg_broadcast() -> Result<()> {
     tycho_util::test::init_logger("overlay_server_msg_broadcast", "info");
+
+    let _ = ExtMsgRepr::set_allowed_workchains(vec![-1, 0]);
 
     #[derive(Default, Clone)]
     struct BroadcastCounter {
