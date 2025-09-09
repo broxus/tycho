@@ -806,6 +806,8 @@ impl CollatorStdImpl {
             self.stats.tps_block = 0;
             self.stats.tps_execute_count = 0;
         }
+
+        self.stats.total_live_states += 1;
     }
 
     fn create_collation_data(

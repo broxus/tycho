@@ -659,57 +659,63 @@ impl CollatorStdImpl {
                             &labels,
                         );
 
-                        let mut unfinished_tasks: Vec<StateUpdateContext> = vec![last_task];
+                        if self.stats.total_live_states > 30 {
+                            self.stats.total_live_states = 0;
 
-                        // Process previous tasks until finding the finished one
-                        while let Some(task) = self.store_new_state_tasks.pop() {
-                            // collect all unfinished tasks
-                            if !task.store_new_state_task.is_finished()
-                                && unfinished_tasks.len() < self.config.merkle_chain_limit
-                            {
-                                unfinished_tasks.push(task);
-                                continue;
+                            let mut unfinished_tasks: Vec<StateUpdateContext> = vec![last_task];
+
+                            // Process previous tasks until finding the finished one
+                            while let Some(task) = self.store_new_state_tasks.pop() {
+                                // collect all unfinished tasks
+                                if !task.store_new_state_task.is_finished()
+                                    && unfinished_tasks.len() < self.config.merkle_chain_limit
+                                {
+                                    unfinished_tasks.push(task);
+                                    continue;
+                                }
+
+                                task.store_new_state_task.await?;
+
+                                // load stored state
+                                let mut prev_state = self
+                                    .state_node_adapter
+                                    .load_state_root(&task.block_id)
+                                    .await
+                                    .context("failed to load prev shard state")?;
+
+                                while let Some(task) = unfinished_tasks.pop() {
+                                    let split_at = {
+                                        let shard_accounts = prev_state
+                                            .as_ref()
+                                            .reference_cloned(1)
+                                            .context("invalid shard state")?
+                                            .parse::<ShardAccounts>()
+                                            .context("failed to load shard accounts")?;
+
+                                        split_aug_dict_raw(shard_accounts, 5)
+                                            .context("failed to split shard accounts")?
+                                            .into_keys()
+                                            .collect::<ahash::HashSet<_>>()
+                                    };
+
+                                    prev_state = rayon_run({
+                                        let state_update = task.state_update.clone();
+                                        move || state_update.par_apply(&prev_state, &split_at)
+                                    })
+                                    .await
+                                    .context("Failed to apply state update")?;
+
+                                    // finalize last store task in background
+                                    self.background_store_new_state_tx.send(task)?;
+                                }
+
+                                // and update pure prev state in working state
+                                Self::update_prev_data(&mut working_state, prev_state).await?;
+
+                                break;
                             }
-
-                            task.store_new_state_task.await?;
-
-                            // load stored state
-                            let mut prev_state = self
-                                .state_node_adapter
-                                .load_state_root(&task.block_id)
-                                .await
-                                .context("failed to load prev shard state")?;
-
-                            while let Some(task) = unfinished_tasks.pop() {
-                                let split_at = {
-                                    let shard_accounts = prev_state
-                                        .as_ref()
-                                        .reference_cloned(1)
-                                        .context("invalid shard state")?
-                                        .parse::<ShardAccounts>()
-                                        .context("failed to load shard accounts")?;
-
-                                    split_aug_dict_raw(shard_accounts, 5)
-                                        .context("failed to split shard accounts")?
-                                        .into_keys()
-                                        .collect::<ahash::HashSet<_>>()
-                                };
-
-                                prev_state = rayon_run({
-                                    let state_update = task.state_update.clone();
-                                    move || state_update.par_apply(&prev_state, &split_at)
-                                })
-                                .await
-                                .context("Failed to apply state update")?;
-
-                                // finalize last store task in background
-                                self.background_store_new_state_tx.send(task)?;
-                            }
-
-                            // and update pure prev state in working state
-                            Self::update_prev_data(&mut working_state, prev_state).await?;
-
-                            break;
+                        } else {
+                            Self::update_prev_data(&mut working_state, last_task._root).await?;
                         }
 
                         hist.finish();

@@ -633,6 +633,8 @@ pub(super) struct CollatorStats {
     pub tps_timer: Option<std::time::Instant>,
     pub tps_execute_count: u64,
     pub tps: u128,
+
+    pub total_live_states: u32,
 }
 
 #[derive(Debug, Clone)]
