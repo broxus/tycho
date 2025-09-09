@@ -654,6 +654,11 @@ impl CollatorStdImpl {
                         Self::reload_prev_data(&mut working_state, self.state_node_adapter.clone())
                             .await?;
                     } else {
+                        let hist = HistogramGuard::begin_with_labels(
+                            "tycho_collator_merkle_apply_time_high",
+                            &labels,
+                        );
+
                         let mut unfinished_tasks: Vec<StateUpdateContext> = vec![last_task];
 
                         // Process previous tasks until finding the finished one
@@ -706,6 +711,8 @@ impl CollatorStdImpl {
 
                             break;
                         }
+
+                        hist.finish();
                     }
                 }
             }
