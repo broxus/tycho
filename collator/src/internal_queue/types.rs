@@ -425,11 +425,7 @@ impl QueueStatistics {
         for stat in self.statistics.iter() {
             let (addr, msg_count) = stat;
             // TODO after split/merge implementation we should use detailed counter for 256 shards
-            let dest_shard = if addr.is_masterchain() {
-                ShardIdent::MASTERCHAIN
-            } else {
-                ShardIdent::new_full(0)
-            };
+            let dest_shard = ShardIdent::new_full(addr.workchain());
 
             shards_messages_count
                 .entry(dest_shard)
@@ -566,11 +562,7 @@ impl DiffStatistics {
                 .or_insert(0) += 1;
 
             // TODO after split/merge implementation we should use detailed counter for 256 shards
-            let dest_shard = if message.destination().is_masterchain() {
-                ShardIdent::MASTERCHAIN
-            } else {
-                ShardIdent::new_full(0)
-            };
+            let dest_shard = ShardIdent::new_full(message.destination().workchain());
 
             shards_messages_count
                 .entry(dest_shard)

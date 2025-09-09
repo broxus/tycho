@@ -8,6 +8,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tycho_block_util::archive::{ArchiveData, WithArchiveData};
 use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
+use tycho_block_util::message::ExtMsgRepr;
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::fs::FileBuilder;
@@ -83,7 +84,29 @@ impl StarterInner {
         self.storage
             .node_state()
             .store_last_mc_block_id(&last_mc_block_id);
-        tracing::info!(last_mc_block_id = %last_mc_block_id, "finished");
+
+        // init allowed workchains
+        let mc_state = self
+            .storage
+            .shard_state_storage()
+            .load_state(last_mc_block_id.seqno, &last_mc_block_id)
+            .await?;
+
+        let config = mc_state.config_params()?;
+
+        let mut allowed_workchains = vec![-1];
+        for item in config.get_workchains()?.iter() {
+            let (w_id, _) = item?;
+            allowed_workchains.push(w_id.try_into().expect("workchain id cannot be out of i8"));
+        }
+
+        tracing::info!(
+            last_mc_block_id = %last_mc_block_id,
+            ?allowed_workchains,
+            "finished",
+        );
+
+        ExtMsgRepr::set_allowed_workchains(allowed_workchains)?;
 
         Ok(last_mc_block_id)
     }

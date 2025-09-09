@@ -489,7 +489,7 @@ where
 
         // check lag and calculate target wu params
         // NOTE: ONLY by shard blocks
-        if shard != ShardIdent::BASECHAIN {
+        if shard == ShardIdent::MASTERCHAIN {
             return Ok(());
         }
 
