@@ -106,7 +106,7 @@ impl Phase<ExecuteState> {
         loop {
             // Stop before crossing into next block's LT window: do not start next group
             // if current max LT exceeds (next_block_start_lt - max_actions_per_group)
-            if self.state.collation_data.next_lt > guard_lt {
+            if self.state.collation_data.next_lt >= guard_lt {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     next_block_lt,
                     guard_lt,
@@ -187,17 +187,28 @@ impl Phase<ExecuteState> {
                     "message group executed",
                 );
 
-                if self
+                if let Some(reach_type) = self
                     .state
                     .collation_data
                     .block_limit
                     .reached(BlockLimitsLevel::Hard)
                 {
                     tracing::debug!(target: tracing_targets::COLLATOR,
-                        "block limits reached: {:?}", self.state.collation_data.block_limit,
+                        "block limits reached: {:?}. Reach type: {reach_type:?}", self.state.collation_data.block_limit,
                     );
-                    metrics::counter!("tycho_do_collate_blocks_with_limits_reached_count", &labels)
-                        .increment(1);
+
+                    let labels_with_type = [
+                        (
+                            "workchain",
+                            self.extra.executor.shard_id.workchain().to_string(),
+                        ),
+                        ("limit_type", reach_type.metric_label().to_string()),
+                    ];
+                    metrics::counter!(
+                        "tycho_do_collate_blocks_with_limit_reached",
+                        &labels_with_type
+                    )
+                    .increment(1);
                     break;
                 }
             } else if !self

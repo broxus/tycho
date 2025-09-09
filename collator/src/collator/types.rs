@@ -525,7 +525,7 @@ impl BlockLimitStats {
         }
     }
 
-    pub fn reached(&self, level: BlockLimitsLevel) -> bool {
+    pub fn reached(&self, level: BlockLimitsLevel) -> Option<BlockLimitReachType> {
         let BlockLimits {
             bytes,
             gas,
@@ -539,10 +539,10 @@ impl BlockLimitStats {
         } = bytes;
 
         if self.total_accounts >= *hard_limit {
-            return true;
+            return Some(BlockLimitReachType::TotalAccountsHard);
         }
         if self.total_accounts >= *soft_limit && level == BlockLimitsLevel::Soft {
-            return true;
+            return Some(BlockLimitReachType::TotalAccountsSoft);
         }
 
         let BlockParamLimits {
@@ -552,10 +552,10 @@ impl BlockLimitStats {
         } = gas;
 
         if self.gas_used >= *hard_limit as u64 {
-            return true;
+            return Some(BlockLimitReachType::GasUsedHard);
         }
         if self.gas_used >= *soft_limit as u64 && level == BlockLimitsLevel::Soft {
-            return true;
+            return Some(BlockLimitReachType::GasUsedSoft);
         }
 
         let BlockParamLimits {
@@ -566,12 +566,35 @@ impl BlockLimitStats {
 
         // created transactions + created out messages
         if self.total_items >= *hard_limit {
-            return true;
+            return Some(BlockLimitReachType::TotalItemsHard);
         }
         if self.total_items >= *soft_limit && level == BlockLimitsLevel::Soft {
-            return true;
+            return Some(BlockLimitReachType::TotalItemsSoft);
         }
-        false
+        None
+    }
+}
+
+#[derive(Debug)]
+pub enum BlockLimitReachType {
+    TotalAccountsSoft,
+    TotalAccountsHard,
+    TotalItemsSoft,
+    TotalItemsHard,
+    GasUsedSoft,
+    GasUsedHard,
+}
+
+impl BlockLimitReachType {
+    pub fn metric_label(&self) -> &'static str {
+        match self {
+            BlockLimitReachType::TotalAccountsSoft => "total_accounts_soft",
+            BlockLimitReachType::TotalAccountsHard => "total_accounts_hard",
+            BlockLimitReachType::TotalItemsSoft => "total_items_soft",
+            BlockLimitReachType::TotalItemsHard => "total_items_hard",
+            BlockLimitReachType::GasUsedSoft => "gas_used_soft",
+            BlockLimitReachType::GasUsedHard => "gas_used_hard",
+        }
     }
 }
 

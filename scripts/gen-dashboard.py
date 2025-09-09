@@ -1246,11 +1246,6 @@ def collation_metrics() -> RowPanel:
             "Number of transactions over time",
             labels_selectors=['workchain=~"$workchain"'],
         ),
-        create_counter_panel(
-            "tycho_do_collate_blocks_with_limits_reached_count",
-            "Number of blocks with limits reached",
-            labels_selectors=['workchain=~"$workchain"'],
-        ),
         create_gauge_panel(
             "tycho_do_collate_tx_per_block",
             "Number of transactions per block",
@@ -1291,6 +1286,19 @@ def collation_metrics() -> RowPanel:
             "tycho_do_collate_block_diff_tail_len",
             "Diff tail length",
             labels=['workchain=~"$workchain"'],
+        ),
+        timeseries_panel(
+            targets=[
+                target(
+                    Expr(
+                        metric="tycho_do_collate_blocks_with_limit_reached",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="{{workchain}} {{limit_type}}",
+                ),
+            ],
+            title="Block limits reached by type",
+            unit=UNITS.NUMBER_FORMAT,
         ),
         timeseries_panel(
             targets=[
