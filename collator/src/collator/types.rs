@@ -509,7 +509,7 @@ pub struct PartialValueFlow {
 pub struct BlockLimitStats {
     pub gas_used: u64,
     pub lt_current: u64,
-    pub cells_bits: u32,
+    pub total_accounts: u32,
     pub total_items: u32,
     pub block_limits: BlockLimits,
 }
@@ -519,7 +519,7 @@ impl BlockLimitStats {
         Self {
             gas_used: 0,
             lt_current: lt_start,
-            cells_bits: 0,
+            total_accounts: 0,
             total_items: 0,
             block_limits,
         }
@@ -538,11 +538,10 @@ impl BlockLimitStats {
             ..
         } = bytes;
 
-        let cells_bytes = self.cells_bits / 8;
-        if cells_bytes >= *hard_limit {
+        if self.total_accounts >= *hard_limit {
             return true;
         }
-        if cells_bytes >= *soft_limit && level == BlockLimitsLevel::Soft {
+        if self.total_accounts >= *soft_limit && level == BlockLimitsLevel::Soft {
             return true;
         }
 
@@ -565,7 +564,7 @@ impl BlockLimitStats {
             ..
         } = lt_delta;
 
-        // touched accounts + created transactions + created out messages
+        // created transactions + created out messages
         if self.total_items >= *hard_limit {
             return true;
         }

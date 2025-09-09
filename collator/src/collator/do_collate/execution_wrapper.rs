@@ -249,8 +249,10 @@ fn new_transaction(
     // Update collation data.
     collation_data.execute_count_all += 1;
 
-    let gas_used = &mut collation_data.block_limit.gas_used;
-    *gas_used = gas_used.saturating_add(executed.gas_used);
+    collation_data
+        .block_limit
+        .gas_used
+        .saturating_add_assign(executed.gas_used);
 
     assert!(
         shard_id.is_masterchain() || executed.burned.is_zero(),
