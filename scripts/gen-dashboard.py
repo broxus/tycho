@@ -1305,21 +1305,21 @@ def collation_metrics() -> RowPanel:
                         metric="tycho_do_collate_total_items_current",
                         label_selectors=['workchain=~"$workchain"'],
                     ),
-                    legend_format="current",
+                    legend_format="{{workchain}} current",
                 ),
                 target(
                     Expr(
                         metric="tycho_do_collate_total_items_soft_limit",
                         label_selectors=['workchain=~"$workchain"'],
                     ),
-                    legend_format="soft limit",
+                    legend_format="{{workchain}} soft limit",
                 ),
                 target(
                     Expr(
                         metric="tycho_do_collate_total_items_hard_limit",
                         label_selectors=['workchain=~"$workchain"'],
                     ),
-                    legend_format="hard limit",
+                    legend_format="{{workchain}} hard limit",
                 ),
             ],
             title="Total items vs limits",
@@ -1332,21 +1332,21 @@ def collation_metrics() -> RowPanel:
                         metric="tycho_do_collate_total_accounts_current",
                         label_selectors=['workchain=~"$workchain"'],
                     ),
-                    legend_format="current",
+                    legend_format="{{workchain}} current",
                 ),
                 target(
                     Expr(
                         metric="tycho_do_collate_total_accounts_soft_limit",
                         label_selectors=['workchain=~"$workchain"'],
                     ),
-                    legend_format="soft limit",
+                    legend_format="{{workchain}} soft limit",
                 ),
                 target(
                     Expr(
                         metric="tycho_do_collate_total_accounts_hard_limit",
                         label_selectors=['workchain=~"$workchain"'],
                     ),
-                    legend_format="hard limit",
+                    legend_format="{{workchain}} hard limit",
                 ),
             ],
             title="Total accounts vs limits",
@@ -1359,21 +1359,21 @@ def collation_metrics() -> RowPanel:
                         metric="tycho_do_collate_lt_progress_current",
                         label_selectors=['workchain=~"$workchain"'],
                     ),
-                    legend_format="current progress",
+                    legend_format="{{workchain}} current progress",
                 ),
                 target(
                     Expr(
                         metric="tycho_do_collate_lt_progress_window_size",
                         label_selectors=['workchain=~"$workchain"'],
                     ),
-                    legend_format="LT window size",
+                    legend_format="{{workchain}} LT window size",
                 ),
                 target(
                     Expr(
                         metric="tycho_do_collate_lt_progress_guard_threshold",
                         label_selectors=['workchain=~"$workchain"'],
                     ),
-                    legend_format="guard threshold",
+                    legend_format="{{workchain}} guard threshold",
                 ),
             ],
             title="LT progress vs next block LT",
