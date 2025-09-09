@@ -659,7 +659,7 @@ impl CollatorStdImpl {
                             &labels,
                         );
 
-                        if self.stats.total_live_states > 30 {
+                        if self.stats.total_live_states > 15 {
                             self.stats.total_live_states = 0;
 
                             let mut unfinished_tasks: Vec<StateUpdateContext> = vec![last_task];
