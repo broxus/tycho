@@ -669,9 +669,12 @@ impl CollatorStdImpl {
 
                         // Process previous tasks until finding the finished one
                         while let Some(task) = self.store_new_state_tasks.pop() {
+                            let is_last = self.store_new_state_tasks.is_empty();
+
                             // collect all unfinished tasks
                             if !task.store_new_state_task.is_finished()
                                 && unfinished_tasks.len() < self.config.merkle_chain_limit
+                                && !is_last
                             {
                                 unfinished_tasks.push(task);
                                 continue;
