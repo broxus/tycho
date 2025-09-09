@@ -1352,6 +1352,33 @@ def collation_metrics() -> RowPanel:
             title="Total accounts vs limits",
             unit=UNITS.NUMBER_FORMAT,
         ),
+        timeseries_panel(
+            targets=[
+                target(
+                    Expr(
+                        metric="tycho_do_collate_lt_progress_current",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="current progress",
+                ),
+                target(
+                    Expr(
+                        metric="tycho_do_collate_lt_progress_window_size",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="LT window size",
+                ),
+                target(
+                    Expr(
+                        metric="tycho_do_collate_lt_progress_guard_threshold",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="guard threshold",
+                ),
+            ],
+            title="LT progress vs next block LT",
+            unit=UNITS.NUMBER_FORMAT,
+        ),
         create_gauge_panel(
             "tycho_blocks_count_in_collation_manager_cache",
             "Blocks count in collation manager cache",
