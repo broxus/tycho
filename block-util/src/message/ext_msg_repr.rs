@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::sync::OnceLock;
 
 use tycho_types::cell::CellTreeStats;
 use tycho_types::error::Error;
@@ -78,6 +79,8 @@ pub fn build_normalized_external_message(dst: &IntAddr, body: Cell) -> Result<Ce
     b.build_ext(cx)
 }
 
+static ALLOWED_WORKCHAINS: OnceLock<Vec<i8>> = OnceLock::new();
+
 pub struct ExtMsgRepr;
 
 impl ExtMsgRepr {
@@ -88,7 +91,17 @@ impl ExtMsgRepr {
     pub const MAX_MSG_CELLS: u64 = 1 << 13;
     pub const BOUNDARY_BOC_SIZE: usize = 1 << 12;
 
-    pub const ALLOWED_WORKCHAINS: std::ops::RangeInclusive<i8> = -1..=0;
+    pub fn set_allowed_workchains(workchains: Vec<i8>) {
+        if ALLOWED_WORKCHAINS.get().is_some() {
+            panic!("should run `set_allowed_workchains()` only once")
+        }
+        ALLOWED_WORKCHAINS.get_or_init(|| workchains);
+    }
+    fn allowed_workchains() -> &'static Vec<i8> {
+        ALLOWED_WORKCHAINS
+            .get()
+            .expect("run `set_allowed_workchains()` first")
+    }
 
     // === General methods ===
 
@@ -125,7 +138,7 @@ impl ExtMsgRepr {
                 let info = ExtInMsgInfo::load_from(&mut cs)?;
                 if let IntAddr::Std(std_addr) = &info.dst {
                     // Only `addr_std` (without anycast) to existing workchains is allowed.
-                    if Self::ALLOWED_WORKCHAINS.contains(&std_addr.workchain)
+                    if Self::allowed_workchains().contains(&std_addr.workchain)
                         && std_addr.anycast.is_none()
                     {
                         break 'info;
