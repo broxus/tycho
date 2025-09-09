@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -240,6 +241,10 @@ pub struct CollatorStdImpl {
 
     delayed_working_state: DelayedWorkingState,
     store_new_state_tasks: Vec<StateUpdateContext>,
+
+    // TODO
+    store_state_refs: VecDeque<Cell>,
+
     background_store_new_state_tx: tokio::sync::mpsc::UnboundedSender<StateUpdateContext>,
 
     anchors_cache: AnchorsCache,
@@ -288,6 +293,8 @@ impl CollatorStdImpl {
         let (background_store_new_state_tx, mut background_store_new_state_rx) =
             tokio::sync::mpsc::unbounded_channel::<StateUpdateContext>();
 
+        let store_state_refs = VecDeque::with_capacity(config.merkle_chain_limit);
+
         let processor = Self {
             next_block_info,
             config,
@@ -304,6 +311,7 @@ impl CollatorStdImpl {
                 }
             }),
             store_new_state_tasks: Default::default(),
+            store_state_refs,
             background_store_new_state_tx,
             anchors_cache: Default::default(),
             block_serializer_cache: BlockSerializerCache::with_capacity(BLOCK_CELL_COUNT_BASELINE),
@@ -713,6 +721,9 @@ impl CollatorStdImpl {
                 }
             }
 
+            // TODO
+            self.store_state_refs.clear();
+
             // finalize all remaining state store tasks in background
             for cx in self.store_new_state_tasks.drain(..) {
                 self.background_store_new_state_tx.send(cx)?;
@@ -720,6 +731,9 @@ impl CollatorStdImpl {
 
             working_state
         } else {
+            // TODO
+            self.store_state_refs.clear();
+
             // finalize all remaining state store tasks in background
             for cx in self.store_new_state_tasks.drain(..) {
                 self.background_store_new_state_tx.send(cx)?;
@@ -987,8 +1001,16 @@ impl CollatorStdImpl {
                     block_id,
                     store_new_state_task,
                     state_update,
-                    _root: new_observable_state_root.clone(),
                 });
+
+                // TODO
+                {
+                    if self.store_state_refs.len() == self.config.merkle_chain_limit {
+                        self.store_state_refs.pop_front();
+                    }
+                    self.store_state_refs
+                        .push_back(new_observable_state_root.clone());
+                }
 
                 // build state stuff from new observable state after collation
                 GetNewShardStateStuff::BuildFromNewObservable {
@@ -2315,8 +2337,6 @@ struct StateUpdateContext {
     block_id: BlockId,
     store_new_state_task: JoinTask<Result<bool>>,
     state_update: MerkleUpdate,
-    // hold the root state to avoid it being dropped
-    _root: Cell,
 }
 
 struct AnchorsProcessingInfo {
