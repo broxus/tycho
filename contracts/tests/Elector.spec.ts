@@ -31,7 +31,7 @@ import {
 import {
   bufferToBigInt,
   Crypto,
-  CustomConfig,
+  ConfigParams,
   ValidatorAccount,
   VsetTimings,
   simpleInternal,
@@ -59,7 +59,7 @@ describe("Elector", () => {
   });
 
   beforeEach(async () => {
-    const config = new CustomConfig(TychoExecutor.defaultConfig);
+    const config = new ConfigParams(TychoExecutor.defaultConfig);
     config.setVsetSize({
       maxValidators: 1000,
       maxMainValidators: 100,
@@ -392,9 +392,9 @@ async function syncVset(args: {
   vset: Cell;
   electionId: number;
 }) {
-  let config = new CustomConfig(args.blockchain.config);
+  let config = new ConfigParams(args.blockchain.config);
   config.setCurrentVset(args.vset);
-  config.clearNextVset();
+  config.setNextVset(null);
   args.blockchain.setConfig(config.toCell());
 
   await args.elector.runTickTock("tick");
@@ -410,7 +410,7 @@ async function checkElectionId(
   elector: SandboxContract<Elector>
 ): Promise<number> {
   let { electionId } = await elector.getActiveElectionId();
-  let timings = new CustomConfig(blockchain.config).getVsetTimings();
+  let timings = new ConfigParams(blockchain.config).getVsetTimings();
   expect(electionId).toEqual(blockchain.now! + timings.electionsBeginBefore);
   return electionId;
 }

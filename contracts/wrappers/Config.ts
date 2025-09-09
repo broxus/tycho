@@ -10,6 +10,9 @@ import {
   TupleReader,
 } from "@ton/core";
 import assert from "assert";
+import { ConfigParams, UnknownTagError } from "./util";
+
+export const CONFIG_OP_SET_NEXT_VALIDATOR_SET = 0x4e565354;
 
 /// Contract state.
 export type ConfigData = {
@@ -80,7 +83,7 @@ const CONFIG_PROPOSAL_TAG = 0xce;
 export function loadConfigProposal(cs: Slice): ConfigProposal {
   const tag = cs.loadUint(8);
   if (tag != CONFIG_PROPOSAL_TAG) {
-    throw Error(`unknown tag 0x${tag.toString(16)}`);
+    throw new UnknownTagError({ tag, bits: 8 });
   }
 
   const expireAt = cs.loadUint(32);
@@ -141,7 +144,7 @@ const CONFIG_PROPOSAL_CONTENT_TAG = 0xf3;
 export function loadConfigProposalContent(cs: Slice): ConfigProposalContent {
   const tag = cs.loadUint(8);
   if (tag != CONFIG_PROPOSAL_CONTENT_TAG) {
-    throw Error(`unknown tag 0x${tag.toString(16)}`);
+    throw new UnknownTagError({ tag, bits: 8 });
   }
 
   return {
@@ -197,7 +200,15 @@ export class Config implements Contract {
     return loadConfigData(Cell.fromBoc(state.state.data)[0].asSlice());
   }
 
-  async getParams(
+  async getParams(provider: ContractProvider): Promise<ConfigParams> {
+    const state = await provider.getState();
+    assert(state.state.type === "active");
+    assert(state.state.data != null);
+    let dictCell = Cell.fromBoc(state.state.data)[0].asSlice().loadRef();
+    return new ConfigParams(dictCell);
+  }
+
+  async getParamsRaw(
     provider: ContractProvider
   ): Promise<Dictionary<number, Cell>> {
     const state = await provider.getState();
@@ -214,7 +225,7 @@ export class Config implements Contract {
     provider: ContractProvider,
     param: number
   ): Promise<Cell | undefined> {
-    const params = await this.getParams(provider);
+    const params = await this.getParamsRaw(provider);
     return params.get(param);
   }
 
