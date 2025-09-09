@@ -126,13 +126,13 @@ impl Phase<ExecuteState> {
                 executed_groups_count += 1;
                 let group_tx_count = group_result.items.len();
                 self.state.collation_data.tx_count += group_tx_count as u64;
-                // Increment touched accounts only for first-time-seen accounts in this block
+                // Track first-time-seen accounts in this block
                 for acc in group_result.touched_account_ids {
                     if self.state.collation_data.touched_accounts.insert(acc) {
                         self.state
                             .collation_data
                             .block_limit
-                            .total_items
+                            .total_accounts
                             .saturating_add_assign(1);
                     }
                 }
