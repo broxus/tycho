@@ -171,7 +171,9 @@ impl ShardStateStorage {
 
             raw_db.write(batch)?;
 
+            let h = HistogramGuard::begin("tycho_storage_drop_cell_time_high");
             drop(root_cell);
+            h.finish();
 
             hist.finish();
 
