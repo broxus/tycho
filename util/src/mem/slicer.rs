@@ -194,11 +194,14 @@ struct Inner {
     available: Mutex<ByteSize>,
 }
 
-#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "sysinfo", derive(Default))]
 #[serde(tag = "type")]
 pub enum MemorySlicerRange {
-    #[default]
+    #[cfg(feature = "sysinfo")]
+    #[cfg_attr(feature = "sysinfo", default)]
     Available,
+    #[cfg(feature = "sysinfo")]
     Physical,
     Fixed {
         capacity: ByteSize,
@@ -216,12 +219,14 @@ impl MemorySlicerRange {
 
     pub fn measure_available(&self) -> ByteSize {
         match self {
+            #[cfg(feature = "sysinfo")]
             Self::Available => {
                 let mut sys = sysinfo::System::new();
                 sys.refresh_memory();
                 ByteSize(sys.available_memory())
             }
             // TODO: Add support for cgroups?
+            #[cfg(feature = "sysinfo")]
             Self::Physical => {
                 let mut sys = sysinfo::System::new();
                 sys.refresh_memory();

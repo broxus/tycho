@@ -1,3 +1,4 @@
+use std::mem::ManuallyDrop;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -6,6 +7,7 @@ use bytes::Bytes;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
+use tycho_util::mem::Reclaimer;
 
 use crate::archive::WithArchiveData;
 
@@ -99,12 +101,14 @@ impl BlockStuff {
         Self {
             inner: Arc::new(Inner {
                 id: *id,
-                block,
-                root,
-                block_info: Default::default(),
-                block_extra: Default::default(),
-                block_mc_extra: Default::default(),
                 data_size,
+                parts: ManuallyDrop::new(InnerParts {
+                    block,
+                    root,
+                    block_info: Default::default(),
+                    block_extra: Default::default(),
+                    block_mc_extra: Default::default(),
+                }),
             }),
         }
     }
@@ -130,12 +134,14 @@ impl BlockStuff {
         Ok(Self {
             inner: Arc::new(Inner {
                 id: *id,
-                block,
-                root,
-                block_info: Default::default(),
-                block_extra: Default::default(),
-                block_mc_extra: Default::default(),
                 data_size: data.len(),
+                parts: ManuallyDrop::new(InnerParts {
+                    block,
+                    root,
+                    block_info: Default::default(),
+                    block_extra: Default::default(),
+                    block_mc_extra: Default::default(),
+                }),
             }),
         })
     }
@@ -300,10 +306,33 @@ unsafe impl arc_swap::RefCnt for BlockStuff {
 #[doc(hidden)]
 pub struct Inner {
     id: BlockId,
+    data_size: usize,
+    parts: ManuallyDrop<InnerParts>,
+}
+
+impl std::ops::Deref for Inner {
+    type Target = InnerParts;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.parts
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // SAFETY: Inner is dropped only once.
+        let parts = unsafe { ManuallyDrop::take(&mut self.parts) };
+        Reclaimer::instance().drop(parts);
+    }
+}
+
+// NOTE: Stored as a separate struct to queue drop all at once.
+#[doc(hidden)]
+pub struct InnerParts {
     block: Block,
     root: Cell,
     block_info: OnceLock<Result<BlockInfo, tycho_types::error::Error>>,
     block_extra: OnceLock<Result<BlockExtra, tycho_types::error::Error>>,
     block_mc_extra: OnceLock<Result<McBlockExtra, tycho_types::error::Error>>,
-    data_size: usize,
 }

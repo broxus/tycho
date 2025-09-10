@@ -4273,6 +4273,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "rand 0.9.1",
  "rayon",
+ "scopeguard",
  "serde",
  "serde_json",
  "serde_path_to_error",

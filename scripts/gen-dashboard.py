@@ -411,11 +411,7 @@ def core_bc() -> RowPanel:
         timeseries_panel(
             targets=[
                 target(
-                    expr_operator(
-                        'timestamp(up{instance=~"$instance"})',
-                        "-",
-                        Expr("tycho_core_last_mc_block_utime"),
-                    ),
+                    'timestamp(up{instance=~"$instance"}) - tycho_core_last_mc_block_utime{instance=~"$instance"}',
                     legend_format="{{instance}}",
                 )
             ],
@@ -611,6 +607,38 @@ def core_blockchain_rpc_per_method_stats() -> RowPanel:
     ]
 
     return create_row("blockchain: RPC - Method Stats", counter_panels + heatmap_panels)
+
+
+def util_reclaimer() -> RowPanel:
+    # Queue length = sum by (instance) (enqueued) - sum by (instance) (dropped)
+    # Use raw timeseries_panel to avoid the label selector issue
+    queue_panel = timeseries_panel(
+        title="Reclaimer queue length",
+        targets=[
+            target(
+                "sum by (instance) (tycho_delayed_drop_enqueued{instance=~\"$instance\"}) - sum by (instance) (tycho_delayed_drop_dropped{instance=~\"$instance\"})",
+                legend_format="{{instance}}"
+            )
+        ],
+        unit=UNITS.NUMBER_FORMAT,
+    )
+
+    metrics = [
+        queue_panel,
+        create_heatmap_panel(
+            "tycho_delayed_drop_time",
+            "Reclaimer drop time",
+        ),
+        create_counter_panel(
+            "tycho_delayed_drop_enqueued",
+            "Reclaimer enqueue rate",
+        ),
+        create_counter_panel(
+            "tycho_delayed_drop_dropped",
+            "Reclaimer dequeue rate",
+        ),
+    ]
+    return create_row("util: Reclaimer", metrics)
 
 
 def net_conn_manager() -> RowPanel:
@@ -851,23 +879,7 @@ def storage() -> RowPanel:
             title="Storage Cache Hit Rate",
             targets=[
                 target(
-                    expr=expr_operator(
-                        expr_operator(
-                            "1",
-                            "-",
-                            expr_operator(
-                                expr_sum_rate(
-                                    "tycho_storage_get_cell_from_rocksdb_time_count",
-                                ),
-                                "/",
-                                expr_sum_rate(
-                                    "tycho_storage_load_cell_time_count",
-                                ),
-                            ),
-                        ),
-                        "*",
-                        "100",
-                    ),
+                    expr='(1 - (sum(rate(tycho_storage_get_cell_from_rocksdb_time_count{instance=~"$instance"}[$__rate_interval])) by (instance) / sum(rate(tycho_storage_load_cell_time_count{instance=~"$instance"}[$__rate_interval])) by (instance))) * 100',
                     legend_format="Hit Rate",
                 )
             ],
@@ -936,13 +948,7 @@ def storage() -> RowPanel:
         timeseries_panel(
             targets=[
                 target(
-                    expr_operator(
-                        Expr(
-                            metric="tycho_core_last_mc_block_seqno",
-                        ),
-                        "- on(instance, job)",
-                        Expr("tycho_gc_states_seqno"),
-                    ),
+                    'tycho_core_last_mc_block_seqno{instance=~"$instance"} - on(instance, job) tycho_gc_states_seqno{instance=~"$instance"}',
                     legend_format="{{instance}}",
                 )
             ],
@@ -3134,6 +3140,7 @@ dashboard = Dashboard(
         net_peer(),
         net_dht(),
         *quic_network_panels(),
+        util_reclaimer(),
         allocator_stats(),
         rayon_stats(),
         jrpc(),

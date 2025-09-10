@@ -9,8 +9,6 @@ use std::process::Command;
 pub mod compression;
 pub mod config;
 pub mod io;
-#[cfg(feature = "mem")]
-pub mod mem;
 pub mod progress_bar;
 pub mod serde_helpers;
 pub mod time;
@@ -25,6 +23,17 @@ pub mod futures {
     mod box_future_or_noop;
     mod join_task;
     mod shared;
+}
+
+pub mod mem {
+    pub use self::reclaimer::Reclaimer;
+    pub use self::slicer::{
+        AllocatedMemoryConstraints, MemoryConstraint, MemoryConstraints, MemorySlicer,
+        MemorySlicerGuard, MemorySlicerRange,
+    };
+
+    mod reclaimer;
+    mod slicer;
 }
 
 pub mod num {
