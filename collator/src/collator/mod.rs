@@ -1804,9 +1804,7 @@ impl CollatorStdImpl {
         }
         let mut anchor_import_skipped = false;
         let mut try_collate_check = 'check: {
-            if force_mc_block_by_uncommitted_chain {
-                TryCollateCheck::ForceMcBlockByUncommittedChainLength
-            } else {
+            {
                 // check has unprocessed messages in buffer or queue
                 let has_uprocessed_messages =
                     self.check_has_unprocessed_messages(&mut working_state)?;
@@ -1847,6 +1845,18 @@ impl CollatorStdImpl {
                     has_externals,
                     force_import_anchor_by_used_wu,
                 ) {
+                    // When uncommitted chain limit is reached we still import anchors
+                    // and later force master collation regardless of pending messages
+                    _ if force_mc_block_by_uncommitted_chain => {
+                        tracing::debug!(target: tracing_targets::COLLATOR,
+                            top_processed_to_anchor,
+                            last_imported_anchor_id,
+                            last_imported_chain_time,
+                            uncommitted_chain_length,
+                            max_uncommitted_chain_length,
+                            "uncommitted chain limit reached, will import next anchor and then force master collation",
+                        );
+                    }
                     (true, _, false) => break 'check TryCollateCheck::HasUnprocessedMessages,
                     (_, true, false) => break 'check TryCollateCheck::HasExternals,
                     (false, false, false) => {
@@ -2022,6 +2032,10 @@ impl CollatorStdImpl {
                 let has_externals = has_externals || imported_anchors_has_externals;
 
                 match (has_uprocessed_messages, has_externals) {
+                    // force master collation regardless of pending messages
+                    _ if force_mc_block_by_uncommitted_chain => {
+                        TryCollateCheck::ForceMcBlockByUncommittedChainLength
+                    }
                     (true, _) => TryCollateCheck::HasUnprocessedMessages,
                     (false, true) => TryCollateCheck::HasExternals,
                     (false, false) => TryCollateCheck::NoPendingMessages,
