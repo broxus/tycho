@@ -242,7 +242,7 @@ pub struct CollatorStdImpl {
     delayed_working_state: DelayedWorkingState,
     store_new_state_tasks: Vec<StateUpdateContext>,
 
-    // TODO
+    /// Refs on states to keep them alive until a Merkle chain is applied
     store_state_refs: VecDeque<Cell>,
 
     background_store_new_state_tx: tokio::sync::mpsc::UnboundedSender<StateUpdateContext>,
@@ -724,7 +724,7 @@ impl CollatorStdImpl {
                 }
             }
 
-            // TODO
+            // Drop states
             self.store_state_refs.clear();
 
             // finalize all remaining state store tasks in background
@@ -734,7 +734,7 @@ impl CollatorStdImpl {
 
             working_state
         } else {
-            // TODO
+            // Drop states
             self.store_state_refs.clear();
 
             // finalize all remaining state store tasks in background
@@ -1006,7 +1006,7 @@ impl CollatorStdImpl {
                     state_update,
                 });
 
-                // TODO
+                // Keep only the last `merkle_chain_limit` states alive
                 {
                     if self.store_state_refs.len() == self.config.merkle_chain_limit {
                         self.store_state_refs.pop_front();
