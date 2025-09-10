@@ -613,6 +613,36 @@ def core_blockchain_rpc_per_method_stats() -> RowPanel:
     return create_row("blockchain: RPC - Method Stats", counter_panels + heatmap_panels)
 
 
+def util_reclaimer() -> RowPanel:
+    # Queue length = sum by (instance) (enqueued) - sum by (instance) (dropped)
+    queued_expr = expr_operator(
+        "sum by (instance) (tycho_delayed_drop_enqueued)",
+        "-",
+        "sum by (instance) (tycho_delayed_drop_dropped)",
+    )
+
+    metrics = [
+        create_gauge_panel(
+            expr=queued_expr,
+            title="Reclaimer queue length",
+            legend_format="{{instance}}",
+        ),
+        create_heatmap_panel(
+            "tycho_delayed_drop_time",
+            "Reclaimer drop time",
+        ),
+        create_counter_panel(
+            "tycho_delayed_drop_enqueued",
+            "Reclaimer enqueue rate",
+        ),
+        create_counter_panel(
+            "tycho_delayed_drop_dropped",
+            "Reclaimer dequeue rate",
+        ),
+    ]
+    return create_row("util: Reclaimer", metrics)
+
+
 def net_conn_manager() -> RowPanel:
     metrics = [
         create_heatmap_panel(
@@ -3134,6 +3164,7 @@ dashboard = Dashboard(
         net_peer(),
         net_dht(),
         *quic_network_panels(),
+        util_reclaimer(),
         allocator_stats(),
         rayon_stats(),
         jrpc(),

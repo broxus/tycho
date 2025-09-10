@@ -120,6 +120,8 @@ impl CmdRun {
             init_metrics(metrics_config)?;
         }
 
+        // Reclaimer initializes on first use; no explicit init needed.
+
         if self.single_node {
             let too_new_archive_threshold =
                 &mut node_config.blockchain_rpc_client.too_new_archive_threshold;
