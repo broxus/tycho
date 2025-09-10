@@ -60,7 +60,7 @@ pub(super) mod tests;
 
 #[cfg(test)]
 pub(crate) use messages_reader::tests::{TestInternalMessage, TestMessageFactory};
-
+use tycho_util::drop::Reclaimer;
 // FACTORY
 
 pub struct CollatorContext {
@@ -725,7 +725,9 @@ impl CollatorStdImpl {
             }
 
             // Drop states
-            self.store_state_refs.clear();
+            while let Some(cell) = self.store_state_refs.pop_front() {
+                Reclaimer::instance().drop_later(cell);
+            }
 
             // finalize all remaining state store tasks in background
             for cx in self.store_new_state_tasks.drain(..) {
@@ -735,7 +737,9 @@ impl CollatorStdImpl {
             working_state
         } else {
             // Drop states
-            self.store_state_refs.clear();
+            while let Some(cell) = self.store_state_refs.pop_front() {
+                Reclaimer::instance().drop_later(cell);
+            }
 
             // finalize all remaining state store tasks in background
             for cx in self.store_new_state_tasks.drain(..) {

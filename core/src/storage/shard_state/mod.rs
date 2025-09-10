@@ -12,6 +12,7 @@ use tycho_storage::fs::TempFileStorage;
 use tycho_storage::kv::StoredValue;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
+use tycho_util::drop::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
@@ -171,7 +172,7 @@ impl ShardStateStorage {
 
             raw_db.write(batch)?;
 
-            drop(root_cell);
+            Reclaimer::instance().drop_later(root_cell);
 
             hist.finish();
 

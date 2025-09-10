@@ -16,6 +16,7 @@ use tycho_types::boc::BocRepr;
 use tycho_types::merkle::MerkleProof;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
+use tycho_util::drop::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use tycho_util::{FastDashMap, FastHashMap};
@@ -368,7 +369,16 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         for (shard, seqno) in &to_split {
             if let Some(mut shard_blocks) = self.blocks.get_mut(shard) {
-                *shard_blocks = shard_blocks.split_off(seqno);
+                let old_blocks = std::mem::take(&mut *shard_blocks);
+
+                let mut temp_blocks = old_blocks;
+                let new_blocks = temp_blocks.split_off(seqno);
+
+                for (_, block) in temp_blocks {
+                    Reclaimer::instance().drop_later(block);
+                }
+
+                *shard_blocks = new_blocks;
             }
         }
 
