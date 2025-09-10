@@ -28,7 +28,7 @@ weedb = { workspace = true }
 
 # local deps
 tycho-storage-traits = { workspace = true }
-tycho-util = { workspace = true, features = ["mem"] }
+tycho-util = { workspace = true, features = ["sysinfo"] }
 
 [dev-dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }

@@ -15,7 +15,7 @@ ahash = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
-bytesize = { workspace = true, optional = true }
+bytesize = { workspace = true }
 castaway = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
@@ -26,6 +26,7 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
 rand = { workspace = true }
 rayon = { workspace = true }
+scopeguard = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
@@ -52,7 +53,6 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 
 [features]
 test = ["dep:tracing-subscriber"]
-mem = ["dep:bytesize", "dep:sysinfo"]
 cli = [
     "dep:getip",
     "dep:libc",

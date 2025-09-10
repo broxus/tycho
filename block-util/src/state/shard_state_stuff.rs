@@ -1,9 +1,11 @@
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 use anyhow::Result;
 use tycho_types::cell::Lazy;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
+use tycho_util::mem::Reclaimer;
 
 use crate::state::{MinRefMcStateTracker, RefMcStateHandle};
 
@@ -66,10 +68,12 @@ impl ShardStateStuff {
         Ok(Self {
             inner: Arc::new(Inner {
                 block_id: *block_id,
-                shard_state_extra: shard_state.load_custom()?,
-                shard_state,
-                root,
-                handle,
+                parts: ManuallyDrop::new(InnerParts {
+                    shard_state_extra: shard_state.load_custom()?,
+                    shard_state,
+                    root,
+                    handle,
+                }),
             }),
         })
     }
@@ -177,6 +181,28 @@ unsafe impl arc_swap::RefCnt for ShardStateStuff {
 #[doc(hidden)]
 pub struct Inner {
     block_id: BlockId,
+    parts: ManuallyDrop<InnerParts>,
+}
+
+impl std::ops::Deref for Inner {
+    type Target = InnerParts;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.parts
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // SAFETY: Inner is dropped only once.
+        let parts = unsafe { ManuallyDrop::take(&mut self.parts) };
+        Reclaimer::instance().drop(parts);
+    }
+}
+
+#[doc(hidden)]
+pub struct InnerParts {
     shard_state: Box<ShardStateUnsplit>,
     shard_state_extra: Option<McStateExtra>,
     handle: RefMcStateHandle,
