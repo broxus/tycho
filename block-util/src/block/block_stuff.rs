@@ -3,9 +3,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
+use tycho_types::cell::Lazy;
+use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
+use tycho_util::drop::delayed_drop;
 
 use crate::archive::WithArchiveData;
 
@@ -306,4 +309,23 @@ pub struct Inner {
     block_extra: OnceLock<Result<BlockExtra, tycho_types::error::Error>>,
     block_mc_extra: OnceLock<Result<McBlockExtra, tycho_types::error::Error>>,
     data_size: usize,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let block = std::mem::replace(&mut self.block, Block {
+            global_id: 0,
+            info: Lazy::new(&BlockInfo::default()).unwrap(),
+            value_flow: Lazy::new(&ValueFlow::default()).unwrap(),
+            state_update: Lazy::new(&MerkleUpdate::default()).unwrap(),
+            out_msg_queue_updates: OutMsgQueueUpdates {
+                diff_hash: Default::default(),
+                tail_len: 0,
+            },
+            extra: Lazy::new(&BlockExtra::default()).unwrap(),
+        });
+        delayed_drop(block);
+        let root = std::mem::take(&mut self.root);
+        delayed_drop(root);
+    }
 }

@@ -9,6 +9,7 @@ use tycho_core::node::NodeKeys;
 use tycho_util::cli::logger::{init_logger, set_abort_with_tracing};
 use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
+use tycho_util::drop::init_drop_guard;
 
 pub use self::control::CmdControl;
 use crate::BaseArgs;
@@ -119,6 +120,9 @@ impl CmdRun {
         if let Some(metrics_config) = &node_config.metrics {
             init_metrics(metrics_config)?;
         }
+
+        // Initialize delayed-drop background worker once for the process.
+        init_drop_guard();
 
         if self.single_node {
             let too_new_archive_threshold =

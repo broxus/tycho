@@ -69,6 +69,8 @@ mod util {
     pub(crate) mod wake_list;
 }
 
+pub mod drop;
+
 #[cfg(feature = "cli")]
 pub mod cli;
 
