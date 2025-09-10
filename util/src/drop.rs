@@ -26,7 +26,7 @@ pub struct Reclaimer {
 }
 
 impl Reclaimer {
-    const QUEUE_CAPACITY: usize = 10;
+    const QUEUE_CAPACITY: usize = 100;
 
     pub fn new(queue_capacity: usize) -> Self {
         let (tx, rx) = mpsc::sync_channel(queue_capacity);

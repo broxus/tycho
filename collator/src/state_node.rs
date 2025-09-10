@@ -369,16 +369,23 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         for (shard, seqno) in &to_split {
             if let Some(mut shard_blocks) = self.blocks.get_mut(shard) {
-                let old_blocks = std::mem::take(&mut *shard_blocks);
+                // let old_blocks = std::mem::take(&mut *shard_blocks);
+                //
+                // let mut temp_blocks = old_blocks;
+                // let new_blocks = temp_blocks.split_off(seqno);
+                //
+                // for (_, block) in temp_blocks {
+                //     Reclaimer::instance().drop_later(block);
+                // }
+                //
+                // *shard_blocks = new_blocks;
 
-                let mut temp_blocks = old_blocks;
-                let new_blocks = temp_blocks.split_off(seqno);
+                let new_shard_blocks = shard_blocks.split_off(seqno);
 
-                for (_, block) in temp_blocks {
-                    Reclaimer::instance().drop_later(block);
-                }
+                let old_shard_blocks = std::mem::take(&mut *shard_blocks);
+                Reclaimer::instance().drop_later(old_shard_blocks);
 
-                *shard_blocks = new_blocks;
+                *shard_blocks = new_shard_blocks;
             }
         }
 
