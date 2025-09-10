@@ -21,6 +21,7 @@ use tycho_network::PeerId;
 use tycho_types::cell::{Cell, HashBytes};
 use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::*;
+use tycho_util::drop::*;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
 use tycho_util::sync::rayon_run;
@@ -725,7 +726,9 @@ impl CollatorStdImpl {
             }
 
             // Drop states
-            self.store_state_refs.clear();
+            while let Some(cell) = self.store_state_refs.pop_front() {
+                drop_in_background(cell);
+            }
 
             // finalize all remaining state store tasks in background
             for cx in self.store_new_state_tasks.drain(..) {
@@ -735,7 +738,9 @@ impl CollatorStdImpl {
             working_state
         } else {
             // Drop states
-            self.store_state_refs.clear();
+            while let Some(cell) = self.store_state_refs.pop_front() {
+                drop_in_background(cell);
+            }
 
             // finalize all remaining state store tasks in background
             for cx in self.store_new_state_tasks.drain(..) {

@@ -4,6 +4,7 @@ use anyhow::Result;
 use tycho_types::cell::Lazy;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
+use tycho_util::drop::*;
 
 use crate::state::{MinRefMcStateTracker, RefMcStateHandle};
 
@@ -181,6 +182,13 @@ pub struct Inner {
     shard_state_extra: Option<McStateExtra>,
     handle: RefMcStateHandle,
     root: Cell,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let root = std::mem::take(&mut self.root);
+        drop_in_background(root);
+    }
 }
 
 #[cfg(test)]

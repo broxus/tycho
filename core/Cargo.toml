@@ -80,6 +80,7 @@ tycho-util = { workspace = true, features = ["test"] }
 similar-asserts = { workspace = true }
 
 [features]
+default = ["cells-metrics"]
 test = []
 cli = ["dep:clap", "clap/derive"]
 cells-metrics = []
