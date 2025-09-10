@@ -20,8 +20,9 @@ use tycho_types::models::{
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 use types::{
-    ActiveCollator, ActiveSync, BlockCacheEntry, BlockCacheEntryData, BlockSeqno, CollationStatus,
-    CollatorState, McBlockSubgraph, NextCollationStep,
+    ActiveCollator, ActiveSync, BlockCacheEntry, BlockCacheEntryData, BlockCacheStoreResult,
+    CollatedBlockInfo, CollationState, CollationStatus, CollatorState, HandledBlockFromBcCtx,
+    ImportedAnchorEvent, McBlockSubgraph, NextCollationStep,
 };
 
 use self::blocks_cache::BlocksCache;
@@ -34,7 +35,6 @@ use crate::collator::{
 use crate::internal_queue::types::{
     DiffStatistics, DiffZone, EnqueuedMessage, QueueDiffWithMessages,
 };
-use crate::manager::types::{BlockCacheStoreResult, HandledBlockFromBcCtx};
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
     StateUpdateContext,
@@ -42,7 +42,7 @@ use crate::mempool::{
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::processed_upto::{
-    ProcessedUptoInfoExtension, ProcessedUptoInfoStuff, find_min_processed_to_by_shards,
+    BlockSeqno, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff, find_min_processed_to_by_shards,
 };
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
@@ -687,10 +687,14 @@ where
         self.run_next_collation_step(
             &prev_mc_block_id,
             next_block_id_short.shard,
-            anchor_chain_time,
-            force_mc_block,
             None,
-            collation_config.mc_block_min_interval_ms as _,
+            DetectNextCollationStepContext::new(
+                anchor_chain_time,
+                force_mc_block,
+                collation_config.mc_block_min_interval_ms as _,
+                collation_config.mc_block_max_interval_ms as _,
+                None,
+            ),
         )
         .await
     }
@@ -702,10 +706,8 @@ where
         &self,
         prev_mc_block_id: &BlockId,
         shard_id: ShardIdent,
-        chain_time: u64,
-        force_mc_block: ForceMasterCollation,
         trigger_shard_block_id_opt: Option<BlockId>,
-        mc_block_min_interval_ms: u64,
+        ctx: DetectNextCollationStepContext,
     ) -> Result<()> {
         let next_step = Self::detect_next_collation_step(
             &mut self.collation_sync_state.lock(),
@@ -715,9 +717,7 @@ where
                 .cloned()
                 .collect(),
             shard_id,
-            chain_time,
-            force_mc_block,
-            mc_block_min_interval_ms,
+            ctx,
         );
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -743,7 +743,7 @@ where
                 )
                 .await?;
             }
-            NextCollationStep::WaitForMasterStatus => {
+            NextCollationStep::WaitForMasterStatus | NextCollationStep::WaitForShardStatus => {
                 // current shard collator will wait
                 self.set_collator_state(&shard_id, |ac| ac.state = CollatorState::Waiting);
             }
@@ -1100,13 +1100,21 @@ where
             tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                 "will run next collation step",
             );
+
             self.run_next_collation_step(
                 &collation_result.prev_mc_block_id,
                 block_id.shard,
-                candidate_chain_time,
-                collation_result.force_next_mc_block,
                 Some(block_id),
-                collation_result.collation_config.mc_block_min_interval_ms as _,
+                DetectNextCollationStepContext::new(
+                    candidate_chain_time,
+                    collation_result.force_next_mc_block,
+                    collation_result.collation_config.mc_block_min_interval_ms as _,
+                    collation_result.collation_config.mc_block_max_interval_ms as _,
+                    Some(CollatedBlockInfo::new(
+                        collation_result.prev_mc_block_id.seqno,
+                        collation_result.has_processed_externals,
+                    )),
+                ),
             )
             .await?;
         }
@@ -2642,13 +2650,8 @@ where
         // prune
         for (_, collation_state) in guard.states.iter_mut() {
             collation_state
-                .last_imported_chain_times
-                .retain(|(ct, _)| ct > &chain_time);
-            let mc_collation_forced = collation_state
-                .last_imported_chain_times
-                .iter()
-                .any(|(_, forced)| *forced);
-            collation_state.mc_collation_forced = mc_collation_forced;
+                .last_imported_anchor_events
+                .retain(|it| it.ct > chain_time);
         }
     }
 
@@ -2667,200 +2670,408 @@ where
     }
 
     /// 1. Store collation status for current shard
-    /// 2. Detect the next step: wait for master status, resume attempts, run master collation
+    /// 2. Detect the next step
+    #[tracing::instrument(skip_all)]
     fn detect_next_collation_step(
         guard: &mut CollationSyncState,
         active_shards: Vec<ShardIdent>,
         shard_id: ShardIdent,
-        last_imported_anchor_ct: u64,
-        force_mc_block: ForceMasterCollation,
-        mc_block_min_interval_ms: u64,
+        ctx: DetectNextCollationStepContext,
     ) -> NextCollationStep {
+        let DetectNextCollationStepContext {
+            last_imported_anchor_ct,
+            force_mc_block,
+            mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
+            collated_block_info,
+        } = ctx;
+
+        // backward compatibility: if max interval is not defined take it equal to min interval
+        let mc_block_max_interval_ms = if mc_block_max_interval_ms == 0 {
+            mc_block_min_interval_ms
+        } else {
+            mc_block_max_interval_ms
+        };
+
         let _histogram = HistogramGuard::begin("detect_next_collation_step_time");
+        assert!(
+            active_shards.contains(&shard_id),
+            "active_shards must include current shard"
+        );
 
         let mc_block_latest_chain_time = guard.mc_block_latest_chain_time;
 
-        // check if master collation state exists
+        // Check if masterchain collation state exists (already imported anchor events from MC shard)
         let mc_collation_state_exist = shard_id.is_masterchain()
             || guard
                 .states
                 .get(&ShardIdent::MASTERCHAIN)
-                .is_some_and(|state| !state.last_imported_chain_times.is_empty());
+                .is_some_and(|state| !state.last_imported_anchor_events.is_empty());
 
-        // check if master collation hard forced for all shards
+        // Force collation for all if MC shard explicitly requires it (unprocessed messages)
         if shard_id.is_masterchain()
-            && matches!(force_mc_block, ForceMasterCollation::ByUprocessedMessages)
+            && matches!(force_mc_block, ForceMasterCollation::ByUnprocessedMessages)
         {
             guard.mc_collation_forced_for_all = true;
-        };
-        let hard_forced_for_all = guard.mc_collation_forced_for_all;
+        }
 
-        // save current shard collator state
+        // Another forcing rule: no pending messages after shard blocks
+        if matches!(
+            force_mc_block,
+            ForceMasterCollation::NoPendingMessagesAfterShardBlocks
+        ) {
+            guard.mc_forced_by_no_pending_msgs_on_ct = Some(last_imported_anchor_ct);
+        }
+
+        let hard_forced_for_all = guard.mc_collation_forced_for_all;
+        let mc_forced_by_no_pending_msgs_on_ct = guard.mc_forced_by_no_pending_msgs_on_ct;
+
+        // Determine if the current shard collation is explicitly forced in new anchor event
         let forced_in_current_shard = force_mc_block.is_forced();
+
+        // Add new anchor event for current shard
+        tracing::trace!(
+            target: tracing_targets::COLLATION_MANAGER,
+            shard_id=?shard_id,
+            last_imported_anchor_ct,
+            forced_in_current_shard,
+            ?collated_block_info,
+            "anchor event appended"
+        );
         let current_collation_state = guard.states.entry(shard_id).or_default();
         current_collation_state
-            .last_imported_chain_times
-            .push((last_imported_anchor_ct, forced_in_current_shard));
-        current_collation_state.mc_collation_forced |= forced_in_current_shard;
+            .last_imported_anchor_events
+            .push(ImportedAnchorEvent {
+                ct: last_imported_anchor_ct,
+                mc_forced: forced_in_current_shard,
+                collated_block_info,
+            });
 
-        // check if should collate master by current shard or because forced in master collator
-        let should_collate_by_current_shard = if hard_forced_for_all {
-            tracing::info!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Master block collation hard forced for all shards \
-                because there are unprocessed messages for master",
-            );
-            true
-        } else if forced_in_current_shard {
-            tracing::info!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Master block collation forced in current shard {}",
-                shard_id,
-            );
-            true
-        } else {
-            // check if master block interval exceeded in current shard
-            let chain_time_elapsed_ms = last_imported_anchor_ct
-                .checked_sub(mc_block_latest_chain_time)
-                .unwrap_or_default();
-            let mc_block_interval_exceeded = chain_time_elapsed_ms > mc_block_min_interval_ms;
-            if mc_block_interval_exceeded {
-                tracing::info!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    mc_block_min_interval_ms,
-                    chain_time_elapsed_ms,
-                    %shard_id,
-                    "Master block interval exceeded by elapsed chain time in current shard",
-                );
-                true
-            } else {
-                tracing::debug!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    mc_block_min_interval_ms,
-                    chain_time_elapsed_ms,
-                    %shard_id,
-                    "Elapsed chain time has not exceeded master block interval in current shard \
-                    - do not need to collate next master block",
-                );
-                false
-            }
-        };
-
-        // check if should collate master by every shard
-        let mut first_chain_times_for_mc_block = vec![];
-        let mut should_collate_by_every_shard = should_collate_by_current_shard;
-        if should_collate_by_current_shard {
-            for active_shard in active_shards {
-                match guard.states.get(&active_shard) {
-                    Some(shard_collation_state)
-                        if !shard_collation_state.last_imported_chain_times.is_empty() =>
-                    {
-                        // get first chain time that exceed master block interval or has "forced" flag
-                        let first_chain_time_that_exceed_or_forced = shard_collation_state
-                            .last_imported_chain_times
-                            .iter()
-                            .find(|(chain_time, force_in_current_shard)| {
-                                *force_in_current_shard
-                                    || (*chain_time)
-                                        .checked_sub(mc_block_latest_chain_time)
-                                        .unwrap_or_default()
-                                        > mc_block_min_interval_ms
-                            });
-
-                        // otherwise get the first one if master block collation hard forced for all shards
-                        let first_chain_time_that_exceed_or_forced =
-                            match first_chain_time_that_exceed_or_forced {
-                                Some((ct, _)) => Some(*ct),
-                                None if hard_forced_for_all => shard_collation_state
-                                    .last_imported_chain_times
-                                    .first()
-                                    .map(|(ct, _)| *ct),
-                                _ => None,
-                            };
-
-                        if let Some(ct) = first_chain_time_that_exceed_or_forced {
-                            first_chain_times_for_mc_block.push(ct);
-                        } else {
-                            // we have collated chain times in active shard
-                            // but master block should not be collated according to them
-                            should_collate_by_every_shard = false;
-                            break;
-                        }
-                    }
-                    _ => {
-                        // we do not have collation statuses for every shard
-                        // master block should not be collated
-                        should_collate_by_every_shard = false;
-                        break;
-                    }
+        // Per-shard facts to simplify decision-making
+        #[derive(Debug, Clone)]
+        struct ShardFact {
+            shard_id: ShardIdent,
+            status: CollationStatus,   // current collation status for shard
+            first_ct: Option<u64>,     // first ct
+            mc_forced_ct: Option<u64>, // first ct on which mc block collation forced
+            min_ct: Option<u64>,       // first ct >= min interval
+            max_ct: Option<u64>,       // first ct >= max interval
+            has_shard_block_with_externals: bool, // produced shard block with externals
+        }
+        impl ShardFact {
+            fn with_status(shard_id: ShardIdent, status: CollationStatus) -> Self {
+                Self {
+                    shard_id,
+                    status,
+                    first_ct: None,
+                    mc_forced_ct: None,
+                    min_ct: None,
+                    max_ct: None,
+                    has_shard_block_with_externals: false,
                 }
             }
-        };
+            fn calc(
+                shard_id: ShardIdent,
+                state: &CollationState,
+                mc_ct: u64,
+                min_interval_ms: u64,
+                max_interval_ms: u64,
+            ) -> Self {
+                let mut fact = Self::with_status(shard_id, state.status);
 
-        // resume collation attempts if should not collate master by every shard
+                let mut last_known_collated_block_info: Option<CollatedBlockInfo> = None;
+
+                for s in &state.last_imported_anchor_events {
+                    // check for the first shard block with externals
+                    let mut is_first_shard_block_with_externals = false;
+                    if let Some(curr_b_info) = s.collated_block_info {
+                        // find first block after previous master
+                        let is_first_after_prev_master = match &last_known_collated_block_info {
+                            Some(last_b_info)
+                                if last_b_info.prev_mc_block_seqno
+                                    < curr_b_info.prev_mc_block_seqno =>
+                            {
+                                true
+                            }
+                            None => true,
+                            _ => false,
+                        };
+
+                        if !shard_id.is_masterchain() {
+                            // if found then will seek for the first shard block with externals
+                            if is_first_after_prev_master {
+                                fact.has_shard_block_with_externals = false;
+                            }
+
+                            // remember the first shard block with externals
+                            is_first_shard_block_with_externals = curr_b_info
+                                .has_processed_externals
+                                && !fact.has_shard_block_with_externals;
+                            if is_first_shard_block_with_externals {
+                                fact.has_shard_block_with_externals = true;
+                            }
+                        }
+
+                        last_known_collated_block_info = Some(curr_b_info);
+                    }
+
+                    if fact.first_ct.is_none() {
+                        fact.first_ct = Some(s.ct);
+                    }
+
+                    if s.mc_forced && fact.mc_forced_ct.is_none() {
+                        fact.mc_forced_ct = Some(s.ct);
+                    }
+
+                    // we take only first ct that exceed min interval
+                    // or the next that goes with the first shard block with externals
+                    if (fact.min_ct.is_none() || is_first_shard_block_with_externals)
+                        && s.ct.saturating_sub(mc_ct) >= min_interval_ms
+                    {
+                        fact.min_ct = Some(s.ct);
+                    }
+
+                    // we take only first ct that exceed max interval
+                    if fact.max_ct.is_none() && s.ct.saturating_sub(mc_ct) >= max_interval_ms {
+                        fact.max_ct = Some(s.ct);
+                    }
+                }
+
+                fact
+            }
+        }
+
+        // Collect facts for all active shards
+        let mut facts = Vec::with_capacity(active_shards.len());
+        for sid in &active_shards {
+            if let Some(st) = guard.states.get(sid) {
+                let f = ShardFact::calc(
+                    *sid,
+                    st,
+                    mc_block_latest_chain_time,
+                    mc_block_min_interval_ms,
+                    mc_block_max_interval_ms,
+                );
+                facts.push(f);
+            } else {
+                facts.push(ShardFact::with_status(
+                    *sid,
+                    CollationStatus::AttemptsInProgress,
+                ));
+            }
+        }
+
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            mc_block_latest_chain_time,
+            mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
+            hard_forced_for_all,
+            mc_forced_by_no_pending_msgs_on_ct,
+            ?facts,
+            "calculated shard facts"
+        );
+
+        let any_has_shard_block_with_externals =
+            facts.iter().any(|f| f.has_shard_block_with_externals);
+
+        fn choose_candidate(
+            curr_sid: &ShardIdent,
+            f: &ShardFact,
+            mc_forced_by_shard_on_ct: Option<u64>,
+            any_has_shard_block_with_externals: bool,
+            hard_forced_for_all: bool,
+        ) -> Option<u64> {
+            // take into account shard if it is current
+            // or it is ready to collate or waiting
+            let ready_to_detect_next_step = f.shard_id == *curr_sid
+                || matches!(
+                    f.status,
+                    CollationStatus::ReadyToCollateMaster
+                        | CollationStatus::WaitForMasterStatus
+                        | CollationStatus::WaitForShardStatus
+                );
+
+            // chain time on which master was forced
+            f.mc_forced_ct
+                // first ct if master was forced for all
+                .or(if hard_forced_for_all {
+                    f.first_ct
+                } else {
+                    None
+                })
+                .or(
+                    // chain time that exceed min interval or when was forced by shard
+                    // when any shard has collated shard block with externals
+                    // or any shard has forced master block (e.g. by no more pending messages)
+                    // if shard is ready to detect next step
+                    if any_has_shard_block_with_externals || mc_forced_by_shard_on_ct.is_some() {
+                        if ready_to_detect_next_step {
+                            f.min_ct.map(|min_ct| {
+                                mc_forced_by_shard_on_ct
+                                    .map_or(min_ct, |forced_ct| min_ct.max(forced_ct))
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    // finally take chain time that exceed max interval
+                    else {
+                        f.max_ct
+                    },
+                )
+        }
+
+        // get next mc block ct candidates from all shards
+        // and detect if should collate by current shard
+        let mut should_collate_by_current_shard = false;
+
+        let candidates: Vec<_> = facts
+            .iter()
+            .map(|f| {
+                let ct = choose_candidate(
+                    &shard_id,
+                    f,
+                    mc_forced_by_no_pending_msgs_on_ct,
+                    any_has_shard_block_with_externals,
+                    hard_forced_for_all,
+                );
+                if f.shard_id == shard_id && ct.is_some() {
+                    should_collate_by_current_shard = true;
+                }
+                ct
+            })
+            .collect();
+
+        // check if should collate by every shard
+        let should_collate_by_every_shard =
+            !candidates.is_empty() && candidates.iter().all(|c| c.is_some());
+
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            shard_id=?shard_id,
+            ?candidates,
+            should_collate_by_current_shard,
+            should_collate_by_every_shard,
+            any_has_shard_block_with_externals,
+            hard_forced_for_all,
+            mc_forced_by_no_pending_msgs_on_ct,
+            mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
+            "candidates collected"
+        );
+
+        // If not all shards ready to collate next master then resume attempts
         if !should_collate_by_every_shard {
             let mut shards_to_resume_attempts = vec![];
 
-            // resume for current shard only when should not collate master by current shard
+            // check if other shards ready to collate
+            let all_other_shards_ready_to_collate = guard.states.iter().all(|(sid, s)| {
+                *sid == shard_id || s.status == CollationStatus::ReadyToCollateMaster
+            });
+
+            // If current shard is not ready to collate master then try to resume attempts
+            let current_collation_state = guard.states.entry(shard_id).or_default();
             if !should_collate_by_current_shard {
-                // wait for master collation status if it not exist yet
-                let current_collation_state = guard.states.entry(shard_id).or_default();
                 if !mc_collation_state_exist {
+                    // wait for master collation status if it not exist yet
                     current_collation_state.status = CollationStatus::WaitForMasterStatus;
-
-                    return NextCollationStep::WaitForMasterStatus;
+                } else if shard_id.is_masterchain() && !all_other_shards_ready_to_collate {
+                    // master always wait for next shard event if any is not ready to collate
+                    // not to wait for one more anchor if shard forces master collation
+                    current_collation_state.status = CollationStatus::WaitForShardStatus;
                 } else {
+                    // or resume attempts right now
                     current_collation_state.status = CollationStatus::AttemptsInProgress;
-
                     shards_to_resume_attempts.push(shard_id);
                 }
-            }
+            } else {
+                // otherwise it is ready to collate master
+                current_collation_state.status = CollationStatus::ReadyToCollateMaster;
+            };
 
-            if shard_id.is_masterchain() {
-                // when we check master collation status and consider to resume attempts
-                // then we should resume for all shards that have been waiting for master
-                for (shard_ident, shard_collation_state) in
-                    guard.states.iter_mut().filter(|(s, _)| !s.is_masterchain())
+            for (sid, collation_state) in guard.states.iter_mut() {
+                // master resumes all waiting shards
+                if (shard_id.is_masterchain()
+                            && collation_state.status == CollationStatus::WaitForMasterStatus)
+                            // shard resumes waiting master
+                            || (!shard_id.is_masterchain()
+                            && collation_state.status == CollationStatus::WaitForShardStatus)
                 {
-                    if shard_collation_state.status == CollationStatus::WaitForMasterStatus {
-                        shard_collation_state.status = CollationStatus::AttemptsInProgress;
-                        shards_to_resume_attempts.push(*shard_ident);
-                    }
+                    collation_state.status = CollationStatus::AttemptsInProgress;
+                    shards_to_resume_attempts.push(*sid);
                 }
             }
 
-            return NextCollationStep::ResumeAttemptsIn(shards_to_resume_attempts);
+            let res = if !shards_to_resume_attempts.is_empty() {
+                NextCollationStep::ResumeAttemptsIn(shards_to_resume_attempts)
+            } else if shard_id.is_masterchain() {
+                NextCollationStep::WaitForShardStatus
+            } else {
+                NextCollationStep::WaitForMasterStatus
+            };
+
+            tracing::info!(
+                target: tracing_targets::COLLATION_MANAGER,
+                shard_id=?shard_id,
+                ?candidates,
+                should_collate_by_current_shard,
+                should_collate_by_every_shard,
+                any_has_shard_block_with_externals,
+                hard_forced_for_all,
+                mc_forced_by_no_pending_msgs_on_ct,
+                mc_collation_state_exist,
+                mc_block_min_interval_ms,
+                mc_block_max_interval_ms,
+                decision=?res,
+                "step decision"
+            );
+
+            return res;
         }
 
-        let next_mc_block_chain_time = first_chain_times_for_mc_block
-            .into_iter()
-            .max()
-            .expect("Here `first_chain_times_for_mc_block` vec should not be empty");
+        // Otherwise: collate MC block using max candidate ct
+        let next_mc_block_chain_time = candidates.into_iter().flatten().max().unwrap();
+
+        // Mark all shards as "running" (attempts in progress)
+        for (sid, st) in guard.states.iter_mut() {
+            st.status = CollationStatus::AttemptsInProgress;
+
+            // we may use not last imported chain time to collate master
+            // so we prune all cached chain times for master above next chain time
+            // so next anchors will be imported again
+            if sid.is_masterchain() {
+                st.last_imported_anchor_events
+                    .retain(|s| s.ct <= next_mc_block_chain_time);
+            }
+        }
+
+        // Update MC block time and reset force flags
+        Self::renew_mc_block_latest_chain_time(guard, next_mc_block_chain_time);
+
+        // drop "forced for all" and "forced by no pending messages" flags
+        // if we decided to collate master
+        guard.mc_collation_forced_for_all = false;
+        guard.mc_forced_by_no_pending_msgs_on_ct = None;
+
+        let res = NextCollationStep::CollateMaster(next_mc_block_chain_time);
 
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
+            shard_id=?shard_id,
+            should_collate_by_current_shard,
+            should_collate_by_every_shard,
+            any_has_shard_block_with_externals,
             hard_forced_for_all,
-            forced_in_current_shard,
+            mc_forced_by_no_pending_msgs_on_ct,
+            mc_collation_state_exist,
             mc_block_min_interval_ms,
-            next_mc_block_chain_time,
-            "Master block collation forced or interval exceeded in every shard - \
-            will collate next master block",
+            mc_block_max_interval_ms,
+            decision=?res,
+            "step decision"
         );
 
-        // update collation status in every shard
-        for shard_collation_state in guard.states.values_mut() {
-            shard_collation_state.status = CollationStatus::AttemptsInProgress;
-        }
-
-        // will renew latest master block chain time
-        // because anyway we will collate master block
-        // on current exit from this method
-        Self::renew_mc_block_latest_chain_time(guard, next_mc_block_chain_time);
-
-        // drop "forced for all" flag if we decided to collate master
-        guard.mc_collation_forced_for_all = false;
-
-        NextCollationStep::CollateMaster(next_mc_block_chain_time)
+        res
     }
 
     /// Enqueue master block collation task. Will determine top shard blocks for this collation
@@ -3179,5 +3390,32 @@ impl GlobalCapabilitiesExt for GlobalCapabilities {
         let this = self.into_inner();
         let other = other.into_inner();
         this & !other == 0
+    }
+}
+
+#[derive(Debug)]
+struct DetectNextCollationStepContext {
+    pub last_imported_anchor_ct: u64,
+    pub force_mc_block: ForceMasterCollation,
+    pub mc_block_min_interval_ms: u64,
+    pub mc_block_max_interval_ms: u64,
+    pub collated_block_info: Option<CollatedBlockInfo>,
+}
+
+impl DetectNextCollationStepContext {
+    pub fn new(
+        last_imported_anchor_ct: u64,
+        force_mc_block: ForceMasterCollation,
+        mc_block_min_interval_ms: u64,
+        mc_block_max_interval_ms: u64,
+        collated_block_info: Option<CollatedBlockInfo>,
+    ) -> Self {
+        Self {
+            last_imported_anchor_ct,
+            force_mc_block,
+            mc_block_min_interval_ms,
+            mc_block_max_interval_ms,
+            collated_block_info,
+        }
     }
 }

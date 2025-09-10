@@ -12,14 +12,14 @@ use tycho_types::models::{
 use tycho_util::{FastDashMap, FastHashMap};
 
 use super::types::{
-    BlockCacheEntry, BlockCacheKey, BlockCacheStoreResult, BlockSeqno, CandidateStatus,
-    McBlockSubgraph, McBlockSubgraphExtract,
+    BlockCacheEntry, BlockCacheKey, BlockCacheStoreResult, CandidateStatus, McBlockSubgraph,
+    McBlockSubgraphExtract,
 };
 use crate::manager::types::{AdditionalShardBlockCacheInfo, BlockCacheEntryData};
 use crate::mempool::MempoolAnchorId;
 use crate::state_node::StateNodeAdapter;
 use crate::tracing_targets;
-use crate::types::processed_upto::ProcessedUptoInfoStuff;
+use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
 use crate::types::{
     BlockCandidate, DisplayIntoIter, DisplayIter, ProcessedToByPartitions, TopBlockDescription,
 };

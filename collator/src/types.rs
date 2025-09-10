@@ -67,6 +67,10 @@ pub struct CollatorConfig {
     ///
     /// Default: `5` (means 32 shards).
     pub merkle_split_depth: u8,
+    /// Maximum number of [`MerkleUpdate`] that can be chained.
+    ///
+    /// Default: `5`.
+    pub merkle_chain_limit: usize,
 }
 
 impl Default for CollatorConfig {
@@ -80,6 +84,7 @@ impl Default for CollatorConfig {
             fast_sync: true,
             accounts_split_depth: 4,
             merkle_split_depth: 5,
+            merkle_chain_limit: 5,
         }
     }
 }
@@ -115,6 +120,8 @@ pub struct BlockCollationResult {
     pub mc_data: Option<Arc<McData>>,
     pub collation_config: Arc<CollationConfig>,
     pub force_next_mc_block: ForceMasterCollation,
+    /// Whether any external has been executed in this block
+    pub has_processed_externals: bool,
 }
 
 #[derive(Debug)]

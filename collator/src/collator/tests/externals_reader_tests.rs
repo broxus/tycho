@@ -46,7 +46,7 @@ pub(crate) fn fill_test_anchors_cache(
                 DisplayIter(curr_dst_addrs.iter().map(|addr| addr.to_string())),
             );
         }
-        anchors_cache.insert(anchor, our_exts_count);
+        anchors_cache.add(anchor, our_exts_count);
         dst_addrs.append(&mut curr_dst_addrs);
     }
 
@@ -270,8 +270,8 @@ fn test_read_externals() {
     };
 
     let next_chain_time = anchors_cache
-        .last_imported_anchor()
-        .map(|a| a.ct)
+        .get_last_imported_anchor_id_and_ct()
+        .map(|(_, ct)| ct)
         .unwrap_or_default();
 
     // create new reader

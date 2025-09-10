@@ -40,6 +40,7 @@ tycho-util = { workspace = true, features = ["test"] }
 
 [features]
 test = []
+cells-metrics = []
 
 [lints]
 workspace = true

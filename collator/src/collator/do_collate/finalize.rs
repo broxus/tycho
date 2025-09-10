@@ -670,7 +670,7 @@ impl Phase<FinalizeState> {
                 &shard,
                 self.state.prev_shard_data.pure_state_root(),
                 &new_state_root,
-                &usage_tree,
+                usage_tree,
                 old_split_at,
                 new_split_at,
             )?;
@@ -895,6 +895,7 @@ impl Phase<FinalizeState> {
                 collation_data: self.state.collation_data,
                 block_candidate,
                 mc_data: new_mc_data,
+                state_update,
                 new_state_root,
                 new_observable_state,
                 finalize_wu: self.extra.finalize_wu,
@@ -1091,17 +1092,25 @@ impl Phase<FinalizeState> {
             file_hash: prev_state.block_id().file_hash,
         };
 
-        prev_blocks.set(
-            prev_state.block_id().seqno,
-            KeyMaxLt {
-                has_key_block: prev_is_key_block,
-                max_end_lt: prev_state.state().gen_lt,
-            },
-            &KeyBlockRef {
-                is_key_block: prev_is_key_block,
-                block_ref: prev_blk_ref.clone(),
-            },
-        )?;
+        if prev_is_key_block
+            || !prev_state_extra
+                .config
+                .get_global_version()?
+                .capabilities
+                .contains(GlobalCapability::CapOmitMasterBlockHistory)
+        {
+            prev_blocks.set(
+                prev_state.block_id().seqno,
+                KeyMaxLt {
+                    has_key_block: prev_is_key_block,
+                    max_end_lt: prev_state.state().gen_lt,
+                },
+                &KeyBlockRef {
+                    is_key_block: prev_is_key_block,
+                    block_ref: prev_blk_ref.clone(),
+                },
+            )?;
+        }
 
         // 7. update last_key_block
         let last_key_block = if prev_state_extra.after_key_block {
@@ -1627,7 +1636,7 @@ fn create_merkle_update(
     shard_id: &ShardIdent,
     old_state_root: &Cell,
     new_state_root: &Cell,
-    usage_tree: &UsageTree,
+    usage_tree: UsageTree,
     old_split_at: ahash::HashSet<HashBytes>,
     new_split_at: ahash::HashSet<HashBytes>,
 ) -> Result<MerkleUpdate> {

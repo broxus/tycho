@@ -8,6 +8,7 @@ use std::process::Command;
 
 pub mod compression;
 pub mod config;
+pub mod dropper;
 pub mod io;
 #[cfg(feature = "mem")]
 pub mod mem;
