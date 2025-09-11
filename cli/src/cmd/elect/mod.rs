@@ -911,7 +911,7 @@ impl TransferArgs {
             },
             timeout: self.ttl,
             wait_for_balance: self.wait_balance,
-            wait_for_delivery: self.ignore_delivery,
+            wait_for_delivery: !self.ignore_delivery,
         }
     }
 }
