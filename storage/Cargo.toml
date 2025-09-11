@@ -39,6 +39,7 @@ tokio = { workspace = true, features = ["full"] }
 tycho-util = { workspace = true, features = ["test"] }
 
 [features]
+default = ["cells-metrics"]
 test = []
 cells-metrics = []
 
