@@ -131,6 +131,9 @@ impl MessagesBuffer {
         // take slots info from group
         let mut slots_info = std::mem::take(&mut msg_group.slots_info);
 
+        // pre-allocate index by msgs count size
+        slots_info.index_by_msgs_count.presize(slot_vert_size);
+
         // we will collect updates for slots index and apply them at the end
         let mut slots_index_updates = BTreeMap::new();
 
@@ -138,8 +141,8 @@ impl MessagesBuffer {
         let mut collected_int_msgs = vec![];
         let mut collected_count = 0;
 
-        // track accounts whose messages were not used to fill group
-        let mut buffer_accounts: VecDeque<HashBytes> = self.msgs.keys().copied().collect();
+        // will iterate over accounts in buffer
+        let mut buf_account_idx = 0;
 
         // 1. try to fill remaning slots with messages of accounts which are not included in any slot
         let mut new_used_slots = FastHashSet::<SlotId>::default();
@@ -169,7 +172,9 @@ impl MessagesBuffer {
                 };
 
                 // try to get messages of other accounts which are not included in any slot
-                while let Some(account_id) = buffer_accounts.pop_front() {
+                while let Some((&account_id, _)) = self.msgs.get_index(buf_account_idx) {
+                    buf_account_idx += 1;
+
                     if msg_group.msgs.contains_key(&account_id) {
                         // try skip messages from skipped account: maybe they expired
                         self.try_skip_account_msgs(&account_id, &mut msg_filter);
@@ -235,7 +240,8 @@ impl MessagesBuffer {
         // 2. try to fill all slots up to limit
         // including slots which were not fully filled
         // in message group before the previous step
-        for (_, slot_ids) in slots_info.index_by_msgs_count.range(..slot_vert_size) {
+        // iterate buckets with count < slot_vert_size
+        for slot_ids in slots_info.index_by_msgs_count.iter_upto(slot_vert_size) {
             for slot_id in slot_ids {
                 // skip slot that was used in the previous step
                 // we already looked up thru whole buffer to fill them
@@ -258,7 +264,9 @@ impl MessagesBuffer {
                 };
 
                 // try to get messages of accounts which are already included in slot
-                for account_id in slot_cx.slot.accounts.clone() {
+                for i in 0..slot_cx.slot.accounts.len() {
+                    let account_id = slot_cx.slot.accounts[i];
+
                     // TODO: we may not check account that was already skipped before
                     // skip accounts that do not pass the provided check
                     let (skip_account, check_ops_count) = check_skip_account(&account_id);
@@ -292,8 +300,9 @@ impl MessagesBuffer {
                 }
 
                 // then try to get messages of other accounts which are not included in any slot
+                while let Some((&account_id, _)) = self.msgs.get_index(buf_account_idx) {
+                    buf_account_idx += 1;
 
-                while let Some(account_id) = buffer_accounts.pop_front() {
                     if msg_group.msgs.contains_key(&account_id) {
                         // try skip messages from skipped account: maybe they expired
                         self.try_skip_account_msgs(&account_id, &mut msg_filter);
@@ -331,7 +340,8 @@ impl MessagesBuffer {
 
         // check and skip messages in remaning accounts if required
         if msg_filter.can_skip() {
-            while let Some(account_id) = buffer_accounts.pop_front() {
+            while let Some((&account_id, _)) = self.msgs.get_index(buf_account_idx) {
+                buf_account_idx += 1;
                 self.try_skip_account_msgs(&account_id, &mut msg_filter);
             }
         }
@@ -343,7 +353,7 @@ impl MessagesBuffer {
         // 3. update slots index
         let mut remove_slot_ids = BTreeMap::<usize, FastHashSet<u16>>::new();
         for (slot_id, index_update) in slots_index_updates {
-            // remove slot from old count basket
+            // remove slot from old count bucket
             if index_update.old_count() != 0 {
                 remove_slot_ids
                     .entry(index_update.old_count())
@@ -355,17 +365,19 @@ impl MessagesBuffer {
                 slots_info.ext_count -= index_update.old_ext_count;
             }
 
-            // add slot to a new count basket
+            // add slot to a new count bucket
             let slots_ids = slots_info
                 .index_by_msgs_count
-                .entry(index_update.new_count())
-                .or_default();
+                .get_mut_or_grow(index_update.new_count());
             slots_ids.insert(slot_id);
             slots_info.int_count += index_update.new_int_count;
             slots_info.ext_count += index_update.new_ext_count;
         }
         for (old_count, to_remove) in remove_slot_ids {
-            let slots_ids = slots_info.index_by_msgs_count.entry(old_count).or_default();
+            if slots_info.index_by_msgs_count.len() <= old_count {
+                continue;
+            }
+            let slots_ids = &mut slots_info.index_by_msgs_count[old_count];
             slots_ids.retain(|id| !to_remove.contains(id));
         }
 
@@ -710,14 +722,14 @@ impl MessageGroup {
         }
 
         // 2. check if has not fully filled slots
-        if self
+        for bucket in self
             .slots_info
             .index_by_msgs_count
-            .range(..slot_vert_size)
-            .next()
-            .is_some()
+            .iter_upto(slot_vert_size)
         {
-            return false;
+            if !bucket.is_empty() {
+                return false;
+            }
         }
 
         true
@@ -733,8 +745,7 @@ impl MessageGroup {
             let slots_ids = self
                 .slots_info
                 .index_by_msgs_count
-                .entry(new_slot.msgs_count())
-                .or_default();
+                .get_mut_or_grow(new_slot.msgs_count());
             slots_ids.insert(next_slot_id);
 
             self.slots_info.slots.insert(next_slot_id, new_slot);
@@ -853,7 +864,8 @@ impl std::fmt::Debug for DebugMessageGroupHashMap<'_> {
 pub(super) struct SlotsInfo {
     slots: FastHashMap<SlotId, SlotInfo>,
     last_slot_id: Option<SlotId>,
-    index_by_msgs_count: BTreeMap<usize, FastIndexSet<SlotId>>,
+    /// Buckets of slot ids by messages count
+    index_by_msgs_count: Vec<FastIndexSet<SlotId>>,
     int_count: usize,
     ext_count: usize,
 }
@@ -917,5 +929,39 @@ impl SlotIndexUpdate {
     }
     fn new_count(&self) -> usize {
         self.new_int_count + self.new_ext_count
+    }
+}
+
+trait IndexByMsgsCountExt<T> {
+    /// Iterate over items up to specified max len
+    fn iter_upto(&self, max_len: usize) -> std::slice::Iter<'_, T>;
+
+    /// Pre-allocate index size
+    fn presize(&mut self, len: usize);
+
+    /// Mutable access to an item with enlarging vec capacity if required
+    fn get_mut_or_grow(&mut self, idx: usize) -> &mut T;
+}
+
+impl<T> IndexByMsgsCountExt<T> for Vec<T>
+where
+    T: Default,
+{
+    #[inline]
+    fn iter_upto(&self, max_len: usize) -> std::slice::Iter<'_, T> {
+        let upper = max_len.min(self.len());
+        self[..upper].iter()
+    }
+
+    fn presize(&mut self, len: usize) {
+        if self.len() <= len {
+            self.resize_with(len + 1, T::default);
+        }
+    }
+
+    #[inline]
+    fn get_mut_or_grow(&mut self, idx: usize) -> &mut T {
+        self.presize(idx);
+        &mut self[idx]
     }
 }
