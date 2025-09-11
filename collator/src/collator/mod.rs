@@ -50,6 +50,16 @@ mod messages_buffer;
 mod messages_reader;
 mod types;
 
+#[cfg(any(test, feature = "bench-helpers"))]
+mod test_utils;
+
+#[cfg(feature = "bench-helpers")]
+pub mod bench_export {
+    pub use super::messages_buffer::{IncludeAllMessages, MessageGroup, MessagesBuffer};
+    pub use super::test_utils::make_stub_internal_parsed_message;
+    pub use super::types::ParsedMessage;
+}
+
 pub use do_collate::{is_first_block_after_prev_master, work_units};
 pub use error::CollationCancelReason;
 pub use types::{ForceMasterCollation, ShardDescriptionExt};
