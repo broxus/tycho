@@ -21,6 +21,7 @@ use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
 use crate::intercom::core::{PointByIdResponse, PointQueryResult, QueryRequest};
 use crate::intercom::dependency::limiter::Limiter;
+use crate::intercom::dependency::peer_resource::PeerResource;
 use crate::intercom::peer_schedule::PeerState;
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{PeerCount, Point, PointId};
@@ -39,6 +40,7 @@ struct DownloaderInner {
     dispatcher: Dispatcher,
     peer_schedule: PeerSchedule,
     limiter: Limiter,
+    resource: PeerResource,
     consensus_round: RoundWatcher<Consensus>,
 }
 
@@ -92,13 +94,14 @@ impl Downloader {
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
         consensus_round: RoundWatcher<Consensus>,
-        _conf: &MempoolConfig,
+        conf: &MempoolConfig,
     ) -> Self {
         Self {
             inner: Arc::new(DownloaderInner {
                 dispatcher: dispatcher.clone(),
                 peer_schedule: peer_schedule.clone(),
                 limiter: Limiter::new(NodeConfig::get().max_download_tasks),
+                resource: PeerResource::new(conf.consensus.download_peer_queries.into()),
                 consensus_round,
             }),
         }
@@ -321,10 +324,12 @@ impl<T: DownloadType> DownloadTask<T> {
         );
         status.is_in_flight = true;
 
+        let round = self.point_id.round;
         let parent = self.parent.clone();
         let request = self.request.clone();
         self.downloading.push(Box::pin(async move {
-            parent.inner.dispatcher.query_point(peer_id, request).await
+            let permit = parent.inner.resource.get(peer_id, round).await;
+            parent.inner.dispatcher.query_point(permit, request).await
         }));
     }
 

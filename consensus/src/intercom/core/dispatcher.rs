@@ -5,6 +5,7 @@ use tycho_util::metrics::HistogramGuard;
 use crate::intercom::core::{
     BroadcastResponse, PointByIdResponse, QueryResponse, SignatureResponse,
 };
+use crate::intercom::dependency::PeerDownloadPermit;
 use crate::models::{Point, PointIntegrityError};
 
 #[derive(Clone)]
@@ -74,15 +75,18 @@ impl Dispatcher {
 
     pub async fn query_point(
         &self,
-        peer_id: PeerId,
+        peer_permit: PeerDownloadPermit,
         request: Request,
     ) -> (PeerId, PointQueryResult) {
         let _task_duration = HistogramGuard::begin("tycho_mempool_download_query_dispatcher_time");
 
+        let peer_id = peer_permit.peer_id;
         let response = match self.overlay.query(&self.network, &peer_id, request).await {
             Ok(response) => response,
             Err(e) => return (peer_id, Err(e)),
         };
+
+        drop(peer_permit);
 
         let result = QueryResponse::parse_point_by_id(response).await;
         (peer_id, result.map_err(Into::into))
