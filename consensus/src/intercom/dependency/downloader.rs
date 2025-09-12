@@ -92,12 +92,13 @@ impl Downloader {
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
         consensus_round: RoundWatcher<Consensus>,
+        conf: &MempoolConfig,
     ) -> Self {
         Self {
             inner: Arc::new(DownloaderInner {
                 dispatcher: dispatcher.clone(),
                 peer_schedule: peer_schedule.clone(),
-                limiter: Default::default(),
+                limiter: Limiter::new(conf.consensus.download_tasks),
                 consensus_round,
             }),
         }
@@ -119,7 +120,7 @@ impl Downloader {
         verified_broadcast: oneshot::Receiver<DownloadResult>,
         ctx: DownloadCtx,
     ) -> TaskResult<Option<DownloadResult>> {
-        let _guard = self.inner.limiter.enter(point_id.round, ctx.conf()).await;
+        let _guard = self.inner.limiter.enter(point_id.round).await;
 
         if point_id.round + ctx.conf().consensus.min_front_rounds()
             >= self.inner.consensus_round.get()
@@ -241,7 +242,7 @@ impl<T: DownloadType> DownloadTask<T> {
         let maybe_found = loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
-                Ok(bcast_result) = &mut broadcast_result => break Some(bcast_result),
+                bcast_result = &mut broadcast_result => break bcast_result.ok(),
                 Some(depender) = dependers_rx.recv() => self.add_depender(&depender),
                 update = self.updates.recv() => self.match_peer_updates(update)?,
                 Some((peer_id, result)) = self.downloading.next() =>
@@ -300,17 +301,17 @@ impl<T: DownloadType> DownloadTask<T> {
         )
         .min(filtered.len());
 
-        for (peer_id, _) in &filtered[..to_add] {
+        for (peer_id, _) in filtered.into_iter().take(to_add) {
             self.download_one(peer_id);
         }
 
         self.attempt = self.attempt.wrapping_add(1);
     }
 
-    fn download_one(&mut self, peer_id: &PeerId) {
+    fn download_one(&mut self, peer_id: PeerId) {
         let status = self
             .undone_peers
-            .get_mut(peer_id)
+            .get_mut(&peer_id)
             .unwrap_or_else(|| panic!("Coding error: peer not in map {}", peer_id.alt()));
         assert!(
             !status.is_in_flight,
@@ -320,12 +321,11 @@ impl<T: DownloadType> DownloadTask<T> {
         );
         status.is_in_flight = true;
 
-        self.downloading.push(
-            self.parent
-                .inner
-                .dispatcher
-                .query_point(peer_id, &self.request),
-        );
+        let parent = self.parent.clone();
+        let request = self.request.clone();
+        self.downloading.push(Box::pin(async move {
+            parent.inner.dispatcher.query_point(peer_id, request).await
+        }));
     }
 
     fn verify(&mut self, peer_id: &PeerId, result: PointQueryResult) -> Option<DownloadResult> {

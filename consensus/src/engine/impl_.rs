@@ -81,7 +81,7 @@ impl Engine {
             &net.peer_schedule,
             &round_ctx,
         );
-        let committer_run = CommitterTask::new(committer, engine_ctx.conf());
+        let committer_run = CommitterTask::new(committer, conf);
 
         let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();
@@ -93,7 +93,7 @@ impl Engine {
             }
         });
 
-        let round_task = RoundTaskReady::new(&store, bind, &consensus_round, net);
+        let round_task = RoundTaskReady::new(&store, bind, &consensus_round, net, conf);
 
         let peer_schedule_updater = engine_ctx.task().spawn({
             let peer_schedule = net.peer_schedule.clone();

@@ -1,17 +1,16 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use parking_lot::{Mutex, MutexGuard};
-use tokio::sync::Semaphore;
+use parking_lot::Mutex;
+use tokio::sync::{Semaphore, TryAcquireError};
 
-use crate::engine::MempoolConfig;
 use crate::models::Round;
 
-#[derive(Default)]
 pub struct Limiter(Mutex<LimiterInner>);
-#[derive(Default, Debug)]
+
+#[derive(Debug)]
 struct LimiterInner {
-    inflight_bypassed: u16,
+    permits: u16,
     waiters: BTreeMap<Round, Waiter>,
 }
 
@@ -22,15 +21,29 @@ struct Waiter {
 }
 
 impl Limiter {
+    pub fn new(permits: u16) -> Self {
+        Self(Mutex::new(LimiterInner {
+            permits,
+            waiters: BTreeMap::default(),
+        }))
+    }
+
     #[must_use]
-    pub async fn enter(&self, round: Round, conf: &MempoolConfig) -> LimiterGuard<'_> {
+    pub async fn enter(&self, round: Round) -> LimiterGuard<'_> {
+        self.acquire(round).await;
+        LimiterGuard {
+            limiter: self,
+            round,
+        }
+    }
+
+    async fn acquire(&self, round: Round) {
         let semaphore_opt = {
             let mut inner = self.0.lock();
-            let bypass = inner.inflight_bypassed <= conf.consensus.download_tasks;
-            // cannot be strict equality: at least one is always allowed, others are concurrent to it
-            let result = if bypass {
-                tracing::trace!("{round:?} bypass");
-                inner.inflight_bypassed += 1;
+            // permits cannot be zero: at least one is always allowed, others are concurrent to it
+            if inner.permits.checked_sub(1).is_some() {
+                tracing::trace!("{round:?} permits bypass");
+                inner.permits -= 1;
                 None
             } else {
                 let waiter = inner.waiters.entry(round).or_insert_with(|| Waiter {
@@ -40,18 +53,21 @@ impl Limiter {
                 waiter.inflight += 1;
                 tracing::trace!("{round:?} semaphore get, pos {}", waiter.inflight);
                 Some(waiter.clone())
-            };
-            MutexGuard::unlock_fair(inner);
-            result
+            }
         };
 
         if let Some(waiter) = semaphore_opt {
-            match waiter.semaphore.acquire().await {
-                Ok(permit) => {
+            let permit_or_closed = match waiter.semaphore.try_acquire() {
+                Ok(permit) => Some(permit),
+                Err(TryAcquireError::NoPermits) => waiter.semaphore.acquire().await.ok(),
+                Err(TryAcquireError::Closed) => None,
+            };
+            match permit_or_closed {
+                Some(permit) => {
                     tracing::trace!("{round:?} semaphore acquire, pos {}", waiter.inflight);
                     permit.forget(); // may add permit to another round or to bypassed on drop
                 }
-                Err(_) => {
+                None => {
                     // semaphore drop may follow last permit
                     tracing::trace!(
                         "{round:?} semaphore dropped before acquire, pos {}",
@@ -60,11 +76,7 @@ impl Limiter {
                 }
             }
         } else {
-            tracing::trace!("{round:?} bypass");
-        }
-        LimiterGuard {
-            limiter: self,
-            round,
+            tracing::trace!("{round:?} permits bypass");
         }
     }
 
@@ -87,17 +99,15 @@ impl Limiter {
                 None => panic!("limiter inflight counter for round {} underflow", key.0),
             }
         } else {
-            tracing::trace!("{round:?} bypass release, left {}", inner.inflight_bypassed);
-            match inner.inflight_bypassed.checked_sub(1) {
-                Some(decreased) => inner.inflight_bypassed = decreased,
+            tracing::trace!("{round:?} permits release, left {}", inner.permits);
+            match inner.permits.checked_add(1) {
+                Some(increased) => inner.permits = increased,
                 None => {
                     // It's OK if `ConsensusConfig.download_tasks` was decreased
-                    panic!("limiter bypass counter underflow for round {}", round.0)
+                    panic!("limiter permits counter overflow for round {}", round.0)
                 }
             }
         }
-
-        MutexGuard::unlock_fair(inner);
     }
 }
 
@@ -125,7 +135,7 @@ mod tests {
     use tokio_stream::StreamExt;
 
     use super::*;
-    use crate::test_utils::{default_test_config, test_logger};
+    use crate::test_utils::test_logger;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn order_many() -> Result<()> {
@@ -153,11 +163,9 @@ mod tests {
     }
 
     async fn order() -> Result<()> {
-        let mut conf = default_test_config().conf;
+        const PERMITS: u16 = 1; // Note feature of this test: sequential execution
 
-        conf.consensus.download_tasks = 0; // Note feature of this test: sequential execution
-
-        let limiter = Arc::new(Limiter::default());
+        let limiter = Arc::new(Limiter::new(PERMITS));
 
         const ITEMS: usize = 200;
 
@@ -179,11 +187,10 @@ mod tests {
         for i in values {
             let all_spawned = all_spawned.clone();
             let limiter = limiter.clone();
-            let conf = conf.clone();
             let sender = sender.clone();
             spawned.push(tokio::spawn(async move {
                 all_spawned.wait().await;
-                let _guard = limiter.enter(Round(i), &conf).await;
+                let _guard = limiter.enter(Round(i)).await;
                 tracing::debug!("{i} guard entered");
                 // no ctx switch here
                 sender.try_send(i)?;
@@ -202,7 +209,7 @@ mod tests {
 
         receiver.recv_many(&mut results, ITEMS).await;
 
-        ensure_roundtrip(limiter)?;
+        ensure_roundtrip(limiter, PERMITS)?;
 
         let bad_order = results
             .iter()
@@ -226,17 +233,15 @@ mod tests {
         test_logger::spans("liveness", "info");
         test_logger::set_print_panic_hook(true);
 
-        let mut conf = default_test_config().conf;
-
-        conf.consensus.download_tasks = 37;
+        const PERMITS: u16 = 37;
         let extra = 300;
         let sleep_duration = Duration::from_millis(10);
 
-        let limiter = Arc::new(Limiter::default());
+        let limiter = Arc::new(Limiter::new(PERMITS));
 
         let mut futs = Vec::new();
 
-        let values = (0..conf.consensus.download_tasks as u32 + extra)
+        let values = (0..PERMITS as u32 + extra)
             .sorted_by_cached_key(|_| rand::rng().next_u32())
             .collect::<Vec<_>>();
 
@@ -244,9 +249,8 @@ mod tests {
 
         for i in values.clone() {
             let limiter = limiter.clone();
-            let conf = conf.clone();
             futs.push(tokio::spawn(async move {
-                let _guard = limiter.enter(Round(i / 5), &conf).await;
+                let _guard = limiter.enter(Round(i / 5)).await;
                 tracing::debug!("{i} guard entered");
                 tokio::time::sleep(sleep_duration).await;
                 i
@@ -269,19 +273,20 @@ mod tests {
             humantime::format_duration(expected_duration),
         );
 
-        ensure_roundtrip(limiter)?;
+        ensure_roundtrip(limiter, PERMITS)?;
 
         anyhow::ensure!(elapsed < expected_duration);
 
         Ok(())
     }
 
-    fn ensure_roundtrip(limiter: Arc<Limiter>) -> Result<()> {
+    fn ensure_roundtrip(limiter: Arc<Limiter>, permits: u16) -> Result<()> {
+        let limiter = Arc::into_inner(limiter).expect("must be last ref");
         let inner = limiter.0.lock();
         anyhow::ensure!(
-            inner.inflight_bypassed == 0,
+            inner.permits == permits,
             "all bypass permit credits must be returned, got {}",
-            inner.inflight_bypassed
+            inner.permits
         );
 
         anyhow::ensure!(
