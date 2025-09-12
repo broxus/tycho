@@ -12,37 +12,46 @@ use crate::effects::{AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task};
 use crate::engine::lifecycle::EngineError;
 use crate::engine::{ConsensusConfigExt, EngineResult, MempoolConfig};
 use crate::models::{AnchorData, MempoolOutput, PointInfo, Round};
+use crate::moderator::Moderator;
 
 pub struct CommitterTask {
-    inner: Inner,
+    state: State,
     pub interval: Interval,
 }
 
-enum Inner {
+enum State {
     Uninit,
-    Ready(Box<Committer>),
-    Running(Task<Result<Box<Committer>, EngineError>>),
+    Ready(Box<Inner>),
+    Running(Task<Result<Box<Inner>, EngineError>>),
+}
+
+struct Inner {
+    committer: Committer,
+    moderator: Moderator,
 }
 
 impl CommitterTask {
-    pub fn new(committer: Committer, conf: &MempoolConfig) -> Self {
+    pub fn new(committer: Committer, moderator: &Moderator, conf: &MempoolConfig) -> Self {
         let mut interval = tokio::time::interval(Duration::from_millis(
             conf.consensus.broadcast_retry_millis.get() as _,
         ));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         Self {
-            inner: Inner::Ready(Box::new(committer)),
+            state: State::Ready(Box::new(Inner {
+                committer,
+                moderator: moderator.clone(),
+            })),
             interval,
         }
     }
 
     pub async fn ready_mut(&mut self) -> EngineResult<Option<&mut Committer>> {
-        if let Some(committer) = self.inner.take_ready().await? {
-            self.inner = Inner::Ready(committer);
+        if let Some(inner) = self.state.take_ready().await? {
+            self.state = State::Ready(inner);
         };
-        Ok(match &mut self.inner {
-            Inner::Ready(committer) => Some(committer),
+        Ok(match &mut self.state {
+            State::Ready(inner) => Some(&mut inner.committer),
             _ => None,
         })
     }
@@ -54,26 +63,20 @@ impl CommitterTask {
         stats_tx: Arc<dyn MempoolEventsListener>,
         round_ctx: &RoundCtx,
     ) -> EngineResult<()> {
-        let Some(committer) = self.inner.take_ready().await? else {
+        let Some(inner) = self.state.take_ready().await? else {
             return Ok(());
         };
-        self.inner = Inner::running(
-            committer,
-            full_history_bottom,
-            anchors_tx,
-            stats_tx,
-            round_ctx,
-        );
+        self.state = State::running(inner, full_history_bottom, anchors_tx, stats_tx, round_ctx);
         Ok(())
     }
 }
 
-impl Inner {
-    async fn take_ready(&mut self) -> EngineResult<Option<Box<Committer>>> {
-        Ok(match mem::replace(self, Inner::Uninit) {
-            Inner::Uninit => panic!("must be taken only once"),
-            Inner::Ready(committer) => Some(committer),
-            Inner::Running(task) => {
+impl State {
+    async fn take_ready(&mut self) -> EngineResult<Option<Box<Inner>>> {
+        Ok(match mem::replace(self, State::Uninit) {
+            State::Uninit => panic!("must be taken only once"),
+            State::Ready(inner) => Some(inner),
+            State::Running(task) => {
                 if task.is_finished() {
                     Some(task.await??)
                 } else {
@@ -85,7 +88,7 @@ impl Inner {
     }
 
     fn running(
-        mut committer: Box<Committer>,
+        mut inner: Box<Inner>,
         mut full_history_bottom: Option<Round>,
         anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
         stats_tx: Arc<dyn MempoolEventsListener>,
@@ -97,24 +100,24 @@ impl Inner {
             // may run for long several times in a row and commit nothing, because of missed points
             let _span = round_ctx.span().enter();
 
-            let start_bottom = committer.bottom_round().0;
-            let start_dag_len = committer.dag_len();
+            let start_bottom = inner.committer.bottom_round().0;
+            let start_dag_len = inner.committer.dag_len();
 
             let mut attempt = 0;
             let committed = loop {
                 attempt += 1;
                 let is_dropping =
-                    committer.dag_len() > round_ctx.conf().consensus.min_front_rounds() as _;
-                match committer.commit(round_ctx.conf()) {
+                    inner.committer.dag_len() > round_ctx.conf().consensus.min_front_rounds() as _;
+                match inner.committer.commit(round_ctx.conf()) {
                     Ok(data) => break Some(data),
                     Err(HistoryConflict(round)) if is_dropping => {
-                        let result = committer.drop_upto(round.next(), round_ctx.conf());
+                        let result = inner.committer.drop_upto(round.next(), round_ctx.conf());
                         full_history_bottom = Some(result.unwrap_or_else(|x| x));
                         tracing::info!(
                             start_bottom,
                             start_dag_len,
-                            current_bottom = ?committer.bottom_round(),
-                            current_dag_len = committer.dag_len(),
+                            current_bottom = ?inner.committer.bottom_round(),
+                            current_dag_len = inner.committer.dag_len(),
                             attempt,
                             "comitter rounds were dropped as impossible to sync"
                         );
@@ -125,7 +128,7 @@ impl Inner {
                                 "infinite loop on dropping dag rounds: attempt {attempt}, \
                                  start dag len {start_dag_len}, start bottom {start_bottom} \
                                  resulting {:?}",
-                                committer.alt()
+                                inner.committer.alt()
                             )
                         };
                     }
@@ -134,8 +137,8 @@ impl Inner {
                             err = %history_conflict,
                             start_bottom,
                             start_dag_len,
-                            current_bottom = ?committer.bottom_round(),
-                            current_dag_len = committer.dag_len(),
+                            current_bottom = ?inner.committer.bottom_round(),
+                            current_dag_len = inner.committer.dag_len(),
                             attempt,
                             "will try to fix local history"
                         );
@@ -162,17 +165,20 @@ impl Inner {
                 }
                 // stats should be reported for each round separately - to be grouped by consumer
                 for anchor_round in anchor_rounds {
-                    let stats = committer.remove_committed(anchor_round, round_ctx.conf())?;
+                    let (stats, events) =
+                        (inner.committer).remove_committed(anchor_round, round_ctx.conf())?;
                     stats_tx.put_stats(stats.anchor_round.0, stats.data);
+                    // Note: we are in a spawned blocking thread
+                    inner.moderator.report_blocking(&events, &round_ctx);
                     anchors_tx
                         .send(MempoolOutput::CommitFinished(anchor_round))
                         .map_err(|_closed| Cancelled())?;
                 }
             }
 
-            EngineCtx::meter_dag_len(committer.dag_len());
+            EngineCtx::meter_dag_len(inner.committer.dag_len());
 
-            Ok(committer)
+            Ok(inner)
         };
 
         Self::Running(task_ctx.spawn_blocking(task))
