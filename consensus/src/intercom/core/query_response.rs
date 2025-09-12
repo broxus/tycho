@@ -9,9 +9,18 @@ use tycho_util::sync::rayon_run_fifo;
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Point, PointIntegrityError, Signature};
 
+/// All responses are ACKs, distinguished only for debug purposes
 #[derive(Debug, TlWrite, TlRead)]
-#[tl(boxed, id = "intercom.broadcastResponse", scheme = "proto.tl")]
-pub struct BroadcastResponse;
+#[tl(boxed, scheme = "proto.tl")]
+pub enum BroadcastResponse {
+    #[tl(id = "intercom.broadcastResponse.ok")]
+    Ok,
+    #[tl(id = "intercom.broadcastResponse.tryLater")]
+    TryLater,
+    #[tl(id = "intercom.broadcastResponse.banned")]
+    /// Requester made queries to often and signer banned him
+    Banned,
+}
 
 #[derive(Debug, TlWrite, TlRead)]
 #[tl(boxed, scheme = "proto.tl")]
@@ -27,6 +36,9 @@ pub enum SignatureResponse {
     /// * signer still validates the point;
     /// * clock skew: signer's wall time lags the time from point's body
     TryLater,
+    #[tl(id = "intercom.signatureResponse.banned")]
+    /// Requester made queries to often and signer banned him
+    Banned,
 
     #[tl(id = "intercom.signatureResponse.rejected")]
     /// * malformed point
@@ -60,10 +72,10 @@ pub enum PointByIdResponse<T> {
 
 pub struct QueryResponse;
 impl QueryResponse {
-    pub fn broadcast(start: Instant) -> Response {
+    pub fn broadcast(start: Instant, response: BroadcastResponse) -> Response {
         let histogram = metrics::histogram!("tycho_mempool_broadcast_query_responder_time");
         histogram.record(start.elapsed());
-        Response::from_tl(BroadcastResponse)
+        Response::from_tl(response)
     }
 
     pub fn parse_broadcast(response: &Response) -> Result<BroadcastResponse, TlError> {
@@ -73,7 +85,9 @@ impl QueryResponse {
     pub fn signature(start: Instant, body: SignatureResponse) -> Response {
         let response = Response::from_tl(&body);
         let histogram = match body {
-            SignatureResponse::NoPoint | SignatureResponse::TryLater => {
+            SignatureResponse::NoPoint
+            | SignatureResponse::TryLater
+            | SignatureResponse::Banned => {
                 metrics::histogram!("tycho_mempool_signature_query_responder_pong_time")
             }
             SignatureResponse::Signature(_) | SignatureResponse::Rejected(_) => {
@@ -131,6 +145,7 @@ impl Display for AltFmt<'_, SignatureResponse> {
             SignatureResponse::Signature(_) => f.write_str("Signature"),
             SignatureResponse::NoPoint => f.write_str("NoPoint"),
             SignatureResponse::TryLater => f.write_str("TryLater"),
+            SignatureResponse::Banned => f.write_str("Banned"),
             SignatureResponse::Rejected(reason) => f.debug_tuple("Rejected").field(reason).finish(),
         }
     }

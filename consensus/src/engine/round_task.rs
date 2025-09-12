@@ -18,10 +18,12 @@ use crate::intercom::{
     Downloader, PeerSchedule, Responder,
 };
 use crate::models::{Cert, Link, Point, PointInfo};
+use crate::moderator::Moderator;
 use crate::storage::MempoolStore;
 
 pub struct RoundTaskState {
     pub store: MempoolStore,
+    pub moderator: Moderator,
     input_buffer: InputBuffer,
     pub top_known_anchor: RoundWatch<TopKnownAnchor>,
     pub consensus_round: RoundWatch<Consensus>,
@@ -59,6 +61,7 @@ impl RoundTaskReady {
         Self {
             state: RoundTaskState {
                 store: store.clone(),
+                moderator: bind.moderator.clone(),
                 input_buffer: bind.input_buffer.clone(),
                 top_known_anchor: bind.top_known_anchor.clone(),
                 consensus_round: consensus_round.clone(),
@@ -193,6 +196,7 @@ impl RoundTaskReady {
         // own point future must do nothing until polled (must not be spawned)
         self.state.responder.update(
             &self.state.store,
+            &self.state.moderator,
             &self.state.broadcast_filter,
             &self.state.downloader,
             head,

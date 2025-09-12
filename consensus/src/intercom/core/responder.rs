@@ -7,13 +7,15 @@ use futures_util::{FutureExt, future};
 use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::dag::DagHead;
-use crate::effects::{AltFormat, RoundCtx};
+use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::intercom::broadcast::Signer;
+use crate::intercom::core::bcast_rate_limit::BcasterLimiter;
 use crate::intercom::core::{
-    PointByIdResponse, QueryRequest, QueryRequestRaw, QueryRequestTag, QueryResponse,
-    SignatureResponse,
+    BroadcastResponse, PointByIdResponse, QueryRequest, QueryRequestRaw, QueryRequestTag,
+    QueryResponse, SignatureResponse,
 };
 use crate::intercom::{BroadcastFilter, Downloader, Uploader};
+use crate::moderator::{EventData, Moderator};
 use crate::storage::MempoolStore;
 
 #[derive(Clone, Default)]
@@ -22,6 +24,7 @@ pub struct Responder(Arc<ResponderInner>);
 #[derive(Default)]
 struct ResponderInner {
     current: ArcSwapOption<ResponderCurrent>,
+    bcaster_limiter: BcasterLimiter,
     #[cfg(feature = "mock-feedback")]
     top_known_anchor: std::sync::OnceLock<
         crate::engine::round_watch::RoundWatch<crate::engine::round_watch::TopKnownAnchor>,
@@ -31,6 +34,7 @@ struct ResponderInner {
 struct ResponderCurrent {
     // state and storage components go here
     store: MempoolStore,
+    moderator: Moderator,
     broadcast_filter: BroadcastFilter,
     downloader: Downloader,
     head: DagHead,
@@ -59,6 +63,7 @@ impl Responder {
     pub fn update(
         &self,
         store: &MempoolStore,
+        moderator: &Moderator,
         broadcast_filter: &BroadcastFilter,
         downloader: &Downloader,
         head: &DagHead,
@@ -74,6 +79,7 @@ impl Responder {
         //  BroadcastFilter may account such repeated broadcast as malicious.
         self.0.current.store(Some(Arc::new(ResponderCurrent {
             store: store.clone(),
+            moderator: moderator.clone(),
             broadcast_filter: broadcast_filter.clone(),
             downloader: downloader.clone(),
             head: head.clone(),
@@ -123,25 +129,14 @@ impl Responder {
             }
         };
 
+        let peer_id = &req.metadata.peer_id;
         let raw_query_tag = raw_query.tag;
-        let query = match raw_query.parse().await {
-            Ok(query) => query,
-            Err(error) => {
-                tracing::error!(
-                    tag = ?raw_query_tag,
-                    peer_id = display(req.metadata.peer_id.alt()),
-                    %error,
-                    "bad query",
-                );
-                return None;
-            }
-        };
 
         let Some(inner) = self.0.current.load_full() else {
             return Some(match raw_query_tag {
                 QueryRequestTag::Broadcast => {
                     // do nothing: sender has retry loop via signature request
-                    QueryResponse::broadcast(task_start)
+                    QueryResponse::broadcast(task_start, BroadcastResponse::TryLater)
                 }
                 QueryRequestTag::PointById => {
                     QueryResponse::point_by_id::<&[u8]>(task_start, PointByIdResponse::TryLater)
@@ -152,22 +147,53 @@ impl Responder {
             });
         };
 
+        match raw_query_tag {
+            QueryRequestTag::Broadcast
+                if !(self.0.bcaster_limiter).is_broadcast_ok(peer_id, inner.round_ctx.conf()) =>
+            {
+                (inner.moderator).send_report(EventData::BroadcastLimitReached(*peer_id));
+                let response = QueryResponse::broadcast(task_start, BroadcastResponse::Banned);
+                return Some(response);
+            }
+            QueryRequestTag::Signature
+                if !(self.0.bcaster_limiter).is_sig_query_ok(peer_id, inner.round_ctx.conf()) =>
+            {
+                (inner.moderator).send_report(EventData::SigRequestLimitReached(*peer_id));
+                let response = QueryResponse::signature(task_start, SignatureResponse::TryLater);
+                return Some(response);
+            }
+            _ => {}
+        }
+
+        let query = match raw_query.parse().await {
+            Ok(query) => query,
+            Err(error) => {
+                tracing::error!(
+                    tag = ?raw_query_tag,
+                    peer_id = display(peer_id.alt()),
+                    %error,
+                    "bad query",
+                );
+                return None;
+            }
+        };
+
         Some(match query {
             QueryRequest::Broadcast(point) => {
                 inner.broadcast_filter.add(
-                    &req.metadata.peer_id,
+                    peer_id,
                     &point,
                     &inner.head,
                     &inner.downloader,
                     &inner.store,
                     &inner.round_ctx,
                 );
-                QueryResponse::broadcast(task_start)
+                QueryResponse::broadcast(task_start, BroadcastResponse::Ok)
             }
             QueryRequest::PointById(point_id) => QueryResponse::point_by_id(
                 task_start,
                 Uploader::find(
-                    &req.metadata.peer_id,
+                    peer_id,
                     point_id,
                     &inner.head,
                     &inner.store,
@@ -178,7 +204,7 @@ impl Responder {
             QueryRequest::Signature(round) => QueryResponse::signature(
                 task_start,
                 Signer::signature_response(
-                    &req.metadata.peer_id,
+                    peer_id,
                     round,
                     &inner.head,
                     &inner.broadcast_filter,

@@ -82,6 +82,7 @@ intercom.pointByIdResponse.tryLater                         = intercom.PointById
 intercom.signatureResponse.signature        x:bytes         = intercom.SignatureResponse;
 intercom.signatureResponse.noPoint                          = intercom.SignatureResponse;
 intercom.signatureResponse.tryLater                         = intercom.SignatureResponse;
+intercom.signatureResponse.banned                           = intercom.SignatureResponse;
 intercom.signatureResponse.rejected                         = intercom.SignatureResponse;
 
 /*
@@ -95,7 +96,9 @@ intercom.signatureRejectedReason.unknownPeer                = intercom.Signature
 /*
 * Representation of BroadcastResponse
 */
-intercom.broadcastResponse                                  = intercom.BroadcastResponse;
+intercom.broadcastResponse.ok                               = intercom.BroadcastResponse;
+intercom.broadcastResponse.tryLater                         = intercom.BroadcastResponse;
+intercom.broadcastResponse.banned                           = intercom.BroadcastResponse;
 
 /*
 * Representation of generic query wrapper
