@@ -195,6 +195,7 @@ fn test_read_externals() {
                 None,
                 &prev_partitions_readers,
                 &msg_groups,
+                &mut Default::default(),
             )
             .unwrap();
         println!(
@@ -335,6 +336,7 @@ fn test_read_externals() {
                 None,
                 &prev_partitions_readers,
                 &msg_groups,
+                &mut Default::default(),
             )
             .unwrap();
         println!(
@@ -438,6 +440,7 @@ fn test_read_externals() {
                 None,
                 &prev_partitions_readers,
                 &msg_groups,
+                &mut Default::default(),
             )
             .unwrap();
         println!(
@@ -506,6 +509,7 @@ fn test_read_externals() {
                 None,
                 &prev_partitions_readers,
                 &msg_groups,
+                &mut Default::default(),
             )
             .unwrap();
         println!(
@@ -756,6 +760,7 @@ fn test_read_externals() {
                 None,
                 &prev_partitions_readers,
                 &msg_groups,
+                &mut Default::default(),
             )
             .unwrap();
         println!(
@@ -942,6 +947,7 @@ fn test_read_externals() {
                     None,
                     &prev_partitions_readers,
                     &msg_groups,
+                    &mut Default::default(),
                 )
                 .unwrap();
             println!(
