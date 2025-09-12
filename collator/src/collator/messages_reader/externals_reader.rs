@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::{Context, Result};
 use tycho_block_util::queue::{QueuePartitionIdx, get_short_addr_string, get_short_hash_string};
+use tycho_types::cell::HashBytes;
 use tycho_types::models::{IntAddr, MsgInfo, ShardIdent};
+use tycho_util::FastHashSet;
 
 use super::{
     DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState,
@@ -673,6 +675,7 @@ impl ExternalsReader {
         curr_partition_reader: Option<&InternalsPartitionReader<V>>,
         prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
+        already_skipped_accounts: &mut FastHashSet<HashBytes>,
     ) -> Result<CollectExternalsResult> {
         let mut res = CollectExternalsResult::default();
 
@@ -720,6 +723,7 @@ impl ExternalsReader {
                     msg_group,
                     buffer_limits.slots_count,
                     buffer_limits.slot_vert_size,
+                    already_skipped_accounts,
                     |account_id| {
                         let mut check_ops_count = 0;
 
