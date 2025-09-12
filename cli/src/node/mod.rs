@@ -7,6 +7,7 @@ use bytes::Bytes;
 use futures_util::future;
 use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockIdRelation;
+use tycho_block_util::message::ExtMsgRepr;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::state::storage::QueueStateImplFactory;
@@ -166,6 +167,14 @@ impl Node {
                 is_single_node == (v_set_len == 1),
                 "cannot start with v_set_len={v_set_len} and single_node={is_single_node}"
             );
+
+            // set allowed workchains for mempool ext messages validator
+            let mut workchains = vec![-1];
+            for item in config.get_workchains()?.iter() {
+                let (w_id, _) = item?;
+                workchains.push(w_id.try_into().unwrap());
+            }
+            ExtMsgRepr::set_allowed_workchains(workchains);
         }
 
         // Create mempool adapter

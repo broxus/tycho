@@ -109,14 +109,6 @@ pub struct TopBlocks {
 }
 
 impl TopBlocks {
-    /// Constructs this structure for the zerostate.
-    pub fn zerostate() -> Self {
-        Self {
-            mc_block: BlockIdShort::from((ShardIdent::MASTERCHAIN, 0)),
-            shard_heights: ShardHeights::from_iter([(ShardIdent::BASECHAIN, 0u32)]),
-        }
-    }
-
     /// Extracts last blocks for each workchain and shard from the given masterchain block.
     pub fn from_mc_block(mc_block_data: &BlockStuff) -> Result<Self> {
         let block_id = mc_block_data.id();
