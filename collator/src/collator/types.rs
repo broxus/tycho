@@ -326,6 +326,7 @@ impl BlockCollationDataBuilder {
             start_lt,
             next_lt: start_lt + 1,
             tx_count: 0,
+            touched_accounts: Default::default(),
             shard_accounts_count: 0,
             updated_accounts_count: 0,
             added_accounts_count: 0,
@@ -365,6 +366,7 @@ pub(super) struct BlockCollationData {
     pub gen_utime_ms: u16,
 
     pub tx_count: u64,
+    pub touched_accounts: FastHashSet<HashBytes>,
 
     pub shard_accounts_count: u64,
     pub updated_accounts_count: u64,
@@ -504,8 +506,8 @@ pub struct PartialValueFlow {
 pub struct BlockLimitStats {
     pub gas_used: u64,
     pub lt_current: u64,
-    pub lt_start: u64,
-    pub cells_bits: u32,
+    pub total_accounts: u32,
+    pub total_items: u32,
     pub block_limits: BlockLimits,
 }
 
@@ -514,13 +516,13 @@ impl BlockLimitStats {
         Self {
             gas_used: 0,
             lt_current: lt_start,
-            lt_start,
-            cells_bits: 0,
+            total_accounts: 0,
+            total_items: 0,
             block_limits,
         }
     }
 
-    pub fn reached(&self, level: BlockLimitsLevel) -> bool {
+    pub fn reached(&self, level: BlockLimitsLevel) -> Option<BlockLimitReachType> {
         let BlockLimits {
             bytes,
             gas,
@@ -533,12 +535,11 @@ impl BlockLimitStats {
             ..
         } = bytes;
 
-        let cells_bytes = self.cells_bits / 8;
-        if cells_bytes >= *hard_limit {
-            return true;
+        if self.total_accounts >= *hard_limit {
+            return Some(BlockLimitReachType::TotalAccountsHard);
         }
-        if cells_bytes >= *soft_limit && level == BlockLimitsLevel::Soft {
-            return true;
+        if self.total_accounts >= *soft_limit && level == BlockLimitsLevel::Soft {
+            return Some(BlockLimitReachType::TotalAccountsSoft);
         }
 
         let BlockParamLimits {
@@ -548,10 +549,10 @@ impl BlockLimitStats {
         } = gas;
 
         if self.gas_used >= *hard_limit as u64 {
-            return true;
+            return Some(BlockLimitReachType::GasUsedHard);
         }
         if self.gas_used >= *soft_limit as u64 && level == BlockLimitsLevel::Soft {
-            return true;
+            return Some(BlockLimitReachType::GasUsedSoft);
         }
 
         let BlockParamLimits {
@@ -560,14 +561,37 @@ impl BlockLimitStats {
             ..
         } = lt_delta;
 
-        let delta_lt = u32::try_from(self.lt_current - self.lt_start).unwrap_or(u32::MAX);
-        if delta_lt >= *hard_limit {
-            return true;
+        // created transactions + created out messages
+        if self.total_items >= *hard_limit {
+            return Some(BlockLimitReachType::TotalItemsHard);
         }
-        if delta_lt >= *soft_limit && level == BlockLimitsLevel::Soft {
-            return true;
+        if self.total_items >= *soft_limit && level == BlockLimitsLevel::Soft {
+            return Some(BlockLimitReachType::TotalItemsSoft);
         }
-        false
+        None
+    }
+}
+
+#[derive(Debug)]
+pub enum BlockLimitReachType {
+    TotalAccountsSoft,
+    TotalAccountsHard,
+    TotalItemsSoft,
+    TotalItemsHard,
+    GasUsedSoft,
+    GasUsedHard,
+}
+
+impl BlockLimitReachType {
+    pub fn metric_label(&self) -> &'static str {
+        match self {
+            BlockLimitReachType::TotalAccountsSoft => "total_accounts_soft",
+            BlockLimitReachType::TotalAccountsHard => "total_accounts_hard",
+            BlockLimitReachType::TotalItemsSoft => "total_items_soft",
+            BlockLimitReachType::TotalItemsHard => "total_items_hard",
+            BlockLimitReachType::GasUsedSoft => "gas_used_soft",
+            BlockLimitReachType::GasUsedHard => "gas_used_hard",
+        }
     }
 }
 

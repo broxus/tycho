@@ -17,7 +17,7 @@ use crate::collator::types::{
 };
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
-use crate::types::ShardIdentExt;
+use crate::types::{SaturatingAddAssign, ShardIdentExt};
 
 pub struct ExecutorWrapper {
     pub executor: MessagesExecutor,
@@ -249,8 +249,10 @@ fn new_transaction(
     // Update collation data.
     collation_data.execute_count_all += 1;
 
-    let gas_used = &mut collation_data.block_limit.gas_used;
-    *gas_used = gas_used.saturating_add(executed.gas_used);
+    collation_data
+        .block_limit
+        .gas_used
+        .saturating_add_assign(executed.gas_used);
 
     assert!(
         shard_id.is_masterchain() || executed.burned.is_zero(),
@@ -335,6 +337,11 @@ fn new_transaction(
             MsgInfo::ExtIn(_) => bail!("External inbound message cannot be an output"),
         }
     }
+
+    collation_data
+        .block_limit
+        .total_items
+        .saturating_add_assign(1);
 
     Ok(out_messages)
 }
@@ -480,6 +487,11 @@ fn process_in_message(
             )
         }
     };
+
+    collation_data
+        .block_limit
+        .total_items
+        .saturating_add_assign(1);
 
     collation_data.in_msgs.insert(in_msg_hash, PreparedInMsg {
         in_msg,

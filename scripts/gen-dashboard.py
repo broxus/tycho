@@ -1252,11 +1252,6 @@ def collation_metrics() -> RowPanel:
             "Number of transactions over time",
             labels_selectors=['workchain=~"$workchain"'],
         ),
-        create_counter_panel(
-            "tycho_do_collate_blocks_with_limits_reached_count",
-            "Number of blocks with limits reached",
-            labels_selectors=['workchain=~"$workchain"'],
-        ),
         create_gauge_panel(
             "tycho_do_collate_tx_per_block",
             "Number of transactions per block",
@@ -1297,6 +1292,100 @@ def collation_metrics() -> RowPanel:
             "tycho_do_collate_block_diff_tail_len",
             "Diff tail length",
             labels=['workchain=~"$workchain"'],
+        ),
+        timeseries_panel(
+            targets=[
+                target(
+                    Expr(
+                        metric="tycho_do_collate_blocks_with_limit_reached",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="{{workchain}} {{limit_type}}",
+                ),
+            ],
+            title="Block limits reached by type",
+            unit=UNITS.NUMBER_FORMAT,
+        ),
+        timeseries_panel(
+            targets=[
+                target(
+                    Expr(
+                        metric="tycho_do_collate_total_items_current",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="{{workchain}} current",
+                ),
+                target(
+                    Expr(
+                        metric="tycho_do_collate_total_items_soft_limit",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="{{workchain}} soft limit",
+                ),
+                target(
+                    Expr(
+                        metric="tycho_do_collate_total_items_hard_limit",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="{{workchain}} hard limit",
+                ),
+            ],
+            title="Total items vs limits",
+            unit=UNITS.NUMBER_FORMAT,
+        ),
+        timeseries_panel(
+            targets=[
+                target(
+                    Expr(
+                        metric="tycho_do_collate_total_accounts_current",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="{{workchain}} current",
+                ),
+                target(
+                    Expr(
+                        metric="tycho_do_collate_total_accounts_soft_limit",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="{{workchain}} soft limit",
+                ),
+                target(
+                    Expr(
+                        metric="tycho_do_collate_total_accounts_hard_limit",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="{{workchain}} hard limit",
+                ),
+            ],
+            title="Total accounts vs limits",
+            unit=UNITS.NUMBER_FORMAT,
+        ),
+        timeseries_panel(
+            targets=[
+                target(
+                    Expr(
+                        metric="tycho_do_collate_lt_progress_current",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="{{workchain}} current progress",
+                ),
+                target(
+                    Expr(
+                        metric="tycho_do_collate_lt_progress_window_size",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="{{workchain}} LT window size",
+                ),
+                target(
+                    Expr(
+                        metric="tycho_do_collate_lt_progress_guard_threshold",
+                        label_selectors=['workchain=~"$workchain"'],
+                    ),
+                    legend_format="{{workchain}} guard threshold",
+                ),
+            ],
+            title="LT progress vs next block LT",
+            unit=UNITS.NUMBER_FORMAT,
         ),
         create_gauge_panel(
             "tycho_blocks_count_in_collation_manager_cache",

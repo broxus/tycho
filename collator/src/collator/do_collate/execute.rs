@@ -16,6 +16,10 @@ use crate::collator::messages_reader::{
 use crate::collator::types::{BlockLimitsLevel, ExecuteMetrics, ExecuteResult};
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
+use crate::types::SaturatingAddAssign;
+
+/// Maximum number of LT shifting in one message processing
+const MAX_ACTIONS: u64 = 256;
 
 pub struct ExecuteState {
     pub messages_reader: MessagesReader<EnqueuedMessage>,
@@ -91,7 +95,28 @@ impl Phase<ExecuteState> {
         let mut fill_msgs_total_elapsed = Duration::ZERO;
 
         let mut executed_groups_count = 0;
+
+        // Calculate LT window boundaries once
+        let lt_align = self.state.mc_data.lt_align();
+        let next_block_lt = self.state.collation_data.start_lt.saturating_add(lt_align);
+        let group_vert_size = self.state.collation_config.msgs_exec_params.group_vert_size as u64;
+        let max_actions_per_group = MAX_ACTIONS.saturating_mul(group_vert_size);
+        let guard_lt = next_block_lt.saturating_sub(max_actions_per_group);
+
         loop {
+            // Stop before crossing into next block's LT window: do not start next group
+            // if current max LT exceeds (next_block_start_lt - max_actions_per_group)
+            if self.state.collation_data.next_lt >= guard_lt {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    next_block_lt,
+                    guard_lt,
+                    current_lt = self.state.collation_data.next_lt,
+                    max_actions_per_group,
+                    "stopping before crossing next block LT window",
+                );
+                break;
+            }
+
             // exit collation if cancelled
             if self.state.collation_is_cancelled.check() {
                 return Err(CollatorError::Cancelled(
@@ -125,6 +150,17 @@ impl Phase<ExecuteState> {
                 executed_groups_count += 1;
                 let group_tx_count = group_result.items.len();
                 self.state.collation_data.tx_count += group_tx_count as u64;
+                // Track first-time-seen accounts in this block
+                for acc in group_result.touched_account_ids {
+                    if self.state.collation_data.touched_accounts.insert(acc) {
+                        self.state
+                            .collation_data
+                            .block_limit
+                            .total_accounts
+                            .saturating_add_assign(1);
+                    }
+                }
+
                 self.state.collation_data.ext_msgs_error_count += group_result.ext_msgs_error_count;
                 self.state.collation_data.ext_msgs_skipped_count += group_result.ext_msgs_skipped;
 
@@ -151,17 +187,28 @@ impl Phase<ExecuteState> {
                     "message group executed",
                 );
 
-                if self
+                if let Some(reach_type) = self
                     .state
                     .collation_data
                     .block_limit
                     .reached(BlockLimitsLevel::Hard)
                 {
                     tracing::debug!(target: tracing_targets::COLLATOR,
-                        "block limits reached: {:?}", self.state.collation_data.block_limit,
+                        "block limits reached: {:?}. Reach type: {reach_type:?}", self.state.collation_data.block_limit,
                     );
-                    metrics::counter!("tycho_do_collate_blocks_with_limits_reached_count", &labels)
-                        .increment(1);
+
+                    let labels_with_type = [
+                        (
+                            "workchain",
+                            self.extra.executor.shard_id.workchain().to_string(),
+                        ),
+                        ("limit_type", reach_type.metric_label().to_string()),
+                    ];
+                    metrics::counter!(
+                        "tycho_do_collate_blocks_with_limit_reached",
+                        &labels_with_type
+                    )
+                    .increment(1);
                     break;
                 }
             } else if !self
@@ -176,6 +223,21 @@ impl Phase<ExecuteState> {
         }
 
         self.extra.execute_metrics.execute_incoming_msgs_elapsed = histogram.finish();
+
+        // Report LT progress metrics (final state after all groups processed)
+        let lt_progress = self
+            .state
+            .collation_data
+            .next_lt
+            .saturating_sub(self.state.collation_data.start_lt);
+        let lt_window_size = next_block_lt.saturating_sub(self.state.collation_data.start_lt);
+        let lt_guard_threshold = lt_window_size.saturating_sub(max_actions_per_group);
+
+        metrics::gauge!("tycho_do_collate_lt_progress_current", &labels).set(lt_progress as f64);
+        metrics::gauge!("tycho_do_collate_lt_progress_window_size", &labels)
+            .set(lt_window_size as f64);
+        metrics::gauge!("tycho_do_collate_lt_progress_guard_threshold", &labels)
+            .set(lt_guard_threshold as f64);
 
         // metrics
         metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
