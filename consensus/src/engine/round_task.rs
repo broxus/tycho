@@ -9,6 +9,7 @@ use crate::dag::{
     DagHead, LastOwnPoint, ProduceError, Producer, ValidateResult, Verifier, WeakDagRound,
 };
 use crate::effects::{AltFormat, CollectCtx, Ctx, RoundCtx, Task, TaskResult, ValidateCtx};
+use crate::engine::MempoolConfig;
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::lifecycle::{EngineBinding, EngineNetwork};
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
@@ -46,12 +47,14 @@ impl RoundTaskReady {
         bind: &EngineBinding,
         consensus_round: &RoundWatch<Consensus>,
         net: &EngineNetwork,
+        conf: &MempoolConfig,
     ) -> Self {
         let broadcast_filter = BroadcastFilter::new(&net.peer_schedule, consensus_round);
         let downloader = Downloader::new(
             &net.dispatcher,
             &net.peer_schedule,
             consensus_round.receiver(),
+            conf,
         );
         Self {
             state: RoundTaskState {

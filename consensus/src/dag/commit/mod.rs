@@ -50,7 +50,8 @@ impl Committer {
             "already initialized"
         );
         self.dag.init(bottom_round);
-        self.full_history_bottom = bottom_round.round() + conf.consensus.commit_history_rounds;
+        self.full_history_bottom =
+            bottom_round.round() + conf.consensus.commit_history_rounds.get();
         self.full_history_bottom // hidden in other cases
     }
 
@@ -78,7 +79,7 @@ impl Committer {
         let actual_bottom = new_bottom_round.min(self.dag.top().round());
         self.dag.drop_upto(actual_bottom);
         self.anchor_chain.drop_upto(actual_bottom);
-        self.full_history_bottom = actual_bottom + conf.consensus.commit_history_rounds;
+        self.full_history_bottom = actual_bottom + conf.consensus.commit_history_rounds.get();
         if actual_bottom == new_bottom_round {
             Ok(self.full_history_bottom)
         } else {
@@ -195,7 +196,7 @@ impl Committer {
         conf: &MempoolConfig,
     ) -> Result<AnchorData, SyncError> {
         // in case previous anchor was triggered directly - rounds are already dropped
-        (self.dag).drop_upto(next.anchor.round() - conf.consensus.commit_history_rounds);
+        (self.dag).drop_upto(next.anchor.round() - conf.consensus.commit_history_rounds.get());
         let uncommitted =
             match (self.dag).gather_uncommitted(self.full_history_bottom, &next.anchor, conf) {
                 Ok(uncommitted) => uncommitted,

@@ -18,7 +18,7 @@ use tycho_util::metrics::HistogramGuard;
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, TaskResult};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
-use crate::engine::{ConsensusConfigExt, MempoolConfig};
+use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
 use crate::intercom::core::{PointByIdResponse, PointQueryResult, QueryRequest};
 use crate::intercom::dependency::limiter::Limiter;
 use crate::intercom::peer_schedule::PeerState;
@@ -61,7 +61,7 @@ trait DownloadType: Send + 'static {
 struct ExponentialQuery;
 impl DownloadType for ExponentialQuery {
     fn max_downloads_per_attempt(attempt: usize, conf: &MempoolConfig) -> usize {
-        let download_peers = conf.consensus.download_peers as usize;
+        let download_peers = conf.consensus.download_peers.get() as usize;
         download_peers.saturating_mul(download_peers.saturating_pow(attempt as u32))
     }
 }
@@ -70,7 +70,7 @@ impl DownloadType for ExponentialQuery {
 struct LinearQuery;
 impl DownloadType for LinearQuery {
     fn max_downloads_per_attempt(attempt: usize, conf: &MempoolConfig) -> usize {
-        let download_peers = conf.consensus.download_peers as usize;
+        let download_peers = conf.consensus.download_peers.get() as usize;
         download_peers.saturating_add(download_peers.saturating_mul(attempt))
     }
 }
@@ -92,12 +92,13 @@ impl Downloader {
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
         consensus_round: RoundWatcher<Consensus>,
+        _conf: &MempoolConfig,
     ) -> Self {
         Self {
             inner: Arc::new(DownloaderInner {
                 dispatcher: dispatcher.clone(),
                 peer_schedule: peer_schedule.clone(),
-                limiter: Default::default(),
+                limiter: Limiter::new(NodeConfig::get().max_download_tasks),
                 consensus_round,
             }),
         }
@@ -119,7 +120,7 @@ impl Downloader {
         verified_broadcast: oneshot::Receiver<DownloadResult>,
         ctx: DownloadCtx,
     ) -> TaskResult<Option<DownloadResult>> {
-        let _guard = self.inner.limiter.enter(point_id.round, ctx.conf()).await;
+        let _guard = self.inner.limiter.clone().enter(point_id.round).await;
 
         if point_id.round + ctx.conf().consensus.min_front_rounds()
             >= self.inner.consensus_round.get()
@@ -232,7 +233,7 @@ impl<T: DownloadType> DownloadTask<T> {
         mut broadcast_result: oneshot::Receiver<DownloadResult>,
     ) -> TaskResult<Option<DownloadResult>> {
         let mut interval = tokio::time::interval(Duration::from_millis(
-            self.ctx.conf().consensus.download_retry_millis as _,
+            self.ctx.conf().consensus.download_retry_millis.get() as _,
         ));
         // no `interval.reset()`: download starts right after biased receive of all known dependers
         // give equal time to every attempt, ignoring local runtime delays; do not `Burst` requests
@@ -300,17 +301,17 @@ impl<T: DownloadType> DownloadTask<T> {
         )
         .min(filtered.len());
 
-        for (peer_id, _) in &filtered[..to_add] {
+        for (peer_id, _) in filtered.into_iter().take(to_add) {
             self.download_one(peer_id);
         }
 
         self.attempt = self.attempt.wrapping_add(1);
     }
 
-    fn download_one(&mut self, peer_id: &PeerId) {
+    fn download_one(&mut self, peer_id: PeerId) {
         let status = self
             .undone_peers
-            .get_mut(peer_id)
+            .get_mut(&peer_id)
             .unwrap_or_else(|| panic!("Coding error: peer not in map {}", peer_id.alt()));
         assert!(
             !status.is_in_flight,
@@ -320,12 +321,11 @@ impl<T: DownloadType> DownloadTask<T> {
         );
         status.is_in_flight = true;
 
-        self.downloading.push(
-            self.parent
-                .inner
-                .dispatcher
-                .query_point(peer_id, &self.request),
-        );
+        let parent = self.parent.clone();
+        let request = self.request.clone();
+        self.downloading.push(Box::pin(async move {
+            parent.inner.dispatcher.query_point(peer_id, request).await
+        }));
     }
 
     fn verify(&mut self, peer_id: &PeerId, result: PointQueryResult) -> Option<DownloadResult> {

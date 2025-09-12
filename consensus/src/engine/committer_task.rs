@@ -25,7 +25,7 @@ enum Inner {
 impl CommitterTask {
     pub fn new(committer: Committer, conf: &MempoolConfig) -> Self {
         let mut interval = tokio::time::interval(Duration::from_millis(
-            conf.consensus.broadcast_retry_millis as _,
+            conf.consensus.broadcast_retry_millis.get() as _,
         ));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 

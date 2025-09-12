@@ -49,8 +49,12 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
     peer_schedule.init(&merged_conf, &init_peers);
 
     let stub_consensus_round = RoundWatch::<Consensus>::default();
-    let stub_downloader =
-        Downloader::new(&dispatcher, &peer_schedule, stub_consensus_round.receiver());
+    let stub_downloader = Downloader::new(
+        &dispatcher,
+        &peer_schedule,
+        stub_consensus_round.receiver(),
+        conf,
+    );
 
     (peer_schedule, stub_downloader, genesis, engine_ctx)
 }

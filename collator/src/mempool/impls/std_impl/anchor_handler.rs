@@ -31,7 +31,7 @@ impl AnchorHandler {
     ) -> Self {
         Self {
             anchor_rx,
-            deduplicate_rounds: config.deduplicate_rounds,
+            deduplicate_rounds: config.deduplicate_rounds.get(),
         }
     }
 

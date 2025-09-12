@@ -153,7 +153,7 @@ tycho-wu-tuner = { path = "./wu-tuner", version = "0.2.12" }
 
 [patch.crates-io]
 # patches here
-tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "715769a16fc4497a60865948eb15be928f974446" }
+tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "b2b8709394d03b52bc4f2343d8d3611fda163414" }
 tycho-executor = { git = "https://github.com/broxus/tycho-vm.git", rev = "985a350d83385b9f90e69a77073e6cbb1071fa93" }
 tycho-vm = { git = "https://github.com/broxus/tycho-vm.git", rev = "985a350d83385b9f90e69a77073e6cbb1071fa93" }
 
