@@ -72,28 +72,20 @@ impl Dispatcher {
         Box::pin(future)
     }
 
-    pub fn query_point(
+    pub async fn query_point(
         &self,
-        peer_id: &PeerId,
-        request: &Request,
-    ) -> BoxFuture<'static, (PeerId, PointQueryResult)> {
-        let peer_id = *peer_id;
-        let metric = HistogramGuard::begin("tycho_mempool_download_query_dispatcher_time");
-        let overlay = self.overlay.clone();
-        let network = self.network.clone();
+        peer_id: PeerId,
+        request: Request,
+    ) -> (PeerId, PointQueryResult) {
+        let _task_duration = HistogramGuard::begin("tycho_mempool_download_query_dispatcher_time");
 
-        let request = request.clone();
-
-        let future = async move {
-            let _task_duration = metric;
-            let response = match overlay.query(&network, &peer_id, request).await {
-                Ok(response) => response,
-                Err(e) => return (peer_id, Err(e)),
-            };
-            let result = QueryResponse::parse_point_by_id(response).await;
-            (peer_id, result.map_err(Into::into))
+        let response = match self.overlay.query(&self.network, &peer_id, request).await {
+            Ok(response) => response,
+            Err(e) => return (peer_id, Err(e)),
         };
-        Box::pin(future)
+
+        let result = QueryResponse::parse_point_by_id(response).await;
+        (peer_id, result.map_err(Into::into))
     }
 
     #[cfg(feature = "mock-feedback")]
