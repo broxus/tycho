@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, get_short_addr_string};
+use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockIdShort, IntAddr, MsgInfo, ShardIdent, StdAddr};
+use tycho_util::FastHashSet;
 
 use super::{
     DebugInternalsRangeReaderState, GetNextMessageGroupMode, InternalsPartitionReaderState,
@@ -996,6 +998,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         msg_group: &mut MessageGroup,
         prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
+        already_skipped_accounts: &mut FastHashSet<HashBytes>,
     ) -> Result<CollectInternalsResult> {
         let mut res = CollectInternalsResult::default();
 
@@ -1034,6 +1037,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                     prev_par_readers,
                     &range_readers,
                     prev_msg_groups,
+                    already_skipped_accounts,
                 );
                 res.metrics
                     .add_to_msgs_groups_ops_count
@@ -1149,6 +1153,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
         prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
         prev_range_readers: &BTreeMap<BlockSeqno, InternalsRangeReader<V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
+        already_skipped_accounts: &mut FastHashSet<HashBytes>,
     ) -> CollectMessagesFromRangeReaderResult {
         let FillMessageGroupResult {
             collected_int_msgs,
@@ -1158,6 +1163,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
             msg_group,
             self.buffer_limits.slots_count,
             self.buffer_limits.slot_vert_size,
+            already_skipped_accounts,
             |account_id| {
                 let mut check_ops_count = 0;
 

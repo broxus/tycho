@@ -118,6 +118,7 @@ impl MessagesBuffer {
         msg_group: &mut MessageGroup,
         slots_count: usize,
         slot_vert_size: usize,
+        already_skipped_accounts: &mut FastHashSet<HashBytes>,
         check_skip_account: FA,
         mut msg_filter: FM,
     ) -> FillMessageGroupResult
@@ -143,6 +144,21 @@ impl MessagesBuffer {
 
         // will iterate over accounts in buffer
         let mut buf_account_idx = 0;
+
+        // track already skipped accounts to avoid re-checking them
+        let mut check_skip_account_ext = |account_id: &HashBytes, ops_count: &mut u64| {
+            if already_skipped_accounts.contains(account_id) {
+                ops_count.saturating_add_assign(1);
+                true
+            } else {
+                let (skip_account, check_ops_count) = check_skip_account(account_id);
+                ops_count.saturating_add_assign(check_ops_count);
+                if skip_account {
+                    already_skipped_accounts.insert(*account_id);
+                }
+                skip_account
+            }
+        };
 
         // 1. try to fill remaning slots with messages of accounts which are not included in any slot
         let mut new_used_slots = FastHashSet::<SlotId>::default();
@@ -183,9 +199,7 @@ impl MessagesBuffer {
                     }
 
                     // skip accounts that do not pass the provided check
-                    let (skip_account, check_ops_count) = check_skip_account(&account_id);
-                    ops_count.saturating_add_assign(check_ops_count);
-                    if skip_account {
+                    if check_skip_account_ext(&account_id, &mut ops_count) {
                         // try skip messages from skipped account: maybe they expired
                         self.try_skip_account_msgs(&account_id, &mut msg_filter);
 
@@ -267,11 +281,8 @@ impl MessagesBuffer {
                 for i in 0..slot_cx.slot.accounts.len() {
                     let account_id = slot_cx.slot.accounts[i];
 
-                    // TODO: we may not check account that was already skipped before
                     // skip accounts that do not pass the provided check
-                    let (skip_account, check_ops_count) = check_skip_account(&account_id);
-                    ops_count.saturating_add_assign(check_ops_count);
-                    if skip_account {
+                    if check_skip_account_ext(&account_id, &mut ops_count) {
                         // try skip messages from skipped account: maybe they expired
                         self.try_skip_account_msgs(&account_id, &mut msg_filter);
 
@@ -311,9 +322,7 @@ impl MessagesBuffer {
                     }
 
                     // skip accounts that do not pass the provided check
-                    let (skip_account, check_ops_count) = check_skip_account(&account_id);
-                    ops_count.saturating_add_assign(check_ops_count);
-                    if skip_account {
+                    if check_skip_account_ext(&account_id, &mut ops_count) {
                         // try skip messages from skipped account: maybe they expired
                         self.try_skip_account_msgs(&account_id, &mut msg_filter);
 
