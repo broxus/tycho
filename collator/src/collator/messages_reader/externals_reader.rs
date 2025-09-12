@@ -1104,11 +1104,6 @@ impl ExternalsRangeReader {
                     }
                 }
 
-                metrics::counter!("tycho_do_collate_ext_msgs_expired_count", &labels)
-                    .increment(expired_msgs_count);
-                metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-                    .decrement(expired_msgs_count as f64);
-
                 // skip and remove expired anchor
                 assert_eq!(next_idx, 0);
                 anchors_cache.pop_front();
@@ -1232,9 +1227,6 @@ impl ExternalsRangeReader {
                 }
             }
 
-            metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-                .decrement(msgs_imported_from_last_anchor as f64);
-
             tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                 anchor_id,
                 msgs_read_offset_in_last_anchor,
@@ -1306,6 +1298,14 @@ impl ExternalsRangeReader {
             has_pending_externals_in_range,
             ?read_mode,
         );
+
+        // report metrics
+        metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
+            .decrement((total_msgs_imported + count_expired_messages) as f64);
+        if count_expired_messages > 0 {
+            metrics::counter!("tycho_do_collate_ext_msgs_expired_count", &labels)
+                .increment(count_expired_messages);
+        }
 
         // accumulate time metrics
         {
