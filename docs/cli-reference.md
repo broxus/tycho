@@ -45,6 +45,7 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho tool bc set-master-key`↴](#tycho-tool-bc-set-master-key)
 * [`tycho tool bc set-elector-code`↴](#tycho-tool-bc-set-elector-code)
 * [`tycho tool bc set-config-code`↴](#tycho-tool-bc-set-config-code)
+* [`tycho tool dump-state`↴](#tycho-tool-dump-state)
 * [`tycho elect`↴](#tycho-elect)
 * [`tycho elect run`↴](#tycho-elect-run)
 * [`tycho elect once`↴](#tycho-elect-once)
@@ -742,6 +743,19 @@ Set config contract code
 * `--key <KEY>` — secret key (reads from stdin if only flag is provided)
 * `-r`, `--raw-key` — expect a raw key input (32 bytes)
 
+
+## `tycho tool dump-state`
+
+Dumps node state for a specific block, intended for testing collation of the next block
+
+**Usage:** `tycho tool dump-state --db <DB> --output <OUTPUT> --block-id <BLOCK_ID>`
+
+###### **Options:**
+
+* `--config <CONFIG>` — path to the node config. By default, path to the node's database directory will be taken from config
+* `--db <DB>` — path to the node's database directory
+* `--output <OUTPUT>` — path to the directory where the dump files will be saved
+* `--block-id <BLOCK_ID>` — full block ID, can be a masterchain or a shardchain block
 
 
 ## `tycho elect`
