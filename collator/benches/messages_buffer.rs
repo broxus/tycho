@@ -8,6 +8,7 @@ use tycho_collator::collator::bench_export::{
 };
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{IntAddr, ShardIdent, StdAddr};
+use tycho_util::FastHashSet;
 
 fn config() -> Criterion {
     Criterion::default().measurement_time(std::time::Duration::from_secs(40))
@@ -59,10 +60,12 @@ fn fill_message_group_benchmark(c: &mut Criterion) {
                         let mut filter = IncludeAllMessages;
                         for _ in 0..20 {
                             let mut msg_group = MessageGroup::default();
+                            let mut already_skipped_accounts = FastHashSet::default();
                             let _res = buf1.fill_message_group(
                                 &mut msg_group,
                                 slots_count,
                                 slot_vert_size,
+                                &mut already_skipped_accounts,
                                 |_| (false, 0),
                                 &mut filter,
                             );
@@ -70,6 +73,7 @@ fn fill_message_group_benchmark(c: &mut Criterion) {
                                 &mut msg_group,
                                 slots_count,
                                 slot_vert_size,
+                                &mut already_skipped_accounts,
                                 |acc_id| {
                                     let exist = buf1.account_messages_count(acc_id) > 0;
                                     (exist, 0)
