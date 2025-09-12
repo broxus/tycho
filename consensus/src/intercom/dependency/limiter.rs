@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -22,9 +23,9 @@ struct Waiter {
 }
 
 impl Limiter {
-    pub fn new(permits: u16) -> Self {
+    pub fn new(permits: NonZeroU16) -> Self {
         Self(Arc::new(Mutex::new(LimiterInner {
-            permits,
+            permits: permits.get(),
             waiters: BTreeMap::default(),
         })))
     }
@@ -160,7 +161,7 @@ mod tests {
     }
 
     async fn order() -> Result<()> {
-        const PERMITS: u16 = 1; // Note feature of this test: sequential execution
+        const PERMITS: NonZeroU16 = NonZeroU16::MIN; // Note feature of this test: sequential execution
 
         let limiter = Limiter::new(PERMITS);
 
@@ -230,7 +231,7 @@ mod tests {
         test_logger::spans("liveness", "info");
         test_logger::set_print_panic_hook(true);
 
-        const PERMITS: u16 = 37;
+        const PERMITS: NonZeroU16 = NonZeroU16::new(37).unwrap();
         let extra = 300;
         let sleep_duration = Duration::from_millis(10);
 
@@ -238,7 +239,7 @@ mod tests {
 
         let mut futs = Vec::new();
 
-        let values = (0..PERMITS as u32 + extra)
+        let values = (0..PERMITS.get() as u32 + extra)
             .sorted_by_cached_key(|_| rand::rng().next_u32())
             .collect::<Vec<_>>();
 
@@ -277,10 +278,10 @@ mod tests {
         Ok(())
     }
 
-    fn ensure_roundtrip(limiter: Limiter, permits: u16) -> Result<()> {
+    fn ensure_roundtrip(limiter: Limiter, permits: NonZeroU16) -> Result<()> {
         let inner = limiter.0.lock();
         anyhow::ensure!(
-            inner.permits == permits,
+            inner.permits == permits.get(),
             "all bypass permit credits must be returned, got {}",
             inner.permits
         );

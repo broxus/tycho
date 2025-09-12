@@ -593,7 +593,8 @@ impl Phase<FinalizeState> {
                 .mc_data
                 .config
                 .get_consensus_config()?
-                .max_consensus_lag_rounds as u64;
+                .max_consensus_lag_rounds
+                .get() as u64;
             let wu_used_to_import_next_anchor =
                 self.state.collation_config.wu_used_to_import_next_anchor;
             let max_wu_used_limit = max_consensus_lag_rounds
@@ -1007,7 +1008,7 @@ impl Phase<FinalizeState> {
                 // `prev_processed_to_anchor` is a round in the ending session, after which
                 // mempool can create `max_consensus_lag` rounds in DAG until it stops to wait
                 let last_round_to_create = prev_processed_to_anchor
-                    + prev_consensus_config.max_consensus_lag_rounds as u32;
+                    + prev_consensus_config.max_consensus_lag_rounds.get() as u32;
                 // `+1` because it will be the first mempool round in the new session
                 if !is_curr_switch_applied {
                     // just overwrite (skip) outdated v_set preserving prev_* attributes;

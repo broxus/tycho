@@ -46,7 +46,7 @@ impl Point {
         let min_ext_msg_boc_size: usize = 48;
 
         let max_payload_size: usize = tl_proto::bytes_max_size_hint(min_ext_msg_boc_size)
-            * (1 + (consensus_config.payload_batch_bytes as usize / min_ext_msg_boc_size));
+            * (1 + (consensus_config.payload_batch_bytes.get() as usize / min_ext_msg_boc_size));
 
         4 + max_payload_size + PointInfo::MAX_BYTE_SIZE
     }
@@ -204,7 +204,7 @@ pub mod test_point {
     }
 
     pub fn payload(conf: &MempoolConfig) -> Vec<Bytes> {
-        let msg_count = conf.consensus.payload_batch_bytes as usize / MSG_BYTES;
+        let msg_count = conf.consensus.payload_batch_bytes.get() as usize / MSG_BYTES;
         let mut payload = Vec::with_capacity(msg_count);
         let mut bytes = vec![0; MSG_BYTES];
         for _ in 0..msg_count {

@@ -132,7 +132,8 @@ impl Engine {
         // wait collator to load blocks and update peer schedule
 
         let top_known_anchor = {
-            let min_top_known_anchor = last_db_round - conf.consensus.max_consensus_lag_rounds;
+            let min_top_known_anchor =
+                last_db_round - conf.consensus.max_consensus_lag_rounds.get();
 
             // NOTE collator have to apply mc state update to mempool first,
             //  and pass its top known anchor only after completion
@@ -485,7 +486,7 @@ fn collator_feedback(
 ) -> Result<Round, BoxFuture<'static, TaskResult<()>>> {
     let top_known_anchor = top_known_anchor_recv.get();
     // For example in `max_consensus_lag_rounds` comments this results to `217` of `8..=217`
-    let pause_at = top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds;
+    let pause_at = top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds.get();
     // Note pause bound is inclusive with `>=` because new vset may be unknown for next dag top
     //  (the next after next engine round), while vset switch round is exactly pause bound + 1
     if old_dag_top_round >= pause_at {
@@ -500,7 +501,8 @@ fn collator_feedback(
             committed_info_tx.send(MempoolOutput::Paused).ok();
         }
 
-        let timeout = Duration::from_millis(round_ctx.conf().consensus.broadcast_retry_millis as _);
+        let timeout =
+            Duration::from_millis(round_ctx.conf().consensus.broadcast_retry_millis.get() as _);
 
         let round_ctx = round_ctx.clone();
         let collator_sync = async move {
@@ -508,7 +510,7 @@ fn collator_feedback(
                 let top_known_anchor = top_known_anchor_recv.next().await?;
                 //  exit if ready to produce point: collator synced enough
                 let pause_at =
-                    top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds;
+                    top_known_anchor + round_ctx.conf().consensus.max_consensus_lag_rounds.get();
                 let exit = old_dag_top_round < pause_at;
                 tracing::debug!(
                     parent: round_ctx.span(),

@@ -30,7 +30,7 @@ impl AnchorSingleNodeHandler {
         let prev_anchor_id = top_processed_to_anchor_id.saturating_sub(ANCHOR_ID_STEP);
         Self {
             cache,
-            parser: Parser::new(config.deduplicate_rounds),
+            parser: Parser::new(config.deduplicate_rounds.get()),
             peer_id,
             prev_anchor_id: (prev_anchor_id > 1).then_some(prev_anchor_id),
         }
