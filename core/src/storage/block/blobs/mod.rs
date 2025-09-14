@@ -92,7 +92,7 @@ impl BlobStorage {
         let (archive_ids_tx, _) = broadcast::channel(4);
         let config = cassadilia::Config {
             sync_mode: cassadilia::SyncMode::Sync,
-            num_ops_per_wal: 100_000,
+            num_ops_per_wal: std::num::NonZeroU64::new(10_000).unwrap(),
             pre_create_cas_dirs,
             scan_orphans_on_startup: true,   // Clean-up your deads
             verify_blob_integrity: true,     // Better safe than sorry

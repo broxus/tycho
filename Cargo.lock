@@ -452,9 +452,9 @@ dependencies = [
 
 [[package]]
 name = "cassadilia"
-version = "0.2.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "416cc3730eb4c98b735b31e4e38f65f9ec838041f7b8487d2e211c6db1e90290"
+checksum = "1ee614b19927e2db9756990de11c1f877a77b863a22c462fa53039ca4507433c"
 dependencies = [
  "ahash",
  "blake3",
