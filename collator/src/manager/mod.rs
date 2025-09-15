@@ -470,8 +470,15 @@ where
 
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
     fn cancel_validation_sessions_until_block(&self, state: ShardStateStuff) -> Result<()> {
-        self.validator
-            .cancel_validation(&state.block_id().as_short_id())?;
+        let block_id = state.block_id().as_short_id();
+
+        let session_id = self
+            .active_collation_sessions
+            .read()
+            .get(&block_id.shard)
+            .map(|session_info| session_info.get_validation_session_id());
+
+        self.validator.cancel_validation(&block_id, session_id)?;
         Ok(())
     }
 
@@ -1328,7 +1335,15 @@ where
         let is_key_block = state.state_extra()?.after_key_block;
 
         // stop any running validations up to this block
-        self.validator.cancel_validation(&block_id.as_short_id())?;
+        // try to get the validation session ID from active collation sessions
+        let session_id = self
+            .active_collation_sessions
+            .read()
+            .get(&block_id.shard)
+            .map(|session_info| session_info.get_validation_session_id());
+
+        self.validator
+            .cancel_validation(&block_id.as_short_id(), session_id)?;
 
         // check if should sync to last applied mc block right now
         let should_sync_to_last_applied_mc_block = 'check_should_sync: {

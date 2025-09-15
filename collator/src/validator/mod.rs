@@ -34,8 +34,13 @@ pub trait Validator: Send + Sync + 'static {
 
     /// Cancels validation before the specified block.
     ///
-    /// TODO: Simplify implementation by somehow passing a corresponding `session_id` as well.
-    fn cancel_validation(&self, before: &BlockIdShort) -> Result<()>;
+    /// If `session_id` is provided, it will be used to directly cancel the specific session,
+    /// avoiding unnecessary lookups and potential ambiguity.
+    fn cancel_validation(
+        &self,
+        before: &BlockIdShort,
+        session_id: Option<ValidationSessionId>,
+    ) -> Result<()>;
 }
 
 // === Types ===

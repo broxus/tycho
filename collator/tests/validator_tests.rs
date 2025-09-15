@@ -162,7 +162,8 @@ async fn validator_signatures_match() -> Result<()> {
             }
 
             for node in &nodes {
-                node.validator.cancel_validation(&block_id.as_short_id())?;
+                node.validator
+                    .cancel_validation(&block_id.as_short_id(), Some(session_id))?;
             }
 
             block_id.seqno += 1;
@@ -254,7 +255,8 @@ async fn malicious_validators_are_ignored() -> Result<()> {
             }
 
             for node in &nodes {
-                node.validator.cancel_validation(&block_id.as_short_id())?;
+                node.validator
+                    .cancel_validation(&block_id.as_short_id(), Some(session_id))?;
             }
 
             while let Some((peer_id, res)) = bad_validators.next().await {

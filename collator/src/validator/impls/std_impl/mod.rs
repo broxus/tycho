@@ -143,18 +143,36 @@ impl Validator for ValidatorStdImpl {
         session.validate_block(block_id).await
     }
 
-    fn cancel_validation(&self, until: &BlockIdShort) -> Result<()> {
+    fn cancel_validation(
+        &self,
+        until: &BlockIdShort,
+        session_id: Option<ValidationSessionId>,
+    ) -> Result<()> {
         let session = {
-            // Find the latest session that has started before the specified block.
             let mut sessions = self.inner.sessions.lock();
             let Some(shard_sessions) = sessions.get_mut(&until.shard) else {
                 return Ok(());
             };
 
-            let Some((id, session)) = shard_sessions.iter().rev().find_map(|(id, session)| {
-                (session.start_block_seqno() <= until.seqno).then(|| (*id, session.clone()))
-            }) else {
-                return Ok(());
+            let (id, session) = if let Some(session_id) = session_id {
+                let Some(session) = shard_sessions.get(&session_id).cloned() else {
+                    tracing::warn!(
+                        target: tracing_targets::VALIDATOR,
+                        session_id = ?session_id,
+                        shard = %until.shard,
+                        "validation session not found for explicit session_id"
+                    );
+                    return Ok(());
+                };
+                (session_id, session)
+            } else {
+                // Find the latest session that has started before the specified block.
+                let Some((id, session)) = shard_sessions.iter().rev().find_map(|(id, session)| {
+                    (session.start_block_seqno() <= until.seqno).then(|| (*id, session.clone()))
+                }) else {
+                    return Ok(());
+                };
+                (id, session)
             };
 
             // Remove all sessions before the found one.
