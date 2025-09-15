@@ -250,6 +250,10 @@ pub struct ExternalsRangeReaderStateByPartition {
     /// Every range contains offset that was reached when range was the last.
     /// So the current last range contains the actual offset.
     pub processed_offset: u32,
+    /// Last chain time used to check externals expiration.
+    /// If `next_chain_time` was not changed on collect,
+    /// we can omit the expire check.
+    pub last_expire_check_on_ct: Option<u64>,
 }
 
 impl ExternalsRangeReaderStateByPartition {
@@ -267,6 +271,7 @@ impl From<&ExternalsRangeInfo> for ExternalsRangeReaderStateByPartition {
             buffer: Default::default(),
             skip_offset: value.skip_offset,
             processed_offset: value.processed_offset,
+            last_expire_check_on_ct: None,
         }
     }
 }

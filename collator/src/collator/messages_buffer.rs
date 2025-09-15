@@ -612,6 +612,26 @@ impl MessageFilter for SkipExpiredExternals<'_> {
     }
 }
 
+/// Wrap message filter options in enum to make
+/// a cheap runtime filter type selection.
+pub enum MsgFilter<'a> {
+    SkipExpiredExternals(SkipExpiredExternals<'a>),
+    IncludeAll(IncludeAllMessages),
+}
+impl MessageFilter for MsgFilter<'_> {
+    fn can_skip(&self) -> bool {
+        match self {
+            Self::SkipExpiredExternals(f) => f.can_skip(),
+            Self::IncludeAll(f) => f.can_skip(),
+        }
+    }
+    fn should_skip(&mut self, m: &ParsedMessage) -> bool {
+        match self {
+            Self::SkipExpiredExternals(f) => f.should_skip(m),
+            Self::IncludeAll(f) => f.should_skip(m),
+        }
+    }
+}
 #[cfg(test)]
 pub(super) struct DebugMessagesBuffer<'a>(pub &'a MessagesBuffer);
 #[cfg(test)]

@@ -13,8 +13,8 @@ use super::{
     MessagesReaderMetricsByPartitions,
 };
 use crate::collator::messages_buffer::{
-    BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
-    MessagesBufferLimits, SkipExpiredExternals,
+    BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, IncludeAllMessages,
+    MessageGroup, MessagesBufferLimits, MsgFilter, SkipExpiredExternals,
 };
 use crate::collator::messages_reader::{DebugInternalsRangeReaderState, InternalsRangeReaderKind};
 use crate::collator::types::{
@@ -442,6 +442,7 @@ impl ExternalsReader {
                 buffer: Default::default(),
                 skip_offset: par.curr_processed_offset,
                 processed_offset: par.curr_processed_offset,
+                last_expire_check_on_ct: None,
             });
         }
 
@@ -714,6 +715,23 @@ impl ExternalsReader {
 
             // skip up to skip offset
             if curr_processed_offset > range_reader_state_by_partition.skip_offset {
+                // setup messages filter
+                // do not check for expired externals if check chain time was not changed
+                let msg_filter = if matches!(range_reader_state_by_partition.last_expire_check_on_ct, Some(last) if next_chain_time > last)
+                    || range_reader_state_by_partition
+                        .last_expire_check_on_ct
+                        .is_none()
+                {
+                    range_reader_state_by_partition.last_expire_check_on_ct = Some(next_chain_time);
+                    MsgFilter::SkipExpiredExternals(SkipExpiredExternals {
+                        chain_time_threshold_ms: next_chain_time
+                            .saturating_sub(externals_expire_timeout_ms),
+                        total_skipped: &mut expired_msgs_count,
+                    })
+                } else {
+                    MsgFilter::IncludeAll(IncludeAllMessages)
+                };
+
                 res.metrics.add_to_message_groups_timer.start();
                 let FillMessageGroupResult {
                     ops_count,
@@ -871,11 +889,7 @@ impl ExternalsReader {
 
                         (false, check_ops_count)
                     },
-                    SkipExpiredExternals {
-                        chain_time_threshold_ms: next_chain_time
-                            .saturating_sub(externals_expire_timeout_ms),
-                        total_skipped: &mut expired_msgs_count,
-                    },
+                    msg_filter,
                 );
                 res.metrics
                     .add_to_msgs_groups_ops_count
