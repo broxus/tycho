@@ -717,20 +717,25 @@ impl ExternalsReader {
             if curr_processed_offset > range_reader_state_by_partition.skip_offset {
                 // setup messages filter
                 // do not check for expired externals if check chain time was not changed
-                let msg_filter = if matches!(range_reader_state_by_partition.last_expire_check_on_ct, Some(last) if next_chain_time > last)
+                // or if minimal chain time in buffer is above the threshold
+                let mut msg_filter = MsgFilter::IncludeAll(IncludeAllMessages);
+                if matches!(range_reader_state_by_partition.last_expire_check_on_ct, Some(last) if next_chain_time > last)
                     || range_reader_state_by_partition
                         .last_expire_check_on_ct
                         .is_none()
                 {
                     range_reader_state_by_partition.last_expire_check_on_ct = Some(next_chain_time);
-                    MsgFilter::SkipExpiredExternals(SkipExpiredExternals {
-                        chain_time_threshold_ms: next_chain_time
-                            .saturating_sub(externals_expire_timeout_ms),
-                        total_skipped: &mut expired_msgs_count,
-                    })
-                } else {
-                    MsgFilter::IncludeAll(IncludeAllMessages)
-                };
+                    let chain_time_threshold_ms =
+                        next_chain_time.saturating_sub(externals_expire_timeout_ms);
+                    if range_reader_state_by_partition.buffer.min_ext_chain_time()
+                        < chain_time_threshold_ms
+                    {
+                        msg_filter = MsgFilter::SkipExpiredExternals(SkipExpiredExternals {
+                            chain_time_threshold_ms,
+                            total_skipped: &mut expired_msgs_count,
+                        });
+                    }
+                }
 
                 res.metrics.add_to_message_groups_timer.start();
                 let FillMessageGroupResult {

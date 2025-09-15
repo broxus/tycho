@@ -31,6 +31,7 @@ pub struct MessagesBuffer {
     int_count: usize,
     ext_count: usize,
     sorted_index: BTreeMap<usize, FastHashSet<HashBytes>>,
+    min_ext_chain_time: Option<u64>,
 }
 
 impl MessagesBuffer {
@@ -43,6 +44,19 @@ impl MessagesBuffer {
 
     pub fn msgs_count(&self) -> usize {
         self.int_count + self.ext_count
+    }
+
+    fn update_min_ext_chain_time(&mut self, ext_chain_time: Option<u64>) {
+        if let Some(ext_ct) = ext_chain_time
+            && (matches!(self.min_ext_chain_time, Some(min_ct) if ext_ct < min_ct)
+                || self.min_ext_chain_time.is_none())
+        {
+            self.min_ext_chain_time = Some(ext_ct);
+        }
+    }
+
+    pub fn min_ext_chain_time(&self) -> u64 {
+        self.min_ext_chain_time.unwrap_or(u64::MAX)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&HashBytes, &VecDeque<Box<ParsedMessage>>)> {
@@ -62,6 +76,7 @@ impl MessagesBuffer {
             }
             MsgInfo::ExtIn(ExtInMsgInfo { dst, .. }) => {
                 self.ext_count += 1;
+                self.update_min_ext_chain_time(msg.ext_msg_chain_time);
                 dst
             }
             MsgInfo::ExtOut(info) => {
@@ -358,6 +373,11 @@ impl MessagesBuffer {
         // remove empty accounts from buffer
         ops_count.saturating_add_assign(self.msgs.len() as u64);
         self.msgs.retain(|_, account_msgs| !account_msgs.is_empty());
+
+        // drop min externals chain time if buffer was drained
+        if self.msgs.is_empty() {
+            self.min_ext_chain_time = None;
+        }
 
         // 3. update slots index
         let mut remove_slot_ids = BTreeMap::<usize, FastHashSet<u16>>::new();
