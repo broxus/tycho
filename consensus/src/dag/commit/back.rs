@@ -407,8 +407,8 @@ impl DagBack {
         }
         // do not commit genesis - we may place some arbitrary payload in it,
         // also mempool adapter does not expect it, and collator cannot use it too
-        let history_limit =
-            (conf.genesis_round.next()).max(anchor.round() - conf.consensus.commit_history_rounds);
+        let history_limit = (conf.genesis_round.next())
+            .max(anchor.round() - conf.consensus.commit_history_rounds.get());
 
         let mut r = array::from_fn::<_, 3, _>(|_| FastHashMap::new()); // [r+0, r-1, r-2]
         extend(&mut r[0], anchor.includes()); // points @ r+0
