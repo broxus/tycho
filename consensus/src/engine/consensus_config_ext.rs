@@ -51,11 +51,11 @@ impl ConsensusConfigExt for ConsensusConfig {
         // notice that procedure happens at round start, before new local point's dependencies
         // finished their validation, a new 'next' dag round will appear and so no `-1` below
         3 // new current, includes and witness rounds to validate
-            + self.commit_history_rounds as u32 // all committable history for every point
+            + self.commit_history_rounds.get() as u32 // all committable history for every point
     }
 
     fn replay_anchor_rounds(&self) -> u32 {
-        self.commit_history_rounds as u32 // to take full first anchor history
+        self.commit_history_rounds.get() as u32 // to take full first anchor history
             + self.deduplicate_rounds as u32 // to discard full anchor history after restart
             + 2 // bottommost includes and witness may not have dag round, so dependers are invalid
             + 2 // invalid but certified dependers are not eligible to be committed
@@ -64,8 +64,8 @@ impl ConsensusConfigExt for ConsensusConfig {
     fn reset_rounds(&self) -> u32 {
         // we could `-1` to use both top and bottom as inclusive range bounds for lag rounds,
         // but collator may re-request TKA from collator, not only the next one
-        self.max_consensus_lag_rounds as u32 // assumed to contain at least one TKA
-            + self.commit_history_rounds as u32 // to take full first anchor history
+        self.max_consensus_lag_rounds.get() as u32 // assumed to contain at least one TKA
+            + self.commit_history_rounds.get() as u32 // to take full first anchor history
             + self.deduplicate_rounds as u32 // to discard full anchor history after restart
             + 2 // includes and witness will not have dag round, so dependers are invalid
             + 2 // invalid but certified dependers are not eligible to be committed
@@ -75,9 +75,9 @@ impl ConsensusConfigExt for ConsensusConfig {
         // we could `-1` to use both top and bottom as inclusive range bounds for lag rounds,
         // but collator may re-request TKA from collator, not only the next one;
         // next `2 + 2` is for dropped rounds as in methods above, just implementation detail
-        (self.sync_support_rounds as u32).max(2 + 2) // to follow consensus during sync
-            + self.max_consensus_lag_rounds as u32 // assumed to contain at least one TKA
-            + self.commit_history_rounds as u32 // to take full first anchor history
+        (self.sync_support_rounds.get() as u32).max(2 + 2) // to follow consensus during sync
+            + self.max_consensus_lag_rounds.get() as u32 // assumed to contain at least one TKA
+            + self.commit_history_rounds.get() as u32 // to take full first anchor history
             + self.deduplicate_rounds as u32 // to discard full anchor history after restart
     }
 }

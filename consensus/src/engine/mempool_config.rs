@@ -137,13 +137,13 @@ impl MempoolConfigBuilder {
         // unaligned `genesis_info.start_round` is not used
         hasher.update(&(genesis_round.0 as u128).to_be_bytes());
         hasher.update(&(genesis_info.genesis_millis as u128).to_be_bytes());
-        hasher.update(&(consensus.clock_skew_millis as u128).to_be_bytes());
-        hasher.update(&(consensus.payload_batch_bytes as u128).to_be_bytes());
-        hasher.update(&(consensus.commit_history_rounds as u128).to_be_bytes());
+        hasher.update(&(consensus.clock_skew_millis.get() as u128).to_be_bytes());
+        hasher.update(&(consensus.payload_batch_bytes.get() as u128).to_be_bytes());
+        hasher.update(&(consensus.commit_history_rounds.get() as u128).to_be_bytes());
         hasher.update(&(consensus.deduplicate_rounds as u128).to_be_bytes());
-        hasher.update(&(consensus.max_consensus_lag_rounds as u128).to_be_bytes());
-        // TODO add comment in tycho-types
-        hasher.update(&(consensus.sync_support_rounds as u128).to_be_bytes());
+        hasher.update(&(consensus.max_consensus_lag_rounds.get() as u128).to_be_bytes());
+        hasher.update(&(consensus.download_peer_queries.get() as u128).to_be_bytes());
+        hasher.update(&(consensus.sync_support_rounds.get() as u128).to_be_bytes());
 
         let overlay_id = OverlayId(hasher.finalize().into());
 
@@ -178,16 +178,20 @@ pub struct MempoolNodeConfig {
 
     /// Max simultaneous point search tasks fulfilling download request
     pub max_upload_tasks: NonZeroU8,
+
+    /// Limits amount of unique points being simultaneously downloaded from all peers.
+    pub max_download_tasks: NonZeroU16,
 }
 
 impl Default for MempoolNodeConfig {
     fn default() -> Self {
         Self {
             log_truncate_long_values: true,
-            clean_db_period_rounds: NonZeroU16::new(105).unwrap(),
+            clean_db_period_rounds: 105.try_into().unwrap(),
             cache_future_broadcasts_rounds: 105,
-            max_blocking_tasks: NonZeroU16::new(250).unwrap(),
-            max_upload_tasks: NonZeroU8::new(50).unwrap(),
+            max_blocking_tasks: 250.try_into().unwrap(),
+            max_upload_tasks: 50.try_into().unwrap(),
+            max_download_tasks: 250.try_into().unwrap(),
         }
     }
 }

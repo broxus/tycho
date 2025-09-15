@@ -791,18 +791,18 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
 
     // Param 29
     params.set_consensus_config(&ConsensusConfig {
-        clock_skew_millis: 5 * 1000,
-        payload_batch_bytes: 768 * 1024,
-        commit_history_rounds: 20,
+        clock_skew_millis: (5 * 1000).try_into().unwrap(),
+        payload_batch_bytes: (768 * 1024).try_into().unwrap(),
+        commit_history_rounds: 20.try_into().unwrap(),
         deduplicate_rounds: 140,
-        max_consensus_lag_rounds: 210,
-        payload_buffer_bytes: 50 * 1024 * 1024,
-        broadcast_retry_millis: 150,
-        download_retry_millis: 25,
-        download_peers: 2,
-        download_tasks: 260,
-        sync_support_rounds: 840,
-        broadcast_retry_attempts: 2,
+        max_consensus_lag_rounds: 210.try_into().unwrap(),
+        payload_buffer_bytes: (50 * 1024 * 1024).try_into().unwrap(),
+        broadcast_retry_millis: 150.try_into().unwrap(),
+        download_retry_millis: 25.try_into().unwrap(),
+        download_peers: 2.try_into().unwrap(),
+        min_sign_attempts: 3.try_into().unwrap(),
+        download_peer_queries: 10.try_into().unwrap(),
+        sync_support_rounds: 840.try_into().unwrap(),
     })?;
 
     // Param 31

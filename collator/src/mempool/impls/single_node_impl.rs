@@ -59,8 +59,8 @@ impl MempoolAdapterSingleNodeImpl {
 
         self.input_buffer.apply_config(&merged_conf.conf.consensus);
 
-        let timeout = merged_conf.conf.consensus.broadcast_retry_millis as u64
-            * merged_conf.conf.consensus.broadcast_retry_attempts as u64
+        let timeout = merged_conf.conf.consensus.broadcast_retry_millis.get() as u64
+            * merged_conf.conf.consensus.min_sign_attempts.get() as u64
             * ANCHOR_ID_STEP as u64;
 
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(timeout));

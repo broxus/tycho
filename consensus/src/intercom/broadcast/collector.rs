@@ -74,7 +74,7 @@ impl CollectorTask {
         mut bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> TaskResult<()> {
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
-            self.ctx.conf().consensus.broadcast_retry_millis as _,
+            self.ctx.conf().consensus.broadcast_retry_millis.get() as _,
         ));
         // no `interval.reset()` as may receive bcaster_signal after jump immediately
         retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
