@@ -775,7 +775,7 @@ impl MessagesBuffer {
             for (&account_msgs_count, account_ids) in self.sorted_index.iter().rev() {
                 for _ in account_ids {
                     current_slot_msgs_count += account_msgs_count;
-                    if current_slot_msgs_count >= limits.slot_vert_size {
+                    if current_slot_msgs_count >= limits.slot_vert_size * 3 {
                         full_slots_count += 1;
                         current_slot_msgs_count = 0;
 
