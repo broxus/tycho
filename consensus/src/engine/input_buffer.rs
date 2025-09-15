@@ -63,11 +63,11 @@ impl InputBufferInner for InputBufferData {
     }
 
     fn apply_config(&mut self, consensus_config: &ConsensusConfig) {
-        self.payload_buffer_bytes = consensus_config.payload_buffer_bytes as usize;
-        self.payload_batch_bytes = consensus_config.payload_batch_bytes as usize;
+        self.payload_buffer_bytes = consensus_config.payload_buffer_bytes.get() as usize;
+        self.payload_batch_bytes = consensus_config.payload_batch_bytes.get() as usize;
         tracing::info!(
-            payload_batch_bytes = consensus_config.payload_batch_bytes,
-            payload_buffer_bytes = consensus_config.payload_buffer_bytes,
+            payload_batch_bytes = consensus_config.payload_batch_bytes.get(),
+            payload_buffer_bytes = consensus_config.payload_buffer_bytes.get(),
             "input buffer config applied"
         );
     }
@@ -206,7 +206,7 @@ mod stub {
                 fetch_count: NonZeroUsize::MIN,
                 steps_until_full,
                 payload_step,
-                payload_batch_bytes: consensus_config.payload_batch_bytes as usize,
+                payload_batch_bytes: consensus_config.payload_batch_bytes.get() as usize,
             })))
         }
     }

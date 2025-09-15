@@ -18,7 +18,7 @@ use tycho_util::metrics::HistogramGuard;
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, TaskResult};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
-use crate::engine::{ConsensusConfigExt, MempoolConfig};
+use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
 use crate::intercom::core::{PointByIdResponse, PointQueryResult, QueryRequest};
 use crate::intercom::dependency::limiter::Limiter;
 use crate::intercom::peer_schedule::PeerState;
@@ -61,7 +61,7 @@ trait DownloadType: Send + 'static {
 struct ExponentialQuery;
 impl DownloadType for ExponentialQuery {
     fn max_downloads_per_attempt(attempt: usize, conf: &MempoolConfig) -> usize {
-        let download_peers = conf.consensus.download_peers as usize;
+        let download_peers = conf.consensus.download_peers.get() as usize;
         download_peers.saturating_mul(download_peers.saturating_pow(attempt as u32))
     }
 }
@@ -70,7 +70,7 @@ impl DownloadType for ExponentialQuery {
 struct LinearQuery;
 impl DownloadType for LinearQuery {
     fn max_downloads_per_attempt(attempt: usize, conf: &MempoolConfig) -> usize {
-        let download_peers = conf.consensus.download_peers as usize;
+        let download_peers = conf.consensus.download_peers.get() as usize;
         download_peers.saturating_add(download_peers.saturating_mul(attempt))
     }
 }
@@ -92,13 +92,13 @@ impl Downloader {
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
         consensus_round: RoundWatcher<Consensus>,
-        conf: &MempoolConfig,
+        _conf: &MempoolConfig,
     ) -> Self {
         Self {
             inner: Arc::new(DownloaderInner {
                 dispatcher: dispatcher.clone(),
                 peer_schedule: peer_schedule.clone(),
-                limiter: Limiter::new(conf.consensus.download_tasks),
+                limiter: Limiter::new(NodeConfig::get().max_download_tasks),
                 consensus_round,
             }),
         }
@@ -233,7 +233,7 @@ impl<T: DownloadType> DownloadTask<T> {
         mut broadcast_result: oneshot::Receiver<DownloadResult>,
     ) -> TaskResult<Option<DownloadResult>> {
         let mut interval = tokio::time::interval(Duration::from_millis(
-            self.ctx.conf().consensus.download_retry_millis as _,
+            self.ctx.conf().consensus.download_retry_millis.get() as _,
         ));
         // no `interval.reset()`: download starts right after biased receive of all known dependers
         // give equal time to every attempt, ignoring local runtime delays; do not `Burst` requests

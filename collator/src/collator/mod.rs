@@ -1476,7 +1476,8 @@ impl CollatorStdImpl {
                 .mc_data
                 .config
                 .get_consensus_config()?
-                .max_consensus_lag_rounds as u32;
+                .max_consensus_lag_rounds
+                .get() as u32;
             while last_imported_chain_time < next_chain_time {
                 // next anchor importing can stuck if mempool paused
                 // so allow to cancel collation here
@@ -1640,7 +1641,8 @@ impl CollatorStdImpl {
                 .mc_data
                 .config
                 .get_consensus_config()?
-                .max_consensus_lag_rounds as u32,
+                .max_consensus_lag_rounds
+                .get() as u32,
         );
 
         let import_anchor_result = tokio::select! {
@@ -1885,7 +1887,8 @@ impl CollatorStdImpl {
                     .mc_data
                     .config
                     .get_consensus_config()?
-                    .max_consensus_lag_rounds as u32;
+                    .max_consensus_lag_rounds
+                    .get() as u32;
 
                 let mut imported_anchors_count = 0;
                 let mut imported_anchors_has_externals = false;

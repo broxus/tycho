@@ -44,7 +44,7 @@ impl Threshold {
             round,
             target_count,
             count: AtomicU32::new(count.pack()),
-            clock_skew: UnixTime::from_millis(conf.consensus.clock_skew_millis as _),
+            clock_skew: UnixTime::from_millis(conf.consensus.clock_skew_millis.get() as _),
             sender,
             work: Mutex::new(ThresholdWork {
                 is_reached: false,

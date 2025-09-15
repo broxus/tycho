@@ -12,18 +12,18 @@ use crate::engine::{MempoolConfigBuilder, MempoolMergedConfig, MempoolNodeConfig
 
 pub fn default_test_config() -> MempoolMergedConfig {
     let consensus_config = ConsensusConfig {
-        clock_skew_millis: 5 * 1000,
-        payload_batch_bytes: 768 * 1024,
-        commit_history_rounds: 20,
+        clock_skew_millis: (5 * 1000).try_into().unwrap(),
+        payload_batch_bytes: (768 * 1024).try_into().unwrap(),
+        commit_history_rounds: 20.try_into().unwrap(),
         deduplicate_rounds: 20,
-        max_consensus_lag_rounds: 20,
-        payload_buffer_bytes: 50 * 1024 * 1024,
-        broadcast_retry_millis: 150,
-        download_retry_millis: 25,
-        download_peers: 2,
-        download_tasks: 1,
-        sync_support_rounds: 15,
-        broadcast_retry_attempts: 2,
+        max_consensus_lag_rounds: 20.try_into().unwrap(),
+        payload_buffer_bytes: (50 * 1024 * 1024).try_into().unwrap(),
+        broadcast_retry_millis: 150.try_into().unwrap(),
+        download_retry_millis: 25.try_into().unwrap(),
+        download_peers: 2.try_into().unwrap(),
+        min_sign_attempts: 3.try_into().unwrap(),
+        download_peer_queries: 1.try_into().unwrap(),
+        sync_support_rounds: 15.try_into().unwrap(),
     };
 
     let node_config = MempoolNodeConfig {

@@ -168,7 +168,7 @@ impl Broadcaster {
         self.ctx = BroadcastCtx::new(round_ctx, &self.point);
 
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
-            self.ctx.conf().consensus.broadcast_retry_millis as _,
+            self.ctx.conf().consensus.broadcast_retry_millis.get() as _,
         ));
         retry_interval.reset(); // query signatures after time passes, just to resend broadcast
         retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -216,7 +216,7 @@ impl Broadcaster {
                     };
                     true
                 } else {
-                    if self.attempt > self.ctx.conf().consensus.broadcast_retry_attempts // artificial delay for stable point rate
+                    if self.attempt >= self.ctx.conf().consensus.min_sign_attempts.get()
                         && self.signatures.len() >= self.signers_count.majority_of_others()
                         && let Some(sender) = mem::take(&mut self.bcaster_signal)
                     {

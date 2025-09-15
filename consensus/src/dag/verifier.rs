@@ -365,7 +365,7 @@ impl Verifier {
         let anchor_proof_link_id = info.anchor_link_id(AnchorStageRole::Proof);
 
         let max_allowed_dep_time =
-            info.time() + UnixTime::from_millis(conf.consensus.clock_skew_millis as _);
+            info.time() + UnixTime::from_millis(conf.consensus.clock_skew_millis.get() as _);
 
         while let Some(task_result) = deps_and_prev.next().await {
             let Some(dag_point) = task_result? else {
@@ -650,7 +650,7 @@ impl Verifier {
                 return Some(IllFormedReason::AnchorTime);
             }
         } else {
-            if info.payload_bytes() > conf.consensus.payload_batch_bytes {
+            if info.payload_bytes() > conf.consensus.payload_batch_bytes.get() {
                 return Some(IllFormedReason::TooLargePayload(info.payload_bytes()));
             }
             // leader must maintain its chain of proofs,
