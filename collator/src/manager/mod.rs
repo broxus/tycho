@@ -2120,7 +2120,7 @@ where
                 self.refresh_collation_sessions(mc_data, reset_collators)
                     .await?;
             } else {
-                tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+                tracing::warn!(target: tracing_targets::COLLATION_MANAGER,
                     collator_supported_block_version = self.config.supported_block_version,
                     mc_block_version = block_global.version,
                     collator_supported_capabilities = ?self.config.supported_capabilities,
