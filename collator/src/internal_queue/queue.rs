@@ -294,9 +294,8 @@ where
         {
             tracing::debug!(
                 target: tracing_targets::MQ,
-                "Skip commit diff for block_id: {}. Committed by next mc_block_id: {}",
-                mc_block_id,
-                mc_pointer.seqno
+                "Skip commit diff for mc block {}. Committed by next mc block with seqno {}",
+                mc_block_id, commit_pointer.seqno,
             );
             // Skip commit because it was already committed
             return Ok(());
@@ -304,7 +303,7 @@ where
 
         let mut gc_ranges = FastHashMap::default();
 
-        let mut commit_pointer = FastHashMap::default();
+        let mut commit_pointers = FastHashMap::default();
 
         for (block_id, top_shard_block_changed) in mc_top_blocks {
             // Check if the diff is already applied
@@ -323,7 +322,7 @@ where
             };
 
             // Check for duplicate shard in commit_diff
-            if commit_pointer
+            if commit_pointers
                 .insert(block_id.shard, (diff.max_message, diff.seqno))
                 .is_some()
             {
@@ -347,8 +346,13 @@ where
             }
         }
 
-        // change pointer position
-        self.state.commit(&commit_pointer, mc_block_id)?;
+        tracing::debug!(target: tracing_targets::MQ,
+            ?commit_pointers,
+            "commit_diff",
+        );
+
+        // change the commit pointers position
+        self.state.commit(commit_pointers, mc_block_id)?;
 
         // run GC for each found partition
         for (shard, gc_end_key) in gc_ranges {

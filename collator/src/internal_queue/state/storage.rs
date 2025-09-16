@@ -81,10 +81,12 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
 
     /// Delete messages in given partition and ranges
     fn delete(&self, partition: QueuePartitionIdx, ranges: &[QueueShardRange]) -> Result<()>;
-    /// Set commit pointers and last applied mc block id
+
+    /// Set commit pointers and last committed mc block id.
+    /// ATTENTION! Overrides old value without checks. Should validate the new value in the calling code.
     fn commit(
         &self,
-        commit_pointers: &FastHashMap<ShardIdent, (QueueKey, u32)>,
+        commit_pointers: FastHashMap<ShardIdent, (QueueKey, u32)>,
         mc_block_id: &BlockId,
     ) -> Result<()>;
 
@@ -188,12 +190,12 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
 
     fn commit(
         &self,
-        commit_pointers: &FastHashMap<ShardIdent, (QueueKey, u32)>,
+        commit_pointers: FastHashMap<ShardIdent, (QueueKey, u32)>,
         mc_block_id: &BlockId,
     ) -> Result<()> {
         let mut tx = self.storage.begin_transaction();
         tx.commit_messages(commit_pointers)?;
-        tx.set_last_applied_mc_block_id(mc_block_id);
+        tx.set_last_committed_mc_block_id(mc_block_id)?;
         tx.write()
     }
 
