@@ -16,12 +16,12 @@ use weedb::{BoundedCfHandle, rocksdb};
 
 use super::cell_storage::*;
 use super::entries_buffer::*;
-use crate::storage::{BriefBocHeader, CoreDb, ShardStateReader};
+use crate::storage::{BriefBocHeader, CellsDb, ShardStateReader};
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
 pub struct StoreStateContext {
-    pub db: CoreDb,
+    pub cells_db: CellsDb,
     pub cell_storage: Arc<CellStorage>,
     pub temp_file_storage: TempFileStorage,
     pub min_ref_mc_state: MinRefMcStateTracker,
@@ -124,11 +124,11 @@ impl StoreStateContext {
             .prealloc(header.cell_count as usize * HashesEntry::LEN)
             .open_as_mapped_mut()?;
 
-        let raw = self.db.rocksdb().as_ref();
-        let write_options = self.db.cells.new_write_config();
+        let raw = self.cells_db.rocksdb().as_ref();
+        let write_options = self.cells_db.temp_cells.write_config();
 
-        let mut ctx = FinalizationContext::new(&self.db);
-        ctx.clear_temp_cells(&self.db)?;
+        let mut ctx = FinalizationContext::new(&self.cells_db);
+        ctx.clear_temp_cells(&self.cells_db)?;
 
         // Allocate on heap to prevent big future size
         let mut chunk_buffer = Vec::with_capacity(1 << 20);
@@ -202,7 +202,7 @@ impl StoreStateContext {
 
             if batch_len > CELLS_PER_BATCH {
                 ctx.finalize_cell_usages();
-                raw.write_opt(std::mem::take(&mut ctx.write_batch), &write_options)?;
+                raw.write_opt(std::mem::take(&mut ctx.write_batch), write_options)?;
                 batch_len = 0;
             }
 
@@ -211,7 +211,7 @@ impl StoreStateContext {
 
         if batch_len > 0 {
             ctx.finalize_cell_usages();
-            raw.write_opt(std::mem::take(&mut ctx.write_batch), &write_options)?;
+            raw.write_opt(std::mem::take(&mut ctx.write_batch), write_options)?;
         }
 
         // Current entry contains root cell
@@ -219,15 +219,17 @@ impl StoreStateContext {
         ctx.final_check(root_hash)?;
 
         self.cell_storage.apply_temp_cell(&HashBytes(*root_hash))?;
-        ctx.clear_temp_cells(&self.db)?;
+        ctx.clear_temp_cells(&self.cells_db)?;
 
         let shard_state_key = block_id.to_vec();
-        self.db.shard_states.insert(&shard_state_key, root_hash)?;
+        self.cells_db
+            .shard_states
+            .insert(&shard_state_key, root_hash)?;
 
         pg.complete();
 
         // Load stored shard state
-        match self.db.shard_states.get(shard_state_key)? {
+        match self.cells_db.shard_states.get(shard_state_key)? {
             Some(root) => {
                 let cell_id = HashBytes::from_slice(&root[..32]);
 
@@ -253,7 +255,7 @@ struct FinalizationContext<'a> {
 }
 
 impl<'a> FinalizationContext<'a> {
-    fn new(db: &'a CoreDb) -> Self {
+    fn new(db: &'a CellsDb) -> Self {
         Self {
             pruned_branches: Default::default(),
             cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
@@ -264,7 +266,7 @@ impl<'a> FinalizationContext<'a> {
         }
     }
 
-    fn clear_temp_cells(&self, db: &CoreDb) -> std::result::Result<(), rocksdb::Error> {
+    fn clear_temp_cells(&self, db: &CellsDb) -> std::result::Result<(), rocksdb::Error> {
         let from = &[0x00; 32];
         let to = &[0xff; 32];
         db.rocksdb().delete_range_cf(&self.temp_cells_cf, from, to)
@@ -600,11 +602,11 @@ mod test {
         })
         .await?;
 
-        let core_db = storage.db();
+        let cells_db = storage.cells_db().clone();
         let cell_storage = &storage.shard_state_storage().cell_storage;
 
         let store_ctx = StoreStateContext {
-            db: core_db.clone(),
+            cells_db: cells_db.clone(),
             cell_storage: cell_storage.clone(),
             temp_file_storage: storage.context().temp_files().clone(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
@@ -623,12 +625,12 @@ mod test {
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");
-        states_gc(cell_storage, core_db).await?;
+        states_gc(cell_storage, &cells_db).await?;
 
         Ok(())
     }
 
-    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CoreDb) -> Result<()> {
+    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CellsDb) -> Result<()> {
         let states_iterator = db.shard_states.iterator(IteratorMode::Start);
         let bump = bumpalo::Bump::new();
 
@@ -667,8 +669,7 @@ mod test {
 
         let (ctx, _tempdir) = StorageContext::new_temp().await?;
         let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
-
-        let core_db = storage.db();
+        let cells_db = storage.cells_db();
         let cell_storage = &storage.shard_state_storage().cell_storage;
 
         let mut rng = StdRng::seed_from_u64(1337);
@@ -735,9 +736,9 @@ mod test {
 
             cell_keys.push(*cell_hash);
 
-            core_db
+            cells_db
                 .rocksdb()
-                .write_opt(batch, core_db.cells.write_config())?;
+                .write_opt(batch, cells_db.cells.write_config())?;
 
             tracing::info!("Iteration {i} Finished. traversed: {traversed}",);
         }
@@ -752,18 +753,18 @@ mod test {
             traverse_cell((cell as Arc<DynCell>).as_ref());
 
             let (res, batch) = cell_storage.remove_cell(&bump, &key)?;
-            core_db
+            cells_db
                 .rocksdb()
-                .write_opt(batch, core_db.cells.write_config())?;
+                .write_opt(batch, cells_db.cells.write_config())?;
             tracing::info!("Gc {id} of {total} done. Traversed: {res}",);
             bump.reset();
         }
 
         // two compactions in row. First one run merge operators, second one will remove all tombstones
-        core_db.trigger_compaction().await;
-        core_db.trigger_compaction().await;
+        cells_db.trigger_compaction().await;
+        cells_db.trigger_compaction().await;
 
-        let cells_left = core_db.cells.iterator(IteratorMode::Start).count();
+        let cells_left = cells_db.cells.iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
         Ok(())

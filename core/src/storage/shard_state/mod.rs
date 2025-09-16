@@ -18,14 +18,14 @@ use weedb::rocksdb;
 
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
-use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CoreDb};
+use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb};
 
 mod cell_storage;
 mod entries_buffer;
 mod store_state_raw;
 
 pub struct ShardStateStorage {
-    db: CoreDb,
+    cells_db: CellsDb,
 
     block_handle_storage: Arc<BlockHandleStorage>,
     block_storage: Arc<BlockStorage>,
@@ -43,17 +43,17 @@ pub struct ShardStateStorage {
 impl ShardStateStorage {
     // TODO: Replace args with a config.
     pub fn new(
-        db: CoreDb,
+        cells_db: CellsDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
         temp_file_storage: TempFileStorage,
         cache_size_bytes: ByteSize,
         drop_interval: u32,
     ) -> Result<Arc<Self>> {
-        let cell_storage = CellStorage::new(db.clone(), cache_size_bytes, drop_interval);
+        let cell_storage = CellStorage::new(cells_db.clone(), cache_size_bytes, drop_interval);
 
         Ok(Arc::new(Self {
-            db,
+            cells_db,
             block_handle_storage,
             block_storage,
             temp_file_storage,
@@ -122,8 +122,8 @@ impl ShardStateStorage {
         let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
 
         let block_id = *handle.id();
-        let raw_db = self.db.rocksdb().clone();
-        let cf = self.db.shard_states.get_unbounded_cf();
+        let raw_db = self.cells_db.rocksdb().clone();
+        let cf = self.cells_db.shard_states.get_unbounded_cf();
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
@@ -203,7 +203,7 @@ impl ShardStateStorage {
         boc: File,
     ) -> Result<ShardStateStuff> {
         let ctx = StoreStateContext {
-            db: self.db.clone(),
+            cells_db: self.cells_db.clone(),
             cell_storage: self.cell_storage.clone(),
             temp_file_storage: self.temp_file_storage.clone(),
             min_ref_mc_state: self.min_ref_mc_state.clone(),
@@ -254,12 +254,12 @@ impl ShardStateStorage {
         );
         let started_at = Instant::now();
 
-        let raw = self.db.rocksdb();
+        let raw = self.cells_db.rocksdb();
 
         // Manually get required column factory and r/w options
         let snapshot = raw.snapshot();
-        let shard_states_cf = self.db.shard_states.get_unbounded_cf();
-        let mut states_read_options = self.db.shard_states.new_read_config();
+        let shard_states_cf = self.cells_db.shard_states.get_unbounded_cf();
+        let mut states_read_options = self.cells_db.shard_states.new_read_config();
         states_read_options.set_snapshot(&snapshot);
 
         let mut alloc = bumpalo_herd::Herd::new();
@@ -299,7 +299,7 @@ impl ShardStateStorage {
                 self.gc_lock.clone().lock_owned().await
             };
 
-            let db = self.db.clone();
+            let db = self.cells_db.clone();
             let cell_storage = self.cell_storage.clone();
             let key = key.to_vec();
             let accounts_split_depth = self.accounts_split_depth;
@@ -372,7 +372,7 @@ impl ShardStateStorage {
             mc_seqno = min_ref_mc_seqno;
         }
 
-        let snapshot = self.db.rocksdb().snapshot();
+        let snapshot = self.cells_db.rocksdb().snapshot();
 
         // 1. Find target block
 
@@ -422,7 +422,7 @@ impl ShardStateStorage {
     }
 
     pub fn load_state_root(&self, block_id: &BlockId) -> Result<HashBytes> {
-        let shard_states = &self.db.shard_states;
+        let shard_states = &self.cells_db.shard_states;
         let shard_state = shard_states.get(block_id.to_vec())?;
         match shard_state {
             Some(root) => Ok(HashBytes::from_slice(&root[..32])),
@@ -437,7 +437,7 @@ impl ShardStateStorage {
         mc_seqno: u32,
         snapshot: &rocksdb::Snapshot<'_>,
     ) -> Result<Option<BlockId>> {
-        let shard_states = &self.db.shard_states;
+        let shard_states = &self.cells_db.shard_states;
 
         let mut bound = BlockId {
             shard: ShardIdent::MASTERCHAIN,
@@ -453,7 +453,7 @@ impl ShardStateStorage {
         readopts.set_iterate_upper_bound(bound.to_vec().as_slice());
 
         let mut iter = self
-            .db
+            .cells_db
             .rocksdb()
             .raw_iterator_cf_opt(&shard_states.cf(), readopts);
         iter.seek_to_first();
