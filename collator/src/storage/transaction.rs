@@ -1,5 +1,3 @@
-use std::cmp::Ordering;
-
 use anyhow::{Result, ensure};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr};
 use tycho_storage::kv::StoredValue;
@@ -14,6 +12,7 @@ use super::models::{
     CommitPointerKey, CommitPointerValue, DiffInfoKey, DiffTailKey, QueueRange,
     ShardsInternalMessagesKey, StatKey,
 };
+use crate::tracing_targets;
 
 pub struct InternalQueueTransaction {
     pub db: InternalQueueDB,
@@ -66,39 +65,21 @@ impl InternalQueueTransaction {
         self.batch.put_cf(&cf, key.to_vec(), self.buffer.as_slice());
     }
 
+    /// Updates commit pointers in message queue.
+    /// ATTENTION! Overrides old value without checks. Should validate the new value in the calling code.
     pub fn commit_messages(
         &mut self,
-        commit_pointers: &FastHashMap<ShardIdent, (QueueKey, u32)>,
+        commit_pointers: FastHashMap<ShardIdent, (QueueKey, u32)>,
     ) -> Result<()> {
         let commit_pointers_cf = self.db.internal_message_commit_pointer.cf();
 
-        for (&shard_ident, (queue_key, seqno)) in commit_pointers.iter() {
+        for (shard_ident, (queue_key, seqno)) in commit_pointers {
             let key = CommitPointerKey { shard_ident }.to_vec();
 
-            // Get the old value if it exists
-            let old_pointer = self
-                .db
-                .rocksdb()
-                .get_cf(&commit_pointers_cf, &key)?
-                .map(|bytes| CommitPointerValue::from_slice(&bytes))
-                .unwrap_or_default();
+            let new_val = CommitPointerValue { queue_key, seqno };
 
-            match queue_key.cmp(&old_pointer.queue_key) {
-                Ordering::Less => {
-                    tracing::trace!(
-                        "Trying to commit a pointer that is less than the old pointer. Skip."
-                    );
-                }
-                Ordering::Greater => {
-                    let new_val = CommitPointerValue {
-                        queue_key: *queue_key,
-                        seqno: *seqno,
-                    };
-                    self.batch
-                        .put_cf(&commit_pointers_cf, key, new_val.to_vec());
-                }
-                Ordering::Equal => {}
-            }
+            self.batch
+                .put_cf(&commit_pointers_cf, key, new_val.to_vec());
         }
 
         Ok(())
@@ -148,6 +129,12 @@ impl InternalQueueTransaction {
                 }
             }
         }
+
+        tracing::debug!(target: tracing_targets::MQ,
+            ?commit_pointers,
+            ?ranges,
+            "clear_uncommitted_state",
+        );
 
         self.delete(&ranges)
     }
@@ -280,16 +267,18 @@ impl InternalQueueTransaction {
         Ok(())
     }
 
-    /// Stores the queue version in the `internal_message_version` column family under the key `mc_version`
-    pub fn set_last_applied_mc_block_id(&mut self, mc_block_id: &BlockId) {
-        // Retrieve the column family handle for "internal_message_version"
+    /// Stores mc block id on which the queue was committed.
+    /// ATTENTION! Overrides old value without checks. Should validate the new value in the calling code.
+    pub fn set_last_committed_mc_block_id(&mut self, mc_block_id: &BlockId) -> Result<()> {
         let cf = self.db.internal_message_var.cf();
-        // Convert the version into a little-endian byte array and store it
+
         self.batch.put_cf(
             &cf,
             INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY,
             mc_block_id.to_vec(),
         );
+
+        Ok(())
     }
 }
 

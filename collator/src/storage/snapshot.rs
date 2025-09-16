@@ -335,11 +335,8 @@ impl InternalQueueSnapshot {
         let res = self
             .db
             .rocksdb()
-            .get_cf(&cf, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY)?;
-        if let Some(bytes) = data {
-            return Ok(Some(BlockId::from_slice(&bytes)));
-        }
-
-        Ok(None)
+            .get_cf(&cf, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY)?
+            .map(|bytes| BlockId::from_slice(&bytes));
+        Ok(res)
     }
 }
