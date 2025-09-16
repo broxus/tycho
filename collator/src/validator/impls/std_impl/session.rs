@@ -138,6 +138,10 @@ impl ValidatorSession {
         Ok(session)
     }
 
+    pub fn id(&self) -> ValidationSessionId {
+        self.inner.session_id
+    }
+
     pub fn start_block_seqno(&self) -> u32 {
         self.inner.start_block_seqno
     }
