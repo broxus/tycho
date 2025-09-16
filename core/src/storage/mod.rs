@@ -17,7 +17,7 @@ pub use self::config::{
     ArchivesGcConfig, BlocksCacheConfig, BlocksGcConfig, BlocksGcType, CoreStorageConfig,
     StatesGcConfig,
 };
-pub use self::db::{CoreDb, CoreDbExt, CoreTables};
+pub use self::db::{CellsDb, CoreDb, CoreDbExt, CoreTables};
 pub use self::node_state::{NodeStateStorage, NodeSyncState};
 pub use self::persistent_state::{
     BriefBocHeader, PersistentStateInfo, PersistentStateKind, PersistentStateStorage,
@@ -46,7 +46,8 @@ mod util {
     mod stored_value;
 }
 
-const BASE_DB_SUBDIR: &str = "base";
+const CORE_DB_SUBDIR: &str = "core";
+const CELLS_DB_SUBDIR: &str = "cells";
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -56,9 +57,13 @@ pub struct CoreStorage {
 
 impl CoreStorage {
     pub async fn open(ctx: StorageContext, config: CoreStorageConfig) -> Result<Self> {
-        let db: CoreDb = ctx.open_preconfigured(BASE_DB_SUBDIR)?;
+        let db: CoreDb = ctx.open_preconfigured(CORE_DB_SUBDIR)?;
         db.normalize_version()?;
         db.apply_migrations().await?;
+
+        let cells_db: CellsDb = ctx.open_preconfigured(CELLS_DB_SUBDIR)?;
+        cells_db.normalize_version()?;
+        cells_db.apply_migrations().await?;
 
         let blocks_storage_config = BlockStorageConfig {
             blocks_cache: config.blocks_cache,
@@ -76,7 +81,7 @@ impl CoreStorage {
         .await?;
         let block_storage = Arc::new(block_storage);
         let shard_state_storage = ShardStateStorage::new(
-            db.clone(),
+            cells_db.clone(),
             block_handle_storage.clone(),
             block_storage.clone(),
             ctx.temp_files().clone(),
@@ -84,7 +89,7 @@ impl CoreStorage {
             config.drop_interval,
         )?;
         let persistent_state_storage = PersistentStateStorage::new(
-            db.clone(),
+            cells_db.clone(),
             ctx.files_dir(),
             block_handle_storage.clone(),
             block_storage.clone(),
@@ -99,6 +104,7 @@ impl CoreStorage {
             inner: Arc::new(Inner {
                 ctx,
                 db,
+                cells_db,
                 config,
                 block_handle_storage,
                 block_storage,
@@ -116,6 +122,10 @@ impl CoreStorage {
 
     pub fn db(&self) -> &CoreDb {
         &self.inner.db
+    }
+
+    pub fn cells_db(&self) -> &CellsDb {
+        &self.inner.cells_db
     }
 
     pub fn config(&self) -> &CoreStorageConfig {
@@ -154,6 +164,7 @@ impl CoreStorage {
 struct Inner {
     ctx: StorageContext,
     db: CoreDb,
+    cells_db: CellsDb,
     config: CoreStorageConfig,
 
     block_handle_storage: Arc<BlockHandleStorage>,
