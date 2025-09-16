@@ -43,7 +43,7 @@ where
         ranges: &[QueueShardBoundedRange],
     ) -> Result<QueueStatistics>;
 
-    /// Apply diff to the current queue uncommitted state (waiting for the operation to complete)
+    /// Apply diff by storing it to the queue uncommitted zone (waiting for the operation to complete)
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
@@ -53,8 +53,7 @@ where
         check_sequence: Option<DiffZone>,
     ) -> Result<()>;
 
-    /// Commit previously applied diff, saving changes to committed state (waiting for the operation to complete).
-    /// Return `None` if specified diff does not exist.
+    /// Commit previously applied diffs, updating commit pointers (waiting for the operation to complete)
     fn commit_diff(
         &self,
         mc_top_blocks: Vec<(BlockId, bool)>,
@@ -63,28 +62,34 @@ where
 
     fn clear_uncommitted_state(&self, top_shards: &[ShardIdent]) -> Result<()>;
 
-    /// Get diff for the given block from committed and uncommitted state
+    /// Get diff for the given block from committed and/or uncommitted zone
     fn get_diff_info(
         &self,
         shard_ident: &ShardIdent,
         seqno: u32,
         zone: DiffZone,
     ) -> Result<Option<DiffInfo>>;
-    /// Check if diff exists in the cache
+
+    /// Check if diff exists in state
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool>;
-    /// Get last committed mc block id
+
+    /// Get mc block id on which the queue was committed.
+    /// Returns None if queue was not committed
     fn get_last_commited_mc_block_id(&self) -> Result<Option<BlockId>>;
-    /// Get diffs tail len from uncommitted state and committed state
+
+    /// Get diffs tail len.
     /// `from` - start key for the tail. Diff with `max_message` == `from` will be excluded from the tail
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
-    /// Load separated diff statistics for the specified partitions and range
-    /// `range.from` = diff with `max_message == range.from` will be excluded in statistics
+
+    /// Load separated diff statistics for the specified partitions and range.
+    /// `range.from` = diff with `max_message == range.from` will be excluded in statistics;
     /// `range.to` = diff with `max_message == range.to` will be included in statistics
     fn load_separated_diff_statistics(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
         range: &QueueShardBoundedRange,
     ) -> Result<SeparatedStatisticsByPartitions>;
+
     /// Get partition router and statistics for the specified block
     fn get_router_and_statistics(
         &self,
