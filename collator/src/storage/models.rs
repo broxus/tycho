@@ -215,6 +215,7 @@ impl StoredValue for DiffInfoKey {
     }
 }
 
+#[derive(Debug)]
 pub struct QueueRange {
     pub shard_ident: ShardIdent,
     pub partition: QueuePartitionIdx,
