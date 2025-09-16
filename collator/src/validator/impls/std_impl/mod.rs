@@ -154,25 +154,33 @@ impl Validator for ValidatorStdImpl {
                 return Ok(());
             };
 
-            let (id, session) = if let Some(session_id) = session_id {
-                let Some(session) = shard_sessions.get(&session_id).cloned() else {
+            // try to find the session by the provided `session_id` first
+            // if not provided or not found, find the latest session that started before `until`
+            let session = session_id.and_then(|id| {
+                shard_sessions.get(&id).or_else(|| {
                     tracing::warn!(
                         target: tracing_targets::VALIDATOR,
-                        session_id = ?session_id,
+                        session_id = ?id,
                         shard = %until.shard,
-                        "validation session not found for explicit session_id"
-                    );
-                    return Ok(());
-                };
-                (session_id, session)
-            } else {
-                // Find the latest session that has started before the specified block.
-                let Some((id, session)) = shard_sessions.iter().rev().find_map(|(id, session)| {
-                    (session.start_block_seqno() <= until.seqno).then(|| (*id, session.clone()))
-                }) else {
-                    return Ok(());
-                };
-                (id, session)
+                        "validation session not found for explicit session_id" );
+                    None
+                })
+            });
+
+            let session = match session {
+                // Directly use the found session.
+                Some(session) => session.clone(),
+                // Otherwise, find the latest session that started before `until`.
+                None => {
+                    if let Some(s) = shard_sessions.iter().rev().find_map(|(_, session)| {
+                        (session.start_block_seqno() <= until.seqno).then(|| session.clone())
+                    }) {
+                        s
+                    } else {
+                        // No session found, nothing to cancel.
+                        return Ok(());
+                    }
+                }
             };
 
             // Remove all sessions before the found one.
@@ -185,7 +193,7 @@ impl Validator for ValidatorStdImpl {
 
             if until.seqno >= seqno_threshold {
                 while let Some(entry) = shard_sessions.first_entry() {
-                    if *entry.key() < id {
+                    if *entry.key() < session.id() {
                         // Fully cancel the session before removing it.
                         entry.get().cancel();
                         entry.shift_remove();
