@@ -1779,13 +1779,25 @@ where
         &self,
         last_collated_mc_block_id: Option<BlockId>,
     ) -> Result<Option<BlockId>> {
-        match self.get_top_mc_block_id_for_next_collation(last_collated_mc_block_id) {
-            // return last collated if it exists or last "synced to"
-            Some(block_id) => Ok(Some(block_id)),
-            // otherwise we just started and do not have stored last collated or "synced to"
-            // in this case we read last master block id comitted into queue
-            None => self.mq_adapter.get_last_commited_mc_block_id(),
-        }
+        let last_queue_comitted_on = self.mq_adapter.get_last_commited_mc_block_id()?;
+        let last_collated_or_synced_to =
+            self.get_top_mc_block_id_for_next_collation(last_collated_mc_block_id);
+
+        let mc_block_id = match (last_queue_comitted_on, last_collated_or_synced_to) {
+            (Some(last_queue_comitted_on), Some(last_collated_or_synced_to)) => {
+                // return last collated if it exists (or last "synced to")
+                // if above mc block on which the queue was committed
+                if last_collated_or_synced_to.seqno >= last_queue_comitted_on.seqno {
+                    Some(last_collated_or_synced_to)
+                } else {
+                    Some(last_queue_comitted_on)
+                }
+            }
+            (Some(mc_block_id), _) | (_, Some(mc_block_id)) => Some(mc_block_id),
+            _ => None,
+        };
+
+        Ok(mc_block_id)
     }
 
     /// Return last collated if it is ahead of last received and "synced to".
