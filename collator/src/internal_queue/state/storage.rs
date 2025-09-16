@@ -103,11 +103,13 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
         range: &QueueShardRange,
     ) -> Result<SeparatedStatisticsByPartitions>;
 
-    /// Get last committed mc block id
-    /// Returns None if no block was applied
+    /// Get mc block id on which the queue was committed.
+    /// Returns None if queue was not committed
     fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>>;
+
     /// Get diffs tail len from uncommitted state and committed state
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
+
     /// Get diff info by diff seqno
     fn get_diff_info(
         &self,
@@ -115,8 +117,10 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
         seqno: u32,
         zone: DiffZone,
     ) -> Result<Option<DiffInfo>>;
+
     /// Get last applied block seqno by shard ident from committed and uncommited zone
     fn get_last_applied_seqno(&self, shard_ident: &ShardIdent) -> Result<Option<u32>>;
+
     /// Get commit pointers
     fn get_commit_pointers(&self) -> Result<FastHashMap<ShardIdent, CommitPointerValue>>;
 

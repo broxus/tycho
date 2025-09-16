@@ -75,7 +75,8 @@ where
         ranges: &[QueueShardRange],
         for_shard_id: ShardIdent,
     ) -> Result<Box<dyn StateIterator<V>>>;
-    /// Add messages to state from `diff.messages` and add diff to the cache
+
+    /// Add messages to state from `diff.messages` and store diff info
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
@@ -84,20 +85,24 @@ where
         statistics: DiffStatistics,
         check_sequence: Option<DiffZone>,
     ) -> Result<()>;
+
     /// Commit diffs to the state and update GC
     fn commit_diff(
         &self,
         mc_top_blocks: &[(BlockId, bool)],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
-    /// Remove all data in uncommitted zone storage
+
+    /// Remove all data in uncommitted zone
     fn clear_uncommitted_state(
         &self,
         partitions: &FastHashSet<QueuePartitionIdx>,
         top_shards: &[ShardIdent],
     ) -> Result<()>;
-    /// Get diffs tail len from uncommitted state and committed state
+
+    /// Get diffs tail len
     fn get_diffs_tail_len(&self, shard_ident: &ShardIdent, from: &QueueKey) -> u32;
+
     /// Load statistics for the given range by accounts
     fn load_diff_statistics(
         &self,
@@ -105,17 +110,22 @@ where
         range: &QueueShardRange,
         result: &mut AccountStatistics,
     ) -> Result<()>;
-    /// Get diff for the given block from committed and uncommitted zones
+
+    /// Get diff info for the given block from committed and/or uncommitted zones
     fn get_diff_info(
         &self,
         shard_ident: &ShardIdent,
         seqno: u32,
         zone: DiffZone,
     ) -> Result<Option<DiffInfo>>;
-    /// Check if diff exists in the cache
+
+    /// Check if diff exists in state
     fn is_diff_exists(&self, block_id_short: &BlockIdShort) -> Result<bool>;
-    /// Get last committed mc block id
+
+    /// Get mc block id on which the queue was committed.
+    /// Returns None if queue was not committed
     fn get_last_committed_mc_block_id(&self) -> Result<Option<BlockId>>;
+
     /// Load separated diff statistics for the specified partitions and range
     fn load_separated_diff_statistics(
         &self,
@@ -218,44 +228,45 @@ where
             let last_applied_seqno = self.state.get_last_applied_seqno(&block_id_short.shard)?;
 
             if let Some(last_applied_seqno) = last_applied_seqno {
-                let diff: Option<DiffInfo> = internal_queue::queue::Queue::get_diff_info(
+                let last_applied_diff_opt = internal_queue::queue::Queue::get_diff_info(
                     self,
                     &block_id_short.shard,
                     last_applied_seqno,
                     zone,
                 )?;
 
-                if let Some(diff) = diff {
+                if let Some(last_applied_diff) = last_applied_diff_opt {
                     // Check if the diff is already applied
-                    if block_id_short.seqno <= diff.seqno {
+                    if block_id_short.seqno <= last_applied_diff.seqno {
                         return Ok(());
                     }
 
                     // Check if the diff is sequential
-                    if block_id_short.seqno != diff.seqno + 1 {
+                    if block_id_short.seqno != last_applied_diff.seqno + 1 {
                         bail!(
                             "Diff seqno is not sequential new seqno {}. last_applied_seqno {}",
                             block_id_short.seqno,
-                            diff.seqno
+                            last_applied_diff.seqno
                         );
                     }
                 }
             }
         }
 
-        // Check that applied diff is greater than committed pointer
-        let committed_pointer = self.state.get_commit_pointers()?;
-        if let Some(committed_pointer) = committed_pointer.get(&block_id_short.shard)
+        // Check that applied diff is above the commit pointer
+        let commit_pointers = self.state.get_commit_pointers()?;
+        if let Some(commit_pointer) = commit_pointers.get(&block_id_short.shard)
             && let Some(min_message) = diff.min_message()
-            && min_message <= &committed_pointer.queue_key
+            && min_message <= &commit_pointer.queue_key
         {
             bail!(
-                "Diff min_message is less than committed_pointer: block_id={}, diff_min_message={}, committed_pointer={}",
+                "Diff min_message is less than commit_pointer: block_id={}, diff_min_message={}, commit_pointer={}",
                 block_id_short.seqno,
                 min_message,
-                committed_pointer.queue_key
+                commit_pointer.queue_key
             );
         }
+
         self.state
             .write_diff(&block_id_short, &statistics, *hash, diff)?;
 
@@ -277,10 +288,9 @@ where
             .ok_or_else(|| anyhow!("Masterchain block not found in commit_diff"))?;
 
         // check current commit pointer. If it is greater than committing diff then skip
-        let committed_pointer = self.state.get_commit_pointers()?;
-        let mc_pointer = committed_pointer.get(&mc_block_id.shard);
-        if let Some(mc_pointer) = mc_pointer
-            && mc_pointer.seqno >= mc_block_id.seqno
+        let commit_pointers = self.state.get_commit_pointers()?;
+        if let Some(commit_pointer) = commit_pointers.get(&mc_block_id.shard)
+            && commit_pointer.seqno >= mc_block_id.seqno
         {
             tracing::debug!(
                 target: tracing_targets::MQ,
@@ -340,7 +350,7 @@ where
         // change pointer position
         self.state.commit(&commit_pointer, mc_block_id)?;
 
-        // run GC for each found partition in routers
+        // run GC for each found partition
         for (shard, gc_end_key) in gc_ranges {
             for partition in partitions {
                 self.gc.update_delete_until(*partition, shard, gc_end_key);
