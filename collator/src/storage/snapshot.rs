@@ -148,8 +148,8 @@ impl InternalQueueSnapshot {
         Ok(data)
     }
 
-    /// Collects statistics in a specified range
-    /// it's loading by diffs and adding to the result
+    /// Collects statistics in a specified range.
+    /// It loads by diffs and adds to the result
     pub fn collect_stats_in_range(
         &self,
         shard_ident: &ShardIdent,
@@ -284,6 +284,7 @@ impl InternalQueueSnapshot {
 
         Ok(result)
     }
+
     /// Reads all commit pointers from the `internal_message_commit_pointer` CF.
     /// Returns a map: `ShardIdent` -> last committed `QueueKey`.
     pub fn read_commit_pointers(
@@ -322,16 +323,16 @@ impl InternalQueueSnapshot {
 
             iter.next();
         }
+
         // Check for any iteration errors
         iter.status()?;
 
         Ok(result)
     }
 
-    /// Retrieves the queue version from the `internal_message_version` column family under the key `last_committed_mc_block_id`
     pub fn get_last_committed_mc_block_id(&self) -> anyhow::Result<Option<BlockId>> {
         let cf = self.db.internal_message_var.cf();
-        let data = self
+        let res = self
             .db
             .rocksdb()
             .get_cf(&cf, INT_QUEUE_LAST_COMMITTED_MC_BLOCK_ID_KEY)?;
