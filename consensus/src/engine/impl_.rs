@@ -89,7 +89,7 @@ impl Engine {
             &net.peer_schedule,
             &round_ctx,
         );
-        let committer_run = CommitterTask::new(committer, conf);
+        let committer_run = CommitterTask::new(committer, &net.moderator, conf);
 
         let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();
