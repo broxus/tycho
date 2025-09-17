@@ -4215,6 +4215,11 @@ impl StateNodeAdapter for TestStateNodeAdapter {
         res.ok_or_else(|| anyhow!("state not found for mc block {}", block_id.as_short_id()))
     }
 
+    async fn load_state_root(&self, ref_by_mc_seqno: u32, block_id: &BlockId) -> Result<Cell> {
+        let res = self.load_state(ref_by_mc_seqno, block_id).await;
+        res.map(|s| s.root_cell().clone())
+    }
+
     fn load_last_applied_mc_block_id(&self) -> Result<BlockId> {
         unreachable!()
     }
