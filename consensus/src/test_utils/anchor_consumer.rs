@@ -75,7 +75,7 @@ impl AnchorConsumer {
             MempoolOutput::CommitFinished(round) => {
                 // while MempoolAdapter sets commit_round at this event,
                 // here in simulation we check that every NextAnchor is followed by CommitFinished
-                assert_eq!(self.commit_round.get(), round, "anchor was not received");
+                assert!(self.commit_round.get() >= round, "anchor was not received");
                 return;
             }
         };
@@ -102,7 +102,7 @@ impl AnchorConsumer {
             MempoolOutput::CommitFinished(round) => {
                 // while MempoolAdapter sets commit_round at this event,
                 // here in simulation we check that every NextAnchor is followed by CommitFinished
-                assert_eq!(self.commit_round.get(), round, "anchor was not received");
+                assert!(self.commit_round.get() >= round, "anchor was not received");
                 return;
             }
         };

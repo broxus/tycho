@@ -12,7 +12,6 @@ RPC=$2
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 root_dir=$(cd "${script_dir}/../" && pwd -P)
-tycho_bin="${root_dir}/target/${profile}/tycho"
 
 if [ "$#" -lt 2 ]; then
     echo "Usage: $0 <N> <RPC>"
@@ -27,12 +26,14 @@ if [ ! -n "$RPC" ]; then
     RPC="http://localhost:8001/rpc"
 fi
 
+echo "rpc: ${RPC}"
 echo "script_dir: ${script_dir}"
 echo "root_dir: ${root_dir}"
-echo "tycho_bin: ${tycho_bin}"
-echo "rpc: ${RPC}"
 
 source "${script_dir}/common.sh"
+tycho_bin=$(/usr/bin/env bash "${script_dir}/build-node.sh")
+
+echo "tycho_bin: ${tycho_bin}"
 
 curr_config=$($tycho_bin tool bc get-param ${N} --rpc ${RPC})
 param_config=$(echo "${curr_config}" | jq ".param")
