@@ -91,7 +91,7 @@ impl Moderator {
     }
 
     /// Blocking sequential write to DB of batch of events
-    pub fn report_blocking(&self, batch: Vec<JournalEvent>, round_ctx: &RoundCtx) {
+    pub(crate) fn report_blocking(&self, batch: Vec<JournalEvent>, round_ctx: &RoundCtx) {
         self.0.report_blocking(batch, round_ctx);
     }
 
