@@ -27,10 +27,15 @@ pub enum ProduceError {
     NextRoundThreshold,
     #[error("node is not scheduled at this round")]
     NotScheduled,
-    #[error("included prev point # {} != broadcasted # {}", included.alt(), broadcasted.alt())]
+    #[error(
+        "Included prev point digest does not match broadcasted: # {} != {:?}. \
+         This may be OK after DB deletion: try to restart the node.",
+        included.alt(),
+        broadcasted.as_ref().map(|a| tracing::field::display(a.alt()))
+    )]
     PrevPointMismatch {
         included: Digest,
-        broadcasted: Digest,
+        broadcasted: Option<Digest>,
     },
 }
 
@@ -306,24 +311,25 @@ impl Producer {
         prev_info: Option<&PointInfo>,
         proven_vertex: Option<&Digest>,
     ) -> Result<(), ProduceError> {
+        const OR_REBUILD_TO_SKIP: &str =
+            "Or rebuild the node in `release` profile to skip produce point at this round.";
         match (prev_info.map(|prev| prev.digest()), proven_vertex) {
             (None, None) => Ok(()),
             (Some(a), Some(b)) if a == b => Ok(()),
-            (Some(&included), Some(&broadcasted)) => {
-                debug_assert_eq!(
-                    included, broadcasted,
-                    "included prev point digest does not match broadcasted one. \
-                     This may be OK after DB deletion: try to restart the node a couple of times \
-                     or rebuild the node in `release` profile to skip produce point at this round"
-                );
-                Err(ProduceError::PrevPointMismatch {
+            (Some(&included), broadcasted) => {
+                let err = ProduceError::PrevPointMismatch {
                     included,
-                    broadcasted,
-                })
+                    broadcasted: broadcasted.cloned(),
+                };
+                debug_assert!(false, "{err} {OR_REBUILD_TO_SKIP}");
+                Err(err)
             }
-            (included, broadcasted) => panic!(
-                "included prev point {included:?} does not match broadcasted {broadcasted:?}"
-            ),
+            (None, Some(broadcasted)) => {
+                panic!(
+                    "No point included after broadcasted # {}",
+                    broadcasted.alt()
+                );
+            }
         }
     }
 }
