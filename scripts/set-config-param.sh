@@ -13,7 +13,6 @@ KEY=$3
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 root_dir=$(cd "${script_dir}/../" && pwd -P)
-tycho_bin="${root_dir}/target/${profile}/tycho"
 
 if [ "$#" -lt 2 ]; then
     echo "Usage: $0 <N> <RPC>"
@@ -33,11 +32,10 @@ if [ ! -n "$KEY" ]; then
     KEY=$(jq -r .secret ${root_dir}/keys.json)
 fi
 
-echo "script_dir: ${script_dir}"
-echo "root_dir: ${root_dir}"
-echo "tycho_bin: ${tycho_bin}"
 echo "rpc: ${RPC}"
 echo "key: ${KEY}"
+echo "script_dir: ${script_dir}"
+echo "root_dir: ${root_dir}"
 
 param_config_file="${root_dir}/.temp/param-${N}.json"
 echo "config file: ${param_config_file}"
@@ -53,5 +51,8 @@ else
 fi
 
 source "${script_dir}/common.sh"
+tycho_bin=$(/usr/bin/env bash "${script_dir}/build-node.sh")
+
+echo "tycho_bin: ${tycho_bin}"
 
 $tycho_bin tool bc set-param --rpc ${RPC} --key ${KEY} ${N} "${param_config}"

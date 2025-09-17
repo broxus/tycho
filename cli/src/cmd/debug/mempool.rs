@@ -233,12 +233,19 @@ impl Mempool {
         };
 
         // Setup storage
-        let ctx = StorageContext::new(node_config.storage.clone())
-            .await
-            .context("failed to create storage context")?;
-        let storage = CoreStorage::open(ctx, node_config.core_storage.clone())
-            .await
-            .context("failed to create storage")?;
+
+        let storage = {
+            let ctx = StorageContext::new(node_config.storage.clone())
+                .await
+                .context("failed to create storage context")?;
+            let mut core_storage = node_config.core_storage.clone();
+            if std::mem::replace(&mut core_storage.blob_db.pre_create_cas_tree, false) {
+                tracing::warn!("Cas_tree will not be created, blob_db config ignored");
+            }
+            CoreStorage::open(ctx, core_storage)
+                .await
+                .context("failed to create storage")?
+        };
 
         let mut last_anchor_file = LastAnchorFile::reopen_in(&Self::file_storage(&storage)?)?;
         let last_anchor_opt = last_anchor_file.read_opt()?;
