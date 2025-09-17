@@ -31,16 +31,15 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
         .build("0.0.0.0:0", Router::builder().build())
         .expect("network with unused stub socket");
 
+    let merged_conf = crate::test_utils::default_test_config();
+    let conf = &merged_conf.conf;
+
     let private_overlay = PrivateOverlay::builder(*OverlayId::wrap(&[0; 32]))
-        .build(Responder::new(&Moderator::new_stub()));
+        .build(Responder::new(&Moderator::new_stub(), conf));
 
     let dispatcher = Dispatcher::new(&network, &private_overlay);
 
     let task_tracker = TaskTracker::default();
-
-    let merged_conf = crate::test_utils::default_test_config();
-    let conf = &merged_conf.conf;
-    let genesis = merged_conf.genesis();
 
     let engine_ctx = EngineCtx::new(conf.genesis_round, conf, &task_tracker);
 
@@ -57,6 +56,7 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
         conf,
     );
 
+    let genesis = merged_conf.genesis();
     (peer_schedule, stub_downloader, genesis, engine_ctx)
 }
 

@@ -46,7 +46,7 @@ impl EngineNetwork {
         merged_conf: &MempoolMergedConfig,
         init_peers: &InitPeers,
     ) -> Self {
-        let responder = Responder::new(&net_args.moderator);
+        let responder = Responder::new(&net_args.moderator, &merged_conf.conf);
 
         let private_overlay = PrivateOverlay::builder(merged_conf.overlay_id)
             .with_peer_resolver(net_args.peer_resolver.clone())

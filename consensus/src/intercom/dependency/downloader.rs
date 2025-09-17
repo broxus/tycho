@@ -337,6 +337,10 @@ impl<T: DownloadType> DownloadTask<T> {
             match result {
                 Ok(PointByIdResponse::Defined(point_result)) => Some(point_result),
                 Ok(PointByIdResponse::DefinedNone) => None,
+                Ok(PointByIdResponse::Banned) => {
+                    tracing::error!(peer = display(peer_id.alt()), "we are banned");
+                    None
+                }
                 Ok(PointByIdResponse::TryLater) => {
                     let status = self.undone_peers.get_mut(peer_id).unwrap_or_else(|| {
                         panic!("Coding error: peer not in map {}", peer_id.alt())

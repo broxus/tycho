@@ -75,6 +75,7 @@ link.through.includes   x:int256 = link.Through;
 intercom.pointByIdResponse.defined          x:bytes         = intercom.PointByIdResponse;
 intercom.pointByIdResponse.definedNone                      = intercom.PointByIdResponse;
 intercom.pointByIdResponse.tryLater                         = intercom.PointByIdResponse;
+intercom.pointByIdResponse.banned                           = intercom.PointByIdResponse;
 
 /*
 * Representation of SignatureResponse
@@ -82,6 +83,7 @@ intercom.pointByIdResponse.tryLater                         = intercom.PointById
 intercom.signatureResponse.signature        x:bytes         = intercom.SignatureResponse;
 intercom.signatureResponse.noPoint                          = intercom.SignatureResponse;
 intercom.signatureResponse.tryLater                         = intercom.SignatureResponse;
+intercom.signatureResponse.banned                           = intercom.SignatureResponse;
 intercom.signatureResponse.rejected                         = intercom.SignatureResponse;
 
 /*
@@ -95,7 +97,9 @@ intercom.signatureRejectedReason.unknownPeer                = intercom.Signature
 /*
 * Representation of BroadcastResponse
 */
-intercom.broadcastResponse                                  = intercom.BroadcastResponse;
+intercom.broadcastResponse.ok                               = intercom.BroadcastResponse;
+intercom.broadcastResponse.tryLater                         = intercom.BroadcastResponse;
+intercom.broadcastResponse.banned                           = intercom.BroadcastResponse;
 
 /*
 * Representation of generic query wrapper

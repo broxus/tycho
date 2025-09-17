@@ -8,23 +8,28 @@ use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, RoundCtx};
+use crate::engine::MempoolConfig;
 use crate::intercom::broadcast::Signer;
+use crate::intercom::core::bcast_rate_limit::BcastRateLimit;
+use crate::intercom::core::upload_rate_limit::UploadRateLimit;
 use crate::intercom::core::{
-    PointByIdResponse, QueryRequest, QueryRequestRaw, QueryRequestTag, QueryResponse,
-    SignatureResponse,
+    BroadcastResponse, PointByIdResponse, QueryRequest, QueryRequestRaw, QueryRequestTag,
+    QueryResponse, SignatureResponse,
 };
 use crate::intercom::{BroadcastFilter, Downloader, Uploader};
-use crate::moderator::Moderator;
+use crate::moderator::{EventData, Moderator};
 use crate::storage::MempoolStore;
 
 #[derive(Clone)]
 pub struct Responder(Arc<ResponderInner>);
 
 impl Responder {
-    pub fn new(moderator: &Moderator) -> Self {
+    pub fn new(moderator: &Moderator, conf: &MempoolConfig) -> Self {
         Self(Arc::new(ResponderInner {
             current: ArcSwapOption::empty(),
             moderator: moderator.clone(),
+            bcast_rate_limit: BcastRateLimit::new(conf),
+            upload_rate_limit: UploadRateLimit::new(conf),
             #[cfg(feature = "mock-feedback")]
             top_known_anchor: std::sync::OnceLock::new(),
         }))
@@ -37,6 +42,8 @@ impl Responder {
 struct ResponderInner {
     current: ArcSwapOption<ResponderCurrent>,
     moderator: Moderator,
+    bcast_rate_limit: BcastRateLimit,
+    upload_rate_limit: UploadRateLimit,
     #[cfg(feature = "mock-feedback")]
     top_known_anchor: std::sync::OnceLock<
         crate::engine::round_watch::RoundWatch<crate::engine::round_watch::TopKnownAnchor>,
@@ -138,13 +145,38 @@ impl Responder {
             }
         };
 
+        let peer_id = &req.metadata.peer_id;
         let raw_query_tag = raw_query.tag;
+
+        let _upload_permit = match raw_query_tag {
+            QueryRequestTag::Broadcast if !(self.0.bcast_rate_limit).is_broadcast_ok(peer_id) => {
+                (self.0.moderator).send_report(EventData::BroadcastLimitReached(*peer_id));
+                let response = QueryResponse::broadcast(task_start, BroadcastResponse::Banned);
+                return Some(response);
+            }
+            QueryRequestTag::Signature if !(self.0.bcast_rate_limit).is_sig_query_ok(peer_id) => {
+                (self.0.moderator).send_report(EventData::SigRequestLimitReached(*peer_id));
+                let response = QueryResponse::signature(task_start, SignatureResponse::Banned);
+                return Some(response);
+            }
+            QueryRequestTag::PointById => match self.0.upload_rate_limit.get(peer_id) {
+                Some(permit) => Some(permit),
+                None => {
+                    (self.0.moderator).send_report(EventData::UploadLimitReached(*peer_id));
+                    let response =
+                        QueryResponse::point_by_id::<&[u8]>(task_start, PointByIdResponse::Banned);
+                    return Some(response);
+                }
+            },
+            QueryRequestTag::Broadcast | QueryRequestTag::Signature => None,
+        };
+
         let query = match raw_query.parse().await {
             Ok(query) => query,
             Err(error) => {
                 tracing::error!(
                     tag = ?raw_query_tag,
-                    peer_id = display(req.metadata.peer_id.alt()),
+                    peer_id = display(peer_id.alt()),
                     %error,
                     "bad query",
                 );
@@ -156,13 +188,13 @@ impl Responder {
             return Some(match raw_query_tag {
                 QueryRequestTag::Broadcast => {
                     // do nothing: sender has retry loop via signature request
-                    QueryResponse::broadcast(task_start)
-                }
-                QueryRequestTag::PointById => {
-                    QueryResponse::point_by_id::<&[u8]>(task_start, PointByIdResponse::TryLater)
+                    QueryResponse::broadcast(task_start, BroadcastResponse::TryLater)
                 }
                 QueryRequestTag::Signature => {
                     QueryResponse::signature(task_start, SignatureResponse::TryLater)
+                }
+                QueryRequestTag::PointById => {
+                    QueryResponse::point_by_id::<&[u8]>(task_start, PointByIdResponse::TryLater)
                 }
             });
         };
@@ -170,35 +202,35 @@ impl Responder {
         Some(match query {
             QueryRequest::Broadcast(point) => {
                 inner.broadcast_filter.add(
-                    &req.metadata.peer_id,
+                    peer_id,
                     &point,
                     &inner.head,
                     &inner.downloader,
                     &inner.store,
                     &inner.round_ctx,
                 );
-                QueryResponse::broadcast(task_start)
+                QueryResponse::broadcast(task_start, BroadcastResponse::Ok)
             }
+            QueryRequest::Signature(round) => QueryResponse::signature(
+                task_start,
+                Signer::signature_response(
+                    peer_id,
+                    round,
+                    &inner.head,
+                    &inner.broadcast_filter,
+                    &inner.round_ctx,
+                ),
+            ),
             QueryRequest::PointById(point_id) => QueryResponse::point_by_id(
                 task_start,
                 Uploader::find(
-                    &req.metadata.peer_id,
+                    peer_id,
                     point_id,
                     &inner.head,
                     &inner.store,
                     &inner.round_ctx,
                 )
                 .await,
-            ),
-            QueryRequest::Signature(round) => QueryResponse::signature(
-                task_start,
-                Signer::signature_response(
-                    &req.metadata.peer_id,
-                    round,
-                    &inner.head,
-                    &inner.broadcast_filter,
-                    &inner.round_ctx,
-                ),
             ),
         })
     }

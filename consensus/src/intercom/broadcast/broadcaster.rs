@@ -269,12 +269,13 @@ impl Broadcaster {
                     "failed to send broadcast to"
                 );
             }
-            Ok(BroadcastResponse) => {
+            Ok(response) => {
                 // self.sig_peers.insert(*peer_id); // give some time to validate
                 self.request_signature(true, peer_id); // fast nodes may have delivered it as a dependency
                 tracing::trace!(
                     parent: self.ctx.span(),
                     peer = display(peer_id.alt()),
+                    response = debug(response),
                     "finished broadcast to"
                 );
             }
@@ -334,6 +335,11 @@ impl Broadcaster {
                         }
                     }
                     SignatureResponse::TryLater => _ = self.sig_peers.insert(*peer_id),
+                    SignatureResponse::Banned => {
+                        if self.signers.contains(peer_id) {
+                            self.rejections.insert(*peer_id);
+                        }
+                    }
                     SignatureResponse::Rejected(_) => {
                         if self.signers.contains(peer_id) {
                             self.rejections.insert(*peer_id);
