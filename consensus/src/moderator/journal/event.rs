@@ -8,6 +8,7 @@ use crate::effects::AltFormat;
 use crate::intercom::QueryRequestTag;
 use crate::models::{
     Digest, IllFormedPoint, InvalidPoint, Point, PointId, PointIntegrityError, PointKey, Round,
+    TransInvalidPoint,
 };
 use crate::moderator::EventTag;
 use crate::moderator::journal::item::JournalAction;
@@ -38,6 +39,7 @@ pub enum JournalEvent {
     },
     IllFormed(IllFormedPoint),
     Invalid(InvalidPoint),
+    TransInvalid(TransInvalidPoint),
 }
 
 impl JournalEvent {
@@ -52,7 +54,7 @@ impl JournalEvent {
             Self::Equivocated(_, _, _) => EventTag::ForkedPoint,
             Self::EvidenceNoInclusion { .. } => EventTag::EvidenceNoInclusion,
             Self::IllFormed(_) => EventTag::IllFormedPoint,
-            Self::Invalid(_) => EventTag::InvalidPoint,
+            Self::Invalid(_) | Self::TransInvalid(_) => EventTag::InvalidPoint,
         }
     }
 
@@ -70,12 +72,13 @@ impl JournalEvent {
             Self::EvidenceNoInclusion { signer, .. } => signer,
             Self::IllFormed(ill) => &ill.id().author,
             Self::Invalid(invalid) => invalid.info().author(),
+            Self::TransInvalid(invalid) => invalid.info().author(),
         }
     }
 
     pub fn action(&self) -> JournalAction {
         #[allow(clippy::match_same_arms, reason = "common order")]
-        match self {
+        let invalid_reason = match self {
             Self::UnknownQuery(_, _)
             | Self::BadRequest(_, _, _)
             | Self::BadResponse(_, _, _)
@@ -84,9 +87,10 @@ impl JournalEvent {
             | Self::SenderNotAuthor(_, _)
             | Self::ReplacedPoint { .. }
             | Self::Equivocated(_, _, _)
-            | Self::EvidenceNoInclusion { .. } => JournalAction::StoreAndCheckBan,
+            | Self::EvidenceNoInclusion { .. } => return JournalAction::StoreAndCheckBan,
             Self::IllFormed(ill) => match ill.reason() {
-                IllFormedReason::AfterLoadFromDb => JournalAction::Ignore, // already (re)stored
+                // already (re)stored
+                IllFormedReason::AfterLoadFromDb => return JournalAction::Ignore,
                 IllFormedReason::Structure(_)
                 | IllFormedReason::BeforeGenesis
                 | IllFormedReason::TooLargePayload(_)
@@ -99,39 +103,42 @@ impl JournalEvent {
                 | IllFormedReason::SelfAnchorStage(_)
                 | IllFormedReason::ChainedProofMustUse(_)
                 | IllFormedReason::SelfLink
-                | IllFormedReason::AnchorLink(_) => JournalAction::StoreAndCheckBan,
+                | IllFormedReason::AnchorLink(_) => return JournalAction::StoreAndCheckBan,
             },
-            Self::Invalid(invalid) => match invalid.reason() {
-                InvalidReason::AfterLoadFromDb { .. } => JournalAction::Ignore, // (re)stored
-                InvalidReason::NoRoundInDag(_) | InvalidReason::DependencyRoundDropped => {
-                    JournalAction::Ignore
-                }
-                InvalidReason::TimeNotGreaterThanInPrevPoint(_)
-                | InvalidReason::AnchorProofDoesntInheritAnchorTime(_)
-                | InvalidReason::AnchorTimeNotInheritedFromProof(_)
-                | InvalidReason::MustHaveReferencedPrevPoint(_)
-                | InvalidReason::MustHaveSkippedRound(_)
-                | InvalidReason::DependencyTimeTooFarInFuture(_)
-                | InvalidReason::NewerAnchorInDependency(_)
-                | InvalidReason::AnchorLinkBadPath(_)
-                | InvalidReason::ChainedProofBadPath(_)
-                | InvalidReason::NewerProofToChainInDependency(_)
-                | InvalidReason::DepIllFormed(_)
-                | InvalidReason::DepNotFound(_) => JournalAction::StoreAndCheckBan,
-            },
+            Self::Invalid(invalid) => invalid.reason(),
+            JournalEvent::TransInvalid(invalid) => &invalid.root_cause().reason,
+        };
+        match invalid_reason {
+            InvalidReason::AfterLoadFromDb { .. } => JournalAction::Ignore, // (re)stored
+            InvalidReason::NoRoundInDag(_) | InvalidReason::DependencyRoundDropped => {
+                JournalAction::Ignore
+            }
+            InvalidReason::TimeNotGreaterThanInPrevPoint(_)
+            | InvalidReason::AnchorProofDoesntInheritAnchorTime(_)
+            | InvalidReason::AnchorTimeNotInheritedFromProof(_)
+            | InvalidReason::MustHaveReferencedPrevPoint(_)
+            | InvalidReason::MustHaveSkippedRound(_)
+            | InvalidReason::DependencyTimeTooFarInFuture(_)
+            | InvalidReason::NewerAnchorInDependency(_)
+            | InvalidReason::AnchorLinkBadPath(_)
+            | InvalidReason::ChainedProofBadPath(_)
+            | InvalidReason::NewerProofToChainInDependency(_)
+            | InvalidReason::DepIllFormed(_)
+            | InvalidReason::DepNotFound(_) => JournalAction::StoreAndCheckBan,
         }
     }
 
     pub fn fill_points<'a>(&'a self, _points: &mut Vec<&'a Point>, point_keys: &mut Vec<PointKey>) {
         #[allow(clippy::match_same_arms, reason = "common order")]
-        match self {
+        let (info, invalid_reason) = match self {
             Self::UnknownQuery(_, _)
             | Self::BadRequest(_, _, _)
             | Self::BadResponse(_, _, _)
             | Self::QueryLimitReached(_, _)
-            | Self::PointIntegrityError(_, _, _) => {}
+            | Self::PointIntegrityError(_, _, _) => return,
             Self::SenderNotAuthor(_, point_id) => {
                 point_keys.push(point_id.key());
+                return;
             }
             Self::ReplacedPoint {
                 requested,
@@ -140,25 +147,32 @@ impl JournalEvent {
             } => {
                 point_keys.push(requested.key());
                 point_keys.push(received.key());
+                return;
             }
             Self::Equivocated(_, round, digests) => {
                 for digest in digests {
                     point_keys.push(PointKey::new(*round, *digest));
                 }
+                return;
             }
             Self::EvidenceNoInclusion { blamed, proofs, .. } => {
                 for point_id in blamed.iter().chain(proofs) {
                     point_keys.push(point_id.key());
                 }
+                return;
             }
             Self::IllFormed(ill) => {
                 point_keys.push(ill.id().key());
+                return;
             }
-            Self::Invalid(invalid) => match invalid.reason() {
+            Self::Invalid(invalid) => (invalid.info(), invalid.reason()),
+            Self::TransInvalid(invalid) => (invalid.info(), &invalid.root_cause().reason),
+        };
+        match invalid_reason {
                 InvalidReason::AfterLoadFromDb { .. } // point already stored, but we reference it
                 // for self-diagnostics only, because this round was successfully commited
                 | InvalidReason::NoRoundInDag(_) | InvalidReason::DependencyRoundDropped => {
-                    point_keys.push(invalid.info().key());
+                    point_keys.push(info.key());
                 }
                 InvalidReason::TimeNotGreaterThanInPrevPoint(point_id)
                 | InvalidReason::AnchorProofDoesntInheritAnchorTime(point_id)
@@ -172,10 +186,9 @@ impl JournalEvent {
                 | InvalidReason::NewerProofToChainInDependency(point_id)
                 | InvalidReason::DepIllFormed((point_id, _))
                 | InvalidReason::DepNotFound(point_id) => {
-                    point_keys.push(invalid.info().key());
+                    point_keys.push(info.key());
                     point_keys.push(point_id.key());
                 }
-            },
         }
     }
 }
@@ -221,6 +234,9 @@ impl Display for JournalEvent {
             }
             Self::Invalid(invalid) => {
                 write!(f, "invalid: {}", invalid.reason())
+            }
+            Self::TransInvalid(invalid) => {
+                write!(f, "transitional {}", invalid.root_cause())
             }
         }
     }
