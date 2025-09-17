@@ -1,25 +1,47 @@
 use std::mem;
 use std::sync::atomic;
 
-use ahash::{HashMapExt, HashSetExt};
+use ahash::HashMapExt;
 use futures_util::FutureExt;
 use tycho_network::PeerId;
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::FastHashMap;
 
 use crate::dag::DagRound;
 use crate::effects::{AltFormat, TaskResult};
-use crate::models::{DagPoint, Digest, MempoolPeerCounters, MempoolPeerStats, PointInfo, Round};
+use crate::models::{
+    DagPoint, Digest, IllFormedPoint, InvalidPoint, MempoolPeerCounters, MempoolPeerStats, PointId,
+    PointInfo, Round,
+};
+use crate::moderator::JournalEvent;
 
 type RoundDataMap = FastHashMap<PeerId, PeerRoundData>;
 struct PeerRoundData {
     /// at this round this peer created points without issues
     authored: Vec<PointInfo>,
-    /// at this round this peer made signatures for other's digest and peer id
-    signed: FastHashSet<Digest>,
+    /// at this round this peer made signatures for these digests which are contained in proofs
+    signed_proofs: FastHashMap<Digest, PointInfo>,
+}
+
+struct Fork {
+    author: PeerId,
+    round: Round,
+    items: Vec<Digest>,
+}
+
+struct NotReferenced {
+    signer: PeerId,
+    /// points by the signer that miss reference
+    blamed: Vec<PointId>,
+    /// neighbour's proofs with evidences that signer signed but didn't reference their points
+    proofs: Vec<PointId>,
 }
 
 pub struct RoundInspector {
     stats: FastHashMap<PeerId, MempoolPeerStats>,
+    invalid: Vec<InvalidPoint>,
+    ill_formed: Vec<IllFormedPoint>,
+    forks: Vec<Fork>,
+    not_referenced: Vec<NotReferenced>,
     last_round: Round,
     last_round_data_map: RoundDataMap,
 }
@@ -27,6 +49,10 @@ impl Default for RoundInspector {
     fn default() -> Self {
         Self {
             stats: FastHashMap::default(),
+            invalid: Vec::new(),
+            ill_formed: Vec::new(),
+            forks: Vec::new(),
+            not_referenced: Vec::new(),
             last_round: Round::BOTTOM,
             last_round_data_map: FastHashMap::default(),
         }
@@ -41,6 +67,30 @@ impl RoundInspector {
             self.stats.capacity()
         };
         mem::replace(&mut self.stats, FastHashMap::with_capacity(capacity))
+    }
+
+    pub fn take_events(&mut self) -> Vec<JournalEvent> {
+        let invalid = mem::take(&mut self.invalid)
+            .into_iter()
+            .map(JournalEvent::Invalid);
+        let ill_formed = mem::take(&mut self.ill_formed)
+            .into_iter()
+            .map(JournalEvent::IllFormed);
+        let forks = mem::take(&mut self.forks)
+            .into_iter()
+            .map(|fork| JournalEvent::Equivocated(fork.author, fork.round, fork.items));
+        let not_referenced = mem::take(&mut self.not_referenced).into_iter().map(|nr| {
+            JournalEvent::EvidenceNoInclusion {
+                signer: nr.signer,
+                blamed: nr.blamed,
+                proofs: nr.proofs,
+            }
+        });
+        invalid
+            .chain(ill_formed)
+            .chain(forks)
+            .chain(not_referenced)
+            .collect()
     }
 
     pub fn inspect(&mut self, r_0: &DagRound) -> TaskResult<()> {
@@ -70,12 +120,14 @@ impl RoundInspector {
                         authored_versions += 1;
                         if !invalid.is_certified() && !invalid.reason().no_dag_round() {
                             author_counters.invalid_points += 1;
+                            self.invalid.push(invalid.clone());
                         }
                     }
                     DagPoint::IllFormed(ill) => {
                         authored_versions += 1;
                         if !ill.is_certified() {
                             author_counters.ill_formed_points += 1;
+                            self.ill_formed.push(ill.clone());
                         }
                     }
                     DagPoint::NotFound(_) => {}
@@ -86,6 +138,17 @@ impl RoundInspector {
                 author_counters.skipped_rounds += 1;
             } else {
                 author_counters.equivocated += authored_versions - 1;
+                if author_counters.equivocated > 0 {
+                    let forks = authored.iter().filter_map(|version| match version {
+                        DagPoint::NotFound(_) => None,
+                        found => Some(*found.digest()),
+                    });
+                    self.forks.push(Fork {
+                        author: *author,
+                        round: r_0.round(),
+                        items: forks.collect(),
+                    });
+                }
             }
 
             if let Some((leader, used)) = leader_used
@@ -125,7 +188,7 @@ impl RoundInspector {
                 (self.last_round_data_map.iter()).flat_map(|(_, a)| &a.authored),
             );
             for (signer, signer_prev_round) in prev_last_round_data_map {
-                if signer_prev_round.signed.is_empty() {
+                if signer_prev_round.signed_proofs.is_empty() {
                     // peer either signed nothing at prev round or referenced all as includes
                     continue;
                 }
@@ -147,7 +210,21 @@ impl RoundInspector {
                     continue;
                 };
                 // signer created points at both rounds, but skipped somme points it signed
-                signer_stats.add_references_skipped(signer_prev_round.signed.len() as u32);
+                signer_stats.add_references_skipped(signer_prev_round.signed_proofs.len() as u32);
+                self.not_referenced.push(NotReferenced {
+                    signer,
+                    blamed: signer_prev_round
+                        .authored
+                        .iter()
+                        .chain(signer_curr_round_authored)
+                        .map(|info| info.id())
+                        .collect(),
+                    proofs: signer_prev_round
+                        .signed_proofs
+                        .into_values()
+                        .map(|proof| proof.id())
+                        .collect(),
+                });
             }
         }
 
@@ -188,9 +265,11 @@ impl RoundInspector {
                             .entry(*signer)
                             .or_insert_with(|| PeerRoundData {
                                 authored: Vec::with_capacity(1),
-                                signed: FastHashSet::with_capacity(r_0_peers),
+                                signed_proofs: FastHashMap::with_capacity(r_0_peers),
                             });
-                    signer_data.signed.insert(*signed_digest);
+                    signer_data
+                        .signed_proofs
+                        .insert(*signed_digest, proof.clone());
                 }
             }
         }
@@ -201,11 +280,11 @@ impl RoundInspector {
                         .entry(*authored.author())
                         .or_insert_with(|| PeerRoundData {
                             authored: Vec::with_capacity(1),
-                            signed: FastHashSet::with_capacity(0),
+                            signed_proofs: FastHashMap::with_capacity(0),
                         });
                 author_data.authored.push(authored.clone());
                 for included_digest in authored.includes().values() {
-                    author_data.signed.remove(included_digest);
+                    author_data.signed_proofs.remove(included_digest);
                 }
             }
         }
@@ -220,10 +299,10 @@ impl RoundInspector {
         for curr_authored in curr_points {
             if !curr_authored.witness().is_empty()
                 && let Some(author_data) = prev_must_reference.get_mut(curr_authored.author())
-                && !author_data.signed.is_empty()
+                && !author_data.signed_proofs.is_empty()
             {
                 for witnessed_digest in curr_authored.witness().values() {
-                    author_data.signed.remove(witnessed_digest);
+                    author_data.signed_proofs.remove(witnessed_digest);
                 }
             }
         }

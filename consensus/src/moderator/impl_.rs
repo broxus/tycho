@@ -93,7 +93,7 @@ impl Moderator {
         self.0.set_peer_schedule(peer_schedule);
     }
 
-    pub fn report(&self, data: JournalEvent) {
+    pub(crate) fn report(&self, data: JournalEvent) {
         self.0.report(data);
     }
 
