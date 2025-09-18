@@ -9,8 +9,8 @@ use rayon::prelude::*;
 use tycho_executor::{Executor, ExecutorInspector, ExecutorParams, ParsedConfig, TxError};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::*;
-use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use super::messages_buffer::MessageGroup;
 use super::types::{
@@ -126,7 +126,7 @@ impl MessagesExecutor {
         let params = self.params.clone();
 
         // collect touched account ids for accounts with executed transactions only
-        let mut touched_account_ids: Vec<HashBytes> = Vec::new();
+        let mut touched_account_ids = FastHashSet::default();
 
         let accounts_cache = Arc::new(&self.accounts_cache);
         let result = msg_group
@@ -228,7 +228,7 @@ impl MessagesExecutor {
         group_max_vert_size: &mut usize,
         group_gas: &mut u128,
         items: &mut Vec<ExecutedTickItem>,
-        touched_account_ids: &mut Vec<HashBytes>,
+        touched_account_ids: &mut FastHashSet<HashBytes>,
         executed: ExecutedTransactions,
     ) -> Result<()> {
         *ext_msgs_skipped += executed.ext_msgs_skipped;
@@ -266,7 +266,7 @@ impl MessagesExecutor {
 
         let account_addr = executed.account_state.account_addr;
         if has_executed {
-            touched_account_ids.push(account_addr);
+            touched_account_ids.insert(account_addr);
         }
 
         self.accounts_cache
@@ -431,7 +431,7 @@ pub struct ExecutedGroup {
     pub items: Vec<ExecutedTickItem>,
     pub ext_msgs_error_count: u64,
     pub ext_msgs_skipped: u64,
-    pub touched_account_ids: Vec<HashBytes>,
+    pub touched_account_ids: FastHashSet<HashBytes>,
 }
 
 pub struct ExecutedTickItem {
