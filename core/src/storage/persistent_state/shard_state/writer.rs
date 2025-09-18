@@ -340,7 +340,7 @@ impl<'a> ShardStateWriter<'a> {
                     }
 
                     iteration += 1;
-                    if iteration % 100000 == 0 {
+                    if iteration.is_multiple_of(100000) {
                         tracing::info!(iteration);
                     }
 

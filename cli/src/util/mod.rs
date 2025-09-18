@@ -163,7 +163,7 @@ impl std::fmt::Display for FpTokens {
         int.fmt(f)?;
         if frac > 0 {
             let mut len = 9usize;
-            while frac % 10 == 0 && frac > 0 {
+            while frac.is_multiple_of(10) && frac > 0 {
                 len -= 1;
                 frac /= 10;
             }

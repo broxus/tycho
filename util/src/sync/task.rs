@@ -52,7 +52,7 @@ impl DebounceCancellationFlag {
     pub fn check(&mut self) -> bool {
         let mut cancelled = false;
 
-        if self.counter % self.debounce.get() == 0 {
+        if self.counter.is_multiple_of(self.debounce.get()) {
             self.counter = 0;
             cancelled |= self.inner.check();
         }

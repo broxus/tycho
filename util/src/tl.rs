@@ -136,7 +136,7 @@ impl<const MAX_SIZE: usize> BigBytesRef<MAX_SIZE> {
         let len = bytes.len();
         packet.write_u32(len as u32);
         packet.write_raw_slice(bytes);
-        if len % 4 != 0 {
+        if !len.is_multiple_of(4) {
             packet.write_raw_slice(&PADDING[0..4 - len % 4]);
         }
     }

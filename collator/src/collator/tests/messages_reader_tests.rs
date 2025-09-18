@@ -661,7 +661,11 @@ where
         )?;
 
         // collate master every 3 shard blocks
-        if self.sc_collator.block_seqno % collate_master_every == 0 {
+        if self
+            .sc_collator
+            .block_seqno
+            .is_multiple_of(collate_master_every)
+        {
             let all_shards_processed_to = self.get_all_shards_processed_to_by_partitions();
 
             let TestCollateResult {
