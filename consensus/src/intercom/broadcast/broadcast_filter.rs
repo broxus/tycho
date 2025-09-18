@@ -1,12 +1,11 @@
-use std::collections::{VecDeque, hash_map};
+use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 use std::{cmp, mem};
 
-use dashmap::mapref::entry::Entry as DashMapEntry;
 use tycho_network::PeerId;
+use tycho_util::FastDashMap;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::dag::{DagHead, DagRound, IllFormedReason, Verifier, VerifyError, VerifyFailReason};
 use crate::dyn_event;
@@ -62,7 +61,10 @@ impl BroadcastFilter {
         let _task_time = HistogramGuard::begin("tycho_mempool_bf_has_point_time");
         match self.inner.by_round.get(&round) {
             None => false,
-            Some(round_item) => round_item.value().by_author.contains_key(sender),
+            Some(round_item) => match round_item.cached.as_ref() {
+                Some(cached) => cached.by_author.contains_key(sender),
+                None => false,
+            },
         }
     }
 
@@ -77,24 +79,30 @@ impl BroadcastFilter {
         self.inner.flush_to_dag(head, downloader, store, round_ctx);
     }
 }
-// TODO
-//   Current DashMapLock<Round>->PeerId->items map has (potentially) higher contention than
-//   DashMapLock<PeerId>->Round->items map. Then 1/3F+1 per-round counter may be moved to separate
-//   read-optimised map RWLock<Round>->AtomicUsize which entries are removed when threshold is reached.
-//   I.e. access path will be RWLock<Round>->DashMapLock<PeerId>->ByRound->items.
-//   Signer's search for point @ DagHead.next() will stay the same: first check in BF, then in DAG.
+
 struct BroadcastFilterInner {
     peer_schedule: PeerSchedule,
     consensus_round: RoundWatch<Consensus>,
-    // very much like DAG structure, but without dependency check;
-    // just to determine reliably that consensus advanced without current node
+    /// very much like DAG structure, but without dependency check;
+    /// just to determine reliably that consensus advanced without current node;
     by_round: FastDashMap<Round, ByRoundItem>,
 }
+
+/// Both fields cannot be `None` - they are changed under dash map lock
 struct ByRoundItem {
-    peer_count: PeerCount,
-    by_author: MapByAuthor,
+    /// values are initialized with `Some` that are taken during cleanup,
+    /// because empty [`dashmap::DashMap`] allocates
+    cached: Option<Cached>,
+    /// when equal or greater round exists, points are send to it directly
+    dag_round: Option<DagRound>,
 }
-type MapByAuthor = FastHashMap<PeerId, ByAuthor>;
+
+struct Cached {
+    peer_count: PeerCount,
+    /// By-round lock is mostly read lock, so this provides write locks
+    by_author: FastDashMap<PeerId, ByAuthor>,
+}
+
 #[derive(Clone)]
 struct ByAuthor {
     item: ByAuthorItem,
@@ -204,16 +212,26 @@ impl BroadcastFilterInner {
                     }
                 } else {
                     // note: entry lock guard is passed into its ref which cannot remove entry
-                    match self.by_round.entry(round) {
-                        DashMapEntry::Occupied(occupied) => MapSearch::Entry(occupied.into_ref()),
-                        DashMapEntry::Vacant(vacant) => {
-                            // try to create new future round
+                    match self.by_round.get(&round) {
+                        Some(round_item) => MapSearch::Entry(round_item),
+                        None => {
+                            // try to create new future round: take write lock later, v_set may be uninit
                             let v_set_len = self.peer_schedule.atomic().peers_for(round).len();
                             match PeerCount::try_from(v_set_len) {
-                                Ok(peer_count) => MapSearch::Entry(vacant.insert(ByRoundItem {
-                                    peer_count,
-                                    by_author: Default::default(),
-                                })),
+                                Ok(peer_count) => {
+                                    let entry =
+                                        self.by_round.entry(round).or_insert_with(|| ByRoundItem {
+                                            cached: Some(Cached {
+                                                peer_count,
+                                                by_author: FastDashMap::with_capacity_and_hasher(
+                                                    peer_count.full(),
+                                                    Default::default(),
+                                                ),
+                                            }),
+                                            dag_round: None,
+                                        });
+                                    MapSearch::Entry(entry.downgrade())
+                                }
                                 Err(_) => {
                                     // v_set is not initialized, nothing to do.
                                     // actually such point cannot be successfully verified,
@@ -225,37 +243,62 @@ impl BroadcastFilterInner {
                     }
                 };
                 match map_search {
-                    MapSearch::Entry(mut entry_ref) => {
-                        let round_item = entry_ref.value_mut();
-                        // ban the author, if we detect equivocation now; we won't be able to prove it
-                        // if some signatures are invalid (it's another reason for a local ban)
-                        let (duplicates, equivocation) = match round_item.by_author.entry(author) {
-                            hash_map::Entry::Occupied(mut existing) => {
-                                let old_digest = *existing.get().item.digest();
-                                let duplicates = &mut existing.get_mut().duplicates;
+                    MapSearch::Entry(round_item_opt) => match &*round_item_opt {
+                        ByRoundItem {
+                            cached: Some(cached),
+                            dag_round: Option::None,
+                        } => {
+                            // ban the author, if we detect equivocation now; we won't be able to prove it
+                            // if some signatures are invalid (it's another reason for a local ban)
+                            let (duplicates, equivocation) = match cached.by_author.entry(author) {
+                                dashmap::Entry::Occupied(mut existing) => {
+                                    let old_digest = *existing.get().item.digest();
+                                    let duplicates = &mut existing.get_mut().duplicates;
 
-                                let equivocation = if &old_digest == point.info().digest() {
-                                    *duplicates = duplicates.saturating_add(1);
-                                    None
-                                } else {
-                                    Some(old_digest)
-                                };
-                                // allow some duplicates in case of network error or sender restart
-                                // sender could have not received our response, thus retried
-                                (Some(*duplicates).filter(|d| *d > 3), equivocation)
+                                    let equivocation = if &old_digest == point.info().digest() {
+                                        *duplicates = duplicates.saturating_add(1);
+                                        None
+                                    } else {
+                                        Some(old_digest)
+                                    };
+                                    // allow some duplicates in case of network error or sender restart
+                                    // sender could have not received our response, thus retried
+                                    (Some(*duplicates).filter(|d| *d > 3), equivocation)
+                                }
+                                dashmap::Entry::Vacant(vacant) => {
+                                    vacant.insert(ByAuthor {
+                                        item: verified.clone(),
+                                        duplicates: 0,
+                                    });
+                                    (None, None)
+                                }
+                            };
+                            let is_future_threshold_reached =
+                                cached.by_author.len() == cached.peer_count.reliable_minority();
+                            (is_future_threshold_reached, duplicates, equivocation)
+                        }
+                        ByRoundItem {
+                            dag_round: Some(start_round),
+                            ..
+                        } => {
+                            // start round is newer than current head
+                            if let Some(point_round) = start_round.scan(round) {
+                                let iter = std::iter::once((&author, verified));
+                                Self::add_all_to_dag(
+                                    iter,
+                                    &point_round,
+                                    downloader,
+                                    store,
+                                    round_ctx,
+                                );
                             }
-                            hash_map::Entry::Vacant(vacant) => {
-                                vacant.insert(ByAuthor {
-                                    item: verified.clone(),
-                                    duplicates: 0,
-                                });
-                                (None, None)
-                            }
-                        };
-                        let is_future_threshold_reached =
-                            round_item.by_author.len() == round_item.peer_count.reliable_minority();
-                        (is_future_threshold_reached, duplicates, equivocation)
-                    }
+                            (false, None, None)
+                        }
+                        ByRoundItem {
+                            cached: None,
+                            dag_round: None,
+                        } => panic!("flush must not leave both fields empty"),
+                    },
                     MapSearch::AddToDag => {
                         if let Some(dag_round) = head.next().scan(round) {
                             let iter = std::iter::once((&author, verified));
@@ -360,10 +403,14 @@ impl BroadcastFilterInner {
                 past_removed.add(round, round_item);
                 false
             } else if round < head_prev_round {
-                outdated_unordered.push((round, mem::take(&mut round_item.by_author)));
+                if let Some(cached) = mem::take(&mut round_item.cached) {
+                    outdated_unordered.push((round, cached.by_author.into_read_only()));
+                }
+                // no need to set `round_item.dag_round` as item is removed under lock
                 false
             } else if round <= head_next_round {
-                // keep head rounds for Signer now, remove later in this method
+                // keep head rounds for now, remove later in this method
+                // do not set `round_item.dag_round` now to flush only in by-round order
                 true
             } else {
                 future_kept.add(round, round_item);
@@ -398,26 +445,35 @@ impl BroadcastFilterInner {
         };
 
         // preserve historical order by round to not create excessive download tasks
-        for (dag_round, map_by_author) in &outdated {
+        for (dag_round, map_by_author) in outdated {
             let iter = (map_by_author.iter()).map(|(author, by_author)| (author, &by_author.item));
-            let incr = Self::add_all_to_dag(iter, dag_round, downloader, store, round_ctx);
+            let incr = Self::add_all_to_dag(iter, &dag_round, downloader, store, round_ctx);
             flushed.add(dag_round.round(), incr);
         }
 
         // broadcasts of points at these rounds are very likely,
-        // keep dashmap lock in entry to move points into dag safely for Signer
+        // so we remove rounds in order to move points into dag safely for Signer
 
         for dag_round in [head.prev(), head.current(), head.next()] {
             let round = dag_round.round();
-            let DashMapEntry::Occupied(entry) = self.by_round.entry(round) else {
-                continue; // already in dag
+            let map_by_author = {
+                let dashmap::Entry::Occupied(mut entry) = self.by_round.entry(round) else {
+                    continue; // already in dag
+                };
+                // set `dag_round` to channel points and drop the write lock for now
+                (entry.get_mut().dag_round).get_or_insert_with(|| dag_round.clone());
+                match mem::take(&mut entry.get_mut().cached) {
+                    Some(cached) => cached.by_author.into_read_only(),
+                    None => {
+                        entry.remove();
+                        continue; // already in dag
+                    }
+                }
             };
-            let map_by_author = &entry.get().by_author;
             let iter = (map_by_author.iter()).map(|(author, by_author)| (author, &by_author.item));
             let incr = Self::add_all_to_dag(iter, dag_round, downloader, store, round_ctx);
             flushed.add(round, incr);
-
-            entry.remove(); // release lock
+            self.by_round.remove(&round);
         }
 
         if !flushed.is_empty() || !past_removed.is_empty() {
@@ -531,10 +587,12 @@ impl Default for CleanCounter {
 }
 impl CleanCounter {
     fn add(&mut self, round: Round, by_round_item: &ByRoundItem) {
-        self.items = self.items.saturating_add(by_round_item.by_author.len());
         self.rounds = self.rounds.saturating_add(1);
         self.min = self.min.min(round);
         self.max = self.max.max(round);
+        if let Some(cached) = by_round_item.cached.as_ref() {
+            self.items = self.items.saturating_add(cached.by_author.len());
+        };
     }
     fn is_empty(&self) -> bool {
         self.rounds == 0
