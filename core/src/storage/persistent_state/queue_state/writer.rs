@@ -147,7 +147,7 @@ impl<'a> QueueStateWriter<'a> {
 
             // Write padding
             const PADDING: [u8; 3] = [0; 3];
-            if total_size % 4 != 0 {
+            if !total_size.is_multiple_of(4) {
                 buffer.write_all(&PADDING[0..4 - (total_size as usize) % 4])?;
             }
         }

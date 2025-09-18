@@ -629,7 +629,7 @@ impl BlobStorage {
     /// Get a chunk of the archive at the specified offset.
     pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<Bytes> {
         anyhow::ensure!(
-            offset % DEFAULT_CHUNK_SIZE == 0,
+            offset.is_multiple_of(DEFAULT_CHUNK_SIZE),
             BlockStorageError::InvalidOffset {
                 offset,
                 chunk_size: DEFAULT_CHUNK_SIZE,
