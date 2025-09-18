@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, btree_map};
+use std::ops::Add as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1145,7 +1146,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         }
 
         // retun None when messages group is empty
-        if msg_group.len() == 0
+        if msg_group.is_empty()
             // and we reached previous processed offset on refill
             && ((read_mode == GetNextMessageGroupMode::Refill && all_prev_processed_offset_reached)
                 // or we do not have messages in buffers and no pending new messages and all ranges fully read

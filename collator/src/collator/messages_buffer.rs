@@ -751,6 +751,10 @@ impl MessageGroup {
         self.slots_info.slots.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn accounts_count(&self) -> usize {
         self.msgs.len()
     }
@@ -784,7 +788,15 @@ impl MessageGroup {
         true
     }
 
-    pub fn add(mut self, other: Self) -> Self {
+    pub fn contains_account(&self, account_id: &HashBytes) -> bool {
+        self.msgs.contains_key(account_id)
+    }
+}
+
+impl std::ops::Add for MessageGroup {
+    type Output = Self;
+
+    fn add(mut self, other: Self) -> Self::Output {
         let last_slot_id = self.slots_info.last_slot_id.as_ref();
         let mut next_slot_id = match last_slot_id {
             Some(slot_id) => *slot_id + 1,
@@ -812,10 +824,6 @@ impl MessageGroup {
         }
 
         self
-    }
-
-    pub fn contains_account(&self, account_id: &HashBytes) -> bool {
-        self.msgs.contains_key(account_id)
     }
 }
 
