@@ -82,7 +82,7 @@ impl RoundTaskReady {
 
         let (bcaster_ready_tx, stub_rx) = oneshot::channel();
         let (stub_tx, collector_status_rx) = watch::channel(CollectorStatus {
-            attempt: 0, // default
+            attempt: 0,  // default
             ready: true, // make broadcaster to resume its work not waiting for collector
         });
         let broadcaster = Broadcaster::new(
