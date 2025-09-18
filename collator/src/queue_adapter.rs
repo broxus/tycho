@@ -265,7 +265,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         let start_time = std::time::Instant::now();
         let exists = self.queue.is_diff_exists(block_id_short)?;
         let elapsed = start_time.elapsed();
-        tracing::info!(target: tracing_targets::MQ_ADAPTER,
+        tracing::debug!(target: tracing_targets::MQ_ADAPTER,
             elapsed = %humantime::format_duration(elapsed),
             exists,
             "is_diff_exists completed"
