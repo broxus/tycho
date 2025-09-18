@@ -1198,8 +1198,7 @@ impl CollatorStdImpl {
         // metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels).decrement(our_exts_count as f64);
 
         // look for required anchors in cache
-        let mut idx = 0;
-        while let Some((_, anchor)) = anchors_cache.get(idx) {
+        for anchor in anchors_cache.iter().map(|(_, ca)| &ca.anchor) {
             if anchor.id >= processed_to_anchor_id {
                 // check if processed_to anchor exists in cache
                 if anchor.id == processed_to_anchor_id {
@@ -1233,13 +1232,12 @@ impl CollatorStdImpl {
                 let our_exts_count = anchor.count_externals_for(&shard_id, 0);
                 res.anchors_info
                     .push(InitAnchorSource::FromCache(AnchorInfo::from_anchor(
-                        &anchor,
+                        anchor,
                         our_exts_count,
                     )));
 
-                last_anchor = Some(anchor);
+                last_anchor = Some(anchor.clone());
             }
-            idx += 1;
         }
 
         // return if we have all required anchors in cache
