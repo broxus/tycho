@@ -231,6 +231,54 @@ async fn test_import_init_anchors() {
     assert_eq!(anchors_count_above_last_imported_in_current_shard, 0);
 
     // =========================================================================
+    // processed_to anchor exists in cache, fully read, get all from cache
+    // =========================================================================
+
+    let processed_to_anchor_id = 11;
+    let processed_to_msgs_offset = 6;
+    let last_block_chain_time = 24304;
+    let current_shard_last_imported_chain_time = 24304;
+
+    let ImportInitAnchorsResult {
+        anchors_info,
+        anchors_count_above_last_imported_in_current_shard,
+    } = CollatorStdImpl::import_init_anchors(
+        processed_to_anchor_id,
+        processed_to_msgs_offset,
+        last_block_chain_time,
+        current_shard_last_imported_chain_time,
+        shard_id,
+        &mut anchors_cache,
+        mpool_adapter.clone(),
+    )
+    .await
+    .unwrap();
+
+    tracing::debug!("restored anchors on init: {:?}", anchors_info.as_slice(),);
+
+    let anchor_info = anchors_info.first().unwrap();
+    assert!(matches!(anchor_info, InitAnchorSource::FromCache(anchor) if anchor.id == 12));
+
+    let anchors_info = filter_imported(anchors_info);
+
+    tracing::debug!(
+        "imported anchors on init (count_above_last = {}): {:?}",
+        anchors_count_above_last_imported_in_current_shard,
+        anchors_info.as_slice(),
+    );
+
+    assert_eq!(anchors_info.len(), 0);
+    let anchor = anchors_cache.first_with_our_externals().unwrap();
+    assert_eq!(anchor.id, 11);
+    let (last_imported_id, last_imported_ct) =
+        anchors_cache.get_last_imported_anchor_id_and_ct().unwrap();
+    assert_eq!(last_imported_id, 14);
+    assert_eq!(last_imported_ct, 24304);
+    assert_eq!(anchors_cache.len(), 4);
+    assert!(anchors_cache.has_pending_externals());
+    assert_eq!(anchors_count_above_last_imported_in_current_shard, 0);
+
+    // =========================================================================
     // processed_to anchor is before all anchors in cache, should clear cache and load all required from mempool
     // =========================================================================
 

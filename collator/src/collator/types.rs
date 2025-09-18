@@ -1248,6 +1248,10 @@ impl AnchorsCache {
             .map(|(id, ca)| (*id, ca.anchor.clone()))
     }
 
+    pub fn iter(&self) -> std::collections::vec_deque::Iter<'_, (MempoolAnchorId, CachedAnchor)> {
+        self.cache.iter()
+    }
+
     #[cfg(test)]
     pub fn first_with_our_externals(&self) -> Option<&Arc<MempoolAnchor>> {
         let mut idx = 0;
