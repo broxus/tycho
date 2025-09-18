@@ -126,9 +126,13 @@ impl SpawnLimit {
         F: Send + 'static,
         R: Send + 'static,
     {
-        let permit = match self.0.clone().acquire_owned().await {
+        let permit = match self.0.clone().try_acquire_owned() {
             Ok(permit) => permit,
-            Err(_closed) => return Task::aborted(),
+            Err(TryAcquireError::NoPermits) => match self.0.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_closed) => return Task::aborted(),
+            },
+            Err(TryAcquireError::Closed) => return Task::aborted(),
         };
         ctx.spawn_blocking(move || {
             let res = task();
