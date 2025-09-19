@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, btree_map};
+use std::ops::Add as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -975,6 +976,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         // collect messages after reading
         let mut partitions_readers = BTreeMap::new();
         let mut can_drop_processing_offset_in_all_partitions = true;
+        let mut already_skipped_accounts = FastHashSet::default();
         for (par_id, par_reader_stage) in self.readers_stages.iter_mut() {
             // extract partition reader from state to use partition 0 buffer
             // to check for account skip on collecting messages from partition 1
@@ -1011,6 +1013,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 &partitions_readers,
                 &msg_groups,
                 &self.internals_partition_readers,
+                &mut already_skipped_accounts,
             )?;
             msg_groups.insert(*par_id, msg_group);
             metrics_by_partitions.get_mut(*par_id).append(&metrics);
@@ -1143,7 +1146,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         }
 
         // retun None when messages group is empty
-        if msg_group.len() == 0
+        if msg_group.is_empty()
             // and we reached previous processed offset on refill
             && ((read_mode == GetNextMessageGroupMode::Refill && all_prev_processed_offset_reached)
                 // or we do not have messages in buffers and no pending new messages and all ranges fully read
@@ -1327,6 +1330,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
         prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
         other_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
+        already_skipped_accounts: &mut FastHashSet<HashBytes>,
     ) -> Result<CollectMessageForPartitionResult> {
         let mut res = CollectMessageForPartitionResult::default();
 
@@ -1356,6 +1360,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 &mut res.msg_group,
                 prev_partitions_readers,
                 prev_msg_groups,
+                already_skipped_accounts,
             )?;
 
             res.metrics.append(&metrics);
@@ -1371,6 +1376,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 Some(par_reader),
                 prev_partitions_readers,
                 prev_msg_groups,
+                already_skipped_accounts,
             )?;
             res.metrics.append(&metrics);
         }
@@ -1390,6 +1396,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 &mut res.msg_group,
                 prev_partitions_readers,
                 prev_msg_groups,
+                already_skipped_accounts,
             )?;
             res.metrics.append(&metrics);
             res.collected_new_msgs.append(&mut collected_int_msgs);

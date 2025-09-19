@@ -3879,6 +3879,7 @@ dependencies = [
  "bumpalo",
  "bytes",
  "bytesize",
+ "criterion",
  "futures-util",
  "humantime",
  "indexmap",

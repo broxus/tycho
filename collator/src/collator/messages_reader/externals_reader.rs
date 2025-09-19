@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::{Context, Result};
 use tycho_block_util::queue::{QueuePartitionIdx, get_short_addr_string, get_short_hash_string};
+use tycho_types::cell::HashBytes;
 use tycho_types::models::{IntAddr, MsgInfo, ShardIdent};
+use tycho_util::FastHashSet;
 
 use super::{
     DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState,
@@ -11,8 +13,8 @@ use super::{
     MessagesReaderMetricsByPartitions,
 };
 use crate::collator::messages_buffer::{
-    BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, MessageGroup,
-    MessagesBufferLimits, SaturatingAddAssign, SkipExpiredExternals,
+    BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, IncludeAllMessages,
+    MessageGroup, MessagesBufferLimits, MsgFilter, SaturatingAddAssign, SkipExpiredExternals,
 };
 use crate::collator::messages_reader::{DebugInternalsRangeReaderState, InternalsRangeReaderKind};
 use crate::collator::types::{
@@ -440,6 +442,7 @@ impl ExternalsReader {
                 buffer: Default::default(),
                 skip_offset: par.curr_processed_offset,
                 processed_offset: par.curr_processed_offset,
+                last_expire_check_on_ct: None,
             });
         }
 
@@ -673,6 +676,7 @@ impl ExternalsReader {
         curr_partition_reader: Option<&InternalsPartitionReader<V>>,
         prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
+        already_skipped_accounts: &mut FastHashSet<HashBytes>,
     ) -> Result<CollectExternalsResult> {
         let mut res = CollectExternalsResult::default();
 
@@ -711,6 +715,28 @@ impl ExternalsReader {
 
             // skip up to skip offset
             if curr_processed_offset > range_reader_state_by_partition.skip_offset {
+                // setup messages filter
+                // do not check for expired externals if check chain time was not changed
+                // or if minimal chain time in buffer is above the threshold
+                let mut msg_filter = MsgFilter::IncludeAll(IncludeAllMessages);
+                if matches!(range_reader_state_by_partition.last_expire_check_on_ct, Some(last) if next_chain_time > last)
+                    || range_reader_state_by_partition
+                        .last_expire_check_on_ct
+                        .is_none()
+                {
+                    range_reader_state_by_partition.last_expire_check_on_ct = Some(next_chain_time);
+                    let chain_time_threshold_ms =
+                        next_chain_time.saturating_sub(externals_expire_timeout_ms);
+                    if range_reader_state_by_partition.buffer.min_ext_chain_time()
+                        < chain_time_threshold_ms
+                    {
+                        msg_filter = MsgFilter::SkipExpiredExternals(SkipExpiredExternals {
+                            chain_time_threshold_ms,
+                            total_skipped: &mut expired_msgs_count,
+                        });
+                    }
+                }
+
                 res.metrics.add_to_message_groups_timer.start();
                 let FillMessageGroupResult {
                     ops_count,
@@ -720,6 +746,7 @@ impl ExternalsReader {
                     msg_group,
                     buffer_limits.slots_count,
                     buffer_limits.slot_vert_size,
+                    already_skipped_accounts,
                     |account_id| {
                         let mut check_ops_count = 0;
 
@@ -867,11 +894,7 @@ impl ExternalsReader {
 
                         (false, check_ops_count)
                     },
-                    SkipExpiredExternals {
-                        chain_time_threshold_ms: next_chain_time
-                            .saturating_sub(externals_expire_timeout_ms),
-                        total_skipped: &mut expired_msgs_count,
-                    },
+                    msg_filter,
                 );
                 res.metrics
                     .add_to_msgs_groups_ops_count
@@ -1104,11 +1127,6 @@ impl ExternalsRangeReader {
                     }
                 }
 
-                metrics::counter!("tycho_do_collate_ext_msgs_expired_count", &labels)
-                    .increment(expired_msgs_count);
-                metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-                    .decrement(expired_msgs_count as f64);
-
                 // skip and remove expired anchor
                 assert_eq!(next_idx, 0);
                 anchors_cache.pop_front();
@@ -1232,9 +1250,6 @@ impl ExternalsRangeReader {
                 }
             }
 
-            metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-                .decrement(msgs_imported_from_last_anchor as f64);
-
             tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                 anchor_id,
                 msgs_read_offset_in_last_anchor,
@@ -1306,6 +1321,14 @@ impl ExternalsRangeReader {
             has_pending_externals_in_range,
             ?read_mode,
         );
+
+        // report metrics
+        metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
+            .decrement((total_msgs_imported + count_expired_messages) as f64);
+        if count_expired_messages > 0 {
+            metrics::counter!("tycho_do_collate_ext_msgs_expired_count", &labels)
+                .increment(count_expired_messages);
+        }
 
         // accumulate time metrics
         {

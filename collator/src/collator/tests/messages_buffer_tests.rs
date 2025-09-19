@@ -1,57 +1,14 @@
 use std::time::Instant;
 
-use tycho_types::cell::{CellBuilder, HashBytes};
-use tycho_types::models::{IntAddr, IntMsgInfo, MsgInfo, ShardIdent, StdAddr};
+use tycho_types::cell::HashBytes;
+use tycho_types::models::{IntAddr, ShardIdent, StdAddr};
 
 use super::{DebugMessageGroupDetailed, DebugMessagesBuffer, MessageGroup, MessagesBuffer};
 use crate::collator::messages_buffer::IncludeAllMessages;
-use crate::collator::types::ParsedMessage;
-use crate::internal_queue::types::EnqueuedMessage;
-use crate::mempool::{MempoolAnchorId, make_stub_external};
-
-pub(crate) fn make_stub_internal_parsed_message(
-    src_shard: ShardIdent,
-    dst: IntAddr,
-    created_lt: u64,
-    is_new: bool,
-) -> Box<ParsedMessage> {
-    let dst_wc = dst.workchain();
-    let info = IntMsgInfo {
-        dst,
-        created_lt,
-        ..Default::default()
-    };
-    let cell = CellBuilder::build_from(&info).unwrap();
-    let enq_msg = EnqueuedMessage { info, cell };
-    let msg = ParsedMessage {
-        info: MsgInfo::Int(enq_msg.info),
-        dst_in_current_shard: true,
-        cell: enq_msg.cell,
-        special_origin: None,
-        block_seqno: None,
-        from_same_shard: (!is_new).then(|| dst_wc == src_shard.workchain()),
-        ext_msg_chain_time: None,
-    };
-    Box::new(msg)
-}
-
-pub(crate) fn make_stub_external_parsed_message(
-    anchor_id: MempoolAnchorId,
-    chain_time: u64,
-    msg_idx: u32,
-    dst: IntAddr,
-) -> Box<ParsedMessage> {
-    let ext_msg = make_stub_external(anchor_id, chain_time, msg_idx, dst);
-    Box::new(ParsedMessage {
-        info: MsgInfo::ExtIn(ext_msg.info),
-        dst_in_current_shard: true,
-        cell: ext_msg.cell,
-        special_origin: None,
-        block_seqno: None,
-        from_same_shard: None,
-        ext_msg_chain_time: Some(chain_time),
-    })
-}
+use crate::collator::test_utils::{
+    make_stub_external_parsed_message, make_stub_internal_parsed_message,
+};
+use crate::mempool::MempoolAnchorId;
 
 fn fill_test_buffers(
     mc_shard: ShardIdent,
@@ -249,6 +206,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit - 3,
         group_vert_size,
+        &mut Default::default(),
         |_| (false, 0),
         do_not_check_skip_msg,
     );
@@ -268,6 +226,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit - 2,
         group_vert_size,
+        &mut Default::default(),
         |account_id| (int_buffer_par_0.msgs.contains_key(account_id), 1),
         do_not_check_skip_msg,
     );
@@ -289,6 +248,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit,
         group_vert_size + 1,
+        &mut Default::default(),
         |_| (false, 0),
         check_skip_msg,
     );
@@ -308,6 +268,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit,
         group_vert_size + 1,
+        &mut Default::default(),
         |account_id| (ext_buffer_range_1.msgs.contains_key(account_id), 1),
         check_skip_msg,
     );
@@ -331,6 +292,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit - 3,
         group_vert_size,
+        &mut Default::default(),
         |_| (false, 0),
         do_not_check_skip_msg,
     );
@@ -350,6 +312,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit - 2,
         group_vert_size,
+        &mut Default::default(),
         |account_id| (int_buffer_par_0.msgs.contains_key(account_id), 1),
         do_not_check_skip_msg,
     );
@@ -371,6 +334,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit,
         group_vert_size + 1,
+        &mut Default::default(),
         |_| (false, 0),
         check_skip_msg,
     );
@@ -390,6 +354,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit,
         group_vert_size + 1,
+        &mut Default::default(),
         |account_id| (ext_buffer_range_1.msgs.contains_key(account_id), 1),
         check_skip_msg,
     );
@@ -414,6 +379,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit - 3,
         group_vert_size,
+        &mut Default::default(),
         |_| (false, 0),
         do_not_check_skip_msg,
     );
@@ -433,6 +399,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit - 2,
         group_vert_size,
+        &mut Default::default(),
         |account_id| (int_buffer_par_0.msgs.contains_key(account_id), 1),
         do_not_check_skip_msg,
     );
@@ -455,6 +422,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit,
         group_vert_size + 1,
+        &mut Default::default(),
         |_| (false, 0),
         check_skip_msg,
     );
@@ -474,6 +442,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit,
         group_vert_size + 1,
+        &mut Default::default(),
         |account_id| (ext_buffer_range_1.msgs.contains_key(account_id), 1),
         check_skip_msg,
     );
@@ -499,6 +468,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit - 3,
         group_vert_size,
+        &mut Default::default(),
         |_| (false, 0),
         do_not_check_skip_msg,
     );
@@ -518,6 +488,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit - 2,
         group_vert_size,
+        &mut Default::default(),
         |account_id| (int_buffer_par_0.msgs.contains_key(account_id), 1),
         do_not_check_skip_msg,
     );
@@ -540,6 +511,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit,
         group_vert_size + 1,
+        &mut Default::default(),
         |_| (false, 0),
         check_skip_msg,
     );
@@ -561,6 +533,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit,
         group_vert_size + 1,
+        &mut Default::default(),
         |account_id| (ext_buffer_range_1.msgs.contains_key(account_id), 1),
         check_skip_msg,
     );
@@ -585,6 +558,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit - 3,
         group_vert_size,
+        &mut Default::default(),
         |_| (false, 0),
         do_not_check_skip_msg,
     );
@@ -604,6 +578,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit - 2,
         group_vert_size,
+        &mut Default::default(),
         |account_id| (int_buffer_par_0.msgs.contains_key(account_id), 1),
         do_not_check_skip_msg,
     );
@@ -626,6 +601,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit,
         group_vert_size + 1,
+        &mut Default::default(),
         |_| (false, 0),
         check_skip_msg,
     );
@@ -648,6 +624,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit,
         group_vert_size + 1,
+        &mut Default::default(),
         |account_id| (ext_buffer_range_1.msgs.contains_key(account_id), 1),
         check_skip_msg,
     );
@@ -677,6 +654,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit - 3,
         group_vert_size,
+        &mut Default::default(),
         |_| (false, 0),
         do_not_check_skip_msg,
     );
@@ -696,6 +674,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit - 2,
         group_vert_size,
+        &mut Default::default(),
         |account_id| (int_buffer_par_0.msgs.contains_key(account_id), 1),
         do_not_check_skip_msg,
     );
@@ -715,6 +694,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit,
         group_vert_size + 1,
+        &mut Default::default(),
         |_| (false, 0),
         check_skip_msg,
     );
@@ -734,6 +714,7 @@ fn test_message_group_filling_from_buffers() {
         &mut msg_group,
         group_limit,
         group_vert_size + 1,
+        &mut Default::default(),
         |account_id| (ext_buffer_range_1.msgs.contains_key(account_id), 1),
         check_skip_msg,
     );
