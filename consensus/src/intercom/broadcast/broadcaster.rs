@@ -15,7 +15,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::dag::LastOwnPoint;
 use crate::dyn_event;
 use crate::effects::{AltFormat, BroadcastCtx, Cancelled, Ctx, RoundCtx, TaskResult};
-use crate::intercom::broadcast::collector::CollectorSignal;
+use crate::intercom::broadcast::collector::CollectorStatus;
 use crate::intercom::core::{BroadcastResponse, QueryRequest, SignatureResponse};
 use crate::intercom::peer_schedule::PeerState;
 use crate::intercom::{Dispatcher, PeerSchedule};
@@ -32,7 +32,7 @@ pub struct Broadcaster {
     dispatcher: Dispatcher,
     /// Receiver may be closed (collector finished), so do not require `Ok` on send
     bcaster_signal: Option<oneshot::Sender<BroadcasterSignal>>,
-    collector_signal: watch::Receiver<CollectorSignal>,
+    collector_status: watch::Receiver<CollectorStatus>,
 
     peer_updates: broadcast::Receiver<(PeerId, PeerState)>,
     removed_peers: FastHashSet<PeerId>,
@@ -42,7 +42,6 @@ pub struct Broadcaster {
     // results
     rejections: FastHashSet<PeerId>,
     signatures: FastHashMap<PeerId, Signature>,
-    attempt: u8,
 
     bcast_request: Request,
     bcast_peers: FastHashSet<PeerId>,
@@ -61,7 +60,7 @@ impl Broadcaster {
         point: Point,
         peer_schedule: PeerSchedule,
         bcaster_signal: oneshot::Sender<BroadcasterSignal>,
-        collector_signal: watch::Receiver<CollectorSignal>,
+        collector_status: watch::Receiver<CollectorStatus>,
         round_ctx: &RoundCtx,
     ) -> Self {
         let (signers, bcast_peers, peer_updates) = {
@@ -81,7 +80,7 @@ impl Broadcaster {
             ctx: BroadcastCtx::new(round_ctx, &point),
             dispatcher,
             bcaster_signal: Some(bcaster_signal),
-            collector_signal,
+            collector_status,
 
             peer_updates,
             signers,
@@ -89,7 +88,6 @@ impl Broadcaster {
             removed_peers: FastHashSet::from_iter([*point.info().author()]), // no loopback
             rejections: Default::default(),
             signatures: Default::default(),
-            attempt: 0,
 
             bcast_request: QueryRequest::broadcast(&point),
             bcast_peers,
@@ -112,7 +110,7 @@ impl Broadcaster {
         //   (we ping such a peer with a short signature request instead of sending the whole point)
         // * if any async task hangs for too long - try poll another sort of tasks
         // * if no task of some sort - try poll another sort of tasks
-        // * periodically check if loop completion requirement is met (2F++ signs or 1/3+1++ fails) -
+        // * periodically check if loop completion requirement is met (2F signs or 1F+1 fails) -
         //   is a tradeoff between gather at least 2F signatures and do not wait unresponsive peers
         //   (i.e. response bucketing where the last bucket is full and contains 2f-th element)
         // i.e. at any moment any peer may be in a single state:
@@ -133,12 +131,11 @@ impl Broadcaster {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 // rare event that may cause immediate completion
-                result = self.collector_signal.changed() => {
-                    let signal = result.map(|_| *self.collector_signal.borrow_and_update());
-                    if self.should_finish(signal) {
+                result = self.collector_status.changed() => {
+                    if self.should_finish(result) {
                         break;
                     }
-                }
+                },
                 // rare event essential for up-to-date retries
                 update = self.peer_updates.recv() => self.match_peer_updates(update)?,
                 // either request signature immediately or postpone until retry
@@ -202,60 +199,61 @@ impl Broadcaster {
         }
     }
 
-    fn should_finish(
-        &mut self,
-        collector_signal: Result<CollectorSignal, watch::error::RecvError>,
-    ) -> bool {
-        self.attempt = self.attempt.wrapping_add(1);
-        let result = match collector_signal {
-            Err(_) => true, // exited
-            Ok(CollectorSignal::Retry { .. }) => {
-                if self.rejections.len() >= self.signers_count.reliable_minority() {
-                    if let Some(sender) = mem::take(&mut self.bcaster_signal) {
-                        _ = sender.send(BroadcasterSignal::Err);
-                    };
-                    true
-                } else {
-                    if self.attempt >= self.ctx.conf().consensus.min_sign_attempts.get()
-                        && self.signatures.len() >= self.signers_count.majority_of_others()
-                        && let Some(sender) = mem::take(&mut self.bcaster_signal)
-                    {
-                        _ = sender.send(BroadcasterSignal::Ok);
-                    };
-                    if self.attempt == 0 {
-                        // network is stuck, give all broadcast filters a push; forget rejections
-                        self.sig_peers.clear();
-                        self.rejections.clear();
-                        self.sig_futures.clear();
-                        self.bcast_futures.clear();
-                        let peers = self.signers.clone();
-                        BroadcastCtx::retry(peers.len());
-                        for peer in &*peers {
-                            self.broadcast(peer);
-                        }
-                    } else {
-                        let peers = mem::take(&mut self.sig_peers);
-                        BroadcastCtx::retry(peers.len());
-                        for peer in &peers {
-                            self.request_signature(false, peer);
-                        }
+    fn should_finish(&mut self, collector_signal: Result<(), watch::error::RecvError>) -> bool {
+        // don't mark as seen, otherwise may skip ERR notification when collector exits
+        let collector_status = *self.collector_status.borrow();
+
+        let is_ready = if collector_signal.is_ok() {
+            if self.rejections.len() >= self.signers_count.reliable_minority() {
+                if let Some(sender) = mem::take(&mut self.bcaster_signal) {
+                    _ = sender.send(BroadcasterSignal::Err);
+                };
+                true
+            } else {
+                if collector_status.attempt >= self.ctx.conf().consensus.min_sign_attempts.get()
+                    && self.signatures.len() >= self.signers_count.majority_of_others()
+                    && let Some(sender) = mem::take(&mut self.bcaster_signal)
+                {
+                    _ = sender.send(BroadcasterSignal::Ok);
+                };
+                if collector_status.attempt == 0 {
+                    // network is stuck, give all broadcast filters a push; forget rejections
+                    self.sig_peers.clear();
+                    self.rejections.clear();
+                    self.sig_futures.clear();
+                    self.bcast_futures.clear();
+                    let peers = self.signers.clone();
+                    BroadcastCtx::retry(peers.len());
+                    for peer in &*peers {
+                        self.broadcast(peer);
                     }
-                    false
+                } else if collector_status.attempt > 1 {
+                    let peers = mem::take(&mut self.sig_peers);
+                    BroadcastCtx::retry(peers.len());
+                    for peer in &peers {
+                        self.request_signature(false, peer);
+                    }
                 }
+                false
             }
+        } else {
+            true
         };
         tracing::debug!(
             parent: self.ctx.span(),
-            result = result,
-            attempt = self.attempt,
-            collector_signal = debug(collector_signal),
+            result = is_ready,
+            collector = format!(
+                "{{ {collector_signal:?}, attempt={}, ready={} }}",
+                collector_status.attempt,
+                collector_status.ready
+            ),
             signatures = self.signatures.len(),
             "2F" = self.signers_count.majority_of_others(),
             rejections = self.rejections.len(),
             "F+1" = self.signers_count.reliable_minority(),
             "ready?",
         );
-        result
+        is_ready
     }
 
     fn match_broadcast_result(&mut self, peer_id: &PeerId, result: Result<BroadcastResponse>) {
