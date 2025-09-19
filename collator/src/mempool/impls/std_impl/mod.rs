@@ -1,10 +1,10 @@
+mod adapter_impl;
 mod anchor_handler;
+mod state_update_queue;
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
-use bytes::Bytes;
 use futures_util::FutureExt;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::Instrument;
@@ -12,26 +12,29 @@ use tycho_consensus::prelude::*;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver};
 use tycho_storage::StorageContext;
-use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
 use crate::mempool::impls::common::cache::Cache;
-use crate::mempool::impls::common::config::ConfigAdapter;
-use crate::mempool::impls::std_impl::anchor_handler::AnchorHandler;
-use crate::mempool::{
-    DebugStateUpdateContext, GetAnchorResult, MempoolAdapter, MempoolAnchorId, StateUpdateContext,
-};
+use crate::mempool::impls::common::v_set_adapter::VSetAdapter;
+use crate::mempool::impls::std_impl::anchor_handler::StdAnchorHandler;
+use crate::mempool::impls::std_impl::state_update_queue::StateUpdateQueue;
+use crate::mempool::{DebugStateUpdateContext, StateUpdateContext};
 use crate::tracing_targets;
-use crate::types::processed_upto::BlockSeqno;
 
 pub struct MempoolAdapterStdImpl {
     cache: Arc<Cache>,
     net_args: EngineNetworkArgs,
 
-    config: Mutex<ConfigAdapter>,
+    config: Mutex<StdConfigAdapter>,
 
     mempool_db: Arc<MempoolDb>,
     input_buffer: InputBuffer,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
+}
+
+struct StdConfigAdapter {
+    builder: MempoolConfigBuilder,
+    state_update_queue: StateUpdateQueue,
+    engine_session: Option<EngineSession>,
 }
 
 impl MempoolAdapterStdImpl {
@@ -53,7 +56,7 @@ impl MempoolAdapterStdImpl {
                 peer_resolver: peer_resolver.clone(),
                 overlay_service: overlay_service.clone(),
             },
-            config: Mutex::new(ConfigAdapter {
+            config: Mutex::new(StdConfigAdapter {
                 builder: config_builder,
                 state_update_queue: Default::default(),
                 engine_session: None,
@@ -67,7 +70,7 @@ impl MempoolAdapterStdImpl {
 
     async fn process_state_update(
         &self,
-        config_guard: &mut ConfigAdapter,
+        config_guard: &mut StdConfigAdapter,
         new_cx: &StateUpdateContext,
     ) -> Result<()> {
         // method is called in a for-cycle, so `seq_no` may differ
@@ -84,7 +87,7 @@ impl MempoolAdapterStdImpl {
 
             // when genesis doesn't change - just (re-)schedule v_set change as defined by collator
             if session.genesis_info() == new_cx.consensus_info.genesis_info {
-                session.set_peers(ConfigAdapter::init_peers(new_cx)?);
+                session.set_peers(VSetAdapter::init_peers(new_cx)?);
                 return Ok(());
             }
 
@@ -202,7 +205,7 @@ impl MempoolAdapterStdImpl {
             ctx.mc_block_id,
         );
 
-        let init_peers = ConfigAdapter::init_peers(ctx)?;
+        let init_peers = VSetAdapter::init_peers(ctx)?;
         if init_peers.curr_v_set.len() == 1 {
             anyhow::bail!("pass `single-node` cli flag to run network of 1 node");
         } else if init_peers.curr_v_set.len() == 2 {
@@ -218,7 +221,7 @@ impl MempoolAdapterStdImpl {
             engine_stop_tx,
         );
 
-        let mut anchor_task = AnchorHandler::new(&merged_conf.conf.consensus, anchor_rx)
+        let mut anchor_task = StdAnchorHandler::new(&merged_conf.conf.consensus, anchor_rx)
             .run(self.cache.clone(), self.mempool_db.clone())
             .boxed();
 
@@ -241,94 +244,5 @@ impl MempoolAdapterStdImpl {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Mempool started");
 
         Ok(session)
-    }
-}
-
-#[async_trait]
-impl MempoolAdapter for MempoolAdapterStdImpl {
-    async fn handle_mc_state_update(&self, new_cx: StateUpdateContext) -> Result<()> {
-        // assume first block versions are monotonic by both top anchor and seqno
-        // and there may be a second block version out of particular order,
-        // but strictly before `handle_top_processed_to_anchor()` is called;
-        // handle_top_processed_to_anchor() is called with monotonically increasing anchors
-        let mut config_guard = self.config.lock().await;
-
-        tracing::debug!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            full_id = %new_cx.mc_block_id,
-            "Received state update from mc block",
-        );
-
-        if let Some(ctx) = config_guard.state_update_queue.push(new_cx)? {
-            self.process_state_update(&mut config_guard, &ctx).await?;
-            self.top_known_anchor
-                .set_max_raw(ctx.top_processed_to_anchor_id);
-        }
-
-        Ok(())
-    }
-
-    async fn handle_signed_mc_block(&self, mc_block_seqno: BlockSeqno) -> Result<()> {
-        let mut config_guard = self.config.lock().await;
-
-        for ctx in config_guard.state_update_queue.signed(mc_block_seqno)? {
-            self.process_state_update(&mut config_guard, &ctx).await?;
-            self.top_known_anchor
-                .set_max_raw(ctx.top_processed_to_anchor_id);
-        }
-        Ok(())
-    }
-
-    async fn get_anchor_by_id(&self, anchor_id: MempoolAnchorId) -> Result<GetAnchorResult> {
-        tracing::debug!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            %anchor_id,
-            "get_anchor_by_id"
-        );
-
-        let result = match self.cache.get_anchor_by_id(anchor_id).await {
-            Some(anchor) => GetAnchorResult::Exist(anchor),
-            None => GetAnchorResult::NotExist,
-        };
-
-        Ok(result)
-    }
-
-    async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<GetAnchorResult> {
-        tracing::debug!(
-            target: tracing_targets::MEMPOOL_ADAPTER,
-            %prev_anchor_id,
-            "get_next_anchor"
-        );
-
-        let result = match self.cache.get_next_anchor(prev_anchor_id).await? {
-            Some(anchor) => GetAnchorResult::Exist(anchor),
-            None => GetAnchorResult::NotExist,
-        };
-
-        Ok(result)
-    }
-
-    fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
-        self.cache.clear(before_anchor_id);
-        Ok(())
-    }
-
-    fn accept_external(&self, message: Bytes) {
-        self.input_buffer.push(message);
-    }
-
-    async fn update_delayed_config(
-        &self,
-        consensus_config: Option<&ConsensusConfig>,
-        genesis_info: &GenesisInfo,
-    ) -> Result<()> {
-        let mut config_guard = self.config.lock().await;
-        if let Some(consensus_config) = consensus_config {
-            (config_guard.builder).set_consensus_config(consensus_config)?;
-        } // else: will be set from mc state after sync
-
-        config_guard.builder.set_genesis(*genesis_info);
-        Ok(())
     }
 }
