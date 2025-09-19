@@ -39,23 +39,22 @@ impl Signer {
     fn make_signature_response(
         round: Round,
         author: &PeerId,
-        head: &DagHead,
+        head: &DagHead, // Note: head may be older than BF bottom during Engine round switch
         broadcast_filter: &BroadcastFilter,
         conf: &MempoolConfig,
     ) -> SignatureResponse {
-        if round >= head.next().round() {
-            // first check BroadcastFilter, then DAG for top_dag_round exactly
-            if broadcast_filter.has_point(round, author) {
-                // hold fast nodes from moving forward
-                return SignatureResponse::TryLater;
-            } else if round > head.next().round() {
-                // such points may be in BroadcastFilter only
-                return SignatureResponse::NoPoint;
+        // first check BroadcastFilter, then DAG for top_dag_round exactly
+        if round > head.next().round() {
+            // BF doesn't have next round points, as they are flushed earlier than Head advances
+            return match broadcast_filter.has_point(round, author) {
+                // Bf may be flushing points at round after `head.next`, or maybe have them
+                None | Some(true) => return SignatureResponse::TryLater, // we're not ready to sign
+                Some(false) => SignatureResponse::NoPoint, // such points may be in BF only
             };
         } else if round < head.prev().round() {
             // lagged too far from consensus and us, will sign only 1 round behind current;
             return SignatureResponse::Rejected(SignatureRejectedReason::TooOldRound);
-        };
+        }; // else: check head's current or next rounds - point is either there or not received
 
         let current_round = head.current().round();
 

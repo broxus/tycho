@@ -75,14 +75,13 @@ impl Responder {
         head: &DagHead,
         round_ctx: &RoundCtx,
     ) {
+        // Note: first flush `BroadcastFilter`, then advance `Head` for `Signer`.
+        //  That way, from Signer's point of view, BF will always have at least next round flushed.
+        //  So Signer will access fully ready state of DAG up to `Head.next()`.
+        //  Signer does not care for inconsistencies in BF later than `Head.next()` because
+        //  no matter if it responds with TryLater or NoPoint, there is time and it won't sign now.
+        //  It's important to respond with NoPoint by reason up to `Head.next()` inclusively.
         broadcast_filter.flush_to_dag(head, downloader, store, round_ctx);
-        // Note that `next_dag_round` for Signer should be advanced _after_ new points
-        //  are moved from BroadcastFilter into DAG. Then Signer will look for points
-        //  (of rounds greater than local engine round, including top dag round exactly)
-        //  first in BroadcastFilter, then in DAG.
-        //  Otherwise local Signer will skip BroadcastFilter check and search in DAG directly,
-        //  will not find cached point and will ask to repeat broadcast once more, and local
-        //  BroadcastFilter may account such repeated broadcast as malicious.
         self.0.current.store(Some(Arc::new(ResponderCurrent {
             store: store.clone(),
             broadcast_filter: broadcast_filter.clone(),
