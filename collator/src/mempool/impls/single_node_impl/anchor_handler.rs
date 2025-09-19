@@ -13,14 +13,14 @@ use crate::tracing_targets;
 
 pub const ANCHOR_ID_STEP: u32 = 4;
 
-pub struct AnchorSingleNodeHandler {
+pub struct SingleNodeAnchorHandler {
     cache: Arc<Cache>,
     parser: Parser,
     peer_id: PeerId,
     prev_anchor_id: Option<MempoolAnchorId>,
 }
 
-impl AnchorSingleNodeHandler {
+impl SingleNodeAnchorHandler {
     pub fn new(
         cache: Arc<Cache>,
         peer_id: PeerId,
