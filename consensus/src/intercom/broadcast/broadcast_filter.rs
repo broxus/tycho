@@ -41,11 +41,11 @@ impl BroadcastFilter {
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) {
-        let is_future_threshold_reached = {
+        let cache_info = {
             let _task_time = HistogramGuard::begin("tycho_mempool_bf_add_time");
             (self.inner).add(sender, point, head, downloader, store, round_ctx)
         };
-        if is_future_threshold_reached {
+        if cache_info.is_threshold_reached {
             // notify Collector after max consensus round is updated
             self.inner.consensus_round.set_max(point.info().round());
             // round is determined, so clean history;
@@ -144,6 +144,13 @@ enum CheckError {
     Fail(VerifyFailReason),
 }
 
+#[derive(Default)]
+struct CacheInfo {
+    is_threshold_reached: bool,
+    duplicates: Option<u16>,
+    equivocation: Option<Digest>,
+}
+
 impl BroadcastFilterInner {
     // Note logic still under consideration because of contradiction in requirements:
     //  * we must determine the latest consensus round reliably:
@@ -164,29 +171,23 @@ impl BroadcastFilterInner {
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
-    ) -> bool {
-        let PointId {
-            author,
-            round,
-            digest,
-        } = point.info().id();
+    ) -> CacheInfo {
+        let id = point.info().id();
 
-        // head may be outdated during Engine round switch
-        let top_round = head.next().round();
-
-        let checked = if sender != author {
+        let checked = if sender != id.author {
             Err(CheckError::SenderNotAuthor(*sender))
         } else {
-            // have to cache every point when the node lags behind consensus
-            let prune_after = top_round + NodeConfig::get().cache_future_broadcasts_rounds;
+            // have to cache every point when the node lags behind consensus;
+            let prune_after =
+                head.next().round() + NodeConfig::get().cache_future_broadcasts_rounds;
             match Verifier::verify(point.info(), &self.peer_schedule, round_ctx.conf()) {
-                Ok(()) => Ok(if round > prune_after {
-                    ByAuthorItem::OkPruned(digest)
+                Ok(()) => Ok(if id.round > prune_after {
+                    ByAuthorItem::OkPruned(id.digest)
                 } else {
                     ByAuthorItem::Ok(point.clone())
                 }),
-                Err(VerifyError::IllFormed(reason)) => Ok(if round > prune_after {
-                    ByAuthorItem::IllFormedPruned(digest, reason)
+                Err(VerifyError::IllFormed(reason)) => Ok(if id.round > prune_after {
+                    ByAuthorItem::IllFormedPruned(id.digest, reason)
                 } else {
                     ByAuthorItem::IllFormed(point.clone(), reason)
                 }),
@@ -194,129 +195,13 @@ impl BroadcastFilterInner {
             }
         };
 
-        let (is_future_threshold_reached, duplicates, equivocation) = match &checked {
-            Ok(verified) => {
-                // just don't want to mess with exact type, thus generic
-                enum MapSearch<T> {
-                    Entry(T),
-                    AddToDag,
-                    Ignore,
-                }
-                let map_search = if round <= top_round {
-                    if head.last_back_bottom() <= round {
-                        // just add to dag directly, Engine removes such BF entries by itself
-                        MapSearch::AddToDag
-                    } else {
-                        // too old and totally useless now
-                        MapSearch::Ignore
-                    }
-                } else {
-                    // note: entry lock guard is passed into its ref which cannot remove entry
-                    match self.by_round.get(&round) {
-                        Some(round_item) => MapSearch::Entry(round_item),
-                        None => {
-                            // try to create new future round: take write lock later, v_set may be uninit
-                            let v_set_len = self.peer_schedule.atomic().peers_for(round).len();
-                            match PeerCount::try_from(v_set_len) {
-                                Ok(peer_count) => {
-                                    let entry =
-                                        self.by_round.entry(round).or_insert_with(|| ByRoundItem {
-                                            cached: Some(Cached {
-                                                peer_count,
-                                                by_author: FastDashMap::with_capacity_and_hasher(
-                                                    peer_count.full(),
-                                                    Default::default(),
-                                                ),
-                                            }),
-                                            dag_round: None,
-                                        });
-                                    MapSearch::Entry(entry.downgrade())
-                                }
-                                Err(_) => {
-                                    // v_set is not initialized, nothing to do.
-                                    // actually such point cannot be successfully verified,
-                                    // but we neither have log debounce nor should panic here
-                                    MapSearch::Ignore
-                                }
-                            }
-                        }
-                    }
-                };
-                match map_search {
-                    MapSearch::Entry(round_item_opt) => match &*round_item_opt {
-                        ByRoundItem {
-                            cached: Some(cached),
-                            dag_round: Option::None,
-                        } => {
-                            // ban the author, if we detect equivocation now; we won't be able to prove it
-                            // if some signatures are invalid (it's another reason for a local ban)
-                            let (duplicates, equivocation) = match cached.by_author.entry(author) {
-                                dashmap::Entry::Occupied(mut existing) => {
-                                    let old_digest = *existing.get().item.digest();
-                                    let duplicates = &mut existing.get_mut().duplicates;
-
-                                    let equivocation = if &old_digest == point.info().digest() {
-                                        *duplicates = duplicates.saturating_add(1);
-                                        None
-                                    } else {
-                                        Some(old_digest)
-                                    };
-                                    // allow some duplicates in case of network error or sender restart
-                                    // sender could have not received our response, thus retried
-                                    (Some(*duplicates).filter(|d| *d > 3), equivocation)
-                                }
-                                dashmap::Entry::Vacant(vacant) => {
-                                    vacant.insert(ByAuthor {
-                                        item: verified.clone(),
-                                        duplicates: 0,
-                                    });
-                                    (None, None)
-                                }
-                            };
-                            let is_future_threshold_reached =
-                                cached.by_author.len() == cached.peer_count.reliable_minority();
-                            (is_future_threshold_reached, duplicates, equivocation)
-                        }
-                        ByRoundItem {
-                            dag_round: Some(start_round),
-                            ..
-                        } => {
-                            // start round is newer than current head
-                            if let Some(point_round) = start_round.scan(round) {
-                                let iter = std::iter::once((&author, verified));
-                                Self::add_all_to_dag(
-                                    iter,
-                                    &point_round,
-                                    downloader,
-                                    store,
-                                    round_ctx,
-                                );
-                            }
-                            (false, None, None)
-                        }
-                        ByRoundItem {
-                            cached: None,
-                            dag_round: None,
-                        } => panic!("flush must not leave both fields empty"),
-                    },
-                    MapSearch::AddToDag => {
-                        if let Some(dag_round) = head.next().scan(round) {
-                            let iter = std::iter::once((&author, verified));
-                            Self::add_all_to_dag(iter, &dag_round, downloader, store, round_ctx);
-                        }
-                        (false, None, None)
-                    }
-                    MapSearch::Ignore => (false, None, None),
-                }
-            }
-            Err(_) => (false, None, None),
-        };
+        let cache_info = self.cache(&checked, &id, head, downloader, store, round_ctx);
 
         let ill_formed_reason = (checked.as_ref().ok()).and_then(|item| item.ill_formed_reason());
         let level = if checked.is_err()
             || ill_formed_reason.is_some()
-            || duplicates.is_some()
-            || equivocation.is_some()
+            || cache_info.duplicates.is_some()
+            || cache_info.equivocation.is_some()
         {
             tracing::Level::ERROR
         } else {
@@ -325,19 +210,125 @@ impl BroadcastFilterInner {
         dyn_event!(
             parent: round_ctx.span(),
             level,
-            author = display(author.alt()),
-            round = round.0,
-            digest = display(digest.alt()),
+            author = display(id.author.alt()),
+            round = id.round.0,
+            digest = display(id.digest.alt()),
             is_pruned = checked.as_ref().ok().map(|ok| ok.is_pruned()).filter(|x| *x),
             ill_formed = ill_formed_reason.map(display),
             checked = checked.as_ref().err().map(display),
-            duplicates = duplicates,
-            equivocation = equivocation.as_ref().map(|digest| display(digest.alt())),
-            threshold_reached = Some(is_future_threshold_reached).filter(|x| *x),
+            duplicates = cache_info.duplicates,
+            equivocation = cache_info.equivocation.as_ref().map(|digest| display(digest.alt())),
+            threshold_reached = cache_info.is_threshold_reached.then_some(true),
             "received broadcast"
         );
 
-        is_future_threshold_reached
+        cache_info
+    }
+
+    fn cache(
+        &self,
+        checked: &Result<ByAuthorItem, CheckError>,
+        id: &PointId,
+        head: &DagHead,
+        downloader: &Downloader,
+        store: &MempoolStore,
+        round_ctx: &RoundCtx,
+    ) -> CacheInfo {
+        let Ok(verified) = checked else {
+            return CacheInfo::default();
+        };
+
+        if id.round <= head.next().round() {
+            if head.last_back_bottom() <= id.round
+                && let Some(dag_round) = head.next().scan(id.round)
+            {
+                // just add to dag directly, Engine removes such BF entries by itself
+                let iter = std::iter::once((&id.author, verified));
+                Self::add_all_to_dag(iter, &dag_round, downloader, store, round_ctx);
+            } // else: too old and totally useless now
+            return CacheInfo::default();
+        }
+
+        let round_item_read = match self.by_round.get(&id.round) {
+            Some(round_item) => round_item,
+            None => {
+                // try to create new future round: take write lock later, v_set may be uninit
+                let v_set_len = self.peer_schedule.atomic().peers_for(id.round).len();
+                match PeerCount::try_from(v_set_len) {
+                    Ok(peer_count) => (self.by_round.entry(id.round))
+                        .or_insert_with(|| ByRoundItem {
+                            cached: Some(Cached {
+                                peer_count,
+                                by_author: FastDashMap::with_capacity_and_hasher(
+                                    peer_count.full(),
+                                    Default::default(),
+                                ),
+                            }),
+                            dag_round: None,
+                        })
+                        .downgrade(),
+                    Err(_) => {
+                        // v_set is not initialized, nothing to do.
+                        // actually such point cannot be successfully verified,
+                        // but we neither have log debounce nor should panic here
+                        return CacheInfo::default();
+                    }
+                }
+            }
+        };
+        match &*round_item_read {
+            ByRoundItem {
+                cached: Some(cached),
+                dag_round: Option::None,
+            } => {
+                let mut cached_info = CacheInfo::default();
+                // ban the author, if we detect equivocation now; we won't be able to prove it
+                // if some signatures are invalid (it's another reason for a local ban)
+                (cached.by_author.entry(id.author))
+                    .and_modify(|existing| {
+                        let old_digest = *existing.item.digest();
+                        if old_digest == id.digest {
+                            existing.duplicates = existing.duplicates.saturating_add(1);
+                            // allow some duplicates in case of network error or sender restart
+                            // sender could have not received our response, thus retried
+                            if existing.duplicates > 3 {
+                                cached_info.duplicates = Some(existing.duplicates);
+                            }
+                        } else {
+                            cached_info.equivocation = Some(old_digest);
+                        };
+                    })
+                    .or_insert_with(|| ByAuthor {
+                        item: verified.clone(),
+                        duplicates: 0,
+                    });
+                cached_info.is_threshold_reached =
+                    cached.by_author.len() == cached.peer_count.reliable_minority();
+                cached_info
+            }
+            ByRoundItem {
+                dag_round: Some(start_round),
+                ..
+            } => {
+                let start_round = start_round.clone();
+                drop(round_item_read);
+                let point_round = if start_round.round() == id.round {
+                    Some(start_round)
+                } else {
+                    start_round.scan(id.round)
+                };
+                // start round is newer than current head
+                if let Some(point_round) = point_round {
+                    let iter = std::iter::once((&id.author, verified));
+                    Self::add_all_to_dag(iter, &point_round, downloader, store, round_ctx);
+                }
+                CacheInfo::default()
+            }
+            ByRoundItem {
+                cached: None,
+                dag_round: None,
+            } => panic!("flush must not leave both fields empty"),
+        }
     }
 
     /// just drop unneeded data when Engine is paused and round task is not running
