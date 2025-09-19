@@ -14,7 +14,7 @@ use crate::engine::input_buffer::InputBuffer;
 use crate::engine::lifecycle::{EngineBinding, EngineNetwork};
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
 use crate::intercom::{
-    BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
+    BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorStatus, Dispatcher,
     Downloader, PeerSchedule, Responder,
 };
 use crate::models::{Cert, Link, Point, PointInfo};
@@ -81,13 +81,16 @@ impl RoundTaskReady {
         );
 
         let (bcaster_ready_tx, stub_rx) = oneshot::channel();
-        let (stub_tx, collector_signal_rx) = watch::channel(CollectorSignal::Retry { ready: true });
+        let (stub_tx, collector_status_rx) = watch::channel(CollectorStatus {
+            attempt: 0,  // default
+            ready: true, // make broadcaster to resume its work not waiting for collector
+        });
         let broadcaster = Broadcaster::new(
             self.state.dispatcher.clone(),
             prev_last_point,
             self.state.peer_schedule.clone(),
             bcaster_ready_tx,
-            collector_signal_rx,
+            collector_status_rx,
             round_ctx,
         );
         let task_ctx = round_ctx.task();
@@ -105,7 +108,7 @@ impl RoundTaskReady {
         input_buffer: InputBuffer,
         store: MempoolStore,
         head: DagHead,
-        mut collector_signal_rx: watch::Receiver<CollectorSignal>,
+        mut collector_status_rx: watch::Receiver<CollectorStatus>,
         round_ctx: RoundCtx,
     ) -> TaskResult<Result<Point, ProduceError>> {
         let allowed_to_produce = (last_own_point.as_ref()).is_none_or(|prev_own| {
@@ -140,13 +143,9 @@ impl RoundTaskReady {
                 () = &mut threshold => {
                     break true;
                 },
-                recv_status = collector_signal_rx.changed() => {
-                    if recv_status.is_err() {
+                recv_status = collector_status_rx.changed() => {
+                    if recv_status.is_err() || collector_status_rx.borrow().ready {
                         break false;
-                    }
-                    match *collector_signal_rx.borrow_and_update() {
-                        CollectorSignal::Retry {ready: true} => break false,
-                        CollectorSignal::Retry {ready: false} => {},
                     }
                 }
             );
@@ -199,7 +198,7 @@ impl RoundTaskReady {
             round_ctx,
         );
 
-        let collector_signal_tx = watch::Sender::new(CollectorSignal::Retry { ready: false });
+        let collector_status_tx = watch::Sender::new(CollectorStatus::default());
 
         let broadcaster_run = round_ctx.task().spawn({
             let produce_point_fut = match start_replay_bcasts {
@@ -214,14 +213,14 @@ impl RoundTaskReady {
                     self.state.input_buffer.clone(),
                     self.state.store.clone(),
                     head.clone(),
-                    collector_signal_tx.subscribe(),
+                    collector_status_tx.subscribe(),
                     round_ctx.clone(),
                 )
                 .boxed(),
             };
 
             let own_point_round = head.current().downgrade();
-            let collector_signal_rx = collector_signal_tx.subscribe();
+            let collector_status_rx = collector_status_tx.subscribe();
             let round_ctx = round_ctx.clone();
             let peer_schedule = self.state.peer_schedule.clone();
             let prev_bcast = self.prev_broadcast;
@@ -246,7 +245,7 @@ impl RoundTaskReady {
                         own_point,
                         peer_schedule,
                         bcaster_ready_tx,
-                        collector_signal_rx,
+                        collector_status_rx,
                         &round_ctx,
                     );
                     let new_last_own_point = broadcaster.run().await?;
@@ -275,7 +274,7 @@ impl RoundTaskReady {
             async move {
                 let next_round = head.next().round();
                 let collector = collector
-                    .run(collector_ctx, head, collector_signal_tx, bcaster_ready_rx)
+                    .run(collector_ctx, head, collector_status_tx, bcaster_ready_rx)
                     .await?;
                 consensus_round.set_max(next_round);
                 Ok(collector)

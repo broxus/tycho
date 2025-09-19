@@ -11,10 +11,13 @@ use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::intercom::BroadcasterSignal;
 use crate::models::Round;
 
-/// collector may run without broadcaster, as if broadcaster signalled Ok
-#[derive(Copy, Clone, Debug)]
-pub enum CollectorSignal {
-    Retry { ready: bool },
+#[derive(Clone, Copy, Default)]
+pub struct CollectorStatus {
+    /// collector fires attempt=1 immediately when starts;
+    /// wraps around if a loop takes too long to retry broadcast as a heartbeat
+    pub attempt: u8,
+    /// `true` is "soft success", while watch channel close is "hard fail"
+    pub ready: bool,
 }
 
 pub struct Collector {
@@ -26,11 +29,12 @@ impl Collector {
         Self { consensus_round }
     }
 
+    /// to run collector without broadcaster, send Ok to `bcaster_signal`
     pub async fn run(
         self,
         ctx: CollectCtx,
         head: DagHead,
-        collector_signal: watch::Sender<CollectorSignal>,
+        status: watch::Sender<CollectorStatus>,
         bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> TaskResult<Self> {
         let mut task = CollectorTask {
@@ -39,7 +43,7 @@ impl Collector {
             current_dag_round: head.current().clone(),
             next_round: head.next().round(),
             is_includes_ready: false,
-            collector_signal,
+            status,
             is_bcaster_ready_ok: false,
         };
 
@@ -62,7 +66,7 @@ struct CollectorTask {
 
     is_includes_ready: bool,
     /// Receiver may be closed (bcaster finished), so do not require `Ok` on send
-    collector_signal: watch::Sender<CollectorSignal>,
+    status: watch::Sender<CollectorStatus>,
     is_bcaster_ready_ok: bool,
 }
 
@@ -109,9 +113,10 @@ impl CollectorTask {
                     if self.is_ready() {
                         break;
                     } else {
-                        self.collector_signal.send_replace(
-                            CollectorSignal::Retry { ready: self.is_includes_ready }
-                        );
+                        self.status.send_modify(|status|{
+                            status.attempt = status.attempt.wrapping_add(1);
+                            status.ready = self.is_includes_ready;
+                        });
                     }
                 },
                 // very frequent event that may seldom cause completion
