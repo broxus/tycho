@@ -12,7 +12,7 @@ use crate::mempool::impls::common::parser::{Parser, ParserOutput};
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
 
-pub struct AnchorHandler {
+pub struct StdAnchorHandler {
     anchor_rx: mpsc::UnboundedReceiver<MempoolOutput>,
     deduplicate_rounds: u16,
 }
@@ -24,7 +24,7 @@ struct Shuttle {
     first_after_gap: Option<MempoolAnchorId>,
 }
 
-impl AnchorHandler {
+impl StdAnchorHandler {
     pub fn new(
         config: &ConsensusConfig,
         anchor_rx: mpsc::UnboundedReceiver<MempoolOutput>,

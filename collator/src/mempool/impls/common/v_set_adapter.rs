@@ -1,17 +1,12 @@
-use tycho_consensus::prelude::{EngineSession, InitPeers, MempoolConfigBuilder};
+use tycho_consensus::prelude::InitPeers;
 
-use super::state_update_queue::StateUpdateQueue;
 use crate::mempool::StateUpdateContext;
 
-pub struct ConfigAdapter {
-    pub builder: MempoolConfigBuilder,
-    pub state_update_queue: StateUpdateQueue,
-    pub engine_session: Option<EngineSession>,
-}
+pub struct VSetAdapter;
 
 // TODO keep track of last applied v_set hash and round
 
-impl ConfigAdapter {
+impl VSetAdapter {
     pub fn init_peers(new_cx: &StateUpdateContext) -> anyhow::Result<InitPeers> {
         let peers = InitPeers {
             prev_start_round: new_cx.consensus_info.prev_vset_switch_round,
