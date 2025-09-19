@@ -57,14 +57,14 @@ impl BroadcastFilter {
         }
     }
 
-    pub fn has_point(&self, round: Round, sender: &PeerId) -> bool {
+    /// None for "currently undefined": round is being flushed so we don't know if was received
+    pub fn has_point(&self, round: Round, sender: &PeerId) -> Option<bool> {
         let _task_time = HistogramGuard::begin("tycho_mempool_bf_has_point_time");
         match self.inner.by_round.get(&round) {
-            None => false,
-            Some(round_item) => match round_item.cached.as_ref() {
-                Some(cached) => cached.by_author.contains_key(sender),
-                None => false,
-            },
+            None => Some(false), // round is either already flushed or not yet created
+            Some(round_item) => {
+                (round_item.cached.as_ref()).map(|cached| cached.by_author.contains_key(sender))
+            }
         }
     }
 
@@ -167,7 +167,7 @@ impl BroadcastFilterInner {
         &self,
         sender: &PeerId,
         point: &Point,
-        head: &DagHead,
+        head: &DagHead, // Note: head may be older than BF bottom during Engine round switch
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
@@ -229,7 +229,7 @@ impl BroadcastFilterInner {
         &self,
         checked: &Result<ByAuthorItem, CheckError>,
         id: &PointId,
-        head: &DagHead,
+        head: &DagHead, // Note: head may be older than BF bottom during Engine round switch
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
