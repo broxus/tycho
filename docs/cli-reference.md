@@ -52,6 +52,7 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho tool bc gen-proposal set-elector-code`↴](#tycho-tool-bc-gen-proposal-set-elector-code)
 * [`tycho tool bc gen-proposal set-config-code`↴](#tycho-tool-bc-gen-proposal-set-config-code)
 * [`tycho tool bc gen-proposal-vote`↴](#tycho-tool-bc-gen-proposal-vote)
+* [`tycho tool dump-state`↴](#tycho-tool-dump-state)
 * [`tycho elect`↴](#tycho-elect)
 * [`tycho elect run`↴](#tycho-elect-run)
 * [`tycho elect once`↴](#tycho-elect-once)
@@ -888,6 +889,19 @@ Create proposal voting payload
 * `-r`, `--raw-key` — expect a raw key input (32 bytes)
 * `--query-id <QUERY_ID>` — query ID. Default: current timestamp in milliseconds
 
+
+## `tycho tool dump-state`
+
+Dumps node state for a specific block, intended for testing collation of the next block
+
+**Usage:** `tycho tool dump-state --db <DB> --output <OUTPUT> --block-id <BLOCK_ID>`
+
+###### **Options:**
+
+* `--config <CONFIG>` — path to the node config. By default, path to the node's database directory will be taken from config
+* `--db <DB>` — path to the node's database directory
+* `--output <OUTPUT>` — path to the directory where the dump files will be saved
+* `--block-id <BLOCK_ID>` — full block ID, can be a masterchain or a shardchain block
 
 
 ## `tycho elect`
