@@ -227,7 +227,7 @@ impl Broadcaster {
                     for peer in &*peers {
                         self.broadcast(peer);
                     }
-                } else {
+                } else if collector_status.attempt > 1 {
                     let peers = mem::take(&mut self.sig_peers);
                     BroadcastCtx::retry(peers.len());
                     for peer in &peers {
