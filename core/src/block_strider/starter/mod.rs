@@ -12,7 +12,7 @@ use tycho_util::serde_helpers;
 
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
-use crate::storage::CoreStorage;
+use crate::storage::{CoreStorage, ShardStateStorage};
 
 mod cold_boot;
 
@@ -157,6 +157,13 @@ impl Starter {
         P: ZerostateProvider,
     {
         self.inner.cold_boot(boot_type, zerostate_provider).await
+    }
+
+    pub async fn init_allowed_workchains(
+        shard_state_storage: &ShardStateStorage,
+        last_mc_block_id: &BlockId,
+    ) -> Result<()> {
+        StarterInner::init_allowed_workchains(shard_state_storage, last_mc_block_id).await
     }
 }
 
