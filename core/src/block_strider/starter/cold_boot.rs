@@ -26,7 +26,7 @@ use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
 use crate::storage::{
     BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
-    PersistentStateKind,
+    PersistentStateKind, ShardStateStorage,
 };
 
 impl StarterInner {
@@ -85,11 +85,21 @@ impl StarterInner {
             .node_state()
             .store_last_mc_block_id(&last_mc_block_id);
 
-        // init allowed workchains
-        let mc_state = self
-            .storage
-            .shard_state_storage()
-            .load_state(last_mc_block_id.seqno, &last_mc_block_id)
+        tracing::info!(
+            last_mc_block_id = %last_mc_block_id,
+            "finished",
+        );
+
+        Ok(last_mc_block_id)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn init_allowed_workchains(
+        shard_state_storage: &ShardStateStorage,
+        last_mc_block_id: &BlockId,
+    ) -> Result<()> {
+        let mc_state = shard_state_storage
+            .load_state(last_mc_block_id.seqno, last_mc_block_id)
             .await?;
 
         let config = mc_state.config_params()?;
@@ -103,12 +113,12 @@ impl StarterInner {
         tracing::info!(
             last_mc_block_id = %last_mc_block_id,
             ?allowed_workchains,
-            "finished",
+            "init",
         );
 
         ExtMsgRepr::set_allowed_workchains(allowed_workchains)?;
 
-        Ok(last_mc_block_id)
+        Ok(())
     }
 
     // === Sync steps ===
