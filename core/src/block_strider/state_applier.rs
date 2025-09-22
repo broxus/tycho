@@ -50,14 +50,12 @@ where
         let state_storage = self.inner.storage.shard_state_storage();
 
         // Load/Apply state
-        let (state, handles) = if handle.has_state() {
+        let state = if handle.has_state() {
             // Fast path when state is already applied
-            let state = state_storage
+            state_storage
                 .load_state(handle.ref_by_mc_seqno(), handle.id())
                 .await
-                .context("failed to load applied shard state")?;
-
-            (state, RefMcStateHandles::Skip)
+                .context("failed to load applied shard state")?
         } else {
             // Load previous states
             let (prev_id, prev_id_alt) = cx
@@ -105,18 +103,17 @@ where
             };
 
             // Apply state
-            let state = self
-                .compute_and_store_state_update(&cx.block, &handle, prev_root_cell, old_split_at)
-                .await?;
-
-            (state, handles)
+            self.compute_and_store_state_update(
+                &cx.block,
+                &handle,
+                prev_root_cell,
+                old_split_at,
+                handles.min_safe_handle().clone(),
+            )
+            .await?
         };
 
-        Ok(StateApplierPrepared {
-            handle,
-            state,
-            _prev_handles: handles,
-        })
+        Ok(StateApplierPrepared { handle, state })
     }
 
     async fn handle_block_impl(
@@ -172,6 +169,7 @@ where
         handle: &BlockHandle,
         prev_root: Cell,
         split_at: ahash::HashSet<HashBytes>,
+        ref_mc_state_handle: RefMcStateHandle,
     ) -> Result<ShardStateStuff> {
         let labels = [("workchain", block.id().shard.workchain().to_string())];
         let _histogram =
@@ -192,9 +190,8 @@ where
 
         let state_storage = self.inner.storage.shard_state_storage();
 
-        let new_state =
-            ShardStateStuff::from_root(block.id(), new_state, state_storage.min_ref_mc_state())
-                .context("Failed to create new state")?;
+        let new_state = ShardStateStuff::from_root(block.id(), new_state, ref_mc_state_handle)
+            .context("Failed to create new state")?;
 
         state_storage
             .store_state(handle, &new_state, StoreStateHint {
@@ -241,16 +238,20 @@ where
 pub struct StateApplierPrepared {
     handle: BlockHandle,
     state: ShardStateStuff,
-    _prev_handles: RefMcStateHandles,
 }
 
 enum RefMcStateHandles {
-    Skip,
-    Split(
-        #[allow(unused)] RefMcStateHandle,
-        #[allow(unused)] RefMcStateHandle,
-    ),
-    Single(#[allow(unused)] RefMcStateHandle),
+    Split(RefMcStateHandle, RefMcStateHandle),
+    Single(RefMcStateHandle),
+}
+
+impl RefMcStateHandles {
+    fn min_safe_handle(&self) -> &RefMcStateHandle {
+        match self {
+            Self::Split(left, right) => left.min_safe(right),
+            Self::Single(handle) => handle,
+        }
+    }
 }
 
 struct Inner<S> {

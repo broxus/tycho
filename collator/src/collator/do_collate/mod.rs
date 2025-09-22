@@ -8,7 +8,7 @@ use phase::{ActualState, Phase};
 use prepare::PrepareState;
 use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
 use tycho_block_util::queue::QueueKey;
-use tycho_block_util::state::MinRefMcStateTracker;
+use tycho_block_util::state::RefMcStateHandle;
 use tycho_core::storage::{NewBlockMeta, StoreStateHint};
 use tycho_types::models::*;
 use tycho_types::num::Tokens;
@@ -59,7 +59,7 @@ pub struct FinalizeCollationCtx {
     pub has_unprocessed_messages: bool,
     pub finalized: FinalizeBlockResult,
     pub reader_state: ReaderState,
-    pub tracker: MinRefMcStateTracker,
+    pub ref_mc_state_handle: RefMcStateHandle,
     pub force_next_mc_block: ForceMasterCollation,
     pub resume_collation_elapsed: Duration,
 }
@@ -100,7 +100,7 @@ impl CollatorStdImpl {
         let mc_block_id = mc_data.block_id;
         let prev_shard_data = prev_shard_data.unwrap();
         let usage_tree = usage_tree.unwrap();
-        let tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
+        let ref_mc_state_handle = prev_shard_data.ref_mc_state_handle().clone();
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "Start collating block: mc_data_block_id={}, prev_block_ids={}, top_shard_blocks_ids: {:?}",
@@ -272,7 +272,7 @@ impl CollatorStdImpl {
                 has_unprocessed_messages: final_result.has_unprocessed_messages,
                 finalized,
                 reader_state,
-                tracker,
+                ref_mc_state_handle,
                 force_next_mc_block,
                 resume_collation_elapsed,
             })
@@ -934,7 +934,7 @@ impl CollatorStdImpl {
             has_unprocessed_messages,
             finalized,
             reader_state,
-            tracker,
+            ref_mc_state_handle,
             force_next_mc_block,
             resume_collation_elapsed,
         } = ctx;
@@ -1008,7 +1008,7 @@ impl CollatorStdImpl {
                 collation_config,
                 has_unprocessed_messages,
                 reader_state,
-                tracker,
+                ref_mc_state_handle,
                 resume_collation_elapsed,
             )?;
 

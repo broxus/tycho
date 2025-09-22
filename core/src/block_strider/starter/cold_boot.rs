@@ -759,9 +759,15 @@ impl StarterInner {
             // NOTE: `store_state_file` error is mostly unrecoverable since the operation
             //       context is too large to be atomic.
             // TODO: Make this operation recoverable to allow an infinite number of attempts.
+            shard_states
+                .store_state_file(block_id, file)
+                .await
+                .context("failed to store shard state file")?;
+
             let state = shard_states
-                .store_state_file(mc_seqno, block_id, file)
-                .await?;
+                .load_state(mc_seqno, block_id)
+                .await
+                .context("failed to reload saved shard state")?;
 
             let block_handle = match block_handle {
                 Some(handle) => handle,
@@ -944,7 +950,7 @@ fn make_shard_state(
         file_hash,
     };
 
-    ShardStateStuff::from_root(&block_id, root, tracker)
+    ShardStateStuff::from_root(&block_id, root, tracker.insert_untracked())
 }
 
 #[derive(Clone)]

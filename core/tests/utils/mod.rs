@@ -27,7 +27,7 @@ pub(crate) fn parse_zerostate(data: &Vec<u8>) -> Result<ShardStateStuff> {
     };
 
     let tracker = MinRefMcStateTracker::new();
-    ShardStateStuff::from_root(&block_id, root, &tracker)
+    ShardStateStuff::from_root(&block_id, root, tracker.insert_untracked())
 }
 
 pub(crate) fn parse_archive(data: &[u8]) -> Result<Archive> {

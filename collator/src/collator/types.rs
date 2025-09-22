@@ -95,13 +95,9 @@ impl PrevData {
         let pure_prev_state_root = prev_states[0].root_cell().clone();
         let pure_prev_states = prev_states;
 
-        let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
-        let observable_root = usage_tree.track(&pure_prev_state_root);
-        let observable_states = vec![ShardStateStuff::from_root(
-            pure_prev_states[0].block_id(),
-            observable_root,
-            pure_prev_states[0].ref_mc_state_handle().tracker(),
-        )?];
+        let (usage_tree, observable_state) =
+            pure_prev_states[0].track_usage(UsageTreeMode::OnLoad)?;
+        let observable_states = vec![observable_state];
 
         let gen_chain_time = observable_states[0].get_gen_chain_time();
         let gen_lt = observable_states[0].state().gen_lt;
