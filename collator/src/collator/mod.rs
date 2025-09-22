@@ -14,8 +14,7 @@ use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
-use tycho_block_util::dict::split_aug_dict_raw;
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
 use tycho_types::cell::{Cell, HashBytes};
@@ -666,7 +665,7 @@ impl CollatorStdImpl {
                         )
                         .await?;
                     } else {
-                        let mut unfinished_tasks: Vec<StateUpdateContext> = vec![last_task];
+                        let mut unfinished_tasks = vec![last_task];
 
                         // Process previous tasks until finding the finished one
                         while let Some(task) = self.store_new_state_tasks.pop() {
@@ -686,31 +685,30 @@ impl CollatorStdImpl {
                             // load stored state
                             let mut prev_state = self
                                 .state_node_adapter
-                                .load_state_root(prev_mc_seqno, &task.block_id)
+                                .load_state(prev_mc_seqno, &task.block_id)
                                 .await
                                 .context("failed to load prev shard state")?;
 
                             while let Some(task) = unfinished_tasks.pop() {
-                                let split_at = {
-                                    let shard_accounts = prev_state
-                                        .as_ref()
-                                        .reference_cloned(1)
-                                        .context("invalid shard state")?
-                                        .parse::<ShardAccounts>()
-                                        .context("failed to load shard accounts")?;
-
-                                    split_aug_dict_raw(shard_accounts, 5)
-                                        .context("failed to split shard accounts")?
-                                        .into_keys()
-                                        .collect::<ahash::HashSet<_>>()
-                                };
-
+                                let prev_block_id = *prev_state.block_id();
                                 prev_state = rayon_run({
-                                    let state_update = task.state_update.clone();
-                                    move || state_update.par_apply(&prev_state, &split_at)
+                                    let block_id = task.block_id;
+                                    let merkle_update = task.state_update.clone();
+                                    move || {
+                                        prev_state.par_make_next_state(
+                                            &block_id,
+                                            &merkle_update,
+                                            Some(5),
+                                        )
+                                    }
                                 })
                                 .await
-                                .context("Failed to apply state update")?;
+                                .with_context(|| {
+                                    format!(
+                                        "failed to apply merkle of block {} to {prev_block_id}",
+                                        task.block_id
+                                    )
+                                })?;
 
                                 // finalize last store task in background
                                 self.background_store_new_state_tx.send(task)?;
@@ -901,12 +899,10 @@ impl CollatorStdImpl {
 
     async fn update_prev_data(
         working_state: &mut WorkingState,
-        pure_state_root: Cell,
+        prev_state: ShardStateStuff,
     ) -> Result<()> {
         // drop prev usage tree
-        {
-            working_state.usage_tree.take();
-        }
+        working_state.usage_tree.take();
 
         // get prev shard data
         let prev_shard_data = working_state
@@ -914,18 +910,12 @@ impl CollatorStdImpl {
             .as_ref()
             .expect("should exist here");
         let prev_queue_diff_hashes = prev_shard_data.prev_queue_diff_hashes().clone();
-        let prev_blocks_ids = prev_shard_data.blocks_ids().clone();
-        let tracker = prev_shard_data.ref_mc_state_handle().tracker().clone();
-
-        // rebuild prev state
-        let prev_state =
-            ShardStateStuff::from_root(&prev_blocks_ids[0], pure_state_root, &tracker)?;
-        let prev_states = vec![prev_state];
 
         // update working state
         tracing::debug!(target: tracing_targets::COLLATOR, "updating prev data in working state from built pure state root...");
 
-        let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
+        let (prev_shard_data, usage_tree) =
+            PrevData::build(vec![prev_state], prev_queue_diff_hashes)?;
 
         // set new prev shard data and usage tree
         working_state.prev_shard_data = Some(prev_shard_data);
@@ -940,9 +930,7 @@ impl CollatorStdImpl {
         state_node_adapter: Arc<dyn StateNodeAdapter>,
     ) -> Result<()> {
         // drop prev usage tree
-        {
-            working_state.usage_tree.take();
-        }
+        working_state.usage_tree.take();
 
         // get prev shard data
         let prev_shard_data = working_state
@@ -987,7 +975,7 @@ impl CollatorStdImpl {
         collation_config: Arc<CollationConfig>,
         has_unprocessed_messages: bool,
         reader_state: ReaderState,
-        tracker: MinRefMcStateTracker,
+        ref_mc_state_handle: RefMcStateHandle,
         resume_collation_elapsed: Duration,
     ) -> Result<()> {
         enum GetNewShardStateStuff {
@@ -996,37 +984,31 @@ impl CollatorStdImpl {
                 block_id: BlockId,
                 new_observable_state: Box<ShardStateUnsplit>,
                 new_observable_state_root: Cell,
-                tracker: MinRefMcStateTracker,
             },
         }
 
-        let get_new_state_stuff = {
-            if block_id.is_masterchain() {
-                GetNewShardStateStuff::ReloadFromStorage(store_new_state_task)
-            } else {
-                // append new store task
-                self.store_new_state_tasks.push(StateUpdateContext {
-                    block_id,
-                    store_new_state_task,
-                    state_update,
-                });
+        let get_new_state_stuff = if block_id.is_masterchain() {
+            GetNewShardStateStuff::ReloadFromStorage(store_new_state_task)
+        } else {
+            // append new store task
+            self.store_new_state_tasks.push(StateUpdateContext {
+                block_id,
+                store_new_state_task,
+                state_update,
+            });
 
-                // Keep only the last `merkle_chain_limit` states alive
-                {
-                    if self.store_state_refs.len() == self.config.merkle_chain_limit {
-                        self.store_state_refs.pop_front();
-                    }
-                    self.store_state_refs
-                        .push_back(new_observable_state_root.clone());
-                }
+            // Keep only the last `merkle_chain_limit` states alive
+            if self.store_state_refs.len() == self.config.merkle_chain_limit {
+                self.store_state_refs.pop_front();
+            }
+            self.store_state_refs
+                .push_back(new_observable_state_root.clone());
 
-                // build state stuff from new observable state after collation
-                GetNewShardStateStuff::BuildFromNewObservable {
-                    block_id,
-                    new_observable_state,
-                    new_observable_state_root,
-                    tracker,
-                }
+            // build state stuff from new observable state after collation
+            GetNewShardStateStuff::BuildFromNewObservable {
+                block_id,
+                new_observable_state,
+                new_observable_state_root,
             }
         };
 
@@ -1044,12 +1026,11 @@ impl CollatorStdImpl {
                     block_id,
                     new_observable_state,
                     new_observable_state_root,
-                    tracker,
                 } => ShardStateStuff::from_state_and_root(
                     &block_id,
                     new_observable_state,
                     new_observable_state_root,
-                    &tracker,
+                    ref_mc_state_handle,
                 )?,
                 GetNewShardStateStuff::ReloadFromStorage(store_new_state_task) => {
                     store_new_state_task.await?;

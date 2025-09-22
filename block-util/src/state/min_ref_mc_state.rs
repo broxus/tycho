@@ -2,6 +2,7 @@ use std::collections::hash_map;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use tycho_types::models::ShardStateUnsplit;
 use tycho_util::FastHashMap;
 
 #[derive(Clone, Default)]
@@ -22,7 +23,18 @@ impl MinRefMcStateTracker {
         self.inner.counters.read().min_seqno
     }
 
-    pub fn insert(&self, mc_seqno: u32) -> RefMcStateHandle {
+    pub fn insert(&self, state: &ShardStateUnsplit) -> RefMcStateHandle {
+        if state.seqno == 0 {
+            // Insert zerostates as untracked states to prevent their cache
+            // to hold back the global archives GC. This handle will still
+            // point to a shared tracker, but will have not touch any ref.
+            self.insert_untracked()
+        } else {
+            self.insert_seqno(state.min_ref_mc_seqno)
+        }
+    }
+
+    pub fn insert_seqno(&self, mc_seqno: u32) -> RefMcStateHandle {
         self.inner.insert(mc_seqno)
     }
 
@@ -45,6 +57,22 @@ impl MinRefMcStateTracker {
 pub struct RefMcStateHandle(Arc<HandleInner>);
 
 impl RefMcStateHandle {
+    pub fn min_safe<'a>(&'a self, other: &'a Self) -> &'a Self {
+        match (self.0.mc_seqno, other.0.mc_seqno) {
+            // Tracked seqno is safer.
+            (_, None) => self,
+            (None, Some(_)) => other,
+            // Lower seqno is safer.
+            (Some(this_seqno), Some(other_seqno)) => {
+                if other_seqno < this_seqno {
+                    other
+                } else {
+                    self
+                }
+            }
+        }
+    }
+
     pub fn tracker(&self) -> &MinRefMcStateTracker {
         MinRefMcStateTracker::wrap(&self.0.min_ref_mc_state)
     }
@@ -142,4 +170,34 @@ impl Drop for HandleInner {
 struct StateIds {
     min_seqno: Option<u32>,
     refs: FastHashMap<u32, AtomicU32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn min_ref_mc_state() {
+        let state = MinRefMcStateTracker::new();
+
+        {
+            let _handle = state.insert_seqno(10);
+            assert_eq!(state.seqno(), Some(10));
+        }
+        assert_eq!(state.seqno(), None);
+
+        {
+            let handle1 = state.insert_seqno(10);
+            assert_eq!(state.seqno(), Some(10));
+            let _handle2 = state.insert_seqno(15);
+            assert_eq!(state.seqno(), Some(10));
+            let handle3 = state.insert_seqno(10);
+            assert_eq!(state.seqno(), Some(10));
+            drop(handle3);
+            assert_eq!(state.seqno(), Some(10));
+            drop(handle1);
+            assert_eq!(state.seqno(), Some(15));
+        }
+        assert_eq!(state.seqno(), None);
+    }
 }

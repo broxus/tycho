@@ -1,13 +1,16 @@
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tycho_types::cell::Lazy;
+use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
+use tycho_util::FastHashSet;
 use tycho_util::mem::Reclaimer;
 
-use crate::state::{MinRefMcStateTracker, RefMcStateHandle};
+use crate::dict::split_aug_dict_raw;
+use crate::state::RefMcStateHandle;
 
 /// Parsed shard state.
 #[derive(Clone)]
@@ -25,29 +28,16 @@ impl ShardStateStuff {
         .map_err(From::from)
     }
 
-    pub fn from_root(
-        block_id: &BlockId,
-        root: Cell,
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Self> {
+    pub fn from_root(block_id: &BlockId, root: Cell, handle: RefMcStateHandle) -> Result<Self> {
         let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
-        Self::from_state_and_root(block_id, shard_state, root, tracker)
-    }
-
-    pub fn from_state(
-        block_id: &BlockId,
-        shard_state: Box<ShardStateUnsplit>,
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Self> {
-        let root = CellBuilder::build_from(&shard_state)?;
-        ShardStateStuff::from_state_and_root(block_id, shard_state, root, tracker)
+        Self::from_state_and_root(block_id, shard_state, root, handle)
     }
 
     pub fn from_state_and_root(
         block_id: &BlockId,
         shard_state: Box<ShardStateUnsplit>,
         root: Cell,
-        tracker: &MinRefMcStateTracker,
+        handle: RefMcStateHandle,
     ) -> Result<Self> {
         anyhow::ensure!(
             shard_state.shard_ident == block_id.shard,
@@ -55,15 +45,6 @@ impl ShardStateStuff {
         );
 
         anyhow::ensure!(shard_state.seqno == block_id.seqno, "state seqno mismatch");
-
-        let handle = if block_id.seqno == 0 {
-            // Insert zerostates as untracked states to prevent their cache
-            // to hold back the global archives GC. This handle will still
-            // point to a shared tracker, but will have not touch any ref.
-            tracker.insert_untracked()
-        } else {
-            tracker.insert(shard_state.min_ref_mc_seqno)
-        };
 
         Ok(Self {
             inner: Arc::new(Inner {
@@ -81,7 +62,7 @@ impl ShardStateStuff {
     pub fn deserialize_zerostate(
         zerostate_id: &BlockId,
         bytes: &[u8],
-        tracker: &MinRefMcStateTracker,
+        handle: RefMcStateHandle,
     ) -> Result<Self> {
         anyhow::ensure!(zerostate_id.seqno == 0, "given id has a non-zero seqno");
 
@@ -101,7 +82,7 @@ impl ShardStateStuff {
             got = root.repr_hash(),
         );
 
-        Self::from_root(zerostate_id, root, tracker)
+        Self::from_root(zerostate_id, root, handle)
     }
 
     pub fn block_id(&self) -> &BlockId {
@@ -150,6 +131,84 @@ impl ShardStateStuff {
         }
 
         Ok(res)
+    }
+
+    /// Creates a derived state which tracks access to cells data and references.
+    #[must_use = "this new state must be used to track cell usage"]
+    pub fn track_usage(&self, usage_mode: UsageTreeMode) -> Result<(UsageTree, Self)> {
+        let usage_tree = UsageTree::new(usage_mode);
+        let root = usage_tree.track(&Cell::untrack(self.inner.root.clone()));
+
+        // NOTE: Reload parsed object from a tracked cell to fill the tracker
+        // with the tree root.
+        let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
+
+        let shard_state = Self {
+            inner: Arc::new(Inner {
+                block_id: self.inner.block_id,
+                parts: ManuallyDrop::new(InnerParts {
+                    shard_state_extra: shard_state.load_custom()?,
+                    shard_state,
+                    root,
+                    handle: self.inner.handle.clone(),
+                }),
+            }),
+        };
+
+        Ok((usage_tree, shard_state))
+    }
+
+    /// Applies merkle update of the specified block and preserves
+    /// the `tracker` from the initial state.
+    ///
+    /// NOTE: Call from inside `rayon`.
+    pub fn par_make_next_state(
+        &self,
+        next_block_id: &BlockId,
+        merkle_update: &MerkleUpdate,
+        split_at_depth: Option<u8>,
+    ) -> Result<Self> {
+        let old_split_at = if let Some(depth) = split_at_depth {
+            let shard_accounts = self
+                .root_cell()
+                .reference_cloned(1)
+                .context("invalid shard state")?
+                .parse::<ShardAccounts>()
+                .context("failed to load shard accounts")?;
+
+            split_aug_dict_raw(shard_accounts, depth)
+                .context("failed to split shard accounts")?
+                .into_keys()
+                .collect::<FastHashSet<_>>()
+        } else {
+            Default::default()
+        };
+
+        let new_root = merkle_update
+            .par_apply(&self.inner.root, &old_split_at)
+            .context("failed to apply merkle update")?;
+
+        let shard_state = new_root.parse::<Box<ShardStateUnsplit>>()?;
+        anyhow::ensure!(
+            shard_state.shard_ident == next_block_id.shard,
+            "shard state shard_ident mismatch"
+        );
+        anyhow::ensure!(
+            shard_state.seqno == next_block_id.seqno,
+            "state seqno mismatch"
+        );
+
+        Ok(Self {
+            inner: Arc::new(Inner {
+                block_id: *next_block_id,
+                parts: ManuallyDrop::new(InnerParts {
+                    shard_state_extra: shard_state.load_custom()?,
+                    shard_state,
+                    root: new_root,
+                    handle: self.inner.handle.clone(),
+                }),
+            }),
+        })
     }
 }
 
@@ -205,36 +264,8 @@ impl Drop for Inner {
 pub struct InnerParts {
     shard_state: Box<ShardStateUnsplit>,
     shard_state_extra: Option<McStateExtra>,
-    handle: RefMcStateHandle,
     root: Cell,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn min_ref_mc_state() {
-        let state = MinRefMcStateTracker::new();
-
-        {
-            let _handle = state.insert(10);
-            assert_eq!(state.seqno(), Some(10));
-        }
-        assert_eq!(state.seqno(), None);
-
-        {
-            let handle1 = state.insert(10);
-            assert_eq!(state.seqno(), Some(10));
-            let _handle2 = state.insert(15);
-            assert_eq!(state.seqno(), Some(10));
-            let handle3 = state.insert(10);
-            assert_eq!(state.seqno(), Some(10));
-            drop(handle3);
-            assert_eq!(state.seqno(), Some(10));
-            drop(handle1);
-            assert_eq!(state.seqno(), Some(15));
-        }
-        assert_eq!(state.seqno(), None);
-    }
+    // The fields of a struct are dropped in declaration order. So we need the
+    // `root` field to drop BEFORE the handle.
+    handle: RefMcStateHandle,
 }

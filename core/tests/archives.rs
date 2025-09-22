@@ -213,7 +213,11 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
             file_hash,
         };
 
-        let state = ShardStateStuff::from_root(&block_id, root, shard_states.min_ref_mc_state())?;
+        let state = ShardStateStuff::from_root(
+            &block_id,
+            root,
+            shard_states.min_ref_mc_state().insert_untracked(),
+        )?;
 
         let (handle, _) =
             storage

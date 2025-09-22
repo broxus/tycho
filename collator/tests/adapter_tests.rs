@@ -249,7 +249,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     &block_id,
                     Box::new(shard_state),
                     Cell::default(),
-                    &mcstate_tracker,
+                    mcstate_tracker.insert_untracked(),
                 )
                 .unwrap();
 
