@@ -56,12 +56,9 @@ pub async fn prepare_test_storage() -> anyhow::Result<(CoreStorage, tempfile::Te
     let mc_state_extra = master_state.load_custom()?;
     let mc_state_extra = mc_state_extra.unwrap();
 
-    let master_state_stuff = ShardStateStuff::from_state_and_root(
-        &master_block_id,
-        master_state,
-        master_root,
-        shard_states.min_ref_mc_state(),
-    )?;
+    let handle = shard_states.min_ref_mc_state().insert(&master_state);
+    let master_state_stuff =
+        ShardStateStuff::from_state_and_root(&master_block_id, master_state, master_root, handle)?;
 
     let meta_data = NewBlockMeta {
         is_key_block: mc_state_extra.after_key_block,
@@ -133,8 +130,11 @@ pub async fn prepare_test_storage() -> anyhow::Result<(CoreStorage, tempfile::Te
             file_hash,
         };
 
-        let shard_state_stuff =
-            ShardStateStuff::from_root(&block_id, root, shard_states.min_ref_mc_state())?;
+        let shard_state_stuff = ShardStateStuff::from_root(
+            &block_id,
+            root,
+            shard_states.min_ref_mc_state().insert_untracked(),
+        )?;
 
         let (handle, _) =
             storage

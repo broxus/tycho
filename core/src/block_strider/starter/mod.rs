@@ -229,7 +229,7 @@ fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<Shar
         file_hash,
     };
 
-    ShardStateStuff::from_root(&block_id, root, tracker)
+    ShardStateStuff::from_root(&block_id, root, tracker.insert_untracked())
 }
 
 #[async_trait::async_trait]
