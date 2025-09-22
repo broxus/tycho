@@ -202,6 +202,8 @@ impl Broadcaster {
     fn should_finish(&mut self, collector_signal: Result<(), watch::error::RecvError>) -> bool {
         // don't mark as seen, otherwise may skip ERR notification when collector exits
         let collector_status = self.collector_status.borrow().clone();
+        metrics::counter!("tycho_bcaster_recv_events").increment(1);
+        metrics::gauge!("tycho_bcaster_recv_max_event").set(collector_status.attempt);
 
         let is_ready = if collector_signal.is_ok() {
             if self.rejections.len() >= self.signers_count.reliable_minority() {

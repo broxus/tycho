@@ -2712,6 +2712,28 @@ def mempool_engine() -> RowPanel:
     ]
     return create_row("Mempool engine", metrics)
 
+def mempool_rate() -> RowPanel:
+    metrics = [
+        create_counter_panel(
+            "tycho_bcaster_recv_events", "Bcaster: ticks recv"
+        ),
+        create_gauge_panel(
+            "tycho_bcaster_recv_max_event",
+            "Bcaster: max tick",
+        ),
+        create_counter_panel(
+            "tycho_collector_sent_events", "Collector: ticks sent"
+        ),
+        create_gauge_panel(
+            "tycho_collector_max_event",
+            "Collector: max tick",
+        ),
+        create_counter_panel(
+            "tycho_collector_ticks", "Collector: ticks total"
+        ),
+    ]
+    return create_row("Mempool rate", metrics)
+
 
 def mempool_intercom() -> RowPanel:
     metrics = [
@@ -3228,6 +3250,7 @@ dashboard = Dashboard(
         mempool_rounds(),
         mempool_payload_rates(),
         mempool_engine_rates(),
+        mempool_rate(),
         mempool_engine(),
         mempool_intercom(),
         mempool_peers(),

@@ -110,13 +110,16 @@ impl CollectorTask {
                 },
                 // tick is more frequent than bcaster signal, leads to completion too
                 _ = retry_interval.tick() => {
+                    metrics::counter!("tycho_collector_ticks").increment(1);
                     if self.is_ready() {
                         break;
                     } else {
+                        metrics::counter!("tycho_collector_sent_events").increment(1);
                         self.status.send_modify( |status|{
                             status.attempt = status.attempt.wrapping_add(1);
                             status.ready = self.is_includes_ready;
                         });
+                        metrics::gauge!("tycho_collector_max_event").set(self.status.borrow().attempt);
                     }
                 },
                 // very frequent event that may seldom cause completion
