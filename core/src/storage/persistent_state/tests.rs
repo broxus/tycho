@@ -47,7 +47,7 @@ async fn persistent_shard_state() -> Result<()> {
     let zerostate = ShardStateStuff::from_root(
         &zerostate_id,
         zerostate_root,
-        shard_states.min_ref_mc_state(),
+        shard_states.min_ref_mc_state().insert_untracked(),
     )?;
 
     // Write zerostate to db

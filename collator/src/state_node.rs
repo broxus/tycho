@@ -60,7 +60,6 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Return master or shard state on specified block from node local state
     async fn load_state(&self, ref_by_mc_seqno: u32, block_id: &BlockId)
     -> Result<ShardStateStuff>;
-    async fn load_state_root(&self, ref_by_mc_seqno: u32, block_id: &BlockId) -> Result<Cell>;
     /// Store shard state root in the storage.
     /// Returns `true` when state was updated in storage.
     async fn store_state_root(
@@ -199,22 +198,6 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             .await?;
 
         Ok(state)
-    }
-
-    async fn load_state_root(&self, ref_by_mc_seqno: u32, block_id: &BlockId) -> Result<Cell> {
-        let _histogram = HistogramGuard::begin("tycho_collator_state_load_state_root_time");
-
-        let hash = self
-            .storage
-            .shard_state_storage()
-            .load_state_root(block_id)?;
-
-        let cell = self
-            .storage
-            .shard_state_storage()
-            .load_cell(&hash, ref_by_mc_seqno)?;
-
-        Ok(cell)
     }
 
     async fn store_state_root(

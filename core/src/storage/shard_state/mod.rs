@@ -199,17 +199,12 @@ impl ShardStateStorage {
         Ok(updated)
     }
 
-    pub async fn store_state_file(
-        &self,
-        ref_by_mc_seqno: u32,
-        block_id: &BlockId,
-        boc: File,
-    ) -> Result<ShardStateStuff> {
+    // Stores shard state and returns the hash of its root cell.
+    pub async fn store_state_file(&self, block_id: &BlockId, boc: File) -> Result<HashBytes> {
         let ctx = StoreStateContext {
             cells_db: self.cells_db.clone(),
             cell_storage: self.cell_storage.clone(),
             temp_file_storage: self.temp_file_storage.clone(),
-            min_ref_mc_state: self.min_ref_mc_state.clone(),
         };
 
         let block_id = *block_id;
@@ -219,11 +214,16 @@ impl ShardStateStorage {
             // NOTE: Ensure that GC lock is captured by the spawned thread.
             let _gc_lock = gc_lock;
 
-            ctx.store(ref_by_mc_seqno, &block_id, boc)
+            ctx.store(&block_id, boc)
         })
         .await?
     }
 
+    // NOTE: DO NOT try to make a separate `load_state_root` method
+    // since the root must be properly tracked, and this tracking requires
+    // knowing its `min_ref_mc_seqno` which can only be found out by
+    // parsing the state. Creating a "Brief State" struct won't work either
+    // because due to model complexity it is going to be error-prone.
     pub async fn load_state(
         &self,
         ref_by_mc_seqno: u32,
@@ -232,20 +232,29 @@ impl ShardStateStorage {
         // NOTE: only for metrics.
         static MAX_KNOWN_EPOCH: AtomicU32 = AtomicU32::new(0);
 
-        let cell_id = self.load_state_root(block_id)?;
-        let cell = self.cell_storage.load_cell(&cell_id, ref_by_mc_seqno)?;
+        let root_hash = self.load_state_root_hash(block_id)?;
+        let root = self.cell_storage.load_cell(&root_hash, ref_by_mc_seqno)?;
+        let root = Cell::from(root as Arc<_>);
 
         let max_known_epoch = MAX_KNOWN_EPOCH
             .fetch_max(ref_by_mc_seqno, Ordering::Relaxed)
             .max(ref_by_mc_seqno);
         metrics::gauge!("tycho_storage_state_max_epoch").set(max_known_epoch);
 
-        ShardStateStuff::from_root(block_id, Cell::from(cell as Arc<_>), &self.min_ref_mc_state)
+        let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
+        let handle = self.min_ref_mc_state.insert(&shard_state);
+        ShardStateStuff::from_state_and_root(block_id, shard_state, root, handle)
     }
 
-    pub fn load_cell(&self, cell_id: &HashBytes, epoch: u32) -> Result<Cell> {
-        let cell = self.cell_storage.load_cell(cell_id, epoch)?;
-        Ok(Cell::from(cell as Arc<_>))
+    pub fn load_state_root_hash(&self, block_id: &BlockId) -> Result<HashBytes> {
+        let shard_states = &self.cells_db.shard_states;
+        let shard_state = shard_states.get(block_id.to_vec())?;
+        match shard_state {
+            Some(root) => Ok(HashBytes::from_slice(&root[..32])),
+            None => {
+                anyhow::bail!(ShardStateStorageError::NotFound(block_id.as_short_id()))
+            }
+        }
     }
 
     #[tracing::instrument(skip(self))]
@@ -464,17 +473,6 @@ impl ShardStateStorage {
             .await
             .and_then(|block_data| TopBlocks::from_mc_block(&block_data))
             .map(Some)
-    }
-
-    pub fn load_state_root(&self, block_id: &BlockId) -> Result<HashBytes> {
-        let shard_states = &self.cells_db.shard_states;
-        let shard_state = shard_states.get(block_id.to_vec())?;
-        match shard_state {
-            Some(root) => Ok(HashBytes::from_slice(&root[..32])),
-            None => {
-                anyhow::bail!(ShardStateStorageError::NotFound(block_id.as_short_id()))
-            }
-        }
     }
 
     fn find_mc_block_id(

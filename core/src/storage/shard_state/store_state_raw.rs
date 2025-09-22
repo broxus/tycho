@@ -3,7 +3,6 @@ use std::io::{BufWriter, Read, Seek, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tycho_block_util::state::*;
 use tycho_storage::fs::{MappedFile, TempFileStorage};
 use tycho_storage::kv::StoredValue;
 use tycho_types::cell::*;
@@ -24,21 +23,16 @@ pub struct StoreStateContext {
     pub cells_db: CellsDb,
     pub cell_storage: Arc<CellStorage>,
     pub temp_file_storage: TempFileStorage,
-    pub min_ref_mc_state: MinRefMcStateTracker,
 }
 
 impl StoreStateContext {
-    pub fn store<R>(
-        &self,
-        ref_by_mc_seqno: u32,
-        block_id: &BlockId,
-        reader: R,
-    ) -> Result<ShardStateStuff>
+    // Stores shard state and returns the hash of its root cell.
+    pub fn store<R>(&self, block_id: &BlockId, reader: R) -> Result<HashBytes>
     where
         R: std::io::Read,
     {
         let preprocessed = self.preprocess(reader)?;
-        self.finalize(ref_by_mc_seqno, block_id, preprocessed)
+        self.finalize(block_id, preprocessed)
     }
 
     fn preprocess<R>(&self, reader: R) -> Result<PreprocessedState>
@@ -100,12 +94,7 @@ impl StoreStateContext {
         }
     }
 
-    fn finalize(
-        &self,
-        ref_by_mc_seqno: u32,
-        block_id: &BlockId,
-        preprocessed: PreprocessedState,
-    ) -> Result<ShardStateStuff> {
+    fn finalize(&self, block_id: &BlockId, preprocessed: PreprocessedState) -> Result<HashBytes> {
         // 2^7 bits + 1 bytes
         const MAX_DATA_SIZE: usize = 128;
         const CELLS_PER_BATCH: u64 = 1_000_000;
@@ -230,16 +219,7 @@ impl StoreStateContext {
 
         // Load stored shard state
         match self.cells_db.shard_states.get(shard_state_key)? {
-            Some(root) => {
-                let cell_id = HashBytes::from_slice(&root[..32]);
-
-                let cell = self.cell_storage.load_cell(&cell_id, ref_by_mc_seqno)?;
-                Ok(ShardStateStuff::from_root(
-                    block_id,
-                    Cell::from(cell as Arc<_>),
-                    &self.min_ref_mc_state,
-                )?)
-            }
+            Some(root) => Ok(HashBytes::from_slice(&root[..32])),
             None => Err(StoreStateError::NotFound.into()),
         }
     }
@@ -609,7 +589,6 @@ mod test {
             cells_db: cells_db.clone(),
             cell_storage: cell_storage.clone(),
             temp_file_storage: storage.context().temp_files().clone(),
-            min_ref_mc_state: MinRefMcStateTracker::new(),
         };
 
         for file in std::fs::read_dir(current_test_path.join("states"))? {
@@ -621,7 +600,7 @@ mod test {
             #[allow(clippy::disallowed_methods)]
             let file = File::open(file.path())?;
 
-            store_ctx.store(0, &block_id, file)?;
+            store_ctx.store(&block_id, file)?;
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");
