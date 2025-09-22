@@ -88,8 +88,20 @@ impl MempoolAdapterStdImpl {
             );
 
             // when genesis doesn't change - just (re-)schedule v_set change as defined by collator
-            if session.genesis_info() == new_cx.consensus_info.genesis_info {
+            if new_cx.consensus_info.genesis_info == session.genesis_info() {
                 session.set_peers(VSetAdapter::init_peers(new_cx)?);
+                return Ok(());
+            }
+
+            // rare case when node starts with empty DB to sync and genesis in GlobalConfig
+            if !(new_cx.consensus_info.genesis_info).overrides(&session.genesis_info()) {
+                tracing::warn!(
+                    target: tracing_targets::MEMPOOL_ADAPTER,
+                    id = %new_cx.mc_block_id.as_short_id(),
+                    new_cx = ?DebugStateUpdateContext(new_cx),
+                    current = ?session.genesis_info(),
+                    "Ignoring new genesis: it does not override current, node state was deleted?",
+                );
                 return Ok(());
             }
 
