@@ -1,5 +1,6 @@
 use std::array;
 use std::convert::identity;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -11,7 +12,7 @@ use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
 use crate::dag::{AnchorStage, DagRound, ValidateResult, Verifier};
-use crate::effects::{Ctx, EngineCtx, RoundCtx, TaskTracker, ValidateCtx};
+use crate::effects::{Ctx, EngineCtx, MempoolRayon, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
@@ -30,15 +31,18 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
         .build("0.0.0.0:0", Router::builder().build())
         .expect("network with unused stub socket");
 
-    let private_overlay =
-        PrivateOverlay::builder(*OverlayId::wrap(&[0; 32])).build(Responder::default());
-
-    let dispatcher = Dispatcher::new(&network, &private_overlay);
-
-    let task_tracker = TaskTracker::default();
+    let mempool_rayon = MempoolRayon::new(NonZeroUsize::MIN).unwrap();
 
     let merged_conf = crate::test_utils::default_test_config();
     let conf = &merged_conf.conf;
+
+    let private_overlay =
+        PrivateOverlay::builder(*OverlayId::wrap(&[0; 32])).build(Responder::new(&mempool_rayon));
+
+    let dispatcher = Dispatcher::new(&mempool_rayon, &network, &private_overlay);
+
+    let task_tracker = TaskTracker::default();
+
     let genesis = merged_conf.genesis();
 
     let engine_ctx = EngineCtx::new(conf.genesis_round, conf, &task_tracker);

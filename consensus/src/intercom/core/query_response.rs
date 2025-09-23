@@ -4,9 +4,8 @@ use std::time::Instant;
 use bytes::Buf;
 use tl_proto::{TlError, TlRead, TlResult, TlWrite};
 use tycho_network::Response;
-use tycho_util::sync::rayon_run_fifo;
 
-use crate::effects::{AltFmt, AltFormat};
+use crate::effects::{AltFmt, AltFormat, MempoolRayon};
 use crate::models::{Point, PointIntegrityError, Signature};
 
 #[derive(Debug, TlWrite, TlRead)]
@@ -107,7 +106,8 @@ impl QueryResponse {
 
     pub async fn parse_point_by_id(
         mut response: Response,
-    ) -> TlResult<PointByIdResponse<Result<Point, PointIntegrityError>>> {
+        mempool_rayon: &MempoolRayon,
+    ) -> anyhow::Result<PointByIdResponse<Result<Point, PointIntegrityError>>> {
         let interim = PointByIdResponse::<&[u8]>::read_from(&mut &response.body[..])?;
         Ok(match interim {
             PointByIdResponse::Defined(data) => {
@@ -115,7 +115,9 @@ impl QueryResponse {
                 response.body.advance(data_offset);
                 let response_body = response.body;
                 PointByIdResponse::Defined(
-                    rayon_run_fifo(|| Point::parse(response_body.into())).await?,
+                    mempool_rayon
+                        .run_fifo(|| Point::parse(response_body.into()))
+                        .await??,
                 )
             }
             PointByIdResponse::DefinedNone => PointByIdResponse::DefinedNone,
