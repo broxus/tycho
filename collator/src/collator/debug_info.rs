@@ -1,7 +1,7 @@
 use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::{
-    BlockExtra, BlockId, BlockInfo, BlockRef, BlockchainConfig, GlobalVersion, McBlockExtra,
-    McStateExtra, PrevBlockRef, ShardDescription, ShardFeeCreated, ShardIdent, ShardStateUnsplit,
+    BlockExtra, BlockId, BlockInfo, BlockRef, BlockchainConfig, McBlockExtra, McStateExtra,
+    PrevBlockRef, ShardDescription, ShardFeeCreated, ShardIdent, ShardStateUnsplit,
 };
 use tycho_util::FastHashMap;
 
@@ -69,22 +69,6 @@ impl std::fmt::Debug for DebugBlockInfo<'_> {
             .field("prev_key_block_seqno", &self.0.prev_key_block_seqno)
             .field("gen_software", &self.0.gen_software)
             .finish()
-    }
-}
-
-pub struct DisplayGlobalVersion<'a>(pub &'a GlobalVersion);
-impl std::fmt::Debug for DisplayGlobalVersion<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-impl std::fmt::Display for DisplayGlobalVersion<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "ver: {}, capabilities: {:?}",
-            self.0.version, self.0.capabilities
-        )
     }
 }
 

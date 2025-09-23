@@ -105,6 +105,7 @@ pub fn supported_capabilities() -> GlobalCapabilities {
         GlobalCapability::CapBounceAfterFailedAction,
         GlobalCapability::CapSuspendedList,
         GlobalCapability::CapsTvmBugfixes2022,
+        GlobalCapability::CapSuspendByMarks,
     ])
 }
 

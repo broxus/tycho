@@ -73,6 +73,7 @@ impl Phase<PrepareState> {
                 full_body_in_bounced: capabilities.contains(GlobalCapability::CapFullBodyInBounced),
                 charge_action_fees_on_fail: true,
                 strict_extra_currency: true,
+                authority_marks_enabled: capabilities.contains(GlobalCapability::CapSuspendByMarks),
                 vm_modifiers: tycho_vm::BehaviourModifiers {
                     signature_with_id: capabilities
                         .contains(GlobalCapability::CapSignatureWithId)

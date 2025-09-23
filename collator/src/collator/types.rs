@@ -1135,11 +1135,6 @@ pub enum SpecialOrigin {
     Mint,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Dequeued {
-    pub same_shard: bool,
-}
-
 #[derive(Default, Clone)]
 pub struct AnchorsCache {
     /// The cache of imported from mempool anchors that were not processed yet.

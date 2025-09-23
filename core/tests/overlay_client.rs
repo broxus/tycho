@@ -2,13 +2,8 @@ use std::time::Duration;
 
 use rand::distr::Distribution;
 use rand::distr::weighted::WeightedIndex;
-use tl_proto::{TlRead, TlWrite};
 use tycho_core::overlay_client::{Neighbour, Neighbours};
 use tycho_network::PeerId;
-
-#[derive(TlWrite, TlRead)]
-#[tl(boxed, id = 0x11223344)]
-struct TestResponse;
 
 #[tokio::test]
 pub async fn test() {
