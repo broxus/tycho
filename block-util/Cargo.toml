@@ -23,6 +23,7 @@ anyhow = { workspace = true }
 arc-swap = { workspace = true }
 bytes = { workspace = true }
 hex = { workspace = true }
+metrics = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }

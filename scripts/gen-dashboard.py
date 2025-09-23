@@ -956,6 +956,26 @@ def storage() -> RowPanel:
             unit="States",
             title="States GC lag",
         ),
+        timeseries_panel(
+            title="States GC seqno guard",
+            targets=[
+                target(
+                    "tycho_min_ref_mc_seqno{instance=~\"$instance\"} > 0",
+                    legend_format="{{instance}}"
+                )
+            ],
+            unit="States",
+        ),
+        timeseries_panel(
+            title="States GC safe range",
+            targets=[
+                target(
+                    "tycho_min_ref_mc_seqno{instance=~\"$instance\"} - tycho_gc_states_seqno{instance=~\"$instance\"}",
+                    legend_format="{{instance}}"
+                )
+            ],
+            unit="States",
+        ),
         create_gauge_panel(
             "tycho_core_mc_blocks_gc_lag", "Blocks GC lag", unit_format="Blocks"
         ),

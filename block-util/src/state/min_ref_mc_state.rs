@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use tycho_types::models::ShardStateUnsplit;
 use tycho_util::FastHashMap;
 
+// Gauges
+const METRIC_MIN_REF_MC_SEQNO: &str = "tycho_min_ref_mc_seqno";
+
 #[derive(Clone, Default)]
 #[repr(transparent)]
 pub struct MinRefMcStateTracker {
@@ -121,6 +124,11 @@ impl Inner {
             }
         }
 
+        let min_seqno = counters.min_seqno;
+        drop(counters);
+
+        metrics::gauge!(METRIC_MIN_REF_MC_SEQNO).set(min_seqno.unwrap_or_default());
+
         RefMcStateHandle(Arc::new(HandleInner {
             min_ref_mc_state: self.clone(),
             mc_seqno: Some(mc_seqno),
@@ -150,6 +158,11 @@ impl Inner {
             }
             _ => {}
         }
+
+        let min_seqno = counters.min_seqno;
+        drop(counters);
+
+        metrics::gauge!(METRIC_MIN_REF_MC_SEQNO).set(min_seqno.unwrap_or_default());
     }
 }
 
