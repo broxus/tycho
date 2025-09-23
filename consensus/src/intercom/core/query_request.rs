@@ -1,8 +1,8 @@
 use bytes::{Buf, Bytes};
 use tl_proto::{RawBytes, TlError, TlRead, TlWrite};
 use tycho_network::Request;
-use tycho_util::sync::rayon_run_fifo;
 
+use crate::effects::MempoolRayon;
 use crate::models::{Point, PointId, Round};
 
 #[derive(Copy, Clone, Debug, TlRead, TlWrite)]
@@ -72,11 +72,13 @@ impl QueryRequestRaw {
         Ok(Self { request_body, tag })
     }
 
-    pub async fn parse(self) -> anyhow::Result<QueryRequest> {
+    pub async fn parse(self, mempool_rayon: &MempoolRayon) -> anyhow::Result<QueryRequest> {
         Ok(match self.tag {
             QueryRequestTag::Broadcast => {
                 let request_body = self.request_body;
-                let point = rayon_run_fifo(|| Point::parse(request_body.into())).await??;
+                let point = mempool_rayon
+                    .run_fifo(|| Point::parse(request_body.into()))
+                    .await???;
                 QueryRequest::Broadcast(point)
             }
             QueryRequestTag::PointById => {
