@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver, PrivateOverlay};
 
-use crate::effects::{AltFormat, TaskTracker};
+use crate::effects::{AltFormat, MempoolRayon, TaskTracker};
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
 use crate::engine::{InputBuffer, MempoolMergedConfig};
 use crate::intercom::{Dispatcher, InitPeers, PeerSchedule, Responder};
@@ -21,6 +21,7 @@ pub struct EngineBinding {
 
 #[derive(Clone)]
 pub struct EngineNetworkArgs {
+    pub mempool_rayon: MempoolRayon,
     pub key_pair: Arc<KeyPair>,
     pub network: Network,
     pub peer_resolver: PeerResolver,
@@ -42,7 +43,7 @@ impl EngineNetwork {
         merged_conf: &MempoolMergedConfig,
         init_peers: &InitPeers,
     ) -> Self {
-        let responder = Responder::default();
+        let responder = Responder::new(&net_args.mempool_rayon);
 
         let private_overlay = PrivateOverlay::builder(merged_conf.overlay_id)
             .with_peer_resolver(net_args.peer_resolver.clone())
@@ -58,7 +59,8 @@ impl EngineNetwork {
             "mempool overlay added"
         );
 
-        let dispatcher = Dispatcher::new(&net_args.network, &private_overlay);
+        let dispatcher =
+            Dispatcher::new(&net_args.mempool_rayon, &net_args.network, &private_overlay);
         let peer_schedule =
             PeerSchedule::new(net_args.key_pair.clone(), private_overlay, task_tracker);
         peer_schedule.init(merged_conf, init_peers);

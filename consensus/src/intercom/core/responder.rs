@@ -7,7 +7,7 @@ use futures_util::{FutureExt, future};
 use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::dag::DagHead;
-use crate::effects::{AltFormat, RoundCtx};
+use crate::effects::{AltFormat, MempoolRayon, RoundCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::broadcast::Signer;
 use crate::intercom::core::{
@@ -17,12 +17,23 @@ use crate::intercom::core::{
 use crate::intercom::{BroadcastFilter, Downloader, PeerSchedule, Uploader};
 use crate::storage::MempoolStore;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Responder(Arc<ResponderInner>);
 
-#[derive(Default)]
+impl Responder {
+    pub fn new(mempool_rayon: &MempoolRayon) -> Self {
+        Self(Arc::new(ResponderInner {
+            state: OnceLock::default(),
+            current: ArcSwapOption::empty(),
+            mempool_rayon: mempool_rayon.clone(),
+            broadcast_filter: Default::default(),
+        }))
+    }
+}
+
 struct ResponderInner {
     state: OnceLock<ResponderState>,
+    mempool_rayon: MempoolRayon,
     broadcast_filter: BroadcastFilter,
     current: ArcSwapOption<ResponderCurrent>,
 }
@@ -124,7 +135,7 @@ impl Responder {
         };
 
         let raw_query_tag = raw_query.tag;
-        let query = match raw_query.parse().await {
+        let query = match raw_query.parse(&self.0.mempool_rayon).await {
             Ok(query) => query,
             Err(error) => {
                 tracing::error!(

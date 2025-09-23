@@ -3061,6 +3061,15 @@ def rayon_stats() -> RowPanel:
             "FIFO Queue Backlog",
             yaxis(UNITS.NUMBER_FORMAT),
         ),
+        create_heatmap_panel(
+            "tycho_rayon_mempool_threads", "Mempool fifo Threads", yaxis(UNITS.NUMBER_FORMAT)
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_mempool_task_time", "Mempool fifo Task Time", yaxis(UNITS.SECONDS)
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_mempool_queue_time", "Mempool fifo Queue Time", yaxis(UNITS.SECONDS)
+        ),
     ]
     return create_row("Rayon Stats", metrics)
 

@@ -11,6 +11,7 @@ use parking_lot::deadlock;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tycho_consensus::prelude::{
     EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolDb,
+    MempoolRayon,
 };
 use tycho_consensus::test_utils::*;
 use tycho_crypto::ed25519::{KeyPair, SecretKey};
@@ -175,6 +176,7 @@ fn make_network(
                                 }
                             }
                             EngineNetworkArgs {
+                                mempool_rayon: MempoolRayon::new(NonZeroUsize::MIN).unwrap(),
                                 key_pair,
                                 network: dht_client.network().clone(),
                                 peer_resolver: peer_resolver.clone(),

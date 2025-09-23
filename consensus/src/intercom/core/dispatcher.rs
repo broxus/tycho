@@ -2,6 +2,7 @@ use futures_util::future::BoxFuture;
 use tycho_network::{Network, PeerId, PrivateOverlay, Request};
 use tycho_util::metrics::HistogramGuard;
 
+use crate::effects::MempoolRayon;
 use crate::intercom::core::{
     BroadcastResponse, PointByIdResponse, QueryResponse, SignatureResponse,
 };
@@ -10,6 +11,7 @@ use crate::models::{Point, PointIntegrityError};
 
 #[derive(Clone)]
 pub struct Dispatcher {
+    mempool_rayon: MempoolRayon,
     overlay: PrivateOverlay,
     network: Network,
 }
@@ -17,8 +19,13 @@ pub struct Dispatcher {
 pub type PointQueryResult = anyhow::Result<PointByIdResponse<Result<Point, PointIntegrityError>>>;
 
 impl Dispatcher {
-    pub fn new(network: &Network, private_overlay: &PrivateOverlay) -> Self {
+    pub fn new(
+        mempool_rayon: &MempoolRayon,
+        network: &Network,
+        private_overlay: &PrivateOverlay,
+    ) -> Self {
         Self {
+            mempool_rayon: mempool_rayon.clone(),
             overlay: private_overlay.clone(),
             network: network.clone(),
         }
@@ -88,8 +95,8 @@ impl Dispatcher {
 
         drop(peer_permit);
 
-        let result = QueryResponse::parse_point_by_id(response).await;
-        (peer_id, result.map_err(Into::into))
+        let result = QueryResponse::parse_point_by_id(response, &self.mempool_rayon).await;
+        (peer_id, result)
     }
 
     #[cfg(feature = "mock-feedback")]

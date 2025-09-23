@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::{
     EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolConfigBuilder,
-    MempoolDb, MempoolMergedConfig,
+    MempoolDb, MempoolMergedConfig, MempoolRayon,
 };
 use tycho_consensus::test_utils::{AnchorConsumer, LastAnchorFile, test_logger};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
@@ -110,8 +110,6 @@ impl CmdRun {
     pub fn run(self) -> Result<()> {
         let node_config =
             NodeConfig::from_file(&self.config).context("failed to load node config")?;
-
-        node_config.threads.init_global_rayon_pool()?;
 
         node_config
             .threads
@@ -220,6 +218,7 @@ impl Mempool {
             );
 
             EngineNetworkArgs {
+                mempool_rayon: MempoolRayon::new(node_config.threads.mempool_rayon_threads())?,
                 key_pair,
                 network: dht_client.network().clone(),
                 peer_resolver,
