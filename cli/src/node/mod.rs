@@ -87,6 +87,7 @@ impl Node {
         } else {
             RpcMempoolAdapter {
                 inner: Arc::new(MempoolAdapterStdImpl::new(
+                    node_config.threads.mempool_rayon_threads(),
                     base.keypair().clone(),
                     base.network(),
                     base.peer_resolver(),

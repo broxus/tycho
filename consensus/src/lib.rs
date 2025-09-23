@@ -11,6 +11,7 @@ mod storage;
 pub mod test_utils;
 
 pub mod prelude {
+    pub use crate::effects::MempoolRayon;
     pub use crate::engine::lifecycle::{EngineBinding, EngineNetworkArgs, EngineSession};
     pub use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
     pub use crate::engine::{

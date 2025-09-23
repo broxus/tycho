@@ -2,6 +2,7 @@ mod adapter_impl;
 mod anchor_handler;
 mod state_update_queue;
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -39,6 +40,7 @@ struct StdConfigAdapter {
 
 impl MempoolAdapterStdImpl {
     pub fn new(
+        mempool_rayon_treads: NonZeroUsize,
         key_pair: Arc<KeyPair>,
         network: &Network,
         peer_resolver: &PeerResolver,
@@ -51,6 +53,7 @@ impl MempoolAdapterStdImpl {
         Ok(Self {
             cache: Default::default(),
             net_args: EngineNetworkArgs {
+                mempool_rayon: MempoolRayon::new(mempool_rayon_treads)?,
                 key_pair,
                 network: network.clone(),
                 peer_resolver: peer_resolver.clone(),
