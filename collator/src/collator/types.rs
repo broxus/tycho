@@ -70,7 +70,6 @@ pub(super) struct PrevData {
     blocks_ids: Vec<BlockId>,
 
     pure_states: Vec<ShardStateStuff>,
-    pure_state_root: Cell,
 
     gen_chain_time: u64,
     gen_lt: u64,
@@ -92,7 +91,6 @@ impl PrevData {
         //  Collator::unpack_last_state()
 
         let prev_blocks_ids: Vec<_> = prev_states.iter().map(|s| *s.block_id()).collect();
-        let pure_prev_state_root = prev_states[0].root_cell().clone();
         let pure_prev_states = prev_states;
 
         let (usage_tree, observable_state) =
@@ -114,7 +112,6 @@ impl PrevData {
             blocks_ids: prev_blocks_ids,
 
             pure_states: pure_prev_states,
-            pure_state_root: pure_prev_state_root,
 
             gen_chain_time,
             gen_lt,
@@ -180,7 +177,7 @@ impl PrevData {
     }
 
     pub fn pure_state_root(&self) -> &Cell {
-        &self.pure_state_root
+        self.pure_states[0].root_cell()
     }
 
     pub fn gen_chain_time(&self) -> u64 {
