@@ -21,7 +21,7 @@ use crate::types::{DebugIter, ProcessedTo};
 // READER STATE
 //=========
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ReaderState {
     pub externals: ExternalsReaderState,
     pub internals: InternalsReaderState,
@@ -127,7 +127,7 @@ impl ReaderState {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ExternalsReaderState {
     /// We fully read each externals range
     /// because we unable to get remaning messages info
@@ -168,7 +168,7 @@ impl ExternalsReaderState {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ExternalsReaderStateByPartition {
     /// The last processed external message from all ranges
     pub processed_to: ExternalKey,
@@ -179,6 +179,7 @@ pub struct ExternalsReaderStateByPartition {
     pub curr_processed_offset: u32,
 }
 
+#[derive(Clone)]
 pub struct ExternalsRangeReaderState {
     /// Range info
     pub range: ExternalsReaderRange,
@@ -208,7 +209,7 @@ impl ExternalsRangeReaderState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExternalsReaderRange {
     pub from: ExternalKey,
     pub to: ExternalKey,
@@ -239,6 +240,7 @@ impl ExternalsReaderRange {
     }
 }
 
+#[derive(Clone)]
 pub struct ExternalsRangeReaderStateByPartition {
     /// Buffer to store external messages
     /// before collect them to the next execution group
@@ -350,7 +352,7 @@ impl From<ExternalKey> for (MempoolAnchorId, u64) {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct InternalsReaderState {
     pub partitions: BTreeMap<QueuePartitionIdx, InternalsPartitionReaderState>,
     pub cumulative_statistics: Option<CumulativeStatistics>,
@@ -371,7 +373,7 @@ impl InternalsReaderState {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct InternalsPartitionReaderState {
     /// Ranges will be extracted during collation process.
     /// Should access them only before collation and after reader finalization.
@@ -413,6 +415,7 @@ impl From<&InternalsPartitionReaderState> for InternalsProcessedUptoStuff {
     }
 }
 
+#[derive(Clone)]
 pub struct InternalsRangeReaderState {
     /// Buffer to store messages from the next iterator
     /// for accounts that have messages in the previous iterator
