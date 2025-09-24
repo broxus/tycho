@@ -443,8 +443,9 @@ impl BroadcastFilterInner {
         for (dag_round, map_by_author) in outdated {
             let mut incr = ByRoundIncrement::default();
             for entry in map_by_author.iter() {
-                incr.count(&entry.item);
-                (entry.item).add_to_dag(entry.key(), &dag_round, downloader, store, round_ctx);
+                let (author, by_author) = entry.pair();
+                incr.count(&by_author.item);
+                (by_author.item).add_to_dag(author, &dag_round, downloader, store, round_ctx);
             }
             flushed.add(dag_round.round(), incr);
         }
@@ -464,8 +465,9 @@ impl BroadcastFilterInner {
             };
             let mut incr = ByRoundIncrement::default();
             for entry in map_by_author.iter() {
-                incr.count(&entry.item);
-                (entry.item).add_to_dag(entry.key(), dag_round, downloader, store, round_ctx);
+                let (author, by_author) = entry.pair();
+                incr.count(&by_author.item);
+                (by_author.item).add_to_dag(author, dag_round, downloader, store, round_ctx);
             }
             flushed.add(dag_round.round(), incr);
             self.by_round.remove(&round);

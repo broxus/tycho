@@ -65,11 +65,15 @@ impl Responder {
         round_ctx: &RoundCtx,
     ) {
         // Note: first flush `BroadcastFilter`, then advance `Head` for `Signer`.
-        //  That way, from Signer's point of view, BF will always have at least next round flushed.
-        //  So Signer will access fully ready state of DAG up to `Head.next()`.
-        //  Signer does not care for inconsistencies in BF later than `Head.next()` because
-        //  no matter if it responds with TryLater or NoPoint, there is time and it won't sign now.
-        //  It's important to respond with NoPoint by reason up to `Head.next()` inclusively.
+        //  During flush, BF keeps all previously received items, while new are routed to DAG.
+        //  Also, broadcast and signature queries for the same point should not interleave,
+        //  and both caching in BF and direct routing to DAG are made during broadcast query.
+        //  That way, from Signer's point of view, point is either in BF or in DAG or not received
+        //  (only that order is correct).
+        //  In case Signer is called with outdated Head just a moment before the flush,
+        //  its next round (actually Engine's current) is already in DAG from the previous flush.
+        //  In case head jumps over a several rounds, BF is still in front of the DAG
+        //  and keeps all intermediate rounds until the next flush.
         broadcast_filter.flush_to_dag(head, downloader, store, round_ctx);
         self.0.current.store(Some(Arc::new(ResponderCurrent {
             store: store.clone(),
