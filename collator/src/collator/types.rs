@@ -1111,6 +1111,7 @@ pub struct SkippedTransaction {
     pub gas_used: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct ParsedMessage {
     pub info: MsgInfo,
     pub dst_in_current_shard: bool,
@@ -1387,7 +1388,7 @@ impl MsgsExecutionParamsExtension for MsgsExecutionParams {
 
 type DiffMaxMessage = QueueKey;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QueueStatisticsWithRemaning {
     /// Statistics shows all messages count
     pub initial_stats: QueueStatistics,
@@ -1396,6 +1397,7 @@ pub struct QueueStatisticsWithRemaning {
     pub remaning_stats: ConcurrentQueueStatistics,
 }
 
+#[derive(Clone)]
 pub struct CumulativeStatistics {
     /// Cumulative statistics created for this shard. When reader reads messages, it decrements `remaining messages`
     /// Another shard stats can be decremented only by calling `update_processed_to_by_partitions`

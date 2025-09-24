@@ -1870,6 +1870,11 @@ def collator_time_metrics() -> RowPanel:
             "Try collate next shard block",
         ),
         create_heatmap_panel(
+            "tycho_collator_reader_state_snapshot_time",
+            "Reader state snapshot time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_collator_import_next_anchor_time_high",
             "Import next anchor time",
             labels=['workchain=~"$workchain"'],

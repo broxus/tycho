@@ -98,6 +98,18 @@ impl CollatorStdImpl {
             ..
         } = *working_state;
 
+        let snapshot_start = std::time::Instant::now();
+        let _reader_state_snapshot = reader_state.clone();
+        let snapshot_elapsed = snapshot_start.elapsed();
+
+        metrics::histogram!("tycho_collator_reader_state_snapshot_time", &labels)
+            .record(snapshot_elapsed.as_millis() as f64);
+
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            snapshot_time_ms = snapshot_elapsed.as_millis(),
+            "Created reader_state snapshot for rollback mechanism"
+        );
+
         let mc_block_id = mc_data.block_id;
         let prev_shard_data = prev_shard_data.unwrap();
         let usage_tree = usage_tree.unwrap();
