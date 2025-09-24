@@ -13,12 +13,15 @@ pub struct MempoolRayon(Arc<rayon::ThreadPool>);
 
 impl MempoolRayon {
     pub fn new(num_threads: NonZeroUsize) -> Result<Self, rayon::ThreadPoolBuildError> {
-        let thread_pool = rayon::ThreadPoolBuilder::new()
+        let mut builder = rayon::ThreadPoolBuilder::new()
             .stack_size(8 * 1024 * 1024)
             .thread_name(|id| format!("rayon-mempool-{id}"))
-            .num_threads(num_threads.get())
-            .build()?;
-        Ok(Self(Arc::new(thread_pool)))
+            .num_threads(num_threads.get());
+        #[allow(deprecated)]
+        {
+            builder = builder.breadth_first();
+        }
+        Ok(Self(Arc::new(builder.build()?)))
     }
 
     pub(crate) async fn run_fifo<T: 'static + Send>(
