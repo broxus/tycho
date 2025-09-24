@@ -3041,6 +3041,26 @@ def rayon_stats() -> RowPanel:
         create_heatmap_panel(
             "tycho_rayon_fifo_queue_time", "FIFO Queue Time", yaxis(UNITS.SECONDS)
         ),
+        create_gauge_panel("tycho_rayon_lifo_queue_depth", "LIFO Queue Depth"),
+        create_gauge_panel("tycho_rayon_fifo_queue_depth", "FIFO Queue Depth"),
+        create_counter_panel(
+            "tycho_rayon_lifo_task_time_count",
+            "LIFO Spawns/sec",
+        ),
+        create_counter_panel(
+            "tycho_rayon_fifo_task_time_count",
+            "FIFO Spawns/sec",
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_lifo_queue_backlog",
+            "LIFO Queue Backlog",
+            yaxis(UNITS.NUMBER_FORMAT),
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_fifo_queue_backlog",
+            "FIFO Queue Backlog",
+            yaxis(UNITS.NUMBER_FORMAT),
+        ),
     ]
     return create_row("Rayon Stats", metrics)
 
