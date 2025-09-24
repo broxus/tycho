@@ -25,7 +25,7 @@ pub struct MessagesBufferLimits {
     pub slot_vert_size: usize,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct MessagesBuffer {
     msgs: FastIndexMap<HashBytes, VecDeque<Box<ParsedMessage>>>,
     int_count: usize,
