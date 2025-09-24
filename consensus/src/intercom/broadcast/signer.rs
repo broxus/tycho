@@ -43,18 +43,21 @@ impl Signer {
         broadcast_filter: &BroadcastFilter,
         conf: &MempoolConfig,
     ) -> SignatureResponse {
-        // first check BroadcastFilter, then DAG for top_dag_round exactly
-        if round > head.next().round() {
-            // BF doesn't have next round points, as they are flushed earlier than Head advances
-            return match broadcast_filter.has_point(round, author) {
-                // Bf may be flushing points at round after `head.next`, or maybe have them
-                None | Some(true) => return SignatureResponse::TryLater, // we're not ready to sign
-                Some(false) => SignatureResponse::NoPoint, // such points may be in BF only
-            };
+        if round >= head.next().round() {
+            // first check BroadcastFilter, then DAG for top_dag_round exactly
+            if broadcast_filter.has_point(round, author) {
+                return SignatureResponse::TryLater; // we have the point but not ready to sign
+            }
+            if round > head.next().round() {
+                return SignatureResponse::NoPoint; // such points may be in BroadcastFilter only
+            }
+            // Else, `head.next` round points are either in DAG or not received, because:
+            // * BF keeps next round points until flush is completed
+            // * DAG contains points that bypassed BF cache after head advanced
         } else if round < head.prev().round() {
             // lagged too far from consensus and us, will sign only 1 round behind current;
             return SignatureResponse::Rejected(SignatureRejectedReason::TooOldRound);
-        }; // else: check head's current or next rounds - point is either there or not received
+        }; // else: may be ready to sign, check inside DAG
 
         let current_round = head.current().round();
 

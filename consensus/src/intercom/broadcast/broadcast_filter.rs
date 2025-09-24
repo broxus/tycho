@@ -1,7 +1,7 @@
+use std::cmp;
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
-use std::{cmp, mem};
 
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
@@ -57,14 +57,11 @@ impl BroadcastFilter {
         }
     }
 
-    /// None for "currently undefined": round is being flushed so we don't know if was received
-    pub fn has_point(&self, round: Round, sender: &PeerId) -> Option<bool> {
+    pub fn has_point(&self, round: Round, sender: &PeerId) -> bool {
         let _task_time = HistogramGuard::begin("tycho_mempool_bf_has_point_time");
         match self.inner.by_round.get(&round) {
-            None => Some(false), // round is either already flushed or not yet created
-            Some(round_item) => {
-                (round_item.cached.as_ref()).map(|cached| cached.by_author.contains_key(sender))
-            }
+            None => false, // round is either already flushed or not yet created
+            Some(round_item) => round_item.by_author.contains_key(sender),
         }
     }
 
@@ -88,19 +85,12 @@ struct BroadcastFilterInner {
     by_round: FastDashMap<Round, ByRoundItem>,
 }
 
-/// Both fields cannot be `None` - they are changed under dash map lock
 struct ByRoundItem {
-    /// values are initialized with `Some` that are taken during cleanup,
-    /// because empty [`dashmap::DashMap`] allocates
-    cached: Option<Cached>,
-    /// when equal or greater round exists, points are send to it directly
+    /// when a GEQ round is set, new points are send to DAG directly, and `self` is ready for removal
     dag_round: Option<DagRound>,
-}
-
-struct Cached {
     peer_count: PeerCount,
-    /// By-round lock is mostly read lock, so this provides write locks
-    by_author: FastDashMap<PeerId, ByAuthor>,
+    /// `Arc` allows to copy during removal in [`BroadcastFilter::flush_to_dag`]
+    by_author: Arc<FastDashMap<PeerId, ByAuthor>>,
 }
 
 #[derive(Clone)]
@@ -133,6 +123,29 @@ impl ByAuthorItem {
         match self {
             Self::Ok(_) | Self::OkPruned(_) => None,
             Self::IllFormed(_, reason) | Self::IllFormedPruned(_, reason) => Some(reason),
+        }
+    }
+    fn add_to_dag(
+        &self,
+        author: &PeerId,
+        dag_round: &DagRound,
+        downloader: &Downloader,
+        store: &MempoolStore,
+        round_ctx: &RoundCtx,
+    ) {
+        match self {
+            ByAuthorItem::Ok(point) => {
+                dag_round.add_broadcast(point, downloader, store, round_ctx);
+            }
+            ByAuthorItem::OkPruned(digest) => {
+                dag_round.add_pruned_broadcast(author, digest, downloader, store, round_ctx);
+            }
+            ByAuthorItem::IllFormed(point, reason) => {
+                dag_round.add_ill_formed_broadcast(point, reason, store, round_ctx);
+            }
+            ByAuthorItem::IllFormedPruned(_digest, _) => {
+                // do nothing, was stored only to determine round because signature is valid
+            }
         }
     }
 }
@@ -243,8 +256,7 @@ impl BroadcastFilterInner {
                 && let Some(dag_round) = head.next().scan(id.round)
             {
                 // just add to dag directly, Engine removes such BF entries by itself
-                let iter = std::iter::once((&id.author, verified));
-                Self::add_all_to_dag(iter, &dag_round, downloader, store, round_ctx);
+                verified.add_to_dag(&id.author, &dag_round, downloader, store, round_ctx);
             } // else: too old and totally useless now
             return CacheInfo::default();
         }
@@ -257,14 +269,12 @@ impl BroadcastFilterInner {
                 match PeerCount::try_from(v_set_len) {
                     Ok(peer_count) => (self.by_round.entry(id.round))
                         .or_insert_with(|| ByRoundItem {
-                            cached: Some(Cached {
-                                peer_count,
-                                by_author: FastDashMap::with_capacity_and_hasher(
-                                    peer_count.full(),
-                                    Default::default(),
-                                ),
-                            }),
                             dag_round: None,
+                            peer_count,
+                            by_author: Arc::new(FastDashMap::with_capacity_and_hasher(
+                                peer_count.full(),
+                                Default::default(),
+                            )),
                         })
                         .downgrade(),
                     Err(_) => {
@@ -278,13 +288,14 @@ impl BroadcastFilterInner {
         };
         match &*round_item_read {
             ByRoundItem {
-                cached: Some(cached),
                 dag_round: Option::None,
+                peer_count,
+                by_author,
             } => {
                 let mut cached_info = CacheInfo::default();
                 // ban the author, if we detect equivocation now; we won't be able to prove it
                 // if some signatures are invalid (it's another reason for a local ban)
-                (cached.by_author.entry(id.author))
+                (by_author.entry(id.author))
                     .and_modify(|existing| {
                         let old_digest = *existing.item.digest();
                         if old_digest == id.digest {
@@ -303,7 +314,7 @@ impl BroadcastFilterInner {
                         duplicates: 0,
                     });
                 cached_info.is_threshold_reached =
-                    cached.by_author.len() == cached.peer_count.reliable_minority();
+                    by_author.len() == peer_count.reliable_minority();
                 cached_info
             }
             ByRoundItem {
@@ -319,15 +330,10 @@ impl BroadcastFilterInner {
                 };
                 // start round is newer than current head
                 if let Some(point_round) = point_round {
-                    let iter = std::iter::once((&id.author, verified));
-                    Self::add_all_to_dag(iter, &point_round, downloader, store, round_ctx);
+                    verified.add_to_dag(&id.author, &point_round, downloader, store, round_ctx);
                 }
                 CacheInfo::default()
             }
-            ByRoundItem {
-                cached: None,
-                dag_round: None,
-            } => panic!("flush must not leave both fields empty"),
         }
     }
 
@@ -394,10 +400,8 @@ impl BroadcastFilterInner {
                 past_removed.add(round, round_item);
                 false
             } else if round < head_prev_round {
-                if let Some(cached) = mem::take(&mut round_item.cached) {
-                    outdated_unordered.push((round, cached.by_author.into_read_only()));
-                }
-                // no need to set `round_item.dag_round` as item is removed under lock
+                outdated_unordered.push((round, round_item.by_author.clone()));
+                // no need to set `round_item.dag_round` as item is removed under lock;
                 false
             } else if round <= head_next_round {
                 // keep head rounds for now, remove later in this method
@@ -437,8 +441,11 @@ impl BroadcastFilterInner {
 
         // preserve historical order by round to not create excessive download tasks
         for (dag_round, map_by_author) in outdated {
-            let iter = (map_by_author.iter()).map(|(author, by_author)| (author, &by_author.item));
-            let incr = Self::add_all_to_dag(iter, &dag_round, downloader, store, round_ctx);
+            let mut incr = ByRoundIncrement::default();
+            for entry in map_by_author.iter() {
+                incr.count(&entry.item);
+                (entry.item).add_to_dag(entry.key(), &dag_round, downloader, store, round_ctx);
+            }
             flushed.add(dag_round.round(), incr);
         }
 
@@ -453,17 +460,14 @@ impl BroadcastFilterInner {
                 };
                 // set `dag_round` to channel points and drop the write lock for now
                 (entry.get_mut().dag_round).get_or_insert_with(|| dag_round.clone());
-                match mem::take(&mut entry.get_mut().cached) {
-                    Some(cached) => cached.by_author.into_read_only(),
-                    None => {
-                        entry.remove();
-                        continue; // already in dag
-                    }
-                }
+                entry.get().by_author.clone()
             };
-            let iter = (map_by_author.iter()).map(|(author, by_author)| (author, &by_author.item));
-            let incr = Self::add_all_to_dag(iter, dag_round, downloader, store, round_ctx);
-            flushed.add(round, incr);
+            let mut incr = ByRoundIncrement::default();
+            for entry in map_by_author.iter() {
+                incr.count(&entry.item);
+                (entry.item).add_to_dag(entry.key(), dag_round, downloader, store, round_ctx);
+            }
+            flushed.add(dag_round.round(), incr);
             self.by_round.remove(&round);
         }
 
@@ -482,38 +486,6 @@ impl BroadcastFilterInner {
             );
         }
     }
-
-    fn add_all_to_dag<'a>(
-        author_item: impl Iterator<Item = (&'a PeerId, &'a ByAuthorItem)>,
-        dag_round: &DagRound,
-        downloader: &Downloader,
-        store: &MempoolStore,
-        round_ctx: &RoundCtx,
-    ) -> ByRoundIncrement {
-        let mut incr = ByRoundIncrement::default();
-
-        for (author, item) in author_item {
-            match item {
-                ByAuthorItem::Ok(point) => {
-                    dag_round.add_broadcast(point, downloader, store, round_ctx);
-                    incr.add_point();
-                }
-                ByAuthorItem::OkPruned(digest) => {
-                    dag_round.add_pruned_broadcast(author, digest, downloader, store, round_ctx);
-                    incr.add_digest();
-                }
-                ByAuthorItem::IllFormed(point, reason) => {
-                    dag_round.add_ill_formed_broadcast(point, reason, store, round_ctx);
-                    incr.add_point();
-                }
-                ByAuthorItem::IllFormedPruned(_digest, _) => {
-                    // do nothing, was stored only to determine round because signature matched
-                    incr.add_digest();
-                }
-            }
-        }
-        incr
-    }
 }
 
 /// Every round in BF contains at most one point for each peer from `v_set`, which size
@@ -524,11 +496,12 @@ struct ByRoundIncrement {
     digests: u8,
 }
 impl ByRoundIncrement {
-    fn add_point(&mut self) {
-        self.points = self.points.saturating_add(1);
-    }
-    fn add_digest(&mut self) {
-        self.digests = self.digests.saturating_add(1);
+    fn count(&mut self, item: &ByAuthorItem) {
+        if item.is_pruned() {
+            self.digests = self.digests.saturating_add(1);
+        } else {
+            self.points = self.points.saturating_add(1);
+        }
     }
 }
 
@@ -578,12 +551,10 @@ impl Default for CleanCounter {
 }
 impl CleanCounter {
     fn add(&mut self, round: Round, by_round_item: &ByRoundItem) {
+        self.items = self.items.saturating_add(by_round_item.by_author.len());
         self.rounds = self.rounds.saturating_add(1);
         self.min = self.min.min(round);
         self.max = self.max.max(round);
-        if let Some(cached) = by_round_item.cached.as_ref() {
-            self.items = self.items.saturating_add(cached.by_author.len());
-        };
     }
     fn is_empty(&self) -> bool {
         self.rounds == 0
