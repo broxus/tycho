@@ -22,8 +22,8 @@ pub struct BroadcastFilter {
 }
 
 struct ByRoundItem {
-    /// when a GEQ round is set, new points are send to DAG directly, and `self` is ready for removal
-    dag_round: Option<DagRound>,
+    /// when a GEQ round is set, new points are send to DAG directly, and `self` will be soon removed
+    temp_new_head: Option<DagRound>,
     peer_count: PeerCount,
     /// `Arc` allows to copy during removal in [`BroadcastFilter::flush_to_dag`]
     by_author: Arc<FastDashMap<PeerId, ByAuthor>>,
@@ -227,7 +227,7 @@ impl BroadcastFilter {
                 match PeerCount::try_from(v_set_len) {
                     Ok(peer_count) => (self.by_round.entry(id.round))
                         .or_insert_with(|| ByRoundItem {
-                            dag_round: None,
+                            temp_new_head: None,
                             peer_count,
                             by_author: Arc::new(FastDashMap::with_capacity_and_hasher(
                                 peer_count.full(),
@@ -246,7 +246,7 @@ impl BroadcastFilter {
         };
         match &*round_item_read {
             ByRoundItem {
-                dag_round: Option::None,
+                temp_new_head: Option::None,
                 peer_count,
                 by_author,
             } => {
@@ -275,12 +275,20 @@ impl BroadcastFilter {
                 cached_info
             }
             ByRoundItem {
-                dag_round: Some(point_round),
+                temp_new_head: Some(start_round),
                 ..
             } => {
-                let point_round = point_round.clone();
+                // a rare scenario to handle race with `flush_to_dag()` when `head` arg is older
+                let start_round = start_round.clone();
                 drop(round_item_read);
-                verified.add_to_dag(&id.author, &point_round, downloader, store, round_ctx);
+                let point_round_opt = if start_round.round() == id.round {
+                    Some(start_round)
+                } else {
+                    start_round.scan(id.round)
+                };
+                if let Some(point_round) = point_round_opt {
+                    verified.add_to_dag(&id.author, &point_round, downloader, store, round_ctx);
+                }
                 CacheInfo::default()
             }
         }
@@ -343,24 +351,28 @@ impl BroadcastFilter {
         // We are unlikely to receive such old broadcasts while node is in sync with others.
 
         let mut past_removed = CleanCounter::default();
-        // allocate once up to the max
+        // allocate up to the max
         let mut outdated =
             Vec::with_capacity(1 + head_next_round.0.saturating_sub(back_bottom.0) as usize);
         let mut future_kept = CleanCounter::default();
 
-        for entry in self.by_round.iter() {
-            let (&round, round_item) = entry.pair();
+        self.by_round.retain(|&round, round_item| {
             if round < back_bottom {
                 past_removed.add(round, round_item);
+                false
             } else if round <= head_next_round {
+                (round_item.temp_new_head).get_or_insert_with(|| head.next().clone());
                 outdated.push((round, round_item.by_author.clone(), None));
-                // no need to set `round_item.dag_round` as item is removed under lock;
+                true
             } else {
                 future_kept.add(round, round_item);
+                true
             }
-        }
+        });
+
         // most frequent case: only DagHead.next() round is taken and counter is used only once
         let mut flushed = ByRoundCounter::with_capacity(outdated.len());
+        let mut not_in_dag = Vec::with_capacity(outdated.len());
 
         // apply reversed historical order to scan dag rounds (first is new and last is old)
         outdated.sort_unstable_by_key(|(round, _, _)| cmp::Reverse(*round));
@@ -378,21 +390,18 @@ impl BroadcastFilter {
 
         // preserve historical order by round to not create excessive download tasks
         for (round, map_by_author, dag_round) in outdated {
-            let Some(dag_round) = dag_round else {
-                continue; // skip prefix until rounds are found in dag
-            };
-            assert_eq!(round, dag_round.round(), "inserted wrong round");
-            if let Some(mut entry) = self.by_round.get_mut(&round) {
-                // route new points to dag, so we can read snapshot
-                entry.dag_round.get_or_insert_with(|| dag_round.clone());
+            if let Some(dag_round) = &dag_round {
+                assert_eq!(round, dag_round.round(), "inserted wrong round");
+                let mut incr = ByRoundIncrement::default();
+                for entry in map_by_author.iter() {
+                    let (author, by_author) = entry.pair();
+                    incr.count(&by_author.item);
+                    (by_author.item).add_to_dag(author, dag_round, downloader, store, round_ctx);
+                }
+                flushed.add(round, incr);
+            } else {
+                not_in_dag.push(round.0);
             }
-            let mut incr = ByRoundIncrement::default();
-            for entry in map_by_author.iter() {
-                let (author, by_author) = entry.pair();
-                incr.count(&by_author.item);
-                (by_author.item).add_to_dag(author, &dag_round, downloader, store, round_ctx);
-            }
-            flushed.add(round, incr);
             self.by_round.remove(&round);
         }
 
@@ -401,10 +410,11 @@ impl BroadcastFilter {
                 parent: round_ctx.span(),
                 dag_top = head.next().round().0,
                 flushed_rounds = flushed.rounds,
-                points_total = Some(flushed.points_total).filter(|qnt| *qnt > 0),
-                digests_total = Some(flushed.digests_total).filter(|qnt| *qnt > 0),
-                points = Some(flushed.points).filter(|vec| !vec.is_empty()).map(debug),
-                digests = Some(flushed.digests).filter(|vec| !vec.is_empty()).map(debug),
+                points_total = (flushed.points_total > 0).then_some(flushed.points_total),
+                digests_total = (flushed.digests_total > 0).then_some(flushed.digests_total),
+                points = (!flushed.points.is_empty()).then_some(debug(flushed.points)),
+                digests = (!flushed.digests.is_empty()).then_some(debug(flushed.digests)),
+                rounds_not_in_dag = (!not_in_dag.is_empty()).then_some(debug(not_in_dag)),
                 past_removed = %past_removed,
                 future_kept = %future_kept,
                 "BF flushed to DAG"
