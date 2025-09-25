@@ -1,5 +1,4 @@
 use std::cmp;
-use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
@@ -276,20 +275,12 @@ impl BroadcastFilter {
                 cached_info
             }
             ByRoundItem {
-                dag_round: Some(start_round),
+                dag_round: Some(point_round),
                 ..
             } => {
-                let start_round = start_round.clone();
+                let point_round = point_round.clone();
                 drop(round_item_read);
-                let point_round = if start_round.round() == id.round {
-                    Some(start_round)
-                } else {
-                    start_round.scan(id.round)
-                };
-                // start round is newer than current head
-                if let Some(point_round) = point_round {
-                    verified.add_to_dag(&id.author, &point_round, downloader, store, round_ctx);
-                }
+                verified.add_to_dag(&id.author, &point_round, downloader, store, round_ctx);
                 CacheInfo::default()
             }
         }
@@ -352,7 +343,9 @@ impl BroadcastFilter {
         // We are unlikely to receive such old broadcasts while node is in sync with others.
 
         let mut past_removed = CleanCounter::default();
-        let mut unordered = Vec::new();
+        // allocate once up to the max
+        let mut outdated =
+            Vec::with_capacity(1 + head_next_round.0.saturating_sub(back_bottom.0) as usize);
         let mut future_kept = CleanCounter::default();
 
         for entry in self.by_round.iter() {
@@ -360,73 +353,46 @@ impl BroadcastFilter {
             if round < back_bottom {
                 past_removed.add(round, round_item);
             } else if round <= head_next_round {
-                unordered.push((round, round_item.by_author.clone()));
+                outdated.push((round, round_item.by_author.clone(), None));
                 // no need to set `round_item.dag_round` as item is removed under lock;
             } else {
                 future_kept.add(round, round_item);
             }
         }
         // most frequent case: only DagHead.next() round is taken and counter is used only once
-        let mut flushed = ByRoundCounter::default();
+        let mut flushed = ByRoundCounter::with_capacity(outdated.len());
 
-        let (outdated, not_in_dag) = if unordered.is_empty() {
-            Default::default()
-        } else {
-            // alloc to the max
-            let mut outdated = VecDeque::with_capacity(unordered.len());
-            let mut not_in_dag = VecDeque::with_capacity(unordered.len());
+        // apply reversed historical order to scan dag rounds (first is new and last is old)
+        outdated.sort_unstable_by_key(|(round, _, _)| cmp::Reverse(*round));
 
-            // apply reversed historical order to scan dag rounds (back is new and front is old)
-            unordered.sort_unstable_by_key(|(round, _)| cmp::Reverse(*round));
-            let outdated_reversed = unordered;
+        let mut last_used_dag_round = head.next();
+        for (round, _, dag_round_opt) in outdated.iter_mut() {
+            let Some(found) = last_used_dag_round.scan(*round) else {
+                break; // reached dag end; nothing can do if dag is not contiguous
+            };
+            last_used_dag_round = dag_round_opt.insert(found);
+        }
 
-            let mut last_used_dag_round = Some(head.next().clone());
-            for (round, map_by_author) in outdated_reversed {
-                last_used_dag_round = last_used_dag_round.and_then(|last| last.scan(round));
-                match &last_used_dag_round {
-                    Some(found) => outdated.push_front((found.clone(), map_by_author)),
-                    None => not_in_dag.push_front(round),
-                };
-            }
-            // results in historical order: back is old and front is new
-            (outdated, not_in_dag)
-        };
+        // apply natural historical order (first is old and last is new)
+        outdated.reverse();
 
         // preserve historical order by round to not create excessive download tasks
-        for (dag_round, map_by_author) in &outdated {
-            if let Some(mut entry) = self.by_round.get_mut(&dag_round.round()) {
-                // route new points to dag, so we can read snapshot with maybe some excessive data
+        for (round, map_by_author, dag_round) in outdated {
+            let Some(dag_round) = dag_round else {
+                continue; // skip prefix until rounds are found in dag
+            };
+            assert_eq!(round, dag_round.round(), "inserted wrong round");
+            if let Some(mut entry) = self.by_round.get_mut(&round) {
+                // route new points to dag, so we can read snapshot
                 entry.dag_round.get_or_insert_with(|| dag_round.clone());
             }
             let mut incr = ByRoundIncrement::default();
             for entry in map_by_author.iter() {
                 let (author, by_author) = entry.pair();
                 incr.count(&by_author.item);
-                (by_author.item).add_to_dag(author, dag_round, downloader, store, round_ctx);
+                (by_author.item).add_to_dag(author, &dag_round, downloader, store, round_ctx);
             }
-            flushed.add(dag_round.round(), incr);
-        }
-
-        // broadcasts of points at these rounds are very likely,
-        // so we remove rounds in order to move points into dag safely for Signer
-
-        for dag_round in [head.prev(), head.current(), head.next()] {
-            let round = dag_round.round();
-            let map_by_author = {
-                let dashmap::Entry::Occupied(mut entry) = self.by_round.entry(round) else {
-                    continue; // already in dag
-                };
-                // set `dag_round` to channel points and drop the write lock for now
-                (entry.get_mut().dag_round).get_or_insert_with(|| dag_round.clone());
-                entry.get().by_author.clone()
-            };
-            let mut incr = ByRoundIncrement::default();
-            for entry in map_by_author.iter() {
-                let (author, by_author) = entry.pair();
-                incr.count(&by_author.item);
-                (by_author.item).add_to_dag(author, dag_round, downloader, store, round_ctx);
-            }
-            flushed.add(dag_round.round(), incr);
+            flushed.add(round, incr);
             self.by_round.remove(&round);
         }
 
@@ -439,7 +405,6 @@ impl BroadcastFilter {
                 digests_total = Some(flushed.digests_total).filter(|qnt| *qnt > 0),
                 points = Some(flushed.points).filter(|vec| !vec.is_empty()).map(debug),
                 digests = Some(flushed.digests).filter(|vec| !vec.is_empty()).map(debug),
-                not_in_dag = Some(not_in_dag).filter(|vec| !vec.is_empty()).map(debug),
                 past_removed = %past_removed,
                 future_kept = %future_kept,
                 "BF flushed to DAG"
@@ -466,7 +431,6 @@ impl ByRoundIncrement {
 }
 
 /// Keeps [`Round`] as `u32` to be formatted with default `DebugFmt` for `Vec`.
-#[derive(Default)]
 struct ByRoundCounter {
     rounds: u32,
     // round -> count; values are inserted in historical order
@@ -477,6 +441,15 @@ struct ByRoundCounter {
     digests_total: u32,
 }
 impl ByRoundCounter {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            rounds: 0,
+            points: Vec::with_capacity(capacity),
+            digests: Vec::with_capacity(capacity),
+            points_total: 0,
+            digests_total: 0,
+        }
+    }
     fn add(&mut self, round: Round, incr: ByRoundIncrement) {
         self.rounds = self.rounds.saturating_add(1);
         if incr.points > 0 {
