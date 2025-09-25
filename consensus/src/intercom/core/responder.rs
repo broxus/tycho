@@ -20,7 +20,7 @@ use crate::storage::MempoolStore;
 pub struct Responder(Arc<ResponderInner>);
 
 impl Responder {
-    pub fn new(mempool_rayon: &MempoolRayon) -> Self {
+    pub fn new(mempool_rayon: &MempoolRayon, broadcast_filter: BroadcastFilter) -> Self {
         Self(Arc::new(ResponderInner {
             current: ArcSwapOption::empty(),
             mempool_rayon: mempool_rayon.clone(),
@@ -32,6 +32,7 @@ impl Responder {
 
 struct ResponderInner {
     current: ArcSwapOption<ResponderCurrent>,
+    broadcast_filter: BroadcastFilter,
     mempool_rayon: MempoolRayon,
     #[cfg(feature = "mock-feedback")]
     top_known_anchor: std::sync::OnceLock<
@@ -42,7 +43,6 @@ struct ResponderInner {
 struct ResponderCurrent {
     // state and storage components go here
     store: MempoolStore,
-    broadcast_filter: BroadcastFilter,
     downloader: Downloader,
     head: DagHead,
     round_ctx: RoundCtx,
@@ -88,11 +88,11 @@ impl Responder {
         broadcast_filter.flush_to_dag(head, downloader, store, round_ctx);
         self.0.current.store(Some(Arc::new(ResponderCurrent {
             store: store.clone(),
-            broadcast_filter: broadcast_filter.clone(),
             downloader: downloader.clone(),
             head: head.clone(),
             round_ctx: round_ctx.clone(),
         })));
+        // TODO commit the flush with rounds passed with vec
     }
 }
 
@@ -168,10 +168,9 @@ impl Responder {
 
         Some(match query {
             QueryRequest::Broadcast(point) => {
-                inner.broadcast_filter.add(
+                self.0.broadcast_filter.add(
                     &req.metadata.peer_id,
                     &point,
-                    &inner.head,
                     &inner.downloader,
                     &inner.store,
                     &inner.round_ctx,
@@ -195,7 +194,7 @@ impl Responder {
                     &req.metadata.peer_id,
                     round,
                     &inner.head,
-                    &inner.broadcast_filter,
+                    &self.0.broadcast_filter,
                     &inner.round_ctx,
                 ),
             ),

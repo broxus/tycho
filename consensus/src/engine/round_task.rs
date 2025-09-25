@@ -47,6 +47,7 @@ impl RoundTaskReady {
         bind: &EngineBinding,
         consensus_round: &RoundWatch<Consensus>,
         net: &EngineNetwork,
+        head: DagHead,
         conf: &MempoolConfig,
     ) -> Self {
         let broadcast_filter = BroadcastFilter::new(&net.peer_schedule, consensus_round);

@@ -2,12 +2,12 @@ use std::cmp;
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
-
+use parking_lot::RwLock;
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{DagHead, DagRound, IllFormedReason, Verifier, VerifyError, VerifyFailReason};
+use crate::dag::{DagHead, DagHeadSwap, DagRound, IllFormedReason, Verifier, VerifyError, VerifyFailReason};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
@@ -19,14 +19,16 @@ use crate::storage::MempoolStore;
 #[derive(Clone)]
 pub struct BroadcastFilter {
     inner: Arc<BroadcastFilterInner>,
+    head: DagHeadSwap,
 }
 
 impl BroadcastFilter {
-    pub fn new(peer_schedule: &PeerSchedule, consensus_round: &RoundWatch<Consensus>) -> Self {
+    pub fn new(peer_schedule: &PeerSchedule, consensus_round: &RoundWatch<Consensus>, head: DagHead) -> Self {
         Self {
             inner: Arc::new(BroadcastFilterInner {
                 peer_schedule: peer_schedule.clone(),
                 consensus_round: consensus_round.clone(),
+                head: RwLock::new(head),
                 by_round: Default::default(),
             }),
         }
@@ -36,14 +38,13 @@ impl BroadcastFilter {
         &self,
         sender: &PeerId,
         point: &Point,
-        head: &DagHead,
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) {
         let cache_info = {
             let _task_time = HistogramGuard::begin("tycho_mempool_bf_add_time");
-            (self.inner).add(sender, point, head, downloader, store, round_ctx)
+            (self.inner).add(sender, point, downloader, store, round_ctx)
         };
         if cache_info.is_threshold_reached {
             // notify Collector after max consensus round is updated
@@ -80,6 +81,7 @@ impl BroadcastFilter {
 struct BroadcastFilterInner {
     peer_schedule: PeerSchedule,
     consensus_round: RoundWatch<Consensus>,
+    head: RwLock<DagHead>,
     /// very much like DAG structure, but without dependency check;
     /// just to determine reliably that consensus advanced without current node;
     by_round: FastDashMap<Round, ByRoundItem>,
@@ -180,12 +182,12 @@ impl BroadcastFilterInner {
         &self,
         sender: &PeerId,
         point: &Point,
-        head: &DagHead, // Note: head may be older than BF bottom during Engine round switch
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) -> CacheInfo {
         let id = point.info().id();
+        let head = self.head.read().clone();
 
         let checked = if sender != id.author {
             Err(CheckError::SenderNotAuthor(*sender))
@@ -384,7 +386,6 @@ impl BroadcastFilterInner {
         round_ctx: &RoundCtx,
     ) {
         let back_bottom = head.last_back_bottom();
-        let head_prev_round = head.prev().round();
         let head_next_round = head.next().round();
 
         // Drain points in historical order that cannot be neither included nor signed,
@@ -392,40 +393,33 @@ impl BroadcastFilterInner {
         // We are unlikely to receive such old broadcasts while node is in sync with others.
 
         let mut past_removed = CleanCounter::default();
-        let mut outdated_unordered = Vec::new();
+        let mut unordered = Vec::new();
         let mut future_kept = CleanCounter::default();
 
-        self.by_round.retain(|&round, round_item| {
+        for entry in self.by_round.iter() {
+            let (&round, round_item) = entry.pair();
             if round < back_bottom {
                 past_removed.add(round, round_item);
-                false
-            } else if round < head_prev_round {
-                outdated_unordered.push((round, round_item.by_author.clone()));
-                // no need to set `round_item.dag_round` as item is removed under lock;
-                false
             } else if round <= head_next_round {
-                // keep head rounds for now, remove later in this method
-                // do not set `round_item.dag_round` now to flush only in by-round order
-                true
-            } else {
+                unordered.push((round, round_item.by_author.clone()));
+                // no need to set `round_item.dag_round` as item is removed under lock;
+            } else  {
                 future_kept.add(round, round_item);
-                true
             }
-        });
-
+        }
         // most frequent case: only DagHead.next() round is taken and counter is used only once
         let mut flushed = ByRoundCounter::default();
 
-        let (outdated, not_in_dag) = if outdated_unordered.is_empty() {
+        let (outdated, not_in_dag) = if unordered.is_empty() {
             Default::default()
         } else {
             // alloc to the max
-            let mut outdated = VecDeque::with_capacity(outdated_unordered.len());
-            let mut not_in_dag = VecDeque::with_capacity(outdated_unordered.len());
+            let mut outdated = VecDeque::with_capacity(unordered.len());
+            let mut not_in_dag = VecDeque::with_capacity(unordered.len());
 
             // apply reversed historical order to scan dag rounds (back is new and front is old)
-            outdated_unordered.sort_unstable_by_key(|(round, _)| cmp::Reverse(*round));
-            let outdated_reversed = outdated_unordered;
+            unordered.sort_unstable_by_key(|(round, _)| cmp::Reverse(*round));
+            let outdated_reversed = unordered;
 
             let mut last_used_dag_round = Some(head.next().clone());
             for (round, map_by_author) in outdated_reversed {
@@ -440,7 +434,11 @@ impl BroadcastFilterInner {
         };
 
         // preserve historical order by round to not create excessive download tasks
-        for (dag_round, map_by_author) in outdated {
+        for (dag_round, map_by_author) in &outdated {
+            if let Some(mut entry) = self.by_round.get_mut(&dag_round.round()) {
+                // route new points to dag, so we can read snapshot with maybe some excessive data
+                entry.dag_round.get_or_insert_with(|| dag_round.clone());
+            }
             let mut incr = ByRoundIncrement::default();
             for entry in map_by_author.iter() {
                 let (author, by_author) = entry.pair();
