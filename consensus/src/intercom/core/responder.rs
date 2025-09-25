@@ -24,7 +24,7 @@ impl Responder {
     pub fn new(mempool_rayon: &MempoolRayon) -> Self {
         Self(Arc::new(ResponderInner {
             current: ArcSwapOption::empty(),
-            broadcast_filter: BroadcastFilter::new(),
+            broadcast_filter: BroadcastFilter::default(),
             mempool_rayon: mempool_rayon.clone(),
             #[cfg(feature = "mock-feedback")]
             top_known_anchor: std::sync::OnceLock::new(),
@@ -177,7 +177,6 @@ impl Responder {
                     &inner.store,
                     &inner.peer_schedule,
                     &inner.downloader,
-                    &inner.head,
                     &inner.round_ctx,
                 );
                 if is_round_threshold_reached {

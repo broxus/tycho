@@ -3,11 +3,14 @@ use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
+use arc_swap::{ArcSwap, ArcSwapOption};
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{DagHead, DagRound, IllFormedReason, Verifier, VerifyError, VerifyFailReason};
+use crate::dag::{
+    DagHead, DagHeadSwap, DagRound, IllFormedReason, Verifier, VerifyError, VerifyFailReason,
+};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::engine::{ConsensusConfigExt, NodeConfig};
@@ -15,7 +18,9 @@ use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointId, Round};
 use crate::storage::MempoolStore;
 
+#[derive(Default)]
 pub struct BroadcastFilter {
+    head: DagHeadSwap,
     /// very much like DAG structure, but without dependency check;
     /// just to determine reliably that consensus advanced without current node;
     by_round: FastDashMap<Round, ByRoundItem>,
@@ -112,12 +117,6 @@ struct CacheInfo {
 //  * if Engine is CACHE_ROUNDS+ behind consensus: BF stores point digests only
 //  * if Engine is MAX_HISTORY_DEPTH+ behind consensus: BF keeps MAX_HISTORY_DEPTH items
 impl BroadcastFilter {
-    pub fn new() -> Self {
-        Self {
-            by_round: FastDashMap::default(),
-        }
-    }
-
     pub fn has_point(&self, round: Round, sender: &PeerId) -> bool {
         let _task_time = HistogramGuard::begin("tycho_mempool_bf_has_point_time");
         match self.by_round.get(&round) {
@@ -134,9 +133,12 @@ impl BroadcastFilter {
         store: &MempoolStore,
         peer_schedule: &PeerSchedule,
         downloader: &Downloader,
-        head: &DagHead, // Note: head may be older than BF bottom during Engine round switch
         round_ctx: &RoundCtx,
     ) -> bool {
+        let Some(head) = self.head.load() else {
+            return false;
+        };
+
         let _task_time = HistogramGuard::begin("tycho_mempool_bf_add_time");
         let id = point.info().id();
 
@@ -167,7 +169,7 @@ impl BroadcastFilter {
             store,
             peer_schedule,
             downloader,
-            head,
+            &head,
             round_ctx,
         );
 
@@ -184,6 +186,7 @@ impl BroadcastFilter {
         dyn_event!(
             parent: round_ctx.span(),
             level,
+            dag_top = head.next().round().0,
             author = display(id.author.alt()),
             round = id.round.0,
             digest = display(id.digest.alt()),
@@ -207,7 +210,7 @@ impl BroadcastFilter {
         store: &MempoolStore,
         peer_schedule: &PeerSchedule,
         downloader: &Downloader,
-        head: &DagHead, // Note: head may be older than BF bottom during Engine round switch
+        head: &DagHead,
         round_ctx: &RoundCtx,
     ) -> CacheInfo {
         let Ok(verified) = checked else {

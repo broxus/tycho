@@ -1,23 +1,20 @@
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use tycho_crypto::ed25519::KeyPair;
 
 use crate::dag::DagRound;
 use crate::intercom::PeerSchedule;
 use crate::models::Round;
 
-#[derive(Clone)]
-pub struct DagHeadSwap(Arc<ArcSwap<DagHeadInner>>);
+#[derive(Default)]
+pub struct DagHeadSwap(ArcSwapOption<DagHeadInner>);
 impl DagHeadSwap {
-    pub fn new(new_head: &DagHead) -> Self {
-        Self(Arc::new(ArcSwap::new(new_head.0.clone())))
-    }
-    pub fn load(&self) -> DagHead {
-        DagHead(self.0.load_full())
+    pub fn load(&self) -> Option<DagHead> {
+        self.0.load_full().map(DagHead)
     }
     pub fn store(&self, new_head: &DagHead) {
-        self.0.store(new_head.0.clone());
+        self.0.store(Some(new_head.0.clone()));
     }
 }
 
