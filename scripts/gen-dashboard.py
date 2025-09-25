@@ -568,6 +568,16 @@ def core_blockchain_rpc_general() -> RowPanel:
             unit_format=UNITS.SECONDS,
             legend_format="{{instance}} - {{kind}}",
         ),
+        create_gauge_panel(
+            "tycho_core_overlay_client_neighbour_score",
+            "Current score per peer",
+        ),
+        create_counter_panel(
+            "tycho_core_overlay_client_neighbour_total_requests", "Number of total requests per peer"
+        ),
+        create_counter_panel(
+            "tycho_core_overlay_client_neighbour_failed_requests", "Number of failed requests per peer"
+        ),
     ]
     return create_row("blockchain: RPC - General Stats", metrics)
 

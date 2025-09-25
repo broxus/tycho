@@ -179,8 +179,11 @@ impl BlockchainBlockProvider {
                 self.fallback.is_some(),
                 || {
                     tracing::debug!(%block_id, "get_block_full requested");
+
+                    // Should be optional to avoid of banning of all neighbors
+                    // when requests too new blocks
                     self.client
-                        .get_block_full(block_id, DataRequirement::Expected)
+                        .get_block_full(block_id, DataRequirement::Optional)
                 },
                 |res| async move {
                     match res {
