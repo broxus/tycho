@@ -87,22 +87,12 @@ impl Cmd {
             println!("Input is a shard block. Finding corresponding master block...");
             let shard_block = dumper.load_block_stuff(&target_block_id).await?;
             let info = shard_block.load_info()?;
-            let mc_seqno = info
-                .load_master_ref()
+            info.load_master_ref()
                 .context("Shard block has no master ref")?
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Shard block {} has no master ref",
-                        target_block_id.to_string().replace(':', "_")
-                    )
-                })?;
-            dumper
-                .find_master_block_by_seqno(mc_seqno.seqno)
-                .await
-                .context(format!(
-                    "Master block for seqno {} not found",
-                    mc_seqno.seqno
-                ))?
+                    anyhow::anyhow!("Shard block {} has no master ref", target_block_id)
+                })?
+                .as_block_id(target_block_id.shard)
         };
 
         println!("Master block found: {}", master_block_id);
@@ -114,11 +104,17 @@ impl Cmd {
         let master_block = dumper.load_block_stuff(&master_block_id).await?;
         let shards = master_block.load_custom()?.shards.latest_blocks();
 
-        println!("Dumping top shard blocks and states...");
+        println!("Dumping top shard blocks, states and queues...");
         for shard_block in shards {
             let block_id = shard_block?;
             if let Err(e) = dumper.dump_block_and_state(&block_id).await {
                 println!("Failed to dump shard block {}: {}", block_id, e);
+            };
+            if let Err(e) = dumper.dump_queue_state(&block_id).await {
+                println!(
+                    "Failed to dump queue state for top shard block {}: {}",
+                    block_id, e
+                );
             };
         }
 
@@ -159,15 +155,6 @@ impl Dumper {
         Ok(())
     }
 
-    async fn find_master_block_by_seqno(&self, mc_seqno: u32) -> Option<BlockId> {
-        self.storage
-            .block_handle_storage()
-            .key_blocks_iterator(tycho_core::storage::KeyBlocksDirection::ForwardFrom(
-                mc_seqno,
-            ))
-            .find(|id| id.seqno == mc_seqno)
-    }
-
     async fn dump_block_data(&self, block_id: &BlockId) -> Result<()> {
         let block = self.load_block_stuff(block_id).await?;
         let raw_data = Boc::encode(block.root_cell());
@@ -185,10 +172,16 @@ impl Dumper {
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
         let writer = ShardStateWriter::new(self.storage.db(), &dir, block_id);
 
+        let ref_by_mc_seqno = self
+            .storage
+            .block_handle_storage()
+            .load_handle(block_id)
+            .map(|block_handle| block_handle.ref_by_mc_seqno());
+
         let state = self
             .storage
             .shard_state_storage()
-            .load_state(block_id.seqno + 1, block_id)
+            .load_state(ref_by_mc_seqno.unwrap_or(block_id.seqno + 1), block_id)
             .await?;
 
         writer
