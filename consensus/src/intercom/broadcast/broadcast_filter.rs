@@ -5,6 +5,7 @@ use std::{cmp, mem};
 
 use dashmap::mapref::entry::Entry as DashMapEntry;
 use tycho_network::PeerId;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::dag::{DagHead, DagRound, IllFormedReason, Verifier, VerifyError, VerifyFailReason};
@@ -41,11 +42,24 @@ impl BroadcastFilter {
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) {
-        self.inner
-            .add(sender, point, head, downloader, store, round_ctx);
+        let is_future_threshold_reached = {
+            let _task_time = HistogramGuard::begin("tycho_mempool_bf_add_time");
+            (self.inner).add(sender, point, head, downloader, store, round_ctx)
+        };
+        if is_future_threshold_reached {
+            // notify Collector after max consensus round is updated
+            self.inner.consensus_round.set_max(point.info().round());
+            // round is determined, so clean history;
+            // do not flush to DAG as it may have no needed rounds yet
+            if self.inner.consensus_round.get() == point.info().round() {
+                let _task_time = HistogramGuard::begin("tycho_mempool_bf_clean_time");
+                self.inner.clean(point.info().round(), head, round_ctx);
+            } // else: engine is not paused, let it do its work
+        }
     }
 
     pub fn has_point(&self, round: Round, sender: &PeerId) -> bool {
+        let _task_time = HistogramGuard::begin("tycho_mempool_bf_has_point_time");
         match self.inner.by_round.get(&round) {
             None => false,
             Some(round_item) => round_item.value().by_author.contains_key(sender),
@@ -59,6 +73,7 @@ impl BroadcastFilter {
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) {
+        let _task_time = HistogramGuard::begin("tycho_mempool_bf_flush_time");
         self.inner.flush_to_dag(head, downloader, store, round_ctx);
     }
 }
@@ -141,7 +156,7 @@ impl BroadcastFilterInner {
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
-    ) {
+    ) -> bool {
         let PointId {
             author,
             round,
@@ -279,24 +294,12 @@ impl BroadcastFilterInner {
             "received broadcast"
         );
 
-        if is_future_threshold_reached {
-            // notify Collector after max consensus round is updated
-            self.consensus_round.set_max(round);
-
-            // round is determined, so clean history;
-            // do not flush to DAG as it may have no needed rounds yet
-            self.clean(round, head, round_ctx);
-        }
+        is_future_threshold_reached
     }
 
     /// just drop unneeded data when Engine is paused and round task is not running
     /// while collator is syncing blocks
     fn clean(&self, round: Round, head: &DagHead, round_ctx: &RoundCtx) {
-        if round != self.consensus_round.get() {
-            // engine is not paused, let it do its work
-            return;
-        }
-
         // inclusive bounds on what should be left in cache
         let history_bottom =
             (head.last_back_bottom()).max(round - round_ctx.conf().consensus.max_total_rounds());

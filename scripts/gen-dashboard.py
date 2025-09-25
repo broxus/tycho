@@ -2745,6 +2745,22 @@ def mempool_engine() -> RowPanel:
 def mempool_intercom() -> RowPanel:
     metrics = [
         create_heatmap_panel(
+            "tycho_mempool_bf_add_time",
+            "Broadcast filter: add",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_bf_clean_time",
+            "Broadcast filter: clean",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_bf_flush_time",
+            "Broadcast filter: flush",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_bf_has_point_time",
+            "Broadcast filter: point lookup",
+        ),
+        create_heatmap_panel(
             "tycho_mempool_broadcast_query_dispatcher_time",
             "Dispatcher: Broadcast send",
         ),
