@@ -25,14 +25,16 @@ pub struct MempoolAdapterStubImpl {
     listener: Arc<dyn MempoolEventListener>,
     anchors_cache: Arc<RwLock<BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
     sleep_between_anchors: AtomicBool,
+    first_anchor_id: Option<u32>,
 }
 
 impl MempoolAdapterStubImpl {
     pub fn with_stub_externals(
         listener: Arc<dyn MempoolEventListener>,
         now: Option<u64>,
+        first_anchor_id: Option<u32>,
     ) -> Arc<Self> {
-        Self::with_generator(listener, |a| {
+        Self::with_generator(listener, first_anchor_id, |a| {
             tokio::spawn(Self::stub_externals_generator(a, now));
             Ok(())
         })
@@ -43,7 +45,7 @@ impl MempoolAdapterStubImpl {
         listener: Arc<dyn MempoolEventListener>,
         dir_path: impl AsRef<Path>,
     ) -> Result<Arc<Self>> {
-        Self::with_generator(listener, move |a| {
+        Self::with_generator(listener, None, move |a| {
             let mut paths = std::fs::read_dir(dir_path)?
                 .map(|res| res.map(|e| e.path()))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -54,7 +56,11 @@ impl MempoolAdapterStubImpl {
         })
     }
 
-    fn with_generator<F>(listener: Arc<dyn MempoolEventListener>, start: F) -> Result<Arc<Self>>
+    fn with_generator<F>(
+        listener: Arc<dyn MempoolEventListener>,
+        first_anchor_id: Option<u32>,
+        start: F,
+    ) -> Result<Arc<Self>>
     where
         F: FnOnce(Arc<Self>) -> Result<()>,
     {
@@ -64,6 +70,7 @@ impl MempoolAdapterStubImpl {
             listener,
             anchors_cache: Arc::new(RwLock::new(BTreeMap::new())),
             sleep_between_anchors: AtomicBool::new(true),
+            first_anchor_id,
         };
 
         let adapter = Arc::new(adapter);
@@ -80,15 +87,16 @@ impl MempoolAdapterStubImpl {
             tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
         }
 
-        let mut prev_anchor_id = 0;
-        for anchor_id in 1.. {
+        let mut prev_anchor_id = self.first_anchor_id.unwrap_or_default();
+        let start_anchor_id = prev_anchor_id + 1;
+        for anchor_id in start_anchor_id.. {
             if self.sleep_between_anchors.load(Ordering::Acquire) {
                 tokio::time::sleep(make_round_interval() * 4).await;
             } else {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
-            let mut anchor = make_stub_anchor(anchor_id, prev_anchor_id);
+            let mut anchor = make_stub_anchor(anchor_id, prev_anchor_id, self.first_anchor_id);
             prev_anchor_id = anchor_id;
 
             if let Some(now) = now {
@@ -186,12 +194,10 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         let mut last_attempt_at = None;
         loop {
             let Some(anchor) = self.anchors_cache.read().get(&anchor_id).cloned() else {
-                let last_anchor_id = self
-                    .anchors_cache
-                    .read()
-                    .last_key_value()
-                    .map(|(_, last_anchor)| last_anchor.id)
-                    .unwrap_or_default();
+                let last_anchor_id = self.anchors_cache.read().last_key_value().map_or(
+                    self.first_anchor_id.unwrap_or_default(),
+                    |(_, last_anchor)| last_anchor.id,
+                );
                 if last_anchor_id > anchor_id {
                     return Ok(GetAnchorResult::NotExist);
                 } else {
@@ -275,12 +281,10 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                 .map(|(_, v)| v.clone());
 
             let Some(anchor) = res else {
-                let last_anchor_id = self
-                    .anchors_cache
-                    .read()
-                    .last_key_value()
-                    .map(|(_, last_anchor)| last_anchor.id)
-                    .unwrap_or_default();
+                let last_anchor_id = self.anchors_cache.read().last_key_value().map_or(
+                    self.first_anchor_id.unwrap_or_default(),
+                    |(_, last_anchor)| last_anchor.id,
+                );
                 let delta = prev_anchor_id.saturating_sub(last_anchor_id);
                 if delta >= 20 {
                     tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
@@ -378,8 +382,12 @@ pub(crate) fn make_empty_anchor(
     })
 }
 
-pub(crate) fn make_stub_anchor(id: MempoolAnchorId, prev_id: MempoolAnchorId) -> MempoolAnchor {
-    let chain_time = id as u64 * 1736 % 1000000000;
+pub(crate) fn make_stub_anchor(
+    id: MempoolAnchorId,
+    prev_id: MempoolAnchorId,
+    anchor_id_offset: Option<u32>,
+) -> MempoolAnchor {
+    let chain_time = (id - anchor_id_offset.unwrap_or_default()) as u64 * 1736 % 1000000000;
 
     let externals_count = (chain_time % 10) as u32;
 
@@ -492,8 +500,11 @@ mod tests {
     async fn test_stub_anchors_generator() -> Result<()> {
         tycho_util::test::init_logger("test_stub_anchors_generator", "trace");
 
-        let adapter =
-            MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener), None);
+        let adapter = MempoolAdapterStubImpl::with_stub_externals(
+            Arc::new(MempoolEventStubListener),
+            None,
+            None,
+        );
 
         // try get existing anchor by id
         let result = adapter.get_anchor_by_id(3).await?;

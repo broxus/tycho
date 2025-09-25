@@ -12,7 +12,7 @@ use tycho_core::storage::{
 use tycho_storage::StorageContext;
 use tycho_storage::fs::Dir;
 use tycho_types::boc::Boc;
-use tycho_types::models::{BlockId, PrevBlockRef};
+use tycho_types::models::{BlockId, PrevBlockRef, ShardIdent};
 
 use crate::node::NodeConfig;
 
@@ -92,7 +92,7 @@ impl Cmd {
                 .ok_or_else(|| {
                     anyhow::anyhow!("Shard block {} has no master ref", target_block_id)
                 })?
-                .as_block_id(target_block_id.shard)
+                .as_block_id(ShardIdent::MASTERCHAIN)
         };
 
         println!("Master block found: {}", master_block_id);
@@ -150,7 +150,16 @@ struct Dumper {
 impl Dumper {
     async fn dump_block_and_state(&self, block_id: &BlockId) -> Result<()> {
         println!("Dumping data for block {}", block_id);
-        self.dump_block_data(block_id).await?;
+        if let Err(e) = self.dump_block_data(block_id).await {
+            if block_id.seqno == 0 {
+                println!(
+                    "Skipping block data dump for zerostate block {}: {}",
+                    block_id, e
+                );
+            } else {
+                return Err(e);
+            }
+        }
         self.dump_persistent_state(block_id).await?;
         Ok(())
     }
@@ -170,8 +179,7 @@ impl Dumper {
 
     async fn dump_persistent_state(&self, block_id: &BlockId) -> Result<()> {
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
-        let writer = ShardStateWriter::new(self.storage.db(), &dir, block_id);
-
+        let writer = ShardStateWriter::new(self.storage.cells_db(), &dir, block_id);
         let ref_by_mc_seqno = self
             .storage
             .block_handle_storage()
@@ -192,6 +200,11 @@ impl Dumper {
     }
 
     async fn dump_queue_state(&self, block_id: &BlockId) -> Result<()> {
+        if block_id.seqno == 0 {
+            // For zerostate blocks, there is no queue state to dump
+            return Ok(());
+        }
+
         let mut top_block_handle = self
             .storage
             .block_handle_storage()
