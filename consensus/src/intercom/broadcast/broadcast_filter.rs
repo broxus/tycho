@@ -23,7 +23,7 @@ pub struct BroadcastFilter {
 
 #[derive(Clone)]
 struct ByRoundItem {
-    /// when a GEQ round is set, new points are send to DAG directly, and `self` will be soon removed
+    /// when defined, new points are send to DAG directly, and `self` will be soon removed
     flush_dag_round: Option<DagRound>,
     peer_count: PeerCount,
     /// `Arc` allows to copy during removal in [`BroadcastFilter::flush_to_dag`]
@@ -113,44 +113,6 @@ struct CacheInfo {
 //  * if Engine is CACHE_ROUNDS+ behind consensus: BF stores point digests only
 //  * if Engine is MAX_HISTORY_DEPTH+ behind consensus: BF keeps MAX_HISTORY_DEPTH items
 impl BroadcastFilter {
-    /// also may search in DAG if it knows an updated [`DagHead`] during flush
-    pub fn has_point(&self, round: Round, sender: &PeerId, round_ctx: &RoundCtx) -> bool {
-        let _task_time = HistogramGuard::begin("tycho_mempool_bf_has_point_time");
-        let by_round = match self.by_round.get(&round) {
-            None => return false, // round is either already flushed or not yet created
-            Some(by_round_read) => by_round_read.clone(),
-        };
-        let Some(flush_dag_round) = by_round.flush_dag_round else {
-            // no ongoing flush, so point cannot be routed to DAG bypassing cache
-            return by_round.by_author.contains_key(sender);
-        };
-        // ongoing flush is a relatively rare and short scenario, so we have to search twice
-        if by_round.by_author.contains_key(sender) {
-            return true;
-        }
-        // point may have bypassed the cache and was routed to DAG directly
-        // temp head is most likely to be close to the requested round, so we may scan each time
-        let point_round_opt = if flush_dag_round.round() == round {
-            Some(flush_dag_round)
-        } else {
-            flush_dag_round.scan(round)
-        };
-        let Some(point_round) = point_round_opt else {
-            // should not happen
-            tracing::warn!(
-                parent: round_ctx.span(),
-                round = round.0,
-                "too deep point search"
-            );
-            return false;
-        };
-        // consistent only for points that bypassed cache,
-        // because signature and broadcast queries should not interleave
-        point_round
-            .view(sender, |loc| !loc.versions.is_empty())
-            .unwrap_or_default()
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn add_check_threshold(
         &self,
@@ -302,6 +264,7 @@ impl BroadcastFilter {
                         item: verified.clone(),
                         duplicates: 0,
                     });
+                // length is approximate, but clean will fire eventually, concurrently is ok too
                 cached_info.reached_threshold = by_author.len() == peer_count.reliable_minority();
                 cached_info
             }
@@ -310,16 +273,10 @@ impl BroadcastFilter {
                 ..
             } => {
                 // a rare scenario to handle race with `flush_to_dag()` when `head` arg is older
-                let flush_dag_round = flush_dag_round.clone();
+                let point_round = flush_dag_round.clone();
                 drop(round_item_read);
-                let point_round_opt = if flush_dag_round.round() == id.round {
-                    Some(flush_dag_round)
-                } else {
-                    flush_dag_round.scan(id.round)
-                };
-                if let Some(point_round) = point_round_opt {
-                    verified.add_to_dag(&id.author, &point_round, downloader, store, round_ctx);
-                }
+                assert_eq!(id.round, point_round.round(), "wrong round to flush into");
+                verified.add_to_dag(&id.author, &point_round, downloader, store, round_ctx);
                 CacheInfo::default()
             }
         }

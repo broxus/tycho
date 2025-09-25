@@ -82,17 +82,9 @@ impl Responder {
     }
 
     pub fn update(&self, head: &DagHead, round_ctx: &RoundCtx) {
-        // Note: first flush `BroadcastFilter`, then advance `Head` for `Signer`.
-        //  During flush, BF keeps all previously received items, while new are routed to DAG.
-        //  Also, broadcast and signature queries for the same point should not interleave,
-        //  and both caching in BF and direct routing to DAG are made during broadcast query.
-        //  That way, from Signer's point of view, point is either in BF or in DAG or not received
-        //  (only that order is correct).
-        //  In case Signer is called with outdated Head just a moment before the flush,
-        //  its next round (actually Engine's current) is already in DAG from the previous flush.
-        //  In case head jumps over a several rounds, BF is still in front of the DAG
-        //  and keeps all intermediate rounds until the next flush.
         let state = self.0.state.get().expect("responder must be init");
+        // Note: Signer must see DAG rounds completely flushed from BroadcastFilter,
+        //  its OK if Signer uses outdated DagHead and doesn't see the DAG up to the latest top
         (self.0.broadcast_filter).flush_to_dag(head, &state.downloader, &state.store, round_ctx);
         self.0.current.store(Some(Arc::new(ResponderCurrent {
             head: head.clone(),
@@ -215,7 +207,6 @@ impl Responder {
                 Signer::signature_response(
                     &req.metadata.peer_id,
                     round,
-                    &self.0.broadcast_filter,
                     &current.head,
                     &current.round_ctx,
                 ),

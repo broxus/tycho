@@ -5,7 +5,6 @@ use tycho_network::PeerId;
 use crate::dag::DagHead;
 use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
-use crate::intercom::BroadcastFilter;
 use crate::intercom::core::{SignatureRejectedReason, SignatureResponse};
 use crate::models::Round;
 
@@ -14,12 +13,10 @@ impl Signer {
     pub fn signature_response(
         author: &PeerId,
         round: Round,
-        broadcast_filter: &BroadcastFilter,
         head: &DagHead,
         round_ctx: &RoundCtx,
     ) -> SignatureResponse {
-        let response =
-            Self::make_signature_response(round, author, head, broadcast_filter, round_ctx);
+        let response = Self::make_signature_response(round, author, head, round_ctx);
         let level = match response {
             SignatureResponse::Rejected(_) => tracing::Level::WARN,
             _ => tracing::Level::TRACE,
@@ -38,20 +35,14 @@ impl Signer {
     fn make_signature_response(
         round: Round,
         author: &PeerId,
-        head: &DagHead, // Note: head may be older than temp one in BF during Engine round switch
-        broadcast_filter: &BroadcastFilter,
+        head: &DagHead,
         round_ctx: &RoundCtx,
     ) -> SignatureResponse {
         if round >= head.next().round() {
-            // first check BroadcastFilter, then DAG for top_dag_round exactly
-            return if broadcast_filter.has_point(round, author, round_ctx) {
-                SignatureResponse::TryLater // we have the point but not ready to sign
-            } else {
-                SignatureResponse::NoPoint // such points may be in BroadcastFilter only
-            };
-            // Else, `head.next` round points are either in DAG or not received, because:
-            // * BF keeps next round points until flush is completed
-            // * DAG contains points that bypassed BF cache after head advanced
+            // No matter if we received the point or not, we're not ready to sign.
+            // Check in BF is racy during flush especially when head jumps over several rounds.
+            // If broadcast failed, sender has to repeat it when we reach the round.
+            return SignatureResponse::TryLater;
         } else if round < head.prev().round() {
             // lagged too far from consensus and us, will sign only 1 round behind current;
             return SignatureResponse::Rejected(SignatureRejectedReason::TooOldRound);
@@ -60,7 +51,7 @@ impl Signer {
         let current_round = head.current().round();
 
         let point_dag_round = match round.cmp(&current_round) {
-            cmp::Ordering::Greater => panic!("next round should be checked only in BF"),
+            cmp::Ordering::Greater => unreachable!("next round should return earlier"),
             cmp::Ordering::Equal => head.current(),
             cmp::Ordering::Less => head.prev(),
         };
