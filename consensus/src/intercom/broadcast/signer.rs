@@ -15,8 +15,8 @@ impl Signer {
     pub fn signature_response(
         author: &PeerId,
         round: Round,
-        head: &DagHead,
         broadcast_filter: &BroadcastFilter,
+        head: &DagHead,
         round_ctx: &RoundCtx,
     ) -> SignatureResponse {
         let response =

@@ -3,14 +3,11 @@ use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
-use arc_swap::{ArcSwap, ArcSwapOption};
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{
-    DagHead, DagHeadSwap, DagRound, IllFormedReason, Verifier, VerifyError, VerifyFailReason,
-};
+use crate::dag::{DagHead, DagRound, IllFormedReason, Verifier, VerifyError, VerifyFailReason};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::engine::{ConsensusConfigExt, NodeConfig};
@@ -20,7 +17,6 @@ use crate::storage::MempoolStore;
 
 #[derive(Default)]
 pub struct BroadcastFilter {
-    head: DagHeadSwap,
     /// very much like DAG structure, but without dependency check;
     /// just to determine reliably that consensus advanced without current node;
     by_round: FastDashMap<Round, ByRoundItem>,
@@ -100,7 +96,7 @@ enum CheckError {
 
 #[derive(Default)]
 struct CacheInfo {
-    is_threshold_reached: bool,
+    reached_threshold: bool,
     duplicates: Option<u16>,
     equivocation: Option<Digest>,
 }
@@ -133,12 +129,9 @@ impl BroadcastFilter {
         store: &MempoolStore,
         peer_schedule: &PeerSchedule,
         downloader: &Downloader,
+        head: &DagHead,
         round_ctx: &RoundCtx,
     ) -> bool {
-        let Some(head) = self.head.load() else {
-            return false;
-        };
-
         let _task_time = HistogramGuard::begin("tycho_mempool_bf_add_time");
         let id = point.info().id();
 
@@ -169,7 +162,7 @@ impl BroadcastFilter {
             store,
             peer_schedule,
             downloader,
-            &head,
+            head,
             round_ctx,
         );
 
@@ -195,11 +188,11 @@ impl BroadcastFilter {
             checked = checked.as_ref().err().map(display),
             duplicates = cache_info.duplicates,
             equivocation = cache_info.equivocation.as_ref().map(|digest| display(digest.alt())),
-            threshold_reached = cache_info.is_threshold_reached.then_some(true),
+            reached_threshold = cache_info.reached_threshold.then_some(true),
             "received broadcast"
         );
 
-        cache_info.is_threshold_reached
+        cache_info.reached_threshold
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -279,8 +272,7 @@ impl BroadcastFilter {
                         item: verified.clone(),
                         duplicates: 0,
                     });
-                cached_info.is_threshold_reached =
-                    by_author.len() == peer_count.reliable_minority();
+                cached_info.reached_threshold = by_author.len() == peer_count.reliable_minority();
                 cached_info
             }
             ByRoundItem {
@@ -332,6 +324,7 @@ impl BroadcastFilter {
         if !past_removed.is_empty() || !future_removed.is_empty() {
             tracing::info!(
                 parent: round_ctx.span(),
+                dag_top = head.next().round().0,
                 consensus_round = round.0,
                 keep_range = %format!("[{} ..= {}]", history_bottom.0, prune_after.0),
                 kept = %current_kept,
@@ -440,6 +433,7 @@ impl BroadcastFilter {
         if !flushed.is_empty() || !past_removed.is_empty() {
             tracing::info!(
                 parent: round_ctx.span(),
+                dag_top = head.next().round().0,
                 flushed_rounds = flushed.rounds,
                 points_total = Some(flushed.points_total).filter(|qnt| *qnt > 0),
                 digests_total = Some(flushed.digests_total).filter(|qnt| *qnt > 0),

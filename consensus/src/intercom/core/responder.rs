@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
@@ -6,7 +6,7 @@ use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, future};
 use tycho_network::{Response, Service, ServiceRequest};
 
-use crate::dag::DagHead;
+use crate::dag::{DagHead, DagHeadSwap};
 use crate::effects::{AltFormat, MempoolRayon, RoundCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::broadcast::Signer;
@@ -23,59 +23,68 @@ pub struct Responder(Arc<ResponderInner>);
 impl Responder {
     pub fn new(mempool_rayon: &MempoolRayon) -> Self {
         Self(Arc::new(ResponderInner {
-            current: ArcSwapOption::empty(),
+            state: OnceLock::new(),
             broadcast_filter: BroadcastFilter::default(),
+            broadcast_filter_head: DagHeadSwap::default(),
+            current: ArcSwapOption::empty(),
             mempool_rayon: mempool_rayon.clone(),
-            #[cfg(feature = "mock-feedback")]
-            top_known_anchor: std::sync::OnceLock::new(),
         }))
     }
 }
 
 struct ResponderInner {
-    current: ArcSwapOption<ResponderCurrent>,
+    state: OnceLock<ResponderState>,
     broadcast_filter: BroadcastFilter,
+    broadcast_filter_head: DagHeadSwap,
+    current: ArcSwapOption<ResponderCurrent>,
     mempool_rayon: MempoolRayon,
-    #[cfg(feature = "mock-feedback")]
-    top_known_anchor: std::sync::OnceLock<RoundWatch<crate::engine::round_watch::TopKnownAnchor>>,
 }
 
 struct ResponderCurrent {
+    head: DagHead,
+    round_ctx: RoundCtx,
+}
+
+struct ResponderState {
     // state and storage components go here
     store: MempoolStore,
     consensus_round: RoundWatch<Consensus>,
     peer_schedule: PeerSchedule,
     downloader: Downloader,
-    head: DagHead,
-    round_ctx: RoundCtx,
+    #[cfg(feature = "mock-feedback")]
+    top_known_anchor: RoundWatch<crate::engine::round_watch::TopKnownAnchor>,
 }
 
 impl Responder {
-    #[cfg(feature = "mock-feedback")]
-    pub fn set_top_known_anchor(
-        &self,
-        top_known_anchor: &RoundWatch<crate::engine::round_watch::TopKnownAnchor>,
-    ) {
-        if (self.0.top_known_anchor.set(top_known_anchor.clone())).is_err() {
-            panic!("top known anchor in responder is already initialized")
-        };
-    }
-
-    /// as `Self` is passed to Overlay as a `Service` and may be cloned there,
-    /// free `DagHead` and other resources upon `Engine` termination
-    pub fn dispose(&self) {
-        self.0.current.store(None);
-    }
-
-    pub fn update(
+    pub fn init(
         &self,
         store: &MempoolStore,
         consensus_round: &RoundWatch<Consensus>,
         peer_schedule: &PeerSchedule,
         downloader: &Downloader,
-        head: &DagHead,
-        round_ctx: &RoundCtx,
+        #[cfg(feature = "mock-feedback")] top_known_anchor: &RoundWatch<
+            crate::engine::round_watch::TopKnownAnchor,
+        >,
     ) {
+        let result = self.0.state.set(ResponderState {
+            store: store.clone(),
+            consensus_round: consensus_round.clone(),
+            peer_schedule: peer_schedule.clone(),
+            downloader: downloader.clone(),
+            #[cfg(feature = "mock-feedback")]
+            top_known_anchor: top_known_anchor.clone(),
+        });
+        result.ok().expect("cannot init responder twice");
+    }
+
+    /// as `Self` is passed to Overlay as a `Service` and may be cloned there,
+    /// free `DagHead` and other resources upon `Engine` termination
+    pub fn dispose(&self) {
+        self.0.broadcast_filter_head.store(None);
+        self.0.current.store(None);
+    }
+
+    pub fn update(&self, head: &DagHead, round_ctx: &RoundCtx) {
         // Note: first flush `BroadcastFilter`, then advance `Head` for `Signer`.
         //  During flush, BF keeps all previously received items, while new are routed to DAG.
         //  Also, broadcast and signature queries for the same point should not interleave,
@@ -86,12 +95,10 @@ impl Responder {
         //  its next round (actually Engine's current) is already in DAG from the previous flush.
         //  In case head jumps over a several rounds, BF is still in front of the DAG
         //  and keeps all intermediate rounds until the next flush.
-        (self.0.broadcast_filter).flush_to_dag(head, downloader, store, round_ctx);
+        let state = self.0.state.get().expect("responder must be init");
+        self.0.broadcast_filter_head.store(Some(head.clone()));
+        (self.0.broadcast_filter).flush_to_dag(head, &state.downloader, &state.store, round_ctx);
         self.0.current.store(Some(Arc::new(ResponderCurrent {
-            store: store.clone(),
-            consensus_round: consensus_round.clone(),
-            peer_schedule: peer_schedule.clone(),
-            downloader: downloader.clone(),
             head: head.clone(),
             round_ctx: round_ctx.clone(),
         })));
@@ -115,9 +122,9 @@ impl Service<ServiceRequest> for Responder {
         {
             use crate::mock_feedback::RoundBoxed;
             if let Ok(data) = _req.parse_tl::<RoundBoxed>()
-                && let Some(tka) = self.0.top_known_anchor.get()
+                && let Some(state) = self.0.state.get()
             {
-                tka.set_max(data.round);
+                state.top_known_anchor.set_max(data.round);
             }
         }
         future::ready(())
@@ -154,7 +161,7 @@ impl Responder {
             }
         };
 
-        let Some(inner) = self.0.current.load_full() else {
+        let Some(current) = self.0.current.load_full() else {
             return Some(match raw_query_tag {
                 QueryRequestTag::Broadcast => {
                     // do nothing: sender has retry loop via signature request
@@ -169,26 +176,33 @@ impl Responder {
             });
         };
 
+        let state = self.0.state.get().expect("responder must be init");
+
         Some(match query {
             QueryRequest::Broadcast(point) => {
-                let is_round_threshold_reached = self.0.broadcast_filter.add_check_threshold(
+                let Some(bcast_head) = self.0.broadcast_filter_head.load_full() else {
+                    // cannot panic because of race with `dispose()` though it's called only once
+                    return Some(QueryResponse::broadcast(task_start));
+                };
+                let reached_threshold = self.0.broadcast_filter.add_check_threshold(
                     &req.metadata.peer_id,
                     &point,
-                    &inner.store,
-                    &inner.peer_schedule,
-                    &inner.downloader,
-                    &inner.round_ctx,
+                    &state.store,
+                    &state.peer_schedule,
+                    &state.downloader,
+                    &bcast_head,
+                    &current.round_ctx,
                 );
-                if is_round_threshold_reached {
+                if reached_threshold {
                     // notify Collector after max consensus round is updated
-                    inner.consensus_round.set_max(point.info().round());
+                    state.consensus_round.set_max(point.info().round());
                     // round is determined, so clean history;
                     // do not flush to DAG as it may have no needed rounds yet
-                    if inner.consensus_round.get() == point.info().round() {
+                    if state.consensus_round.get() == point.info().round() {
                         self.0.broadcast_filter.clean(
                             point.info().round(),
-                            &inner.head,
-                            &inner.round_ctx,
+                            &bcast_head,
+                            &current.round_ctx,
                         );
                     } // else: engine is not paused, let it do its work
                 }
@@ -199,9 +213,9 @@ impl Responder {
                 Uploader::find(
                     &req.metadata.peer_id,
                     point_id,
-                    &inner.head,
-                    &inner.store,
-                    &inner.round_ctx,
+                    &state.store,
+                    &current.head,
+                    &current.round_ctx,
                 )
                 .await,
             ),
@@ -210,9 +224,9 @@ impl Responder {
                 Signer::signature_response(
                     &req.metadata.peer_id,
                     round,
-                    &inner.head,
                     &self.0.broadcast_filter,
-                    &inner.round_ctx,
+                    &current.head,
+                    &current.round_ctx,
                 ),
             ),
         })

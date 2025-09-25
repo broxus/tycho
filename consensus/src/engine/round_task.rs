@@ -54,6 +54,14 @@ impl RoundTaskReady {
             consensus_round.receiver(),
             conf,
         );
+        net.responder.init(
+            store,
+            consensus_round,
+            &net.peer_schedule,
+            &downloader,
+            #[cfg(feature = "mock-feedback")]
+            &bind.top_known_anchor,
+        );
         Self {
             state: RoundTaskState {
                 store: store.clone(),
@@ -187,14 +195,7 @@ impl RoundTaskReady {
 
         // Signer must stop making new signatures for witness round before new point is produced
         // own point future must do nothing until polled (must not be spawned)
-        self.state.responder.update(
-            &self.state.store,
-            &self.state.consensus_round,
-            &self.state.peer_schedule,
-            &self.state.downloader,
-            head,
-            round_ctx,
-        );
+        self.state.responder.update(head, round_ctx);
 
         let collector_status_tx = watch::Sender::new(CollectorStatus::default());
 
