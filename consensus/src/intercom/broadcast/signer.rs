@@ -5,7 +5,6 @@ use tycho_network::PeerId;
 use crate::dag::DagHead;
 use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
-use crate::engine::MempoolConfig;
 use crate::intercom::BroadcastFilter;
 use crate::intercom::core::{SignatureRejectedReason, SignatureResponse};
 use crate::models::Round;
@@ -20,7 +19,7 @@ impl Signer {
         round_ctx: &RoundCtx,
     ) -> SignatureResponse {
         let response =
-            Self::make_signature_response(round, author, head, broadcast_filter, round_ctx.conf());
+            Self::make_signature_response(round, author, head, broadcast_filter, round_ctx);
         let level = match response {
             SignatureResponse::Rejected(_) => tracing::Level::WARN,
             _ => tracing::Level::TRACE,
@@ -39,18 +38,17 @@ impl Signer {
     fn make_signature_response(
         round: Round,
         author: &PeerId,
-        head: &DagHead, // Note: head may be older than BF bottom during Engine round switch
+        head: &DagHead, // Note: head may be older than temp one in BF during Engine round switch
         broadcast_filter: &BroadcastFilter,
-        conf: &MempoolConfig,
+        round_ctx: &RoundCtx,
     ) -> SignatureResponse {
         if round >= head.next().round() {
             // first check BroadcastFilter, then DAG for top_dag_round exactly
-            if broadcast_filter.has_point(round, author) {
-                return SignatureResponse::TryLater; // we have the point but not ready to sign
-            }
-            if round > head.next().round() {
-                return SignatureResponse::NoPoint; // such points may be in BroadcastFilter only
-            }
+            return if broadcast_filter.has_point(round, author, round_ctx) {
+                SignatureResponse::TryLater // we have the point but not ready to sign
+            } else {
+                SignatureResponse::NoPoint // such points may be in BroadcastFilter only
+            };
             // Else, `head.next` round points are either in DAG or not received, because:
             // * BF keeps next round points until flush is completed
             // * DAG contains points that bypassed BF cache after head advanced
@@ -62,16 +60,13 @@ impl Signer {
         let current_round = head.current().round();
 
         let point_dag_round = match round.cmp(&current_round) {
-            cmp::Ordering::Greater => head.next(),
+            cmp::Ordering::Greater => panic!("next round should be checked only in BF"),
             cmp::Ordering::Equal => head.current(),
             cmp::Ordering::Less => head.prev(),
         };
         let state = match point_dag_round.view(author, |loc| {
             if loc.versions.is_empty() {
                 Err(SignatureResponse::NoPoint)
-            } else if round > current_round {
-                // we found the point, but cannot sign future rounds
-                Err(SignatureResponse::TryLater)
             } else {
                 Ok(loc.state.clone())
             }
@@ -87,7 +82,7 @@ impl Signer {
             // only previous to current round
             &head.keys().to_witness
         };
-        match state.sign(current_round, keys.as_deref(), conf) {
+        match state.sign(current_round, keys.as_deref(), round_ctx.conf()) {
             Some(Ok(signed)) => SignatureResponse::Signature(signed.signature.clone()),
             Some(Err(())) => SignatureResponse::Rejected(SignatureRejectedReason::CannotSign),
             None => SignatureResponse::TryLater,

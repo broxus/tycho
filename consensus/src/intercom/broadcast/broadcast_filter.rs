@@ -21,9 +21,10 @@ pub struct BroadcastFilter {
     by_round: FastDashMap<Round, ByRoundItem>,
 }
 
+#[derive(Clone)]
 struct ByRoundItem {
     /// when a GEQ round is set, new points are send to DAG directly, and `self` will be soon removed
-    temp_new_head: Option<DagRound>,
+    flush_dag_round: Option<DagRound>,
     peer_count: PeerCount,
     /// `Arc` allows to copy during removal in [`BroadcastFilter::flush_to_dag`]
     by_author: Arc<FastDashMap<PeerId, ByAuthor>>,
@@ -112,12 +113,42 @@ struct CacheInfo {
 //  * if Engine is CACHE_ROUNDS+ behind consensus: BF stores point digests only
 //  * if Engine is MAX_HISTORY_DEPTH+ behind consensus: BF keeps MAX_HISTORY_DEPTH items
 impl BroadcastFilter {
-    pub fn has_point(&self, round: Round, sender: &PeerId) -> bool {
+    /// also may search in DAG if it knows an updated [`DagHead`] during flush
+    pub fn has_point(&self, round: Round, sender: &PeerId, round_ctx: &RoundCtx) -> bool {
         let _task_time = HistogramGuard::begin("tycho_mempool_bf_has_point_time");
-        match self.by_round.get(&round) {
-            None => false, // round is either already flushed or not yet created
-            Some(round_item) => round_item.by_author.contains_key(sender),
+        let by_round = match self.by_round.get(&round) {
+            None => return false, // round is either already flushed or not yet created
+            Some(by_round_read) => by_round_read.clone(),
+        };
+        let Some(flush_dag_round) = by_round.flush_dag_round else {
+            // no ongoing flush, so point cannot be routed to DAG bypassing cache
+            return by_round.by_author.contains_key(sender);
+        };
+        // ongoing flush is a relatively rare and short scenario, so we have to search twice
+        if by_round.by_author.contains_key(sender) {
+            return true;
         }
+        // point may have bypassed the cache and was routed to DAG directly
+        // temp head is most likely to be close to the requested round, so we may scan each time
+        let point_round_opt = if flush_dag_round.round() == round {
+            Some(flush_dag_round)
+        } else {
+            flush_dag_round.scan(round)
+        };
+        let Some(point_round) = point_round_opt else {
+            // should not happen
+            tracing::warn!(
+                parent: round_ctx.span(),
+                round = round.0,
+                "too deep point search"
+            );
+            return false;
+        };
+        // consistent only for points that bypassed cache,
+        // because signature and broadcast queries should not interleave
+        point_round
+            .view(sender, |loc| !loc.versions.is_empty())
+            .unwrap_or_default()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -227,7 +258,7 @@ impl BroadcastFilter {
                 match PeerCount::try_from(v_set_len) {
                     Ok(peer_count) => (self.by_round.entry(id.round))
                         .or_insert_with(|| ByRoundItem {
-                            temp_new_head: None,
+                            flush_dag_round: None,
                             peer_count,
                             by_author: Arc::new(FastDashMap::with_capacity_and_hasher(
                                 peer_count.full(),
@@ -246,7 +277,7 @@ impl BroadcastFilter {
         };
         match &*round_item_read {
             ByRoundItem {
-                temp_new_head: Option::None,
+                flush_dag_round: Option::None,
                 peer_count,
                 by_author,
             } => {
@@ -275,16 +306,16 @@ impl BroadcastFilter {
                 cached_info
             }
             ByRoundItem {
-                temp_new_head: Some(start_round),
+                flush_dag_round: Some(flush_dag_round),
                 ..
             } => {
                 // a rare scenario to handle race with `flush_to_dag()` when `head` arg is older
-                let start_round = start_round.clone();
+                let flush_dag_round = flush_dag_round.clone();
                 drop(round_item_read);
-                let point_round_opt = if start_round.round() == id.round {
-                    Some(start_round)
+                let point_round_opt = if flush_dag_round.round() == id.round {
+                    Some(flush_dag_round)
                 } else {
-                    start_round.scan(id.round)
+                    flush_dag_round.scan(id.round)
                 };
                 if let Some(point_round) = point_round_opt {
                     verified.add_to_dag(&id.author, &point_round, downloader, store, round_ctx);
@@ -357,12 +388,11 @@ impl BroadcastFilter {
         let mut future_kept = CleanCounter::default();
 
         self.by_round.retain(|&round, round_item| {
-            if round < back_bottom || round_item.temp_new_head.is_some() {
+            if round < back_bottom {
                 past_removed.add(round, round_item);
                 false
             } else if round <= head_next_round {
-                // rounds marked as outdated will be removed on next flush
-                round_item.temp_new_head = Some(head.next().clone());
+                // don't set temp dag round yet to route new points to DAG only in historical order
                 outdated.push((round, round_item.by_author.clone(), None));
                 true
             } else {
@@ -393,6 +423,13 @@ impl BroadcastFilter {
         for (round, map_by_author, dag_round) in outdated {
             if let Some(dag_round) = &dag_round {
                 assert_eq!(round, dag_round.round(), "inserted wrong round");
+                if let Some(mut by_round) = self.by_round.get_mut(&round) {
+                    let prev = by_round.flush_dag_round.replace(dag_round.clone());
+                    if prev.is_some() {
+                        let _span = round_ctx.span().enter();
+                        panic!("should not flush in parallel, BF round {}", round.0)
+                    }
+                }
                 let mut incr = ByRoundIncrement::default();
                 for entry in map_by_author.iter() {
                     let (author, by_author) = entry.pair();
@@ -400,6 +437,7 @@ impl BroadcastFilter {
                     (by_author.item).add_to_dag(author, dag_round, downloader, store, round_ctx);
                 }
                 flushed.add(round, incr);
+                self.by_round.remove(&round);
             } else {
                 not_in_dag.push(round.0);
             }
