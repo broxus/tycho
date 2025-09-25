@@ -85,19 +85,24 @@ impl Cmd {
             target_block_id
         } else {
             println!("Input is a shard block. Finding corresponding master block...");
-            let handle = dumper
-                .storage
-                .block_handle_storage()
-                .load_handle(&target_block_id)
-                .context(format!(
-                    "Target shard block handle not found for {}",
-                    target_block_id
-                ))?;
-            let mc_seqno = handle.ref_by_mc_seqno();
+            let shard_block = dumper.load_block_stuff(&target_block_id).await?;
+            let info = shard_block.load_info()?;
+            let mc_seqno = info
+                .load_master_ref()
+                .context("Shard block has no master ref")?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Shard block {} has no master ref",
+                        target_block_id.to_string().replace(':', "_")
+                    )
+                })?;
             dumper
-                .find_master_block_by_seqno(mc_seqno)
+                .find_master_block_by_seqno(mc_seqno.seqno)
                 .await
-                .context(format!("Master block for seqno {} not found", mc_seqno))?
+                .context(format!(
+                    "Master block for seqno {} not found",
+                    mc_seqno.seqno
+                ))?
         };
 
         println!("Master block found: {}", master_block_id);
@@ -179,11 +184,13 @@ impl Dumper {
     async fn dump_persistent_state(&self, block_id: &BlockId) -> Result<()> {
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
         let writer = ShardStateWriter::new(self.storage.db(), &dir, block_id);
+
         let state = self
             .storage
             .shard_state_storage()
-            .load_state(block_id)
+            .load_state(block_id.seqno + 1, block_id)
             .await?;
+
         writer
             .write(state.root_cell().repr_hash(), None)
             .context(format!("Failed to write state for {}", block_id))?;
@@ -271,19 +278,30 @@ impl Dumper {
                 .block_handle_storage()
                 .load_handle(&current_block_id)
                 .context(format!(
-                    "Handle not found for shard chain block {}",
+                    "Failed to load handle for block {}",
                     current_block_id
                 ))?;
+            let shard_block = self
+                .storage
+                .block_storage()
+                .load_block_data(&handle)
+                .await?;
 
-            if handle.is_persistent() {
-                let state = self
-                    .storage
-                    .shard_state_storage()
-                    .load_state(&current_block_id)
-                    .await?;
-                if state.state().min_ref_mc_seqno < handle.ref_by_mc_seqno() {
-                    break;
-                }
+            let info = shard_block.load_info()?;
+            let mc_seqno = info
+                .load_master_ref()
+                .context("Shard block has no master ref")?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Shard block {} has no master ref", current_block_id)
+                })?;
+
+            let state = self
+                .storage
+                .shard_state_storage()
+                .load_state(handle.ref_by_mc_seqno(), &current_block_id)
+                .await?;
+            if state.state().min_ref_mc_seqno < mc_seqno.seqno {
+                break;
             }
 
             if let Some(prev_id) = self
