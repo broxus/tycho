@@ -2752,7 +2752,7 @@ def mempool_engine() -> RowPanel:
     return create_row("Mempool engine", metrics)
 
 
-def mempool_intercom() -> RowPanel:
+def mempool_broadcasts() -> RowPanel:
     metrics = [
         create_heatmap_panel(
             "tycho_mempool_broadcast_query_dispatcher_time",
@@ -2762,40 +2762,74 @@ def mempool_intercom() -> RowPanel:
             "tycho_mempool_broadcast_query_responder_time",
             "Responder: Broadcast accept",
         ),
-        # == Network tasks - multiple per round == #
+        create_heatmap_panel(
+            "tycho_mempool_bf_clean_time",
+            "Broadcast filter: clean",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_bf_add_time",
+            "Broadcast filter: add",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_bf_flush_time",
+            "Broadcast filter: flush",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_bf_has_point_time",
+            "Broadcast filter: point lookup",
+        ),
         create_heatmap_panel(
             "tycho_mempool_signature_query_dispatcher_time",
             "Dispatcher: Signature request",
         ),
         create_heatmap_panel(
-            "tycho_mempool_download_query_dispatcher_time",
-            "Dispatcher: Download request",
-        ),
-        create_heatmap_panel(
             "tycho_mempool_signature_query_responder_data_time",
             "Responder: Signature send: send ready or sign or reject",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_signatures_unreliable_count",
+                range_selector="$__interval",
+            ),
+            "Broadcaster: unreliable signatures in response (total at moment)",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_signature_query_responder_pong_time",
+            "Responder: Signature send: no point or try later",
+        ),
+    ]
+    return create_row("Mempool broadcasts", metrics)
+
+
+def mempool_downloads() -> RowPanel:
+    metrics = [
+        create_heatmap_panel(
+            "tycho_mempool_download_task_time", "Downloader: tasks duration"
         ),
         create_heatmap_panel(
             "tycho_mempool_download_query_responder_some_time",
             "Responder: Download send: Some(point)",
         ),
         create_heatmap_panel(
-            "tycho_mempool_signature_query_responder_pong_time",
-            "Responder: Signature send: no point or try later",
+            "tycho_mempool_download_query_dispatcher_time",
+            "Dispatcher: Download request",
         ),
         create_heatmap_panel(
             "tycho_mempool_download_query_responder_none_time",
             "Responder: Download send: None",
         ),
-        # == Download tasks - multiple per round == #
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_download_task_count", range_selector="$__interval"
             ),
             "Downloader: tasks (unique point id) (total at moment)",
         ),
-        create_heatmap_panel(
-            "tycho_mempool_download_task_time", "Downloader: tasks duration"
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_download_not_found_responses",
+                range_selector="$__interval",
+            ),
+            "Downloader: received None in response (total at moment)",
         ),
         create_counter_panel(
             expr_aggr_func(
@@ -2810,10 +2844,10 @@ def mempool_intercom() -> RowPanel:
         ),
         create_counter_panel(
             expr_sum_increase(
-                "tycho_mempool_download_not_found_responses",
+                "tycho_mempool_download_query_failed_count",
                 range_selector="$__interval",
             ),
-            "Downloader: received None in response (total at moment)",
+            "Downloader: queries network error (total at moment)",
         ),
         create_counter_panel(
             expr_sum_increase(
@@ -2824,27 +2858,13 @@ def mempool_intercom() -> RowPanel:
         ),
         create_counter_panel(
             expr_sum_increase(
-                "tycho_mempool_download_query_failed_count",
-                range_selector="$__interval",
-            ),
-            "Downloader: queries network error (total at moment)",
-        ),
-        create_counter_panel(
-            expr_sum_increase(
                 "tycho_mempool_download_unreliable_responses",
                 range_selector="$__interval",
             ),
             "Downloader: unreliable responses (total at moment)",
         ),
-        create_counter_panel(
-            expr_sum_increase(
-                "tycho_mempool_signatures_unreliable_count",
-                range_selector="$__interval",
-            ),
-            "Broadcaster: unreliable signatures in response (total at moment)",
-        ),
     ]
-    return create_row("Mempool communication", metrics)
+    return create_row("Mempool downloads", metrics)
 
 
 def mempool_peers() -> RowPanel:
@@ -3259,7 +3279,8 @@ dashboard = Dashboard(
         mempool_payload_rates(),
         mempool_engine_rates(),
         mempool_engine(),
-        mempool_intercom(),
+        mempool_broadcasts(),
+        mempool_downloads(),
         mempool_peers(),
         mempool_storage(),
         net_traffic(),
