@@ -94,6 +94,34 @@ impl Neighbours {
         true
     }
 
+    /// Update neighbours metrics.
+    pub fn update_metrics(&self) {
+        let entries = self.get_active_neighbours();
+
+        for neighbour in entries.iter() {
+            let peer_id = neighbour.peer_id();
+            let stats = neighbour.get_stats();
+
+            metrics::gauge!(
+                "tycho_core_overlay_client_neighbour_score",
+                "peer_id" => peer_id.to_string()
+            )
+            .set(stats.score as f64);
+
+            metrics::gauge!(
+                "tycho_core_overlay_client_neighbour_total_requests",
+                "peer_id" => peer_id.to_string()
+            )
+            .set(stats.total_requests as f64);
+
+            metrics::gauge!(
+                "tycho_core_overlay_client_neighbour_failed_requests",
+                "peer_id" => peer_id.to_string()
+            )
+            .set(stats.failed_requests as f64);
+        }
+    }
+
     pub fn get_sorted_neighbours(&self) -> Vec<(Neighbour, u32)> {
         let mut index = self.inner.selection_index.lock();
         index
