@@ -16,68 +16,6 @@ use crate::models::{Digest, PeerCount, Point, PointId, Round};
 use crate::storage::MempoolStore;
 
 pub struct BroadcastFilter {
-    inner: Arc<BroadcastFilterInner>,
-}
-
-impl BroadcastFilter {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(BroadcastFilterInner {
-                by_round: Default::default(),
-            }),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn add(
-        &self,
-        sender: &PeerId,
-        point: &Point,
-        store: &MempoolStore,
-        peer_schedule: &PeerSchedule,
-        downloader: &Downloader,
-        head: &DagHead,
-        round_ctx: &RoundCtx,
-    ) -> bool {
-        let _task_time = HistogramGuard::begin("tycho_mempool_bf_add_time");
-        let cache_info = (self.inner).add(
-            sender,
-            point,
-            store,
-            peer_schedule,
-            downloader,
-            head,
-            round_ctx,
-        );
-        cache_info.is_threshold_reached
-    }
-
-    pub fn clean(&self, round: Round, head: &DagHead, round_ctx: &RoundCtx) {
-        let _task_time = HistogramGuard::begin("tycho_mempool_bf_clean_time");
-        self.inner.clean(round, head, round_ctx);
-    }
-
-    pub fn has_point(&self, round: Round, sender: &PeerId) -> bool {
-        let _task_time = HistogramGuard::begin("tycho_mempool_bf_has_point_time");
-        match self.inner.by_round.get(&round) {
-            None => false, // round is either already flushed or not yet created
-            Some(round_item) => round_item.by_author.contains_key(sender),
-        }
-    }
-
-    pub fn flush_to_dag(
-        &self,
-        head: &DagHead,
-        downloader: &Downloader,
-        store: &MempoolStore,
-        round_ctx: &RoundCtx,
-    ) {
-        let _task_time = HistogramGuard::begin("tycho_mempool_bf_flush_time");
-        self.inner.flush_to_dag(head, downloader, store, round_ctx);
-    }
-}
-
-struct BroadcastFilterInner {
     /// very much like DAG structure, but without dependency check;
     /// just to determine reliably that consensus advanced without current node;
     by_round: FastDashMap<Round, ByRoundItem>,
@@ -162,20 +100,34 @@ struct CacheInfo {
     equivocation: Option<Digest>,
 }
 
-impl BroadcastFilterInner {
-    // Note logic still under consideration because of contradiction in requirements:
-    //  * we must determine the latest consensus round reliably:
-    //    the current approach is to collect 1/3+1 points at the same future round
-    //    => we should collect as much points as possible
-    //  * we must defend the DAG and current cache from spam from future rounds,
-    //    => we should discard points from the far future
-    //  * DAG can account equivocated points, but caching future equivocations is an easy OOM
-    //  On cache eviction:
-    //  * if Engine is [0, CACHE_ROUNDS] behind consensus: BF stores points
-    //  * if Engine is CACHE_ROUNDS+ behind consensus: BF stores point digests only
-    //  * if Engine is MAX_HISTORY_DEPTH+ behind consensus: BF keeps MAX_HISTORY_DEPTH items
+// Note logic still under consideration because of contradiction in requirements:
+//  * we must determine the latest consensus round reliably:
+//    the current approach is to collect 1/3+1 points at the same future round
+//    => we should collect as much points as possible
+//  * we must defend the DAG and current cache from spam from future rounds,
+//    => we should discard points from the far future
+//  * DAG can account equivocated points, but caching future equivocations is an easy OOM
+//  On cache eviction:
+//  * if Engine is [0, CACHE_ROUNDS] behind consensus: BF stores points
+//  * if Engine is CACHE_ROUNDS+ behind consensus: BF stores point digests only
+//  * if Engine is MAX_HISTORY_DEPTH+ behind consensus: BF keeps MAX_HISTORY_DEPTH items
+impl BroadcastFilter {
+    pub fn new() -> Self {
+        Self {
+            by_round: FastDashMap::default(),
+        }
+    }
+
+    pub fn has_point(&self, round: Round, sender: &PeerId) -> bool {
+        let _task_time = HistogramGuard::begin("tycho_mempool_bf_has_point_time");
+        match self.by_round.get(&round) {
+            None => false, // round is either already flushed or not yet created
+            Some(round_item) => round_item.by_author.contains_key(sender),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn add(
+    pub fn add_check_threshold(
         &self,
         sender: &PeerId,
         point: &Point,
@@ -184,7 +136,8 @@ impl BroadcastFilterInner {
         downloader: &Downloader,
         head: &DagHead, // Note: head may be older than BF bottom during Engine round switch
         round_ctx: &RoundCtx,
-    ) -> CacheInfo {
+    ) -> bool {
+        let _task_time = HistogramGuard::begin("tycho_mempool_bf_add_time");
         let id = point.info().id();
 
         let checked = if sender != id.author {
@@ -243,7 +196,7 @@ impl BroadcastFilterInner {
             "received broadcast"
         );
 
-        cache_info
+        cache_info.is_threshold_reached
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -349,7 +302,8 @@ impl BroadcastFilterInner {
 
     /// just drop unneeded data when Engine is paused and round task is not running
     /// while collator is syncing blocks
-    fn clean(&self, round: Round, head: &DagHead, round_ctx: &RoundCtx) {
+    pub fn clean(&self, round: Round, head: &DagHead, round_ctx: &RoundCtx) {
+        let _task_time = HistogramGuard::begin("tycho_mempool_bf_clean_time");
         // inclusive bounds on what should be left in cache
         let history_bottom =
             (head.last_back_bottom()).max(round - round_ctx.conf().consensus.max_total_rounds());
@@ -386,13 +340,14 @@ impl BroadcastFilterInner {
     }
 
     /// drop everything up to the new round (inclusive) on round task
-    fn flush_to_dag(
+    pub fn flush_to_dag(
         &self,
         head: &DagHead,
         downloader: &Downloader,
         store: &MempoolStore,
         round_ctx: &RoundCtx,
     ) {
+        let _task_time = HistogramGuard::begin("tycho_mempool_bf_flush_time");
         let back_bottom = head.last_back_bottom();
         let head_next_round = head.next().round();
 

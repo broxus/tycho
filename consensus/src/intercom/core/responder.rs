@@ -171,7 +171,7 @@ impl Responder {
 
         Some(match query {
             QueryRequest::Broadcast(point) => {
-                let round_threshold_reached = self.0.broadcast_filter.add(
+                let is_round_threshold_reached = self.0.broadcast_filter.add_check_threshold(
                     &req.metadata.peer_id,
                     &point,
                     &inner.store,
@@ -180,7 +180,7 @@ impl Responder {
                     &inner.head,
                     &inner.round_ctx,
                 );
-                if round_threshold_reached {
+                if is_round_threshold_reached {
                     // notify Collector after max consensus round is updated
                     inner.consensus_round.set_max(point.info().round());
                     // round is determined, so clean history;
