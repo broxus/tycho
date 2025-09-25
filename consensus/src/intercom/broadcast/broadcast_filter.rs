@@ -357,11 +357,12 @@ impl BroadcastFilter {
         let mut future_kept = CleanCounter::default();
 
         self.by_round.retain(|&round, round_item| {
-            if round < back_bottom {
+            if round < back_bottom || round_item.temp_new_head.is_some() {
                 past_removed.add(round, round_item);
                 false
             } else if round <= head_next_round {
-                (round_item.temp_new_head).get_or_insert_with(|| head.next().clone());
+                // rounds marked as outdated will be removed on next flush
+                round_item.temp_new_head = Some(head.next().clone());
                 outdated.push((round, round_item.by_author.clone(), None));
                 true
             } else {
@@ -402,7 +403,6 @@ impl BroadcastFilter {
             } else {
                 not_in_dag.push(round.0);
             }
-            self.by_round.remove(&round);
         }
 
         if !flushed.is_empty() || !past_removed.is_empty() {
