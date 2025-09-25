@@ -107,6 +107,7 @@ impl Downloader {
         }
     }
 
+    // TODO remove
     pub fn peer_schedule(&self) -> &PeerSchedule {
         &self.inner.peer_schedule
     }

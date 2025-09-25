@@ -14,8 +14,8 @@ use crate::engine::input_buffer::InputBuffer;
 use crate::engine::lifecycle::{EngineBinding, EngineNetwork};
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
 use crate::intercom::{
-    BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorStatus, Dispatcher,
-    Downloader, PeerSchedule, Responder,
+    Broadcaster, BroadcasterSignal, Collector, CollectorStatus, Dispatcher, Downloader,
+    PeerSchedule, Responder,
 };
 use crate::models::{Cert, Link, Point, PointInfo};
 use crate::storage::MempoolStore;
@@ -28,7 +28,6 @@ pub struct RoundTaskState {
     pub peer_schedule: PeerSchedule,
     dispatcher: Dispatcher,
     pub responder: Responder,
-    pub broadcast_filter: BroadcastFilter,
     pub downloader: Downloader,
 }
 
@@ -47,10 +46,8 @@ impl RoundTaskReady {
         bind: &EngineBinding,
         consensus_round: &RoundWatch<Consensus>,
         net: &EngineNetwork,
-        head: DagHead,
         conf: &MempoolConfig,
     ) -> Self {
-        let broadcast_filter = BroadcastFilter::new(&net.peer_schedule, consensus_round);
         let downloader = Downloader::new(
             &net.dispatcher,
             &net.peer_schedule,
@@ -66,7 +63,6 @@ impl RoundTaskReady {
                 peer_schedule: net.peer_schedule.clone(),
                 dispatcher: net.dispatcher.clone(),
                 responder: net.responder.clone(),
-                broadcast_filter,
                 downloader,
             },
             collector: Collector::new(consensus_round.receiver()),
@@ -193,7 +189,8 @@ impl RoundTaskReady {
         // own point future must do nothing until polled (must not be spawned)
         self.state.responder.update(
             &self.state.store,
-            &self.state.broadcast_filter,
+            &self.state.consensus_round,
+            &self.state.peer_schedule,
             &self.state.downloader,
             head,
             round_ctx,

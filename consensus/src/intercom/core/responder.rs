@@ -8,21 +8,23 @@ use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, MempoolRayon, RoundCtx};
+use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::broadcast::Signer;
 use crate::intercom::core::{
     PointByIdResponse, QueryRequest, QueryRequestRaw, QueryRequestTag, QueryResponse,
     SignatureResponse,
 };
-use crate::intercom::{BroadcastFilter, Downloader, Uploader};
+use crate::intercom::{BroadcastFilter, Downloader, PeerSchedule, Uploader};
 use crate::storage::MempoolStore;
 
 #[derive(Clone)]
 pub struct Responder(Arc<ResponderInner>);
 
 impl Responder {
-    pub fn new(mempool_rayon: &MempoolRayon, broadcast_filter: BroadcastFilter) -> Self {
+    pub fn new(mempool_rayon: &MempoolRayon) -> Self {
         Self(Arc::new(ResponderInner {
             current: ArcSwapOption::empty(),
+            broadcast_filter: BroadcastFilter::new(),
             mempool_rayon: mempool_rayon.clone(),
             #[cfg(feature = "mock-feedback")]
             top_known_anchor: std::sync::OnceLock::new(),
@@ -35,14 +37,14 @@ struct ResponderInner {
     broadcast_filter: BroadcastFilter,
     mempool_rayon: MempoolRayon,
     #[cfg(feature = "mock-feedback")]
-    top_known_anchor: std::sync::OnceLock<
-        crate::engine::round_watch::RoundWatch<crate::engine::round_watch::TopKnownAnchor>,
-    >,
+    top_known_anchor: std::sync::OnceLock<RoundWatch<crate::engine::round_watch::TopKnownAnchor>>,
 }
 
 struct ResponderCurrent {
     // state and storage components go here
     store: MempoolStore,
+    consensus_round: RoundWatch<Consensus>,
+    peer_schedule: PeerSchedule,
     downloader: Downloader,
     head: DagHead,
     round_ctx: RoundCtx,
@@ -52,9 +54,7 @@ impl Responder {
     #[cfg(feature = "mock-feedback")]
     pub fn set_top_known_anchor(
         &self,
-        top_known_anchor: &crate::engine::round_watch::RoundWatch<
-            crate::engine::round_watch::TopKnownAnchor,
-        >,
+        top_known_anchor: &RoundWatch<crate::engine::round_watch::TopKnownAnchor>,
     ) {
         if (self.0.top_known_anchor.set(top_known_anchor.clone())).is_err() {
             panic!("top known anchor in responder is already initialized")
@@ -70,7 +70,8 @@ impl Responder {
     pub fn update(
         &self,
         store: &MempoolStore,
-        broadcast_filter: &BroadcastFilter,
+        consensus_round: &RoundWatch<Consensus>,
+        peer_schedule: &PeerSchedule,
         downloader: &Downloader,
         head: &DagHead,
         round_ctx: &RoundCtx,
@@ -85,9 +86,11 @@ impl Responder {
         //  its next round (actually Engine's current) is already in DAG from the previous flush.
         //  In case head jumps over a several rounds, BF is still in front of the DAG
         //  and keeps all intermediate rounds until the next flush.
-        broadcast_filter.flush_to_dag(head, downloader, store, round_ctx);
+        (self.0.broadcast_filter).flush_to_dag(head, downloader, store, round_ctx);
         self.0.current.store(Some(Arc::new(ResponderCurrent {
             store: store.clone(),
+            consensus_round: consensus_round.clone(),
+            peer_schedule: peer_schedule.clone(),
             downloader: downloader.clone(),
             head: head.clone(),
             round_ctx: round_ctx.clone(),
@@ -168,13 +171,28 @@ impl Responder {
 
         Some(match query {
             QueryRequest::Broadcast(point) => {
-                self.0.broadcast_filter.add(
+                let round_threshold_reached = self.0.broadcast_filter.add(
                     &req.metadata.peer_id,
                     &point,
-                    &inner.downloader,
                     &inner.store,
+                    &inner.peer_schedule,
+                    &inner.downloader,
+                    &inner.head,
                     &inner.round_ctx,
                 );
+                if round_threshold_reached {
+                    // notify Collector after max consensus round is updated
+                    inner.consensus_round.set_max(point.info().round());
+                    // round is determined, so clean history;
+                    // do not flush to DAG as it may have no needed rounds yet
+                    if inner.consensus_round.get() == point.info().round() {
+                        self.0.broadcast_filter.clean(
+                            point.info().round(),
+                            &inner.head,
+                            &inner.round_ctx,
+                        );
+                    } // else: engine is not paused, let it do its work
+                }
                 QueryResponse::broadcast(task_start)
             }
             QueryRequest::PointById(point_id) => QueryResponse::point_by_id(

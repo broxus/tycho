@@ -2,60 +2,59 @@ use std::cmp;
 use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
-use parking_lot::RwLock;
+
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{DagHead, DagHeadSwap, DagRound, IllFormedReason, Verifier, VerifyError, VerifyFailReason};
+use crate::dag::{DagHead, DagRound, IllFormedReason, Verifier, VerifyError, VerifyFailReason};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
-use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::engine::{ConsensusConfigExt, NodeConfig};
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointId, Round};
 use crate::storage::MempoolStore;
 
-#[derive(Clone)]
 pub struct BroadcastFilter {
     inner: Arc<BroadcastFilterInner>,
-    head: DagHeadSwap,
 }
 
 impl BroadcastFilter {
-    pub fn new(peer_schedule: &PeerSchedule, consensus_round: &RoundWatch<Consensus>, head: DagHead) -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Arc::new(BroadcastFilterInner {
-                peer_schedule: peer_schedule.clone(),
-                consensus_round: consensus_round.clone(),
-                head: RwLock::new(head),
                 by_round: Default::default(),
             }),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add(
         &self,
         sender: &PeerId,
         point: &Point,
-        downloader: &Downloader,
         store: &MempoolStore,
+        peer_schedule: &PeerSchedule,
+        downloader: &Downloader,
+        head: &DagHead,
         round_ctx: &RoundCtx,
-    ) {
-        let cache_info = {
-            let _task_time = HistogramGuard::begin("tycho_mempool_bf_add_time");
-            (self.inner).add(sender, point, downloader, store, round_ctx)
-        };
-        if cache_info.is_threshold_reached {
-            // notify Collector after max consensus round is updated
-            self.inner.consensus_round.set_max(point.info().round());
-            // round is determined, so clean history;
-            // do not flush to DAG as it may have no needed rounds yet
-            if self.inner.consensus_round.get() == point.info().round() {
-                let _task_time = HistogramGuard::begin("tycho_mempool_bf_clean_time");
-                self.inner.clean(point.info().round(), head, round_ctx);
-            } // else: engine is not paused, let it do its work
-        }
+    ) -> bool {
+        let _task_time = HistogramGuard::begin("tycho_mempool_bf_add_time");
+        let cache_info = (self.inner).add(
+            sender,
+            point,
+            store,
+            peer_schedule,
+            downloader,
+            head,
+            round_ctx,
+        );
+        cache_info.is_threshold_reached
+    }
+
+    pub fn clean(&self, round: Round, head: &DagHead, round_ctx: &RoundCtx) {
+        let _task_time = HistogramGuard::begin("tycho_mempool_bf_clean_time");
+        self.inner.clean(round, head, round_ctx);
     }
 
     pub fn has_point(&self, round: Round, sender: &PeerId) -> bool {
@@ -79,9 +78,6 @@ impl BroadcastFilter {
 }
 
 struct BroadcastFilterInner {
-    peer_schedule: PeerSchedule,
-    consensus_round: RoundWatch<Consensus>,
-    head: RwLock<DagHead>,
     /// very much like DAG structure, but without dependency check;
     /// just to determine reliably that consensus advanced without current node;
     by_round: FastDashMap<Round, ByRoundItem>,
@@ -178,16 +174,18 @@ impl BroadcastFilterInner {
     //  * if Engine is [0, CACHE_ROUNDS] behind consensus: BF stores points
     //  * if Engine is CACHE_ROUNDS+ behind consensus: BF stores point digests only
     //  * if Engine is MAX_HISTORY_DEPTH+ behind consensus: BF keeps MAX_HISTORY_DEPTH items
+    #[allow(clippy::too_many_arguments)]
     fn add(
         &self,
         sender: &PeerId,
         point: &Point,
-        downloader: &Downloader,
         store: &MempoolStore,
+        peer_schedule: &PeerSchedule,
+        downloader: &Downloader,
+        head: &DagHead, // Note: head may be older than BF bottom during Engine round switch
         round_ctx: &RoundCtx,
     ) -> CacheInfo {
         let id = point.info().id();
-        let head = self.head.read().clone();
 
         let checked = if sender != id.author {
             Err(CheckError::SenderNotAuthor(*sender))
@@ -195,7 +193,7 @@ impl BroadcastFilterInner {
             // have to cache every point when the node lags behind consensus;
             let prune_after =
                 head.next().round() + NodeConfig::get().cache_future_broadcasts_rounds;
-            match Verifier::verify(point.info(), &self.peer_schedule, round_ctx.conf()) {
+            match Verifier::verify(point.info(), peer_schedule, round_ctx.conf()) {
                 Ok(()) => Ok(if id.round > prune_after {
                     ByAuthorItem::OkPruned(id.digest)
                 } else {
@@ -210,7 +208,15 @@ impl BroadcastFilterInner {
             }
         };
 
-        let cache_info = self.cache(&checked, &id, head, downloader, store, round_ctx);
+        let cache_info = self.cache(
+            &checked,
+            &id,
+            store,
+            peer_schedule,
+            downloader,
+            head,
+            round_ctx,
+        );
 
         let ill_formed_reason = (checked.as_ref().ok()).and_then(|item| item.ill_formed_reason());
         let level = if checked.is_err()
@@ -240,13 +246,15 @@ impl BroadcastFilterInner {
         cache_info
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn cache(
         &self,
         checked: &Result<ByAuthorItem, CheckError>,
         id: &PointId,
-        head: &DagHead, // Note: head may be older than BF bottom during Engine round switch
-        downloader: &Downloader,
         store: &MempoolStore,
+        peer_schedule: &PeerSchedule,
+        downloader: &Downloader,
+        head: &DagHead, // Note: head may be older than BF bottom during Engine round switch
         round_ctx: &RoundCtx,
     ) -> CacheInfo {
         let Ok(verified) = checked else {
@@ -267,7 +275,7 @@ impl BroadcastFilterInner {
             Some(round_item) => round_item,
             None => {
                 // try to create new future round: take write lock later, v_set may be uninit
-                let v_set_len = self.peer_schedule.atomic().peers_for(id.round).len();
+                let v_set_len = peer_schedule.atomic().peers_for(id.round).len();
                 match PeerCount::try_from(v_set_len) {
                     Ok(peer_count) => (self.by_round.entry(id.round))
                         .or_insert_with(|| ByRoundItem {
@@ -403,7 +411,7 @@ impl BroadcastFilterInner {
             } else if round <= head_next_round {
                 unordered.push((round, round_item.by_author.clone()));
                 // no need to set `round_item.dag_round` as item is removed under lock;
-            } else  {
+            } else {
                 future_kept.add(round, round_item);
             }
         }
@@ -443,7 +451,7 @@ impl BroadcastFilterInner {
             for entry in map_by_author.iter() {
                 let (author, by_author) = entry.pair();
                 incr.count(&by_author.item);
-                (by_author.item).add_to_dag(author, &dag_round, downloader, store, round_ctx);
+                (by_author.item).add_to_dag(author, dag_round, downloader, store, round_ctx);
             }
             flushed.add(dag_round.round(), incr);
         }
