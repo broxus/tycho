@@ -247,6 +247,68 @@ where
     Ok(shards)
 }
 
+pub fn split_aug_dict_raw_by_shards<K, A, V>(
+    workchain: i32,
+    dict: AugDict<K, A, V>,
+    depth: u8,
+) -> Result<Vec<(ShardIdent, Option<Cell>)>, Error>
+where
+    K: DictKey,
+    A: Default,
+{
+    fn split_dict_impl(
+        shard: &ShardIdent,
+        dict: Option<Cell>,
+        key_bit_len: u16,
+        depth: u8,
+        shards: &mut Vec<(ShardIdent, Option<Cell>)>,
+    ) -> Result<(), Error> {
+        if depth == 0 {
+            shards.push((*shard, dict));
+            return Ok(());
+        }
+
+        let Some((left_shard, right_shard)) = shard.split() else {
+            shards.push((*shard, dict));
+            return Ok(());
+        };
+
+        let PartialSplitDict {
+            remaining_bit_len,
+            left_branch,
+            right_branch,
+        } = dict_split_raw(dict.as_ref(), key_bit_len, Cell::empty_context())?;
+
+        split_dict_impl(
+            &left_shard,
+            left_branch,
+            remaining_bit_len,
+            depth - 1,
+            shards,
+        )?;
+        split_dict_impl(
+            &right_shard,
+            right_branch,
+            remaining_bit_len,
+            depth - 1,
+            shards,
+        )
+    }
+
+    let mut shards = Vec::with_capacity(2usize.pow(depth as _));
+
+    let (dict_root, _) = dict.into_parts();
+    split_dict_impl(
+        &ShardIdent::new_full(workchain),
+        dict_root.into_root(),
+        K::BITS,
+        depth,
+        &mut shards,
+    )?;
+
+    Ok(shards)
+}
+
 /// Merges multiple `RelaxedAugDict` into a single one using a binary tree approach.
 pub fn merge_relaxed_aug_dicts<I, K, A, V>(shards: I) -> Result<AugDict<K, A, V>, Error>
 where

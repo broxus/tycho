@@ -1,7 +1,7 @@
 use std::cell::UnsafeCell;
 use std::collections::hash_map;
 use std::mem::{ManuallyDrop, MaybeUninit};
-use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread::Scope;
 use std::time::Duration;
@@ -17,18 +17,26 @@ use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
 use tycho_storage::kv::refcount;
 use tycho_types::cell::*;
+use tycho_types::models::ShardIdent;
 use tycho_util::metrics::{HistogramGuard, spawn_metrics_loop};
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet, FastHasherState};
 use weedb::rocksdb::WriteBatch;
-use weedb::{BoundedCfHandle, rocksdb};
+use weedb::{BoundedCfHandle, Table, rocksdb};
 
-use crate::storage::CellsDb;
+use super::{SplitAccountEntry, StoragePartsMap};
+use crate::storage::{CellsDb, CellsPartDb, tables};
 
 pub struct CellStorage {
-    cells_db: CellsDb,
+    cells_db: CellStorageDb,
     cells_cache: Arc<CellsIndex>,
     raw_cells_cache: Arc<RawCellsCache>,
     drop_interval: u32,
+    /// Contains the shard of the state partition when used in `ShardStateStoragePart`
+    part_shard: Option<ShardIdent>,
+    /// The target split depth of shard accounts cells on partitions
+    part_split_depth: u8,
+    /// State storage partitions
+    storage_parts: Option<Arc<StoragePartsMap>>,
 }
 
 type CellsIndex = FastDashMap<HashBytes, CachedCell>;
@@ -38,8 +46,85 @@ struct CachedCell {
     weak: Weak<StorageCell>,
 }
 
+/// The abstraction over `CellsDb` and `CellsShardDb`
+trait CellsDbOps: Send + Sync {
+    fn cells(&self) -> &Table<tables::Cells>;
+    fn temp_cells(&self) -> &Table<tables::TempCells>;
+    fn rocksdb(&self) -> &Arc<rocksdb::DB>;
+}
+
+#[derive(Clone)]
+enum CellStorageDb {
+    Main(CellsDb),
+    Part(CellsPartDb),
+}
+
+impl CellsDbOps for CellStorageDb {
+    fn cells(&self) -> &Table<tables::Cells> {
+        match self {
+            Self::Main(db) => &db.cells,
+            Self::Part(db) => &db.cells,
+        }
+    }
+
+    fn temp_cells(&self) -> &Table<tables::TempCells> {
+        match self {
+            Self::Main(db) => &db.temp_cells,
+            Self::Part(db) => &db.temp_cells,
+        }
+    }
+
+    fn rocksdb(&self) -> &Arc<rocksdb::DB> {
+        match self {
+            Self::Main(db) => db.rocksdb(),
+            Self::Part(db) => db.rocksdb(),
+        }
+    }
+}
+
 impl CellStorage {
-    pub fn new(cells_db: CellsDb, cache_size_bytes: ByteSize, drop_interval: u32) -> Arc<Self> {
+    pub fn new(
+        cells_db: CellsDb,
+        cache_size_bytes: ByteSize,
+        drop_interval: u32,
+        part_split_depth: u8,
+        storage_parts: Option<Arc<StoragePartsMap>>,
+    ) -> Arc<Self> {
+        Self::new_inner(
+            CellStorageDb::Main(cells_db),
+            cache_size_bytes,
+            drop_interval,
+            None,
+            part_split_depth,
+            storage_parts,
+        )
+    }
+
+    pub fn new_for_shard(
+        cells_db: CellsPartDb,
+        cache_size_bytes: ByteSize,
+        drop_interval: u32,
+        part_shard: ShardIdent,
+        part_split_depth: u8,
+    ) -> Arc<Self> {
+        Self::new_inner(
+            CellStorageDb::Part(cells_db),
+            cache_size_bytes,
+            drop_interval,
+            Some(part_shard),
+            part_split_depth,
+            None,
+        )
+    }
+
+    fn new_inner(
+        cells_db: CellStorageDb,
+        cache_size_bytes: ByteSize,
+        drop_interval: u32,
+        part_shard: Option<ShardIdent>,
+        part_split_depth: u8,
+        storage_parts: Option<Arc<StoragePartsMap>>,
+    ) -> Arc<Self> {
         let cells_cache = Default::default();
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
 
@@ -54,6 +139,9 @@ impl CellStorage {
             cells_cache,
             raw_cells_cache,
             drop_interval,
+            part_shard,
+            part_split_depth,
+            storage_parts,
         })
     }
 
@@ -100,9 +188,9 @@ impl CellStorage {
             Existing,
         }
 
-        struct Context<'a> {
+        struct Context<'a, D: CellsDbOps> {
             cells_cf: BoundedCfHandle<'a>,
-            cells_db: &'a CellsDb,
+            cells_db: &'a D,
             buffer: Vec<u8>,
             transaction: FastHashMap<HashBytes, TempCell>,
             new_cells_batch: rocksdb::WriteBatch,
@@ -110,10 +198,10 @@ impl CellStorage {
             raw_cache: &'a RawCellsCache,
         }
 
-        impl<'a> Context<'a> {
-            fn new(cells_db: &'a CellsDb, raw_cache: &'a RawCellsCache) -> Self {
+        impl<'a, D: CellsDbOps> Context<'a, D> {
+            fn new(cells_db: &'a D, raw_cache: &'a RawCellsCache) -> Self {
                 Self {
-                    cells_cf: cells_db.cells.cf(),
+                    cells_cf: cells_db.cells().cf(),
                     cells_db,
                     buffer: Vec::with_capacity(512),
                     transaction: Default::default(),
@@ -124,9 +212,9 @@ impl CellStorage {
             }
 
             fn load_temp(&self, key: &HashBytes) -> Result<CellHashesIter<'a>, CellStorageError> {
-                let data = match self.cells_db.temp_cells.get(key) {
+                let data = match self.cells_db.temp_cells().get(key) {
                     Ok(Some(data)) => data,
-                    Ok(None) => return Err(CellStorageError::CellNotFound),
+                    Ok(None) => return Err(CellStorageError::CellNotFound(*key)),
                     Err(e) => return Err(CellStorageError::Internal(e)),
                 };
 
@@ -163,7 +251,7 @@ impl CellStorage {
                         InsertedCell::Existing
                     }
                     hash_map::Entry::Vacant(entry) => {
-                        if let Some(value) = self.cells_db.cells.get(key)? {
+                        if let Some(value) = self.cells_db.cells().get(key)? {
                             let (rc, value) = refcount::decode_value_with_rc(value.as_ref());
                             debug_assert!(rc > 0 && value.is_some() || rc == 0 && value.is_none());
                             if value.is_some() {
@@ -270,7 +358,7 @@ impl CellStorage {
         &self,
         root: &DynCell,
         batch: &mut WriteBatch,
-        split_at: FastHashMap<HashBytes, Cell>,
+        split_at: FastHashMap<HashBytes, SplitAccountEntry>,
         capacity: usize,
     ) -> Result<usize, CellStorageError> {
         type StoreResult = Result<(), CellStorageError>;
@@ -286,12 +374,18 @@ impl CellStorage {
             buffer: Vec<u8>,
         }
 
-        struct StoreContext<'a> {
-            db: &'a CellsDb,
+        struct StoreContext<'a, D: CellsDbOps> {
+            db: &'a D,
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
-            split_at: FastHashMap<HashBytes, Cell>,
+            split_at: FastHashMap<HashBytes, SplitAccountEntry>,
+            /// State storage partitions if used
+            storage_parts: Option<Arc<StoragePartsMap>>,
+            /// Estimated count of cells in one partition
+            part_estimated_cells_count: usize,
+            /// Sum of new added cells in partitions
+            new_cells_in_parts: Arc<AtomicUsize>,
             // TODO: Use `&'a HashBytes` for key?
             // Pros:
             //   - Less `memcpy` calls;
@@ -306,12 +400,14 @@ impl CellStorage {
             delayed_additions: std::sync::Mutex<FastHashMap<HashBytes, u32>>,
         }
 
-        impl<'a> StoreContext<'a> {
+        impl<'a, D: CellsDbOps> StoreContext<'a, D> {
             fn new(
-                db: &'a CellsDb,
+                db: &'a D,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
-                split_accounts: FastHashMap<HashBytes, Cell>,
+                split_accounts: FastHashMap<HashBytes, SplitAccountEntry>,
+                storage_parts: Option<Arc<StoragePartsMap>>,
+                part_estimated_cells_count: usize,
                 capacity: usize,
             ) -> Self {
                 Self {
@@ -319,6 +415,9 @@ impl CellStorage {
                     raw_cache,
                     herd,
                     split_at: split_accounts,
+                    storage_parts,
+                    part_estimated_cells_count,
+                    new_cells_in_parts: Arc::new(AtomicUsize::new(0)),
                     transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
                         capacity,
                         Default::default(),
@@ -352,9 +451,40 @@ impl CellStorage {
                     };
 
                     for child in &mut *iter {
-                        // Skip cell to store it later in parallel
                         let child_hash = child.repr_hash();
-                        if self.split_at.contains_key(child_hash) {
+                        if let Some(entry) = self.split_at.get(child_hash) {
+                            // if subtree should be stored in partition
+                            // then store its root cell both in main db and in partition
+                            if let Some(storage_part) = self
+                                .storage_parts
+                                .as_ref()
+                                .and_then(|parts| parts.get(&entry.shard))
+                                .cloned()
+                            {
+                                let part_estimated_cells_count =
+                                    self.part_estimated_cells_count.max(1);
+                                let new_cells_in_parts = self.new_cells_in_parts.clone();
+                                scope.spawn(move || {
+                                    let part_new_cells = storage_part.store_accounts_subtree(
+                                        child,
+                                        part_estimated_cells_count,
+                                    )?;
+                                    tracing::debug!(
+                                        shard = %storage_part.shard(),
+                                        child_hash = %child.repr_hash(),
+                                        part_new_cells,
+                                        "stored subtree in storage part"
+                                    );
+                                    new_cells_in_parts.fetch_add(part_new_cells, Ordering::Relaxed);
+                                    Ok::<_, CellStorageError>(())
+                                });
+
+                                self.insert_cell(child, &mut alloc, depth)?;
+
+                                continue;
+                            }
+
+                            // skip cell to store it in parallel
                             let mut delayed_additions = self.delayed_additions.lock().unwrap();
                             match delayed_additions.entry(*child_hash) {
                                 hash_map::Entry::Vacant(entry) => {
@@ -508,7 +638,7 @@ impl CellStorage {
                     // Merge transaction items into the final batch.
                     let mut buffer = Vec::with_capacity(512);
                     let total = self.transaction.len();
-                    let cells_cf = &self.db.cells.cf();
+                    let cells_cf = &self.db.cells().cf();
                     for kv in self.transaction.iter() {
                         let key = kv.key();
                         let item = kv.value();
@@ -517,10 +647,21 @@ impl CellStorage {
                         refcount::add_positive_refount(item.additions, item.data, &mut buffer);
                         batch.merge_cf(cells_cf, key.as_slice(), &buffer);
                     }
-                    total
+
+                    let new_cells_in_parts = self.new_cells_in_parts.load(Ordering::Relaxed);
+
+                    total + new_cells_in_parts
                 })
             }
         }
+
+        // estimate partition cells count
+        let part_estimated_cells_count = if self.part_split_depth > 0 {
+            let denom = 1 << (self.part_split_depth.saturating_add(1));
+            (capacity / denom.max(1)).max(1)
+        } else {
+            capacity
+        };
 
         let herd = Herd::new();
         let ctx = StoreContext::new(
@@ -528,6 +669,8 @@ impl CellStorage {
             &herd,
             &self.raw_cells_cache,
             split_at,
+            self.storage_parts.clone(),
+            part_estimated_cells_count,
             capacity,
         );
 
@@ -548,15 +691,15 @@ impl CellStorage {
             data: Option<&'a [u8]>,
         }
 
-        struct Context<'a> {
-            db: &'a CellsDb,
+        struct Context<'a, D: CellsDbOps> {
+            db: &'a D,
             raw_cells_cache: &'a RawCellsCache,
             alloc: &'a Bump,
             transaction: FastHashMap<&'a HashBytes, AddedCell<'a>>,
             buffer: Vec<u8>,
         }
 
-        impl<'a> Context<'a> {
+        impl<'a, D: CellsDbOps> Context<'a, D> {
             fn insert_cell(
                 &mut self,
                 cell: &'a DynCell,
@@ -596,7 +739,7 @@ impl CellStorage {
 
             fn finalize(mut self, batch: &mut rocksdb::WriteBatch) -> usize {
                 let total = self.transaction.len();
-                let cells_cf = &self.db.cells.cf();
+                let cells_cf = &self.db.cells().cf();
 
                 for (key, item) in self.transaction {
                     self.buffer.clear();
@@ -659,24 +802,104 @@ impl CellStorage {
         hash: &HashBytes,
         epoch: u32,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
+        self.load_cell_ext(hash, epoch, None)
+    }
+
+    pub fn load_cell_ext(
+        self: &Arc<Self>,
+        hash: &HashBytes,
+        epoch: u32,
+        shard_router: Option<CellShardRouter>,
+    ) -> Result<Arc<StorageCell>, CellStorageError> {
         #[cfg(feature = "cells-metrics")]
         let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
+        let need_replace_cell_in_cache =
+            |cached_router: &Option<CellShardRouter>, load_router: &Option<CellShardRouter>| {
+                match (cached_router, load_router) {
+                    (Some(cached), Some(required)) if cached.eq_by_inner_refs(required) => {
+                        // do not reload cell if routers match
+                        false
+                    }
+                    (_, None) => {
+                        // do not reload cell if loading without router
+                        false
+                    }
+                    _ => {
+                        // do not use cached cell
+                        true
+                    }
+                }
+            };
+
+        tracing::trace!(
+            storage_shard = ?self.part_shard,
+            %hash,
+            load_router = ?shard_router,
+            "try load cell",
+        );
+
+        // try to take cell from the cache
         if let Some(cell) = self.cells_cache.get(hash)
             && cell.epoch.saturating_add(self.drop_interval) >= epoch
             && let Some(cell) = cell.weak.upgrade()
+            // cell may be cached before without shard router
+            // when we reload cell with specified shard router we should replace it in the cache
+            && !need_replace_cell_in_cache(&cell.shard_router, &shard_router)
         {
+            tracing::trace!(
+                storage_shard = ?self.part_shard,
+                %hash,
+                cell_shard_router = ?cell.shard_router,
+                load_router = ?shard_router,
+                "return cell from cache",
+            );
             return Ok(cell);
         }
 
-        let mut cell = match self.raw_cells_cache.get_raw(&self.cells_db, hash) {
-            Ok(Some(value)) => match StorageCell::deserialize(self.clone(), &value.slice, epoch) {
-                Some(cell) => Arc::new(cell),
-                None => return Err(CellStorageError::InvalidCell),
-            },
-            Ok(None) => return Err(CellStorageError::CellNotFound),
-            Err(e) => return Err(CellStorageError::Internal(e)),
+        let mut from_part = None;
+
+        // load cell from separate storage partition if required
+        let mut cell = if self.part_shard.is_none()
+            && let &Some(CellShardRouter::Shard { shard }) = &shard_router
+            && let Some(storage_part) = self
+                .storage_parts
+                .as_ref()
+                .and_then(|parts| parts.get(&shard))
+                .cloned()
+        {
+            let cell = storage_part
+                .cell_storage()
+                .load_cell_ext(hash, epoch, None)?;
+            from_part = Some(shard);
+            cell
+        } else {
+            // fallback: if no shard partition storage, do not inherit router
+            let target_shard_router = match &shard_router {
+                Some(CellShardRouter::Shard { .. }) => None,
+                _ => shard_router.clone(),
+            };
+
+            // otherwise load from raw cache or db
+            match self.raw_cells_cache.get_raw(&self.cells_db, hash) {
+                Ok(Some(value)) => {
+                    match StorageCell::deserialize(
+                        self.clone(),
+                        &value.slice,
+                        epoch,
+                        target_shard_router.clone(),
+                    ) {
+                        Some(cell) => Arc::new(cell),
+                        None => return Err(CellStorageError::InvalidCell),
+                    }
+                }
+                Ok(None) => return Err(CellStorageError::CellNotFound(*hash)),
+                Err(e) => return Err(CellStorageError::Internal(e)),
+            }
         };
+
+        let mut replaced_in_cache = false;
+        let mut loaded_prev_from_cache = false;
 
         let has_new;
         match self.cells_cache.entry(*hash) {
@@ -689,19 +912,35 @@ impl CellStorage {
             }
             dashmap::Entry::Occupied(mut entry) => {
                 has_new = false;
-                if entry.get().epoch >= epoch
+                let cached_epoch = entry.get().epoch;
+                if cached_epoch >= epoch
                     && let Some(mut prev) = entry.get().weak.upgrade()
+                    // we should replace cell in the cache if reloaded with specified shard
+                    && !need_replace_cell_in_cache(&prev.shard_router, &cell.shard_router)
                 {
                     drop(entry);
                     std::mem::swap(&mut prev, &mut cell);
+                    loaded_prev_from_cache = true;
                 } else {
                     entry.insert(CachedCell {
                         epoch,
                         weak: Arc::downgrade(&cell),
                     });
+                    replaced_in_cache = true;
                 }
             }
         };
+
+        tracing::trace!(
+            storage_shard = ?self.part_shard,
+            %hash,
+            cell_shard_router = ?cell.shard_router,
+            load_router = ?shard_router,
+            ?from_part,
+            loaded_prev_from_cache,
+            replaced_in_cache,
+            "cell loaded",
+        );
 
         if has_new {
             #[cfg(feature = "cells-metrics")]
@@ -724,8 +963,8 @@ impl CellStorage {
             buffer: Vec<HashBytes>,
         }
 
-        struct RemoveContext<'a> {
-            db: &'a CellsDb,
+        struct RemoveContext<'a, D: CellsDbOps> {
+            db: &'a D,
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
@@ -744,9 +983,9 @@ impl CellStorage {
             delayed_removes: std::sync::Mutex<FastHashMap<HashBytes, u32>>,
         }
 
-        impl<'a> RemoveContext<'a> {
+        impl<'a, D: CellsDbOps> RemoveContext<'a, D> {
             fn new(
-                db: &'a CellsDb,
+                db: &'a D,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
                 split_at: FastHashSet<HashBytes>,
@@ -929,7 +1168,7 @@ impl CellStorage {
 
                     // Merge transaction items into the final batch.
                     let total = self.transaction.len();
-                    let cells_cf = &self.db.cells.cf();
+                    let cells_cf = &self.db.cells().cf();
                     for kv in self.transaction.iter() {
                         let key = kv.key();
                         let item = kv.value();
@@ -963,7 +1202,7 @@ impl CellStorage {
         alloc: &Bump,
         hash: &HashBytes,
     ) -> Result<(usize, WriteBatch), CellStorageError> {
-        let cells = &self.cells_db.cells;
+        let cells = self.cells_db.cells();
         let cells_cf = &cells.cf();
 
         let mut transaction: FastHashMap<&HashBytes, RemovedCell<'_>> =
@@ -1078,14 +1317,46 @@ impl<'a> RemovedCell<'a> {
 
 #[derive(thiserror::Error, Debug)]
 pub enum CellStorageError {
-    #[error("Cell not found in cell db")]
-    CellNotFound,
+    #[error("Cell not found in cell db (hash: {0})")]
+    CellNotFound(HashBytes),
     #[error("Invalid cell")]
     InvalidCell,
     #[error("Cell counter mismatch: expected refcount {expected}, got {actual} removes")]
     CounterMismatch { expected: i64, actual: u32 },
     #[error("Internal rocksdb error")]
     Internal(#[from] rocksdb::Error),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CellShardRouter {
+    /// Cell belongs to specified shard, stored in a separate partition
+    Shard { shard: ShardIdent },
+    /// Defines that specified child is a root cell for shard accounts,
+    /// defines roots in descending cells to split on shard partitions
+    ChildIsShardAccountsRoot(u8, Arc<FastHashMap<HashBytes, ShardIdent>>),
+    /// Cell belongs to shard accounts subtree,
+    /// defines roots in descending cells to split on shard partitions
+    SplitOnPartitionsAt(Arc<FastHashMap<HashBytes, ShardIdent>>),
+}
+
+impl CellShardRouter {
+    fn eq_by_inner_refs(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Shard { shard }, Self::Shard { shard: other_shard }) if shard == other_shard => {
+                true
+            }
+            (
+                Self::ChildIsShardAccountsRoot(idx, map),
+                Self::ChildIsShardAccountsRoot(other_idx, other_map),
+            ) if idx == other_idx && Arc::ptr_eq(map, other_map) => true,
+            (Self::SplitOnPartitionsAt(map), Self::SplitOnPartitionsAt(other_map))
+                if Arc::ptr_eq(map, other_map) =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 pub struct StorageCell {
@@ -1099,6 +1370,9 @@ pub struct StorageCell {
 
     reference_states: [AtomicU8; 4],
     reference_data: [UnsafeCell<StorageCellReferenceData>; 4],
+
+    /// Defines cell relation to accounts shard
+    shard_router: Option<CellShardRouter>,
 }
 
 impl StorageCell {
@@ -1108,7 +1382,12 @@ impl StorageCell {
 
     const HASHES_ITEM_LEN: usize = 32 + 2;
 
-    pub fn deserialize(cell_storage: Arc<CellStorage>, buffer: &[u8], epoch: u32) -> Option<Self> {
+    pub fn deserialize(
+        cell_storage: Arc<CellStorage>,
+        buffer: &[u8],
+        epoch: u32,
+        shard_router: Option<CellShardRouter>,
+    ) -> Option<Self> {
         if buffer.len() < 4 {
             return None;
         }
@@ -1141,6 +1420,7 @@ impl StorageCell {
             );
         }
 
+        // preload child hashes and map to shards
         Some(Self {
             cell_storage,
             bit_len,
@@ -1151,6 +1431,7 @@ impl StorageCell {
             epoch,
             reference_states,
             reference_data,
+            shard_router,
         })
     }
 
@@ -1217,14 +1498,57 @@ impl StorageCell {
 
         let current_state = state.load(Ordering::Acquire);
         if current_state == Self::REF_STORAGE {
-            return Some(unsafe { &(*slot).storage_cell });
+            let cell = unsafe { &(*slot).storage_cell };
+            return Some(cell);
         }
 
+        let child_hash = unsafe { (*slot).hash };
+
+        // detect shard router for child cell
+        let child_shard_router = match &self.shard_router {
+            Some(CellShardRouter::ChildIsShardAccountsRoot(idx, map)) => {
+                if *idx == index {
+                    if let Some(child_shard) = map.get(&child_hash) {
+                        Some(CellShardRouter::Shard {
+                            shard: *child_shard,
+                        })
+                    } else {
+                        Some(CellShardRouter::SplitOnPartitionsAt(map.clone()))
+                    }
+                } else {
+                    None
+                }
+            }
+            Some(CellShardRouter::SplitOnPartitionsAt(map)) => {
+                if let Some(child_shard) = map.get(&child_hash) {
+                    Some(CellShardRouter::Shard {
+                        shard: *child_shard,
+                    })
+                } else {
+                    self.shard_router.clone()
+                }
+            }
+            Some(CellShardRouter::Shard { .. }) if self.cell_storage.part_shard.is_none() => {
+                self.shard_router.clone()
+            }
+            Some(CellShardRouter::Shard { .. }) | None => None,
+        };
+
+        tracing::debug!(
+            index,
+            child_cell = %child_hash,
+            ?child_shard_router,
+            current_cell = %DynCell::repr_hash(self),
+            current_shard_router = ?self.shard_router,
+            "try load child cell",
+        );
+
         let mut res = Ok(());
-        Self::initialize_inner(state, &mut || match self
-            .cell_storage
-            .load_cell(unsafe { &(*slot).hash }, self.epoch)
-        {
+        Self::initialize_inner(state, &mut || match self.cell_storage.load_cell_ext(
+            &child_hash,
+            self.epoch,
+            child_shard_router.clone(),
+        ) {
             Ok(cell) => unsafe {
                 *slot = StorageCellReferenceData {
                     storage_cell: ManuallyDrop::new(cell),
@@ -1232,6 +1556,13 @@ impl StorageCell {
                 true
             },
             Err(err) => {
+                tracing::error!(
+                    child_cell = %child_hash,
+                    ?child_shard_router,
+                    current_cell = %DynCell::repr_hash(self),
+                    current_shard_router = ?self.shard_router,
+                    "unable to load child cell",
+                );
                 res = Err(err);
                 false
             }
@@ -1455,9 +1786,9 @@ impl RawCellsCache {
         }
     }
 
-    fn get_raw(
+    fn get_raw<D: CellsDbOps>(
         &self,
-        db: &CellsDb,
+        db: &D,
         key: &HashBytes,
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
         use quick_cache::sync::GuardResult;
@@ -1471,7 +1802,7 @@ impl RawCellsCache {
                         self.rocksdb_access_histogram.record(started_at.elapsed());
                     });
 
-                    db.cells.get(key.as_slice())?
+                    db.cells().get(key.as_slice())?
                 };
 
                 Ok(if let Some(value) = value {
@@ -1492,9 +1823,9 @@ impl RawCellsCache {
         }
     }
 
-    fn get_rc_for_insert(
+    fn get_rc_for_insert<D: CellsDbOps>(
         &self,
-        db: &CellsDb,
+        db: &D,
         key: &HashBytes,
         depth: usize,
     ) -> Result<i64, CellStorageError> {
@@ -1516,7 +1847,7 @@ impl RawCellsCache {
             }
         }
 
-        match db.cells.get(key).map_err(CellStorageError::Internal)? {
+        match db.cells().get(key).map_err(CellStorageError::Internal)? {
             Some(value) => {
                 let (rc, value) = refcount::decode_value_with_rc(value.as_ref());
 
@@ -1530,9 +1861,9 @@ impl RawCellsCache {
         }
     }
 
-    fn get_rc_for_delete(
+    fn get_rc_for_delete<D: CellsDbOps>(
         &self,
-        db: &CellsDb,
+        db: &D,
         key: &HashBytes,
         refs_buffer: &mut Vec<HashBytes>,
     ) -> Result<i64, CellStorageError> {
@@ -1542,7 +1873,7 @@ impl RawCellsCache {
         if let Some(value) = self.inner.peek(key) {
             let rc = value.header.header.load(Ordering::Acquire);
             if rc <= 0 {
-                return Err(CellStorageError::CellNotFound);
+                return Err(CellStorageError::CellNotFound(*key));
             } else if rc != i64::MAX {
                 return StorageCell::deserialize_references(&value.slice, refs_buffer)
                     .then_some(rc)
@@ -1550,7 +1881,7 @@ impl RawCellsCache {
             }
         }
 
-        match db.cells.get(key.as_slice()) {
+        match db.cells().get(key.as_slice()) {
             Ok(value) => {
                 if let Some(value) = value
                     && let (rc, Some(value)) = refcount::decode_value_with_rc(&value)
@@ -1560,7 +1891,7 @@ impl RawCellsCache {
                         .ok_or(CellStorageError::InvalidCell);
                 }
 
-                Err(CellStorageError::CellNotFound)
+                Err(CellStorageError::CellNotFound(*key))
             }
             Err(e) => Err(CellStorageError::Internal(e)),
         }

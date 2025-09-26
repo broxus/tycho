@@ -1,8 +1,10 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use anyhow::Result;
 use tycho_storage::StorageContext;
 use tycho_storage::kv::ApplyMigrations;
+use tycho_types::models::ShardIdent;
 
 pub use self::block::{
     ArchiveId, BlockGcStats, BlockStorage, BlockStorageConfig, MaybeExistingHandle, OpenStats,
@@ -17,14 +19,15 @@ pub use self::config::{
     ArchivesGcConfig, BlocksCacheConfig, BlocksGcConfig, BlocksGcType, CoreStorageConfig,
     StatesGcConfig,
 };
-pub use self::db::{CellsDb, CoreDb, CoreDbExt, CoreTables};
+pub use self::db::{CellsDb, CellsPartDb, CoreDb, CoreDbExt, CoreTables};
 pub use self::node_state::{NodeStateStorage, NodeSyncState};
 pub use self::persistent_state::{
     BriefBocHeader, PersistentStateInfo, PersistentStateKind, PersistentStateStorage,
     QueueDiffReader, QueueStateReader, QueueStateWriter, ShardStateReader, ShardStateWriter,
 };
 pub use self::shard_state::{
-    ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics, StoreStateHint,
+    ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics, ShardStateStoragePart,
+    ShardStateStoragePartImpl, StoragePartsMap, StoreStateHint,
 };
 
 pub mod tables;
@@ -80,6 +83,62 @@ impl CoreStorage {
         )
         .await?;
         let block_storage = Arc::new(block_storage);
+
+        const SHARD_PARTITIONS_SPLIT_DEPTH: u8 = 2; // TODO: move to node config
+
+        let mut shards = vec![];
+
+        // TODO: make a helper, pass workchain id from outside
+        struct SplitShardCx {
+            shard: ShardIdent,
+            remaining_split_depth: u8,
+        }
+        let mut split_queue = VecDeque::new();
+        split_queue.push_back(SplitShardCx {
+            shard: ShardIdent::new_full(0),
+            remaining_split_depth: SHARD_PARTITIONS_SPLIT_DEPTH,
+        });
+        while let Some(shard_split_cx) = split_queue.pop_front() {
+            if shard_split_cx.remaining_split_depth > 0
+                && let Some((left, right)) = shard_split_cx.shard.split()
+            {
+                let remaining_split_depth = shard_split_cx.remaining_split_depth.saturating_sub(1);
+                if remaining_split_depth > 0 {
+                    split_queue.push_back(SplitShardCx {
+                        shard: left,
+                        remaining_split_depth,
+                    });
+                    split_queue.push_back(SplitShardCx {
+                        shard: right,
+                        remaining_split_depth,
+                    });
+                } else {
+                    shards.push(left);
+                    shards.push(right);
+                }
+            }
+        }
+
+        let mut storage_parts = StoragePartsMap::default();
+        for shard in shards {
+            let cells_part_db: CellsPartDb = ctx.open_preconfigured(format!(
+                "cells-parts/cells-part-{0}",
+                shard.to_string().replace(":", "_")
+            ))?;
+            cells_part_db.normalize_version()?;
+            cells_part_db.apply_migrations().await?;
+            storage_parts.insert(
+                shard,
+                Arc::new(ShardStateStoragePartImpl::new(
+                    shard,
+                    cells_part_db,
+                    config.cells_cache_size,
+                    config.drop_interval,
+                    SHARD_PARTITIONS_SPLIT_DEPTH,
+                )),
+            );
+        }
+
         let shard_state_storage = ShardStateStorage::new(
             cells_db.clone(),
             block_handle_storage.clone(),
@@ -87,6 +146,8 @@ impl CoreStorage {
             ctx.temp_files().clone(),
             config.cells_cache_size,
             config.drop_interval,
+            SHARD_PARTITIONS_SPLIT_DEPTH,
+            Arc::new(storage_parts),
         )?;
         let persistent_state_storage = PersistentStateStorage::new(
             cells_db.clone(),
