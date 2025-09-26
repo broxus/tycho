@@ -261,7 +261,7 @@ impl Inner {
         let mut interval = tokio::time::interval(self.config.neighbors.update_interval);
 
         loop {
-            if overlay_peer_count < max_neighbours {
+            if overlay_peer_count == 0 {
                 tracing::info!("not enough neighbours, waiting for more");
 
                 overlay_peers_added.await;
