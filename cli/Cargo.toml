@@ -39,12 +39,13 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 serde_path_to_error = { workspace = true }
 tabled = { workspace = true, default-features = false, features = ["std"] }
 tempfile = { workspace = true }
-tikv-jemalloc-ctl = { workspace = true, optional = true }
-tikv-jemallocator = { workspace = true, features = [
-    "unprefixed_malloc_on_supported_platforms",
-    "background_threads",
-    "profiling",
-], optional = true }
+#tikv-jemalloc-ctl = { workspace = true, optional = true }
+#tikv-jemallocator = { workspace = true, features = [
+#    "unprefixed_malloc_on_supported_platforms",
+#    "background_threads",
+#    "profiling",
+#], optional = true }
+tcmalloc-better = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -73,8 +74,9 @@ anyhow = { workspace = true }
 rustc_version = { workspace = true }
 
 [features]
-default = ["jemalloc"]
-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
+#default = ["jemalloc"]
+#jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
+jemalloc = []
 deadlock-detection = ["parking_lot/deadlock_detection"]
 debug = ["tycho-consensus/test", "tycho-consensus/mock-feedback"]
 lto = ["weedb/lto"]

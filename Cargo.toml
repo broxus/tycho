@@ -114,6 +114,7 @@ tikv-jemallocator = { version = "0.6.0", features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
 ] }
+tcmalloc-better = { git = "https://github.com/0xdeafbeef/tcmalloc-better.git", rev = "da55f0d6", features = ["unprefixed_malloc_on_supported_platforms", "extension"] }
 tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"] }
 tl-proto = "0.5.1"
 tokio = { version = "1", default-features = false }
@@ -133,7 +134,7 @@ tycho-crypto = { version = "0.4", features = ["tl-proto", "serde", "rand9"] }
 tycho-executor = "0.2.0"
 tycho-types = { version = "0.2.1", features = ["tycho", "stats"] }
 tycho-vm = "0.2.0"
-weedb = "0.6.0"
+weedb = { version = "0.6.0", default-features = false, features = ["lz4", "zstd", "metrics"] }
 zstd-safe = "7.2"
 zstd-sys = "2.0"
 

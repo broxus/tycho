@@ -20,9 +20,9 @@ mod cmd {
 mod node;
 mod util;
 
-#[cfg(feature = "jemalloc")]
+use tcmalloc_better::TCMalloc;
 #[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+static GLOBAL: TCMalloc = TCMalloc;
 
 fn main() -> ExitCode {
     if std::env::var("RUST_BACKTRACE").is_err() {

@@ -4,8 +4,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-pub use tikv_jemalloc_ctl::Error;
-use tikv_jemalloc_ctl::{epoch, stats};
 
 #[macro_export]
 macro_rules! set_metrics {
@@ -107,13 +105,17 @@ pub fn spawn_allocator_metrics_loop() {
             .spawn(move || {
                 let mut deadline = Instant::now();
                 loop {
-                    let s = match fetch_stats() {
+                    let s = match tcmalloc_better::fetch_allocator_metrics() {
                         Ok(s) => s,
                         Err(e) => {
                             tracing::error!("failed to fetch jemalloc stats: {e}");
                             return;
                         }
                     };
+
+                    let stats = tcmalloc_better::metrics_raw().unwrap();
+                    let stats = String::from_utf8(stats).unwrap();
+                    tracing::info!("alloc_stats:\n{stats}");
 
                     set_metrics!(
                         "jemalloc_allocated_bytes" => s.allocated,
@@ -134,33 +136,4 @@ pub fn spawn_allocator_metrics_loop() {
             })
             .unwrap();
     });
-}
-
-fn fetch_stats() -> Result<JemallocStats, Error> {
-    // Stats are cached. Need to advance epoch to refresh.
-    epoch::advance()?;
-
-    Ok(JemallocStats {
-        allocated: stats::allocated::read()? as u64,
-        active: stats::active::read()? as u64,
-        metadata: stats::metadata::read()? as u64,
-        resident: stats::resident::read()? as u64,
-        mapped: stats::mapped::read()? as u64,
-        retained: stats::retained::read()? as u64,
-        dirty: stats::resident::read()?
-            .saturating_sub(stats::active::read()?)
-            .saturating_sub(stats::metadata::read()?) as u64,
-        fragmentation: stats::active::read()?.saturating_sub(stats::allocated::read()?) as u64,
-    })
-}
-
-pub struct JemallocStats {
-    pub allocated: u64,
-    pub active: u64,
-    pub metadata: u64,
-    pub resident: u64,
-    pub mapped: u64,
-    pub retained: u64,
-    pub dirty: u64,
-    pub fragmentation: u64,
 }

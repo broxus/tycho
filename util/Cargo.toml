@@ -32,8 +32,8 @@ serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
 sysinfo = { workspace = true, optional = true }
 thiserror = { workspace = true }
-tikv-jemalloc-ctl = { workspace = true, optional = true }
 tl-proto = { workspace = true }
+tcmalloc-better = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "rt"] }
 tracing = { workspace = true }
 tracing-appender = { workspace = true, optional = true }
@@ -61,7 +61,6 @@ cli = [
     "dep:tracing-subscriber",
     "tokio/signal",
     "metrics-exporter-prometheus",
-    "tikv-jemalloc-ctl",
 ]
 
 [[bench]]
