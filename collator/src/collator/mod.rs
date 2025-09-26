@@ -692,6 +692,11 @@ impl CollatorStdImpl {
 
                             task.store_new_state_task.await?;
 
+                            let _histogram_apply_merkles = HistogramGuard::begin_with_labels(
+                                "tycho_collator_resume_collation_apply_merkles_time_high",
+                                &labels,
+                            );
+
                             // load stored state
                             let mut prev_state = self
                                 .state_node_adapter
