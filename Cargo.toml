@@ -82,6 +82,7 @@ quote = "1.0"
 rand = "0.9"
 rand_pcg = { version = "0.9" }
 rayon = "1.10"
+rayon-core = "1.10"
 reqwest = { version = "0.12", default-features = false }
 ring = "0.17.14"
 rlimit = "0.10.1"
@@ -153,6 +154,7 @@ tycho-wu-tuner = { path = "./wu-tuner", version = "0.3.2" }
 
 [patch.crates-io]
 # patches here
+rayon-core = { git = "https://github.com/0xdeafbeef/rayon.git", rev = "296b58a0f59cfa0f5211536c831cc3b497da494d" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"

@@ -26,6 +26,7 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
 rand = { workspace = true }
 rayon = { workspace = true }
+rayon-core = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

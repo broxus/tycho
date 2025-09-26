@@ -2603,9 +2603,8 @@ dependencies = [
 
 [[package]]
 name = "rayon-core"
-version = "1.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1465873a3dfdaa8ae7cb14b4383657caab0b3e8a0aa9ae8e04b044854c8dfce2"
+version = "1.13.0"
+source = "git+https://github.com/0xdeafbeef/rayon.git?rev=296b58a0f59cfa0f5211536c831cc3b497da494d#296b58a0f59cfa0f5211536c831cc3b497da494d"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
@@ -4184,6 +4183,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "rand 0.9.1",
  "rayon",
+ "rayon-core",
  "scopeguard",
  "serde",
  "serde_json",

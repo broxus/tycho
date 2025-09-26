@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use tracing::Span;
+use tycho_util::cli::config::PoolRecorder;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::effects::{Cancelled, TaskResult};
@@ -17,6 +18,7 @@ impl MempoolRayon {
             .stack_size(8 * 1024 * 1024)
             .thread_name(|id| format!("rayon-mempool-{id}"))
             .num_threads(num_threads.get())
+            .metrics_recorder(PoolRecorder::new(num_threads.get(), "mempool"))
             .build()?;
         Ok(Self(Arc::new(thread_pool)))
     }

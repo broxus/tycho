@@ -3074,6 +3074,81 @@ def rayon_stats() -> RowPanel:
     return create_row("Rayon Stats", metrics)
 
 
+def rayon_pool_metrics() -> RowPanel:
+    labels = ['pool=~"$rayon_pool"']
+    legend = "{{instance}} pool: {{pool}}"
+    metrics = [
+        create_gauge_panel(
+            "rayon_queue_locals_total",
+            "Rayon Local Queue Depth",
+            labels=labels,
+            legend_format=legend,
+        ),
+        create_gauge_panel(
+            "rayon_queue_global_depth",
+            "Rayon Global Queue Depth",
+            labels=labels,
+            legend_format=legend,
+        ),
+        create_gauge_panel(
+            "rayon_queue_total_depth",
+            "Rayon Total Queue Depth",
+            labels=labels,
+            legend_format=legend,
+        ),
+        create_gauge_panel(
+            "rayon_threads_active",
+            "Rayon Active Threads",
+            labels=labels,
+            legend_format=legend,
+        ),
+        create_gauge_panel(
+            "rayon_threads_inactive",
+            "Rayon Inactive Threads",
+            labels=labels,
+            legend_format=legend,
+        ),
+        create_gauge_panel(
+            "rayon_threads_sleeping",
+            "Rayon Sleeping Threads",
+            labels=labels,
+            legend_format=legend,
+        ),
+        create_gauge_panel(
+            "rayon_threads_awake_idle",
+            "Rayon Idle Threads",
+            labels=labels,
+            legend_format=legend,
+        ),
+        create_heatmap_panel(
+            "rayon_queue_backlog",
+            "Rayon Queue Backlog",
+            unit_format=yaxis(UNITS.NUMBER_FORMAT),
+            labels=labels,
+        ),
+        create_heatmap_panel(
+            "rayon_search_latency_seconds",
+            "Rayon Search Latency",
+            unit_format=yaxis(UNITS.SECONDS),
+            labels=labels,
+        ),
+        create_heatmap_panel(
+            "rayon_sleep_duration_seconds",
+            "Rayon Sleep Duration",
+            unit_format=yaxis(UNITS.SECONDS),
+            labels=labels,
+        ),
+        create_counter_panel(
+            "rayon_worker_event_total",
+            "Rayon Worker Events/sec",
+            labels_selectors=labels,
+            legend_format="{{instance}} pool: {{pool}} kind: {{kind}}",
+            by_labels=["instance", "pool", "kind"],
+        ),
+    ]
+    return create_row("Rayon Worker Pools", metrics, repeat="rayon_pool")
+
+
 def quic_network_panels() -> list[RowPanel]:
     """Panels for QUIC network performance monitoring"""
     common_labels = ['peer_id=~"$peer_id"', 'peer_addr=~"$remote_addr"']
@@ -3234,6 +3309,16 @@ def templates() -> Templating:
                 all_value=".*",
             ),
             template(
+                name="rayon_pool",
+                query="label_values(rayon_queue_total_depth,pool)",
+                data_source="${source}",
+                hide=0,
+                regex=None,
+                multi=True,
+                include_all=True,
+                all_value=".*",
+            ),
+            template(
                 name="kind",
                 query="label_values(tycho_mempool_verifier_verify,kind)",
                 data_source="${source}",
@@ -3320,6 +3405,7 @@ dashboard = Dashboard(
         *quic_network_panels(),
         util_reclaimer(),
         allocator_stats(),
+        rayon_pool_metrics(),
         rayon_stats(),
         jrpc(),
         jrpc_timings(),
