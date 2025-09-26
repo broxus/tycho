@@ -10,6 +10,8 @@ pub async fn test() {
     let max_neighbours = 5;
     let default_roundtrip = Duration::from_millis(300);
 
+    let local_id = PeerId([0u8; 32]);
+
     let initial_peers = vec![
         PeerId([0u8; 32]),
         PeerId([1u8; 32]),
@@ -23,7 +25,7 @@ pub async fn test() {
 
     println!("{}", initial_peers.len());
 
-    let neighbours = Neighbours::new(initial_peers.clone(), max_neighbours);
+    let neighbours = Neighbours::new(local_id, initial_peers.clone(), max_neighbours);
     println!("{}", neighbours.get_active_neighbours().len());
 
     let first_success_rate = [0.2, 0.8];

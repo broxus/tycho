@@ -34,6 +34,12 @@ pub struct NeighborsConfig {
     #[serde(with = "serde_helpers::humantime")]
     pub apply_score_interval: Duration,
 
+    /// The interval to export neighbours metrics.
+    ///
+    /// Default: 5 seconds.
+    #[serde(with = "serde_helpers::humantime")]
+    pub update_metrics_interval: Duration,
+
     /// The maximum number of neighbours to keep.
     ///
     /// Default: 5.
@@ -61,6 +67,11 @@ pub struct NeighborsConfig {
     /// Default: 1s.
     #[serde(with = "serde_helpers::humantime")]
     pub query_timeout: Duration,
+
+    /// Whether to enable `Neighbours` metrics.
+    ///
+    /// Default: `true`.
+    pub enable_metrics: bool,
 }
 
 impl Default for NeighborsConfig {
@@ -69,11 +80,13 @@ impl Default for NeighborsConfig {
             update_interval: Duration::from_secs(2 * 60),
             ping_interval: Duration::from_secs(30),
             apply_score_interval: Duration::from_secs(10),
+            update_metrics_interval: Duration::from_secs(5),
             keep: 5,
             max_ping_tasks: 5,
             default_roundtrip: Duration::from_millis(300),
             send_timeout: Duration::from_millis(500),
             query_timeout: Duration::from_secs(1),
+            enable_metrics: true,
         }
     }
 }

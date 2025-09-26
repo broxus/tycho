@@ -14,7 +14,6 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho node status`↴](#tycho-node-status)
 * [`tycho node ping`↴](#tycho-node-ping)
 * [`tycho node get-account`↴](#tycho-node-get-account)
-* [`tycho node get-neighbours`↴](#tycho-node-get-neighbours)
 * [`tycho node find-archive`↴](#tycho-node-find-archive)
 * [`tycho node list-archives`↴](#tycho-node-list-archives)
 * [`tycho node dump-archive`↴](#tycho-node-dump-archive)
@@ -31,6 +30,12 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho node mem-profiler start`↴](#tycho-node-mem-profiler-start)
 * [`tycho node mem-profiler stop`↴](#tycho-node-mem-profiler-stop)
 * [`tycho node mem-profiler dump`↴](#tycho-node-mem-profiler-dump)
+* [`tycho node overlay`↴](#tycho-node-overlay)
+* [`tycho node overlay list`↴](#tycho-node-overlay-list)
+* [`tycho node overlay peers`↴](#tycho-node-overlay-peers)
+* [`tycho node overlay neighbors`↴](#tycho-node-overlay-neighbors)
+* [`tycho node dht`↴](#tycho-node-dht)
+* [`tycho node dht info`↴](#tycho-node-dht-info)
 * [`tycho tool`↴](#tycho-tool)
 * [`tycho tool gen-dht`↴](#tycho-tool-gen-dht)
 * [`tycho tool gen-key`↴](#tycho-tool-gen-key)
@@ -164,7 +169,6 @@ Manage the node
 * `status` — Get node status
 * `ping` — Ping the control server
 * `get-account` — Get account state from the node
-* `get-neighbours` — Get list of all known public overlay neighbours
 * `find-archive` — Get archive info from the node
 * `list-archives` — Fetch the list of all stored archive ids
 * `dump-archive` — Dump the archive from the node
@@ -178,6 +182,8 @@ Manage the node
 * `compact` — Trigger a compaction in database
 * `wait-sync` — Wait until node synced
 * `mem-profiler` — Manage memory profiler
+* `overlay` — Overlay
+* `dht` — DHT
 
 
 
@@ -239,23 +245,6 @@ Get account state from the node
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
 * `-a`, `--addr <ADDR>` — Account address
 * `-p`, `--parse` — Parse the account state
-
-
-
-## `tycho node get-neighbours`
-
-Get list of all known public overlay neighbours
-
-**Usage:** `tycho node get-neighbours [OPTIONS]`
-
-###### **Options:**
-
-* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
-* `-h`, `--human-readable`
-* `--help`
-
-  Possible values: `true`, `false`
-
 
 
 
@@ -505,6 +494,96 @@ Dump the memory profiler data
 ###### **Options:**
 
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+
+
+
+## `tycho node overlay`
+
+Overlay
+
+**Usage:** `tycho node overlay <COMMAND>`
+
+###### **Subcommands:**
+
+* `list` — List all active public and private overlays
+* `peers` — Get overlay peers
+* `neighbors` — Get overlay neighbors
+
+
+
+## `tycho node overlay list`
+
+List all active public and private overlays
+
+**Usage:** `tycho node overlay list [OPTIONS]`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+
+
+
+## `tycho node overlay peers`
+
+Get overlay peers
+
+**Usage:** `tycho node overlay peers [OPTIONS] --id <ID>`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `--id <ID>` — overlay id
+* `-h`, `--human-readable`
+* `--help`
+
+  Possible values: `true`, `false`
+
+
+
+
+## `tycho node overlay neighbors`
+
+Get overlay neighbors
+
+**Usage:** `tycho node overlay neighbors [OPTIONS] --id <ID>`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `--id <ID>` — overlay id
+* `-h`, `--human-readable`
+* `--help`
+
+  Possible values: `true`, `false`
+
+
+
+
+## `tycho node dht`
+
+DHT
+
+**Usage:** `tycho node dht <COMMAND>`
+
+###### **Subcommands:**
+
+* `info` — Get DHT info
+
+
+
+## `tycho node dht info`
+
+Get DHT info
+
+**Usage:** `tycho node dht info [OPTIONS] --id <ID>`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `--id <ID>` — `PeerId` to search
+* `--at <AT>` — Target `PeerId`
+* `-k <K>` — Maximum number of nodes to return
+* `--local` — Target is a local node
 
 
 

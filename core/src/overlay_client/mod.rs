@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bytes::Bytes;
+use rand::prelude::IndexedRandom;
 use tokio::task::AbortHandle;
 use tycho_network::{ConnectionError, Network, PublicOverlay, Request, UnknownPeerError};
 
@@ -45,9 +46,12 @@ impl PublicOverlayClient {
             })
             .collect::<Vec<_>>();
 
-        let neighbours = Neighbours::new(entries, config.neighbors.keep);
+        let local_id = *network.peer_id();
+        let neighbours = Neighbours::new(local_id, entries, config.neighbors.keep);
         let validators_resolver =
             ValidatorsResolver::new(network.clone(), overlay.clone(), config.validators.clone());
+
+        let enable_neighbors_metrics = config.neighbors.enable_metrics;
 
         let mut res = Inner {
             network,
@@ -59,6 +63,7 @@ impl PublicOverlayClient {
             update_task: None,
             score_task: None,
             cleanup_task: None,
+            metrics_task: None,
         };
 
         // NOTE: Reuse same `Inner` type to avoid introducing a new type for shard state
@@ -67,6 +72,13 @@ impl PublicOverlayClient {
         res.update_task = Some(tokio::spawn(res.clone().update_neighbours_task()).abort_handle());
         res.score_task = Some(tokio::spawn(res.clone().apply_score_task()).abort_handle());
         res.cleanup_task = Some(tokio::spawn(res.clone().cleanup_neighbours_task()).abort_handle());
+
+        let neighbors_metrics_handle = if enable_neighbors_metrics {
+            Some(tokio::spawn(res.clone().update_metrics_task()).abort_handle())
+        } else {
+            None
+        };
+        res.metrics_task = neighbors_metrics_handle;
 
         Self {
             inner: Arc::new(res),
@@ -173,6 +185,7 @@ struct Inner {
     update_task: Option<AbortHandle>,
     score_task: Option<AbortHandle>,
     cleanup_task: Option<AbortHandle>,
+    metrics_task: Option<AbortHandle>,
 }
 
 impl Clone for Inner {
@@ -187,6 +200,7 @@ impl Clone for Inner {
             update_task: None,
             score_task: None,
             cleanup_task: None,
+            metrics_task: None,
         }
     }
 }
@@ -204,7 +218,9 @@ impl Inner {
         loop {
             interval.tick().await;
 
-            let Some(neighbour) = self.neighbours.choose() else {
+            // Ping all known neighbours (not only reliable from selection_index)
+            let neighbours = self.neighbours.get_active_neighbours();
+            let Some(neighbour) = neighbours.choose(&mut rand::rng()) else {
                 continue;
             };
 
@@ -248,7 +264,7 @@ impl Inner {
         let mut interval = tokio::time::interval(self.config.neighbors.update_interval);
 
         loop {
-            if overlay_peer_count < max_neighbours {
+            if overlay_peer_count == 0 {
                 tracing::info!("not enough neighbours, waiting for more");
 
                 overlay_peers_added.await;
@@ -304,6 +320,19 @@ impl Inner {
                 applied,
                 "tried to apply neighbours score after some overlay entry was removed"
             );
+        }
+    }
+
+    #[tracing::instrument(name = "metrics_neighbours", skip_all)]
+    async fn update_metrics_task(self) {
+        tracing::info!("started");
+        scopeguard::defer! { tracing::info!("finished"); };
+
+        let mut interval = tokio::time::interval(self.config.neighbors.update_metrics_interval);
+
+        loop {
+            interval.tick().await;
+            self.neighbours.update_metrics();
         }
     }
 

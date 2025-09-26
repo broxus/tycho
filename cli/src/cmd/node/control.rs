@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -10,6 +11,7 @@ use base64::prelude::{BASE64_STANDARD, Engine as _};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use tycho_control::ControlClient;
+use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockId, StdAddr};
 use tycho_util::cli::logger::init_logger_simple;
 use tycho_util::cli::signal;
@@ -23,7 +25,6 @@ pub enum CmdControl {
     Status(CmdStatus),
     Ping(CmdPing),
     GetAccount(CmdGetAccount),
-    GetNeighbours(CmdGetNeighbours),
     FindArchive(CmdFindArchive),
     ListArchives(CmdListArchives),
     DumpArchive(CmdDumpArchive),
@@ -38,6 +39,10 @@ pub enum CmdControl {
     WaitSync(CmdWaitSync),
     #[clap(subcommand)]
     MemProfiler(CmdMemProfiler),
+    #[clap(subcommand)]
+    Overlay(CmdOverlay),
+    #[clap(subcommand)]
+    Dht(CmdDht),
 }
 
 impl CmdControl {
@@ -46,7 +51,6 @@ impl CmdControl {
             Self::Status(cmd) => cmd.run(args),
             Self::Ping(cmd) => cmd.run(args),
             Self::GetAccount(cmd) => cmd.run(args),
-            Self::GetNeighbours(cmd) => cmd.run(args),
             Self::FindArchive(cmd) => cmd.run(args),
             Self::ListArchives(cmd) => cmd.run(args),
             Self::DumpArchive(cmd) => cmd.run(args),
@@ -60,6 +64,8 @@ impl CmdControl {
             Self::Compact(cmd) => cmd.run(args),
             Self::WaitSync(cmd) => cmd.run(args),
             Self::MemProfiler(cmd) => cmd.run(args),
+            Self::Overlay(cmd) => cmd.run(args),
+            Self::Dht(cmd) => cmd.run(args),
         }
     }
 }
@@ -167,63 +173,6 @@ impl CmdGetAccount {
                     "gen_utime": state.gen_utime,
                     "state": BASE64_STANDARD.encode(state.state),
                 }))
-            }
-        })
-    }
-}
-
-/// Get list of all known public overlay neighbours.
-#[derive(Parser)]
-#[clap(disable_help_flag = true)]
-pub struct CmdGetNeighbours {
-    #[clap(flatten)]
-    args: ControlArgs,
-
-    #[clap(short, long)]
-    human_readable: bool,
-
-    #[clap(long, action = clap::ArgAction::HelpLong)]
-    help: Option<bool>,
-}
-
-impl CmdGetNeighbours {
-    pub fn run(self, args: BaseArgs) -> Result<()> {
-        struct TableRow(tycho_control::proto::NeighbourInfo);
-
-        impl tabled::Tabled for TableRow {
-            const LENGTH: usize = 5;
-
-            fn fields(&self) -> Vec<Cow<'_, str>> {
-                vec![
-                    Cow::from(self.0.id.to_string()),
-                    Cow::from(self.0.score.to_string()),
-                    Cow::from(self.0.failed_requests.to_string()),
-                    Cow::from(self.0.total_requests.to_string()),
-                    Cow::from(self.0.roundtrip_ms.to_string()),
-                ]
-            }
-
-            fn headers() -> Vec<Cow<'static, str>> {
-                vec![
-                    Cow::from("peer_id"),
-                    Cow::from("score"),
-                    Cow::from("failed_requests"),
-                    Cow::from("total_requests"),
-                    Cow::from("roundtrip_ms"),
-                ]
-            }
-        }
-
-        self.args.rt(args, move |client| async move {
-            let res = client.get_neighbours_info().await?;
-
-            if self.human_readable {
-                let mut table = tabled::Table::new(res.neighbours.into_iter().map(TableRow));
-                table.with(tabled::settings::Style::psql());
-                println!("{table}");
-                Ok(())
-            } else {
-                print_json(res)
             }
         })
     }
@@ -756,6 +705,244 @@ impl CmdDumpQueueDiff {
             }))
         })
     }
+}
+
+/// Overlay.
+#[derive(Subcommand)]
+pub enum CmdOverlay {
+    List(CmdOverlayList),
+    Peers(CmdOverlayPeers),
+    Neighbors(CmdOverlayNeighbors),
+}
+
+impl CmdOverlay {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        let control = match &self {
+            Self::List(cmd) => &cmd.args,
+            Self::Peers(cmd) => &cmd.args.args,
+            Self::Neighbors(cmd) => &cmd.args.args,
+        }
+        .clone();
+
+        control.rt(args, |client| async move {
+            match self {
+                Self::List(_) => {
+                    let res = client.list_overlays().await?;
+                    print_json(res)
+                }
+                Self::Peers(cmd) => cmd.run(&client).await,
+                Self::Neighbors(cmd) => cmd.run(&client).await,
+            }
+        })
+    }
+}
+
+/// List all active public and private overlays.
+#[derive(Parser)]
+pub struct CmdOverlayList {
+    #[clap(flatten)]
+    args: ControlArgs,
+}
+
+#[derive(Clone, Args)]
+struct CmdOverlayArgs {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// overlay id
+    #[clap(long)]
+    id: String,
+
+    #[clap(short, long)]
+    human_readable: bool,
+
+    #[clap(long, action = clap::ArgAction::HelpLong)]
+    help: Option<bool>,
+}
+
+/// Get overlay peers.
+#[derive(Parser)]
+#[clap(disable_help_flag = true)]
+pub struct CmdOverlayPeers {
+    #[clap(flatten)]
+    args: CmdOverlayArgs,
+}
+
+impl CmdOverlayPeers {
+    async fn run(&self, client: &ControlClient) -> Result<()> {
+        struct PeerTableRow(tycho_control::proto::OverlayPeer);
+
+        impl tabled::Tabled for PeerTableRow {
+            const LENGTH: usize = 4;
+
+            fn fields(&self) -> Vec<Cow<'_, str>> {
+                match &self.0.info {
+                    Some(info) => {
+                        let addresses_str = format!(
+                            "[{}]",
+                            info.address_list
+                                .iter()
+                                .map(|addr| format!("\"{addr}\""))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+
+                        vec![
+                            Cow::from(self.0.peer_id.to_string()),
+                            Cow::from(info.created_at.to_string()),
+                            Cow::from(info.expires_at.to_string()),
+                            Cow::from(addresses_str),
+                        ]
+                    }
+                    None => vec![
+                        Cow::from(self.0.peer_id.to_string()),
+                        Cow::from("N/A"),
+                        Cow::from("N/A"),
+                        Cow::from("[]"),
+                    ],
+                }
+            }
+
+            fn headers() -> Vec<Cow<'static, str>> {
+                vec![
+                    Cow::from("peer_id"),
+                    Cow::from("created_at"),
+                    Cow::from("expires_at"),
+                    Cow::from("addresses"),
+                ]
+            }
+        }
+
+        let res = client
+            .overlay_peers(HashBytes::from_str(&self.args.id)?)
+            .await?;
+
+        if self.args.human_readable {
+            let mut table = tabled::Table::new(res.peers.into_iter().map(PeerTableRow));
+            table.with(tabled::settings::Style::psql());
+            println!("{table}");
+            Ok(())
+        } else {
+            print_json(res)
+        }
+    }
+}
+
+/// Get overlay neighbors.
+#[derive(Parser)]
+#[clap(disable_help_flag = true)]
+pub struct CmdOverlayNeighbors {
+    #[clap(flatten)]
+    args: CmdOverlayArgs,
+}
+
+impl CmdOverlayNeighbors {
+    async fn run(&self, client: &ControlClient) -> Result<()> {
+        struct NeighborTableRow(tycho_control::proto::OverlayNeighbor);
+
+        impl tabled::Tabled for NeighborTableRow {
+            const LENGTH: usize = 5;
+
+            fn fields(&self) -> Vec<Cow<'_, str>> {
+                match &self.0.info {
+                    Some(info) => vec![
+                        Cow::from(self.0.peer_id.to_string()),
+                        Cow::from(info.score.to_string()),
+                        Cow::from(info.failed_requests.to_string()),
+                        Cow::from(info.total_requests.to_string()),
+                        Cow::from(info.roundtrip_ms.to_string()),
+                    ],
+                    None => vec![
+                        Cow::from(self.0.peer_id.to_string()),
+                        Cow::from("N/A"),
+                        Cow::from("N/A"),
+                        Cow::from("N/A"),
+                        Cow::from("N/A"),
+                    ],
+                }
+            }
+
+            fn headers() -> Vec<Cow<'static, str>> {
+                vec![
+                    Cow::from("peer_id"),
+                    Cow::from("score"),
+                    Cow::from("failed_requests"),
+                    Cow::from("total_requests"),
+                    Cow::from("roundtrip_ms"),
+                ]
+            }
+        }
+
+        let res = client
+            .overlay_neighbors(HashBytes::from_str(&self.args.id)?)
+            .await?;
+
+        if self.args.human_readable {
+            let mut table = tabled::Table::new(res.peers.into_iter().map(NeighborTableRow));
+            table.with(tabled::settings::Style::psql());
+            println!("{table}");
+            Ok(())
+        } else {
+            print_json(res)
+        }
+    }
+}
+
+/// DHT.
+#[derive(Subcommand)]
+pub enum CmdDht {
+    Info(CmdDhtInfo),
+}
+
+impl CmdDht {
+    pub fn run(self, args: BaseArgs) -> Result<()> {
+        let control = match &self {
+            Self::Info(cmd) => &cmd.args,
+        }
+        .clone();
+
+        control.rt(args, |client| async move {
+            match self {
+                Self::Info(info) => {
+                    let node_id = HashBytes::from_str(&info.id)?;
+
+                    let res = match (info.at, info.k, info.local) {
+                        (Some(at), Some(k), false) => {
+                            let at = HashBytes::from_str(&at)?;
+                            client.dht_node_info(node_id, at, k).await?
+                        }
+                        (None, Some(k), true) => client.dht_local_info(node_id, k).await?,
+                        _ => anyhow::bail!("invalid argument"),
+                    };
+
+                    print_json(res)
+                }
+            }
+        })
+    }
+}
+
+/// Get DHT info.
+#[derive(Parser)]
+pub struct CmdDhtInfo {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// `PeerId` to search
+    #[clap(long)]
+    id: String,
+
+    /// Target `PeerId`
+    #[clap(long)]
+    at: Option<String>,
+
+    /// Maximum number of nodes to return
+    #[clap(short)]
+    k: Option<u32>,
+
+    /// Target is a local node
+    #[clap(long)]
+    local: bool,
 }
 
 #[derive(Parser)]

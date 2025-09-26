@@ -37,9 +37,6 @@ pub trait ControlServer {
     /// Returns memory profiler dump.
     async fn dump_memory_profiler() -> ServerResult<Vec<u8>>;
 
-    /// Get node neighbours info
-    async fn get_neighbours_info() -> ServerResult<NeighboursInfoResponse>;
-
     /// Broadcast a message to validators.
     async fn broadcast_external_message(req: BroadcastExtMsgRequest) -> ServerResult<()>;
 
@@ -69,6 +66,21 @@ pub trait ControlServer {
 
     /// Returns list of all block ids.
     async fn get_block_ids(req: BlockListRequest) -> ServerResult<BlockListResponse>;
+
+    /// Returns list of all overlays.
+    async fn get_overlays() -> ServerResult<OverlayListResponse>;
+
+    /// Get overlay peers
+    async fn get_overlay_peers(req: OverlayRequest) -> ServerResult<OverlayPeersResponse>;
+
+    /// Get node neighbours
+    async fn get_overlay_neighbors(req: OverlayRequest) -> ServerResult<OverlayNeighborsResponse>;
+
+    /// Get DHT node info
+    async fn get_dht_node_info(req: DhtInfoRequest) -> ServerResult<DhtInfoResponse>;
+
+    /// Get DHT local node info
+    async fn get_dht_local_info(req: DhtLocalInfoRequest) -> ServerResult<DhtInfoResponse>;
 
     /// Signs an elections payload.
     async fn sign_elections_payload(
@@ -285,4 +297,69 @@ pub struct NeighbourInfo {
     pub failed_requests: u64,
     pub total_requests: u64,
     pub roundtrip_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayListResponse {
+    pub overlays: Vec<(HashBytes, OverlayType)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OverlayType {
+    Public,
+    Private,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayRequest {
+    pub id: HashBytes,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayNeighborsResponse {
+    pub kind: OverlayType,
+    pub peers: Vec<OverlayNeighbor>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayNeighbor {
+    pub peer_id: HashBytes,
+    pub info: Option<NeighbourInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayPeersResponse {
+    pub kind: OverlayType,
+    pub peers: Vec<OverlayPeer>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OverlayPeer {
+    pub peer_id: HashBytes,
+    pub info: Option<PeerInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub address_list: Vec<String>,
+    pub created_at: u32,
+    pub expires_at: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DhtInfoRequest {
+    pub search_id: HashBytes,
+    pub target_id: HashBytes,
+    pub k: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DhtLocalInfoRequest {
+    pub id: HashBytes,
+    pub k: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DhtInfoResponse {
+    pub nodes: Vec<HashBytes>,
 }
