@@ -6,7 +6,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
 use tycho_block_util::block::*;
-use tycho_block_util::dict::split_aug_dict_raw;
+use tycho_block_util::dict::split_aug_dict;
 use tycho_block_util::state::*;
 use tycho_storage::fs::TempFileStorage;
 use tycho_storage::kv::StoredValue;
@@ -19,11 +19,109 @@ use weedb::rocksdb;
 
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
-use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb};
+use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CellsPartDb};
 
 mod cell_storage;
 mod entries_buffer;
 mod store_state_raw;
+
+use bumpalo::Bump;
+use dashmap::DashMap;
+
+use self::cell_storage::{CellStorage, CellStorageError};
+
+pub type StoragePartsMap = DashMap<ShardIdent, Arc<dyn ShardStateStoragePart>>;
+
+#[derive(Debug, Clone)]
+pub struct SplitAccountEntry {
+    pub shard: ShardIdent,
+    pub cell: Cell,
+}
+
+pub trait ShardStateStoragePart: Send + Sync {
+    fn shard(&self) -> ShardIdent;
+    fn cell_storage(&self) -> &Arc<CellStorage>;
+    fn store_accounts_subtree(
+        &self,
+        cell: &DynCell,
+        estimated_cell_count: usize,
+    ) -> Result<usize, CellStorageError>;
+    fn remove_accounts_subtree(&self, root_hash: &HashBytes) -> Result<usize, CellStorageError>;
+}
+
+pub struct ShardStateStoragePartImpl {
+    shard: ShardIdent,
+    cells_db: CellsPartDb,
+    cell_storage: Arc<CellStorage>,
+}
+
+impl ShardStateStoragePart for ShardStateStoragePartImpl {
+    fn shard(&self) -> ShardIdent {
+        self.shard
+    }
+
+    fn cell_storage(&self) -> &Arc<CellStorage> {
+        &self.cell_storage
+    }
+
+    fn store_accounts_subtree(
+        &self,
+        cell: &DynCell,
+        estimated_cell_count: usize,
+    ) -> Result<usize, CellStorageError> {
+        self.store_accounts_subtree_impl(cell, estimated_cell_count)
+    }
+
+    fn remove_accounts_subtree(&self, root_hash: &HashBytes) -> Result<usize, CellStorageError> {
+        self.remove_accounts_subtree_impl(root_hash)
+    }
+}
+
+impl ShardStateStoragePartImpl {
+    pub fn new(
+        shard: ShardIdent,
+        cells_db: CellsPartDb,
+        cache_size_bytes: ByteSize,
+        drop_interval: u32,
+        part_split_depth: u8,
+    ) -> Self {
+        let cell_storage = CellStorage::new_for_shard(
+            cells_db.clone(),
+            cache_size_bytes,
+            drop_interval,
+            shard,
+            part_split_depth,
+        );
+        Self {
+            shard,
+            cells_db,
+            cell_storage,
+        }
+    }
+
+    fn store_accounts_subtree_impl(
+        &self,
+        cell: &DynCell,
+        estimated_cell_count: usize,
+    ) -> Result<usize, CellStorageError> {
+        let mut batch = rocksdb::WriteBatch::default();
+        let new_cells = self
+            .cell_storage
+            .store_cell(&mut batch, cell, estimated_cell_count)?;
+        self.cells_db.rocksdb().write(batch)?;
+        Ok(new_cells)
+    }
+
+    fn remove_accounts_subtree_impl(
+        &self,
+        root_hash: &HashBytes,
+    ) -> Result<usize, CellStorageError> {
+        let bump = Bump::new();
+        let (removed, batch) = self.cell_storage.remove_cell(&bump, root_hash)?;
+        self.cells_db.rocksdb().write(batch)?;
+        Ok(removed)
+    }
+}
 
 pub struct ShardStateStorage {
     cells_db: CellsDb,
@@ -40,6 +138,11 @@ pub struct ShardStateStorage {
 
     accounts_split_depth: u8,
     states_gc_batch_size: usize,
+
+    /// The target split depth of shard accounts cells on partitions.
+    /// E.g. `3` -> `2^2=8` partitions
+    part_split_depth: u8,
+    storage_parts: Arc<StoragePartsMap>,
 }
 
 impl ShardStateStorage {
@@ -51,8 +154,23 @@ impl ShardStateStorage {
         temp_file_storage: TempFileStorage,
         cache_size_bytes: ByteSize,
         drop_interval: u32,
+        part_split_depth: u8,
+        storage_parts: Arc<StoragePartsMap>,
     ) -> Result<Arc<Self>> {
-        let cell_storage = CellStorage::new(cells_db.clone(), cache_size_bytes, drop_interval);
+        let expected_parts_count = if part_split_depth == 0 {
+            0
+        } else {
+            1usize << part_split_depth
+        };
+        assert_eq!(storage_parts.len(), expected_parts_count);
+
+        let cell_storage = CellStorage::new(
+            cells_db.clone(),
+            cache_size_bytes,
+            drop_interval,
+            part_split_depth,
+            Some(storage_parts.clone()),
+        );
 
         Ok(Arc::new(Self {
             cells_db,
@@ -66,6 +184,8 @@ impl ShardStateStorage {
             max_new_sc_cell_count: AtomicUsize::new(0),
             accounts_split_depth: 4,
             states_gc_batch_size: 2,
+            part_split_depth,
+            storage_parts,
         }))
     }
 
@@ -103,6 +223,7 @@ impl ShardStateStorage {
             .await
     }
 
+    #[tracing::instrument(skip_all, fields(block_id = %handle.id().as_short_id()))]
     pub async fn store_state_root(
         &self,
         handle: &BlockHandle,
@@ -130,7 +251,14 @@ impl ShardStateStorage {
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
-        let accounts_split_depth = self.accounts_split_depth;
+
+        // split accounts to store in partitions
+        // otherwise split to store in parallel
+        let accounts_split_depth = if self.part_split_depth > 0 {
+            self.part_split_depth
+        } else {
+            self.accounts_split_depth
+        };
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
@@ -149,7 +277,10 @@ impl ShardStateStorage {
                     estimated_merkle_update_size,
                 )?
             } else {
-                let split_at = split_shard_accounts(&root_cell, accounts_split_depth)?;
+                let split_at =
+                    split_shard_accounts(&block_id.shard, &root_cell, accounts_split_depth)?;
+
+                tracing::debug!(accounts_split_depth, ?split_at);
 
                 cell_storage.store_cell_mt(
                     root_cell.as_ref(),
@@ -224,6 +355,7 @@ impl ShardStateStorage {
     // knowing its `min_ref_mc_seqno` which can only be found out by
     // parsing the state. Creating a "Brief State" struct won't work either
     // because due to model complexity it is going to be error-prone.
+    #[tracing::instrument(skip_all, fields(block_id = %block_id.as_short_id()))]
     pub async fn load_state(
         &self,
         ref_by_mc_seqno: u32,
@@ -234,12 +366,22 @@ impl ShardStateStorage {
 
         let root_hash = self.load_state_root_hash(block_id)?;
         let root = self.cell_storage.load_cell(&root_hash, ref_by_mc_seqno)?;
-        let root = Cell::from(root as Arc<_>);
+        let mut root = Cell::from(root as Arc<_>);
 
         let max_known_epoch = MAX_KNOWN_EPOCH
             .fetch_max(ref_by_mc_seqno, Ordering::Relaxed)
             .max(ref_by_mc_seqno);
         metrics::gauge!("tycho_storage_state_max_epoch").set(max_known_epoch);
+
+        if !block_id.shard.is_masterchain() {
+            init_shard_partitions_router(
+                &mut root,
+                &self.cell_storage,
+                ref_by_mc_seqno,
+                &block_id.shard,
+                self.part_split_depth,
+            )?;
+        }
 
         let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
         let handle = self.min_ref_mc_state.insert(&shard_state);
@@ -355,9 +497,10 @@ impl ShardStateStorage {
                     if !block_id.is_masterchain() {
                         let root_cell = Cell::from(cell_storage.load_cell(root, 0)? as Arc<_>);
 
-                        let hashes = split_shard_accounts(root_cell, accounts_split_depth)?
-                            .into_keys()
-                            .collect::<FastHashSet<HashBytes>>();
+                        let hashes =
+                            split_shard_accounts(&block_id.shard, root_cell, accounts_split_depth)?
+                                .into_keys()
+                                .collect::<FastHashSet<HashBytes>>();
 
                         split_at.extend(hashes);
                     }
@@ -540,9 +683,10 @@ pub enum ShardStateStorageError {
 }
 
 fn split_shard_accounts(
+    state_shard: &ShardIdent,
     root_cell: impl AsRef<DynCell>,
     split_depth: u8,
-) -> Result<FastHashMap<HashBytes, Cell>> {
+) -> Result<FastHashMap<HashBytes, SplitAccountEntry>> {
     // Cell#0 - processed_upto
     // Cell#1 - accounts
     let shard_accounts = root_cell
@@ -552,5 +696,50 @@ fn split_shard_accounts(
         .parse::<ShardAccounts>()
         .context("failed to load shard accounts")?;
 
-    split_aug_dict_raw(shard_accounts, split_depth).context("failed to split shard accounts")
+    let shards = split_aug_dict(state_shard.workchain(), shard_accounts, split_depth)
+        .context("failed to split shard accounts")?;
+
+    let mut result = FastHashMap::default();
+
+    for (shard, dict) in shards {
+        let (dict, _) = dict.into_parts();
+        if let Some(cell) = dict.into_root() {
+            result.insert(*cell.repr_hash(), SplitAccountEntry { shard, cell });
+        }
+    }
+
+    Ok(result)
+}
+
+#[tracing::instrument(skip_all)]
+fn init_shard_partitions_router(
+    root_cell: &mut Cell,
+    cell_storage: &Arc<CellStorage>,
+    ref_by_mc_seqno: u32,
+    state_shard: &ShardIdent,
+    part_split_depth: u8,
+) -> Result<()> {
+    if part_split_depth == 0 {
+        return Ok(());
+    }
+
+    // split shard accounts to load root cells for each partition subtree
+    let split_at: FastHashMap<_, _> =
+        split_shard_accounts(state_shard, &root_cell, part_split_depth)?
+            .into_iter()
+            .map(|(hash, SplitAccountEntry { shard, .. })| (hash, shard))
+            .collect();
+
+    tracing::debug!(part_split_depth, ?split_at);
+
+    // reload state root cell with shard router
+    let cell = cell_storage.load_cell_ext(
+        root_cell.repr_hash(),
+        ref_by_mc_seqno,
+        CellShardRouter::ChildIsShardAccountsRoot(1, Arc::new(split_at)),
+    )?;
+
+    *root_cell = Cell::from(cell as Arc<_>);
+
+    Ok(())
 }
