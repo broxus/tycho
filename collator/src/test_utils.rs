@@ -1,7 +1,11 @@
+use std::fs::{self};
+use std::io::Write;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -14,8 +18,9 @@ use tycho_storage::StorageContext;
 use tycho_types::boc::{Boc, BocRepr};
 use tycho_types::cell::CellBuilder;
 use tycho_types::models::{Block, BlockId, ShardStateUnsplit};
+use tycho_util::compression::zstd_decompress_simple;
 
-use crate::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
+use crate::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use crate::internal_queue::state::storage::QueueStateImplFactory;
 use crate::internal_queue::types::InternalMessageValue;
 use crate::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
@@ -164,4 +169,152 @@ pub async fn create_test_queue_adapter<V: InternalMessageValue>()
     let queue = queue_factory.create()?;
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
     Ok((Arc::new(message_queue_adapter), tmp_dir))
+}
+
+#[allow(clippy::disallowed_methods)]
+pub async fn load_storage_from_dump<V: InternalMessageValue>(
+    dump_path: &Path,
+) -> Result<(
+    CoreStorage,
+    Arc<dyn MessageQueueAdapter<V>>,
+    tempfile::TempDir,
+    BlockId,
+)> {
+    let (ctx, temp_dir) = tycho_storage::StorageContext::new_temp().await?;
+    let storage = CoreStorage::open(
+        ctx.clone(),
+        tycho_core::storage::CoreStorageConfig::new_potato(),
+    )
+    .await?;
+
+    let mut latest_mc_block_id: Option<BlockId> = None;
+
+    let queue_factory = QueueFactoryStdImpl {
+        state: QueueStateImplFactory::new(ctx)?,
+        config: QueueConfig {
+            gc_interval: Duration::from_secs(1),
+        },
+    };
+    let queue_handler = &queue_factory.state.storage;
+
+    for entry in std::fs::read_dir(dump_path)? {
+        let path = entry?.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("block") {
+            let filename = path.file_stem().unwrap().to_string_lossy();
+            let block_id_str = filename.replace('_', ":");
+            let block_id = BlockId::from_str(&block_id_str)?;
+
+            let block_boc = tokio::fs::read(&path).await?;
+            let root = Boc::decode(block_boc)?;
+            let block: Block = root.parse()?;
+            let block_stuff = BlockStuff::from_block_and_root(&block_id, block, root, 0);
+
+            let info = block_stuff.load_info()?;
+            let meta = tycho_core::storage::NewBlockMeta {
+                is_key_block: info.key_block,
+                gen_utime: info.gen_utime,
+                ref_by_mc_seqno: info.min_ref_mc_seqno,
+            };
+            storage
+                .block_storage()
+                .store_block_data(&block_stuff, &ArchiveData::New(Default::default()), meta)
+                .await?;
+
+            if block_id.is_masterchain()
+                && (latest_mc_block_id.is_none()
+                    || block_id.seqno > latest_mc_block_id.unwrap().seqno)
+            {
+                latest_mc_block_id = Some(block_id);
+            }
+        }
+    }
+
+    let persistents_path = dump_path.join("persistents");
+    if persistents_path.is_dir() {
+        for entry in std::fs::read_dir(persistents_path)? {
+            let path = entry?.path();
+            let block_id_str = path.file_stem().unwrap().to_string_lossy();
+            let block_id = BlockId::from_str(&block_id_str)?;
+
+            // Read compressed file and decompress it
+            let compressed_data = std::fs::read(&path)?;
+            let decompressed_data = zstd_decompress_simple(&compressed_data)
+                .context(format!("Failed to decompress state file for {}", block_id))?;
+
+            let temp_path = path.with_extension("tempfile");
+            let mut tempfile = std::fs::File::create(&temp_path)?;
+            tempfile.write_all(&decompressed_data)?;
+            drop(tempfile); // Close the write handle
+
+            // Reopen the file for reading
+            let tempfile = std::fs::File::open(&temp_path)?;
+            storage
+                .shard_state_storage()
+                .store_state_file(&block_id, tempfile)
+                .await?;
+            fs::remove_file(path.with_extension("tempfile"))?;
+        }
+    }
+
+    // Process queue files after all blocks and states are loaded
+    let queues_path = dump_path.join("queues");
+    if queues_path.is_dir() {
+        // Collect queue files and sort them by sequence number to ensure proper order
+        let mut queue_files = Vec::new();
+        for entry in std::fs::read_dir(queues_path)? {
+            let path = entry?.path();
+            let block_id_str = path.file_stem().unwrap().to_string_lossy();
+            if let Ok(block_id) = BlockId::from_str(&block_id_str) {
+                queue_files.push((block_id, path));
+            }
+        }
+
+        // Sort by sequence number to process in order
+        queue_files.sort_by_key(|(block_id, _)| block_id.seqno);
+
+        for (block_id, path) in queue_files {
+            // Check if the block exists in storage first
+            if let Some(handle) = storage.block_handle_storage().load_handle(&block_id) {
+                let block = storage.block_storage().load_block_data(&handle).await?;
+                let top_update = &block.block().out_msg_queue_updates;
+
+                // Read compressed file and decompress it
+                let compressed_data = std::fs::read(&path)?;
+                let decompressed_data = zstd_decompress_simple(&compressed_data)
+                    .context(format!("Failed to decompress state file for {}", block_id))?;
+
+                let temp_path = path.with_extension("tempfile");
+                let mut tempfile = std::fs::File::create(&temp_path)?;
+                tempfile.write_all(&decompressed_data)?;
+                drop(tempfile); // Close the write handle
+
+                let file = std::fs::File::open(temp_path)?;
+                queue_handler
+                    .import_from_file(top_update, file, block_id)
+                    .await?;
+                tracing::debug!("Imported queue data for block {}", block_id);
+
+                fs::remove_file(path.with_extension("tempfile"))?;
+            } else {
+                tracing::debug!(
+                    "Skipping queue data for block {} - block not found in storage",
+                    block_id
+                );
+            }
+        }
+    }
+
+    let latest_mc_block_id = latest_mc_block_id.context("No master block found in dump")?;
+    storage
+        .node_state()
+        .store_last_mc_block_id(&latest_mc_block_id);
+
+    let queue = queue_factory.create()?;
+    let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
+    Ok((
+        storage,
+        Arc::new(message_queue_adapter),
+        temp_dir,
+        latest_mc_block_id,
+    ))
 }
