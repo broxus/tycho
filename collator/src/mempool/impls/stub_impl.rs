@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use bumpalo::Bump;
 use humantime::format_duration;
 use parking_lot::RwLock;
 use rand::Rng;
@@ -44,8 +45,9 @@ impl MempoolAdapterStubImpl {
     pub fn with_externals_from_dir(
         listener: Arc<dyn MempoolEventListener>,
         dir_path: impl AsRef<Path>,
+        first_anchor_id: Option<u32>,
     ) -> Result<Arc<Self>> {
-        Self::with_generator(listener, None, move |a| {
+        Self::with_generator(listener, first_anchor_id, move |a| {
             let mut paths = std::fs::read_dir(dir_path)?
                 .map(|res| res.map(|e| e.path()))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -78,6 +80,19 @@ impl MempoolAdapterStubImpl {
         start(adapter.clone())?;
 
         Ok(adapter)
+    }
+
+    pub fn with_anchors_from_dump(
+        listener: Arc<dyn MempoolEventListener>,
+        first_anchor_id: u32,
+        anchors_path: PathBuf,
+    ) -> Result<Arc<Self>> {
+        Self::with_generator(listener.clone(), Some(first_anchor_id), {
+            move |a| {
+                tokio::spawn(Self::anchors_generator(a, anchors_path));
+                Ok(())
+            }
+        })
     }
 
     #[tracing::instrument(skip_all)]
@@ -117,6 +132,112 @@ impl MempoolAdapterStubImpl {
 
             self.listener.on_new_anchor(anchor).await.unwrap();
         }
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn anchors_generator(self: Arc<Self>, anchors_path: PathBuf) {
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "started");
+        defer! {
+            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
+        }
+
+        let mut file_map: BTreeMap<MempoolAnchorId, PathBuf> = BTreeMap::new();
+        if anchors_path.exists()
+            && let Ok(entries) = std::fs::read_dir(&anchors_path)
+        {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if let Some(anchor_id) = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.strip_prefix("anchor_"))
+                    .and_then(|f| f.split('_').next())
+                    && let Ok(anchor_id) = anchor_id.parse::<MempoolAnchorId>()
+                {
+                    file_map.insert(anchor_id, path);
+                }
+            }
+        }
+
+        let mut prev_anchor_id = self.first_anchor_id.unwrap_or_default();
+        let start_anchor_id = prev_anchor_id + 1;
+        for anchor_id in start_anchor_id.. {
+            if self.sleep_between_anchors.load(Ordering::Acquire) {
+                tokio::time::sleep(make_round_interval() * 4).await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            let anchor = if let Some(filepath) = file_map.get(&anchor_id) {
+                let filename = filepath.file_name().unwrap().to_str().unwrap();
+                let parts: Vec<&str> = filename.split('_').collect();
+                let chain_time: u64 = parts[2].parse().unwrap();
+                let point_bytes = std::fs::read(filepath).unwrap();
+                self.load_anchor_from_file(anchor_id, chain_time, point_bytes, prev_anchor_id)
+                    .await
+                    .ok()
+            } else {
+                None
+            };
+
+            let anchor = anchor.unwrap_or_else(|| {
+                let read = self.anchors_cache.read();
+                let chain_time = read
+                    .get(&prev_anchor_id)
+                    .map(|prev_anchor| prev_anchor.chain_time)
+                    .unwrap_or_default();
+                make_empty_anchor(anchor_id, prev_anchor_id, chain_time + 1336)
+            });
+
+            prev_anchor_id = anchor_id;
+
+            self.anchors_cache.write().insert(anchor_id, anchor.clone());
+
+            tracing::debug!(
+                target: tracing_targets::MEMPOOL_ADAPTER,
+                anchor_id = anchor.id,
+                chain_time = anchor.chain_time,
+                externals = anchor.externals.len(),
+                "anchor added to cache from file",
+            );
+
+            self.listener.on_new_anchor(anchor).await.unwrap();
+        }
+    }
+
+    async fn load_anchor_from_file(
+        &self,
+        anchor_id: MempoolAnchorId,
+        chain_time: u64,
+        point_bytes: Vec<u8>,
+        prev_anchor_id: MempoolAnchorId,
+    ) -> Result<Arc<MempoolAnchor>> {
+        use tycho_consensus::prelude::Point;
+        let bump = Bump::new();
+        let payload = Point::read_payload_from_tl_bytes(&point_bytes, &bump).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse payload for anchor {} with error: {e}",
+                anchor_id
+            )
+        })?;
+
+        let mut externals = Vec::new();
+        for msg_bytes in payload {
+            if let Ok(cell) = Boc::decode_base64(msg_bytes) {
+                let message: Message<'_> = cell.parse()?;
+                if let MsgInfo::ExtIn(info) = message.info {
+                    externals.push(Arc::new(ExternalMessage { cell, info }));
+                }
+            }
+        }
+
+        Ok(Arc::new(MempoolAnchor {
+            id: anchor_id,
+            prev_id: Some(prev_anchor_id),
+            author: PeerId(Default::default()),
+            chain_time,
+            externals,
+        }))
     }
 
     #[tracing::instrument(skip_all)]

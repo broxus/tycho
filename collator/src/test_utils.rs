@@ -304,6 +304,19 @@ pub async fn load_storage_from_dump<V: InternalMessageValue>(
         }
     }
 
+    // Copy mempool files
+    let dump_mempool_path = dump_path.join("mempool");
+    let mempool_dir = storage.context().root_dir().create_subdir("mempool")?;
+    if dump_mempool_path.is_dir() {
+        for entry in std::fs::read_dir(dump_mempool_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                std::fs::copy(&path, mempool_dir.path().join(entry.file_name()))?;
+            }
+        }
+    }
+
     let latest_mc_block_id = latest_mc_block_id.context("No master block found in dump")?;
     storage
         .node_state()

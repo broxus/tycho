@@ -1,10 +1,15 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::u32;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
+use tycho_block_util::state::ShardStateStuff;
+use tycho_collator::mempool::MempoolAnchorId;
+use tycho_collator::types::McData;
+use tycho_consensus::prelude::{MempoolDb, RoundWatch};
 use tycho_core::node::ConfiguredStorage;
 use tycho_core::storage::{
     BlockConnection, CoreStorage, CoreStorageConfig, QueueStateWriter, ShardStateWriter,
@@ -99,9 +104,12 @@ impl Cmd {
 
         // Dump master block and its state
         println!("Dumping master block and state...");
-        dumper.dump_block_and_state(&master_block_id).await?;
+        let master_state = dumper.dump_block_and_state(&master_block_id).await?;
+        let mc_data = McData::load_from_state(&master_state, Default::default())?;
+        let top_processed_to_anchor = mc_data.top_processed_to_anchor;
 
         let master_block = dumper.load_block_stuff(&master_block_id).await?;
+
         let shards = master_block.load_custom()?.shards.latest_blocks();
 
         println!("Dumping top shard blocks, states and queues...");
@@ -136,6 +144,10 @@ impl Cmd {
             }
         }
 
+        // Dump mempool state
+        println!("Dumping mempool state...");
+        dumper.dump_mempool_state(top_processed_to_anchor).await?;
+
         println!("Dump completed successfully to: {}", self.output.display());
 
         Ok(())
@@ -148,7 +160,7 @@ struct Dumper {
 }
 
 impl Dumper {
-    async fn dump_block_and_state(&self, block_id: &BlockId) -> Result<()> {
+    async fn dump_block_and_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
         println!("Dumping data for block {}", block_id);
         if let Err(e) = self.dump_block_data(block_id).await {
             if block_id.seqno == 0 {
@@ -160,8 +172,7 @@ impl Dumper {
                 return Err(e);
             }
         }
-        self.dump_persistent_state(block_id).await?;
-        Ok(())
+        self.dump_persistent_state(block_id).await
     }
 
     async fn dump_block_data(&self, block_id: &BlockId) -> Result<()> {
@@ -177,7 +188,7 @@ impl Dumper {
         Ok(())
     }
 
-    async fn dump_persistent_state(&self, block_id: &BlockId) -> Result<()> {
+    async fn dump_persistent_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
         let writer = ShardStateWriter::new(self.storage.cells_db(), &dir, block_id);
         let ref_by_mc_seqno = self
@@ -196,7 +207,7 @@ impl Dumper {
             .write(state.root_cell().repr_hash(), None)
             .context(format!("Failed to write state for {}", block_id))?;
         println!(" - Persistent state saved");
-        Ok(())
+        Ok(state)
     }
 
     async fn dump_queue_state(&self, block_id: &BlockId) -> Result<()> {
@@ -330,5 +341,49 @@ impl Dumper {
             .load_handle(block_id)
             .context(format!("Failed to load handle for block {}", block_id))?;
         self.storage.block_storage().load_block_data(&handle).await
+    }
+
+    async fn dump_mempool_state(&self, top_processed_to_anchor: MempoolAnchorId) -> Result<()> {
+        use tycho_consensus::prelude::{
+            MempoolAdapterStore, PointRestore, PointRestoreSelect, Round,
+        };
+
+        let mempool_db = MempoolDb::open(self.storage.context().clone(), RoundWatch::default())
+            .context("failed to create mempool adapter storage")?;
+
+        let mempool_path = self.storage.context().root_dir().path().join("mempool");
+        if !mempool_path.exists() {
+            println!(" - Mempool files directory does not exist, skipping");
+            return Ok(());
+        }
+        // Extract and save anchors to files
+        let anchors_output_dir = self.output_dir.path().join("mempool");
+        std::fs::create_dir_all(&anchors_output_dir)?;
+
+        let adapter = MempoolAdapterStore::new(mempool_db);
+        let restores = adapter.load_restore(&(Round(top_processed_to_anchor)..=Round(u32::MAX)));
+
+        for select in restores {
+            if let PointRestoreSelect::Ready(ready) = select {
+                match ready {
+                    PointRestore::Validated(info, _status) => {
+                        let anchor_id = info.round().0;
+                        let chain_time = info.time();
+                        let filename = format!("anchor_{anchor_id}_{chain_time}.txt");
+                        let filepath = anchors_output_dir.join(&filename);
+
+                        if let Some(point_bytes) =
+                            adapter.get_point_raw(info.round(), info.digest())
+                        {
+                            std::fs::write(&filepath, &point_bytes)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        println!(" - Mempool state saved with anchors extracted");
+        Ok(())
     }
 }
