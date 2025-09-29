@@ -1,3 +1,4 @@
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use ahash::{HashMapExt, HashSetExt};
@@ -8,9 +9,11 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{ReadOptions, WriteBatch};
 
-use super::{POINT_KEY_LEN, fill_point_key, fill_point_prefix, format_point_key};
+use super::{Digest, POINT_KEY_LEN, fill_point_key, fill_point_prefix, format_point_key};
 use crate::effects::AltFormat;
-use crate::models::{Point, PointInfo, PointStatus, PointStatusValidated, Round};
+use crate::models::{
+    Point, PointInfo, PointRestoreSelect, PointStatus, PointStatusValidated, Round,
+};
 use crate::storage::MempoolDb;
 
 #[derive(Clone)]
@@ -69,6 +72,18 @@ impl MempoolAdapterStore {
         // commit is finished when history payloads is read from DB and marked committed,
         // so that data may be removed consistently with any settings
         self.0.commit_finished.set_max(anchor_round);
+    }
+
+    pub fn get_point_raw(&self, round: Round, digest: &Digest) -> Option<bytes::Bytes> {
+        use crate::storage::MempoolStore;
+        let store = MempoolStore::new(self.0.clone());
+        store.get_point_raw(round, digest)
+    }
+
+    pub fn load_restore(&self, range: &RangeInclusive<Round>) -> Vec<PointRestoreSelect> {
+        use crate::storage::MempoolStore;
+        let store = MempoolStore::new(self.0.clone());
+        store.load_restore(range)
     }
 
     pub fn expand_anchor_history_arena_size(&self, history: &[PointInfo]) -> usize {
