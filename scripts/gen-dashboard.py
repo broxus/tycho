@@ -1735,6 +1735,46 @@ def collator_time_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_collator_reader_state_externals_clone_time",
+            "Reader state externals clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_reader_state_internals_clone_time",
+            "Reader state internals clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_externals_ranges_clone_time",
+            "Externals ranges clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_externals_partitions_clone_time",
+            "Externals partitions clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_internals_partitions_clone_time",
+            "Internals partitions clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_internals_stats_clone_time",
+            "Internals stats clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_messages_buffer_msgs_clone_time",
+            "Messages buffer msgs clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_messages_buffer_index_clone_time",
+            "Messages buffer index clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_collator_import_next_anchor_time_high",
             "Import next anchor time",
             labels=['workchain=~"$workchain"'],
