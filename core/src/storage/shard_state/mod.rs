@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Cursor;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -16,6 +16,7 @@ use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::sync::rayon_run;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
@@ -39,8 +40,10 @@ pub struct ShardStateStorage {
     min_ref_mc_state: MinRefMcStateTracker,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
+    updated_accounts_count: AtomicU64,
 
     accounts_split_depth: u8,
+    store_shard_state_step: u32,
 }
 
 impl ShardStateStorage {
@@ -52,6 +55,7 @@ impl ShardStateStorage {
         temp_file_storage: TempFileStorage,
         cache_size_bytes: ByteSize,
         drop_interval: u32,
+        store_shard_state_step: u32,
     ) -> Result<Arc<Self>> {
         let cell_storage = CellStorage::new(cells_db.clone(), cache_size_bytes, drop_interval);
 
@@ -61,11 +65,13 @@ impl ShardStateStorage {
             block_storage,
             temp_file_storage,
             cell_storage,
+            store_shard_state_step,
             gc_lock: Default::default(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
-            accounts_split_depth: 4,
+            updated_accounts_count: AtomicU64::new(0),
+            accounts_split_depth: 5,
         }))
     }
 
@@ -132,6 +138,29 @@ impl ShardStateStorage {
         if handle.has_state() {
             return Ok(false);
         }
+
+        const UPDATED_ACCOUNTS_LIMIT: u64 = 15_000; // Value was obtained empirically
+
+        let mut should_store = handle.is_masterchain()  // Store all masterchain states
+            || handle.id().seqno.is_multiple_of(self.store_shard_state_step); // Regular checkpoint
+
+        if let Some(updated_accounts) = hint.updated_accounts {
+            let old_total = self
+                .updated_accounts_count
+                .fetch_add(updated_accounts, Ordering::Release);
+            let new_total = old_total.saturating_add(updated_accounts);
+
+            if new_total >= UPDATED_ACCOUNTS_LIMIT {
+                // Large diff
+                should_store = true;
+                self.updated_accounts_count.store(0, Ordering::Release);
+            }
+        }
+
+        if !should_store {
+            return Ok(false);
+        }
+
         let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
 
         let block_id = *handle.id();
@@ -246,7 +275,7 @@ impl ShardStateStorage {
     // knowing its `min_ref_mc_seqno` which can only be found out by
     // parsing the state. Creating a "Brief State" struct won't work either
     // because due to model complexity it is going to be error-prone.
-    pub async fn load_state(
+    pub async fn direct_load_state(
         &self,
         ref_by_mc_seqno: u32,
         block_id: &BlockId,
@@ -268,6 +297,57 @@ impl ShardStateStorage {
         ShardStateStuff::from_state_and_root(block_id, shard_state, root, handle)
     }
 
+    pub async fn load_state(
+        &self,
+        mut ref_by_mc_seqno: u32,
+        block_id: &BlockId,
+    ) -> Result<ShardStateStuff> {
+        // Collect chain of state updates for non-masterchain blocks
+        let mut chain = Vec::new();
+        let mut current_block_id = *block_id;
+
+        if !block_id.is_masterchain() {
+            while !current_block_id
+                .seqno
+                .is_multiple_of(self.store_shard_state_step)
+                || !self.is_state_exist(&current_block_id)?
+            {
+                let handle = self
+                    .block_handle_storage
+                    .load_handle(&current_block_id)
+                    .ok_or(ShardStateStorageError::BlockHandleNotFound(
+                        block_id.as_short_id(),
+                    ))?;
+
+                ref_by_mc_seqno = ref_by_mc_seqno.min(handle.meta().ref_by_mc_seqno());
+
+                let block = self.block_storage.load_block_data(&handle).await?;
+                chain.push((current_block_id, block.block().state_update.load()?));
+
+                let (prev_id, _prev_id_alt) = block.construct_prev_id()?;
+                current_block_id = prev_id; // TODO: split/merge case
+            }
+        }
+
+        let mut state = self
+            .direct_load_state(ref_by_mc_seqno, &current_block_id)
+            .await?;
+
+        // Apply state updates
+        while let Some((block_id, merkle_update)) = chain.pop() {
+            let prev_block_id = *state.block_id();
+            state = rayon_run({
+                move || state.par_make_next_state(&block_id, &merkle_update, Some(5))
+            })
+            .await
+            .with_context(|| {
+                format!("failed to apply merkle of block {block_id} to {prev_block_id}")
+            })?;
+        }
+
+        Ok(state)
+    }
+
     pub fn load_state_root_hash(&self, block_id: &BlockId) -> Result<HashBytes> {
         let shard_states = &self.cells_db.shard_states;
         let shard_state = shard_states.get(block_id.to_vec())?;
@@ -277,6 +357,11 @@ impl ShardStateStorage {
                 anyhow::bail!(ShardStateStorageError::NotFound(block_id.as_short_id()))
             }
         }
+    }
+
+    pub fn is_state_exist(&self, block_id: &BlockId) -> Result<bool> {
+        let shard_states = &self.cells_db.shard_states;
+        Ok(shard_states.get(block_id.to_vec())?.is_some())
     }
 
     #[tracing::instrument(skip(self))]
@@ -492,11 +577,16 @@ impl ShardStateStorage {
 
         Ok(iter.key().map(BlockId::from_slice))
     }
+
+    pub fn store_shard_state_step(&self) -> u32 {
+        self.store_shard_state_step
+    }
 }
 
 #[derive(Default, Debug, Clone, Copy)]
 pub struct StoreStateHint {
     pub block_data_size: Option<usize>,
+    pub updated_accounts: Option<u64>,
 }
 
 impl StoreStateHint {
@@ -526,6 +616,8 @@ pub enum ShardStateStorageError {
         expected: BlockIdShort,
         actual: BlockIdShort,
     },
+    #[error("Shard handle not found for block: {0}")]
+    BlockHandleNotFound(BlockIdShort),
 }
 
 pub fn split_shard_accounts(

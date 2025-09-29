@@ -1040,9 +1040,17 @@ impl CollatorStdImpl {
             };
             let adapter = self.state_node_adapter.clone();
             let new_state_root = finalized.new_state_root.clone();
+
             let hint = StoreStateHint {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
+                updated_accounts: Some(finalized.collation_data.updated_accounts_count),
             };
+
+            adapter.accept_shard_block(
+                finalized.block_candidate.ref_by_mc_seqno,
+                finalized.block_candidate.block.data.clone(),
+            )?;
+
             async move {
                 adapter
                     .store_state_root(&block_id, meta, new_state_root, hint)

@@ -88,6 +88,7 @@ impl CoreStorage {
             ctx.temp_files().clone(),
             config.cells_cache_size,
             config.drop_interval,
+            config.store_shard_state_step,
         )?;
         let persistent_state_storage = PersistentStateStorage::new(
             cells_db.clone(),
