@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use bumpalo::Bump;
 use humantime::format_duration;
 use parking_lot::RwLock;
 use rand::Rng;
@@ -168,14 +167,9 @@ impl MempoolAdapterStubImpl {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
-            let anchor = if let Some(filepath) = file_map.get(&anchor_id) {
-                let filename = filepath.file_name().unwrap().to_str().unwrap();
-                let parts: Vec<&str> = filename.split('_').collect();
-                let chain_time: u64 = parts[2].parse().unwrap();
-                let point_bytes = std::fs::read(filepath).unwrap();
-                self.load_anchor_from_file(anchor_id, chain_time, point_bytes, prev_anchor_id)
-                    .await
-                    .ok()
+            let anchor = if let Some(_filepath) = file_map.get(&anchor_id) {
+                // TODO: read from file in future
+                None
             } else {
                 None
             };
@@ -203,41 +197,6 @@ impl MempoolAdapterStubImpl {
 
             self.listener.on_new_anchor(anchor).await.unwrap();
         }
-    }
-
-    async fn load_anchor_from_file(
-        &self,
-        anchor_id: MempoolAnchorId,
-        chain_time: u64,
-        point_bytes: Vec<u8>,
-        prev_anchor_id: MempoolAnchorId,
-    ) -> Result<Arc<MempoolAnchor>> {
-        use tycho_consensus::prelude::Point;
-        let bump = Bump::new();
-        let payload = Point::read_payload_from_tl_bytes(&point_bytes, &bump).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to parse payload for anchor {} with error: {e}",
-                anchor_id
-            )
-        })?;
-
-        let mut externals = Vec::new();
-        for msg_bytes in payload {
-            if let Ok(cell) = Boc::decode_base64(msg_bytes) {
-                let message: Message<'_> = cell.parse()?;
-                if let MsgInfo::ExtIn(info) = message.info {
-                    externals.push(Arc::new(ExternalMessage { cell, info }));
-                }
-            }
-        }
-
-        Ok(Arc::new(MempoolAnchor {
-            id: anchor_id,
-            prev_id: Some(prev_anchor_id),
-            author: PeerId(Default::default()),
-            chain_time,
-            externals,
-        }))
     }
 
     #[tracing::instrument(skip_all)]

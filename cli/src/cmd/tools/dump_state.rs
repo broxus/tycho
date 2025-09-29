@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::u32;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -9,7 +8,6 @@ use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_collator::mempool::MempoolAnchorId;
 use tycho_collator::types::McData;
-use tycho_consensus::prelude::{MempoolDb, RoundWatch};
 use tycho_core::node::ConfiguredStorage;
 use tycho_core::storage::{
     BlockConnection, CoreStorage, CoreStorageConfig, QueueStateWriter, ShardStateWriter,
@@ -343,47 +341,8 @@ impl Dumper {
         self.storage.block_storage().load_block_data(&handle).await
     }
 
-    async fn dump_mempool_state(&self, top_processed_to_anchor: MempoolAnchorId) -> Result<()> {
-        use tycho_consensus::prelude::{
-            MempoolAdapterStore, PointRestore, PointRestoreSelect, Round,
-        };
-
-        let mempool_db = MempoolDb::open(self.storage.context().clone(), RoundWatch::default())
-            .context("failed to create mempool adapter storage")?;
-
-        let mempool_path = self.storage.context().root_dir().path().join("mempool");
-        if !mempool_path.exists() {
-            println!(" - Mempool files directory does not exist, skipping");
-            return Ok(());
-        }
-        // Extract and save anchors to files
-        let anchors_output_dir = self.output_dir.path().join("mempool");
-        std::fs::create_dir_all(&anchors_output_dir)?;
-
-        let adapter = MempoolAdapterStore::new(mempool_db);
-        let restores = adapter.load_restore(&(Round(top_processed_to_anchor)..=Round(u32::MAX)));
-
-        for select in restores {
-            if let PointRestoreSelect::Ready(ready) = select {
-                match ready {
-                    PointRestore::Validated(info, _status) => {
-                        let anchor_id = info.round().0;
-                        let chain_time = info.time();
-                        let filename = format!("anchor_{anchor_id}_{chain_time}.txt");
-                        let filepath = anchors_output_dir.join(&filename);
-
-                        if let Some(point_bytes) =
-                            adapter.get_point_raw(info.round(), info.digest())
-                        {
-                            std::fs::write(&filepath, &point_bytes)?;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        println!(" - Mempool state saved with anchors extracted");
+    async fn dump_mempool_state(&self, _top_processed_to_anchor: MempoolAnchorId) -> Result<()> {
+        // TODO: Implement dumping mempool state
         Ok(())
     }
 }

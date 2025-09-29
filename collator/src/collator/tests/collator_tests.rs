@@ -686,11 +686,11 @@ impl DumpStateTestCollationManager {
             .await?;
         let mc_data = McData::load_from_state(&mc_state, Default::default())?;
 
-        let mempool_adapter = MempoolAdapterStubImpl::with_anchors_from_dump(
+        let mempool_adapter = MempoolAdapterStubImpl::with_stub_externals(
             Arc::new(MempoolEventStubListener),
-            mc_data.top_processed_to_anchor,
-            storage.context().clone().root_dir().path().join("mempool"),
-        )?;
+            Some(mc_data.gen_chain_time),
+            Some(mc_data.top_processed_to_anchor),
+        );
 
         let counter = Arc::new(AtomicUsize::new(0));
 
