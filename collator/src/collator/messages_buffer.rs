@@ -27,7 +27,7 @@ pub struct MessagesBufferLimits {
 
 #[derive(Default, Clone)]
 pub struct MessagesBuffer {
-    msgs: FastIndexMap<HashBytes, VecDeque<Box<ParsedMessage>>>,
+    msgs: FastIndexMap<HashBytes, VecDeque<ParsedMessage>>,
     int_count: usize,
     ext_count: usize,
     sorted_index: BTreeMap<usize, FastHashSet<HashBytes>>,
@@ -35,6 +35,43 @@ pub struct MessagesBuffer {
 }
 
 impl MessagesBuffer {
+    /// Clone with detailed timing metrics
+    pub fn clone_with_metrics(&self, labels: &[(&str, String)]) -> Self {
+        let msgs_start = std::time::Instant::now();
+        let msgs = self.msgs.clone();
+        let msgs_elapsed = msgs_start.elapsed();
+
+        let index_start = std::time::Instant::now();
+        let sorted_index = self.sorted_index.clone();
+        let index_elapsed = index_start.elapsed();
+
+        // Convert labels to Vec to avoid lifetime issues
+        let labels_vec: Vec<(String, String)> = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+
+        // Record metrics using the same pattern as other metrics in the codebase
+        metrics::histogram!(
+            "tycho_collator_messages_buffer_msgs_clone_time",
+            &labels_vec
+        )
+        .record(msgs_elapsed.as_millis() as f64);
+        metrics::histogram!(
+            "tycho_collator_messages_buffer_index_clone_time",
+            &labels_vec
+        )
+        .record(index_elapsed.as_millis() as f64);
+
+        Self {
+            msgs,
+            int_count: self.int_count,
+            ext_count: self.ext_count,
+            sorted_index,
+            min_ext_chain_time: None,
+        }
+    }
+
     pub fn account_messages_count(&self, account_id: &HashBytes) -> usize {
         self.msgs
             .get(account_id)
@@ -59,24 +96,25 @@ impl MessagesBuffer {
         self.min_ext_chain_time.unwrap_or(u64::MAX)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&HashBytes, &VecDeque<Box<ParsedMessage>>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&HashBytes, &VecDeque<ParsedMessage>)> {
         self.msgs.iter()
     }
 
-    pub fn add_message(&mut self, msg: Box<ParsedMessage>) {
+    pub fn add_message(&mut self, msg: ParsedMessage) {
         assert_eq!(
-            msg.special_origin, None,
+            msg.special_origin(),
+            None,
             "unexpected special origin in ordinary messages set"
         );
 
-        let dst = match &msg.info {
+        let dst = match &msg.info() {
             MsgInfo::Int(IntMsgInfo { dst, .. }) => {
                 self.int_count += 1;
                 dst
             }
             MsgInfo::ExtIn(ExtInMsgInfo { dst, .. }) => {
                 self.ext_count += 1;
-                self.update_min_ext_chain_time(msg.ext_msg_chain_time);
+                self.update_min_ext_chain_time(msg.ext_msg_chain_time());
                 dst
             }
             MsgInfo::ExtOut(info) => {
@@ -466,7 +504,7 @@ impl MessagesBuffer {
                 // check and skip message if required
                 if msg_filter.should_skip(&msg) {
                     debug_assert!(
-                        msg.info.is_external_in(),
+                        msg.info().is_external_in(),
                         "we should only skip extenal messages"
                     );
                     ext_skipped_count += 1;
@@ -474,11 +512,11 @@ impl MessagesBuffer {
                 }
 
                 // collect message if it was not skipped
-                match &msg.info {
+                match &msg.info() {
                     MsgInfo::Int(info) => {
                         collected_int_msgs.push(QueueKey {
                             lt: info.created_lt,
-                            hash: *msg.cell.repr_hash(),
+                            hash: *msg.cell().repr_hash(),
                         });
                         int_collected_count += 1;
                     }
@@ -554,7 +592,7 @@ impl MessagesBuffer {
             account_msgs.retain(|msg| {
                 let skip = filter.should_skip(msg);
                 debug_assert!(
-                    !skip || msg.info.is_external_in(),
+                    !skip || msg.info().is_external_in(),
                     "we should only skip external messages"
                 );
                 self.ext_count -= skip as usize;
@@ -622,9 +660,9 @@ impl MessageFilter for SkipExpiredExternals<'_> {
     }
 
     fn should_skip(&mut self, msg: &ParsedMessage) -> bool {
-        let res = msg.info.is_external_in()
+        let res = msg.info().is_external_in()
             && msg
-                .ext_msg_chain_time
+                .ext_msg_chain_time()
                 .expect("external messages must have a chain time set")
                 < self.chain_time_threshold_ms;
         *self.total_skipped += res as u64;
@@ -698,9 +736,7 @@ impl MessagesBuffer {
 }
 
 #[cfg(test)]
-struct DebugMessagesBufferIndexMap<'a>(
-    pub &'a FastIndexMap<HashBytes, VecDeque<Box<ParsedMessage>>>,
-);
+struct DebugMessagesBufferIndexMap<'a>(pub &'a FastIndexMap<HashBytes, VecDeque<ParsedMessage>>);
 #[cfg(test)]
 impl std::fmt::Debug for DebugMessagesBufferIndexMap<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -732,7 +768,7 @@ struct SlotContext<'a> {
 #[derive(Default)]
 pub struct MessageGroup {
     #[allow(clippy::vec_box)]
-    msgs: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
+    msgs: FastHashMap<HashBytes, Vec<ParsedMessage>>,
     slots_info: SlotsInfo,
 }
 
@@ -818,8 +854,8 @@ impl std::ops::Add for MessageGroup {
 }
 
 impl IntoParallelIterator for MessageGroup {
-    type Item = (HashBytes, Vec<Box<ParsedMessage>>);
-    type Iter = rayon::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
+    type Item = (HashBytes, Vec<ParsedMessage>);
+    type Iter = rayon::collections::hash_map::IntoIter<HashBytes, Vec<ParsedMessage>>;
 
     fn into_par_iter(self) -> Self::Iter {
         self.msgs.into_par_iter()
@@ -827,8 +863,8 @@ impl IntoParallelIterator for MessageGroup {
 }
 
 impl IntoIterator for MessageGroup {
-    type Item = (HashBytes, Vec<Box<ParsedMessage>>);
-    type IntoIter = std::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
+    type Item = (HashBytes, Vec<ParsedMessage>);
+    type IntoIter = std::collections::hash_map::IntoIter<HashBytes, Vec<ParsedMessage>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.msgs.into_iter()
@@ -838,7 +874,7 @@ impl IntoIterator for MessageGroup {
 #[cfg(test)]
 impl MessageGroup {
     #[allow(clippy::vec_box)]
-    pub fn msgs(&self) -> &FastHashMap<HashBytes, Vec<Box<ParsedMessage>>> {
+    pub fn msgs(&self) -> &FastHashMap<HashBytes, Vec<ParsedMessage>> {
         &self.msgs
     }
 }
@@ -893,7 +929,7 @@ impl std::fmt::Debug for DebugMessageGroupDetailed<'_> {
 
 #[cfg(test)]
 #[allow(clippy::vec_box)]
-struct DebugMessageGroupHashMap<'a>(pub &'a FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>);
+struct DebugMessageGroupHashMap<'a>(pub &'a FastHashMap<HashBytes, Vec<ParsedMessage>>);
 #[cfg(test)]
 impl std::fmt::Debug for DebugMessageGroupHashMap<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
