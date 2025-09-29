@@ -952,10 +952,17 @@ impl CollatorStdImpl {
             let hint = StoreStateHint {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
             };
+
+            adapter.accept_shard_block(finalized.block_candidate.block.data.clone())?;
+
             async move {
-                adapter
-                    .store_state_root(&block_id, meta, new_state_root, hint)
-                    .await
+                if block_id.is_masterchain() || block_id.seqno % 5 == 0 {
+                    adapter
+                        .store_state_root(&block_id, meta, new_state_root, hint)
+                        .await
+                } else {
+                    Ok(false)
+                }
             }
         });
 
@@ -1021,6 +1028,7 @@ impl CollatorStdImpl {
 
             handle_block_candidate_elapsed = histogram.finish();
         }
+
         Ok(FinalizeCollationResult {
             handle_block_candidate_elapsed,
         })

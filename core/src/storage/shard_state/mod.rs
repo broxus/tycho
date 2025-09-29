@@ -311,8 +311,6 @@ impl ShardStateStorage {
             .with_context(|| {
                 format!("failed to apply merkle of block {block_id} to {prev_block_id}")
             })?;
-
-            tracing::info!("TEST State load");
         }
 
         Ok(state)

@@ -81,6 +81,8 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// 1. (TODO) Broadcast block to blockchain network
     /// 2. Provide block to the block strider
     fn accept_block(&self, block: Arc<BlockStuffForSync>) -> Result<()>;
+    /// TODO
+    fn accept_shard_block(&self, block: BlockStuff) -> Result<()>;
     /// Waits for the specified block to be received and returns it
     async fn wait_for_block(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Waits for the specified block by `prev_id` to be received and returns it
@@ -103,6 +105,8 @@ pub struct StateNodeAdapterStdImpl {
     sync_context_tx: watch::Sender<CollatorSyncContext>,
 
     delayed_state_notifier: DelayedStateNotifier,
+
+    shard_blocks_cache: Arc<Mutex<BTreeMap<u32, BlockStuff>>>,
 }
 
 impl StateNodeAdapterStdImpl {
@@ -120,6 +124,7 @@ impl StateNodeAdapterStdImpl {
             broadcaster,
             sync_context_tx,
             delayed_state_notifier: DelayedStateNotifier::default(),
+            shard_blocks_cache: Default::default(),
         };
 
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Start watching for sync context updates");
@@ -189,13 +194,52 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     ) -> Result<ShardStateStuff> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_load_state_time");
 
-        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
+        tracing::info!("Load state: {}", block_id.as_short_id());
 
-        let state = self
-            .storage
-            .shard_state_storage()
-            .load_state_direct(ref_by_mc_seqno, block_id)
-            .await?;
+        let state = if block_id.is_masterchain() {
+            // load stored state
+            self.storage
+                .shard_state_storage()
+                .load_state_direct(ref_by_mc_seqno, block_id)
+                .await?
+        } else {
+            let mut chain = Vec::new();
+            let mut current_block_id = *block_id;
+
+            while current_block_id.seqno % 5 != 0 {
+                let block = self
+                    .shard_blocks_cache
+                    .lock()
+                    .get(&current_block_id.seqno)
+                    .unwrap()
+                    .clone();
+
+                chain.push((current_block_id, block.block().state_update.load()?));
+
+                current_block_id = block.construct_prev_id()?.0; // TODO
+            }
+
+            // load stored state
+            let mut state = self
+                .storage
+                .shard_state_storage()
+                .load_state_direct(ref_by_mc_seqno, &current_block_id)
+                .await?;
+
+            // Apply state updates
+            while let Some((block_id, merkle_update)) = chain.pop() {
+                let prev_block_id = *state.block_id();
+                state = rayon_run({
+                    move || state.par_make_next_state(&block_id, &merkle_update, Some(5))
+                })
+                .await
+                .with_context(|| {
+                    format!("failed to apply merkle of block {block_id} to {prev_block_id}")
+                })?;
+            }
+
+            state
+        };
 
         Ok(state)
     }
@@ -268,7 +312,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     fn accept_block(&self, block: Arc<BlockStuffForSync>) -> Result<()> {
         let block_id = *block.block_stuff_aug.id();
 
-        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted: {}", block_id.as_short_id());
+        tracing::info!("Block accepted: {}", block_id.as_short_id());
 
         self.blocks
             .entry(block_id.shard)
@@ -277,6 +321,28 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         let broadcast_result = self.broadcaster.send(block_id).ok();
         tracing::trace!(target: tracing_targets::STATE_NODE_ADAPTER, "Block broadcast_result: {:?}", broadcast_result);
+        Ok(())
+    }
+
+    fn accept_shard_block(&self, block: BlockStuff) -> Result<()> {
+        let block_id = *block.id();
+
+        if !block_id.is_masterchain() {
+            tracing::info!("Shard block accepted: {}", block_id.as_short_id());
+            self.shard_blocks_cache.lock().insert(block_id.seqno, block);
+
+            // GC
+            if block_id.seqno > 100 {
+                let mut shard_blocks = self.shard_blocks_cache.lock();
+                let retained_blocks = shard_blocks.split_off(&(block_id.seqno - 100));
+
+                let to_drop = std::mem::replace(&mut *shard_blocks, retained_blocks);
+
+                // Don't wait for drop inside a tokio context.
+                Reclaimer::instance().drop(to_drop);
+            }
+        }
+
         Ok(())
     }
 
