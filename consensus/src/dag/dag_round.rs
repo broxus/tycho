@@ -258,6 +258,13 @@ impl DagRound {
         store: &MempoolStore,
         validate_ctx: &ValidateCtx,
     ) -> (WeakDagPointFuture, WeakCert) {
+        // dependencies are more often read than written
+        if let Some(loc) = self.0.locations.get(author)
+            && let Some(first) = loc.versions.get(digest)
+        {
+            first.add_depender(depender);
+            return (first.downgrade(), first.weak_cert());
+        };
         self.edit(author, |loc| {
             let first = loc
                 .versions
