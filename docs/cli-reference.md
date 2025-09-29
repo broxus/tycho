@@ -605,6 +605,7 @@ Work with blockchain stuff
 * `gen-zerostate` — Generate a zero state for a network
 * `gen-account` — Generate an account state
 * `bc` — Blockchain stuff
+* `dump-state` — Dumps node state for a specific block, intended for testing collation of the next block. This tool interacts directly with the node's database, bypassing the need for a running node, which is useful for analyzing failed nodes
 
 
 
@@ -973,18 +974,20 @@ Create proposal voting payload
 * `--query-id <QUERY_ID>` — query ID. Default: current timestamp in milliseconds
 
 
+
 ## `tycho tool dump-state`
 
-Dumps node state for a specific block, intended for testing collation of the next block
+Dumps node state for a specific block, intended for testing collation of the next block. This tool interacts directly with the node's database, bypassing the need for a running node, which is useful for analyzing failed nodes
 
-**Usage:** `tycho tool dump-state --db <DB> --output <OUTPUT> --block-id <BLOCK_ID>`
+**Usage:** `tycho tool dump-state [OPTIONS] --output <OUTPUT> --block-id <BLOCK_ID>`
 
 ###### **Options:**
 
-* `--config <CONFIG>` — path to the node config. By default, path to the node's database directory will be taken from config
-* `--db <DB>` — path to the node's database directory
-* `--output <OUTPUT>` — path to the directory where the dump files will be saved
-* `--block-id <BLOCK_ID>` — full block ID, can be a masterchain or a shardchain block
+* `--config <CONFIG>` — Path to the node config. If not specified, will use db path
+* `--db <DB>` — Path to the node's database directory
+* `--output <OUTPUT>` — Path to the directory where the dump files will be saved
+* `-b`, `--block-id <BLOCK_ID>` — The ID of the block for which to dump the state. Can be a masterchain or a shardchain block
+
 
 
 ## `tycho elect`
