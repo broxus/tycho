@@ -205,9 +205,10 @@ pub async fn load_storage_from_dump<V: InternalMessageValue>(
             let block_id = BlockId::from_str(&block_id_str)?;
 
             let block_boc = tokio::fs::read(&path).await?;
-            let root = Boc::decode(block_boc)?;
+            let root = Boc::decode(block_boc.clone())?;
             let block: Block = root.parse()?;
-            let block_stuff = BlockStuff::from_block_and_root(&block_id, block, root, 0);
+            let block_stuff =
+                BlockStuff::from_block_and_root(&block_id, block, root, block_boc.len());
 
             let info = block_stuff.load_info()?;
             let meta = tycho_core::storage::NewBlockMeta {
@@ -217,7 +218,7 @@ pub async fn load_storage_from_dump<V: InternalMessageValue>(
             };
             storage
                 .block_storage()
-                .store_block_data(&block_stuff, &ArchiveData::New(Default::default()), meta)
+                .store_block_data(&block_stuff, &ArchiveData::New(block_boc.into()), meta)
                 .await?;
 
             if block_id.is_masterchain()
