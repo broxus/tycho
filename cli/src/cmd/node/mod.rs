@@ -85,17 +85,11 @@ impl CmdRun {
             .context("failed to load node config")?
             .with_relative_paths(&args.home);
 
-        rayon::ThreadPoolBuilder::new()
-            .stack_size(8 * 1024 * 1024)
-            .thread_name(|_| "rayon_worker".to_string())
-            .num_threads(node_config.threads.rayon_threads)
-            .build_global()
-            .unwrap();
+        node_config.threads.init_global_rayon_pool()?;
 
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(node_config.threads.tokio_workers)
-            .build()?
+        node_config
+            .threads
+            .build_tokio_runtime()?
             .block_on(async move {
                 let run_fut = tokio::spawn(self.run_impl(args, node_config));
                 let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);

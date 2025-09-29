@@ -111,16 +111,11 @@ impl CmdRun {
         let node_config =
             NodeConfig::from_file(&self.config).context("failed to load node config")?;
 
-        rayon::ThreadPoolBuilder::new()
-            .stack_size(8 * 1024 * 1024)
-            .thread_name(|_| "rayon_worker".to_string())
-            .num_threads(node_config.threads.rayon_threads)
-            .build_global()?;
+        node_config.threads.init_global_rayon_pool()?;
 
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(node_config.threads.tokio_workers)
-            .build()?
+        node_config
+            .threads
+            .build_tokio_runtime()?
             .block_on(self.run_impl(node_config))
     }
 
