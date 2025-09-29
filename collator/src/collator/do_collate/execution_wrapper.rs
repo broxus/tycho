@@ -37,7 +37,7 @@ impl ExecutorWrapper {
     pub fn process_transaction(
         &mut self,
         executed: ExecutedTransaction,
-        in_message: Option<Box<ParsedMessage>>,
+        in_message: Option<ParsedMessage>,
         collation_data: &mut BlockCollationData,
     ) -> Result<Vec<Arc<EnqueuedMessage>>> {
         let mut new_messages = vec![];
@@ -46,24 +46,22 @@ impl ExecutorWrapper {
         collation_data.new_msgs_created_count += out_msgs.len() as u64;
 
         for out_msg in out_msgs {
-            let MsgInfo::Int(int_msg_info) = out_msg.info else {
+            let dst_in_current_shard = out_msg.dst_in_current_shard();
+            let (MsgInfo::Int(int_msg_info), cell) = out_msg.try_into_parts()? else {
                 continue;
             };
 
-            if out_msg.dst_in_current_shard {
+            if dst_in_current_shard {
                 let new_message_key = QueueKey {
                     lt: int_msg_info.created_lt,
-                    hash: *out_msg.cell.repr_hash(),
+                    hash: *cell.repr_hash(),
                 };
                 self.max_new_message_key_to_current_shard =
                     std::cmp::max(self.max_new_message_key_to_current_shard, new_message_key);
             }
 
             collation_data.inserted_new_msgs_count += 1;
-            new_messages.push(Arc::new(EnqueuedMessage::from((
-                int_msg_info,
-                out_msg.cell,
-            ))));
+            new_messages.push(Arc::new(EnqueuedMessage::from((int_msg_info, cell))));
         }
 
         collation_data.next_lt = self.executor.min_next_lt();
@@ -150,15 +148,15 @@ impl ExecutorWrapper {
                 layout: None,
             })?;
 
-            Box::new(ParsedMessage {
+            ParsedMessage::new(
                 info,
-                dst_in_current_shard: true,
+                true,
                 cell,
-                special_origin: Some(special_origin),
-                block_seqno: Some(collation_data.block_id_short.seqno),
-                from_same_shard: None,
-                ext_msg_chain_time: None,
-            })
+                Some(special_origin),
+                Some(collation_data.block_id_short.seqno),
+                None,
+                None,
+            )
         };
 
         let executed = self
@@ -241,11 +239,11 @@ fn new_transaction(
     collation_data: &mut BlockCollationData,
     shard_id: &ShardIdent,
     executed: ExecutedTransaction,
-    in_msg: Option<Box<ParsedMessage>>,
-) -> Result<Vec<Box<ParsedMessage>>> {
+    in_msg: Option<ParsedMessage>,
+) -> Result<Vec<ParsedMessage>> {
     tracing::trace!(
         target: tracing_targets::COLLATOR,
-        message_hash = ?in_msg.as_ref().map(|m| m.cell.repr_hash()),
+        message_hash = ?in_msg.as_ref().map(|m| m.cell().repr_hash()),
         transaction_hash = %executed.transaction.inner().repr_hash(),
         "process new transaction from message",
     );
@@ -314,15 +312,15 @@ fn new_transaction(
                         new_tx: Some(executed.transaction.clone()),
                     });
 
-                out_messages.push(Box::new(ParsedMessage {
-                    info: out_msg_info,
+                out_messages.push(ParsedMessage::new(
+                    out_msg_info,
                     dst_in_current_shard,
-                    cell: out_msg_cell.into_inner(),
-                    special_origin: None,
-                    block_seqno: Some(collation_data.block_id_short.seqno),
-                    from_same_shard: Some(true),
-                    ext_msg_chain_time: None,
-                }));
+                    out_msg_cell.into_inner(),
+                    None,
+                    Some(collation_data.block_id_short.seqno),
+                    Some(true),
+                    None,
+                ));
             }
             MsgInfo::ExtOut(_) => {
                 let out_msg = OutMsg::External(OutMsgExternal {
@@ -353,11 +351,11 @@ fn new_transaction(
 fn process_in_message(
     collation_data: &mut BlockCollationData,
     transaction: Lazy<Transaction>,
-    in_msg: Box<ParsedMessage>,
+    in_msg: ParsedMessage,
 ) -> Result<()> {
     let import_fees;
-    let in_msg_hash = *in_msg.cell.repr_hash();
-    let in_msg = match (in_msg.info, in_msg.special_origin) {
+    let in_msg_hash = *in_msg.cell().repr_hash();
+    let in_msg = match (in_msg.info(), in_msg.special_origin()) {
         // Messages with special origin are always immediate
         (_, Some(special_origin)) => {
             let in_msg = InMsg::Immediate(InMsgFinal {
@@ -365,7 +363,7 @@ fn process_in_message(
                     cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
                     next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
                     fwd_fee_remaining: Default::default(),
-                    message: Lazy::from_raw(in_msg.cell)?,
+                    message: Lazy::from_raw(in_msg.cell().clone())?,
                 })?,
                 transaction,
                 fwd_fee: Default::default(),
@@ -390,18 +388,18 @@ fn process_in_message(
 
             import_fees = ImportFees::default();
             Lazy::new(&InMsg::External(InMsgExternal {
-                in_msg: Lazy::from_raw(in_msg.cell)?,
+                in_msg: Lazy::from_raw(in_msg.cell().clone())?,
                 transaction,
             }))?
         }
         // Dequeued messages have a dedicated `InMsg` type
         (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _)
         // check if the message is dequeued or moved from previous collation
-            if in_msg.block_seqno.unwrap_or_default() < collation_data.block_id_short.seqno =>
+            if in_msg.block_seqno().unwrap_or_default() < collation_data.block_id_short.seqno =>
         {
             collation_data.execute_count_int += 1;
 
-            let from_same_shard = in_msg.from_same_shard.unwrap_or_default();
+            let from_same_shard = in_msg.is_from_same_shard().unwrap_or_default();
 
             let envelope = Lazy::new(&MsgEnvelope {
                 // NOTE: `cur_addr` is not used in current routing between shards logic
@@ -411,14 +409,14 @@ fn process_in_message(
                     IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
                 },
                 next_addr: IntermediateAddr::FULL_DEST_SAME_WORKCHAIN,
-                fwd_fee_remaining: fwd_fee,
-                message: Lazy::from_raw(in_msg.cell)?,
+                fwd_fee_remaining: *fwd_fee,
+                message: Lazy::from_raw(in_msg.cell().clone())?,
             })?;
 
             let in_msg = InMsg::Final(InMsgFinal {
                 in_msg_envelope: envelope.clone(),
                 transaction,
-                fwd_fee,
+                fwd_fee: *fwd_fee,
             });
             import_fees = in_msg.compute_fees()?;
 
@@ -448,13 +446,13 @@ fn process_in_message(
             let msg_envelope = MsgEnvelope {
                 cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
                 next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
-                fwd_fee_remaining: fwd_fee,
-                message: Lazy::from_raw(in_msg.cell)?,
+                fwd_fee_remaining: *fwd_fee,
+                message: Lazy::from_raw(in_msg.cell().clone())?,
             };
             let in_msg = InMsg::Immediate(InMsgFinal {
                 in_msg_envelope: Lazy::new(&msg_envelope)?,
                 transaction,
-                fwd_fee,
+                fwd_fee: *fwd_fee,
             });
 
             import_fees = in_msg.compute_fees()?;

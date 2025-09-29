@@ -3,8 +3,7 @@ use std::time::Instant;
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{IntAddr, ShardIdent, StdAddr};
 
-use super::{DebugMessageGroupDetailed, DebugMessagesBuffer, MessageGroup, MessagesBuffer};
-use crate::collator::messages_buffer::IncludeAllMessages;
+use super::MessagesBuffer;
 use crate::collator::test_utils::{
     make_stub_external_parsed_message, make_stub_internal_parsed_message,
 };

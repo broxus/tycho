@@ -471,7 +471,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             range_reader_state.read_stats = Default::default();
         }
 
-        range_reader_state.msgs_stats = Some(msgs_stats);
+        range_reader_state.msgs_stats = Some(Arc::new(msgs_stats));
 
         Ok(())
     }
@@ -749,15 +749,15 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
                     match iterator.next(false)? {
                         Some(int_msg) => {
-                            let msg = Box::new(ParsedMessage {
-                                info: MsgInfo::Int(int_msg.item.message.info().clone()),
-                                dst_in_current_shard: true,
-                                cell: int_msg.item.message.cell().clone(),
-                                special_origin: None,
-                                block_seqno: None,
-                                from_same_shard: Some(int_msg.item.source == self.for_shard_id),
-                                ext_msg_chain_time: None,
-                            });
+                            let msg = ParsedMessage::new(
+                                MsgInfo::Int(int_msg.item.message.info().clone()),
+                                true,
+                                int_msg.item.message.cell().clone(),
+                                None,
+                                None,
+                                Some(int_msg.item.source == self.for_shard_id),
+                                None,
+                            );
 
                             metrics.add_to_message_groups_timer.start();
                             range_reader.reader_state.buffer.add_message(msg);
