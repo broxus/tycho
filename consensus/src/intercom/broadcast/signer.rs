@@ -5,7 +5,6 @@ use tycho_network::PeerId;
 use crate::dag::DagHead;
 use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
-use crate::engine::MempoolConfig;
 use crate::intercom::BroadcastFilter;
 use crate::intercom::core::{SignatureRejectedReason, SignatureResponse};
 use crate::models::Round;
@@ -15,12 +14,12 @@ impl Signer {
     pub fn signature_response(
         author: &PeerId,
         round: Round,
-        head: &DagHead,
         broadcast_filter: &BroadcastFilter,
+        head: &DagHead,
         round_ctx: &RoundCtx,
     ) -> SignatureResponse {
         let response =
-            Self::make_signature_response(round, author, head, broadcast_filter, round_ctx.conf());
+            Self::make_signature_response(author, round, broadcast_filter, head, round_ctx);
         let level = match response {
             SignatureResponse::Rejected(_) => tracing::Level::WARN,
             _ => tracing::Level::TRACE,
@@ -37,11 +36,11 @@ impl Signer {
     }
 
     fn make_signature_response(
-        round: Round,
         author: &PeerId,
-        head: &DagHead,
+        round: Round,
         broadcast_filter: &BroadcastFilter,
-        conf: &MempoolConfig,
+        head: &DagHead, // Note: head may be older than in BF flush if query started moments before
+        round_ctx: &RoundCtx,
     ) -> SignatureResponse {
         if round >= head.next().round() {
             // first check BroadcastFilter, then DAG for top_dag_round exactly
@@ -85,7 +84,7 @@ impl Signer {
             // only previous to current round
             &head.keys().to_witness
         };
-        match state.sign(current_round, keys.as_deref(), conf) {
+        match state.sign(current_round, keys.as_deref(), round_ctx.conf()) {
             Some(Ok(signed)) => SignatureResponse::Signature(signed.signature.clone()),
             Some(Err(())) => SignatureResponse::Rejected(SignatureRejectedReason::CannotSign),
             None => SignatureResponse::TryLater,
