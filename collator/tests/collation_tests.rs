@@ -114,7 +114,7 @@ async fn test_collation_process_on_stubs() {
         |listener| {
             StateNodeAdapterStdImpl::new(listener, storage.clone(), CollatorSyncContext::Historical)
         },
-        |listener| MempoolAdapterStubImpl::with_stub_externals(listener, Some(now)),
+        |listener| MempoolAdapterStubImpl::with_stub_externals(listener, Some(now), None),
         ValidatorStdImpl::new(
             validator_network,
             node_1_keypair.clone(),
