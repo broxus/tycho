@@ -14,8 +14,8 @@ use crate::engine::input_buffer::InputBuffer;
 use crate::engine::lifecycle::{EngineBinding, EngineNetwork};
 use crate::engine::round_watch::{Consensus, RoundWatch, TopKnownAnchor};
 use crate::intercom::{
-    BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorStatus, Dispatcher,
-    Downloader, PeerSchedule, Responder,
+    Broadcaster, BroadcasterSignal, Collector, CollectorStatus, Dispatcher, Downloader,
+    PeerSchedule, Responder,
 };
 use crate::models::{Cert, Link, Point, PointInfo};
 use crate::storage::MempoolStore;
@@ -28,7 +28,6 @@ pub struct RoundTaskState {
     pub peer_schedule: PeerSchedule,
     dispatcher: Dispatcher,
     pub responder: Responder,
-    pub broadcast_filter: BroadcastFilter,
     pub downloader: Downloader,
 }
 
@@ -49,12 +48,19 @@ impl RoundTaskReady {
         net: &EngineNetwork,
         conf: &MempoolConfig,
     ) -> Self {
-        let broadcast_filter = BroadcastFilter::new(&net.peer_schedule, consensus_round);
         let downloader = Downloader::new(
             &net.dispatcher,
             &net.peer_schedule,
             consensus_round.receiver(),
             conf,
+        );
+        net.responder.init(
+            store,
+            consensus_round,
+            &net.peer_schedule,
+            &downloader,
+            #[cfg(feature = "mock-feedback")]
+            &bind.top_known_anchor,
         );
         Self {
             state: RoundTaskState {
@@ -65,7 +71,6 @@ impl RoundTaskReady {
                 peer_schedule: net.peer_schedule.clone(),
                 dispatcher: net.dispatcher.clone(),
                 responder: net.responder.clone(),
-                broadcast_filter,
                 downloader,
             },
             collector: Collector::new(consensus_round.receiver()),
@@ -190,13 +195,7 @@ impl RoundTaskReady {
 
         // Signer must stop making new signatures for witness round before new point is produced
         // own point future must do nothing until polled (must not be spawned)
-        self.state.responder.update(
-            &self.state.store,
-            &self.state.broadcast_filter,
-            &self.state.downloader,
-            head,
-            round_ctx,
-        );
+        self.state.responder.update(head, round_ctx);
 
         let collector_status_tx = watch::Sender::new(CollectorStatus::default());
 

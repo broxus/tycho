@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
@@ -8,12 +8,13 @@ use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, RoundCtx};
+use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::broadcast::Signer;
 use crate::intercom::core::{
     PointByIdResponse, QueryRequest, QueryRequestRaw, QueryRequestTag, QueryResponse,
     SignatureResponse,
 };
-use crate::intercom::{BroadcastFilter, Downloader, Uploader};
+use crate::intercom::{BroadcastFilter, Downloader, PeerSchedule, Uploader};
 use crate::storage::MempoolStore;
 
 #[derive(Clone, Default)]
@@ -21,33 +22,46 @@ pub struct Responder(Arc<ResponderInner>);
 
 #[derive(Default)]
 struct ResponderInner {
+    state: OnceLock<ResponderState>,
+    broadcast_filter: BroadcastFilter,
     current: ArcSwapOption<ResponderCurrent>,
-    #[cfg(feature = "mock-feedback")]
-    top_known_anchor: std::sync::OnceLock<
-        crate::engine::round_watch::RoundWatch<crate::engine::round_watch::TopKnownAnchor>,
-    >,
 }
 
 struct ResponderCurrent {
-    // state and storage components go here
-    store: MempoolStore,
-    broadcast_filter: BroadcastFilter,
-    downloader: Downloader,
     head: DagHead,
     round_ctx: RoundCtx,
 }
 
-impl Responder {
+struct ResponderState {
+    // state and storage components go here
+    store: MempoolStore,
+    consensus_round: RoundWatch<Consensus>,
+    peer_schedule: PeerSchedule,
+    downloader: Downloader,
     #[cfg(feature = "mock-feedback")]
-    pub fn set_top_known_anchor(
+    top_known_anchor: RoundWatch<crate::engine::round_watch::TopKnownAnchor>,
+}
+
+impl Responder {
+    pub fn init(
         &self,
-        top_known_anchor: &crate::engine::round_watch::RoundWatch<
+        store: &MempoolStore,
+        consensus_round: &RoundWatch<Consensus>,
+        peer_schedule: &PeerSchedule,
+        downloader: &Downloader,
+        #[cfg(feature = "mock-feedback")] top_known_anchor: &RoundWatch<
             crate::engine::round_watch::TopKnownAnchor,
         >,
     ) {
-        if (self.0.top_known_anchor.set(top_known_anchor.clone())).is_err() {
-            panic!("top known anchor in responder is already initialized")
-        };
+        let result = self.0.state.set(ResponderState {
+            store: store.clone(),
+            consensus_round: consensus_round.clone(),
+            peer_schedule: peer_schedule.clone(),
+            downloader: downloader.clone(),
+            #[cfg(feature = "mock-feedback")]
+            top_known_anchor: top_known_anchor.clone(),
+        });
+        result.ok().expect("cannot init responder twice");
     }
 
     /// as `Self` is passed to Overlay as a `Service` and may be cloned there,
@@ -56,26 +70,12 @@ impl Responder {
         self.0.current.store(None);
     }
 
-    pub fn update(
-        &self,
-        store: &MempoolStore,
-        broadcast_filter: &BroadcastFilter,
-        downloader: &Downloader,
-        head: &DagHead,
-        round_ctx: &RoundCtx,
-    ) {
-        broadcast_filter.flush_to_dag(head, downloader, store, round_ctx);
-        // Note that `next_dag_round` for Signer should be advanced _after_ new points
-        //  are moved from BroadcastFilter into DAG. Then Signer will look for points
-        //  (of rounds greater than local engine round, including top dag round exactly)
-        //  first in BroadcastFilter, then in DAG.
-        //  Otherwise local Signer will skip BroadcastFilter check and search in DAG directly,
-        //  will not find cached point and will ask to repeat broadcast once more, and local
-        //  BroadcastFilter may account such repeated broadcast as malicious.
+    pub fn update(&self, head: &DagHead, round_ctx: &RoundCtx) {
+        let state = self.0.state.get().expect("responder must be init");
+        // Note: Signer must see DAG rounds completely flushed from BroadcastFilter,
+        //  its OK if Signer uses outdated DagHead and doesn't see the DAG up to the latest top
+        (self.0.broadcast_filter).flush_to_dag(head, &state.downloader, &state.store, round_ctx);
         self.0.current.store(Some(Arc::new(ResponderCurrent {
-            store: store.clone(),
-            broadcast_filter: broadcast_filter.clone(),
-            downloader: downloader.clone(),
             head: head.clone(),
             round_ctx: round_ctx.clone(),
         })));
@@ -98,9 +98,9 @@ impl Service<ServiceRequest> for Responder {
         {
             use crate::mock_feedback::RoundBoxed;
             if let Ok(data) = _req.parse_tl::<RoundBoxed>()
-                && let Some(tka) = self.0.top_known_anchor.get()
+                && let Some(state) = self.0.state.get()
             {
-                tka.set_max(data.round);
+                state.top_known_anchor.set_max(data.round);
             }
         }
         future::ready(())
@@ -137,7 +137,7 @@ impl Responder {
             }
         };
 
-        let Some(inner) = self.0.current.load_full() else {
+        let Some(current) = self.0.current.load_full() else {
             return Some(match raw_query_tag {
                 QueryRequestTag::Broadcast => {
                     // do nothing: sender has retry loop via signature request
@@ -152,16 +152,32 @@ impl Responder {
             });
         };
 
+        let state = self.0.state.get().expect("responder must be init");
+
         Some(match query {
             QueryRequest::Broadcast(point) => {
-                inner.broadcast_filter.add(
+                let reached_threshold = self.0.broadcast_filter.add_check_threshold(
                     &req.metadata.peer_id,
                     &point,
-                    &inner.head,
-                    &inner.downloader,
-                    &inner.store,
-                    &inner.round_ctx,
+                    &state.store,
+                    &state.peer_schedule,
+                    &state.downloader,
+                    &current.head,
+                    &current.round_ctx,
                 );
+                if reached_threshold {
+                    // notify Collector after max consensus round is updated
+                    state.consensus_round.set_max(point.info().round());
+                    // round is determined, so clean history;
+                    // do not flush to DAG as it may have no needed rounds yet
+                    if state.consensus_round.get() == point.info().round() {
+                        self.0.broadcast_filter.clean(
+                            point.info().round(),
+                            &current.head,
+                            &current.round_ctx,
+                        );
+                    } // else: engine is not paused, let it do its work
+                }
                 QueryResponse::broadcast(task_start)
             }
             QueryRequest::PointById(point_id) => QueryResponse::point_by_id(
@@ -169,9 +185,9 @@ impl Responder {
                 Uploader::find(
                     &req.metadata.peer_id,
                     point_id,
-                    &inner.head,
-                    &inner.store,
-                    &inner.round_ctx,
+                    &state.store,
+                    &current.head,
+                    &current.round_ctx,
                 )
                 .await,
             ),
@@ -180,9 +196,9 @@ impl Responder {
                 Signer::signature_response(
                     &req.metadata.peer_id,
                     round,
-                    &inner.head,
-                    &inner.broadcast_filter,
-                    &inner.round_ctx,
+                    &self.0.broadcast_filter,
+                    &current.head,
+                    &current.round_ctx,
                 ),
             ),
         })

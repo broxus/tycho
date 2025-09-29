@@ -49,7 +49,6 @@ impl EngineSession {
             #[cfg(feature = "mock-feedback")]
             mock_feedback: {
                 use crate::mock_feedback::MockFeedbackSender;
-                net.responder.set_top_known_anchor(&bind.top_known_anchor);
                 let sender = MockFeedbackSender::new(
                     net.dispatcher.clone(),
                     peer_schedule,

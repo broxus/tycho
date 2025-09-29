@@ -19,8 +19,8 @@ impl Uploader {
     pub async fn find(
         peer_id: &PeerId,
         point_id: PointId,
-        head: &DagHead,
         store: &MempoolStore,
+        head: &DagHead,
         round_ctx: &RoundCtx,
     ) -> PointByIdResponse<Bytes> {
         let (status_opt, result) = if point_id.round > head.current().round() {

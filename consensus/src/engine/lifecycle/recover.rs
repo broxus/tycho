@@ -89,8 +89,6 @@ impl EngineRecoverLoop {
                 #[cfg(feature = "mock-feedback")]
                 {
                     use crate::mock_feedback::MockFeedbackSender;
-                    net.responder
-                        .set_top_known_anchor(&self.bind.top_known_anchor);
                     let sender = MockFeedbackSender::new(
                         net.dispatcher.clone(),
                         guard.peer_schedule.clone(),
