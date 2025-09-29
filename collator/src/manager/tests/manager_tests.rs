@@ -4371,6 +4371,9 @@ impl StateNodeAdapter for TestStateNodeAdapter {
     fn accept_block(&self, _block: Arc<BlockStuffForSync>) -> Result<()> {
         unreachable!()
     }
+    fn accept_shard_block(&self, _ref_by_mc_seqno: u32, _block: BlockStuff) -> Result<()> {
+        unreachable!()
+    }
     async fn wait_for_block(&self, _block_id: &BlockId) -> Option<Result<BlockStuffAug>> {
         unreachable!()
     }

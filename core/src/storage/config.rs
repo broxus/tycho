@@ -24,6 +24,11 @@ pub struct CoreStorageConfig {
     /// Default: `true`.
     pub store_archives: bool,
 
+    /// Store every Nth shard state to storage
+    ///
+    /// Default: 2.
+    pub store_shard_state_step: u32,
+
     /// Archives storage config.
     ///
     /// Archives are disabled if this field is `None`.
@@ -75,6 +80,7 @@ impl Default for CoreStorageConfig {
             cells_cache_size: ByteSize::mb(256),
             drop_interval: 3,
             store_archives: true,
+            store_shard_state_step: 2,
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),
