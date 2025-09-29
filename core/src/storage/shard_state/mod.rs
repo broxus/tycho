@@ -14,6 +14,7 @@ use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::sync::rayon_run;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
@@ -217,6 +218,33 @@ impl ShardStateStorage {
         .await?
     }
 
+    // // NOTE: DO NOT try to make a separate `load_state_root` method
+    // // since the root must be properly tracked, and this tracking requires
+    // // knowing its `min_ref_mc_seqno` which can only be found out by
+    // // parsing the state. Creating a "Brief State" struct won't work either
+    // // because due to model complexity it is going to be error-prone.
+    // pub async fn load_state(
+    //     &self,
+    //     ref_by_mc_seqno: u32,
+    //     block_id: &BlockId,
+    // ) -> Result<ShardStateStuff> {
+    //     // NOTE: only for metrics.
+    //     static MAX_KNOWN_EPOCH: AtomicU32 = AtomicU32::new(0);
+    //
+    //     let root_hash = self.load_state_root_hash(block_id)?;
+    //     let root = self.cell_storage.load_cell(&root_hash, ref_by_mc_seqno)?;
+    //     let root = Cell::from(root as Arc<_>);
+    //
+    //     let max_known_epoch = MAX_KNOWN_EPOCH
+    //         .fetch_max(ref_by_mc_seqno, Ordering::Relaxed)
+    //         .max(ref_by_mc_seqno);
+    //     metrics::gauge!("tycho_storage_state_max_epoch").set(max_known_epoch);
+    //
+    //     let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
+    //     let handle = self.min_ref_mc_state.insert(&shard_state);
+    //     ShardStateStuff::from_state_and_root(block_id, shard_state, root, handle)
+    // }
+
     // NOTE: DO NOT try to make a separate `load_state_root` method
     // since the root must be properly tracked, and this tracking requires
     // knowing its `min_ref_mc_seqno` which can only be found out by
@@ -224,13 +252,34 @@ impl ShardStateStorage {
     // because due to model complexity it is going to be error-prone.
     pub async fn load_state(
         &self,
-        ref_by_mc_seqno: u32,
+        mut ref_by_mc_seqno: u32,
         block_id: &BlockId,
     ) -> Result<ShardStateStuff> {
+        // Collect chain of state updates for non-masterchain blocks
+        let mut chain = Vec::new();
+        let mut current_block_id = *block_id;
+
+        if !block_id.is_masterchain() {
+            while current_block_id.seqno % 5 != 0 {
+                let handle = self
+                    .block_handle_storage
+                    .load_handle(&current_block_id)
+                    .unwrap();
+
+                ref_by_mc_seqno = ref_by_mc_seqno.min(handle.meta().ref_by_mc_seqno());
+
+                let block = self.block_storage.load_block_data(&handle).await?;
+                chain.push((current_block_id, block.block().state_update.load()?));
+
+                current_block_id = block.construct_prev_id()?.0; // TODO
+            }
+        }
+
         // NOTE: only for metrics.
         static MAX_KNOWN_EPOCH: AtomicU32 = AtomicU32::new(0);
 
-        let root_hash = self.load_state_root_hash(block_id)?;
+        // Load stored state
+        let root_hash = self.load_state_root_hash(&current_block_id)?;
         let root = self.cell_storage.load_cell(&root_hash, ref_by_mc_seqno)?;
         let root = Cell::from(root as Arc<_>);
 
@@ -241,7 +290,30 @@ impl ShardStateStorage {
 
         let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
         let handle = self.min_ref_mc_state.insert(&shard_state);
-        ShardStateStuff::from_state_and_root(block_id, shard_state, root, handle)
+        let mut state = ShardStateStuff::from_state_and_root(
+            if block_id.is_masterchain() {
+                block_id
+            } else {
+                &current_block_id
+            },
+            shard_state,
+            root,
+            handle,
+        )?;
+
+        // Apply state updates
+        while let Some((block_id, merkle_update)) = chain.pop() {
+            let prev_block_id = *state.block_id();
+            state = rayon_run({
+                move || state.par_make_next_state(&block_id, &merkle_update, Some(5))
+            })
+            .await
+            .with_context(|| {
+                format!("failed to apply merkle of block {block_id} to {prev_block_id}")
+            })?;
+        }
+
+        Ok(state)
     }
 
     pub fn load_state_root_hash(&self, block_id: &BlockId) -> Result<HashBytes> {
