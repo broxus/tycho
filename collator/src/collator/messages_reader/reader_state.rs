@@ -147,6 +147,34 @@ pub struct ExternalsReaderState {
 }
 
 impl ExternalsReaderState {
+    /// Clone with detailed timing metrics
+    pub fn clone_with_metrics(&self, labels: &[(&str, String)]) -> Self {
+        let ranges_start = std::time::Instant::now();
+        let ranges = self.ranges.clone();
+        let ranges_elapsed = ranges_start.elapsed();
+        
+        let partitions_start = std::time::Instant::now();
+        let by_partitions = self.by_partitions.clone();
+        let partitions_elapsed = partitions_start.elapsed();
+        
+        // Convert labels to Vec to avoid lifetime issues
+        let labels_vec: Vec<(String, String)> = labels.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        
+        // Record metrics using the same pattern as other metrics in the codebase
+        metrics::histogram!("tycho_collator_externals_ranges_clone_time", &labels_vec)
+            .record(ranges_elapsed.as_millis() as f64);
+        metrics::histogram!("tycho_collator_externals_partitions_clone_time", &labels_vec)
+            .record(partitions_elapsed.as_millis() as f64);
+        
+        Self {
+            ranges,
+            by_partitions,
+            last_read_to_anchor_chain_time: self.last_read_to_anchor_chain_time,
+        }
+    }
+}
+
+impl ExternalsReaderState {
     pub fn get_state_by_partition_mut<T: Into<QueuePartitionIdx>>(
         &mut self,
         par_id: T,
@@ -356,6 +384,33 @@ impl From<ExternalKey> for (MempoolAnchorId, u64) {
 pub struct InternalsReaderState {
     pub partitions: BTreeMap<QueuePartitionIdx, InternalsPartitionReaderState>,
     pub cumulative_statistics: Option<CumulativeStatistics>,
+}
+
+impl InternalsReaderState {
+    /// Clone with detailed timing metrics
+    pub fn clone_with_metrics(&self, labels: &[(&str, String)]) -> Self {
+        let partitions_start = std::time::Instant::now();
+        let partitions = self.partitions.clone();
+        let partitions_elapsed = partitions_start.elapsed();
+        
+        let stats_start = std::time::Instant::now();
+        let cumulative_statistics = self.cumulative_statistics.clone();
+        let stats_elapsed = stats_start.elapsed();
+        
+        // Convert labels to Vec to avoid lifetime issues
+        let labels_vec: Vec<(String, String)> = labels.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        
+        // Record metrics using the same pattern as other metrics in the codebase
+        metrics::histogram!("tycho_collator_internals_partitions_clone_time", &labels_vec)
+            .record(partitions_elapsed.as_millis() as f64);
+        metrics::histogram!("tycho_collator_internals_stats_clone_time", &labels_vec)
+            .record(stats_elapsed.as_millis() as f64);
+        
+        Self {
+            partitions,
+            cumulative_statistics,
+        }
+    }
 }
 
 impl InternalsReaderState {
