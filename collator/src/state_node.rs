@@ -194,7 +194,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let state = self
             .storage
             .shard_state_storage()
-            .load_state(ref_by_mc_seqno, block_id)
+            .load_state_direct(ref_by_mc_seqno, block_id)
             .await?;
 
         Ok(state)

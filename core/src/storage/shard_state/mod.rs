@@ -218,32 +218,32 @@ impl ShardStateStorage {
         .await?
     }
 
-    // // NOTE: DO NOT try to make a separate `load_state_root` method
-    // // since the root must be properly tracked, and this tracking requires
-    // // knowing its `min_ref_mc_seqno` which can only be found out by
-    // // parsing the state. Creating a "Brief State" struct won't work either
-    // // because due to model complexity it is going to be error-prone.
-    // pub async fn load_state(
-    //     &self,
-    //     ref_by_mc_seqno: u32,
-    //     block_id: &BlockId,
-    // ) -> Result<ShardStateStuff> {
-    //     // NOTE: only for metrics.
-    //     static MAX_KNOWN_EPOCH: AtomicU32 = AtomicU32::new(0);
-    //
-    //     let root_hash = self.load_state_root_hash(block_id)?;
-    //     let root = self.cell_storage.load_cell(&root_hash, ref_by_mc_seqno)?;
-    //     let root = Cell::from(root as Arc<_>);
-    //
-    //     let max_known_epoch = MAX_KNOWN_EPOCH
-    //         .fetch_max(ref_by_mc_seqno, Ordering::Relaxed)
-    //         .max(ref_by_mc_seqno);
-    //     metrics::gauge!("tycho_storage_state_max_epoch").set(max_known_epoch);
-    //
-    //     let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
-    //     let handle = self.min_ref_mc_state.insert(&shard_state);
-    //     ShardStateStuff::from_state_and_root(block_id, shard_state, root, handle)
-    // }
+    // NOTE: DO NOT try to make a separate `load_state_root` method
+    // since the root must be properly tracked, and this tracking requires
+    // knowing its `min_ref_mc_seqno` which can only be found out by
+    // parsing the state. Creating a "Brief State" struct won't work either
+    // because due to model complexity it is going to be error-prone.
+    pub async fn load_state_direct(
+        &self,
+        ref_by_mc_seqno: u32,
+        block_id: &BlockId,
+    ) -> Result<ShardStateStuff> {
+        // NOTE: only for metrics.
+        static MAX_KNOWN_EPOCH: AtomicU32 = AtomicU32::new(0);
+
+        let root_hash = self.load_state_root_hash(block_id)?;
+        let root = self.cell_storage.load_cell(&root_hash, ref_by_mc_seqno)?;
+        let root = Cell::from(root as Arc<_>);
+
+        let max_known_epoch = MAX_KNOWN_EPOCH
+            .fetch_max(ref_by_mc_seqno, Ordering::Relaxed)
+            .max(ref_by_mc_seqno);
+        metrics::gauge!("tycho_storage_state_max_epoch").set(max_known_epoch);
+
+        let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
+        let handle = self.min_ref_mc_state.insert(&shard_state);
+        ShardStateStuff::from_state_and_root(block_id, shard_state, root, handle)
+    }
 
     // NOTE: DO NOT try to make a separate `load_state_root` method
     // since the root must be properly tracked, and this tracking requires
@@ -311,6 +311,8 @@ impl ShardStateStorage {
             .with_context(|| {
                 format!("failed to apply merkle of block {block_id} to {prev_block_id}")
             })?;
+
+            tracing::info!("TEST State load");
         }
 
         Ok(state)
