@@ -1110,9 +1110,35 @@ pub struct ExecutedTransaction {
 pub struct SkippedTransaction {
     pub gas_used: u64,
 }
+// #[derive(Debug, Clone)]
+// pub struct ParsedMessage {
+//     pub info: MsgInfo,
+//     pub dst_in_current_shard: bool,
+//     pub cell: Cell,
+//     pub special_origin: Option<SpecialOrigin>,
+//     pub block_seqno: Option<BlockSeqno>,
+//     pub from_same_shard: Option<bool>,
+//     pub ext_msg_chain_time: Option<u64>,
+// }
+//
+// impl ParsedMessage {
+//     pub fn kind(&self) -> ParsedMessageKind {
+//         match (&self.info, self.special_origin) {
+//             (_, Some(SpecialOrigin::Recover)) => ParsedMessageKind::Recover,
+//             (_, Some(SpecialOrigin::Mint)) => ParsedMessageKind::Mint,
+//             (MsgInfo::ExtIn(_), _) => ParsedMessageKind::ExtIn,
+//             (MsgInfo::Int(_), _) => ParsedMessageKind::Int,
+//             (MsgInfo::ExtOut(_), _) => ParsedMessageKind::ExtOut,
+//         }
+//     }
+//
+//     pub fn is_external(&self) -> bool {
+//         matches!(self.info, MsgInfo::ExtIn(_) | MsgInfo::ExtOut(_))
+//     }
+// }
 
-#[derive(Debug, Clone)]
-pub struct ParsedMessage {
+#[derive(Debug)]
+pub struct ParsedMessageInner {
     pub info: MsgInfo,
     pub dst_in_current_shard: bool,
     pub cell: Cell,
@@ -1122,9 +1148,64 @@ pub struct ParsedMessage {
     pub ext_msg_chain_time: Option<u64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ParsedMessage(Arc<ParsedMessageInner>);
+
 impl ParsedMessage {
+    pub fn new(
+        info: MsgInfo,
+        dst_in_current_shard: bool,
+        cell: Cell,
+        special_origin: Option<SpecialOrigin>,
+        block_seqno: Option<BlockSeqno>,
+        from_same_shard: Option<bool>,
+        ext_msg_chain_time: Option<u64>,
+    ) -> Self {
+        Self(Arc::new(ParsedMessageInner {
+            info,
+            dst_in_current_shard,
+            cell,
+            special_origin,
+            block_seqno,
+            from_same_shard,
+            ext_msg_chain_time,
+        }))
+    }
+
+    pub fn block_seqno(&self) -> Option<BlockSeqno> {
+        self.0.block_seqno
+    }
+    pub fn is_from_same_shard(&self) -> Option<bool> {
+        self.0.from_same_shard
+    }
+    pub fn info(&self) -> &MsgInfo {
+        &self.0.info
+    }
+    pub fn cell(&self) -> &Cell {
+        &self.0.cell
+    }
+    pub fn ext_msg_chain_time(&self) -> Option<u64> {
+        self.0.ext_msg_chain_time
+    }
+    pub fn dst_in_current_shard(&self) -> bool {
+        self.0.dst_in_current_shard
+    }
+    pub fn special_origin(&self) -> Option<SpecialOrigin> {
+        self.0.special_origin
+    }
+
+    pub fn try_into_parts(self) -> Result<(MsgInfo, Cell)> {
+        match Arc::try_unwrap(self.0) {
+            Ok(inner) => Ok((inner.info, inner.cell)),
+            Err(arc) => Err(anyhow!(
+                "cannot unwrap ParsedMessage, ref count = {}",
+                Arc::strong_count(&arc)
+            )),
+        }
+    }
+
     pub fn kind(&self) -> ParsedMessageKind {
-        match (&self.info, self.special_origin) {
+        match (self.info(), self.special_origin()) {
             (_, Some(SpecialOrigin::Recover)) => ParsedMessageKind::Recover,
             (_, Some(SpecialOrigin::Mint)) => ParsedMessageKind::Mint,
             (MsgInfo::ExtIn(_), _) => ParsedMessageKind::ExtIn,
@@ -1134,7 +1215,12 @@ impl ParsedMessage {
     }
 
     pub fn is_external(&self) -> bool {
-        matches!(self.info, MsgInfo::ExtIn(_) | MsgInfo::ExtOut(_))
+        matches!(self.info(), MsgInfo::ExtIn(_) | MsgInfo::ExtOut(_))
+    }
+
+    /// Если нужно отдать весь Arc наружу
+    pub fn arc(&self) -> Arc<ParsedMessageInner> {
+        Arc::clone(&self.0)
     }
 }
 
