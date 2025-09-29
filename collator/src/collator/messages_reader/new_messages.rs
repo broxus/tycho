@@ -299,15 +299,15 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                     range_reader
                         .reader_state
                         .buffer
-                        .add_message(Box::new(ParsedMessage {
-                            info: MsgInfo::Int(msg.message.info().clone()),
-                            dst_in_current_shard: true,
-                            cell: msg.message.cell().clone(),
-                            special_origin: None,
-                            block_seqno: Some(block_seqno),
-                            from_same_shard: Some(msg.source == for_shard_id),
-                            ext_msg_chain_time: None,
-                        }));
+                        .add_message(ParsedMessage::new(
+                            MsgInfo::Int(msg.message.info().clone()),
+                            true,
+                            msg.message.cell().clone(),
+                            None,
+                            Some(block_seqno),
+                            Some(msg.source == for_shard_id),
+                            None,
+                        ));
                     res.metrics
                         .add_to_msgs_groups_ops_count
                         .saturating_add_assign(1);
