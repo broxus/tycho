@@ -130,9 +130,9 @@ tracing-stackdriver = "0.10.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 triomphe = "0.1.11"
 tycho-crypto = { version = "0.4", features = ["tl-proto", "serde", "rand9"] }
-tycho-executor = "0.2.0"
-tycho-types = { version = "0.2.1", features = ["tycho", "stats"] }
-tycho-vm = "0.2.0"
+tycho-executor = "0.3.0"
+tycho-types = { version = "0.3.0", features = ["tycho", "stats"] }
+tycho-vm = "0.3.0"
 weedb = "0.6.0"
 zstd-safe = "7.2"
 zstd-sys = "2.0"
@@ -153,9 +153,6 @@ tycho-wu-tuner = { path = "./wu-tuner", version = "0.2.12" }
 
 [patch.crates-io]
 # patches here
-tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "35fea56d604d00cc0f4b4e967d6326ff0793ef26" }
-tycho-executor = { git = "https://github.com/broxus/tycho-vm.git", rev = "985a350d83385b9f90e69a77073e6cbb1071fa93" }
-tycho-vm = { git = "https://github.com/broxus/tycho-vm.git", rev = "985a350d83385b9f90e69a77073e6cbb1071fa93" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
