@@ -3840,6 +3840,7 @@ dependencies = [
  "rayon",
  "scopeguard",
  "serde",
+ "smallvec",
  "tempfile",
  "thiserror 2.0.12",
  "tikv-jemallocator",

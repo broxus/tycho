@@ -23,8 +23,9 @@ use crate::intercom::core::{PointByIdQueryError, PointByIdResponse};
 use crate::intercom::dependency::limiter::Limiter;
 use crate::intercom::dependency::peer_limiter::PeerLimiter;
 use crate::intercom::peer_schedule::PeerState;
-use crate::intercom::{Dispatcher, PeerSchedule, PointByIdRequest};
+use crate::intercom::{Dispatcher, PeerSchedule, PointByIdRequest, QueryRequestTag};
 use crate::models::{PeerCount, Point, PointId};
+use crate::moderator::JournalEvent;
 
 #[derive(Clone)]
 pub struct Downloader {
@@ -343,57 +344,61 @@ impl<T: DownloadType> DownloadTask<T> {
         peer_id: &PeerId,
         result: Result<PointByIdResponse<Point>, PointByIdQueryError>,
     ) -> Option<DownloadResult> {
-        let defined_response =
-            match result {
-                Ok(PointByIdResponse::Defined(point_result)) => Some(point_result),
-                Ok(PointByIdResponse::DefinedNone) => None,
-                Ok(PointByIdResponse::TryLater) => {
-                    let status = self.undone_peers.get_mut(peer_id).unwrap_or_else(|| {
-                        panic!("Coding error: peer not in map {}", peer_id.alt())
-                    });
-                    status.is_in_flight = false;
-                    // apply the same retry strategy as for network errors
-                    status.failed_queries = status.failed_queries.saturating_add(1);
-                    tracing::trace!(peer = display(peer_id.alt()), "try later");
-                    return None;
-                }
-                Err(PointByIdQueryError::Network(network_err)) => {
-                    let status = self.undone_peers.get_mut(peer_id).unwrap_or_else(|| {
-                        panic!("Coding error: peer not in map {}", peer_id.alt())
-                    });
-                    status.is_in_flight = false;
-                    status.failed_queries = status.failed_queries.saturating_add(1);
-                    metrics::counter!("tycho_mempool_download_query_failed_count").increment(1);
-                    tracing::warn!(
-                        peer = display(peer_id.alt()),
-                        error = display(network_err),
-                        "network error",
-                    );
-                    return None;
-                }
-                Err(PointByIdQueryError::BadPoint(bad_point)) => {
-                    // reliable peer won't return unverifiable point
-                    self.not_found = self.not_found.saturating_add(1);
-                    DownloadCtx::meter_unreliable();
-                    tracing::error!(
-                        result = display(&bad_point),
-                        peer = display(peer_id.alt()),
-                        "downloaded",
-                    );
-                    return None;
-                }
-                Err(PointByIdQueryError::TlError(tl_error)) => {
-                    // reliable peer won't return unverifiable point
-                    self.not_found = self.not_found.saturating_add(1);
-                    DownloadCtx::meter_unreliable();
-                    tracing::error!(
-                        result = display(&tl_error),
-                        peer = display(peer_id.alt()),
-                        "downloaded",
-                    );
-                    return None;
-                }
-            };
+        let defined_response = match result {
+            Ok(PointByIdResponse::Defined(point_result)) => Some(point_result),
+            Ok(PointByIdResponse::DefinedNone) => None,
+            Ok(PointByIdResponse::TryLater) => {
+                let status = (self.undone_peers)
+                    .get_mut(peer_id)
+                    .unwrap_or_else(|| panic!("Coding error: peer not in map {}", peer_id.alt()));
+                status.is_in_flight = false;
+                // apply the same retry strategy as for network errors
+                status.failed_queries = status.failed_queries.saturating_add(1);
+                tracing::trace!(peer = display(peer_id.alt()), "try later");
+                return None;
+            }
+            Err(PointByIdQueryError::Network(network_err)) => {
+                let status = (self.undone_peers)
+                    .get_mut(peer_id)
+                    .unwrap_or_else(|| panic!("Coding error: peer not in map {}", peer_id.alt()));
+                status.is_in_flight = false;
+                status.failed_queries = status.failed_queries.saturating_add(1);
+                metrics::counter!("tycho_mempool_download_query_failed_count").increment(1);
+                tracing::warn!(
+                    peer = display(peer_id.alt()),
+                    error = display(network_err),
+                    "network error",
+                );
+                return None;
+            }
+            Err(PointByIdQueryError::BadPoint(bad_point)) => {
+                // reliable peer won't return unverifiable point
+                self.not_found = self.not_found.saturating_add(1);
+                DownloadCtx::meter_unreliable();
+                tracing::error!(
+                    result = display(&bad_point),
+                    peer = display(peer_id.alt()),
+                    "downloaded",
+                );
+                let event = JournalEvent::BadPoint(*peer_id, bad_point);
+                self.parent.inner.dispatcher.moderator.send_report(event);
+                return None;
+            }
+            Err(PointByIdQueryError::TlError(tl_error)) => {
+                // reliable peer won't return unverifiable point
+                self.not_found = self.not_found.saturating_add(1);
+                DownloadCtx::meter_unreliable();
+                tracing::error!(
+                    result = display(&tl_error),
+                    peer = display(peer_id.alt()),
+                    "downloaded",
+                );
+                let event =
+                    JournalEvent::BadResponse(*peer_id, QueryRequestTag::PointById, tl_error);
+                self.parent.inner.dispatcher.moderator.send_report(event);
+                return None;
+            }
+        };
 
         let Some(status) = self.undone_peers.remove(peer_id) else {
             panic!("peer {} was removed, concurrent download?", peer_id.alt());

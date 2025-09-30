@@ -168,6 +168,18 @@ impl Point {
         &self.info
     }
 
+    pub fn read_round_from_tl_bytes<T>(data: T) -> Result<Round, TlError>
+    where
+        T: AsRef<[u8]>,
+    {
+        // type + digest + signature + type + author
+        const OFFSET: usize = 4 + 32 + 64 + 4 + 32;
+        if data.as_ref().len() < OFFSET + 4 {
+            return Err(TlError::InvalidData);
+        };
+        tl_proto::deserialize(&data.as_ref()[OFFSET..OFFSET + 4])
+    }
+
     // Note: resulting slice has lifetime of bump that is elided
     pub fn read_payload_from_tl_bytes<T>(data: T, bump: &Bump) -> Result<Vec<&[u8]>, TlError>
     where
@@ -294,6 +306,11 @@ mod tests {
         let info_2 = tl_proto::deserialize::<PointInfo>(&info_b).context("point info")?;
 
         ensure!(point.info() == &info_2, "compare deserialized info");
+
+        let round = Point::read_round_from_tl_bytes(&info_b).context("read round from bytes")?;
+
+        ensure!(point.info().round() == round, "compare read round from tl");
+
         Ok(())
     }
 

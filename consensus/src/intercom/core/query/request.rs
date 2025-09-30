@@ -73,7 +73,10 @@ impl QueryRequestRaw {
 
     pub fn parse(self) -> Result<QueryRequestMedium, TlError> {
         Ok(match self.tag {
-            QueryRequestTag::Broadcast => QueryRequestMedium::Broadcast(self.request_body),
+            QueryRequestTag::Broadcast => {
+                let round = Point::read_round_from_tl_bytes(&self.request_body)?;
+                QueryRequestMedium::Broadcast(self.request_body, round)
+            }
             QueryRequestTag::PointById => {
                 QueryRequestMedium::PointById(tl_proto::deserialize(&self.request_body)?)
             }
@@ -85,7 +88,16 @@ impl QueryRequestRaw {
 }
 
 pub enum QueryRequestMedium {
-    Broadcast(Bytes),
+    Broadcast(Bytes, Round),
     Signature(Round),
     PointById(PointId),
+}
+
+impl QueryRequestMedium {
+    pub fn round(&self) -> Round {
+        match self {
+            Self::Broadcast(_, round) | Self::Signature(round) => *round,
+            Self::PointById(point_id) => point_id.round,
+        }
+    }
 }

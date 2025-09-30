@@ -278,6 +278,7 @@ impl Broadcaster {
                     error = display(&error),
                     "bad response to broadcast from"
                 );
+                self.bcast_request.report(peer_id, error);
             }
             Err(QueryError::Network(error)) => {
                 self.sig_peers.insert(*peer_id); // lighter weight retry loop
@@ -315,6 +316,7 @@ impl Broadcaster {
                     error = display(&error),
                     "bad signature response from"
                 );
+                self.sig_request.report(peer_id, error);
             }
             Err(QueryError::Network(error)) => {
                 self.sig_peers.insert(*peer_id); // let it retry

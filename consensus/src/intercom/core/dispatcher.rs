@@ -1,24 +1,29 @@
+use tl_proto::TlError;
 use tycho_network::{Network, PeerId, PrivateOverlay, Request, Response};
 use tycho_util::metrics::HistogramGuard;
 
+use crate::intercom::QueryRequestTag;
 use crate::intercom::core::query::error::PointByIdQueryError;
 use crate::intercom::core::query::request::QueryRequest;
 use crate::intercom::core::query::response::QueryResponse;
 use crate::intercom::core::{BroadcastResponse, PointByIdResponse, QueryError, SignatureResponse};
 use crate::intercom::dependency::PeerDownloadPermit;
 use crate::models::{Point, PointId, Round};
+use crate::moderator::{JournalEvent, Moderator};
 
 #[derive(Clone)]
 pub struct Dispatcher {
     network: Network,
     overlay: PrivateOverlay,
+    pub moderator: Moderator,
 }
 
 impl Dispatcher {
-    pub fn new(network: &Network, private_overlay: &PrivateOverlay) -> Self {
+    pub fn new(network: &Network, private_overlay: &PrivateOverlay, moderator: &Moderator) -> Self {
         Self {
             network: network.clone(),
             overlay: private_overlay.clone(),
+            moderator: moderator.clone(),
         }
     }
     async fn query(&self, peer_id: &PeerId, request: Request) -> anyhow::Result<Response> {
@@ -46,6 +51,10 @@ impl BroadcastRequest {
         };
         QueryResponse::parse_broadcast(&response).map_err(QueryError::TlError)
     }
+    pub fn report(&self, peer_id: &PeerId, error: TlError) {
+        let event = JournalEvent::BadResponse(*peer_id, QueryRequestTag::Broadcast, error);
+        self.dispatcher.moderator.send_report(event);
+    }
 }
 
 pub struct SignatureRequest {
@@ -67,6 +76,10 @@ impl SignatureRequest {
             Err(e) => return Err(QueryError::Network(e)),
         };
         QueryResponse::parse_signature(&response).map_err(QueryError::TlError)
+    }
+    pub fn report(&self, peer_id: &PeerId, error: TlError) {
+        let event = JournalEvent::BadResponse(*peer_id, QueryRequestTag::Signature, error);
+        self.dispatcher.moderator.send_report(event);
     }
 }
 

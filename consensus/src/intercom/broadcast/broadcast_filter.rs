@@ -13,6 +13,7 @@ use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::engine::{ConsensusConfigExt, NodeConfig};
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointId, Round};
+use crate::moderator::{JournalEvent, Moderator};
 use crate::storage::MempoolStore;
 
 #[derive(Default)]
@@ -130,6 +131,7 @@ impl BroadcastFilter {
         &self,
         sender: &PeerId,
         point: &Point,
+        moderator: &Moderator,
         store: &MempoolStore,
         peer_schedule: &PeerSchedule,
         downloader: &Downloader,
@@ -140,6 +142,7 @@ impl BroadcastFilter {
         let id = point.info().id();
 
         let checked = if sender != id.author {
+            moderator.send_report(JournalEvent::SenderNotAuthor(*sender, point.clone()));
             Err(CheckError::SenderNotAuthor(*sender))
         } else {
             // have to cache every point when the node lags behind consensus;
