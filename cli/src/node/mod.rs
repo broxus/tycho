@@ -207,6 +207,9 @@ impl Node {
         let top_shards = mc_state.get_top_shards()?;
         message_queue_adapter.clear_uncommitted_state(&top_shards)?;
 
+        // NOTE: Stub
+        let slasher = tycho_slasher::Slasher::default();
+
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {
                 network: base.network.clone(),
@@ -216,6 +219,7 @@ impl Node {
             },
             base.keypair.clone(),
             self.validator_config,
+            slasher.validator_events_listener(),
         );
 
         // Explicitly handle the initial state
