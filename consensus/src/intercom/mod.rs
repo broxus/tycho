@@ -1,4 +1,5 @@
-pub use core::{Dispatcher, Responder};
+pub use core::Responder;
+pub use core::dispatcher::*;
 
 pub use broadcast::*;
 pub use dependency::*;

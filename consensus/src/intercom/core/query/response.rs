@@ -1,13 +1,14 @@
 use std::fmt::{Display, Formatter};
 use std::time::Instant;
 
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use tl_proto::{TlError, TlRead, TlResult, TlWrite};
 use tycho_network::Response;
 use tycho_util::sync::rayon_run_fifo;
 
 use crate::effects::{AltFmt, AltFormat};
-use crate::models::{Point, PointIntegrityError, Signature};
+use crate::intercom::core::PointByIdQueryError;
+use crate::models::{Point, Signature};
 
 #[derive(Debug, TlWrite, TlRead)]
 #[tl(boxed, id = "intercom.broadcastResponse", scheme = "proto.tl")]
@@ -88,10 +89,7 @@ impl QueryResponse {
         SignatureResponse::read_from(&mut &response.body[..])
     }
 
-    pub fn point_by_id<T>(start: Instant, body: PointByIdResponse<T>) -> Response
-    where
-        T: AsRef<[u8]> + TlWrite,
-    {
+    pub fn point_by_id(start: Instant, body: PointByIdResponse<Bytes>) -> Response {
         let response = Response::from_tl(&body);
         let histogram = match body {
             PointByIdResponse::Defined(_) => {
@@ -107,7 +105,7 @@ impl QueryResponse {
 
     pub async fn parse_point_by_id(
         mut response: Response,
-    ) -> TlResult<PointByIdResponse<Result<Point, PointIntegrityError>>> {
+    ) -> Result<PointByIdResponse<Point>, PointByIdQueryError> {
         let interim = PointByIdResponse::<&[u8]>::read_from(&mut &response.body[..])?;
         Ok(match interim {
             PointByIdResponse::Defined(data) => {
@@ -115,7 +113,7 @@ impl QueryResponse {
                 response.body.advance(data_offset);
                 let response_body = response.body;
                 PointByIdResponse::Defined(
-                    rayon_run_fifo(|| Point::parse(response_body.into())).await?,
+                    rayon_run_fifo(|| Point::parse(response_body.into())).await??,
                 )
             }
             PointByIdResponse::DefinedNone => PointByIdResponse::DefinedNone,

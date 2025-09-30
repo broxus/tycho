@@ -1,9 +1,7 @@
-pub use dispatcher::*;
-pub use query_request::*;
-pub use query_response::*;
+pub(super) use query::error::*;
+pub(super) use query::response::*;
 pub use responder::*;
 
-mod dispatcher;
-mod query_request;
-mod query_response;
+pub mod dispatcher;
+mod query;
 mod responder;

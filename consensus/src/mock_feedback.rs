@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -6,11 +7,11 @@ use futures_util::stream::FuturesUnordered;
 use itertools::Itertools;
 use tl_proto::{TlRead, TlWrite};
 use tokio::time::MissedTickBehavior;
-use tycho_network::{PeerId, Request};
+use tycho_network::PeerId;
 
 use crate::effects::{Cancelled, TaskResult};
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
-use crate::intercom::{Dispatcher, InitPeers, WeakPeerSchedule};
+use crate::intercom::{Dispatcher, InitPeers, MockFeedbackMessage, WeakPeerSchedule};
 use crate::models::Round;
 
 #[derive(TlRead, TlWrite)]
@@ -75,9 +76,10 @@ impl MockFeedbackSender {
                 continue;
             }
 
-            let request = Request::from_tl(RoundBoxed {
-                round: self.top_known_anchor.get(),
-            });
+            let message = Arc::new(MockFeedbackMessage::new(
+                self.dispatcher.clone(),
+                self.top_known_anchor.get(),
+            ));
             let Some(peer_schedule) = self.peer_schedule.upgrade() else {
                 return Err(Cancelled());
             };
@@ -88,9 +90,11 @@ impl MockFeedbackSender {
 
             send_futures.clear();
 
-            for peer_id in &receivers {
-                let future = self.dispatcher.send_feedback(peer_id, &request);
-                send_futures.push(future);
+            for peer_id in receivers {
+                send_futures.push({
+                    let message = message.clone();
+                    Box::pin(async move { message.send(&peer_id).await })
+                });
             }
         }
     }
