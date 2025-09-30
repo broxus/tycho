@@ -11,7 +11,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tracing::Instrument;
-use tycho_network::{PeerId, Request};
+use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
 
@@ -19,11 +19,11 @@ use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, TaskResult};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
-use crate::intercom::core::{PointByIdResponse, PointQueryResult, QueryRequest};
+use crate::intercom::core::{PointByIdQueryError, PointByIdResponse};
 use crate::intercom::dependency::limiter::Limiter;
 use crate::intercom::dependency::peer_limiter::PeerLimiter;
 use crate::intercom::peer_schedule::PeerState;
-use crate::intercom::{Dispatcher, PeerSchedule};
+use crate::intercom::{Dispatcher, PeerSchedule, PointByIdRequest};
 use crate::models::{PeerCount, Point, PointId};
 
 #[derive(Clone)]
@@ -180,7 +180,7 @@ impl Downloader {
             parent: self.clone(),
             _phantom: PhantomData,
             ctx,
-            request: QueryRequest::point_by_id(point_id),
+            request: PointByIdRequest::new(point_id),
             point_id: *point_id,
             peer_count,
             not_found: 0, // this node is +1 to 2F
@@ -213,7 +213,7 @@ struct DownloadTask<T> {
     _phantom: PhantomData<T>,
     ctx: DownloadCtx,
 
-    request: Request,
+    request: PointByIdRequest,
     point_id: PointId,
 
     peer_count: PeerCount,
@@ -222,9 +222,14 @@ struct DownloadTask<T> {
     updates: broadcast::Receiver<(PeerId, PeerState)>,
 
     undone_peers: FastHashMap<PeerId, PeerStatus>,
-    downloading: FuturesUnordered<BoxFuture<'static, (PeerId, PointQueryResult)>>,
+    downloading: FuturesUnordered<BoxFuture<'static, QueryFutureOutput>>,
 
     attempt: u8,
+}
+
+struct QueryFutureOutput {
+    peer_id: PeerId,
+    result: Result<PointByIdResponse<Point>, PointByIdQueryError>,
 }
 
 impl<T: DownloadType> DownloadTask<T> {
@@ -248,8 +253,8 @@ impl<T: DownloadType> DownloadTask<T> {
                 bcast_result = &mut broadcast_result => break bcast_result.ok(),
                 Some(depender) = dependers_rx.recv() => self.add_depender(&depender),
                 update = self.updates.recv() => self.match_peer_updates(update)?,
-                Some((peer_id, result)) = self.downloading.next() =>
-                    match self.verify(&peer_id, result) {
+                Some(out) = self.downloading.next() =>
+                    match self.verify(&out.peer_id, out.result) {
                         Some(found) => break Some(found),
                         None => if self.not_found as usize >= self.peer_count.majority_of_others() {
                             break None;
@@ -328,11 +333,16 @@ impl<T: DownloadType> DownloadTask<T> {
         let request = self.request.clone();
         self.downloading.push(Box::pin(async move {
             let permit = parent.inner.peer_limiter.get(peer_id).await;
-            parent.inner.dispatcher.query_point(permit, request).await
+            let result = request.query(&parent.inner.dispatcher, permit).await;
+            QueryFutureOutput { peer_id, result }
         }));
     }
 
-    fn verify(&mut self, peer_id: &PeerId, result: PointQueryResult) -> Option<DownloadResult> {
+    fn verify(
+        &mut self,
+        peer_id: &PeerId,
+        result: Result<PointByIdResponse<Point>, PointByIdQueryError>,
+    ) -> Option<DownloadResult> {
         let defined_response =
             match result {
                 Ok(PointByIdResponse::Defined(point_result)) => Some(point_result),
@@ -347,7 +357,7 @@ impl<T: DownloadType> DownloadTask<T> {
                     tracing::trace!(peer = display(peer_id.alt()), "try later");
                     return None;
                 }
-                Err(network_err) => {
+                Err(PointByIdQueryError::Network(network_err)) => {
                     let status = self.undone_peers.get_mut(peer_id).unwrap_or_else(|| {
                         panic!("Coding error: peer not in map {}", peer_id.alt())
                     });
@@ -358,6 +368,28 @@ impl<T: DownloadType> DownloadTask<T> {
                         peer = display(peer_id.alt()),
                         error = display(network_err),
                         "network error",
+                    );
+                    return None;
+                }
+                Err(PointByIdQueryError::BadPoint(bad_point)) => {
+                    // reliable peer won't return unverifiable point
+                    self.not_found = self.not_found.saturating_add(1);
+                    DownloadCtx::meter_unreliable();
+                    tracing::error!(
+                        result = display(&bad_point),
+                        peer = display(peer_id.alt()),
+                        "downloaded",
+                    );
+                    return None;
+                }
+                Err(PointByIdQueryError::TlError(tl_error)) => {
+                    // reliable peer won't return unverifiable point
+                    self.not_found = self.not_found.saturating_add(1);
+                    DownloadCtx::meter_unreliable();
+                    tracing::error!(
+                        result = display(&tl_error),
+                        peer = display(peer_id.alt()),
+                        "downloaded",
                     );
                     return None;
                 }
@@ -383,18 +415,7 @@ impl<T: DownloadType> DownloadTask<T> {
                 );
                 None
             }
-            Some(Err(parse_error)) => {
-                // reliable peer won't return unverifiable point
-                self.not_found = self.not_found.saturating_add(1);
-                DownloadCtx::meter_unreliable();
-                tracing::error!(
-                    result = display(parse_error),
-                    peer = display(peer_id.alt()),
-                    "downloaded",
-                );
-                None
-            }
-            Some(Ok(point)) if point.info().id() != self.point_id => {
+            Some(point) if point.info().id() != self.point_id => {
                 // it's a ban
                 self.not_found = self.not_found.saturating_add(1);
                 DownloadCtx::meter_unreliable();
@@ -407,7 +428,7 @@ impl<T: DownloadType> DownloadTask<T> {
                 );
                 None
             }
-            Some(Ok(point)) => {
+            Some(point) => {
                 match Verifier::verify(
                     point.info(),
                     &self.parent.inner.peer_schedule,
