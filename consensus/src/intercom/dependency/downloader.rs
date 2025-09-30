@@ -28,8 +28,9 @@ use crate::intercom::core::query::{DownloadIdQuery, QueryError};
 use crate::intercom::dependency::limiter::Limiter;
 use crate::intercom::dependency::peer_limiter::PeerLimiter;
 use crate::intercom::peer_schedule::PeerState;
-use crate::intercom::{Dispatcher, PeerSchedule};
+use crate::intercom::{Dispatcher, PeerSchedule, QueryRequestTag};
 use crate::models::{PeerCount, Point, PointId, PointIntegrityError, StructureIssue};
+use crate::moderator::JournalEvent;
 
 #[derive(Clone)]
 pub struct Downloader {
@@ -430,6 +431,9 @@ impl<T: DownloadType> DownloadTask<T> {
                     peer = display(out.peer_id.alt()),
                     "bad response",
                 );
+                let event =
+                    JournalEvent::BadResponse(out.peer_id, QueryRequestTag::Download, tl_error);
+                self.parent.inner.dispatcher.moderator.send_report(event);
                 None
             }
             LastResponse::BadPoint(bad_point) => {
@@ -441,6 +445,9 @@ impl<T: DownloadType> DownloadTask<T> {
                     peer = display(out.peer_id.alt()),
                     "bad point",
                 );
+                let tag = QueryRequestTag::Download;
+                let event = JournalEvent::PointIntegrityError(out.peer_id, tag, bad_point);
+                self.parent.inner.dispatcher.moderator.send_report(event);
                 None
             }
             LastResponse::IllFormed(point, issue) => {
@@ -463,6 +470,12 @@ impl<T: DownloadType> DownloadTask<T> {
                     digest = display(wrong_id.digest.alt()),
                     "returned wrong point",
                 );
+                let event = JournalEvent::ReplacedPoint {
+                    peer_id: out.peer_id,
+                    requested: self.point_id,
+                    received: wrong_id,
+                };
+                self.parent.inner.dispatcher.moderator.send_report(event);
                 None
             }
             LastResponse::Point(point) => {

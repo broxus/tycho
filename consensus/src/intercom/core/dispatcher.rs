@@ -1,17 +1,21 @@
 use anyhow::Result;
 use tycho_network::{Network, PeerId, PrivateOverlay, Request, Response};
 
+use crate::moderator::Moderator;
+
 #[derive(Clone)]
 pub struct Dispatcher {
     network: Network,
     overlay: PrivateOverlay,
+    pub moderator: Moderator,
 }
 
 impl Dispatcher {
-    pub fn new(network: &Network, private_overlay: &PrivateOverlay) -> Self {
+    pub fn new(network: &Network, private_overlay: &PrivateOverlay, moderator: &Moderator) -> Self {
         Self {
             network: network.clone(),
             overlay: private_overlay.clone(),
+            moderator: moderator.clone(),
         }
     }
     pub(super) async fn query(&self, peer_id: &PeerId, request: Request) -> Result<Response> {
