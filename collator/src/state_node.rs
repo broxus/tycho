@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -13,7 +14,7 @@ use tycho_core::storage::{
 };
 use tycho_network::PeerId;
 use tycho_types::boc::BocRepr;
-use tycho_types::merkle::MerkleProof;
+use tycho_types::merkle::{MerkleProof, MerkleUpdate};
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::mem::Reclaimer;
@@ -96,17 +97,23 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     fn load_init_block_id(&self) -> Option<BlockId>;
 }
 
+#[derive(Clone)]
+struct ShardBlockData {
+    prev_id: BlockId,
+    _prev_id_alt: Option<BlockId>,
+    state_update: MerkleUpdate,
+}
+
 pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, Arc<BlockStuffForSync>>>,
+    shard_blocks: Arc<FastDashMap<ShardIdent, BTreeMap<u32, ShardBlockData>>>,
     storage: CoreStorage,
     broadcaster: broadcast::Sender<BlockId>,
 
     sync_context_tx: watch::Sender<CollatorSyncContext>,
 
     delayed_state_notifier: DelayedStateNotifier,
-
-    shard_blocks_cache: Arc<Mutex<BTreeMap<u32, BlockStuff>>>,
 }
 
 impl StateNodeAdapterStdImpl {
@@ -117,17 +124,46 @@ impl StateNodeAdapterStdImpl {
     ) -> Self {
         let (sync_context_tx, mut sync_context_rx) = watch::channel(initial_sync_context);
         let (broadcaster, _) = broadcast::channel(10000);
+        let shard_blocks = Arc::new(FastDashMap::default());
+
         let adapter = Self {
             listener,
             storage,
             blocks: Default::default(),
+            shard_blocks: shard_blocks.clone(),
             broadcaster,
             sync_context_tx,
             delayed_state_notifier: DelayedStateNotifier::default(),
-            shard_blocks_cache: Default::default(),
         };
 
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Start watching for sync context updates");
+
+        tokio::spawn(async move {
+            // TODO: move into config
+            const TAIL_LEN: u32 = 100;
+            const INTERVAL: Duration = Duration::from_secs(10);
+
+            let mut interval = tokio::time::interval(INTERVAL);
+            loop {
+                interval.tick().await;
+
+                for mut specific_shard in shard_blocks.iter_mut() {
+                    let seqno_to_split = specific_shard
+                        .value()
+                        .last_key_value()
+                        .and_then(|(k, _)| k.checked_sub(TAIL_LEN));
+
+                    if let Some(seqno) = seqno_to_split {
+                        let retained_blocks = specific_shard.split_off(&seqno);
+
+                        let to_drop = std::mem::replace(&mut *specific_shard, retained_blocks);
+
+                        // Don't wait for drop inside a tokio context.
+                        Reclaimer::instance().drop(to_drop);
+                    }
+                }
+            }
+        });
 
         tokio::spawn({
             let listener = adapter.listener.clone();
@@ -194,13 +230,13 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     ) -> Result<ShardStateStuff> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_load_state_time");
 
-        tracing::info!("Load state: {}", block_id.as_short_id());
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
 
         let state = if block_id.is_masterchain() {
             // load stored state
             self.storage
                 .shard_state_storage()
-                .load_state_direct(ref_by_mc_seqno, block_id)
+                .explicit_load_state(ref_by_mc_seqno, block_id)
                 .await?
         } else {
             let mut chain = Vec::new();
@@ -208,22 +244,27 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
             while current_block_id.seqno % 5 != 0 {
                 let block = self
-                    .shard_blocks_cache
-                    .lock()
+                    .shard_blocks
+                    .get(&current_block_id.shard)
+                    .ok_or_else(|| {
+                        anyhow!("shard not found in block cache for {}", current_block_id)
+                    })?
                     .get(&current_block_id.seqno)
-                    .unwrap()
+                    .ok_or_else(|| {
+                        anyhow!("block not found in block cache {:?}", current_block_id)
+                    })?
                     .clone();
 
-                chain.push((current_block_id, block.block().state_update.load()?));
+                chain.push((current_block_id, block.state_update.clone()));
 
-                current_block_id = block.construct_prev_id()?.0; // TODO
+                current_block_id = block.prev_id;
             }
 
             // load stored state
             let mut state = self
                 .storage
                 .shard_state_storage()
-                .load_state_direct(ref_by_mc_seqno, &current_block_id)
+                .explicit_load_state(ref_by_mc_seqno, &current_block_id)
                 .await?;
 
             // Apply state updates
@@ -257,7 +298,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             &labels,
         );
 
-        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
 
         let (handle, _) = self
             .storage
@@ -312,7 +353,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     fn accept_block(&self, block: Arc<BlockStuffForSync>) -> Result<()> {
         let block_id = *block.block_stuff_aug.id();
 
-        tracing::info!("Block accepted: {}", block_id.as_short_id());
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted: {}", block_id.as_short_id());
 
         self.blocks
             .entry(block_id.shard)
@@ -328,19 +369,18 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let block_id = *block.id();
 
         if !block_id.is_masterchain() {
-            tracing::info!("Shard block accepted: {}", block_id.as_short_id());
-            self.shard_blocks_cache.lock().insert(block_id.seqno, block);
+            tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Shard block accepted: {}", block_id.as_short_id());
 
-            // GC
-            if block_id.seqno > 100 {
-                let mut shard_blocks = self.shard_blocks_cache.lock();
-                let retained_blocks = shard_blocks.split_off(&(block_id.seqno - 100));
+            let (prev_id, prev_id_alt) = block.construct_prev_id()?;
 
-                let to_drop = std::mem::replace(&mut *shard_blocks, retained_blocks);
-
-                // Don't wait for drop inside a tokio context.
-                Reclaimer::instance().drop(to_drop);
-            }
+            self.shard_blocks.entry(block_id.shard).or_default().insert(
+                block_id.seqno,
+                ShardBlockData {
+                    prev_id,
+                    _prev_id_alt: prev_id_alt,
+                    state_update: block.block().load_state_update()?,
+                },
+            );
         }
 
         Ok(())

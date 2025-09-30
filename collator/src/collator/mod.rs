@@ -18,7 +18,6 @@ use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_network::PeerId;
 use tycho_types::cell::{Cell, HashBytes};
-use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 use tycho_util::mem::Reclaimer;
@@ -249,7 +248,7 @@ pub struct CollatorStdImpl {
     shard_id: ShardIdent,
 
     delayed_working_state: DelayedWorkingState,
-    store_new_state_tasks: Vec<StateUpdateContext>,
+    store_new_state_tasks: Vec<JoinTask<Result<bool>>>,
 
     /// Refs on states to keep them alive until a Merkle chain is applied
     store_state_refs: VecDeque<Cell>,
@@ -627,8 +626,8 @@ impl CollatorStdImpl {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "awaiting when all state store tasks finished...",
             );
-            for ctx in self.store_new_state_tasks.drain(..) {
-                ctx.store_new_state_task.await?;
+            for task in self.store_new_state_tasks.drain(..) {
+                task.await?;
             }
         }
 
@@ -826,33 +825,6 @@ impl CollatorStdImpl {
         Self::build_and_validate_init_working_state(mc_data, prev_states, prev_queue_diff_hashes)
     }
 
-    async fn update_prev_data(
-        working_state: &mut WorkingState,
-        prev_state: ShardStateStuff,
-    ) -> Result<()> {
-        // drop prev usage tree
-        working_state.usage_tree.take();
-
-        // get prev shard data
-        let prev_shard_data = working_state
-            .prev_shard_data
-            .as_ref()
-            .expect("should exist here");
-        let prev_queue_diff_hashes = prev_shard_data.prev_queue_diff_hashes().clone();
-
-        // update working state
-        tracing::debug!(target: tracing_targets::COLLATOR, "updating prev data in working state from built pure state root...");
-
-        let (prev_shard_data, usage_tree) =
-            PrevData::build(vec![prev_state], prev_queue_diff_hashes)?;
-
-        // set new prev shard data and usage tree
-        working_state.prev_shard_data = Some(prev_shard_data);
-        working_state.usage_tree = Some(usage_tree);
-
-        Ok(())
-    }
-
     async fn reload_prev_data(
         prev_mc_seqno: u32,
         working_state: &mut WorkingState,
@@ -897,7 +869,6 @@ impl CollatorStdImpl {
         block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
         new_observable_state_root: Cell,
-        state_update: MerkleUpdate,
         store_new_state_task: JoinTask<Result<bool>>,
         new_queue_diff_hash: HashBytes,
         new_mc_data: Arc<McData>,
@@ -920,11 +891,7 @@ impl CollatorStdImpl {
             GetNewShardStateStuff::ReloadFromStorage(store_new_state_task)
         } else {
             // append new store task
-            self.store_new_state_tasks.push(StateUpdateContext {
-                block_id,
-                store_new_state_task,
-                state_update,
-            });
+            self.store_new_state_tasks.push(store_new_state_task);
 
             // Keep only the last `merkle_chain_limit` states alive
             if self.store_state_refs.len() == self.config.merkle_chain_limit {
@@ -2264,12 +2231,6 @@ impl DelayedWorkingState {
         self.unused = None;
         self.future = None;
     }
-}
-
-struct StateUpdateContext {
-    block_id: BlockId,
-    store_new_state_task: JoinTask<Result<bool>>,
-    state_update: MerkleUpdate,
 }
 
 struct AnchorsProcessingInfo {

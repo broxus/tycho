@@ -108,6 +108,11 @@ impl ShardStateStorage {
         root_cell: Cell,
         hint: StoreStateHint,
     ) -> Result<bool> {
+        // Store state root only for masterchain blocks and every N shard blocks
+        if !handle.is_masterchain() && handle.id().seqno % 5 != 0 {
+            return Ok(false);
+        }
+
         if handle.has_state() {
             return Ok(false);
         }
@@ -223,7 +228,7 @@ impl ShardStateStorage {
     // knowing its `min_ref_mc_seqno` which can only be found out by
     // parsing the state. Creating a "Brief State" struct won't work either
     // because due to model complexity it is going to be error-prone.
-    pub async fn load_state_direct(
+    pub async fn explicit_load_state(
         &self,
         ref_by_mc_seqno: u32,
         block_id: &BlockId,
@@ -245,11 +250,6 @@ impl ShardStateStorage {
         ShardStateStuff::from_state_and_root(block_id, shard_state, root, handle)
     }
 
-    // NOTE: DO NOT try to make a separate `load_state_root` method
-    // since the root must be properly tracked, and this tracking requires
-    // knowing its `min_ref_mc_seqno` which can only be found out by
-    // parsing the state. Creating a "Brief State" struct won't work either
-    // because due to model complexity it is going to be error-prone.
     pub async fn load_state(
         &self,
         mut ref_by_mc_seqno: u32,
@@ -264,14 +264,15 @@ impl ShardStateStorage {
                 let handle = self
                     .block_handle_storage
                     .load_handle(&current_block_id)
-                    .unwrap();
+                    .ok_or(ShardStateStorageError::NotFound(block_id.as_short_id()))?;
 
                 ref_by_mc_seqno = ref_by_mc_seqno.min(handle.meta().ref_by_mc_seqno());
 
                 let block = self.block_storage.load_block_data(&handle).await?;
                 chain.push((current_block_id, block.block().state_update.load()?));
 
-                current_block_id = block.construct_prev_id()?.0; // TODO
+                let (prev_id, _prev_id_alt) = block.construct_prev_id()?;
+                current_block_id = prev_id; // TODO: prev_id_alt
             }
         }
 
@@ -370,11 +371,6 @@ impl ShardStateStorage {
 
             let block_id = BlockId::from_slice(key);
             let root_hash = HashBytes::from_slice(value);
-
-            tracing::info!(
-                block_id = ?block_id,
-                "remove block GC",
-            );
 
             // Skip blocks from zero state and top blocks
             if block_id.seqno == 0

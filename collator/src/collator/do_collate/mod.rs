@@ -956,15 +956,9 @@ impl CollatorStdImpl {
             adapter.accept_shard_block(finalized.block_candidate.block.data.clone())?;
 
             async move {
-                tracing::info!("Store state root collator: {}", block_id.as_short_id());
-
-                if block_id.is_masterchain() || block_id.seqno % 5 == 0 {
-                    adapter
-                        .store_state_root(&block_id, meta, new_state_root, hint)
-                        .await
-                } else {
-                    Ok(false)
-                }
+                adapter
+                    .store_state_root(&block_id, meta, new_state_root, hint)
+                    .await
             }
         });
 
@@ -1010,7 +1004,6 @@ impl CollatorStdImpl {
                 block_id,
                 finalized.new_observable_state,
                 finalized.new_state_root,
-                finalized.state_update,
                 store_new_state_task,
                 new_queue_diff_hash,
                 new_mc_data,
