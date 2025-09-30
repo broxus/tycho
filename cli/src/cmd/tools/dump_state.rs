@@ -7,7 +7,7 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_collator::mempool::MempoolAnchorId;
-use tycho_collator::types::McData;
+use tycho_collator::types::{McData, ShardDescriptionShortExt};
 use tycho_core::node::ConfiguredStorage;
 use tycho_core::storage::{
     BlockConnection, CoreStorage, CoreStorageConfig, QueueStateWriter, ShardStateWriter,
@@ -106,13 +106,12 @@ impl Cmd {
         let mc_data = McData::load_from_state(&master_state, Default::default())?;
         let top_processed_to_anchor = mc_data.top_processed_to_anchor;
 
-        let master_block = dumper.load_block_stuff(&master_block_id).await?;
-
-        let shards = master_block.load_custom()?.shards.latest_blocks();
-
         println!("Dumping top shard blocks, states and queues...");
-        for shard_block in shards {
-            let block_id = shard_block?;
+        for block_id in mc_data
+            .shards
+            .iter()
+            .map(|(shard_ident, descr)| descr.get_block_id(*shard_ident))
+        {
             if let Err(e) = dumper.dump_block_and_state(&block_id).await {
                 println!("Failed to dump shard block {}: {}", block_id, e);
             };
@@ -131,7 +130,7 @@ impl Cmd {
         // If the original target was a shard block, dump its chain and final state
         if !target_block_id.is_masterchain() {
             println!("Dumping shard block chain...");
-            let shard_chain = dumper.get_shard_chain(target_block_id).await?;
+            let shard_chain = dumper.get_shard_chain(target_block_id, &mc_data).await?;
             for block_id in &shard_chain {
                 dumper.dump_block_and_state(block_id).await?;
             }
@@ -278,46 +277,26 @@ impl Dumper {
         Ok(())
     }
 
-    async fn get_shard_chain(&self, target_block_id: BlockId) -> Result<Vec<BlockId>> {
+    async fn get_shard_chain(
+        &self,
+        target_block_id: BlockId,
+        mc_data: &McData,
+    ) -> Result<Vec<BlockId>> {
+        let top_seqno = mc_data
+            .shards
+            .iter()
+            .find(|(shard, _)| shard == &target_block_id.shard)
+            .map(|(_, descr)| descr.seqno)
+            .unwrap_or(0);
+
         let mut chain = VecDeque::new();
         let mut current_block_id = target_block_id;
 
         loop {
-            if current_block_id.seqno == 0 {
+            if current_block_id.seqno <= top_seqno {
                 break;
             }
             chain.push_front(current_block_id);
-
-            let handle = self
-                .storage
-                .block_handle_storage()
-                .load_handle(&current_block_id)
-                .context(format!(
-                    "Failed to load handle for block {}",
-                    current_block_id
-                ))?;
-            let shard_block = self
-                .storage
-                .block_storage()
-                .load_block_data(&handle)
-                .await?;
-
-            let info = shard_block.load_info()?;
-            let mc_seqno = info
-                .load_master_ref()
-                .context("Shard block has no master ref")?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Shard block {} has no master ref", current_block_id)
-                })?;
-
-            let state = self
-                .storage
-                .shard_state_storage()
-                .load_state(handle.ref_by_mc_seqno(), &current_block_id)
-                .await?;
-            if state.state().min_ref_mc_seqno < mc_seqno.seqno {
-                break;
-            }
 
             if let Some(prev_id) = self
                 .storage

@@ -676,6 +676,60 @@ struct DumpStateTestCollationManager {
 }
 
 impl DumpStateTestCollationManager {
+    /// Helper method to resume collation for all shards
+    async fn resume_shard_collations(&self, mc_data: Arc<McData>) -> Result<()> {
+        let current_session_seqno = mc_data.validator_info.catchain_seqno;
+
+        for s in self.shards_info.iter() {
+            let shard_id = *s.key();
+            let prev_blocks_ids = s.value().clone();
+            let collation_session = Arc::new(CollationSessionInfo::new(
+                shard_id,
+                current_session_seqno,
+                self.collation_session.collators().clone(),
+                self.collation_session.current_collator_keypair().cloned(),
+            ));
+
+            if let Some(collator) = self.active_collators.get(&shard_id) {
+                let reset_collators = false;
+                collator
+                    .enqueue_resume_collation(
+                        mc_data.clone(),
+                        reset_collators,
+                        collation_session,
+                        prev_blocks_ids,
+                    )
+                    .await?;
+            } else {
+                let collator = CollatorStdImpl::start(
+                    self.mq_adapter.clone(),
+                    self.mempool_adapter.clone(),
+                    self.state_node_adapter.clone(),
+                    Arc::new(Default::default()),
+                    collation_session,
+                    Arc::new(self.clone()),
+                    shard_id,
+                    prev_blocks_ids,
+                    mc_data.clone(),
+                    Some(MempoolGlobalConfig {
+                        genesis_info: GenesisInfo {
+                            start_round: mc_data.top_processed_to_anchor,
+                            genesis_millis: 0,
+                        },
+                        consensus_config: None,
+                    }),
+                    Arc::new(Notify::new()),
+                    None,
+                )
+                .await?;
+
+                self.active_collators.insert(shard_id, collator);
+            }
+        }
+
+        Ok(())
+    }
+
     async fn new(dump_path: &Path) -> Result<Arc<Self>> {
         let (storage, mq_adapter, _temp_dir, mc_block_id) =
             load_storage_from_dump(dump_path).await?;
@@ -686,11 +740,12 @@ impl DumpStateTestCollationManager {
             .await?;
         let mc_data = McData::load_from_state(&mc_state, Default::default())?;
 
-        let mempool_adapter = MempoolAdapterStubImpl::with_stub_externals(
+        let mempool_adapter = MempoolAdapterStubImpl::with_anchors_from_dump(
             Arc::new(MempoolEventStubListener),
             Some(mc_data.gen_chain_time),
-            Some(mc_data.top_processed_to_anchor),
-        );
+            mc_data.top_processed_to_anchor,
+            dump_path.join("mempool"),
+        )?;
 
         let counter = Arc::new(AtomicUsize::new(0));
 
@@ -833,9 +888,6 @@ impl CollatorEventListener for DumpStateTestCollationManager {
         let collate_next_master_block =
             anchor_chain_time > last_master_chain_time + time_between_master_collation;
 
-        // Signal that collation was skipped
-        // self.block_produced_signal.notify_one();
-
         // Continue with next collation step similar to on_block_candidate logic
         if collate_next_master_block {
             let mc_collator = self
@@ -853,56 +905,8 @@ impl CollatorEventListener for DumpStateTestCollationManager {
                 .enqueue_do_collate(top_shard_blocks_info, next_mc_block_chain_time)
                 .await?;
         } else {
-            // Resume collation for all shards like in on_block_candidate
             let mc_data = self.mc_data.lock().clone();
-            let current_session_seqno = mc_data.validator_info.catchain_seqno;
-
-            for s in self.shards_info.iter() {
-                let shard_id = *s.key();
-                let prev_blocks_ids = s.value().clone();
-                let collation_session = Arc::new(CollationSessionInfo::new(
-                    shard_id,
-                    current_session_seqno,
-                    self.collation_session.collators().clone(),
-                    self.collation_session.current_collator_keypair().cloned(),
-                ));
-
-                if let Some(collator) = self.active_collators.get(&shard_id) {
-                    let reset_collators = false;
-                    collator
-                        .enqueue_resume_collation(
-                            mc_data.clone(),
-                            reset_collators,
-                            collation_session,
-                            prev_blocks_ids,
-                        )
-                        .await?;
-                } else {
-                    let collator = CollatorStdImpl::start(
-                        self.mq_adapter.clone(),
-                        self.mempool_adapter.clone(),
-                        self.state_node_adapter.clone(),
-                        Arc::new(Default::default()),
-                        collation_session,
-                        Arc::new(self.clone()),
-                        shard_id,
-                        prev_blocks_ids,
-                        mc_data.clone(),
-                        Some(MempoolGlobalConfig {
-                            genesis_info: GenesisInfo {
-                                start_round: mc_data.top_processed_to_anchor,
-                                genesis_millis: 0,
-                            },
-                            consensus_config: None,
-                        }),
-                        Arc::new(Notify::new()),
-                        None,
-                    )
-                    .await?;
-
-                    self.active_collators.insert(shard_id, collator);
-                }
-            }
+            self.resume_shard_collations(mc_data).await?;
         }
 
         Ok(())
@@ -928,7 +932,6 @@ impl CollatorEventListener for DumpStateTestCollationManager {
         };
         let next_mc_block_id_short = mc_data.block_id.get_next_id_short();
         let candidate = *collation_result.candidate.clone();
-        let current_session_seqno = mc_data.validator_info.catchain_seqno;
         let processed_to_anchor_id = candidate.processed_to_anchor_id;
 
         tracing::info!(
@@ -998,52 +1001,7 @@ impl CollatorEventListener for DumpStateTestCollationManager {
                 .enqueue_do_collate(top_shard_blocks_info, next_mc_block_chain_time)
                 .await?;
         } else {
-            for s in self.shards_info.iter() {
-                let shard_id = *s.key();
-                let prev_blocks_ids = s.value().clone();
-                let collation_session = Arc::new(CollationSessionInfo::new(
-                    shard_id,
-                    current_session_seqno,
-                    self.collation_session.collators().clone(),
-                    self.collation_session.current_collator_keypair().cloned(),
-                ));
-
-                if let Some(collator) = self.active_collators.get(&shard_id) {
-                    let reset_collators = false;
-                    collator
-                        .enqueue_resume_collation(
-                            mc_data.clone(),
-                            reset_collators,
-                            collation_session,
-                            prev_blocks_ids,
-                        )
-                        .await?;
-                } else {
-                    let collator = CollatorStdImpl::start(
-                        self.mq_adapter.clone(),
-                        self.mempool_adapter.clone(),
-                        self.state_node_adapter.clone(),
-                        Arc::new(Default::default()),
-                        collation_session,
-                        Arc::new(self.clone()),
-                        shard_id,
-                        prev_blocks_ids,
-                        mc_data.clone(),
-                        Some(MempoolGlobalConfig {
-                            genesis_info: GenesisInfo {
-                                start_round: mc_data.top_processed_to_anchor,
-                                genesis_millis: 0,
-                            },
-                            consensus_config: None,
-                        }),
-                        Arc::new(Notify::new()),
-                        None,
-                    )
-                    .await?;
-
-                    self.active_collators.insert(shard_id, collator);
-                }
-            }
+            self.resume_shard_collations(mc_data).await?;
         }
 
         Ok(())
@@ -1068,16 +1026,13 @@ async fn test_collation_from_dump() -> Result<()> {
     let max_blocks = 5; // Limit test to a reasonable number of blocks
 
     loop {
-        let notify = notify.clone();
-        let result = result.clone();
         notify.notified().await;
         let (is_masterchain, seqno, chain_time) = {
             let lock = result.lock();
             let lock = lock.as_ref();
             let collation_result = lock.unwrap();
             let block_id = *collation_result.candidate.block.id();
-            let load_info = collation_result.candidate.block.load_info()?;
-            let chain_time = load_info.gen_utime as u64 + load_info.gen_utime_ms as u64;
+            let chain_time = collation_result.candidate.chain_time;
             (block_id.shard.is_masterchain(), block_id.seqno, chain_time)
         };
 

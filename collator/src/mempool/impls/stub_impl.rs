@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,12 +83,13 @@ impl MempoolAdapterStubImpl {
 
     pub fn with_anchors_from_dump(
         listener: Arc<dyn MempoolEventListener>,
+        now: Option<u64>,
         first_anchor_id: u32,
         anchors_path: PathBuf,
     ) -> Result<Arc<Self>> {
         Self::with_generator(listener.clone(), Some(first_anchor_id), {
             move |a| {
-                tokio::spawn(Self::anchors_generator(a, anchors_path));
+                tokio::spawn(Self::anchors_generator(a, anchors_path, now));
                 Ok(())
             }
         })
@@ -134,28 +135,40 @@ impl MempoolAdapterStubImpl {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn anchors_generator(self: Arc<Self>, anchors_path: PathBuf) {
+    #[allow(clippy::todo)]
+    async fn anchors_generator(self: Arc<Self>, anchors_path: PathBuf, now: Option<u64>) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "started");
         defer! {
             tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
         }
 
-        let mut file_map: BTreeMap<MempoolAnchorId, PathBuf> = BTreeMap::new();
+        let mut file_queue: VecDeque<(MempoolAnchorId, u64, PathBuf)> = VecDeque::new();
         if anchors_path.exists()
             && let Ok(entries) = std::fs::read_dir(&anchors_path)
         {
             for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
-                if let Some(anchor_id) = path
+                if let Some((anchor_id, chain_time)) = path
                     .file_name()
                     .and_then(|s| s.to_str())
                     .and_then(|s| s.strip_prefix("anchor_"))
-                    .and_then(|f| f.split('_').next())
-                    && let Ok(anchor_id) = anchor_id.parse::<MempoolAnchorId>()
+                    .and_then(|f| {
+                        let mut split = f.split('_');
+                        split.next().and_then(|anchor_id| {
+                            split.next().map(|chain_time| (anchor_id, chain_time))
+                        })
+                    })
                 {
-                    file_map.insert(anchor_id, path);
+                    let anchor_id = anchor_id
+                        .parse::<MempoolAnchorId>()
+                        .expect("Filename should be parseable as u32");
+                    let chain_time: u64 = chain_time
+                        .parse()
+                        .expect("Filename should be parseable as u64");
+                    file_queue.push_back((anchor_id, chain_time, path));
                 }
             }
+            file_queue.make_contiguous().sort_by_key(|(aid, _, _)| *aid);
         }
 
         let mut prev_anchor_id = self.first_anchor_id.unwrap_or_default();
@@ -167,21 +180,22 @@ impl MempoolAdapterStubImpl {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
-            let anchor = if let Some(_filepath) = file_map.get(&anchor_id) {
-                // TODO: read from file in future
-                None
-            } else {
-                None
-            };
-
-            let anchor = anchor.unwrap_or_else(|| {
-                let read = self.anchors_cache.read();
-                let chain_time = read
-                    .get(&prev_anchor_id)
-                    .map(|prev_anchor| prev_anchor.chain_time)
-                    .unwrap_or_default();
-                make_empty_anchor(anchor_id, prev_anchor_id, chain_time + 1336)
-            });
+            let anchor =
+                if let Some((file_anchor_id, _chain_time, _file_path)) = file_queue.pop_front() {
+                    if file_anchor_id == anchor_id {
+                        todo!("make anchor from file")
+                    } else {
+                        continue;
+                    }
+                } else {
+                    let read = self.anchors_cache.read();
+                    let chain_time = read
+                        .get(&prev_anchor_id)
+                        .map(|prev_anchor| prev_anchor.chain_time)
+                        .or(now)
+                        .unwrap_or_default();
+                    make_empty_anchor(anchor_id, prev_anchor_id, chain_time + 1336)
+                };
 
             prev_anchor_id = anchor_id;
 
