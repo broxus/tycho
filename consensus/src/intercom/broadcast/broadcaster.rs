@@ -2,21 +2,21 @@ use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
 use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, oneshot, watch};
 use tokio::time::MissedTickBehavior;
-use tycho_network::{PeerId, Request};
+use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::LastOwnPoint;
 use crate::dyn_event;
 use crate::effects::{AltFormat, BroadcastCtx, Cancelled, Ctx, RoundCtx, TaskResult};
 use crate::intercom::broadcast::collector::CollectorStatus;
-use crate::intercom::core::{BroadcastResponse, QueryRequest, SignatureResponse};
+use crate::intercom::core::query::response::{BroadcastResponse, SignatureResponse};
+use crate::intercom::core::query::{BroadcastQuery, QueryError, SignatureQuery};
 use crate::intercom::peer_schedule::PeerState;
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{PeerCount, Point, Signature};
@@ -29,7 +29,6 @@ pub enum BroadcasterSignal {
 
 pub struct Broadcaster {
     ctx: BroadcastCtx,
-    dispatcher: Dispatcher,
     /// Receiver may be closed (collector finished), so do not require `Ok` on send
     bcaster_signal: Option<oneshot::Sender<BroadcasterSignal>>,
     collector_status: watch::Receiver<CollectorStatus>,
@@ -43,15 +42,26 @@ pub struct Broadcaster {
     rejections: FastHashSet<PeerId>,
     signatures: FastHashMap<PeerId, Signature>,
 
-    bcast_request: Request,
+    bcast_query: Arc<BroadcastQuery>,
     bcast_peers: FastHashSet<PeerId>,
-    bcast_futures: FuturesUnordered<BoxFuture<'static, (PeerId, Result<BroadcastResponse>)>>,
+    bcast_futures: FuturesUnordered<BoxFuture<'static, BcastFutureOutput>>,
 
-    sig_request: Request,
+    sig_query: Arc<SignatureQuery>,
     sig_peers: FastHashSet<PeerId>,
-    sig_futures: FuturesUnordered<BoxFuture<'static, (PeerId, bool, Result<SignatureResponse>)>>,
+    sig_futures: FuturesUnordered<BoxFuture<'static, SigFutureOutput>>,
 
     point: Point,
+}
+
+struct BcastFutureOutput {
+    peer_id: PeerId,
+    result: Result<BroadcastResponse, QueryError>,
+}
+
+struct SigFutureOutput {
+    peer_id: PeerId,
+    after_bcast: bool,
+    result: Result<SignatureResponse, QueryError>,
 }
 
 impl Broadcaster {
@@ -78,7 +88,6 @@ impl Broadcaster {
 
         Self {
             ctx: BroadcastCtx::new(round_ctx, &point),
-            dispatcher,
             bcaster_signal: Some(bcaster_signal),
             collector_status,
 
@@ -89,11 +98,11 @@ impl Broadcaster {
             rejections: Default::default(),
             signatures: Default::default(),
 
-            bcast_request: QueryRequest::broadcast(&point),
+            bcast_query: Arc::new(BroadcastQuery::new(dispatcher.clone(), &point)),
             bcast_peers,
             bcast_futures: FuturesUnordered::default(),
 
-            sig_request: QueryRequest::signature(point.info().round()),
+            sig_query: Arc::new(SignatureQuery::new(dispatcher, point.info().round())),
             sig_peers: FastHashSet::default(),
             sig_futures: FuturesUnordered::default(),
 
@@ -139,12 +148,12 @@ impl Broadcaster {
                 // rare event essential for up-to-date retries
                 update = self.peer_updates.recv() => self.match_peer_updates(update)?,
                 // either request signature immediately or postpone until retry
-                Some((peer_id, result)) = self.bcast_futures.next() => {
-                    self.match_broadcast_result(&peer_id, result);
+                Some(out) = self.bcast_futures.next() => {
+                    self.match_broadcast_result(out);
                 },
                 // most frequent arm that provides data to decide if retry or fail or finish
-                Some((peer_id, after_bcast, result)) = self.sig_futures.next() => {
-                    self.match_signature_result(&peer_id, after_bcast, result);
+                Some(out) = self.sig_futures.next() => {
+                    self.match_signature_result(out);
                 },
                 else => {
                     let _guard = self.ctx.span().enter();
@@ -184,12 +193,12 @@ impl Broadcaster {
                     }
                 }
                 // either request signature immediately or postpone until retry
-                Some((peer_id, result)) = self.bcast_futures.next() => {
-                    self.match_broadcast_result(&peer_id, result);
+                Some(out) = self.bcast_futures.next() => {
+                    self.match_broadcast_result(out);
                 },
                 // most frequent arm that provides data to decide if retry or fail or finish
-                Some((peer_id, after_bcast, result)) = self.sig_futures.next() => {
-                    self.match_signature_result(&peer_id, after_bcast, result);
+                Some(out) = self.sig_futures.next() => {
+                    self.match_signature_result(out);
                 },
                 else => {
                     let _guard = self.ctx.span().enter();
@@ -256,41 +265,54 @@ impl Broadcaster {
         is_ready
     }
 
-    fn match_broadcast_result(&mut self, peer_id: &PeerId, result: Result<BroadcastResponse>) {
-        match result {
-            Err(error) => {
-                self.sig_peers.insert(*peer_id); // lighter weight retry loop
+    fn match_broadcast_result(&mut self, out: BcastFutureOutput) {
+        match out.result {
+            Err(QueryError::TlError(error)) => {
+                self.rejections.insert(out.peer_id);
                 tracing::warn!(
                     parent: self.ctx.span(),
-                    peer = display(peer_id.alt()),
+                    peer = display(out.peer_id.alt()),
+                    error = display(&error),
+                    "bad response to broadcast from"
+                );
+            }
+            Err(QueryError::Network(error)) => {
+                self.sig_peers.insert(out.peer_id); // lighter weight retry loop
+                tracing::debug!(
+                    parent: self.ctx.span(),
+                    peer = display(out.peer_id.alt()),
                     error = display(error),
                     "failed to send broadcast to"
                 );
             }
             Ok(BroadcastResponse) => {
                 // self.sig_peers.insert(*peer_id); // give some time to validate
-                self.request_signature(true, peer_id); // fast nodes may have delivered it as a dependency
+                self.request_signature(true, &out.peer_id); // fast nodes may have delivered it as a dependency
                 tracing::trace!(
                     parent: self.ctx.span(),
-                    peer = display(peer_id.alt()),
+                    peer = display(out.peer_id.alt()),
                     "finished broadcast to"
                 );
             }
         }
     }
 
-    fn match_signature_result(
-        &mut self,
-        peer_id: &PeerId,
-        after_bcast: bool,
-        result: Result<SignatureResponse>,
-    ) {
-        match result {
-            Err(error) => {
-                self.sig_peers.insert(*peer_id); // let it retry
+    fn match_signature_result(&mut self, out: SigFutureOutput) {
+        match out.result {
+            Err(QueryError::TlError(error)) => {
+                self.rejections.insert(out.peer_id);
                 tracing::warn!(
                     parent: self.ctx.span(),
-                    peer = display(peer_id.alt()),
+                    peer = display(out.peer_id.alt()),
+                    error = display(&error),
+                    "bad signature response from"
+                );
+            }
+            Err(QueryError::Network(error)) => {
+                self.sig_peers.insert(out.peer_id); // let it retry
+                tracing::debug!(
+                    parent: self.ctx.span(),
+                    peer = display(out.peer_id.alt()),
                     error = display(error),
                     "failed to query signature from"
                 );
@@ -303,20 +325,20 @@ impl Broadcaster {
                 dyn_event!(
                     parent: self.ctx.span(),
                     level,
-                    peer = display(peer_id.alt()),
+                    peer = display(out.peer_id.alt()),
                     response = display(response.alt()),
                     "signature response from"
                 );
                 match response {
                     SignatureResponse::Signature(signature) => {
-                        if self.signers.contains(peer_id) {
-                            if signature.verifies(peer_id, self.point.info().digest()) {
-                                self.signatures.insert(*peer_id, signature);
+                        if self.signers.contains(&out.peer_id) {
+                            if signature.verifies(&out.peer_id, self.point.info().digest()) {
+                                self.signatures.insert(out.peer_id, signature);
                                 BroadcastCtx::sig_collected();
                             } else {
                                 // any invalid signature lowers our chances
                                 // to successfully finish current round
-                                self.rejections.insert(*peer_id);
+                                self.rejections.insert(out.peer_id);
                                 BroadcastCtx::sig_rejected();
                                 BroadcastCtx::sig_unreliable();
                             }
@@ -325,16 +347,16 @@ impl Broadcaster {
                         }
                     }
                     SignatureResponse::NoPoint => {
-                        if after_bcast {
-                            _ = self.sig_peers.insert(*peer_id); // retry on next attempt
+                        if out.after_bcast {
+                            _ = self.sig_peers.insert(out.peer_id); // retry on next attempt
                         } else {
-                            self.broadcast(peer_id); // send data immediately
+                            self.broadcast(&out.peer_id); // send data immediately
                         }
                     }
-                    SignatureResponse::TryLater => _ = self.sig_peers.insert(*peer_id),
+                    SignatureResponse::TryLater => _ = self.sig_peers.insert(out.peer_id),
                     SignatureResponse::Rejected(_) => {
-                        if self.signers.contains(peer_id) {
-                            self.rejections.insert(*peer_id);
+                        if self.signers.contains(&out.peer_id) {
+                            self.rejections.insert(out.peer_id);
                             BroadcastCtx::sig_rejected();
                         } else {
                             BroadcastCtx::sig_unreliable();
@@ -347,10 +369,14 @@ impl Broadcaster {
 
     fn broadcast(&mut self, peer_id: &PeerId) {
         if !self.removed_peers.contains(peer_id) {
-            self.bcast_futures.push(
-                self.dispatcher
-                    .query_broadcast(peer_id, &self.bcast_request),
-            );
+            self.bcast_futures.push({
+                let bcast_query = self.bcast_query.clone();
+                let peer_id = *peer_id;
+                Box::pin(async move {
+                    let result = bcast_query.send(&peer_id).await;
+                    BcastFutureOutput { peer_id, result }
+                })
+            });
             tracing::trace!(
                 parent: self.ctx.span(),
                 peer = display(peer_id.alt()),
@@ -367,11 +393,18 @@ impl Broadcaster {
 
     fn request_signature(&mut self, after_bcast: bool, peer_id: &PeerId) {
         if !self.removed_peers.contains(peer_id) && self.signers.contains(peer_id) {
-            self.sig_futures.push(self.dispatcher.query_signature(
-                peer_id,
-                after_bcast,
-                &self.sig_request,
-            ));
+            self.sig_futures.push({
+                let sig_query = self.sig_query.clone();
+                let peer_id = *peer_id;
+                Box::pin(async move {
+                    let result = sig_query.send(&peer_id).await;
+                    SigFutureOutput {
+                        peer_id,
+                        after_bcast,
+                        result,
+                    }
+                })
+            });
             tracing::trace!(
                 parent: self.ctx.span(),
                 peer = display(peer_id.alt()),

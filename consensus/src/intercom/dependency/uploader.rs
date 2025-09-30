@@ -6,7 +6,7 @@ use tycho_network::PeerId;
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, Cancelled, Ctx, RoundCtx, SpawnLimit};
 use crate::engine::NodeConfig;
-use crate::intercom::core::PointByIdResponse;
+use crate::intercom::core::query::response::DownloadResponse;
 use crate::models::{PointId, PointStatusStored};
 use crate::storage::MempoolStore;
 
@@ -22,9 +22,9 @@ impl Uploader {
         store: &MempoolStore,
         head: &DagHead,
         round_ctx: &RoundCtx,
-    ) -> PointByIdResponse<Bytes> {
+    ) -> DownloadResponse<Bytes> {
         let (status_opt, result) = if point_id.round > head.current().round() {
-            (None, PointByIdResponse::TryLater)
+            (None, DownloadResponse::TryLater)
         } else {
             let task_opt = LIMIT.try_spawn_blocking(round_ctx.task(), {
                 let store = store.clone();
@@ -36,30 +36,30 @@ impl Uploader {
                             if usable.is_valid | usable.is_certified =>
                         {
                             match store.get_point_raw(point_id.round, &point_id.digest) {
-                                None => PointByIdResponse::DefinedNone,
-                                Some(slice) => PointByIdResponse::Defined(slice),
+                                None => DownloadResponse::DefinedNone,
+                                Some(slice) => DownloadResponse::Defined(slice),
                             }
                         }
                         Some(PointStatusStored::IllFormed(ill)) if ill.is_certified => {
-                            PointByIdResponse::TryLater
+                            DownloadResponse::TryLater
                         }
                         Some(PointStatusStored::NotFound(not_found)) if not_found.is_certified => {
-                            PointByIdResponse::TryLater
+                            DownloadResponse::TryLater
                         }
                         Some(PointStatusStored::Exists) | None => {
                             if last_back_bottom <= point_id.round {
                                 // may be downloading, unknown or resolving - dag may be incomplete
-                                PointByIdResponse::TryLater
+                                DownloadResponse::TryLater
                             } else {
                                 // must have been stored and committed, may be too old and deleted
-                                PointByIdResponse::DefinedNone
+                                DownloadResponse::DefinedNone
                             }
                         }
                         Some(
                             PointStatusStored::IllFormed(_)
                             | PointStatusStored::NotFound(_)
                             | PointStatusStored::Validated(_),
-                        ) => PointByIdResponse::DefinedNone,
+                        ) => DownloadResponse::DefinedNone,
                     };
                     (status_opt, result)
                 }
@@ -67,8 +67,8 @@ impl Uploader {
             match task_opt {
                 Some(task) => task
                     .await
-                    .unwrap_or_else(|Cancelled()| (None, PointByIdResponse::TryLater)),
-                None => (None, PointByIdResponse::TryLater),
+                    .unwrap_or_else(|Cancelled()| (None, DownloadResponse::TryLater)),
+                None => (None, DownloadResponse::TryLater),
             }
         };
         tracing::debug!(

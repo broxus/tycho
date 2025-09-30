@@ -1,7 +1,6 @@
 use bytes::{Buf, Bytes};
 use tl_proto::{RawBytes, TlError, TlRead, TlWrite};
 use tycho_network::Request;
-use tycho_util::sync::rayon_run_fifo;
 
 use crate::models::{Point, PointId, Round};
 
@@ -10,16 +9,16 @@ use crate::models::{Point, PointId, Round};
 pub enum QueryRequestTag {
     #[tl(id = "intercom.queryTag.broadcast")]
     Broadcast,
-    #[tl(id = "intercom.queryTag.pointById")]
-    PointById,
     #[tl(id = "intercom.queryTag.signature")]
     Signature,
+    #[tl(id = "intercom.queryTag.download")]
+    Download,
 }
 
 pub enum QueryRequest {
     Broadcast(Point),
-    PointById(PointId),
     Signature(Round),
+    Download(PointId),
 }
 
 impl QueryRequest {
@@ -37,9 +36,9 @@ impl QueryRequest {
         })
     }
 
-    pub fn point_by_id(id: &PointId) -> Request {
+    pub fn download(id: &PointId) -> Request {
         Request::from_tl(QueryRequestWrite {
-            tag: QueryRequestTag::PointById,
+            tag: QueryRequestTag::Download,
             body: id,
         })
     }
@@ -72,19 +71,21 @@ impl QueryRequestRaw {
         Ok(Self { request_body, tag })
     }
 
-    pub async fn parse(self) -> anyhow::Result<QueryRequest> {
+    pub fn parse(self) -> Result<QueryRequestMedium, TlError> {
         Ok(match self.tag {
-            QueryRequestTag::Broadcast => {
-                let request_body = self.request_body;
-                let point = rayon_run_fifo(|| Point::parse(request_body.into())).await??;
-                QueryRequest::Broadcast(point)
-            }
-            QueryRequestTag::PointById => {
-                QueryRequest::PointById(tl_proto::deserialize::<PointId>(&self.request_body)?)
-            }
+            QueryRequestTag::Broadcast => QueryRequestMedium::Broadcast(self.request_body),
             QueryRequestTag::Signature => {
-                QueryRequest::Signature(tl_proto::deserialize::<Round>(&self.request_body)?)
+                QueryRequestMedium::Signature(tl_proto::deserialize(&self.request_body)?)
+            }
+            QueryRequestTag::Download => {
+                QueryRequestMedium::Download(tl_proto::deserialize(&self.request_body)?)
             }
         })
     }
+}
+
+pub enum QueryRequestMedium {
+    Broadcast(Bytes),
+    Signature(Round),
+    Download(PointId),
 }
