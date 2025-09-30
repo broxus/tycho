@@ -6,7 +6,7 @@ use crate::dag::DagHead;
 use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::intercom::BroadcastFilter;
-use crate::intercom::core::{SignatureRejectedReason, SignatureResponse};
+use crate::intercom::core::query::response::{SignatureRejectedReason, SignatureResponse};
 use crate::models::Round;
 
 pub struct Signer;

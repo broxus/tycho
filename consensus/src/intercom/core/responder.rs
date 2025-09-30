@@ -5,13 +5,16 @@ use arc_swap::ArcSwapOption;
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, future};
 use tycho_network::{Response, Service, ServiceRequest};
+use tycho_util::sync::rayon_run_fifo;
 
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::broadcast::Signer;
-use crate::intercom::core::{QueryRequest, QueryRequestRaw, QueryResponse};
+use crate::intercom::core::query::request::{QueryRequest, QueryRequestMedium, QueryRequestRaw};
+use crate::intercom::core::query::response::QueryResponse;
 use crate::intercom::{BroadcastFilter, Downloader, PeerSchedule, Uploader};
+use crate::models::Point;
 use crate::storage::MempoolStore;
 
 #[derive(Clone, Default)]
@@ -131,10 +134,10 @@ impl ResponderInner {
 
         let raw_query = match QueryRequestRaw::new(req.body) {
             Ok(wrapper) => wrapper,
-            Err(error) => {
-                tracing::error!(
+            Err(tl_error) => {
+                tracing::warn!(
                     peer_id = display(peer_id.alt()),
-                    %error,
+                    error = %tl_error,
                     "unexpected query",
                 );
                 return None;
@@ -142,17 +145,46 @@ impl ResponderInner {
         };
 
         let raw_query_tag = raw_query.tag;
-        let query = match raw_query.parse().await {
-            Ok(query) => query,
-            Err(error) => {
-                tracing::error!(
+
+        let medium_query = match raw_query.parse() {
+            Ok(medium_query) => medium_query,
+            Err(tl_error) => {
+                tracing::warn!(
                     tag = ?raw_query_tag,
                     peer_id = display(peer_id.alt()),
-                    %error,
-                    "bad query",
+                    error = %tl_error,
+                    "bad request",
                 );
                 return None;
             }
+        };
+
+        let query = match medium_query {
+            QueryRequestMedium::Broadcast(bytes) => {
+                match rayon_run_fifo(|| Point::parse(bytes.into())).await {
+                    Ok(Ok(point)) => QueryRequest::Broadcast(point),
+                    Ok(Err(bad_point)) => {
+                        tracing::error!(
+                            tag = ?raw_query_tag,
+                            peer_id = display(peer_id.alt()),
+                            error = %bad_point,
+                            "bad point",
+                        );
+                        return None;
+                    }
+                    Err(tl_error) => {
+                        tracing::warn!(
+                            tag = ?raw_query_tag,
+                            peer_id = display(peer_id.alt()),
+                            error = %tl_error,
+                            "bad request",
+                        );
+                        return None;
+                    }
+                }
+            }
+            QueryRequestMedium::Signature(round) => QueryRequest::Signature(round),
+            QueryRequestMedium::Download(point_id) => QueryRequest::Download(point_id),
         };
 
         Some(match query {
@@ -177,10 +209,6 @@ impl ResponderInner {
                 }
                 QueryResponse::broadcast(task_start)
             }
-            QueryRequest::PointById(point_id) => QueryResponse::point_by_id(
-                task_start,
-                Uploader::find(peer_id, point_id, &state.store, head, round_ctx).await,
-            ),
             QueryRequest::Signature(round) => QueryResponse::signature(
                 task_start,
                 Signer::signature_response(
@@ -190,6 +218,10 @@ impl ResponderInner {
                     head,
                     round_ctx,
                 ),
+            ),
+            QueryRequest::Download(point_id) => QueryResponse::download(
+                task_start,
+                Uploader::find(peer_id, point_id, &state.store, head, round_ctx).await,
             ),
         })
     }

@@ -1,13 +1,12 @@
 use std::fmt::{Display, Formatter};
 use std::time::Instant;
 
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use tl_proto::{TlError, TlRead, TlResult, TlWrite};
 use tycho_network::Response;
-use tycho_util::sync::rayon_run_fifo;
 
 use crate::effects::{AltFmt, AltFormat};
-use crate::models::{Point, PointIntegrityError, Signature};
+use crate::models::Signature;
 
 #[derive(Debug, TlWrite, TlRead)]
 #[tl(boxed, id = "intercom.broadcastResponse", scheme = "proto.tl")]
@@ -49,12 +48,12 @@ pub enum SignatureRejectedReason {
 
 #[derive(Clone, Debug, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
-pub enum PointByIdResponse<T> {
-    #[tl(id = "intercom.pointByIdResponse.defined")]
+pub enum DownloadResponse<T> {
+    #[tl(id = "intercom.downloadResponse.defined")]
     Defined(T),
-    #[tl(id = "intercom.pointByIdResponse.definedNone")]
+    #[tl(id = "intercom.downloadResponse.definedNone")]
     DefinedNone,
-    #[tl(id = "intercom.pointByIdResponse.tryLater")]
+    #[tl(id = "intercom.downloadResponse.tryLater")]
     TryLater,
 }
 
@@ -88,16 +87,13 @@ impl QueryResponse {
         SignatureResponse::read_from(&mut &response.body[..])
     }
 
-    pub fn point_by_id<T>(start: Instant, body: PointByIdResponse<T>) -> Response
-    where
-        T: AsRef<[u8]> + TlWrite,
-    {
+    pub fn download(start: Instant, body: DownloadResponse<Bytes>) -> Response {
         let response = Response::from_tl(&body);
         let histogram = match body {
-            PointByIdResponse::Defined(_) => {
+            DownloadResponse::Defined(_) => {
                 metrics::histogram!("tycho_mempool_download_query_responder_some_time")
             }
-            PointByIdResponse::DefinedNone | PointByIdResponse::TryLater => {
+            DownloadResponse::DefinedNone | DownloadResponse::TryLater => {
                 metrics::histogram!("tycho_mempool_download_query_responder_none_time")
             }
         };
@@ -105,21 +101,16 @@ impl QueryResponse {
         response
     }
 
-    pub async fn parse_point_by_id(
-        mut response: Response,
-    ) -> TlResult<PointByIdResponse<Result<Point, PointIntegrityError>>> {
-        let interim = PointByIdResponse::<&[u8]>::read_from(&mut &response.body[..])?;
+    pub fn parse_download(mut response: Response) -> Result<DownloadResponse<Bytes>, TlError> {
+        let interim = DownloadResponse::<&[u8]>::read_from(&mut &response.body[..])?;
         Ok(match interim {
-            PointByIdResponse::Defined(data) => {
+            DownloadResponse::Defined(data) => {
                 let data_offset = response.body.len() - data.len();
                 response.body.advance(data_offset);
-                let response_body = response.body;
-                PointByIdResponse::Defined(
-                    rayon_run_fifo(|| Point::parse(response_body.into())).await?,
-                )
+                DownloadResponse::Defined(response.body)
             }
-            PointByIdResponse::DefinedNone => PointByIdResponse::DefinedNone,
-            PointByIdResponse::TryLater => PointByIdResponse::TryLater,
+            DownloadResponse::DefinedNone => DownloadResponse::DefinedNone,
+            DownloadResponse::TryLater => DownloadResponse::TryLater,
         })
     }
 }
@@ -136,13 +127,13 @@ impl Display for AltFmt<'_, SignatureResponse> {
     }
 }
 
-impl<T: AsRef<[u8]>> AltFormat for PointByIdResponse<T> {}
-impl<T: AsRef<[u8]>> Display for AltFmt<'_, PointByIdResponse<T>> {
+impl<T: AsRef<[u8]>> AltFormat for DownloadResponse<T> {}
+impl<T: AsRef<[u8]>> Display for AltFmt<'_, DownloadResponse<T>> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match AltFormat::unpack(self) {
-            PointByIdResponse::Defined(_) => f.write_str("Some"),
-            PointByIdResponse::DefinedNone => f.write_str("None"),
-            PointByIdResponse::TryLater => f.write_str("TryLater"),
+            DownloadResponse::Defined(_) => f.write_str("Some"),
+            DownloadResponse::DefinedNone => f.write_str("None"),
+            DownloadResponse::TryLater => f.write_str("TryLater"),
         }
     }
 }

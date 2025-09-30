@@ -70,11 +70,11 @@ link.through.witness    x:int256 = link.Through;
 link.through.includes   x:int256 = link.Through;
 
 /*
-* Representation of PointByIdResponse
+* Representation of DownloadResponse
 */
-intercom.pointByIdResponse.defined          x:bytes         = intercom.PointByIdResponse;
-intercom.pointByIdResponse.definedNone                      = intercom.PointByIdResponse;
-intercom.pointByIdResponse.tryLater                         = intercom.PointByIdResponse;
+intercom.downloadResponse.defined          x:bytes         = intercom.DownloadResponse;
+intercom.downloadResponse.definedNone                      = intercom.DownloadResponse;
+intercom.downloadResponse.tryLater                         = intercom.DownloadResponse;
 
 /*
 * Representation of SignatureResponse
@@ -106,5 +106,5 @@ intercom.queryRequest {X:Type} tag:intercom.QueryTag body:X = intercom.QueryRequ
 * Representation of query wrapper type tag
 */
 intercom.queryTag.broadcast                                 = intercom.QueryTag;
-intercom.queryTag.pointById                                 = intercom.QueryTag;
+intercom.queryTag.download                                  = intercom.QueryTag;
 intercom.queryTag.signature                                 = intercom.QueryTag;
