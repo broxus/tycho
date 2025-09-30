@@ -107,9 +107,11 @@ pub fn supported_capabilities() -> GlobalCapabilities {
         GlobalCapability::CapFastStorageStatBugfix,
         GlobalCapability::CapResolveMerkleCell,
         GlobalCapability::CapFeeInGasUnits,
+        GlobalCapability::CapSignatureWithId,
         GlobalCapability::CapBounceAfterFailedAction,
         GlobalCapability::CapSuspendedList,
         GlobalCapability::CapsTvmBugfixes2022,
+        GlobalCapability::CapSuspendByMarks,
         GlobalCapability::CapOmitMasterBlockHistory,
     ])
 }
