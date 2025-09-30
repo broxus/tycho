@@ -5,7 +5,7 @@ use tycho_network::PeerId;
 
 use crate::dag::{IllFormedReason, InvalidReason};
 use crate::effects::AltFormat;
-use crate::intercom::QueryRequestTag;
+use crate::intercom::{QueryLimitError, QueryRequestTag};
 use crate::models::{
     Digest, IllFormedPoint, InvalidPoint, Point, PointId, PointIntegrityError, Round, UnixTime,
 };
@@ -25,7 +25,7 @@ pub enum EventData {
     Unbanned(PeerId),
     // from Responder
     UnknownQuery(PeerId),
-    QueryLimitReached(PeerId, QueryRequestTag),
+    QueryLimitReached(PeerId, QueryRequestTag, QueryLimitError),
     BadRequest(PeerId, QueryRequestTag, TlError),
     BadResponse(PeerId, QueryRequestTag, TlError),
     // from BcastFilter and Downloader
@@ -59,7 +59,7 @@ impl EventData {
             Self::Banned { .. } => EventTag::Banned,
             Self::Unbanned(_) => EventTag::Unbanned,
             Self::UnknownQuery(_) => EventTag::UnknownQuery,
-            Self::QueryLimitReached(_, _) => EventTag::QueryLimitReached,
+            Self::QueryLimitReached(_, _, _) => EventTag::QueryLimitReached,
             Self::BadRequest(_, _, _) => EventTag::BadRequest,
             Self::BadResponse(_, _, _) => EventTag::BadResponse,
             Self::BadPoint(_, _) => EventTag::BadPoint,
@@ -78,7 +78,7 @@ impl EventData {
             | Self::Banned { peer_id, .. }
             | Self::Unbanned(peer_id)
             | Self::UnknownQuery(peer_id)
-            | Self::QueryLimitReached(peer_id, _)
+            | Self::QueryLimitReached(peer_id, _, _)
             | Self::BadRequest(peer_id, _, _)
             | Self::BadResponse(peer_id, _, _)
             | Self::BadPoint(peer_id, _)
@@ -97,7 +97,7 @@ impl EventData {
                 Some(EventSeverity::Info)
             }
             EventData::UnknownQuery(_)
-            | EventData::QueryLimitReached(_, _)
+            | EventData::QueryLimitReached(_, _, _)
             | EventData::BadRequest(_, _, _)
             | EventData::BadResponse(_, _, _)
             | EventData::BadPoint(_, _)
@@ -146,7 +146,7 @@ impl EventData {
             | EventData::Banned { .. }
             | EventData::Unbanned(_)
             | EventData::UnknownQuery(_)
-            | EventData::QueryLimitReached(_, _)
+            | EventData::QueryLimitReached(_, _, _)
             | EventData::BadRequest(_, _, _)
             | EventData::BadResponse(_, _, _) => {}
             EventData::BadPoint(_, integrity_error) => match integrity_error {
@@ -215,8 +215,8 @@ impl Display for EventData {
             Self::UnknownQuery(_) => {
                 write!(f, "unknown query")
             }
-            Self::QueryLimitReached(_, tag) => {
-                write!(f, "{tag:?} queries limit reached")
+            Self::QueryLimitReached(_, tag, error) => {
+                write!(f, "{tag:?} queries limit reached: {error:?}")
             }
             Self::BadRequest(_, tag, tl_err) => {
                 write!(f, "{tag:?} request tl error: {tl_err}")

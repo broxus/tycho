@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
-use futures_util::future::BoxFuture;
+use futures_util::future::{BoxFuture, Either};
 use futures_util::{FutureExt, future};
 use tycho_network::{Response, Service, ServiceRequest};
 use tycho_util::sync::rayon_run_fifo;
@@ -11,10 +11,13 @@ use crate::dag::DagHead;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::broadcast::Signer;
-use crate::intercom::core::QueryResponse;
+use crate::intercom::core::bcast_rate_limit::BcastRateLimit;
 use crate::intercom::core::query::request::{QueryRequest, QueryRequestMedium, QueryRequestRaw};
+use crate::intercom::core::upload_rate_limit::UploadRateLimit;
+use crate::intercom::core::{QueryRequestTag, QueryResponse};
 use crate::intercom::{BroadcastFilter, Downloader, PeerSchedule, Uploader};
 use crate::models::Point;
+use crate::moderator::{EventData, Moderator};
 use crate::storage::MempoolStore;
 
 #[derive(Clone, Default)]
@@ -28,7 +31,10 @@ struct ResponderInner {
 
 struct ResponderState {
     broadcast_filter: BroadcastFilter,
+    bcast_rate_limit: BcastRateLimit,
+    upload_rate_limit: UploadRateLimit,
     // state and storage components go here
+    moderator: Moderator,
     store: MempoolStore,
     consensus_round: RoundWatch<Consensus>,
     peer_schedule: PeerSchedule,
@@ -41,6 +47,7 @@ impl Responder {
     #[allow(clippy::too_many_arguments)]
     pub fn init(
         &self,
+        moderator: &Moderator,
         store: &MempoolStore,
         consensus_round: &RoundWatch<Consensus>,
         peer_schedule: &PeerSchedule,
@@ -53,6 +60,9 @@ impl Responder {
     ) {
         let state = ResponderState {
             broadcast_filter: BroadcastFilter::default(),
+            bcast_rate_limit: BcastRateLimit::new(round_ctx.conf()),
+            upload_rate_limit: UploadRateLimit::new(round_ctx.conf()),
+            moderator: moderator.clone(),
             store: store.clone(),
             consensus_round: consensus_round.clone(),
             peer_schedule: peer_schedule.clone(),
@@ -122,6 +132,12 @@ impl Service<ServiceRequest> for Responder {
     }
 }
 
+#[derive(Debug)]
+pub enum QueryLimitError {
+    ConcurrentQueries,
+    RateLimit,
+}
+
 impl ResponderInner {
     async fn handle_query(self: Arc<Self>, req: ServiceRequest) -> Option<Response> {
         let task_start = Instant::now();
@@ -140,6 +156,7 @@ impl ResponderInner {
                     %error,
                     "unexpected query",
                 );
+                (state.moderator).send_report(EventData::UnknownQuery(*peer_id));
                 return None;
             }
         };
@@ -155,12 +172,41 @@ impl ResponderInner {
                     %error,
                     "bad request",
                 );
+                let event = EventData::BadRequest(*peer_id, raw_query_tag, error);
+                state.moderator.send_report(event);
+                return None;
+            }
+        };
+
+        let rate_limit = match raw_query_tag {
+            QueryRequestTag::Broadcast => (state.bcast_rate_limit)
+                .broadcast(peer_id, medium_query.round())
+                .map(Either::Left),
+            QueryRequestTag::Signature => (state.bcast_rate_limit)
+                .sig_query(peer_id, medium_query.round())
+                .map(Either::Left),
+            QueryRequestTag::PointById => (state.upload_rate_limit)
+                .try_acquire_owned(peer_id)
+                .map(Either::Right),
+        };
+
+        let _permit = match rate_limit {
+            Ok(permit) => permit,
+            Err(error) => {
+                tracing::error!(
+                    tag = ?raw_query_tag,
+                    peer_id = display(peer_id.alt()),
+                    ?error,
+                    "query limit reached",
+                );
+                let event = EventData::QueryLimitReached(*peer_id, raw_query_tag, error);
+                state.moderator.send_report(event);
                 return None;
             }
         };
 
         let query = match medium_query {
-            QueryRequestMedium::Broadcast(bytes) => {
+            QueryRequestMedium::Broadcast(bytes, _) => {
                 match rayon_run_fifo(|| Point::parse(bytes.into())).await {
                     Ok(Ok(point)) => QueryRequest::Broadcast(point),
                     Ok(Err(bad_point)) => {
@@ -170,6 +216,7 @@ impl ResponderInner {
                             error = %bad_point,
                             "bad point",
                         );
+                        (state.moderator).send_report(EventData::BadPoint(*peer_id, bad_point));
                         return None;
                     }
                     Err(tl_error) => {
@@ -179,6 +226,8 @@ impl ResponderInner {
                             error = %tl_error,
                             "bad request",
                         );
+                        let event = EventData::BadRequest(*peer_id, raw_query_tag, tl_error);
+                        state.moderator.send_report(event);
                         return None;
                     }
                 }
@@ -192,6 +241,7 @@ impl ResponderInner {
                 let reached_threshold = state.broadcast_filter.add_check_threshold(
                     peer_id,
                     &point,
+                    &state.moderator,
                     &state.store,
                     &state.peer_schedule,
                     &state.downloader,
