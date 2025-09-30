@@ -19,6 +19,7 @@ use crate::models::{
     AnchorStageRole, Cert, Digest, Link, PeerCount, Point, PointData, PointId, Round, Signature,
     Through, UnixTime,
 };
+use crate::moderator::Moderator;
 use crate::storage::MempoolStore;
 
 pub fn make_engine_parts<const PEER_COUNT: usize>(
@@ -33,7 +34,7 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
     let private_overlay =
         PrivateOverlay::builder(*OverlayId::wrap(&[0; 32])).build(Responder::default());
 
-    let dispatcher = Dispatcher::new(&network, &private_overlay);
+    let dispatcher = Dispatcher::new(&network, &private_overlay, &Moderator::new_stub());
 
     let task_tracker = TaskTracker::default();
 

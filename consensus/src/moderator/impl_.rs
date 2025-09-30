@@ -96,7 +96,7 @@ impl Moderator {
     }
 
     /// Event is channelled to a separate worker that writes events to DB one-by-one
-    pub fn send_report(&self, data: JournalEvent) {
+    pub(crate) fn send_report(&self, data: JournalEvent) {
         self.0.send_report(data);
     }
 
