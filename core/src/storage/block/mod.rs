@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::BufReader;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -396,6 +398,10 @@ impl BlockStorage {
 
     pub fn get_archive_size(&self, id: u32) -> Result<Option<usize>> {
         self.blob_storage.get_archive_size(id)
+    }
+
+    pub fn get_archive_reader(&self, id: u32) -> Result<Option<BufReader<File>>> {
+        self.blob_storage.get_archive_reader(id)
     }
 
     /// Get the complete archive (compressed).

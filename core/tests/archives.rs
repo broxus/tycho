@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -340,6 +341,14 @@ async fn archives() -> Result<()> {
         original_decompressed, decompressed_stored,
         "Archive content should match after decompression"
     );
+
+    let mut archive_reader = storage
+        .block_storage()
+        .get_archive_reader(archive_id)?
+        .expect("archive reader should exist");
+    let mut read_data = Vec::new();
+    archive_reader.read_to_end(&mut read_data)?;
+    assert_eq!(read_data.as_slice(), stored_archive_data.as_ref());
 
     let all_blocks = test_pagination(storage.clone()).await?;
     test_orphaned_metadata_cleanup(storage, all_blocks, config, zerostate).await?;
