@@ -40,6 +40,8 @@ mod util;
 mod writer;
 
 use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -609,6 +611,10 @@ impl BlobStorage {
         }
 
         Ok(None)
+    }
+
+    pub fn get_archive_reader(&self, id: u32) -> Result<Option<BufReader<File>>> {
+        Ok(self.archives.get_reader(&id)?)
     }
 
     /// Get the complete archive (compressed).
