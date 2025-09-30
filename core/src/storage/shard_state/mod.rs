@@ -371,6 +371,11 @@ impl ShardStateStorage {
             let block_id = BlockId::from_slice(key);
             let root_hash = HashBytes::from_slice(value);
 
+            tracing::info!(
+                block_id = ?block_id,
+                "remove block GC",
+            );
+
             // Skip blocks from zero state and top blocks
             if block_id.seqno == 0
                 || top_blocks.contains_shard_seqno(&block_id.shard, block_id.seqno)
