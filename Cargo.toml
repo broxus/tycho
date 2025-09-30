@@ -47,7 +47,7 @@ castaway = "0.2"
 clap = { version = "4.5.3", features = ["derive"] }
 clap-markdown = "0.1.4"
 crc32c = "0.6"
-criterion = "0.6.0"
+criterion = "0.7.0"
 dashmap = "6.1.0"
 dirs = "6.0.0"
 ed25519 = "2.0"
@@ -59,7 +59,7 @@ getip = "0.2.0"
 hex = "0.4"
 humantime = "2"
 indexmap = "2.2"
-itertools = "0.12"
+itertools = "0.14"
 libc = "0.2"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
@@ -97,11 +97,11 @@ serde_json = "1.0.114"
 serde_path_to_error = "0.1"
 sha2 = "0.10.8"
 smallvec = "1.13.1"
-socket2 = "0.5.7"
+socket2 = "0.6.0"
 syn = "2.0.104"
-sysinfo = "0.35"
+sysinfo = "0.37"
 tabled = { version = "0.20.0", default-features = false }
-tarpc = { version = "0.36", features = [
+tarpc = { version = "0.37", features = [
     "tokio1",
     "serde1",
     "serde-transport",
