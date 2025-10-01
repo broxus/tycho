@@ -40,6 +40,7 @@ pub struct ShardStateStorage {
     max_new_sc_cell_count: AtomicUsize,
 
     accounts_split_depth: u8,
+    store_shard_state_step: u32,
 }
 
 impl ShardStateStorage {
@@ -51,6 +52,7 @@ impl ShardStateStorage {
         temp_file_storage: TempFileStorage,
         cache_size_bytes: ByteSize,
         drop_interval: u32,
+        store_shard_state_step: u32,
     ) -> Result<Arc<Self>> {
         let cell_storage = CellStorage::new(cells_db.clone(), cache_size_bytes, drop_interval);
 
@@ -60,6 +62,7 @@ impl ShardStateStorage {
             block_storage,
             temp_file_storage,
             cell_storage,
+            store_shard_state_step,
             gc_lock: Default::default(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
@@ -109,7 +112,7 @@ impl ShardStateStorage {
         hint: StoreStateHint,
     ) -> Result<bool> {
         // Store state root only for masterchain blocks and every N shard blocks
-        if !handle.is_masterchain() && handle.id().seqno % 5 != 0 {
+        if !handle.is_masterchain() && handle.id().seqno % self.store_shard_state_step != 0 {
             return Ok(false);
         }
 
@@ -260,7 +263,7 @@ impl ShardStateStorage {
         let mut current_block_id = *block_id;
 
         if !block_id.is_masterchain() {
-            while current_block_id.seqno % 5 != 0 {
+            while current_block_id.seqno % self.store_shard_state_step != 0 {
                 let handle = self
                     .block_handle_storage
                     .load_handle(&current_block_id)
@@ -536,6 +539,10 @@ impl ShardStateStorage {
         iter.seek_to_first();
 
         Ok(iter.key().map(BlockId::from_slice))
+    }
+
+    pub fn store_shard_state_step(&self) -> u32 {
+        self.store_shard_state_step
     }
 }
 

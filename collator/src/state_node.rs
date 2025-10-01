@@ -235,7 +235,9 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             let mut chain = Vec::new();
             let mut current_block_id = *block_id;
 
-            while current_block_id.seqno % 5 != 0 {
+            let store_state_step = self.storage.shard_state_storage().store_shard_state_step();
+
+            while current_block_id.seqno % store_state_step != 0 {
                 let block = self
                     .shard_blocks
                     .get(&current_block_id.shard)
