@@ -67,7 +67,7 @@ impl ShardStateStorage {
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
-            accounts_split_depth: 4,
+            accounts_split_depth: 5,
         }))
     }
 
