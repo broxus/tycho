@@ -102,7 +102,9 @@ impl Cmd {
 
         // Dump master block and its state
         println!("Dumping master block and state...");
-        let master_state = dumper.dump_block_and_state(&master_block_id).await?;
+        let master_state = dumper
+            .dump_block_and_state(&master_block_id, master_block_id.seqno)
+            .await?;
         let mc_data = McData::load_from_state(&master_state, Default::default())?;
         let top_processed_to_anchor = mc_data.top_processed_to_anchor;
 
@@ -112,7 +114,10 @@ impl Cmd {
             .iter()
             .map(|(shard_ident, descr)| descr.get_block_id(*shard_ident))
         {
-            if let Err(e) = dumper.dump_block_and_state(&block_id).await {
+            if let Err(e) = dumper
+                .dump_block_and_state(&block_id, master_block_id.seqno)
+                .await
+            {
                 println!("Failed to dump shard block {}: {}", block_id, e);
             };
             if let Err(e) = dumper.dump_queue_state(&block_id).await {
@@ -132,7 +137,9 @@ impl Cmd {
             println!("Dumping shard block chain...");
             let shard_chain = dumper.get_shard_chain(target_block_id, &mc_data).await?;
             for block_id in &shard_chain {
-                dumper.dump_block_and_state(block_id).await?;
+                dumper
+                    .dump_block_and_state(block_id, master_block_id.seqno)
+                    .await?;
             }
 
             if let Some(last_shard_block_id) = shard_chain.last() {
@@ -157,7 +164,11 @@ struct Dumper {
 }
 
 impl Dumper {
-    async fn dump_block_and_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
+    async fn dump_block_and_state(
+        &self,
+        block_id: &BlockId,
+        master_block_seqno: u32,
+    ) -> Result<ShardStateStuff> {
         println!("Dumping data for block {}", block_id);
         if let Err(e) = self.dump_block_data(block_id).await {
             if block_id.seqno == 0 {
@@ -169,7 +180,8 @@ impl Dumper {
                 return Err(e);
             }
         }
-        self.dump_persistent_state(block_id).await
+        self.dump_persistent_state(block_id, master_block_seqno)
+            .await
     }
 
     async fn dump_block_data(&self, block_id: &BlockId) -> Result<()> {
@@ -185,7 +197,11 @@ impl Dumper {
         Ok(())
     }
 
-    async fn dump_persistent_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
+    async fn dump_persistent_state(
+        &self,
+        block_id: &BlockId,
+        master_block_seqno: u32,
+    ) -> Result<ShardStateStuff> {
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
         let writer = ShardStateWriter::new(self.storage.cells_db(), &dir, block_id);
         let ref_by_mc_seqno = self
@@ -197,7 +213,7 @@ impl Dumper {
         let state = self
             .storage
             .shard_state_storage()
-            .load_state(ref_by_mc_seqno.unwrap_or(block_id.seqno + 1), block_id)
+            .load_state(ref_by_mc_seqno.unwrap_or(master_block_seqno), block_id)
             .await?;
 
         writer
@@ -208,6 +224,7 @@ impl Dumper {
     }
 
     async fn dump_queue_state(&self, block_id: &BlockId) -> Result<()> {
+        println!("Dumping queue state for block {}", block_id);
         if block_id.seqno == 0 {
             // For zerostate blocks, there is no queue state to dump
             return Ok(());

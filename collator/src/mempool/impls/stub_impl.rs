@@ -25,16 +25,16 @@ pub struct MempoolAdapterStubImpl {
     listener: Arc<dyn MempoolEventListener>,
     anchors_cache: Arc<RwLock<BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
     sleep_between_anchors: AtomicBool,
-    first_anchor_id: Option<u32>,
+    top_processed_to_anchor: Option<u32>,
 }
 
 impl MempoolAdapterStubImpl {
     pub fn with_stub_externals(
         listener: Arc<dyn MempoolEventListener>,
         now: Option<u64>,
-        first_anchor_id: Option<u32>,
+        top_processed_to_anchor: Option<u32>,
     ) -> Arc<Self> {
-        Self::with_generator(listener, first_anchor_id, |a| {
+        Self::with_generator(listener, top_processed_to_anchor, |a| {
             tokio::spawn(Self::stub_externals_generator(a, now));
             Ok(())
         })
@@ -44,9 +44,9 @@ impl MempoolAdapterStubImpl {
     pub fn with_externals_from_dir(
         listener: Arc<dyn MempoolEventListener>,
         dir_path: impl AsRef<Path>,
-        first_anchor_id: Option<u32>,
+        top_processed_to_anchor: Option<u32>,
     ) -> Result<Arc<Self>> {
-        Self::with_generator(listener, first_anchor_id, move |a| {
+        Self::with_generator(listener, top_processed_to_anchor, move |a| {
             let mut paths = std::fs::read_dir(dir_path)?
                 .map(|res| res.map(|e| e.path()))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -59,7 +59,7 @@ impl MempoolAdapterStubImpl {
 
     fn with_generator<F>(
         listener: Arc<dyn MempoolEventListener>,
-        first_anchor_id: Option<u32>,
+        top_processed_to_anchor: Option<u32>,
         start: F,
     ) -> Result<Arc<Self>>
     where
@@ -71,7 +71,7 @@ impl MempoolAdapterStubImpl {
             listener,
             anchors_cache: Arc::new(RwLock::new(BTreeMap::new())),
             sleep_between_anchors: AtomicBool::new(true),
-            first_anchor_id,
+            top_processed_to_anchor,
         };
 
         let adapter = Arc::new(adapter);
@@ -84,10 +84,10 @@ impl MempoolAdapterStubImpl {
     pub fn with_anchors_from_dump(
         listener: Arc<dyn MempoolEventListener>,
         now: Option<u64>,
-        first_anchor_id: u32,
+        top_processed_to_anchor: u32,
         anchors_path: PathBuf,
     ) -> Result<Arc<Self>> {
-        Self::with_generator(listener.clone(), Some(first_anchor_id), {
+        Self::with_generator(listener.clone(), Some(top_processed_to_anchor), {
             move |a| {
                 tokio::spawn(Self::anchors_generator(a, anchors_path, now));
                 Ok(())
@@ -102,7 +102,7 @@ impl MempoolAdapterStubImpl {
             tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
         }
 
-        let mut prev_anchor_id = self.first_anchor_id.unwrap_or_default();
+        let mut prev_anchor_id = self.top_processed_to_anchor.unwrap_or_default();
         let start_anchor_id = prev_anchor_id + 1;
         for anchor_id in start_anchor_id.. {
             if self.sleep_between_anchors.load(Ordering::Acquire) {
@@ -111,7 +111,8 @@ impl MempoolAdapterStubImpl {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
-            let mut anchor = make_stub_anchor(anchor_id, prev_anchor_id, self.first_anchor_id);
+            let mut anchor =
+                make_stub_anchor(anchor_id, prev_anchor_id, self.top_processed_to_anchor);
             prev_anchor_id = anchor_id;
 
             if let Some(now) = now {
@@ -171,8 +172,8 @@ impl MempoolAdapterStubImpl {
             file_queue.make_contiguous().sort_by_key(|(aid, _, _)| *aid);
         }
 
-        let mut prev_anchor_id = self.first_anchor_id.unwrap_or_default();
-        let start_anchor_id = prev_anchor_id + 1;
+        let mut prev_anchor_id = self.top_processed_to_anchor.unwrap_or_default();
+        let start_anchor_id = prev_anchor_id;
         for anchor_id in start_anchor_id.. {
             if self.sleep_between_anchors.load(Ordering::Acquire) {
                 tokio::time::sleep(make_round_interval() * 4).await;
@@ -289,7 +290,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         loop {
             let Some(anchor) = self.anchors_cache.read().get(&anchor_id).cloned() else {
                 let last_anchor_id = self.anchors_cache.read().last_key_value().map_or(
-                    self.first_anchor_id.unwrap_or_default(),
+                    self.top_processed_to_anchor.unwrap_or_default(),
                     |(_, last_anchor)| last_anchor.id,
                 );
                 if last_anchor_id > anchor_id {
@@ -376,7 +377,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
 
             let Some(anchor) = res else {
                 let last_anchor_id = self.anchors_cache.read().last_key_value().map_or(
-                    self.first_anchor_id.unwrap_or_default(),
+                    self.top_processed_to_anchor.unwrap_or_default(),
                     |(_, last_anchor)| last_anchor.id,
                 );
                 let delta = prev_anchor_id.saturating_sub(last_anchor_id);

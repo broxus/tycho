@@ -8,13 +8,12 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_crypto::ed25519;
 use tycho_types::cell::HashBytes;
 use tycho_types::dict::Dict;
 use tycho_types::models::{
-    BlockId, BlockIdShort, BlockchainConfig, CollationConfig, CurrencyCollection, GenesisInfo,
-    ShardFeeCreated, ShardIdent, ValidatorInfo,
+    BlockId, BlockIdShort, BlockchainConfig, CollationConfig, CurrencyCollection, ShardIdent,
+    ValidatorInfo,
 };
 use tycho_util::FastDashMap;
 
@@ -35,8 +34,8 @@ use crate::types::processed_upto::{
     ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
 };
 use crate::types::{
-    BlockCandidate, BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo,
-    McData, ShardDescriptionShort, ShardDescriptionShortExt, TopBlockDescription,
+    BlockCandidate, BlockCollationResult, CollationSessionId, CollationSessionInfo, McData,
+    ShardDescriptionShort, ShardDescriptionShortExt,
 };
 use crate::utils::async_queued_dispatcher::AsyncQueuedDispatcher;
 
@@ -711,13 +710,7 @@ impl DumpStateTestCollationManager {
                     shard_id,
                     prev_blocks_ids,
                     mc_data.clone(),
-                    Some(MempoolGlobalConfig {
-                        genesis_info: GenesisInfo {
-                            start_round: mc_data.top_processed_to_anchor,
-                            genesis_millis: 0,
-                        },
-                        consensus_config: None,
-                    }),
+                    None,
                     Arc::new(Notify::new()),
                     None,
                 )
@@ -740,10 +733,17 @@ impl DumpStateTestCollationManager {
             .await?;
         let mc_data = McData::load_from_state(&mc_state, Default::default())?;
 
+        let (top_processed_to_anchor, _) = mc_data
+            .processed_upto
+            .get_min_externals_processed_to()
+            .unwrap_or_default();
+
+        let upto_anchor = top_processed_to_anchor.min(mc_data.top_processed_to_anchor);
+
         let mempool_adapter = MempoolAdapterStubImpl::with_anchors_from_dump(
             Arc::new(MempoolEventStubListener),
             Some(mc_data.gen_chain_time),
-            mc_data.top_processed_to_anchor,
+            upto_anchor,
             dump_path.join("mempool"),
         )?;
 
@@ -801,22 +801,16 @@ impl DumpStateTestCollationManager {
         });
 
         let collator = CollatorStdImpl::start(
-            mq_adapter,
-            mempool_adapter,
-            state_node_adapter,
+            mq_adapter.clone(),
+            mempool_adapter.clone(),
+            state_node_adapter.clone(),
             Arc::new(Default::default()),
-            collation_session,
+            collation_session.clone(),
             listener.clone(),
             ShardIdent::MASTERCHAIN,
             vec![mc_block_id],
             mc_data.clone(),
-            Some(MempoolGlobalConfig {
-                genesis_info: GenesisInfo {
-                    start_round: mc_data.top_processed_to_anchor,
-                    genesis_millis: 0,
-                },
-                consensus_config: None,
-            }),
+            None,
             Arc::new(Notify::new()),
             None,
         )
@@ -826,39 +820,27 @@ impl DumpStateTestCollationManager {
             .active_collators
             .insert(mc_block_id.shard, collator);
 
-        Ok(listener)
-    }
+        for (shard_id, descr) in mc_data.shards.iter() {
+            let collator = CollatorStdImpl::start(
+                mq_adapter.clone(),
+                mempool_adapter.clone(),
+                state_node_adapter.clone(),
+                Arc::new(Default::default()),
+                collation_session.clone(),
+                listener.clone(),
+                *shard_id,
+                vec![descr.get_block_id(*shard_id)],
+                mc_data.clone(),
+                None,
+                Arc::new(Notify::new()),
+                None,
+            )
+            .await?;
 
-    pub fn get_top_shard_blocks_info_for_mc_block(
-        &self,
-        next_mc_block_id_short: BlockIdShort,
-    ) -> Result<Vec<TopBlockDescription>> {
-        let mut result = vec![];
-        for r in self.shards_cache.iter() {
-            if r.ref_by_mc_seqno == next_mc_block_id_short.seqno {
-                let processed_to_by_partitions =
-                    r.processed_upto.get_internals_processed_to_by_partitions();
-
-                let proof_funds = ShardFeeCreated {
-                    create: r.value_flow.created.clone(),
-                    fees: r.value_flow.fees_collected.clone(),
-                };
-
-                result.push(TopBlockDescription {
-                    block_id: *r.block.id(),
-                    block_info: r.block.load_info()?.clone(),
-                    processed_to_anchor_id: r.processed_to_anchor_id,
-                    value_flow: r.value_flow.clone(),
-                    proof_funds,
-                    #[cfg(feature = "block-creator-stats")]
-                    creators: vec![],
-                    processed_to_by_partitions,
-                });
-                break;
-            }
+            listener.active_collators.insert(*shard_id, collator);
         }
 
-        Ok(result)
+        Ok(listener)
     }
 }
 
@@ -866,7 +848,7 @@ impl DumpStateTestCollationManager {
 impl CollatorEventListener for DumpStateTestCollationManager {
     async fn on_skipped(
         &self,
-        _prev_mc_block_id: BlockId,
+        prev_mc_block_id: BlockId,
         next_block_id_short: BlockIdShort,
         anchor_chain_time: u64,
         force_mc_block: ForceMasterCollation,
@@ -887,6 +869,7 @@ impl CollatorEventListener for DumpStateTestCollationManager {
         let last_master_chain_time = *self.last_master_chain_time.lock();
         let collate_next_master_block =
             anchor_chain_time > last_master_chain_time + time_between_master_collation;
+        let mc_data = self.mc_data.lock().clone();
 
         // Continue with next collation step similar to on_block_candidate logic
         if collate_next_master_block {
@@ -896,16 +879,15 @@ impl CollatorEventListener for DumpStateTestCollationManager {
                 .unwrap()
                 .clone();
 
-            let top_shard_blocks_info =
-                self.get_top_shard_blocks_info_for_mc_block(next_block_id_short)?;
-
-            let next_mc_block_chain_time = anchor_chain_time;
-
             mc_collator
-                .enqueue_do_collate(top_shard_blocks_info, next_mc_block_chain_time)
+                .enqueue_resume_collation(
+                    mc_data,
+                    true, // TODO: check
+                    self.collation_session.clone(),
+                    vec![prev_mc_block_id],
+                )
                 .await?;
         } else {
-            let mc_data = self.mc_data.lock().clone();
             self.resume_shard_collations(mc_data).await?;
         }
 
@@ -920,6 +902,7 @@ impl CollatorEventListener for DumpStateTestCollationManager {
         Ok(())
     }
     async fn on_block_candidate(&self, collation_result: BlockCollationResult) -> Result<()> {
+        let prev_mc_block_id = collation_result.prev_mc_block_id;
         let block_id = *collation_result.candidate.block.id();
         let load_info = collation_result.candidate.block.load_info()?;
         let chain_time = load_info.gen_utime as u64 * 1000 + load_info.gen_utime_ms as u64;
@@ -930,9 +913,18 @@ impl CollatorEventListener for DumpStateTestCollationManager {
         } else {
             self.mc_data.lock().clone()
         };
-        let next_mc_block_id_short = mc_data.block_id.get_next_id_short();
         let candidate = *collation_result.candidate.clone();
-        let processed_to_anchor_id = candidate.processed_to_anchor_id;
+
+        let need_to_collate_next_shard = if !block_id.shard.is_masterchain() {
+            let (mc_processed_to_anchor_id, _) = mc_data
+                .processed_upto
+                .get_min_externals_processed_to()
+                .unwrap_or_default();
+
+            mc_processed_to_anchor_id > candidate.processed_to_anchor_id
+        } else {
+            false
+        };
 
         tracing::info!(
             "Block candidate received: shard={}, seqno={}, chain_time={}",
@@ -974,31 +966,20 @@ impl CollatorEventListener for DumpStateTestCollationManager {
         self.block_produced_signal.notify_one();
 
         // 4. Collate next block
-        if collate_next_master_block {
+        if !need_to_collate_next_shard && collate_next_master_block {
             let mc_collator = self
                 .active_collators
                 .get(&ShardIdent::MASTERCHAIN)
                 .unwrap()
                 .clone();
 
-            let top_shard_blocks_info =
-                self.get_top_shard_blocks_info_for_mc_block(next_mc_block_id_short)?;
-
-            let next_mc_block_chain_time = if !block_id.shard.is_masterchain() {
-                chain_time
-            } else {
-                self.mempool_adapter
-                    .get_next_anchor(processed_to_anchor_id)
-                    .await?
-                    .anchor()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Failed to get next anchor ({})", processed_to_anchor_id)
-                    })?
-                    .chain_time
-            };
-
             mc_collator
-                .enqueue_do_collate(top_shard_blocks_info, next_mc_block_chain_time)
+                .enqueue_resume_collation(
+                    mc_data,
+                    true, // TODO: check
+                    self.collation_session.clone(),
+                    vec![prev_mc_block_id],
+                )
                 .await?;
         } else {
             self.resume_shard_collations(mc_data).await?;
@@ -1015,7 +996,7 @@ impl CollatorEventListener for DumpStateTestCollationManager {
 async fn test_collation_from_dump() -> Result<()> {
     try_init_test_tracing("trace".parse().unwrap());
 
-    let dump_dir = "../test/data/dump/"; // TODO: insert real dump
+    let dump_dir = "../test/data/dump_1_8000000000000000_373/"; // TODO: insert real dump
 
     let manager = DumpStateTestCollationManager::new(Path::new(dump_dir)).await?;
     let notify = manager.block_produced_signal.clone();
