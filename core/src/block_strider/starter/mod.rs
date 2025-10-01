@@ -6,13 +6,16 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_storage::fs::MappedFile;
 use tycho_types::boc::Boc;
-use tycho_types::models::{BlockId, OutMsgQueueUpdates, ShardStateUnsplit};
+use tycho_types::models::{
+    BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardStateUnsplit,
+};
 use tycho_util::serde_helpers;
 
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
-use crate::storage::{CoreStorage, ShardStateStorage};
+use crate::storage::{CoreStorage, QueueStateReader, ShardStateStorage};
 
 mod cold_boot;
 
@@ -56,7 +59,8 @@ impl StarterBuilder {
                 blockchain_rpc_client,
                 zerostate,
                 config,
-                queue_state_handler,
+                queue_state_handler: queue_state_handler
+                    .unwrap_or_else(|| Box::new(ValidateQueueState)),
             }),
         }
     }
@@ -141,8 +145,8 @@ impl Starter {
         &self.inner.config
     }
 
-    pub fn queue_state_handler(&self) -> Option<&dyn QueueStateHandler> {
-        self.inner.queue_state_handler.as_deref()
+    pub fn queue_state_handler(&self) -> &dyn QueueStateHandler {
+        self.inner.queue_state_handler.as_ref()
     }
 
     /// Boot type when the node has not yet started syncing
@@ -179,7 +183,7 @@ struct StarterInner {
     blockchain_rpc_client: BlockchainRpcClient,
     zerostate: ZerostateId,
     config: StarterConfig,
-    queue_state_handler: Option<Box<dyn QueueStateHandler>>,
+    queue_state_handler: Box<dyn QueueStateHandler>,
 }
 
 pub trait ZerostateProvider {
@@ -263,5 +267,53 @@ impl<T: QueueStateHandler + ?Sized> QueueStateHandler for Box<T> {
         block_id: &BlockId,
     ) -> Result<()> {
         T::import_from_file(self, top_update, file, block_id).await
+    }
+}
+
+/// Does some basic validation of the provided queue state.
+#[derive(Debug, Clone, Copy)]
+pub struct ValidateQueueState;
+
+#[async_trait::async_trait]
+impl QueueStateHandler for ValidateQueueState {
+    async fn import_from_file(
+        &self,
+        top_update: &OutMsgQueueUpdates,
+        file: File,
+        block_id: &BlockId,
+    ) -> Result<()> {
+        tracing::info!(%block_id, "validating internal queue state from file");
+
+        let top_update = top_update.clone();
+
+        let span = tracing::Span::current();
+        tokio::task::spawn_blocking(move || {
+            let _span = span.enter();
+
+            let mapped = MappedFile::from_existing_file(file)?;
+
+            let mut reader = QueueStateReader::begin_from_mapped(mapped.as_slice(), &top_update)?;
+
+            while let Some(mut part) = reader.read_next_queue_diff()? {
+                while let Some(cell) = part.read_next_message()? {
+                    let msg_hash = cell.repr_hash();
+                    let msg = cell.parse::<Message<'_>>()?;
+                    let MsgInfo::Int(int_msg_info) = &msg.info else {
+                        anyhow::bail!("non-internal message in the queue in msg {msg_hash}");
+                    };
+
+                    let IntAddr::Std(_dest) = &int_msg_info.dst else {
+                        anyhow::bail!("non-std destination address in msg {msg_hash}");
+                    };
+
+                    let IntAddr::Std(_src) = &int_msg_info.src else {
+                        anyhow::bail!("non-std destination address in msg {msg_hash}");
+                    };
+                }
+            }
+
+            reader.finish()
+        })
+        .await?
     }
 }

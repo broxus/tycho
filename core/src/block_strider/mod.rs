@@ -22,7 +22,7 @@ pub use self::provider::{
 };
 pub use self::starter::{
     ColdBootType, FileZerostateProvider, QueueStateHandler, Starter, StarterBuilder, StarterConfig,
-    ZerostateProvider,
+    ValidateQueueState, ZerostateProvider,
 };
 pub use self::state::{
     BlockStriderState, CommitMasterBlock, CommitShardBlock, PersistentBlockStriderState,

@@ -1,4 +1,5 @@
-use std::io::{BufWriter, Write};
+use std::fs::File;
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -34,6 +35,46 @@ impl<'a> QueueStateWriter<'a> {
 
     pub fn temp_file_name(block_id: &BlockId) -> PathBuf {
         PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
+    }
+
+    pub fn write_file(
+        states_dir: &'a Dir,
+        block_id: &'a BlockId,
+        mut state_file: File,
+        _cancelled: Option<&CancellationFlag>,
+    ) -> Result<()> {
+        let temp_file_name = Self::temp_file_name(block_id);
+        scopeguard::defer! {
+            states_dir.remove_file(&temp_file_name).ok();
+        }
+
+        state_file.seek(SeekFrom::Start(0))?;
+
+        // Create states file
+        let compressed_file = states_dir
+            .file(&temp_file_name)
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open()?;
+
+        let mut compressed_file = ZstdCompressedFile::new(
+            compressed_file,
+            Self::COMPRESSION_LEVEL,
+            FILE_BUFFER_LEN / 2,
+        )?;
+
+        // TODO: Find a way to cancel this operation.
+        std::io::copy(&mut state_file, &mut compressed_file)?;
+
+        // Terminate the compressor and flush the file
+        compressed_file.finish()?.flush()?;
+
+        // Atomically rename the file
+        states_dir
+            .file(&temp_file_name)
+            .rename(Self::file_name(block_id))
+            .map_err(Into::into)
     }
 
     pub fn new(
