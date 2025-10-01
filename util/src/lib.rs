@@ -11,6 +11,8 @@ pub mod config;
 pub mod io;
 pub mod progress_bar;
 pub mod serde_helpers;
+#[cfg(feature = "cli")]
+pub mod thread;
 pub mod time;
 
 pub mod tl;

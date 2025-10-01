@@ -64,6 +64,7 @@ tycho-storage = { workspace = true }
 tycho-util = { workspace = true, features = ["cli"] }
 tycho-wu-tuner = { workspace = true }
 tycho-consensus = { workspace = true }
+core_affinity = "0.8.3"
 
 [dev-dependencies]
 tycho-collator = { workspace = true, features = ["test"] }
