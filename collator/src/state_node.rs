@@ -246,14 +246,33 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                 let block = self
                     .shard_blocks
                     .get(&current_block_id.shard)
-                    .ok_or_else(|| {
-                        anyhow!("shard not found in block cache for {}", current_block_id)
-                    })?
-                    .get(&current_block_id.seqno)
-                    .ok_or_else(|| {
-                        anyhow!("block not found in block cache {:?}", current_block_id)
-                    })?
-                    .clone();
+                    .and_then(|shard_blocks| shard_blocks.get(&current_block_id.seqno).cloned());
+
+                let block = match block {
+                    Some(block) => block,
+                    None => {
+                        // Load from storage if not found in cache (required during restart)
+                        let handle = self
+                            .storage
+                            .block_handle_storage()
+                            .load_handle(&block_id)
+                            .ok_or_else(|| anyhow!("block not found in storage {}", block_id))?;
+
+                        let block = self
+                            .storage
+                            .block_storage()
+                            .load_block_data(&handle)
+                            .await?;
+
+                        let (prev_id, prev_id_alt) = block.construct_prev_id()?;
+
+                        ShardBlockData {
+                            prev_id,
+                            _prev_id_alt: prev_id_alt,
+                            state_update: block.block().load_state_update()?,
+                        }
+                    }
+                };
 
                 chain.push((current_block_id, block.state_update.clone()));
 
