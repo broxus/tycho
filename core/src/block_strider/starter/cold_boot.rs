@@ -782,9 +782,9 @@ impl StarterInner {
             };
 
             let from = StoreZeroStateFrom::File(state_file);
-            if let Err(e) = try_save_persistent(&block_handle, from).await {
-                tracing::error!("failed to store persistent shard state: {e:?}");
-            }
+            try_save_persistent(&block_handle, from)
+                .await
+                .context("failed to store persistent shard state")?;
 
             remove_state_file.await;
 
@@ -804,6 +804,7 @@ impl StarterInner {
         let block_id = block_handle.id();
 
         let temp = self.storage.context().temp_files();
+        let persistent_states = self.storage.persistent_state_storage();
 
         let state_file = temp.file(format!("queue_state_{block_id}"));
         let state_file_path = state_file.path().to_owned();
@@ -815,6 +816,18 @@ impl StarterInner {
                     path = %state_file_path.display(),
                     "failed to remove downloaded queue state: {e:?}",
                 );
+            }
+        };
+
+        let mc_seqno = block_handle.ref_by_mc_seqno();
+        let try_save_persistent = |block_handle: &BlockHandle, mut state_file: FileBuilder| {
+            let block_handle = block_handle.clone();
+            async move {
+                // Reuse downloaded (and validated) file as is.
+                let state_file = state_file.read(true).open()?;
+                persistent_states
+                    .store_queue_state_file(mc_seqno, &block_handle, state_file)
+                    .await
             }
         };
 
@@ -830,11 +843,13 @@ impl StarterInner {
                 }
             };
 
-            if let Some(queue_state_handler) = &self.queue_state_handler {
-                queue_state_handler
-                    .import_from_file(top_update, file, block_id)
-                    .await?;
-            }
+            self.queue_state_handler
+                .import_from_file(top_update, file, block_id)
+                .await?;
+
+            try_save_persistent(block_handle, state_file)
+                .await
+                .with_context(|| "failed to store persistent queue state")?;
 
             remove_state_file.await;
 

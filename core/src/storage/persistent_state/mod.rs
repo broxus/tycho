@@ -505,6 +505,49 @@ impl PersistentStateStorage {
         .await?
     }
 
+    #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
+    pub async fn store_queue_state_file(
+        &self,
+        mc_seqno: u32,
+        handle: &BlockHandle,
+        file: File,
+    ) -> Result<()> {
+        if self
+            .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Queue)
+            .await?
+        {
+            return Ok(());
+        }
+
+        let cancelled = CancellationFlag::new();
+        scopeguard::defer! {
+            cancelled.cancel();
+        }
+
+        let handle = handle.clone();
+        let this = self.inner.clone();
+        let cancelled = cancelled.clone();
+        let span = tracing::Span::current();
+
+        tokio::task::spawn_blocking(move || {
+            let _span = span.enter();
+
+            let guard = scopeguard::guard((), |_| {
+                tracing::warn!("cancelled");
+            });
+
+            let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
+
+            QueueStateWriter::write_file(&states_dir, handle.id(), file, Some(&cancelled))?;
+            this.block_handles.set_has_persistent_queue_state(&handle);
+            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Queue)?;
+
+            scopeguard::ScopeGuard::into_inner(guard);
+            Ok(())
+        })
+        .await?
+    }
+
     pub async fn rotate_persistent_states(&self, top_handle: &BlockHandle) -> Result<()> {
         anyhow::ensure!(
             top_handle.is_masterchain(),
