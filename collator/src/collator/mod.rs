@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,7 +19,6 @@ use tycho_network::PeerId;
 use tycho_types::cell::{Cell, HashBytes};
 use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
-use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
 use tycho_util::time::now_millis;
 use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
@@ -250,9 +248,6 @@ pub struct CollatorStdImpl {
     delayed_working_state: DelayedWorkingState,
     store_new_state_tasks: Vec<JoinTask<Result<bool>>>,
 
-    /// Refs on states to keep them alive until a Merkle chain is applied
-    store_state_refs: VecDeque<Cell>,
-
     anchors_cache: AnchorsCache,
     block_serializer_cache: BlockSerializerCache,
     stats: CollatorStats,
@@ -296,8 +291,6 @@ impl CollatorStdImpl {
 
         let (working_state_tx, working_state_rx) = oneshot::channel::<Result<Box<WorkingState>>>();
 
-        let store_state_refs = VecDeque::with_capacity(config.merkle_chain_limit);
-
         let processor = Self {
             next_block_info,
             config,
@@ -314,7 +307,6 @@ impl CollatorStdImpl {
                 }
             }),
             store_new_state_tasks: Default::default(),
-            store_state_refs,
             anchors_cache: Default::default(),
             block_serializer_cache: BlockSerializerCache::with_capacity(BLOCK_CELL_COUNT_BASELINE),
             stats: Default::default(),
@@ -661,18 +653,8 @@ impl CollatorStdImpl {
                 }
             }
 
-            // Drop states
-            while let Some(cell) = self.store_state_refs.pop_front() {
-                Reclaimer::instance().drop(cell);
-            }
-
             working_state
         } else {
-            // Drop states
-            while let Some(cell) = self.store_state_refs.pop_front() {
-                Reclaimer::instance().drop(cell);
-            }
-
             // reset any delayed working state because we will init a new one
             self.delayed_working_state.reset();
 
@@ -892,13 +874,6 @@ impl CollatorStdImpl {
         } else {
             // append new store task
             self.store_new_state_tasks.push(store_new_state_task);
-
-            // Keep only the last `merkle_chain_limit` states alive
-            if self.store_state_refs.len() == self.config.merkle_chain_limit {
-                self.store_state_refs.pop_front();
-            }
-            self.store_state_refs
-                .push_back(new_observable_state_root.clone());
 
             // build state stuff from new observable state after collation
             GetNewShardStateStuff::BuildFromNewObservable {
