@@ -953,7 +953,10 @@ impl CollatorStdImpl {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
             };
 
-            adapter.accept_shard_block(finalized.block_candidate.block.data.clone())?;
+            adapter.accept_shard_block(
+                finalized.block_candidate.ref_by_mc_seqno,
+                finalized.block_candidate.block.data.clone(),
+            )?;
 
             async move {
                 adapter

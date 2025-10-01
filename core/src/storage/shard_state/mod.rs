@@ -228,7 +228,7 @@ impl ShardStateStorage {
     // knowing its `min_ref_mc_seqno` which can only be found out by
     // parsing the state. Creating a "Brief State" struct won't work either
     // because due to model complexity it is going to be error-prone.
-    pub async fn explicit_load_state(
+    pub async fn direct_load_state(
         &self,
         ref_by_mc_seqno: u32,
         block_id: &BlockId,
@@ -272,7 +272,7 @@ impl ShardStateStorage {
                 chain.push((current_block_id, block.block().state_update.load()?));
 
                 let (prev_id, _prev_id_alt) = block.construct_prev_id()?;
-                current_block_id = prev_id; // TODO: prev_id_alt
+                current_block_id = prev_id; // TODO: split/merge case
             }
         }
 
