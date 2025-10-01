@@ -69,10 +69,12 @@ pub mod metrics {
     pub use self::gauge_guard::GaugeGuard;
     pub use self::histogram_guard::{HistogramGuard, HistogramGuardWithLabels};
     pub use self::metrics_loop::spawn_metrics_loop;
+    pub use self::tokio::{export_runtime_metrics, spawn_runtime_metrics_exporter};
 
     mod gauge_guard;
     mod histogram_guard;
     mod metrics_loop;
+    mod tokio;
 }
 
 mod util {

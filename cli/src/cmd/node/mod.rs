@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -9,6 +10,7 @@ use tycho_core::node::NodeKeys;
 use tycho_util::cli::logger::{init_logger, set_abort_with_tracing};
 use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
+use tycho_util::metrics::spawn_runtime_metrics_exporter;
 
 pub use self::control::CmdControl;
 use crate::BaseArgs;
@@ -118,6 +120,7 @@ impl CmdRun {
 
         if let Some(metrics_config) = &node_config.metrics {
             init_metrics(metrics_config)?;
+            spawn_runtime_metrics_exporter(Duration::from_secs(5));
         }
 
         if self.single_node {

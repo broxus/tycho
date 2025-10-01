@@ -573,10 +573,12 @@ def core_blockchain_rpc_general() -> RowPanel:
             "Current score per peer",
         ),
         create_counter_panel(
-            "tycho_core_overlay_client_neighbour_total_requests", "Number of total requests per peer"
+            "tycho_core_overlay_client_neighbour_total_requests",
+            "Number of total requests per peer",
         ),
         create_counter_panel(
-            "tycho_core_overlay_client_neighbour_failed_requests", "Number of failed requests per peer"
+            "tycho_core_overlay_client_neighbour_failed_requests",
+            "Number of failed requests per peer",
         ),
     ]
     return create_row("blockchain: RPC - General Stats", metrics)
@@ -626,8 +628,8 @@ def util_reclaimer() -> RowPanel:
         title="Reclaimer queue length",
         targets=[
             target(
-                "sum by (instance) (tycho_delayed_drop_enqueued{instance=~\"$instance\"}) - sum by (instance) (tycho_delayed_drop_dropped{instance=~\"$instance\"})",
-                legend_format="{{instance}}"
+                'sum by (instance) (tycho_delayed_drop_enqueued{instance=~"$instance"}) - sum by (instance) (tycho_delayed_drop_dropped{instance=~"$instance"})',
+                legend_format="{{instance}}",
             )
         ],
         unit=UNITS.NUMBER_FORMAT,
@@ -899,7 +901,7 @@ def storage() -> RowPanel:
         create_gauge_panel(
             "tycho_storage_state_max_epoch",
             "Max known state root cell epoch",
-            unit_format="Seqno"
+            unit_format="Seqno",
         ),
         create_gauge_panel(
             "tycho_storage_raw_cells_cache_size",
@@ -970,8 +972,8 @@ def storage() -> RowPanel:
             title="States GC seqno guard",
             targets=[
                 target(
-                    "tycho_min_ref_mc_seqno{instance=~\"$instance\"} > 0",
-                    legend_format="{{instance}}"
+                    'tycho_min_ref_mc_seqno{instance=~"$instance"} > 0',
+                    legend_format="{{instance}}",
                 )
             ],
             unit="States",
@@ -980,8 +982,8 @@ def storage() -> RowPanel:
             title="States GC safe range",
             targets=[
                 target(
-                    "tycho_min_ref_mc_seqno{instance=~\"$instance\"} - tycho_gc_states_seqno{instance=~\"$instance\"}",
-                    legend_format="{{instance}}"
+                    'tycho_min_ref_mc_seqno{instance=~"$instance"} - tycho_gc_states_seqno{instance=~"$instance"}',
+                    legend_format="{{instance}}",
                 )
             ],
             unit="States",
@@ -2009,6 +2011,7 @@ def collator_wu_metrics() -> RowPanel:
     ]
     return create_row("collator: Work units calculation", metrics)
 
+
 def collator_wu_params() -> RowPanel:
     metrics = [
         create_gauge_panel(
@@ -2067,7 +2070,6 @@ def collator_wu_params() -> RowPanel:
             "tycho_do_collate_wu_param_prepare_add_to_msg_groups_target",
             "prepare.add_to_msg_groups (target)",
         ),
-
         create_gauge_panel(
             "tycho_do_collate_wu_param_execute_prepare_curr",
             "execute.prepare (current)",
@@ -2124,7 +2126,6 @@ def collator_wu_params() -> RowPanel:
             "tycho_do_collate_wu_param_execute_max_threads_target",
             "execute.max_threads (target)",
         ),
-
         create_gauge_panel(
             "tycho_do_collate_wu_param_finalize_build_transactions_curr",
             "finalize.build_transactions (current)",
@@ -2239,6 +2240,7 @@ def collator_wu_params() -> RowPanel:
         ),
     ]
     return create_row("collator: Work units params", metrics)
+
 
 def collator_core_operations_metrics() -> RowPanel:
     metrics = [
@@ -2413,7 +2415,8 @@ def collator_state_adapter_metrics() -> RowPanel:
             "Prepare block proof",
         ),
         create_heatmap_panel(
-            "tycho_collator_state_adapter_save_block_proof_time_high", "Save block proof"
+            "tycho_collator_state_adapter_save_block_proof_time_high",
+            "Save block proof",
         ),
         create_heatmap_panel(
             "tycho_collator_state_store_state_root_time_high",
@@ -2422,7 +2425,9 @@ def collator_state_adapter_metrics() -> RowPanel:
         ),
         create_heatmap_panel("tycho_collator_state_load_block_time", "Load block"),
         create_heatmap_panel("tycho_collator_state_load_state_time", "Load state"),
-        create_heatmap_panel("tycho_collator_state_load_state_root_time", "Load state root"),
+        create_heatmap_panel(
+            "tycho_collator_state_load_state_root_time", "Load state root"
+        ),
         create_heatmap_panel(
             "tycho_collator_state_load_queue_diff_time", "Load queue diff"
         ),
@@ -3001,6 +3006,39 @@ def allocator_stats() -> RowPanel:
     return create_row("Allocator Stats", metrics)
 
 
+def tokio_stats() -> RowPanel:
+    metrics = [
+        create_gauge_panel("tokio_num_workers", "Worker Threads"),
+        create_gauge_panel("tokio_num_alive_tasks", "Alive Tasks"),
+        create_gauge_panel("tokio_global_queue_depth", "Global Queue Depth"),
+        create_gauge_panel(
+            Expr(
+                metric='100 * clamp_max(((increase(tokio_worker_total_busy_duration_seconds{instance=~"$instance"}[1m]) / 60) / tokio_num_workers{instance=~"$instance"}), 1)',
+                default_label_selectors=[],
+            ),
+            "Average Worker Utilization",
+            UNITS.PERCENT_FORMAT,
+        ),
+        create_gauge_panel(
+            Expr(
+                metric='tokio_num_workers{instance=~"$instance"} * clamp_max(((increase(tokio_worker_total_busy_duration_seconds{instance=~"$instance"}[30s]) / 30) / tokio_num_workers{instance=~"$instance"}), 1)',
+                default_label_selectors=[],
+            ),
+            "Busy Workers (30s avg)",
+            UNITS.PERCENT_FORMAT,
+        ),
+        create_gauge_panel(
+            Expr(
+                metric='tokio_num_alive_tasks{instance=~"$instance"} / tokio_num_workers{instance=~"$instance"}',
+                default_label_selectors=[],
+            ),
+            "Tasks per Worker",
+            UNITS.NUMBER_FORMAT,
+        ),
+    ]
+    return create_row("Tokio Stats", metrics)
+
+
 def rayon_stats() -> RowPanel:
     metrics = [
         create_heatmap_panel(
@@ -3229,7 +3267,7 @@ def templates() -> Templating:
 
 
 dashboard = Dashboard(
-    "Tycho Node Metrics",
+    "Tycho Node Metrics temp",
     templating=templates(),
     refresh="30s",
     panels=[
@@ -3270,12 +3308,13 @@ dashboard = Dashboard(
         *quic_network_panels(),
         util_reclaimer(),
         allocator_stats(),
+        tokio_stats(),
         rayon_stats(),
         jrpc(),
         jrpc_timings(),
     ],
     annotations=Annotations(),
-    uid="cdlaji62a1b0gb",
+    uid="cdlaji62a1b0gr",
     version=9,
     schemaVersion=14,
     graphTooltip=GRAPH_TOOLTIP_MODE_SHARED_CROSSHAIR,

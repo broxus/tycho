@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -130,6 +131,7 @@ impl CmdRun {
 
         if let Some(metrics_config) = &node_config.metrics {
             init_metrics(metrics_config)?;
+            spawn_runtime_metrics_exporter(Duration::from_secs(5));
         }
 
         let mut stop_fut = any_signal_repeatable(signal::TERMINATION_SIGNALS);
