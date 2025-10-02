@@ -165,6 +165,8 @@ impl ExternalsReaderState {
             .record(ranges_elapsed.as_millis() as f64);
         metrics::histogram!("tycho_collator_externals_partitions_clone_time", &labels_vec)
             .record(partitions_elapsed.as_millis() as f64);
+
+        println!("Cloned ExternalsReaderState: ranges_elapsed = {:?}, partitions_elapsed = {:?}", ranges_elapsed, partitions_elapsed);
         
         Self {
             ranges,
@@ -400,6 +402,8 @@ impl InternalsReaderState {
             .record(partitions_elapsed.as_millis() as f64);
         metrics::histogram!("tycho_collator_internals_stats_clone_time", &labels_vec)
             .record(stats_elapsed.as_millis() as f64);
+
+        println!("Cloned InternalsReaderState: partitions_elapsed = {:?}, stats_elapsed = {:?}", partitions_elapsed, stats_elapsed);
         
         Self {
             partitions,
