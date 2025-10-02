@@ -13,7 +13,7 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
+use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta, QueueStateReader};
 use tycho_storage::StorageContext;
 use tycho_types::boc::{Boc, BocRepr};
 use tycho_types::cell::CellBuilder;
@@ -282,12 +282,39 @@ pub async fn load_storage_from_dump<V: InternalMessageValue>(
                 // Read compressed file and decompress it
                 let compressed_data = std::fs::read(&path)?;
                 let decompressed_data = zstd_decompress_simple(&compressed_data)
-                    .context(format!("Failed to decompress state file for {}", block_id))?;
+                    .context(format!("Failed to decompress queue file for {}", block_id))?;
 
                 let temp_path = path.with_extension("tempfile");
                 let mut tempfile = std::fs::File::create(&temp_path)?;
                 tempfile.write_all(&decompressed_data)?;
                 drop(tempfile); // Close the write handle
+
+                // Read queue queue state from file
+                let reader = QueueStateReader::begin_from_mapped(&decompressed_data, &top_update)?;
+
+                for queue_diff in &reader.state().header.queue_diffs {
+                    let stuff_aug = QueueDiffStuff::builder(
+                        block_id.shard,
+                        block_id.seqno,
+                        &queue_diff.prev_hash,
+                    )
+                    .with_processed_to(queue_diff.processed_to.clone())
+                    .with_messages(
+                        &queue_diff.min_message,
+                        &queue_diff.max_message,
+                        queue_diff.messages.iter(),
+                    )
+                    .with_router(
+                        queue_diff.router_partitions_src.clone(),
+                        queue_diff.router_partitions_dst.clone(),
+                    )
+                    .serialize()
+                    .build(&block_id);
+                    storage
+                        .block_storage()
+                        .store_queue_diff(&stuff_aug, handle.clone().into())
+                        .await?;
+                }
 
                 let file = std::fs::File::open(temp_path)?;
                 queue_handler
@@ -322,6 +349,9 @@ pub async fn load_storage_from_dump<V: InternalMessageValue>(
     storage
         .node_state()
         .store_last_mc_block_id(&latest_mc_block_id);
+    storage
+        .node_state()
+        .store_init_mc_block_id(&latest_mc_block_id);
 
     let queue = queue_factory.create()?;
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
