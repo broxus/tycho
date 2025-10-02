@@ -1765,6 +1765,36 @@ def collator_time_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_collator_internals_partition_clone_time",
+            "Internals partition clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_internals_range_buffer_clone_time",
+            "Internals range buffer clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_internals_range_msgs_stats_clone_time",
+            "Internals range msgs stats clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_internals_range_remaning_msgs_stats_clone_time",
+            "Internals range remaning msgs stats clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_internals_range_read_stats_clone_time",
+            "Internals range read stats clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_internals_range_shards_clone_time",
+            "Internals range shards clone time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_collator_messages_buffer_msgs_clone_time",
             "Messages buffer msgs clone time",
             labels=['workchain=~"$workchain"'],
