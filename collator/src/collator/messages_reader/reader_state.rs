@@ -152,22 +152,31 @@ impl ExternalsReaderState {
         let ranges_start = std::time::Instant::now();
         let ranges = self.ranges.clone();
         let ranges_elapsed = ranges_start.elapsed();
-        
+
         let partitions_start = std::time::Instant::now();
         let by_partitions = self.by_partitions.clone();
         let partitions_elapsed = partitions_start.elapsed();
-        
+
         // Convert labels to Vec to avoid lifetime issues
-        let labels_vec: Vec<(String, String)> = labels.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
-        
+        let labels_vec: Vec<(String, String)> = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+
         // Record metrics using the same pattern as other metrics in the codebase
         metrics::histogram!("tycho_collator_externals_ranges_clone_time", &labels_vec)
             .record(ranges_elapsed.as_millis() as f64);
-        metrics::histogram!("tycho_collator_externals_partitions_clone_time", &labels_vec)
-            .record(partitions_elapsed.as_millis() as f64);
+        metrics::histogram!(
+            "tycho_collator_externals_partitions_clone_time",
+            &labels_vec
+        )
+        .record(partitions_elapsed.as_millis() as f64);
 
-        println!("Cloned ExternalsReaderState: ranges_elapsed = {:?}, partitions_elapsed = {:?}", ranges_elapsed, partitions_elapsed);
-        
+        println!(
+            "Cloned ExternalsReaderState: ranges_elapsed = {:?}, partitions_elapsed = {:?}",
+            ranges_elapsed, partitions_elapsed
+        );
+
         Self {
             ranges,
             by_partitions,
@@ -392,24 +401,73 @@ impl InternalsReaderState {
     /// Clone with detailed timing metrics
     pub fn clone_with_metrics(&self, labels: &[(&str, String)]) -> Self {
         let partitions_start = std::time::Instant::now();
-        let partitions = self.partitions.clone();
+
+        // Clone partitions with detailed metrics for each InternalsRangeReaderState
+        let mut partitions = BTreeMap::new();
+        for (partition_id, partition_state) in &self.partitions {
+            let partition_start = std::time::Instant::now();
+
+            // Clone ranges with detailed metrics
+            let mut ranges = BTreeMap::new();
+            for (seqno, range_state) in &partition_state.ranges {
+                let range_labels = [labels, &[
+                    ("partition_id", partition_id.to_string()),
+                    ("seqno", seqno.to_string()),
+                ]]
+                .concat();
+                ranges.insert(*seqno, range_state.clone_with_metrics(&range_labels));
+            }
+
+            let partition_elapsed = partition_start.elapsed();
+
+            // Convert labels to Vec to avoid lifetime issues
+            let labels_vec: Vec<(String, String)> = labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect();
+
+            // Record metrics for partition cloning
+            metrics::histogram!("tycho_collator_internals_partition_clone_time", &labels_vec)
+                .record(partition_elapsed.as_millis() as f64);
+
+            println!(
+                "Cloned partition {}: elapsed = {:?}",
+                partition_id, partition_elapsed
+            );
+
+            partitions.insert(*partition_id, InternalsPartitionReaderState {
+                ranges,
+                processed_to: partition_state.processed_to.clone(),
+                curr_processed_offset: partition_state.curr_processed_offset,
+            });
+        }
+
         let partitions_elapsed = partitions_start.elapsed();
-        
+
         let stats_start = std::time::Instant::now();
         let cumulative_statistics = self.cumulative_statistics.clone();
         let stats_elapsed = stats_start.elapsed();
-        
+
         // Convert labels to Vec to avoid lifetime issues
-        let labels_vec: Vec<(String, String)> = labels.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
-        
+        let labels_vec: Vec<(String, String)> = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+
         // Record metrics using the same pattern as other metrics in the codebase
-        metrics::histogram!("tycho_collator_internals_partitions_clone_time", &labels_vec)
-            .record(partitions_elapsed.as_millis() as f64);
+        metrics::histogram!(
+            "tycho_collator_internals_partitions_clone_time",
+            &labels_vec
+        )
+        .record(partitions_elapsed.as_millis() as f64);
         metrics::histogram!("tycho_collator_internals_stats_clone_time", &labels_vec)
             .record(stats_elapsed.as_millis() as f64);
 
-        println!("Cloned InternalsReaderState: partitions_elapsed = {:?}, stats_elapsed = {:?}", partitions_elapsed, stats_elapsed);
-        
+        println!(
+            "Cloned InternalsReaderState: partitions_elapsed = {:?}, stats_elapsed = {:?}",
+            partitions_elapsed, stats_elapsed
+        );
+
         Self {
             partitions,
             cumulative_statistics,
@@ -507,6 +565,81 @@ impl InternalsRangeReaderState {
             Some(remaning_msgs_stats) => {
                 remaning_msgs_stats.statistics().contains_key(account_addr)
             }
+        }
+    }
+
+    /// Clone with detailed timing metrics for each component
+    pub fn clone_with_metrics(&self, labels: &[(&str, String)]) -> Self {
+        let buffer_start = std::time::Instant::now();
+        let buffer = self.buffer.clone();
+        let buffer_elapsed = buffer_start.elapsed();
+
+        let msgs_stats_start = std::time::Instant::now();
+        let msgs_stats = self.msgs_stats.clone();
+        let msgs_stats_elapsed = msgs_stats_start.elapsed();
+
+        let remaning_msgs_stats_start = std::time::Instant::now();
+        let remaning_msgs_stats = self.remaning_msgs_stats.clone();
+        let remaning_msgs_stats_elapsed = remaning_msgs_stats_start.elapsed();
+
+        let read_stats_start = std::time::Instant::now();
+        let read_stats = self.read_stats.clone();
+        let read_stats_elapsed = read_stats_start.elapsed();
+
+        let shards_start = std::time::Instant::now();
+        let shards = self.shards.clone();
+        let shards_elapsed = shards_start.elapsed();
+
+        // Convert labels to Vec to avoid lifetime issues
+        let labels_vec: Vec<(String, String)> = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+
+        // Record metrics for each component
+        metrics::histogram!(
+            "tycho_collator_internals_range_buffer_clone_time",
+            &labels_vec
+        )
+        .record(buffer_elapsed.as_millis() as f64);
+        metrics::histogram!(
+            "tycho_collator_internals_range_msgs_stats_clone_time",
+            &labels_vec
+        )
+        .record(msgs_stats_elapsed.as_millis() as f64);
+        metrics::histogram!(
+            "tycho_collator_internals_range_remaning_msgs_stats_clone_time",
+            &labels_vec
+        )
+        .record(remaning_msgs_stats_elapsed.as_millis() as f64);
+        metrics::histogram!(
+            "tycho_collator_internals_range_read_stats_clone_time",
+            &labels_vec
+        )
+        .record(read_stats_elapsed.as_millis() as f64);
+        metrics::histogram!(
+            "tycho_collator_internals_range_shards_clone_time",
+            &labels_vec
+        )
+        .record(shards_elapsed.as_millis() as f64);
+
+        println!(
+            "Cloned InternalsRangeReaderState: buffer={:?}, msgs_stats={:?}, remaning_msgs_stats={:?}, read_stats={:?}, shards={:?}",
+            buffer_elapsed,
+            msgs_stats_elapsed,
+            remaning_msgs_stats_elapsed,
+            read_stats_elapsed,
+            shards_elapsed
+        );
+
+        Self {
+            buffer,
+            msgs_stats,
+            remaning_msgs_stats,
+            read_stats,
+            shards,
+            skip_offset: self.skip_offset,
+            processed_offset: self.processed_offset,
         }
     }
 }
