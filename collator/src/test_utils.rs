@@ -290,7 +290,7 @@ pub async fn load_storage_from_dump<V: InternalMessageValue>(
                 drop(tempfile); // Close the write handle
 
                 // Read queue queue state from file
-                let reader = QueueStateReader::begin_from_mapped(&decompressed_data, &top_update)?;
+                let reader = QueueStateReader::begin_from_mapped(&decompressed_data, top_update)?;
 
                 for queue_diff in &reader.state().header.queue_diffs {
                     let stuff_aug = QueueDiffStuff::builder(
