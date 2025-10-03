@@ -111,9 +111,6 @@ impl NodeBase {
             }
         };
 
-        let shard_state = self.core_storage.shard_state_storage();
-        Starter::init_allowed_workchains(shard_state, &last_mc_block_id).await?;
-
         tracing::info!(
             %last_mc_block_id,
             "boot finished"

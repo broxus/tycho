@@ -8,7 +8,6 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tycho_block_util::archive::{ArchiveData, WithArchiveData};
 use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
-use tycho_block_util::message::ExtMsgRepr;
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::fs::FileBuilder;
@@ -26,7 +25,7 @@ use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
 use crate::storage::{
     BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
-    PersistentStateKind, ShardStateStorage,
+    PersistentStateKind,
 };
 
 impl StarterInner {
@@ -91,34 +90,6 @@ impl StarterInner {
         );
 
         Ok(last_mc_block_id)
-    }
-
-    #[tracing::instrument(skip_all)]
-    pub async fn init_allowed_workchains(
-        shard_state_storage: &ShardStateStorage,
-        last_mc_block_id: &BlockId,
-    ) -> Result<()> {
-        let mc_state = shard_state_storage
-            .load_state(last_mc_block_id.seqno, last_mc_block_id)
-            .await?;
-
-        let config = mc_state.config_params()?;
-
-        let mut allowed_workchains = vec![-1];
-        for item in config.get_workchains()?.iter() {
-            let (w_id, _) = item?;
-            allowed_workchains.push(w_id.try_into().expect("workchain id cannot be out of i8"));
-        }
-
-        tracing::info!(
-            last_mc_block_id = %last_mc_block_id,
-            ?allowed_workchains,
-            "init",
-        );
-
-        ExtMsgRepr::set_allowed_workchains(allowed_workchains)?;
-
-        Ok(())
     }
 
     // === Sync steps ===
