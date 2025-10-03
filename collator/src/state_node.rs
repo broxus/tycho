@@ -133,7 +133,7 @@ impl StateNodeAdapterStdImpl {
 
         tokio::spawn(async move {
             // TODO: move into config
-            const TAIL_LEN: u32 = 100;
+            const TAIL_LEN: u32 = 10;
             const INTERVAL: Duration = Duration::from_secs(10);
 
             let mut interval = tokio::time::interval(INTERVAL);

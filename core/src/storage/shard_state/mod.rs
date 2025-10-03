@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fs::File;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -5,6 +6,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
+use parking_lot::Mutex;
 use tycho_block_util::block::*;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
@@ -43,6 +45,8 @@ pub struct ShardStateStorage {
     // Only for metrics
     last_state_stored: AtomicU32,
 
+    state_refs: Arc<Mutex<VecDeque<Cell>>>,
+
     accounts_split_depth: u8,
     store_shard_state_step: u32,
 }
@@ -60,12 +64,17 @@ impl ShardStateStorage {
     ) -> Result<Arc<Self>> {
         let cell_storage = CellStorage::new(cells_db.clone(), cache_size_bytes, drop_interval);
 
+        let state_refs = Arc::new(Mutex::new(VecDeque::with_capacity(
+            2 * store_shard_state_step as usize,
+        )));
+
         Ok(Arc::new(Self {
             cells_db,
             block_handle_storage,
             block_storage,
             temp_file_storage,
             cell_storage,
+            state_refs,
             store_shard_state_step,
             gc_lock: Default::default(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
@@ -129,6 +138,18 @@ impl ShardStateStorage {
         // Double check if the state is already stored
         if handle.has_state() {
             return Ok(false);
+        }
+
+        // Keep in memory last `store_shard_state_step` states alive
+        if !handle.is_masterchain() {
+            let mut state_refs = self.state_refs.lock();
+            state_refs.push_back(root_cell.clone());
+
+            while state_refs.len() >= 10 {
+                if let Some(cell) = state_refs.pop_front() {
+                    Reclaimer::instance().drop(cell);
+                }
+            }
         }
 
         const STATE_DIFF_COMPLEXITY_LIMIT: usize = 15_000; // Value was obtained empirically
@@ -203,8 +224,6 @@ impl ShardStateStorage {
                 .record(estimated_update_size_bytes as f64);
 
             raw_db.write(batch)?;
-
-            Reclaimer::instance().drop(root_cell);
 
             hist.finish();
 
