@@ -89,9 +89,12 @@ impl GetParamCmd {
                 .context("invalid config")?
                 .map(Boc::encode_base64)
                 .map(serde_json::Value::String)
+        } else if let Some(value) = res.config.get_raw_cell(self.param as u32)? {
+            // Parse and serialize only the requested param to allow using this
+            // tool for some common params while others have been modified.
+            param_value_to_json(self.param as u32, &value).map(Some)?
         } else {
-            let params = serde_json::to_value(res.config.params)?;
-            params.get(self.param.to_string()).cloned()
+            None
         };
 
         let output = serde_json::json!({
@@ -304,8 +307,8 @@ struct ParsedConfigProposal {
     voters: BTreeSet<HashBytes>,
     weight_remaining: i64,
     rounds_remaining: u8,
-    losses: u8,
     wins: u8,
+    losses: u8,
 }
 
 impl ParsedConfigProposal {
@@ -337,8 +340,8 @@ impl ParsedConfigProposal {
             voters,
             weight_remaining: proposal.weight_remaining,
             rounds_remaining: proposal.rounds_remaining,
-            losses: proposal.losses,
             wins: proposal.wins,
+            losses: proposal.losses,
         }
     }
 }
@@ -364,7 +367,8 @@ enum ParsedConfigProposalValue {
         param: i32,
         #[serde(with = "Boc")]
         value: Cell,
-        parsed: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parsed: Option<serde_json::Value>,
     },
     SetPubkey {
         pubkey: HashBytes,
@@ -432,12 +436,23 @@ impl ParsedConfigProposalValue {
             }
             _ => match value {
                 None => ParsedConfigProposalValue::RemoveParam { param: idx },
-                Some(param_value) => ParsedConfigProposalValue::SetParam {
-                    param: idx,
-                    parsed: param_value_to_json(idx as u32, &param_value)
-                        .unwrap_or(serde_json::Value::Null),
-                    value: param_value,
-                },
+                Some(param_value) => {
+                    let mut parsed = param_value_to_json(idx as u32, &param_value).ok();
+
+                    if let Some(serde_json::Value::String(parsed_str)) = &parsed
+                        && let Ok(parsed_cell) = Boc::decode_base64(parsed_str)
+                        && parsed_cell == param_value
+                    {
+                        // Value was not actually parsed.
+                        parsed = None;
+                    }
+
+                    ParsedConfigProposalValue::SetParam {
+                        param: idx,
+                        parsed,
+                        value: param_value,
+                    }
+                }
             },
         }
     }

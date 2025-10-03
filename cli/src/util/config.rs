@@ -146,8 +146,8 @@ pub struct ConfigProposal {
     pub voters: Vec<u16>,
     pub weight_remaining: i64,
     pub rounds_remaining: u8,
-    pub losses: u8,
     pub wins: u8,
+    pub losses: u8,
 }
 
 impl ConfigProposal {
@@ -204,8 +204,8 @@ impl FromStackValue for ConfigProposal {
             voters: tuple.read_next().map(LispList::into_inner)?,
             weight_remaining: tuple.read_next()?,
             rounds_remaining: tuple.read_next()?,
-            losses: tuple.read_next()?,
             wins: tuple.read_next()?,
+            losses: tuple.read_next()?,
         })
     }
 }
