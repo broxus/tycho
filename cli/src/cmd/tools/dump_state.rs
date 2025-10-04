@@ -12,7 +12,8 @@ use tycho_collator::types::processed_upto::ProcessedUptoInfoExtension;
 use tycho_collator::types::{McData, ShardDescriptionShortExt};
 use tycho_core::node::ConfiguredStorage;
 use tycho_core::storage::{
-    BlockConnection, CoreStorage, CoreStorageConfig, QueueStateWriter, ShardStateWriter,
+    BlockConnection, CellStorageDb, CoreStorage, CoreStorageConfig, QueueStateWriter,
+    ShardStateWriter,
 };
 use tycho_storage::StorageContext;
 use tycho_storage::fs::Dir;
@@ -212,11 +213,10 @@ impl Dumper {
         master_block_seqno: u32,
     ) -> Result<ShardStateStuff> {
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
-        let writer = ShardStateWriter::new(
-            self.storage.shard_state_storage().cell_storage().db(),
-            &dir,
-            block_id,
-        );
+        let CellStorageDb::Main(db) = self.storage.shard_state_storage().cell_storage().db() else {
+            unreachable!("main cell storage always use main cells db")
+        };
+        let writer = ShardStateWriter::new(db, &dir, block_id);
         let ref_by_mc_seqno = self
             .storage
             .block_handle_storage()

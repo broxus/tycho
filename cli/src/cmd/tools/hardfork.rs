@@ -8,7 +8,9 @@ use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::ZerostateId;
-use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta, ShardStateWriter};
+use tycho_core::storage::{
+    CellStorageDb, CoreStorage, CoreStorageConfig, NewBlockMeta, ShardStateWriter,
+};
 use tycho_storage::fs::Dir;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::cell::Lazy;
@@ -258,11 +260,10 @@ impl ShardStateHandler {
         let storage = self.storage.clone();
         let output = self.output_path.clone();
         tokio::task::spawn_blocking(move || {
-            let writer = ShardStateWriter::new(
-                storage.shard_state_storage().cell_storage().db(),
-                &output,
-                handle.id(),
-            );
+            let CellStorageDb::Main(db) = storage.shard_state_storage().cell_storage().db() else {
+                unreachable!("main cell storage always use main cells db")
+            };
+            let writer = ShardStateWriter::new(db, &output, handle.id());
 
             let mut progress_bar = ProgressBar::builder()
                 .exact_unit("bytes")

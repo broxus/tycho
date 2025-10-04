@@ -16,12 +16,13 @@ use weedb::{BoundedCfHandle, rocksdb};
 
 use super::cell_storage::*;
 use super::entries_buffer::*;
-use crate::storage::{BriefBocHeader, CellsDb, ShardStateReader};
+use crate::storage::db::{CellStorageDb, CellsDbOps};
+use crate::storage::{BriefBocHeader, ShardStateReader};
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
 pub struct StoreStateContext {
-    pub cells_db: CellsDb,
+    pub cells_db: CellStorageDb,
     pub cell_storage: Arc<CellStorage>,
     pub temp_file_storage: TempFileStorage,
 }
@@ -115,9 +116,9 @@ impl StoreStateContext {
             .open_as_mapped_mut()?;
 
         let raw = self.cells_db.rocksdb().as_ref();
-        let write_options = self.cells_db.temp_cells.write_config();
+        let write_options = self.cells_db.temp_cells().write_config();
 
-        let mut ctx = FinalizationContext::new(&self.cells_db);
+        let mut ctx = FinalizationContext::new(self.cells_db.temp_cells().cf());
         ctx.clear_temp_cells(&self.cells_db)?;
 
         // Allocate on heap to prevent big future size
@@ -214,13 +215,13 @@ impl StoreStateContext {
 
         let shard_state_key = block_id.to_vec();
         self.cells_db
-            .shard_states
-            .insert(&shard_state_key, root_hash.as_slice())?;
+            .shard_states()
+            .insert(&shard_state_key, root_hash)?;
 
         pg.complete();
 
         // Load stored shard state
-        match self.cells_db.shard_states.get(shard_state_key)? {
+        match self.cells_db.shard_states().get(shard_state_key)? {
             Some(root) => Ok(HashBytes::from_slice(&root[..32])),
             None => Err(StoreStateError::NotFound.into()),
         }
@@ -237,18 +238,18 @@ struct FinalizationContext<'a> {
 }
 
 impl<'a> FinalizationContext<'a> {
-    fn new(db: &'a CellsDb) -> Self {
+    fn new(temp_cells_cf: BoundedCfHandle<'a>) -> Self {
         Self {
             pruned_branches: Default::default(),
             cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
             entries_buffer: EntriesBuffer::new(),
             output_buffer: Vec::with_capacity(1 << 10),
-            temp_cells_cf: db.temp_cells.cf(),
+            temp_cells_cf,
             write_batch: rocksdb::WriteBatch::default(),
         }
     }
 
-    fn clear_temp_cells(&self, db: &CellsDb) -> std::result::Result<(), rocksdb::Error> {
+    fn clear_temp_cells(&self, db: &CellStorageDb) -> std::result::Result<(), rocksdb::Error> {
         let from = &[0x00; 32];
         let to = &[0xff; 32];
         db.rocksdb().delete_range_cf(&self.temp_cells_cf, from, to)
@@ -540,7 +541,7 @@ mod test {
     use weedb::rocksdb::{IteratorMode, WriteBatch};
 
     use super::*;
-    use crate::storage::{CoreStorage, CoreStorageConfig};
+    use crate::storage::{CellsDb, CoreStorage, CoreStorageConfig};
 
     #[tokio::test]
     #[ignore]
@@ -605,11 +606,11 @@ mod test {
         Ok(())
     }
 
-    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CellsDb) -> Result<()> {
-        let states_iterator = db.shard_states.iterator(IteratorMode::Start);
+    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CellStorageDb) -> Result<()> {
+        let states_iterator = db.shard_states().iterator(IteratorMode::Start);
         let bump = bumpalo::Bump::new();
 
-        let total_states = db.shard_states.iterator(IteratorMode::Start).count();
+        let total_states = db.shard_states().iterator(IteratorMode::Start).count();
 
         for (deleted, state) in states_iterator.enumerate() {
             let (_, value) = state?;
@@ -620,16 +621,24 @@ mod test {
             let (_, batch) = cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
             // execute batch
-            db.rocksdb().write_opt(batch, db.cells.write_config())?;
+            db.rocksdb().write_opt(batch, db.cells().write_config())?;
 
             tracing::info!("State deleted. Progress: {}/{total_states}", deleted + 1);
         }
 
         // two compactions in row. First one run merge operators, second one will remove all tombstones
-        db.trigger_compaction().await;
-        db.trigger_compaction().await;
+        match db {
+            CellStorageDb::Main(db) => {
+                db.trigger_compaction().await;
+                db.trigger_compaction().await;
+            }
+            CellStorageDb::Part(db) => {
+                db.trigger_compaction().await;
+                db.trigger_compaction().await;
+            }
+        }
 
-        let cells_left = db.cells.iterator(IteratorMode::Start).count();
+        let cells_left = db.cells().iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
 
@@ -706,14 +715,16 @@ mod test {
                 new_dict_cell.as_ref(),
                 &mut batch,
                 Default::default(),
+                false,
                 MODIFY_COUNT * 3,
+                vec![|| Ok(())],
             )?;
 
             cell_keys.push(*cell_hash);
 
             cells_db
                 .rocksdb()
-                .write_opt(batch, cells_db.cells.write_config())?;
+                .write_opt(batch, cells_db.cells().write_config())?;
 
             tracing::info!("Iteration {i} Finished. traversed: {traversed}",);
         }
@@ -730,16 +741,24 @@ mod test {
             let (res, batch) = cell_storage.remove_cell(&bump, &key)?;
             cells_db
                 .rocksdb()
-                .write_opt(batch, cells_db.cells.write_config())?;
+                .write_opt(batch, cells_db.cells().write_config())?;
             tracing::info!("Gc {id} of {total} done. Traversed: {res}",);
             bump.reset();
         }
 
         // two compactions in row. First one run merge operators, second one will remove all tombstones
-        cells_db.trigger_compaction().await;
-        cells_db.trigger_compaction().await;
+        match cells_db {
+            CellStorageDb::Main(db) => {
+                db.trigger_compaction().await;
+                db.trigger_compaction().await;
+            }
+            CellStorageDb::Part(db) => {
+                db.trigger_compaction().await;
+                db.trigger_compaction().await;
+            }
+        }
 
-        let cells_left = cells_db.cells.iterator(IteratorMode::Start).count();
+        let cells_left = cells_db.cells().iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
         Ok(())
