@@ -15,12 +15,13 @@ use weedb::{BoundedCfHandle, rocksdb};
 
 use super::cell_storage::*;
 use super::entries_buffer::*;
-use crate::storage::{BriefBocHeader, CellsDb, ShardStateReader};
+use crate::storage::db::{CellStorageDb, CellsDbOps};
+use crate::storage::{BriefBocHeader, ShardStateReader};
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
 pub struct StoreStateContext {
-    pub cells_db: CellsDb,
+    pub cells_db: CellStorageDb,
     pub cell_storage: Arc<CellStorage>,
     pub temp_file_storage: TempFileStorage,
 }
@@ -114,9 +115,9 @@ impl StoreStateContext {
             .open_as_mapped_mut()?;
 
         let raw = self.cells_db.rocksdb().as_ref();
-        let write_options = self.cells_db.temp_cells.write_config();
+        let write_options = self.cells_db.temp_cells().write_config();
 
-        let mut ctx = FinalizationContext::new(&self.cells_db);
+        let mut ctx = FinalizationContext::new(self.cells_db.temp_cells().cf());
         ctx.clear_temp_cells(&self.cells_db)?;
 
         // Allocate on heap to prevent big future size
@@ -212,13 +213,13 @@ impl StoreStateContext {
 
         let shard_state_key = block_id.to_vec();
         self.cells_db
-            .shard_states
+            .shard_states()
             .insert(&shard_state_key, root_hash)?;
 
         pg.complete();
 
         // Load stored shard state
-        match self.cells_db.shard_states.get(shard_state_key)? {
+        match self.cells_db.shard_states().get(shard_state_key)? {
             Some(root) => Ok(HashBytes::from_slice(&root[..32])),
             None => Err(StoreStateError::NotFound.into()),
         }
@@ -235,18 +236,18 @@ struct FinalizationContext<'a> {
 }
 
 impl<'a> FinalizationContext<'a> {
-    fn new(db: &'a CellsDb) -> Self {
+    fn new(temp_cells_cf: BoundedCfHandle<'a>) -> Self {
         Self {
             pruned_branches: Default::default(),
             cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
             entries_buffer: EntriesBuffer::new(),
             output_buffer: Vec::with_capacity(1 << 10),
-            temp_cells_cf: db.temp_cells.cf(),
+            temp_cells_cf,
             write_batch: rocksdb::WriteBatch::default(),
         }
     }
 
-    fn clear_temp_cells(&self, db: &CellsDb) -> std::result::Result<(), rocksdb::Error> {
+    fn clear_temp_cells(&self, db: &CellStorageDb) -> std::result::Result<(), rocksdb::Error> {
         let from = &[0x00; 32];
         let to = &[0xff; 32];
         db.rocksdb().delete_range_cf(&self.temp_cells_cf, from, to)
@@ -544,7 +545,7 @@ mod test {
     use weedb::rocksdb::{IteratorMode, WriteBatch};
 
     use super::*;
-    use crate::storage::{CoreStorage, CoreStorageConfig};
+    use crate::storage::{CellsDb, CoreStorage, CoreStorageConfig};
 
     #[tokio::test]
     #[ignore]
@@ -586,7 +587,7 @@ mod test {
         let cell_storage = &storage.shard_state_storage().cell_storage;
 
         let store_ctx = StoreStateContext {
-            cells_db: cells_db.clone(),
+            cells_db: CellStorageDb::Main(cells_db.clone()),
             cell_storage: cell_storage.clone(),
             temp_file_storage: storage.context().temp_files().clone(),
         };
@@ -710,7 +711,9 @@ mod test {
                 new_dict_cell.as_ref(),
                 &mut batch,
                 Default::default(),
+                false,
                 MODIFY_COUNT * 3,
+                vec![|| Ok(())],
             )?;
 
             cell_keys.push(*cell_hash);
