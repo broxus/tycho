@@ -160,6 +160,7 @@ impl Phase<FinalizeState> {
         })
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn finalize_block(
         mut self,
         ctx: FinalizeBlockContext,
@@ -1058,6 +1059,7 @@ impl Phase<FinalizeState> {
         Ok(min_ref_mc_seqno)
     }
 
+    #[tracing::instrument(skip_all)]
     fn build_accounts(
         executor: MessagesExecutor,
         config_address: &HashBytes,

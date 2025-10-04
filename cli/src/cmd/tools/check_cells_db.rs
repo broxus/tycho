@@ -7,7 +7,9 @@ use clap::Parser;
 use tempfile::TempDir;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
-use tycho_core::storage::{CoreStorage, CoreStorageConfig, split_shard_accounts};
+use tycho_core::storage::{
+    CellStorageDb, CellsDbOps, CoreStorage, CoreStorageConfig, split_shard_accounts,
+};
 use tycho_storage::kv::StoredValue;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::cell::Cell;
@@ -75,7 +77,7 @@ impl Cmd {
             let mut herd = Herd::new();
             let mut total_states = 0;
             let mut total_cells = 0;
-            for entry in cells_db.shard_states.iterator(IteratorMode::Start) {
+            for entry in cells_db.shard_states().iterator(IteratorMode::Start) {
                 let (key, value) = entry?;
 
                 let block_id = BlockId::from_slice(&key);
@@ -89,27 +91,39 @@ impl Cmd {
                     drop(cell);
                     cell_storage.remove_cell(herd.get().as_bump(), &root_hash)?
                 } else {
-                    let split_at =
-                        split_shard_accounts(Cell::from(cell), self.accounts_split_depth)?
-                            .into_keys()
-                            .collect();
+                    // TODO: should handle parts
+                    let split_at = split_shard_accounts(
+                        &block_id.shard,
+                        Cell::from(cell),
+                        self.accounts_split_depth,
+                    )?
+                    .into_keys()
+                    .collect();
 
-                    cell_storage.remove_cell_mt(&herd, &root_hash, split_at)?
+                    cell_storage.remove_cell_mt(&herd, &root_hash, split_at, false)?
                 };
                 total_cells += removed_cells;
 
                 cells_db
                     .rocksdb()
-                    .write_opt(local_batch, cells_db.cells.write_config())?;
+                    .write_opt(local_batch, cells_db.cells().write_config())?;
 
                 tracing::info!(%block_id, total_states, removed_cells, "removed state");
                 herd.reset();
             }
 
-            cells_db.trigger_compaction().await;
-            cells_db.trigger_compaction().await;
+            match cells_db {
+                CellStorageDb::Main(db) => {
+                    db.trigger_compaction().await;
+                    db.trigger_compaction().await;
+                }
+                CellStorageDb::Part(db) => {
+                    db.trigger_compaction().await;
+                    db.trigger_compaction().await;
+                }
+            }
 
-            let cells_left = cells_db.cells.iterator(IteratorMode::Start).count();
+            let cells_left = cells_db.cells().iterator(IteratorMode::Start).count();
             tracing::info!(total_states, total_cells, cells_left, "done");
 
             anyhow::ensure!(

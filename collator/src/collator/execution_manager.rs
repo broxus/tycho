@@ -203,6 +203,7 @@ impl MessagesExecutor {
     }
 
     #[allow(clippy::vec_box)]
+    #[tracing::instrument(skip_all, fields(%account_id))]
     fn execute_subgroup(
         account_id: HashBytes,
         msgs: Vec<Box<ParsedMessage>>,
@@ -271,6 +272,7 @@ impl MessagesExecutor {
     }
 
     #[allow(clippy::vec_box)]
+    #[tracing::instrument(skip_all)]
     fn execute_messages(
         mut account_state: Box<ShardAccountStuff>,
         msgs: Vec<Box<ParsedMessage>>,
@@ -398,6 +400,7 @@ impl AccountsCache {
         Ok(None)
     }
 
+    #[tracing::instrument(skip_all)]
     fn get_account_stuff(&self, account_id: &AccountId) -> Result<Box<ShardAccountStuff>> {
         let labels = [("workchain", self.workchain_id.to_string())];
         let _hist = HistogramGuard::begin_with_labels(
