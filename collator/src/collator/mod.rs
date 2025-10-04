@@ -666,8 +666,15 @@ impl CollatorStdImpl {
                     // get last store task
                     let last_task = self.store_new_state_tasks.pop().expect("shouldn't happen");
 
+                    let is_last = self.store_new_state_tasks.is_empty();
+
                     // if it is finished, then we can just reload prev state
-                    if last_task.store_new_state_task.is_finished() {
+                    if last_task.store_new_state_task.is_finished()
+                        // or when unfinished tasks limit is 0
+                        || self.config.merkle_chain_limit == 0
+                        // or this task is the last in queue
+                        || is_last
+                    {
                         last_task.store_new_state_task.await?;
 
                         // and reload pure prev state in the working state
@@ -686,7 +693,9 @@ impl CollatorStdImpl {
 
                             // collect all unfinished tasks
                             if !task.store_new_state_task.is_finished()
+                                // until the limit reached
                                 && unfinished_tasks.len() < self.config.merkle_chain_limit
+                                // or until we reached the last task
                                 && !is_last
                             {
                                 unfinished_tasks.push(task);
@@ -1016,7 +1025,7 @@ impl CollatorStdImpl {
             });
 
             // Keep only the last `merkle_chain_limit` states alive
-            if self.store_state_refs.len() == self.config.merkle_chain_limit
+            if self.store_state_refs.len() >= self.config.merkle_chain_limit
                 && let Some(old_ref) = self.store_state_refs.pop_front()
             {
                 // NOTE: State update can be quite huge so drop it outside of tokio.
