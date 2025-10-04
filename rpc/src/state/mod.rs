@@ -630,6 +630,7 @@ impl Default for LatestBlockchainConfig {
 }
 
 impl Inner {
+    #[tracing::instrument("rpc_init", skip_all, fields(mc_block_id = %mc_block_id.as_short_id()))]
     async fn init(self: &Arc<Self>, mc_block_id: &BlockId) -> Result<()> {
         anyhow::ensure!(mc_block_id.is_masterchain(), "not a masterchain state");
 
