@@ -471,7 +471,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             range_reader_state.read_stats = Default::default();
         }
 
-        range_reader_state.msgs_stats = Some(msgs_stats);
+        range_reader_state.msgs_stats = Some(Arc::new(msgs_stats));
 
         Ok(())
     }
