@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::num::NonZeroU32;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use ahash::{HashMapExt, HashSetExt};
@@ -9,10 +11,13 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{ReadOptions, WriteBatch};
 
-use super::{AnchorFlags, POINT_KEY_LEN, fill_point_key, fill_point_prefix, format_point_key};
+use super::{
+    AnchorFlags, MempoolStore, POINT_KEY_LEN, fill_point_key, fill_point_prefix, format_point_key,
+};
 use crate::effects::AltFormat;
 use crate::models::{
-    CommitHistoryPart, Point, PointInfo, PointStatus, PointStatusValidated, Round,
+    CommitHistoryPart, Point, PointInfo, PointRestore, PointRestoreSelect, PointStatus,
+    PointStatusValidated, Round,
 };
 use crate::storage::MempoolDb;
 
@@ -36,6 +41,7 @@ impl MempoolAdapterStore {
         anchor: &PointInfo,
         history: &[PointInfo],
         bump: &'b Bump,
+        set_committed_in_db: bool,
     ) -> Vec<&'b [u8]> {
         fn context(anchor: &PointInfo, history: &[PointInfo]) -> String {
             format!(
@@ -60,15 +66,16 @@ impl MempoolAdapterStore {
                 .with_context(|| context(anchor, history))
                 .expect("DB expand anchor history")
         };
-        // may skip expand part, but never skip set committed - let it write what it should
-        self.set_committed_db(anchor, history)
-            .with_context(|| context(anchor, history))
-            .expect("DB set committed");
+        if set_committed_in_db {
+            self.set_committed_db(anchor, history)
+                .with_context(|| context(anchor, history))
+                .expect("DB set committed");
+        }
         payloads
     }
 
     /// may skip [`Self::expand_anchor_history`] part, but never skip this one
-    pub fn set_committed(&self, anchor_round: Round) {
+    pub fn set_committed_round(&self, anchor_round: Round) {
         // commit is finished when history payloads is read from DB and marked committed,
         // so that data may be removed consistently with any settings
         self.0.commit_finished.set_max(anchor_round);
@@ -159,6 +166,9 @@ impl MempoolAdapterStore {
     fn set_committed_db(&self, anchor: &PointInfo, history: &[PointInfo]) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_set_committed_status_time");
 
+        let anchor_round =
+            NonZeroU32::try_from(anchor.round().0).context("zero round cannot have points")?;
+
         let mut buf = [0_u8; POINT_KEY_LEN];
 
         let db = self.0.db.rocksdb();
@@ -173,14 +183,14 @@ impl MempoolAdapterStore {
         status.anchor_flags = AnchorFlags::Used;
         status.write_to(&mut status_encoded);
 
-        fill_point_key(anchor.round().0, anchor.digest().inner(), &mut buf);
+        fill_point_key(anchor_round.get(), anchor.digest().inner(), &mut buf);
         batch.merge_cf(&status_cf, buf.as_slice(), &status_encoded);
+        status_encoded.clear();
 
         status = PointStatusValidated::default();
         for (index, info) in history.iter().enumerate() {
             status.committed = Some(CommitHistoryPart {
-                anchor_round: NonZeroU32::try_from(anchor.round().0)
-                    .context("zero round cannot have points")?,
+                anchor_round,
                 seq_no: u32::try_from(index).context("anchor has insanely long history")?,
             });
 
@@ -188,8 +198,68 @@ impl MempoolAdapterStore {
 
             fill_point_key(info.round().0, info.digest().inner(), &mut buf);
             batch.merge_cf(&status_cf, buf.as_slice(), &status_encoded);
+            status_encoded.clear();
         }
 
         Ok(db.write(batch)?)
+    }
+
+    pub fn load_history_since(
+        &self,
+        bottom_round: u32,
+    ) -> BTreeMap<u32, (PointInfo, Vec<PointInfo>)> {
+        let store = MempoolStore::new(self.0.clone());
+
+        let Some(last_db_round) = store.last_round() else {
+            tracing::warn!("Mempool db is empty");
+            return Default::default();
+        };
+
+        let mut anchors = FastHashMap::new();
+
+        let mut items = store
+            .load_restore(&RangeInclusive::new(Round(bottom_round), last_db_round))
+            .into_iter()
+            .filter_map(|item| match item {
+                PointRestoreSelect::Ready(PointRestore::Validated(info, status)) => {
+                    Some((info, status))
+                }
+                _ => None,
+            })
+            .inspect(|(info, status)| {
+                if status.anchor_flags.contains(AnchorFlags::Used) {
+                    anchors.insert(info.round(), info.clone());
+                }
+            })
+            .filter_map(|(info, status)| status.committed.map(|committed| (committed, info)))
+            .collect::<Vec<_>>();
+
+        items.sort_unstable_by_key(|(committed, _)| (committed.anchor_round, committed.seq_no));
+
+        let mut by_anchor_round = BTreeMap::new();
+
+        // should not allocate as all items are sorted
+        let grouped = items
+            .into_iter()
+            .chunk_by(|(committed, _)| Round(committed.anchor_round.get()));
+
+        for (anchor_round, group) in &grouped {
+            let mut keyed_vec = group.collect::<Vec<_>>();
+            // should be a no-op
+            keyed_vec.sort_unstable_by_key(|(committed, _)| committed.seq_no);
+            let point_vec = keyed_vec.into_iter().map(|(_, info)| info);
+            match anchors.remove(&anchor_round) {
+                Some(anchor) => {
+                    by_anchor_round.insert(anchor_round.0, (anchor.clone(), point_vec.collect()));
+                }
+                None => {
+                    tracing::error!(
+                        anchor = anchor_round.0,
+                        "cannot reproduce history: no anchor point"
+                    );
+                }
+            }
+        }
+        by_anchor_round
     }
 }

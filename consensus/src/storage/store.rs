@@ -41,7 +41,7 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn get_status(&self, round: Round, digest: &Digest) -> Result<Option<PointStatusStored>>;
 
-    fn last_round(&self) -> Result<Round>;
+    fn last_round(&self) -> Result<Option<Round>>;
 
     fn reset_statuses(&self, range: &RangeInclusive<Round>) -> Result<()>;
 
@@ -107,7 +107,7 @@ impl MempoolStore {
             .expect("DB get point status")
     }
 
-    pub fn last_round(&self) -> Round {
+    pub fn last_round(&self) -> Option<Round> {
         self.0.last_round().expect("DB load last round")
     }
 
@@ -270,13 +270,14 @@ impl MempoolStoreImpl for MempoolDb {
             .transpose()
     }
 
-    fn last_round(&self) -> Result<Round> {
-        let (last_key, _) = self
-            .db
-            .points_status
+    fn last_round(&self) -> Result<Option<Round>> {
+        let Some((last_key, _)) = (self.db.points_status)
             .iterator(IteratorMode::End)
             .next()
-            .context("db is empty, at least last genesis must be provided")??;
+            .transpose()?
+        else {
+            return Ok(None);
+        };
 
         let mut bytes = [0_u8; 4];
         bytes.copy_from_slice(&last_key[..4]);
@@ -284,7 +285,7 @@ impl MempoolStoreImpl for MempoolDb {
         let round = u32::from_be_bytes(bytes);
         anyhow::ensure!(round > 0, "key with zero round");
 
-        Ok(Round(round))
+        Ok(Some(Round(round)))
     }
 
     fn reset_statuses(&self, range: &RangeInclusive<Round>) -> Result<()> {
@@ -454,7 +455,7 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn last_round(&self) -> Result<Round> {
+    fn last_round(&self) -> Result<Option<Round>> {
         anyhow::bail!("should not be used in tests")
     }
 

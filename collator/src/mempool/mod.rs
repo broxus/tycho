@@ -21,6 +21,7 @@ mod impls {
     pub(crate) use self::stub_impl::{make_stub_anchor, make_stub_external};
 
     mod common;
+    mod dump_anchors;
     mod single_node_impl;
     mod std_impl;
     mod stub_impl;

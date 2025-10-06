@@ -184,6 +184,11 @@ impl AnchorConsumer {
                     .remove(anchor_round)
                     .expect("anchor must have history");
                 assert!(!history.is_empty(), "anchor history cannot be empty");
+                tracing::debug!(
+                    "common anchor {} has history length {}",
+                    anchor_round.0,
+                    history.len()
+                );
                 common_anchors.push(anchor_round.0);
                 common_history.extend(history);
                 false
