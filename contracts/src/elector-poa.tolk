@@ -27,37 +27,33 @@ struct PoAData {
 //
 /// Sync state at the beginning and end of the masterchain block.
 fun onRunTickTock(_isTock: bool) {
-    var data = lazy Storage<PoAData>.load();
-    if (data.currentElection != null) {
-        // Sync current election state if there is any.
-        var election: Election = data.currentElection!.load();
-
+    if (Storage<PoAData>.hasCurrentElection()) {
         // Try to form a new vset.
-        if (conductElection(data, election)) {
+        if (conductElection<PoAData>()) {
             // New vset formed. Wait for a new transaction.
             return;
         }
 
         // Check that `currentElection` vset was installed.
-        if (syncElectionWithVset(data, election)) {
+        if (syncElectionWithVset<PoAData>()) {
             // Validator set installed. Wait for a new transaction.
             return;
         }
     } else {
         // Otherwise try to start a new election.
-        if (announceNewElection(data)) {
+        if (announceNewElection<PoAData>()) {
             // New election started. Wait for a new transaction.
             return;
         }
     }
 
     // Sync current validator set info.
-    if (updateActiveVsetId(data)) {
+    if (updateActiveVsetId<PoAData>()) {
         return; // active validator set id updated, exit
     }
 
     // Unfreeze stakes if any.
-    checkUnfreeze(data);
+    checkUnfreeze<PoAData>();
 }
 
 //

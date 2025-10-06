@@ -48,6 +48,12 @@ struct Storage<T> {
     customData: T
 }
 
+/// Loads C4 and returns `true` if current election is set.
+fun Storage<T>.hasCurrentElection(): bool {
+    val data = lazy Storage<T>.load();
+    return data.currentElection != null;
+}
+
 /// Loads C4 and parses it into a typed struct.
 fun Storage<T>.load(): Storage<T> {
     return Storage<T>.fromCell(contract.getData());
@@ -259,7 +265,10 @@ get fun past_election_ids(): tuple {
 /// - currentElection
 /// - pastElections
 /// - credits
-fun conductElection<T>(data: Storage<T>, election: Election): bool {
+fun conductElection<T>(): bool {
+    var data = lazy Storage<T>.load();
+    var election = lazy data.currentElection!.load();
+
     if (blockchain.now() < election.electClose) {
         // Election not finished yet.
         return false;
@@ -567,7 +576,10 @@ fun computeTotalStake(allStakes: tuple, n: int, lowestStake: coins): coins {
 /// - grams
 /// - activeId
 /// - activeHash
-fun syncElectionWithVset<T>(data: Storage<T>, election: Election): bool {
+fun syncElectionWithVset<T>(): bool {
+    var data = lazy Storage<T>.load();
+    var election = lazy data.currentElection!.load();
+
     if (!election.finished) {
         // Election not finished yet.
         return false;
@@ -591,7 +603,7 @@ fun syncElectionWithVset<T>(data: Storage<T>, election: Election): bool {
         data.currentElection = null;
         data.save();
 
-        updateActiveVsetId(data);
+        updateActiveVsetId<T>();
         return true;
     }
 
@@ -608,7 +620,7 @@ fun syncElectionWithVset<T>(data: Storage<T>, election: Election): bool {
 ///
 /// Mutates persistent storage fields:
 /// - currentElection
-fun announceNewElection<T>(data: Storage<T>): bool {
+fun announceNewElection<T>(): bool {
     if (blockchain.configParam(PARAM_IDX_NEXT_VSET) != null) {
         // Next validator set exists, no election needed.
         return false;
@@ -649,6 +661,7 @@ fun announceNewElection<T>(data: Storage<T>): bool {
     val electAt = t + timingsConfig.electionsBeginBefore;
     val electClose = electAt - timingsConfig.electionsEndBefore;
 
+    var data = lazy Storage<T>.load();
     data.currentElection = Election {
         electAt,
         electClose,
@@ -678,7 +691,9 @@ fun announceNewElection<T>(data: Storage<T>): bool {
 /// - grams
 /// - activeId
 /// - activeHash
-fun updateActiveVsetId<T>(data: Storage<T>): bool {
+fun updateActiveVsetId<T>(): bool {
+    var data = lazy Storage<T>.load();
+
     val currentVsetHash = blockchain.configParam(PARAM_IDX_CURRENT_VSET)!.hash();
     if (currentVsetHash == data.activeHash) {
         // Validator set unchanged.
@@ -746,7 +761,9 @@ fun updateActiveVsetId<T>(data: Storage<T>): bool {
 /// - credits
 /// - pastElections
 /// - grams
-fun checkUnfreeze<T>(data: Storage<T>): bool {
+fun checkUnfreeze<T>(): bool {
+    var data = lazy Storage<T>.load();
+
     var iterNext = -1;
     do {
         var (id, cs, found) = data.pastElections.uDictGetNext(32, iterNext);
@@ -913,6 +930,10 @@ fun processNewStakeImpl<T>(source: address, value: coins, body: slice): int {
         adnlAddr,
     };
     election.participants.uDictSetBuilder(256, pubkey, beginCell().storeAny(participant));
+
+    // NOTE: Always reset `failed` flag on each new stake so that the elector
+    // can try to conduct election again in the next tick-tock transaction.
+    election.failed = false;
 
     // Update storage.
     data.currentElection = election.toCell();

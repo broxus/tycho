@@ -10,37 +10,33 @@ struct NoData {}
 //
 /// Sync state at the beginning and end of the masterchain block.
 fun onRunTickTock(_isTock: bool) {
-    var data = lazy Storage<NoData>.load();
-    if (data.currentElection != null) {
-        // Sync current election state if there is any.
-        var election: Election = data.currentElection!.load();
-
+    if (Storage<NoData>.hasCurrentElection()) {
         // Try to form a new vset.
-        if (conductElection(data, election)) {
+        if (conductElection<NoData>()) {
             // New vset formed. Wait for a new transaction.
             return;
         }
 
         // Check that `currentElection` vset was installed.
-        if (syncElectionWithVset(data, election)) {
+        if (syncElectionWithVset<NoData>()) {
             // Validator set installed. Wait for a new transaction.
             return;
         }
     } else {
         // Otherwise try to start a new election.
-        if (announceNewElection(data)) {
+        if (announceNewElection<NoData>()) {
             // New election started. Wait for a new transaction.
             return;
         }
     }
 
     // Sync current validator set info.
-    if (updateActiveVsetId(data)) {
+    if (updateActiveVsetId<NoData>()) {
         return; // active validator set id updated, exit
     }
 
     // Unfreeze stakes if any.
-    checkUnfreeze(data);
+    checkUnfreeze<NoData>();
 }
 
 //
