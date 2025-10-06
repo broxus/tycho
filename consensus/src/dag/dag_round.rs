@@ -13,7 +13,7 @@ use crate::dag::threshold::Threshold;
 use crate::effects::{AltFmt, AltFormat, Ctx, RoundCtx, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, PointRestore, Round, WeakCert};
+use crate::models::{AnchorStageRole, Digest, PeerCount, Point, PointRestore, Round, WeakCert};
 use crate::storage::MempoolStore;
 
 #[derive(Clone)]
@@ -97,6 +97,11 @@ impl DagRound {
         self.0.anchor_stage.as_ref()
     }
 
+    fn leader_role(&self, peer_id: &PeerId) -> Option<AnchorStageRole> {
+        (self.0.anchor_stage.as_ref())
+            .and_then(|stage| (stage.leader == peer_id).then_some(stage.role))
+    }
+
     pub fn threshold(&self) -> &Threshold {
         &self.0.threshold
     }
@@ -166,7 +171,10 @@ impl DagRound {
                 .entry(*point.info().digest())
                 .and_modify(|_| is_unique = false)
                 .or_insert_with(|| {
-                    DagPointFuture::new_local_valid(point, &loc.state, store, key_pair, round_ctx)
+                    let role = self.leader_role(point.info().author());
+                    DagPointFuture::new_local_valid(
+                        point, role, &loc.state, store, key_pair, round_ctx,
+                    )
                 })
                 .clone()
         });
@@ -221,8 +229,9 @@ impl DagRound {
                 .entry(*point.info().digest())
                 .and_modify(|first| first.resolve_download(point, None))
                 .or_insert_with(|| {
+                    let role = self.leader_role(point.info().author());
                     DagPointFuture::new_broadcast(
-                        self, point, &loc.state, downloader, store, round_ctx,
+                        self, point, role, &loc.state, downloader, store, round_ctx,
                     )
                 });
         });
@@ -240,8 +249,9 @@ impl DagRound {
     ) {
         self.edit(author, |loc| {
             loc.versions.entry(*digest).or_insert_with(|| {
+                let role = self.leader_role(author);
                 DagPointFuture::new_download(
-                    self, author, digest, None, &loc.state, downloader, store, round_ctx,
+                    self, author, digest, role, None, &loc.state, downloader, store, round_ctx,
                 )
             });
         });
@@ -271,10 +281,12 @@ impl DagRound {
                 .entry(*digest)
                 .and_modify(|first| first.add_depender(depender))
                 .or_insert_with(|| {
+                    let role = self.leader_role(author);
                     DagPointFuture::new_download(
                         self,
                         author,
                         digest,
+                        role,
                         Some(depender),
                         &loc.state,
                         downloader,
@@ -306,9 +318,11 @@ impl DagRound {
                 .entry(*point_restore.digest())
                 .and_modify(|_| is_unique = false)
                 .or_insert_with(|| {
+                    let role = self.leader_role(&point_id.author);
                     DagPointFuture::new_restore(
                         self,
                         point_restore,
+                        role,
                         &loc.state,
                         downloader,
                         store,
