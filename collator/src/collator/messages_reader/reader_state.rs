@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
@@ -540,7 +541,7 @@ pub struct InternalsRangeReaderState {
     pub buffer: MessagesBuffer,
 
     /// Statistics shows all messages in current range
-    pub msgs_stats: Option<QueueStatistics>,
+    pub msgs_stats: Option<Arc<QueueStatistics>>,
     /// Statistics shows remaining not read messages from current range.
     /// We reduce initial statistics by the number of messages that were read.
     pub remaning_msgs_stats: Option<QueueStatistics>,
