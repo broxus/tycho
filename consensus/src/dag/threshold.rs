@@ -387,8 +387,10 @@ mod test {
     }
 
     fn new_valid_point(round: Round, now: UnixTime, conf: &MempoolConfig) -> DagPoint {
-        let mut status = PointStatusValidated::default();
-        status.is_valid = true;
+        let status = PointStatusValidated {
+            is_valid: true,
+            ..Default::default()
+        };
         let keypair = rand::random::<KeyPair>();
 
         let delay = UnixTime::from_millis(rand::random_range(1000..8000));

@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use ahash::{HashMapExt, HashSetExt};
@@ -8,9 +9,11 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{ReadOptions, WriteBatch};
 
-use super::{POINT_KEY_LEN, fill_point_key, fill_point_prefix, format_point_key};
+use super::{AnchorFlags, POINT_KEY_LEN, fill_point_key, fill_point_prefix, format_point_key};
 use crate::effects::AltFormat;
-use crate::models::{Point, PointInfo, PointStatus, PointStatusValidated, Round};
+use crate::models::{
+    CommitHistoryPart, Point, PointInfo, PointStatus, PointStatusValidated, Round,
+};
 use crate::storage::MempoolDb;
 
 #[derive(Clone)]
@@ -160,13 +163,29 @@ impl MempoolAdapterStore {
 
         let db = self.0.db.rocksdb();
         let status_cf = self.0.db.points_status.cf();
-        let mut batch = WriteBatch::default();
+        let mut batch = WriteBatch::with_capacity_bytes(
+            PointStatusValidated::size_hint() * (1 + history.len()),
+        );
 
         let mut status = PointStatusValidated::default();
-        status.committed_at_round = Some(anchor.round().0);
-        let status_encoded = status.encode();
+        let mut status_encoded = Vec::with_capacity(PointStatusValidated::size_hint());
 
-        for info in history {
+        status.anchor_flags = AnchorFlags::Used;
+        status.write_to(&mut status_encoded);
+
+        fill_point_key(anchor.round().0, anchor.digest().inner(), &mut buf);
+        batch.merge_cf(&status_cf, buf.as_slice(), &status_encoded);
+
+        status = PointStatusValidated::default();
+        for (index, info) in history.iter().enumerate() {
+            status.committed = Some(CommitHistoryPart {
+                anchor_round: NonZeroU32::try_from(anchor.round().0)
+                    .context("zero round cannot have points")?,
+                seq_no: u32::try_from(index).context("anchor has insanely long history")?,
+            });
+
+            status.write_to(&mut status_encoded);
+
             fill_point_key(info.round().0, info.digest().inner(), &mut buf);
             batch.merge_cf(&status_cf, buf.as_slice(), &status_encoded);
         }

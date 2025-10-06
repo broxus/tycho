@@ -29,7 +29,7 @@ bitflags::bitflags! {
 }
 
 impl StatusFlags {
-    pub const VALIDATED_BYTES: usize = 1 + 1 + 4;
+    pub const VALIDATED_BYTES: usize = 1 + 1 + 8;
     pub const ILL_FORMED_BYTES: usize = 1;
     pub const NOT_FOUND_BYTES: usize = 1 + 32;
 
@@ -65,10 +65,16 @@ pub(super) fn merge(
             None
         })
     }
+    fn merge_validated(validated: &mut [u8; StatusFlags::VALIDATED_BYTES], other: &[u8]) {
+        validated[0] = validated[0].max(other[0]); // status
+        validated[1] |= other[1]; // anchor flags
+        // the rest is committed info
+        if validated[2..] < other[2..] {
+            validated[2..].copy_from_slice(&other[2..]);
+        }
+    }
 
-    let mut valted_status = 0_u8;
-    let mut valted_anchor = 0_u8;
-    let mut committed_round = 0_u32;
+    let mut validated: [u8; StatusFlags::VALIDATED_BYTES] = [0; _];
     stored
         .into_iter()
         .chain(new_status_queue)
@@ -106,24 +112,23 @@ pub(super) fn merge(
                 (_, false) => a, // only already merged flags byte is stored for invalid
                 (false, true) => b,
                 (true, true) => {
-                    valted_status = valted_status.max(a[0]).max(b[0]);
-                    valted_anchor = valted_anchor.max(a[1]).max(b[1]);
-
-                    let mut temp = [0_u8; 4];
-                    temp.copy_from_slice(&a[2..]);
-                    let a_com = u32::from_be_bytes(temp);
-                    temp.copy_from_slice(&b[2..]);
-                    let b_com = u32::from_be_bytes(temp);
-                    committed_round = committed_round.max(a_com).max(b_com);
-
-                    &[]
+                    merge_validated(&mut validated, a);
+                    b
                 }
             }
         })
         .map(|c| {
-            if valted_status > 0 {
-                let cr = committed_round.to_be_bytes();
-                [valted_status, valted_anchor, cr[0], cr[1], cr[2], cr[3]].to_vec()
+            if validated > [0; _] {
+                if validated.len() == c.len() {
+                    merge_validated(&mut validated, c);
+                    validated.to_vec()
+                } else {
+                    let error_msg = "expected other status to be validated";
+                    debug_assert!(false, "{error_msg}");
+                    // cannot panic in production, will spam logs to gain attention
+                    tracing::error!(target: MEMPOOL_DB_STATUS_MERGE, "{error_msg}");
+                    Vec::new() // dismiss stored status
+                }
             } else {
                 c.to_vec()
             }

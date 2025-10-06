@@ -1,4 +1,5 @@
 use std::fmt::{Debug, Display, Formatter};
+use std::num::NonZeroU32;
 
 use tycho_network::PeerId;
 
@@ -159,8 +160,14 @@ pub struct PointStatusValidated {
     pub is_first_valid: bool,
     pub is_first_resolved: bool,
     pub is_certified: bool,
-    anchor_flags: AnchorFlags, // TODO make public and fill, only zeros now
-    pub committed_at_round: Option<u32>, // not committed are stored with impossible zero round
+    pub anchor_flags: AnchorFlags,
+    pub committed: Option<CommitHistoryPart>,
+}
+/// Not committed are stored with impossible zero round
+#[derive(Debug)]
+pub struct CommitHistoryPart {
+    pub anchor_round: NonZeroU32,
+    pub seq_no: u32,
 }
 impl Display for PointStatusValidated {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -211,8 +218,7 @@ impl PointStatus for PointStatusValidated {
 
         buffer.push(flags.bits());
         buffer.push(self.anchor_flags.bits());
-        let at = self.committed_at_round.unwrap_or_default();
-        buffer.extend_from_slice(&at.to_be_bytes());
+        CommitHistoryPart::write(self.committed.as_ref(), buffer);
     }
 }
 
@@ -330,21 +336,13 @@ impl PointStatusStored {
         };
         let resolved = if flags.contains(StatusFlags::Found) {
             if flags.contains(StatusFlags::WellFormed) {
-                let mut committed_at = [0_u8; 4];
-                committed_at.copy_from_slice(&stored[2..]);
-                let committed_at = u32::from_be_bytes(committed_at);
-                let committed_at_round = if committed_at == 0 {
-                    None
-                } else {
-                    Some(committed_at)
-                };
                 Self::Validated(PointStatusValidated {
                     is_valid: flags.contains(StatusFlags::Valid),
                     is_first_valid: flags.contains(StatusFlags::FirstValid),
                     is_first_resolved: flags.contains(StatusFlags::FirstResolved),
                     is_certified: flags.contains(StatusFlags::Certified),
                     anchor_flags: AnchorFlags::from_bits_retain(stored[1]),
-                    committed_at_round,
+                    committed: CommitHistoryPart::read(&stored[2..]),
                 })
             } else {
                 Self::IllFormed(PointStatusIllFormed {
@@ -362,5 +360,29 @@ impl PointStatusStored {
             })
         };
         Ok(resolved)
+    }
+}
+impl CommitHistoryPart {
+    fn write(this: Option<&Self>, dest: &mut Vec<u8>) {
+        let anchor_round = this.map(|c| c.anchor_round.get()).unwrap_or_default();
+        let seq_no = this.map(|c| c.seq_no).unwrap_or_default();
+
+        dest.extend_from_slice(&anchor_round.to_be_bytes());
+        dest.extend_from_slice(&seq_no.to_be_bytes());
+    }
+    fn read(slice: &[u8]) -> Option<Self> {
+        assert_eq!(slice.len(), 4 + 4, "slice len must be 8 bytes");
+        let mut u32_buf = [0_u8; 4];
+
+        u32_buf.copy_from_slice(&slice[..4]);
+        let anchor_round = NonZeroU32::new(u32::from_be_bytes(u32_buf))?;
+
+        u32_buf.copy_from_slice(&slice[4..8]);
+        let seq_no = u32::from_be_bytes(u32_buf);
+
+        Some(Self {
+            anchor_round,
+            seq_no,
+        })
     }
 }

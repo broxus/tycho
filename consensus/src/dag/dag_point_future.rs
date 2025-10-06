@@ -20,11 +20,11 @@ use crate::effects::{
 use crate::engine::NodeConfig;
 use crate::intercom::{DownloadResult, Downloader};
 use crate::models::{
-    Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo, PointRestore,
-    PointStatusIllFormed, PointStatusNotFound, PointStatusStored, PointStatusStoredRef,
-    PointStatusValidated, WeakCert,
+    AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, Point, PointId, PointInfo,
+    PointRestore, PointStatusIllFormed, PointStatusNotFound, PointStatusStored,
+    PointStatusStoredRef, PointStatusValidated, WeakCert,
 };
-use crate::storage::MempoolStore;
+use crate::storage::{AnchorFlags, MempoolStore};
 
 static LIMIT: LazyLock<SpawnLimit> =
     LazyLock::new(|| SpawnLimit::new(NodeConfig::get().max_blocking_tasks.get() as usize));
@@ -77,6 +77,7 @@ impl DagPointFuture {
     /// for points of others - there are all other methods
     pub fn new_local_valid(
         point: &Point,
+        role: Option<AnchorStageRole>,
         state: &InclusionState,
         store: &MempoolStore,
         key_pair: Option<&Arc<KeyPair>>,
@@ -96,7 +97,7 @@ impl DagPointFuture {
             let full_fn = move || {
                 let _span = round_ctx.span().enter();
 
-                let mut status = PointStatusValidated::default();
+                let mut status = Self::new_validated_status(role, &cert);
                 status.is_valid = true;
                 state.acquire(&point.info().id(), &mut status); // only after persisted
 
@@ -171,6 +172,7 @@ impl DagPointFuture {
     pub fn new_broadcast(
         point_dag_round: &DagRound,
         point: &Point,
+        role: Option<AnchorStageRole>,
         state: &InclusionState,
         downloader: &Downloader,
         store: &MempoolStore,
@@ -209,7 +211,7 @@ impl DagPointFuture {
             store_task.await?;
 
             let (dag_point, status) =
-                Self::acquire_validated(&state, info, cert, validated, &validate_ctx);
+                Self::acquire_validated(&state, info, role, cert, validated, &validate_ctx);
 
             let store_fn = move || {
                 store.set_status(point_id.round, &point_id.digest, status.as_ref());
@@ -231,6 +233,7 @@ impl DagPointFuture {
         point_dag_round: &DagRound,
         author: &PeerId,
         digest: &Digest,
+        role: Option<AnchorStageRole>,
         first_depender: Option<&PeerId>,
         state: &InclusionState,
         downloader: &Downloader,
@@ -292,9 +295,10 @@ impl DagPointFuture {
 
                     store_task.await?;
 
-                    let (dag_point, status) =
-                        Self::acquire_validated(&state, info, cert, validated, &into_round_ctx);
                     let ctx = into_round_ctx.clone();
+
+                    let (dag_point, status) =
+                        Self::acquire_validated(&state, info, role, cert, validated, &ctx);
 
                     let store_fn = move || {
                         let _guard = ctx.span().enter();
@@ -357,6 +361,7 @@ impl DagPointFuture {
     pub fn new_restore(
         point_dag_round: &DagRound,
         point_restore: PointRestore,
+        role: Option<AnchorStageRole>,
         state: &InclusionState,
         downloader: &Downloader,
         store: &MempoolStore,
@@ -445,8 +450,9 @@ impl DagPointFuture {
                         validate_ctx,
                     )
                     .await;
-                    let (dag_point, status) =
-                        Self::acquire_validated(&state, verified, cert, validated?, &round_ctx);
+                    let (dag_point, status) = Self::acquire_validated(
+                        &state, verified, role, cert, validated?, &round_ctx,
+                    );
                     let ctx = round_ctx.clone();
 
                     let store_fn = move || {
@@ -478,18 +484,17 @@ impl DagPointFuture {
     fn acquire_validated(
         state: &InclusionState,
         info: PointInfo,
+        role: Option<AnchorStageRole>,
         cert: Cert,
         validated: ValidateResult,
         ctx: &impl Ctx,
     ) -> (DagPoint, PointStatusStored) {
         let _guard = ctx.span().enter();
         let id = info.id();
-        // TODO fill anchor flags in status
         match validated {
             ValidateResult::Valid => {
-                let mut status = PointStatusValidated::default();
+                let mut status = Self::new_validated_status(role, &cert);
                 status.is_valid = true;
-                status.is_certified = cert.is_certified();
                 state.acquire(&id, &mut status);
                 (
                     DagPoint::new_valid(info, cert, &status),
@@ -497,8 +502,7 @@ impl DagPointFuture {
                 )
             }
             ValidateResult::Invalid(reason) => {
-                let mut status = PointStatusValidated::default();
-                status.is_certified = cert.is_certified();
+                let mut status = Self::new_validated_status(role, &cert);
                 state.acquire(&id, &mut status);
                 (
                     DagPoint::new_invalid(info, cert, &status, reason),
@@ -516,6 +520,18 @@ impl DagPointFuture {
                     PointStatusStored::IllFormed(status),
                 )
             }
+        }
+    }
+
+    fn new_validated_status(role: Option<AnchorStageRole>, cert: &Cert) -> PointStatusValidated {
+        PointStatusValidated {
+            is_certified: cert.is_certified(),
+            anchor_flags: match role {
+                None => AnchorFlags::empty(),
+                Some(AnchorStageRole::Proof) => AnchorFlags::Proof,
+                Some(AnchorStageRole::Trigger) => AnchorFlags::Trigger,
+            },
+            ..Default::default()
         }
     }
 
