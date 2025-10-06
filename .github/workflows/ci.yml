@@ -30,6 +30,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       shell: ${{ steps.filter.outputs.shell }}
       proto: ${{ steps.filter.outputs.proto }}
+      contracts: ${{ steps.filter.outputs.contracts }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -46,6 +47,8 @@ jobs:
               - '**.sh'
             proto:
               - '**.proto'
+            contracts:
+              - 'contracts/**'
   rustfmt:
     name: Rustfmt
     needs: changes
@@ -139,6 +142,27 @@ jobs:
         env:
           RUST_LOG: warn
         run: just run_integration_tests
+
+  contracts-tests:
+    name: Contracts Tests
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ needs.changes.outputs.contracts == 'true' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: 'yarn'
+          cache-dependency-path: contracts/yarn.lock
+      - name: Install contracts dependencies
+        run: yarn install --frozen-lockfile
+        working-directory: contracts
+      - name: Run contracts tests
+        run: yarn test
+        working-directory: contracts
 
   metrics:
     name: Metrics
