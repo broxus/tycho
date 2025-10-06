@@ -61,7 +61,7 @@ impl StdAnchorHandler {
         match output {
             MempoolOutput::NextAnchor(committed) => return shuttle.handle(committed).await,
             MempoolOutput::CommitFinished(round) => {
-                shuttle.store.set_committed(round);
+                shuttle.store.set_committed_round(round);
             }
             MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
                 shuttle.reset(self.deduplicate_rounds, anchors_full_bottom.0);
@@ -101,8 +101,12 @@ impl Shuttle {
                 (self.store).expand_anchor_history_arena_size(&committed.history),
             );
 
-            let payloads =
-                (self.store).expand_anchor_history(&committed.anchor, &committed.history, &bump);
+            let payloads = (self.store).expand_anchor_history(
+                &committed.anchor,
+                &committed.history,
+                &bump,
+                true,
+            );
 
             let total_messages = payloads.len();
             let total_bytes: usize = payloads.iter().fold(0, |acc, bytes| acc + bytes.len());

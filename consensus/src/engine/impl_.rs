@@ -123,7 +123,8 @@ impl Engine {
                 let store = self.round_task.state.store.clone();
                 move || store.last_round()
             })
-            .await?;
+            .await?
+            .expect("db is empty, at least last genesis must be stored");
 
         self.ctx.update(last_db_round);
         tracing::info!(parent: self.ctx.span(), "rounds set since found last db round");
