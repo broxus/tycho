@@ -209,6 +209,69 @@ describe("Elector", () => {
     }
   });
 
+  it("can restore failed election", async () => {
+    const validators = Array(4)
+      .fill(null)
+      .map((_, i) =>
+        ValidatorAccount.makeStub(address(`-1:${`e${i}`.repeat(32)}`))
+      );
+
+    const stake = toNano(10000);
+
+    // Start election
+    blockchain.now = time(
+      timings.electedFor - timings.electionsBeginBefore + 1
+    );
+    const firstElectionId = await startElection({ blockchain, elector });
+
+    await sendStakes({
+      blockchain,
+      elector,
+      stake,
+      validators,
+      electionId: firstElectionId,
+      count: 2, // 1 was left behind
+      crypto,
+    });
+
+    // Shift time to when the first election ends
+    blockchain.now = time(timings.electedFor - timings.electionsEndBefore + 1);
+    {
+      await elector.runTickTock("tick");
+
+      const data = await getters(blockchain, elector).getData();
+      assert(data != null);
+
+      // Elections should not pass
+      let pastElection = data.pastElections.get(firstElectionId);
+      expect(pastElection).toBeUndefined();
+
+      // Current election should be marked as `failed`.
+      assert(data.currentElection != null);
+      expect(data.currentElection.failed).toEqual(true);
+      expect(data.currentElection.finished).toEqual(false);
+    }
+
+    // Send missing stake
+    blockchain.now = time(timings.electedFor - timings.electionsEndBefore + 2);
+    const stakeMessage = validators[2].createStakeMessage(elector.address, {
+      stake,
+      stakeAt: firstElectionId,
+      crypto: crypto,
+    });
+    await elector.receiveMessage(stakeMessage);
+
+    // Shift time a bit further
+    blockchain.now = time(timings.electedFor - timings.electionsEndBefore + 3);
+
+    // Elections must be successful now.
+    await finishElection({
+      blockchain,
+      elector,
+      electionId: firstElectionId,
+    });
+  });
+
   it("can be upgraded from old code", async () => {
     const [oldCode] = Cell.fromBoc(
       fs.readFileSync(path.join(__dirname, "../res/old_elector_code.boc"))
@@ -348,7 +411,7 @@ async function sendStakes(args: {
   }
 
   const elector = getters(args.blockchain, args.elector);
-  await checkStakeEquals(elector, args.stake * 3n);
+  await checkStakeEquals(elector, args.stake * BigInt(args.count));
 
   let participants = await elector.getParticipantListExtended();
   for (const validator of args.validators.slice(0, args.count)) {
