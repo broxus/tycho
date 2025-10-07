@@ -15,7 +15,7 @@ use crate::collator::messages_reader::{
     CumulativeStatsCalcParams, MessagesReader, MessagesReaderContext,
 };
 use crate::collator::types::{AnchorsCache, MsgsExecutionParamsStuff};
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::build_all_shards_processed_to_by_partitions;

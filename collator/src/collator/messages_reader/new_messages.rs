@@ -17,9 +17,10 @@ use crate::collator::messages_reader::state::internal::{
 };
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::state::state_iterator::MessageExt;
-use crate::internal_queue::types::{
-    AccountStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
-};
+use crate::internal_queue::types::diff::QueueDiffWithMessages;
+use crate::internal_queue::types::message::InternalMessageValue;
+use crate::internal_queue::types::router::PartitionRouter;
+use crate::internal_queue::types::stats::AccountStatistics;
 use crate::tracing_targets;
 use crate::types::{ProcessedTo, SaturatingAddAssign};
 

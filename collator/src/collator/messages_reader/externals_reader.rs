@@ -23,7 +23,8 @@ use crate::collator::messages_reader::state::internal::DebugInternalsRangeReader
 use crate::collator::types::{
     AnchorsCache, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff, ParsedMessage,
 };
-use crate::internal_queue::types::{InternalMessageValue, PartitionRouter};
+use crate::internal_queue::types::message::InternalMessageValue;
+use crate::internal_queue::types::router::PartitionRouter;
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
 use crate::types::{DebugIter, SaturatingAddAssign};

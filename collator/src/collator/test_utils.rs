@@ -2,7 +2,7 @@ use tycho_types::cell::CellBuilder;
 use tycho_types::models::{IntAddr, IntMsgInfo, MsgInfo, ShardIdent};
 
 use super::types::ParsedMessage;
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::message::EnqueuedMessage;
 
 pub fn make_stub_internal_parsed_message(
     src_shard: ShardIdent,
