@@ -17,7 +17,7 @@ use tycho_types::models::{Block, BlockId, ShardStateUnsplit};
 
 use crate::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
 use crate::internal_queue::state::storage::QueueStateImplFactory;
-use crate::internal_queue::types::InternalMessageValue;
+use crate::internal_queue::types::message::InternalMessageValue;
 use crate::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 
 pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilter) {

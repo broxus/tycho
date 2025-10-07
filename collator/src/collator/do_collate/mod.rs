@@ -30,7 +30,9 @@ use crate::collator::do_collate::work_units::{DoCollateWu, WuEvent, WuEventData}
 use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::types::{FinalizeMetrics, PartialValueFlow, RandSeed};
-use crate::internal_queue::types::{Bound, DiffZone, EnqueuedMessage, QueueShardBoundedRange};
+use crate::internal_queue::types::diff::DiffZone;
+use crate::internal_queue::types::message::EnqueuedMessage;
+use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{

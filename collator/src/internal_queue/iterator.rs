@@ -9,7 +9,7 @@ use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::state_iterator::MessageExt;
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use crate::internal_queue::types::InternalMessageValue;
+use crate::internal_queue::types::message::InternalMessageValue;
 
 pub trait QueueIterator<V: InternalMessageValue>: Send {
     /// Get next message

@@ -22,7 +22,9 @@ use crate::collator::types::{
     ParsedMessage,
 };
 use crate::internal_queue::iterator::QueueIterator;
-use crate::internal_queue::types::{Bound, DiffZone, InternalMessageValue, QueueShardBoundedRange};
+use crate::internal_queue::types::diff::DiffZone;
+use crate::internal_queue::types::message::InternalMessageValue;
+use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, Lt};
