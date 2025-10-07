@@ -25,9 +25,10 @@ use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::messages_reader::log_remaining_msgs_stats;
 use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::types::{AnchorsCache, CumulativeStatistics, ParsedMessage};
-use crate::internal_queue::types::{
-    Bound, DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, QueueShardBoundedRange,
-};
+use crate::internal_queue::types::diff::DiffZone;
+use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValue};
+use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
+use crate::internal_queue::types::stats::DiffStatistics;
 use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};

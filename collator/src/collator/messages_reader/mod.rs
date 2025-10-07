@@ -24,10 +24,11 @@ use crate::collator::messages_reader::state::external::DebugExternalsRangeReader
 use crate::collator::messages_reader::state::internal::{
     DebugInternalsRangeReaderState, InternalsReaderState,
 };
-use crate::internal_queue::types::{
-    DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
-    QueueShardBoundedRange, QueueStatistics,
-};
+use crate::internal_queue::types::diff::QueueDiffWithMessages;
+use crate::internal_queue::types::message::InternalMessageValue;
+use crate::internal_queue::types::ranges::QueueShardBoundedRange;
+use crate::internal_queue::types::router::PartitionRouter;
+use crate::internal_queue::types::stats::{DiffStatistics, QueueStatistics};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, Lt, ProcessedUptoInfoStuff};

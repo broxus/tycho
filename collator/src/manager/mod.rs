@@ -33,9 +33,9 @@ use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
     ForceMasterCollation,
 };
-use crate::internal_queue::types::{
-    DiffStatistics, DiffZone, EnqueuedMessage, QueueDiffWithMessages,
-};
+use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
+use crate::internal_queue::types::message::EnqueuedMessage;
+use crate::internal_queue::types::stats::DiffStatistics;
 use crate::mempool::{
     MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
     StateUpdateContext,

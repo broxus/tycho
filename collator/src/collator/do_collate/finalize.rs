@@ -32,7 +32,9 @@ use crate::collator::types::{
     AccountExistence, BlockCollationData, BlockSerializerCache, ExecuteResult, FinalizeBlockResult,
     FinalizeMessagesReaderResult, FinalizeMetrics, PreparedInMsg, PreparedOutMsg, PublicLibsDiff,
 };
-use crate::internal_queue::types::{DiffStatistics, DiffZone, EnqueuedMessage};
+use crate::internal_queue::types::diff::DiffZone;
+use crate::internal_queue::types::message::EnqueuedMessage;
+use crate::internal_queue::types::stats::DiffStatistics;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
