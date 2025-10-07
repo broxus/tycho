@@ -77,7 +77,7 @@ criterion = { workspace = true }
 
 [features]
 default = []
-test = ["tycho-block-util/test", "tycho-storage/test", "tycho-core/test"]
+test = ["tycho-block-util/test", "tycho-storage/test", "tycho-core/test", "tycho-consensus/test"]
 block-creator-stats = []
 bench-helpers = []
 

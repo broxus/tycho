@@ -99,3 +99,53 @@ impl DumpAnchors {
         Ok(output)
     }
 }
+
+#[cfg(all(test, feature = "test"))]
+mod test {
+    use std::num::NonZeroU16;
+
+    use tycho_consensus::test_utils::default_test_config;
+    use tycho_storage::StorageConfig;
+    use tycho_util::test::init_logger;
+
+    use super::*;
+
+    #[tokio::test]
+    #[ignore] // FIXME it's an example for manual run, should replace with smth more valuable
+    async fn dump_mempool_anchors() -> Result<()> {
+        init_logger("test_dump_mempool_anchors", "debug");
+
+        let storage_conf = StorageConfig {
+            root_dir: "../.temp/db1".into(), // filled by `just node 1`
+            ..Default::default()
+        };
+
+        let ctx = StorageContext::new(storage_conf).await?;
+        let dump_anchors = DumpAnchors::new(&ctx)?;
+
+        let top_processed_to_anchor: MempoolAnchorId = 10;
+
+        let mempool_node_conf = MempoolNodeConfig {
+            clean_db_period_rounds: NonZeroU16::new(10).unwrap(),
+            ..Default::default()
+        };
+
+        let test_conf = default_test_config();
+
+        let dump = dump_anchors.load(
+            top_processed_to_anchor,
+            &mempool_node_conf,
+            &test_conf.conf.consensus,
+            GenesisInfo {
+                start_round: 2,
+                genesis_millis: 0,
+            },
+        )?;
+
+        for i in dump {
+            tracing::info!("{i:?}");
+        }
+
+        Ok(())
+    }
+}
