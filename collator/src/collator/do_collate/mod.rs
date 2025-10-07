@@ -20,7 +20,6 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::time::now_millis;
 
-use super::messages_reader::ReaderState;
 use super::types::{
     AnchorInfo, AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
     CollationResult, ExecuteResult, FinalResult, FinalizeBlockResult, FinalizeCollationResult,
@@ -30,6 +29,7 @@ use super::{CollatorStdImpl, ForceMasterCollation, ShardDescriptionExt};
 use crate::collator::do_collate::finalize::FinalizeBlockContext;
 use crate::collator::do_collate::work_units::{DoCollateWu, WuEvent, WuEventData};
 use crate::collator::error::{CollationCancelReason, CollatorError};
+use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::types::{FinalizeMetrics, PartialValueFlow, RandSeed};
 use crate::internal_queue::types::{Bound, DiffZone, EnqueuedMessage, QueueShardBoundedRange};
 use crate::queue_adapter::MessageQueueAdapter;
