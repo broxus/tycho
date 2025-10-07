@@ -16,7 +16,8 @@ use crate::collator::messages_reader::{
     GetNextMessageGroupMode, InternalsPartitionReader,
 };
 use crate::collator::types::AnchorsCache;
-use crate::internal_queue::types::{EnqueuedMessage, PartitionRouter};
+use crate::internal_queue::types::message::EnqueuedMessage;
+use crate::internal_queue::types::router::PartitionRouter;
 use crate::mempool::make_stub_anchor;
 use crate::test_utils::try_init_test_tracing;
 use crate::types::DisplayIter;
@@ -76,7 +77,7 @@ fn test_read_externals() {
         DisplayIter(dst_addrs.iter().map(|addr| addr.to_string())),
     );
 
-    let mut partition_router = PartitionRouter::new();
+    let mut partition_router = PartitionRouter::default();
     partition_router
         .insert_dst(&dst_addrs[3], QueuePartitionIdx(1))
         .unwrap();

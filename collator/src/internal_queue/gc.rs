@@ -9,7 +9,8 @@ use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::internal_queue::state::storage::QueueState;
-use crate::internal_queue::types::{InternalMessageValue, QueueShardRange};
+use crate::internal_queue::types::message::InternalMessageValue;
+use crate::internal_queue::types::ranges::QueueShardRange;
 use crate::tracing_targets;
 
 pub struct GcManager {

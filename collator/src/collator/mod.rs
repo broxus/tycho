@@ -26,7 +26,7 @@ use tycho_util::time::now_millis;
 use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
 
 use self::types::{BlockSerializerCache, CollatorStats, PrevData, WorkingState};
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
