@@ -6,14 +6,15 @@ use anyhow::{Context, Result};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_types::models::{MsgInfo, ShardIdent};
 
+use super::MessagesReaderMetrics;
 use super::internals_reader::{
     InternalsPartitionReader, InternalsRangeReader, InternalsRangeReaderKind,
 };
-use super::{
-    DebugInternalsRangeReaderState, InternalsRangeReaderState, MessagesReaderMetrics,
-    ShardReaderState,
-};
 use crate::collator::messages_buffer::{BufferFillStateByCount, BufferFillStateBySlots};
+use crate::collator::messages_reader::state::ShardReaderState;
+use crate::collator::messages_reader::state::internal::{
+    DebugInternalsRangeReaderState, InternalsRangeReaderState,
+};
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::state::state_iterator::MessageExt;
 use crate::internal_queue::types::{
