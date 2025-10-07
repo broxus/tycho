@@ -20,7 +20,6 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::time::now_millis;
 
-use super::messages_reader::ReaderState;
 use super::types::{
     AnchorInfo, AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
     CollationResult, ExecuteResult, FinalResult, FinalizeBlockResult, FinalizeCollationResult,
@@ -30,8 +29,11 @@ use super::{CollatorStdImpl, ForceMasterCollation, ShardDescriptionExt};
 use crate::collator::do_collate::finalize::FinalizeBlockContext;
 use crate::collator::do_collate::work_units::{DoCollateWu, WuEvent, WuEventData};
 use crate::collator::error::{CollationCancelReason, CollatorError};
+use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::types::{FinalizeMetrics, PartialValueFlow, RandSeed};
-use crate::internal_queue::types::{Bound, DiffZone, EnqueuedMessage, QueueShardBoundedRange};
+use crate::internal_queue::types::diff::DiffZone;
+use crate::internal_queue::types::message::EnqueuedMessage;
+use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{
@@ -101,8 +103,8 @@ impl CollatorStdImpl {
         let snapshot_start = std::time::Instant::now();
 
         // Measure cloning of each component separately with detailed metrics
-        let _externals_snapshot = reader_state.externals.clone_with_metrics(&labels);
-        let _internals_snapshot = reader_state.internals.clone_with_metrics(&labels);
+        // let _externals_snapshot = reader_state.externals.clone_with_metrics(&labels);
+        // let _internals_snapshot = reader_state.internals.clone_with_metrics(&labels);
 
         let snapshot_elapsed = snapshot_start.elapsed();
 

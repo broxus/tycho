@@ -7,8 +7,6 @@ use tycho_types::models::{IntAddr, MsgInfo, ShardIdent};
 use tycho_util::FastHashSet;
 
 use super::{
-    DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState,
-    ExternalsRangeReaderStateByPartition, ExternalsReaderRange, ExternalsReaderState,
     GetNextMessageGroupMode, InternalsPartitionReader, MessagesReaderMetrics,
     MessagesReaderMetricsByPartitions,
 };
@@ -16,11 +14,17 @@ use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, IncludeAllMessages,
     MessageGroup, MessagesBufferLimits, MsgFilter, SkipExpiredExternals,
 };
-use crate::collator::messages_reader::{DebugInternalsRangeReaderState, InternalsRangeReaderKind};
+use crate::collator::messages_reader::InternalsRangeReaderKind;
+use crate::collator::messages_reader::state::external::{
+    DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState,
+    ExternalsRangeReaderStateByPartition, ExternalsReaderRange, ExternalsReaderState,
+};
+use crate::collator::messages_reader::state::internal::DebugInternalsRangeReaderState;
 use crate::collator::types::{
     AnchorsCache, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff, ParsedMessage,
 };
-use crate::internal_queue::types::{InternalMessageValue, PartitionRouter};
+use crate::internal_queue::types::message::InternalMessageValue;
+use crate::internal_queue::types::router::PartitionRouter;
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
 use crate::types::{DebugIter, SaturatingAddAssign};

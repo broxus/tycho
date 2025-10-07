@@ -10,7 +10,7 @@ use tycho_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::shard_iterator::{IterResult, ShardIterator};
-use crate::internal_queue::types::InternalMessageValue;
+use crate::internal_queue::types::message::InternalMessageValue;
 use crate::storage::iterator::InternalQueueMessagesIter;
 
 pub struct ShardIteratorWithRange {

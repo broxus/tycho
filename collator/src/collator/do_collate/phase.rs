@@ -5,7 +5,7 @@ use tycho_util::sync::CancellationFlag;
 
 use super::{BlockCollationData, PrevData};
 use crate::collator::do_collate::work_units::DoCollateWu;
-use crate::internal_queue::types::QueueShardBoundedRange;
+use crate::internal_queue::types::ranges::QueueShardBoundedRange;
 use crate::types::McData;
 
 pub struct Phase<S: PhaseState> {

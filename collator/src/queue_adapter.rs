@@ -10,9 +10,12 @@ use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::internal_queue::queue::{Queue, QueueImpl};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::state::storage::QueueStateStdImpl;
-use crate::internal_queue::types::{
-    DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
-    QueueShardBoundedRange, QueueShardRange, QueueStatistics, SeparatedStatisticsByPartitions,
+use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
+use crate::internal_queue::types::message::InternalMessageValue;
+use crate::internal_queue::types::ranges::{QueueShardBoundedRange, QueueShardRange};
+use crate::internal_queue::types::router::PartitionRouter;
+use crate::internal_queue::types::stats::{
+    DiffStatistics, QueueStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::storage::models::DiffInfo;
 use crate::storage::snapshot::AccountStatistics;

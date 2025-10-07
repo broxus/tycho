@@ -4,7 +4,7 @@ use tycho_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::state_iterator::{MessageExt, StateIterator};
-use crate::internal_queue::types::InternalMessageValue;
+use crate::internal_queue::types::message::InternalMessageValue;
 
 pub struct StatesIteratorsManager<V: InternalMessageValue> {
     iterator: Box<dyn StateIterator<V>>,
