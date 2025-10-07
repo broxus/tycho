@@ -15,7 +15,7 @@ use crate::collator::types::{
     BlockCollationData, ExecutedTransaction, ParsedMessage, PreparedInMsg, PreparedOutMsg,
     ShardAccountStuff, SpecialOrigin,
 };
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::{SaturatingAddAssign, ShardIdentExt};
 

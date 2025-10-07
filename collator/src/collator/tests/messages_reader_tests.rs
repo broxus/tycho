@@ -18,15 +18,17 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use super::{
     CumulativeStatsCalcParams, FinalizedMessagesReader, GetNextMessageGroupMode, MessagesReader,
-    MessagesReaderContext, ReaderState,
+    MessagesReaderContext,
 };
 use crate::collator::MsgsExecutionParamsStuff;
 use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::messages_reader::log_remaining_msgs_stats;
+use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::types::{AnchorsCache, CumulativeStatistics, ParsedMessage};
-use crate::internal_queue::types::{
-    Bound, DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, QueueShardBoundedRange,
-};
+use crate::internal_queue::types::diff::DiffZone;
+use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValue};
+use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
+use crate::internal_queue::types::stats::DiffStatistics;
 use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
@@ -1289,32 +1291,44 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 );
 
                 assert_eq!(
-                    exp_msg.info, act_msg.info,
+                    exp_msg.info(),
+                    act_msg.info(),
                     "mismatch in 'info' field of message {} for account {} (block_seqno={})",
-                    i, account_id, self.block_seqno,
+                    i,
+                    account_id,
+                    self.block_seqno,
                 );
                 assert_eq!(
-                    exp_msg.dst_in_current_shard, act_msg.dst_in_current_shard,
+                    exp_msg.dst_in_current_shard(),
+                    act_msg.dst_in_current_shard(),
                     "mismatch in 'dst_in_current_shard' field of message {} for account {} (block_seqno={})",
-                    i, account_id, self.block_seqno,
+                    i,
+                    account_id,
+                    self.block_seqno,
                 );
                 assert_eq!(
-                    exp_msg.cell.repr_hash(),
-                    act_msg.cell.repr_hash(),
+                    exp_msg.cell().repr_hash(),
+                    act_msg.cell().repr_hash(),
                     "mismatch in 'cell' field of message {} for account {} (block_seqno={})",
                     i,
                     account_id,
                     self.block_seqno,
                 );
                 assert_eq!(
-                    exp_msg.special_origin, act_msg.special_origin,
+                    exp_msg.special_origin(),
+                    act_msg.special_origin(),
                     "mismatch in 'special_origin' field of message {} for account {} (block_seqno={})",
-                    i, account_id, self.block_seqno,
+                    i,
+                    account_id,
+                    self.block_seqno,
                 );
                 assert_eq!(
-                    exp_msg.from_same_shard, act_msg.from_same_shard,
+                    exp_msg.is_from_same_shard(),
+                    act_msg.is_from_same_shard(),
                     "mismatch in 'from_same_shard' field of message {} for account {} (block_seqno={})",
-                    i, account_id, self.block_seqno,
+                    i,
+                    account_id,
+                    self.block_seqno,
                 );
             }
         }
@@ -2149,21 +2163,21 @@ where
     F: Fn(IntMsgInfo, Cell) -> V,
 {
     fn get_test_msg_info(&self, msg: &ParsedMessage) -> TestMessageInfo {
-        match msg.info {
+        match msg.info() {
             MsgInfo::ExtIn(_) => {
-                let msg_state = self.ext_msgs_journal.get(msg.cell.repr_hash()).unwrap();
+                let msg_state = self.ext_msgs_journal.get(msg.cell().repr_hash()).unwrap();
                 TestMessageInfo::Ext(msg_state.info.clone())
             }
             MsgInfo::Int(IntMsgInfo { created_lt, .. }) => {
                 let key = QueueKey {
-                    lt: created_lt,
-                    hash: *msg.cell.repr_hash(),
+                    lt: *created_lt,
+                    hash: *msg.cell().repr_hash(),
                 };
                 let msg_state = self.int_msgs_journal.get(&key).unwrap();
                 TestMessageInfo::Int(msg_state.info.clone())
             }
             MsgInfo::ExtOut(_) => {
-                unreachable!("ext out message in ordinary messages set: {:?}", msg.info)
+                unreachable!("ext out message in ordinary messages set: {:?}", msg.info())
             }
         }
     }

@@ -6,13 +6,18 @@ use tycho_types::models::{BlockIdShort, IntAddr, MsgsExecutionParams, ShardIdent
 
 use crate::collator::MsgsExecutionParamsStuff;
 use crate::collator::messages_buffer::{MessageGroup, MessagesBufferLimits};
+use crate::collator::messages_reader::state::ReaderState;
+use crate::collator::messages_reader::state::external::{
+    DebugExternalsRangeReaderState, ExternalKey,
+};
+use crate::collator::messages_reader::state::internal::InternalsPartitionReaderState;
 use crate::collator::messages_reader::{
-    CollectExternalsResult, DebugExternalsRangeReaderState, DisplayMessageGroup, ExternalKey,
-    ExternalsReader, FinalizedExternalsReader, GetNextMessageGroupMode, InternalsPartitionReader,
-    InternalsPartitionReaderState, ReaderState,
+    CollectExternalsResult, DisplayMessageGroup, ExternalsReader, FinalizedExternalsReader,
+    GetNextMessageGroupMode, InternalsPartitionReader,
 };
 use crate::collator::types::AnchorsCache;
-use crate::internal_queue::types::{EnqueuedMessage, PartitionRouter};
+use crate::internal_queue::types::message::EnqueuedMessage;
+use crate::internal_queue::types::router::PartitionRouter;
 use crate::mempool::make_stub_anchor;
 use crate::test_utils::try_init_test_tracing;
 use crate::types::DisplayIter;
@@ -72,7 +77,7 @@ fn test_read_externals() {
         DisplayIter(dst_addrs.iter().map(|addr| addr.to_string())),
     );
 
-    let mut partition_router = PartitionRouter::new();
+    let mut partition_router = PartitionRouter::default();
     partition_router
         .insert_dst(&dst_addrs[3], QueuePartitionIdx(1))
         .unwrap();

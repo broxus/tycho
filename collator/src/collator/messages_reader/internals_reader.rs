@@ -7,21 +7,26 @@ use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockIdShort, IntAddr, MsgInfo, ShardIdent, StdAddr};
 use tycho_util::FastHashSet;
 
-use super::{
-    DebugInternalsRangeReaderState, GetNextMessageGroupMode, InternalsPartitionReaderState,
-    InternalsRangeReaderState, MessagesReaderMetrics, MessagesReaderStage, ShardReaderState,
-};
 use crate::collator::error::CollatorError;
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, IncludeAllMessages,
     MessageGroup, MessagesBuffer, MessagesBufferLimits,
+};
+use crate::collator::messages_reader::state::ShardReaderState;
+use crate::collator::messages_reader::state::internal::{
+    DebugInternalsRangeReaderState, InternalsPartitionReaderState, InternalsRangeReaderState,
+};
+use crate::collator::messages_reader::{
+    GetNextMessageGroupMode, MessagesReaderMetrics, MessagesReaderStage,
 };
 use crate::collator::types::{
     ConcurrentQueueStatistics, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff,
     ParsedMessage,
 };
 use crate::internal_queue::iterator::QueueIterator;
-use crate::internal_queue::types::{Bound, DiffZone, InternalMessageValue, QueueShardBoundedRange};
+use crate::internal_queue::types::diff::DiffZone;
+use crate::internal_queue::types::message::InternalMessageValue;
+use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, Lt};

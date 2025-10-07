@@ -30,12 +30,15 @@ use tycho_types::num::Tokens;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
-use super::messages_reader::{MessagesReaderMetrics, ReaderState};
+use super::messages_reader::MessagesReaderMetrics;
 use crate::collator::do_collate::work_units::{DoCollateWu, ExecuteWu, FinalizeWu};
-use crate::collator::messages_reader::{ExternalKey, MetricsTimer};
-use crate::internal_queue::types::{
-    AccountStatistics, Bound, DiffStatistics, InternalMessageValue, QueueShardBoundedRange,
-    QueueStatistics, SeparatedStatisticsByPartitions,
+use crate::collator::messages_reader::MetricsTimer;
+use crate::collator::messages_reader::state::ReaderState;
+use crate::collator::messages_reader::state::external::ExternalKey;
+use crate::internal_queue::types::message::InternalMessageValue;
+use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
+use crate::internal_queue::types::stats::{
+    AccountStatistics, DiffStatistics, QueueStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;

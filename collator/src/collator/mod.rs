@@ -7,9 +7,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use error::CollatorError;
 use futures_util::future::Future;
-use messages_reader::{
-    FinalizedMessagesReader, MessagesReader, MessagesReaderContext, ReaderState,
-};
+use messages_reader::{FinalizedMessagesReader, MessagesReader, MessagesReaderContext};
 use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -28,7 +26,7 @@ use tycho_util::time::now_millis;
 use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
 
 use self::types::{BlockSerializerCache, CollatorStats, PrevData, WorkingState};
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
@@ -62,8 +60,10 @@ pub mod bench_export {
 
 pub use do_collate::{is_first_block_after_prev_master, work_units};
 pub use error::CollationCancelReason;
+use messages_reader::state::ReaderState;
 pub use types::{ForceMasterCollation, ShardDescriptionExt};
 
+mod state;
 #[cfg(test)]
 #[path = "tests/collator_tests.rs"]
 pub(super) mod tests;

@@ -14,7 +14,7 @@ use crate::collator::messages_reader::{
     GetNextMessageGroupMode, MessagesReader, MessagesReaderMetrics,
 };
 use crate::collator::types::{BlockLimitsLevel, ExecuteMetrics, ExecuteResult};
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::tracing_targets;
 use crate::types::SaturatingAddAssign;
 
