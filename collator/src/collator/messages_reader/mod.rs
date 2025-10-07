@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use state::ReaderState;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, get_short_addr_string};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{MsgsExecutionParams, ShardIdent};
@@ -12,7 +13,6 @@ use tycho_util::{FastHashMap, FastHashSet};
 use self::externals_reader::*;
 use self::internals_reader::*;
 use self::new_messages::*;
-pub(super) use self::reader_state::*;
 use super::error::CollatorError;
 use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
 use super::types::{
@@ -20,6 +20,10 @@ use super::types::{
     MsgsExecutionParamsStuff,
 };
 use crate::collator::messages_buffer::DebugMessageGroup;
+use crate::collator::messages_reader::state::external::DebugExternalsRangeReaderState;
+use crate::collator::messages_reader::state::internal::{
+    DebugInternalsRangeReaderState, InternalsReaderState,
+};
 use crate::internal_queue::types::{
     DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
     QueueShardBoundedRange, QueueStatistics,
@@ -32,7 +36,7 @@ use crate::types::{DebugIter, IntAdrExt, ProcessedTo, ProcessedToByPartitions};
 mod externals_reader;
 mod internals_reader;
 mod new_messages;
-mod reader_state;
+pub mod state;
 
 #[cfg(test)]
 #[path = "../tests/messages_reader_tests.rs"]

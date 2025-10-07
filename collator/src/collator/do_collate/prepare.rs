@@ -10,8 +10,9 @@ use crate::collator::CollationCancelReason;
 use crate::collator::do_collate::phase::ActualState;
 use crate::collator::error::CollatorError;
 use crate::collator::execution_manager::MessagesExecutor;
+use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::messages_reader::{
-    CumulativeStatsCalcParams, MessagesReader, MessagesReaderContext, ReaderState,
+    CumulativeStatsCalcParams, MessagesReader, MessagesReaderContext,
 };
 use crate::collator::types::{AnchorsCache, MsgsExecutionParamsStuff};
 use crate::internal_queue::types::EnqueuedMessage;
