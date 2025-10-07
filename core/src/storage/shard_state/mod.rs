@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -38,6 +38,7 @@ pub struct ShardStateStorage {
     min_ref_mc_state: MinRefMcStateTracker,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
+    new_accounts_count: AtomicU64,
 
     accounts_split_depth: u8,
     store_shard_state_step: u32,
@@ -67,6 +68,7 @@ impl ShardStateStorage {
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
+            new_accounts_count: AtomicU64::new(0),
             accounts_split_depth: 5,
         }))
     }
@@ -101,7 +103,7 @@ impl ShardStateStorage {
             }
         );
 
-        self.store_state_root(handle, state.root_cell().clone(), hint)
+        self.store_state_root(handle, state.root_cell().clone(), hint, None)
             .await
     }
 
@@ -110,11 +112,25 @@ impl ShardStateStorage {
         handle: &BlockHandle,
         root_cell: Cell,
         hint: StoreStateHint,
+        new_accounts_count: Option<u64>,
     ) -> Result<bool> {
+        if let Some(new_accounts_count) = new_accounts_count {
+            self.new_accounts_count
+                .fetch_add(new_accounts_count, Ordering::Relaxed);
+        }
+
         // Store state root only for masterchain blocks and every N shard blocks
-        if !handle.is_masterchain() && handle.id().seqno % self.store_shard_state_step != 0 {
+        if !handle.is_masterchain()
+            && !handle
+                .id()
+                .seqno
+                .is_multiple_of(self.store_shard_state_step)
+            && self.new_accounts_count.load(Ordering::Relaxed) < 5000
+        {
             return Ok(false);
         }
+
+        self.new_accounts_count.store(0, Ordering::Relaxed);
 
         if handle.has_state() {
             return Ok(false);
@@ -169,6 +185,7 @@ impl ShardStateStorage {
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
+            tracing::info!(block_id = ?block_id.as_short_id(), "stored state root for block");
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
             let hist = HistogramGuard::begin("tycho_storage_state_update_time_high");
@@ -263,7 +280,11 @@ impl ShardStateStorage {
         let mut current_block_id = *block_id;
 
         if !block_id.is_masterchain() {
-            while current_block_id.seqno % self.store_shard_state_step != 0 {
+            while !current_block_id
+                .seqno
+                .is_multiple_of(self.store_shard_state_step)
+                && !self.is_exist(&current_block_id)?
+            {
                 let handle = self
                     .block_handle_storage
                     .load_handle(&current_block_id)
@@ -279,31 +300,9 @@ impl ShardStateStorage {
             }
         }
 
-        // NOTE: only for metrics.
-        static MAX_KNOWN_EPOCH: AtomicU32 = AtomicU32::new(0);
-
-        // Load stored state
-        let root_hash = self.load_state_root_hash(&current_block_id)?;
-        let root = self.cell_storage.load_cell(&root_hash, ref_by_mc_seqno)?;
-        let root = Cell::from(root as Arc<_>);
-
-        let max_known_epoch = MAX_KNOWN_EPOCH
-            .fetch_max(ref_by_mc_seqno, Ordering::Relaxed)
-            .max(ref_by_mc_seqno);
-        metrics::gauge!("tycho_storage_state_max_epoch").set(max_known_epoch);
-
-        let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
-        let handle = self.min_ref_mc_state.insert(&shard_state);
-        let mut state = ShardStateStuff::from_state_and_root(
-            if block_id.is_masterchain() {
-                block_id
-            } else {
-                &current_block_id
-            },
-            shard_state,
-            root,
-            handle,
-        )?;
+        let mut state = self
+            .direct_load_state(ref_by_mc_seqno, &current_block_id)
+            .await?;
 
         // Apply state updates
         while let Some((block_id, merkle_update)) = chain.pop() {
@@ -329,6 +328,11 @@ impl ShardStateStorage {
                 anyhow::bail!(ShardStateStorageError::NotFound(block_id.as_short_id()))
             }
         }
+    }
+
+    pub fn is_exist(&self, block_id: &BlockId) -> Result<bool> {
+        let shard_states = &self.cells_db.shard_states;
+        Ok(shard_states.get(block_id.to_vec())?.is_some())
     }
 
     #[tracing::instrument(skip(self))]

@@ -953,6 +953,8 @@ impl CollatorStdImpl {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
             };
 
+            let new_accounts_count = Some(finalized.collation_data.added_accounts_count);
+
             adapter.accept_shard_block(
                 finalized.block_candidate.ref_by_mc_seqno,
                 finalized.block_candidate.block.data.clone(),
@@ -960,7 +962,7 @@ impl CollatorStdImpl {
 
             async move {
                 adapter
-                    .store_state_root(&block_id, meta, new_state_root, hint)
+                    .store_state_root(&block_id, meta, new_state_root, hint, new_accounts_count)
                     .await
             }
         });

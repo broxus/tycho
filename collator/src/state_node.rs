@@ -69,6 +69,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
         meta: NewBlockMeta,
         state_root: Cell,
         hint: StoreStateHint,
+        new_accounts_count: Option<u64>,
     ) -> Result<bool>;
     /// Return block by its id from node local state
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>>;
@@ -237,7 +238,12 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
             let store_state_step = self.storage.shard_state_storage().store_shard_state_step();
 
-            while current_block_id.seqno % store_state_step != 0 {
+            while !current_block_id.seqno.is_multiple_of(store_state_step)
+                && !self
+                    .storage
+                    .shard_state_storage()
+                    .is_exist(&current_block_id)?
+            {
                 let block = self
                     .shard_blocks
                     .get(&current_block_id.shard)
@@ -307,6 +313,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         meta: NewBlockMeta,
         state_root: Cell,
         hint: StoreStateHint,
+        new_accounts_count: Option<u64>,
     ) -> Result<bool> {
         let labels = [("workchain", block_id.shard.workchain().to_string())];
         let _histogram = HistogramGuard::begin_with_labels(
@@ -324,7 +331,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let updated = self
             .storage
             .shard_state_storage()
-            .store_state_root(&handle, state_root, hint)
+            .store_state_root(&handle, state_root, hint, new_accounts_count)
             .await?;
 
         Ok(updated)
