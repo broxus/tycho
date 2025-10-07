@@ -6,10 +6,14 @@ use tycho_types::models::{BlockIdShort, IntAddr, MsgsExecutionParams, ShardIdent
 
 use crate::collator::MsgsExecutionParamsStuff;
 use crate::collator::messages_buffer::{MessageGroup, MessagesBufferLimits};
+use crate::collator::messages_reader::state::ReaderState;
+use crate::collator::messages_reader::state::external::{
+    DebugExternalsRangeReaderState, ExternalKey,
+};
+use crate::collator::messages_reader::state::internal::InternalsPartitionReaderState;
 use crate::collator::messages_reader::{
-    CollectExternalsResult, DebugExternalsRangeReaderState, DisplayMessageGroup, ExternalKey,
-    ExternalsReader, FinalizedExternalsReader, GetNextMessageGroupMode, InternalsPartitionReader,
-    InternalsPartitionReaderState, ReaderState,
+    CollectExternalsResult, DisplayMessageGroup, ExternalsReader, FinalizedExternalsReader,
+    GetNextMessageGroupMode, InternalsPartitionReader,
 };
 use crate::collator::types::AnchorsCache;
 use crate::internal_queue::types::{EnqueuedMessage, PartitionRouter};

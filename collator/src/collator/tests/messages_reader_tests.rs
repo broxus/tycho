@@ -18,11 +18,12 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use super::{
     CumulativeStatsCalcParams, FinalizedMessagesReader, GetNextMessageGroupMode, MessagesReader,
-    MessagesReaderContext, ReaderState,
+    MessagesReaderContext,
 };
 use crate::collator::MsgsExecutionParamsStuff;
 use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::messages_reader::log_remaining_msgs_stats;
+use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::types::{AnchorsCache, CumulativeStatistics, ParsedMessage};
 use crate::internal_queue::types::{
     Bound, DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, QueueShardBoundedRange,
