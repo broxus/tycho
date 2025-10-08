@@ -1,7 +1,8 @@
+use std::mem::MaybeUninit;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use tycho_types::cell::HashBytes;
-use tycho_types::models::{BlockId, ShardIdent, ValidatorDescription};
+use tycho_types::models::{BlockId, ValidatorDescription};
 
 // TODO: Decide how to be with this collator-defined type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,154 +40,258 @@ impl PartialOrd for ValidationSessionId {
     }
 }
 
+pub struct ValidatorEvents {
+    listener: Arc<dyn ValidatorEventsListener>,
+}
+
+impl ValidatorEvents {
+    pub fn new(recorder: Arc<dyn ValidatorEventsListener>) -> Self {
+        Self { listener: recorder }
+    }
+
+    pub fn begin_session(
+        &self,
+        session_id: ValidationSessionId,
+        first_mc_seqno: u32,
+        validators: &[ValidatorDescription],
+    ) -> ValidatorSessionScope {
+        self.listener
+            .on_session_started(session_id, first_mc_seqno, validators);
+        ValidatorSessionScope {
+            recorder: self.listener.clone(),
+            session_id,
+            validator_count: validators.len(),
+            is_sealed: AtomicBool::new(false),
+        }
+    }
+}
+
+pub struct ValidatorSessionScope {
+    recorder: Arc<dyn ValidatorEventsListener>,
+    session_id: ValidationSessionId,
+    validator_count: usize,
+    is_sealed: AtomicBool,
+}
+
+impl ValidatorSessionScope {
+    pub fn begin_block(&self, block_id: &BlockId) -> BlockValidationScope {
+        BlockValidationScope {
+            recorder: self.recorder.clone(),
+            session_id: self.session_id,
+            block_id: *block_id,
+            signature_slots: vec![0; self.validator_count]
+                .into_iter()
+                .map(AtomicU8::new)
+                .collect::<Box<[_]>>(),
+            is_sealed: AtomicBool::new(false),
+        }
+    }
+
+    pub fn finish(&self) {
+        if self.seal() {
+            self.recorder.on_session_finished(self.session_id);
+        }
+    }
+
+    fn seal(&self) -> bool {
+        !self.is_sealed.swap(true, Ordering::Release)
+    }
+}
+
+impl Drop for ValidatorSessionScope {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+pub struct BlockValidationScope {
+    recorder: Arc<dyn ValidatorEventsListener>,
+    session_id: ValidationSessionId,
+    block_id: BlockId,
+    signature_slots: Box<[AtomicU8]>,
+    is_sealed: AtomicBool,
+}
+
+impl BlockValidationScope {
+    pub fn session_id(&self) -> ValidationSessionId {
+        self.session_id
+    }
+
+    pub fn block_id(&self) -> &BlockId {
+        &self.block_id
+    }
+
+    pub fn receive_signature(&self, validator_idx: u16, is_valid: bool) -> bool {
+        let mask = if is_valid {
+            ReceivedSignature::VALID_SIGNATURE_BIT
+        } else {
+            ReceivedSignature::INVALID_SIGNATURE_BIT
+        };
+
+        if let Some(status) = self.signature_slots.get(validator_idx as usize) {
+            status.fetch_or(mask, Ordering::Release) & mask == 0
+        } else {
+            false
+        }
+    }
+
+    pub fn commit(&self) -> bool {
+        if self.seal() {
+            // TODO: Use some unsafe magic to make this closer to a NOOP.
+            let mut signatures = Arc::new_uninit_slice(self.signature_slots.len());
+            for (res, slot) in std::iter::zip(
+                Arc::get_mut(&mut signatures).unwrap(),
+                &self.signature_slots,
+            ) {
+                *res = MaybeUninit::new(ReceivedSignature(slot.load(Ordering::Acquire)));
+            }
+            // SAFETY: All items were initialized.
+            let signatures = unsafe { signatures.assume_init() };
+
+            self.recorder
+                .on_block_validated(self.session_id, &self.block_id, signatures);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn discard(&self) -> bool {
+        if self.seal() {
+            self.recorder
+                .on_block_skipped(self.session_id, &self.block_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn seal(&self) -> bool {
+        !self.is_sealed.swap(true, Ordering::Release)
+    }
+}
+
+impl Drop for BlockValidationScope {
+    fn drop(&mut self) {
+        self.discard();
+    }
+}
+
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+pub struct ReceivedSignature(u8);
+
+impl ReceivedSignature {
+    const VALID_SIGNATURE_BIT: u8 = 0b01;
+    const INVALID_SIGNATURE_BIT: u8 = 0b10;
+
+    pub fn has_valid_signature(&self) -> bool {
+        self.0 & Self::VALID_SIGNATURE_BIT != 0
+    }
+
+    pub fn has_invalid_signature(&self) -> bool {
+        self.0 & Self::INVALID_SIGNATURE_BIT != 0
+    }
+}
+
 /// Unified event-sink interface for the validator.
 ///
 /// Implementations can decide whether to perform work inline or forward the
-/// event into an async task / channel.  No async methods are used here to keep
+/// event into an async task / channel. No async methods are used here to keep
 /// the trait usable in both sync and async contexts.
 pub trait ValidatorEventsListener: Send + Sync + 'static {
     /// Called exactly once when a new validation session is created.
-    fn on_session_started(&self, event: SessionStartedEvent<'_>);
+    fn on_session_started(
+        &self,
+        session_id: ValidationSessionId,
+        first_mc_seqno: u32,
+        validators: &[ValidatorDescription],
+    );
 
-    /// Called when the session dropped.
-    fn on_session_dropped(&self, sid: ValidationSessionId);
+    /// Called when the session is complete.
+    fn on_session_finished(&self, session_id: ValidationSessionId);
 
-    /// Called when block validation is started.
-    fn on_validation_started(&self, sid: ValidationSessionId, block_id: &BlockId);
-
-    /// Called for every signature event.
-    ///
-    /// Each unique (`block_id`, `peer_id`) pair is reported at most twice:
-    /// * first with [`SignatureStatus::Invalid`], if the first check failed;
-    /// * later with [`SignatureStatus::Valid`], if a correct signature is eventually received.
-    fn on_validation_event(&self, event: ValidationEvent<'_>);
+    /// Called when validation is complete for a block.
+    fn on_block_validated(
+        &self,
+        session_id: ValidationSessionId,
+        block_id: &BlockId,
+        signatures: Arc<[ReceivedSignature]>,
+    );
 
     /// Called when validation is skipped for a block.
-    fn on_validation_skipped(&self, sid: ValidationSessionId, block_id: &BlockId);
-
-    /// Called when validation is completed for a block.
-    fn on_validation_complete(&self, sid: ValidationSessionId, block_id: &BlockId);
+    fn on_block_skipped(&self, session_id: ValidationSessionId, block_id: &BlockId);
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct SessionStartedEvent<'a> {
-    /// Session id.
-    pub session_id: ValidationSessionId,
-    /// Session shard.
-    pub shard_ident: ShardIdent,
-    /// Validation range start.
-    pub start_block_seqno: u32,
-    /// Validator set entries (in the same order).
-    pub validators: &'a [ValidatorDescription],
+pub struct NoopValidatorEventsRecorder;
+
+impl ValidatorEventsListener for NoopValidatorEventsRecorder {
+    fn on_session_started(
+        &self,
+        _session_id: ValidationSessionId,
+        _first_mc_seqno: u32,
+        _validators: &[ValidatorDescription],
+    ) {
+    }
+
+    fn on_session_finished(&self, _session_id: ValidationSessionId) {}
+
+    fn on_block_validated(
+        &self,
+        _session_id: ValidationSessionId,
+        _block_id: &BlockId,
+        _signatures: Arc<[ReceivedSignature]>,
+    ) {
+    }
+
+    fn on_block_skipped(&self, _session_id: ValidationSessionId, _block_id: &BlockId) {}
 }
 
-/// A single signature-related event.
-#[derive(Debug, Clone, Copy)]
-pub struct ValidationEvent<'a> {
-    /// Session id.
-    pub session_id: ValidationSessionId,
-    /// Validated block id.
-    pub block_id: &'a BlockId,
-    /// Validator whose signature we processed (may be our own node).
-    pub peer_id: &'a HashBytes,
-    /// Whether the signature was valid or invalid.
-    pub signature_status: SignatureStatus,
-    /// Whether the signature was received before the validation start.
-    pub from_cache: bool,
-}
-
-/// Result of signature verification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignatureStatus {
-    /// Signature has been verified and is correct.
-    Valid,
-    /// Signature is present but failed verification.
-    Invalid,
-}
-
-// === Basic Impl ===
-
-macro_rules! impl_listener_for_wrappers {
-    ($($t:ident => $ty:ty),*$(,)?) => {
-        $(impl<$t: ValidatorEventsListener> ValidatorEventsListener for $ty {
-            fn on_session_started(&self, event: SessionStartedEvent<'_>) {
-                <$t>::on_session_started(self, event);
-            }
-
-            fn on_session_dropped(&self, sid: ValidationSessionId) {
-                <$t>::on_session_dropped(self, sid)
-            }
-
-            fn on_validation_started(&self, sid: ValidationSessionId, block_id: &BlockId) {
-                <$t>::on_validation_started(self, sid, block_id)
-            }
-
-            fn on_validation_event(&self, event: ValidationEvent<'_>) {
-                <$t>::on_validation_event(self, event)
-            }
-
-            fn on_validation_skipped(&self, sid: ValidationSessionId, block_id: &BlockId) {
-                <$t>::on_validation_skipped(self, sid, block_id)
-            }
-
-            fn on_validation_complete(&self, sid: ValidationSessionId, block_id: &BlockId) {
-                <$t>::on_validation_complete(self, sid, block_id)
-            }
-        })*
-    };
-}
-
-impl_listener_for_wrappers! {
-    T => Box<T>,
-    T => Arc<T>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct NoopValidatorEventsListener;
-
-impl ValidatorEventsListener for NoopValidatorEventsListener {
-    fn on_session_started(&self, _event: SessionStartedEvent<'_>) {}
-    fn on_session_dropped(&self, _sid: ValidationSessionId) {}
-    fn on_validation_started(&self, _sid: ValidationSessionId, _block_id: &BlockId) {}
-    fn on_validation_event(&self, _event: ValidationEvent<'_>) {}
-    fn on_validation_skipped(&self, _sid: ValidationSessionId, _block_id: &BlockId) {}
-    fn on_validation_complete(&self, _sid: ValidationSessionId, _block_id: &BlockId) {}
-}
-
-macro_rules! impl_listener_for_tuples {
+macro_rules! impl_recorder_for_tuples {
     ($(($($ty:ident: $n:tt),+)),*$(,)?) => {
         $(impl<$($ty),+> ValidatorEventsListener for ($($ty,)+)
         where
             $($ty: ValidatorEventsListener,)+
         {
-            fn on_session_started(&self, event: SessionStartedEvent<'_>) {
-                $(self.$n.on_session_started(event);)+
+            fn on_session_started(
+                &self,
+                session_id: ValidationSessionId,
+                first_mc_seqno: u32,
+                validators: &[ValidatorDescription],
+            ) {
+                $(self.$n.on_session_started(session_id, first_mc_seqno, validators);)+
             }
 
-            fn on_session_dropped(&self, sid: ValidationSessionId) {
-                $(self.$n.on_session_dropped(sid);)+
+            fn on_session_finished(&self, session_id: ValidationSessionId) {
+                $(self.$n.on_session_finished(session_id);)+
             }
 
-            fn on_validation_started(&self, sid: ValidationSessionId, block_id: &BlockId) {
-                $(self.$n.on_validation_started(sid, block_id);)+
+            fn on_block_validated(
+                &self,
+                session_id: ValidationSessionId,
+                block_id: &BlockId,
+                signatures: Arc<[ReceivedSignature]>,
+            ) {
+                impl_recorder_for_tuples!(@call_on_validated self, session_id, block_id, signatures, $($n)+);
             }
 
-            fn on_validation_event(&self, event: ValidationEvent<'_>) {
-                $(self.$n.on_validation_event(event);)+
-            }
-
-            fn on_validation_skipped(&self, sid: ValidationSessionId, block_id: &BlockId) {
-                $(self.$n.on_validation_skipped(sid, block_id);)+
-            }
-
-            fn on_validation_complete(&self, sid: ValidationSessionId, block_id: &BlockId) {
-                $(self.$n.on_validation_complete(sid, block_id);)+
+            fn on_block_skipped(&self, session_id: ValidationSessionId, block_id: &BlockId) {
+                $(self.$n.on_block_skipped(session_id, block_id);)+
             }
         })*
     };
+
+    (@call_on_validated $self:ident, $sid:ident, $block_id:ident, $signatures:ident, $n:tt $($rest:tt)+) => {
+        $self.$n.on_block_validated($sid, $block_id, $signatures.clone());
+        impl_recorder_for_tuples!(@call_on_validated $self, $sid, $block_id, $signatures, $($rest)+)
+    };
+    (@call_on_validated $self:ident, $sid:ident, $block_id:ident, $signatures:ident, $n:tt) => {
+        $self.$n.on_block_validated($sid, $block_id, $signatures);
+    };
 }
 
-impl_listener_for_tuples! {
+impl_recorder_for_tuples! {
     (T0: 0),
     (T0: 0, T1: 1),
     (T0: 0, T1: 1, T2: 2),

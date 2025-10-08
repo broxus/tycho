@@ -4186,11 +4186,14 @@ dependencies = [
 name = "tycho-slasher"
 version = "0.3.4"
 dependencies = [
+ "anyhow",
+ "arc-swap",
  "metrics",
  "parking_lot",
  "scopeguard",
  "tokio",
  "tracing",
+ "tycho-crypto",
  "tycho-slasher-traits",
  "tycho-types",
  "tycho-util",
