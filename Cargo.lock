@@ -4082,13 +4082,14 @@ dependencies = [
 
 [[package]]
 name = "tycho-slasher"
-version = "0.2.12"
+version = "0.3.2"
 dependencies = [
  "metrics",
  "parking_lot",
  "scopeguard",
  "tokio",
  "tracing",
+ "tycho-crypto",
  "tycho-slasher-traits",
  "tycho-types",
  "tycho-util",
@@ -4096,7 +4097,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-slasher-traits"
-version = "0.2.12"
+version = "0.3.2"
 dependencies = [
  "tycho-types",
 ]
