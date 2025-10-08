@@ -1,6 +1,6 @@
 pub use self::validator::{
-    NoopValidatorEventsListener, SessionStartedEvent, SignatureStatus, ValidationEvent,
-    ValidationSessionId, ValidatorEventsListener,
+    BlockValidationScope, NoopValidatorEventsRecorder, ReceivedSignature, ValidationSessionId,
+    ValidatorEvents, ValidatorEventsListener, ValidatorSessionScope,
 };
 
 mod validator;

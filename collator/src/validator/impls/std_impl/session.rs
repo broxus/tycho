@@ -1,8 +1,8 @@
 use std::fmt;
 use std::future::IntoFuture;
 use std::pin::{Pin, pin};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 
 use anyhow::Result;
@@ -16,8 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
-use tycho_slasher_traits::{SignatureStatus, ValidationEvent, ValidatorEventsListener};
-use tycho_types::cell::HashBytes;
+use tycho_slasher_traits::{BlockValidationScope, ValidatorEvents, ValidatorSessionScope};
 use tycho_types::models::*;
 use tycho_util::FastHashMap;
 use tycho_util::futures::JoinTask;
@@ -62,13 +61,13 @@ impl ValidatorSession {
         key_pair: Arc<KeyPair>,
         config: &ValidatorStdImplConfig,
         info: AddSession<'_>,
-        listeners: Arc<dyn ValidatorEventsListener>,
+        events: &ValidatorEvents,
     ) -> Result<Self> {
         // Prepare a map with other validators
         let mut validators = FastHashMap::default();
-        for descr in info.validators {
+        for (i, descr) in info.validators.iter().enumerate() {
             // TODO: Skip invalid entries? But what should we do with the total weight?
-            let validator_info = BriefValidatorDescr::try_from(descr)?;
+            let validator_info = BriefValidatorDescr::from_descr(i as u16, descr)?;
             validators.insert(validator_info.peer_id, validator_info);
         }
 
@@ -76,14 +75,21 @@ impl ValidatorSession {
         let weight_threshold = max_weight.saturating_mul(2) / 3 + 1;
 
         let peer_id = net_context.network.peer_id();
-        let own_weight = match validators.remove(peer_id) {
-            Some(info) => info.weight,
+        let (own_weight, own_validator_idx) = match validators.remove(peer_id) {
+            Some(info) => (info.weight, info.validator_idx),
             None => anyhow::bail!("node is not in the validator set"),
         };
 
         // NOTE: At this point we are sure that our node is in the validator set
 
         let peer_ids = validators.values().map(|v| v.peer_id).collect::<Vec<_>>();
+
+        // Create events scope
+        let events_scope = events.begin_session(
+            info.session_id.into(),
+            info.start_block_seqno,
+            info.validators,
+        );
 
         // Create the session state
         let state = Arc::new(SessionState {
@@ -94,8 +100,7 @@ impl ValidatorSession {
             cached_signatures: TreeIndex::new(),
             cancelled: AtomicBool::new(false),
             cancelled_signal: Notify::new(),
-            listener: listeners.clone(),
-            session_id: info.session_id,
+            events_scope,
         });
 
         // Create the private overlay
@@ -129,9 +134,9 @@ impl ValidatorSession {
                 key_pair,
                 peer_id: *peer_id,
                 own_weight,
+                own_validator_idx,
                 state,
                 min_seqno: AtomicU32::new(info.start_block_seqno),
-                listener: listeners,
             }),
         };
 
@@ -153,6 +158,7 @@ impl ValidatorSession {
     }
 
     pub fn cancel(&self) {
+        self.inner.state.events_scope.finish();
         self.inner.state.cancelled.store(true, Ordering::Release);
         self.inner.state.cancelled_signal.notify_waiters();
     }
@@ -186,9 +192,14 @@ impl ValidatorSession {
 
         debug_assert_eq!(self.inner.state.shard_ident, block_id.shard);
 
-        self.inner
-            .listener
-            .on_validation_started(self.inner.session_id.into(), block_id);
+        let events_scope = scopeguard::guard(
+            Arc::new(self.inner.state.events_scope.begin_block(block_id)),
+            |scope| {
+                // Discard block if parent (this) future was cancelled.
+                // Due to spawned tasks we need to explicitly call this method.
+                scope.discard();
+            },
+        );
 
         self.inner
             .min_seqno
@@ -206,8 +217,8 @@ impl ValidatorSession {
 
         // Prepare block signatures
         let block_signatures = match &cached {
-            Some(cached) => self.reuse_signatures(block_id, cached.clone()).await,
-            None => self.prepare_new_signatures(block_id),
+            Some(cached) => self.reuse_signatures(block_id, &events_scope, cached).await,
+            None => self.prepare_new_signatures(block_id, &events_scope),
         }
         .build(block_id, state.weight_threshold);
 
@@ -243,14 +254,7 @@ impl ValidatorSession {
         );
 
         // Notify listeners about the own signature
-        self.inner.listener.on_validation_event(ValidationEvent {
-            session_id: self.id().into(),
-            block_id,
-            peer_id: HashBytes::wrap(self.inner.client.peer_id().as_bytes()),
-            signature_status: SignatureStatus::Valid,
-            // NOTE: Treat own signature as newly created.
-            from_cache: false,
-        });
+        events_scope.receive_signature(self.inner.own_validator_idx, true);
 
         let mut total_weight = self.inner.own_weight;
 
@@ -327,6 +331,8 @@ impl ValidatorSession {
             total_weight += validator_info.weight;
         }
 
+        scopeguard::ScopeGuard::into_inner(events_scope).commit();
+
         tracing::info!(target: tracing_targets::VALIDATOR, "finished");
         Ok(ValidationStatus::Complete(ValidationComplete {
             signatures: result,
@@ -334,7 +340,11 @@ impl ValidatorSession {
         }))
     }
 
-    fn prepare_new_signatures(&self, block_id: &BlockId) -> BlockSignaturesBuilder {
+    fn prepare_new_signatures(
+        &self,
+        block_id: &BlockId,
+        events_scope: &Arc<BlockValidationScope>,
+    ) -> BlockSignaturesBuilder {
         let data = Block::build_data_for_sign(block_id);
 
         // Prepare our own signature
@@ -362,13 +372,15 @@ impl ValidatorSession {
             own_signature,
             other_signatures,
             total_weight: self.inner.own_weight,
+            events_scope: Arc::downgrade(events_scope),
         }
     }
 
     async fn reuse_signatures(
         &self,
         block_id: &BlockId,
-        cached: Arc<CachedSignatures>,
+        events_scope: &Arc<BlockValidationScope>,
+        cached: &Arc<CachedSignatures>,
     ) -> BlockSignaturesBuilder {
         let data = Block::build_data_for_sign(block_id);
         let block_id = *block_id;
@@ -377,9 +389,9 @@ impl ValidatorSession {
         let my_peer_id = self.inner.peer_id;
         let validators = self.inner.state.validators.clone();
         let mut total_weight = self.inner.own_weight;
-        let session_id = self.id();
         let span = tracing::Span::current();
-        let listeners = self.inner.listener.clone();
+        let events_scope = Arc::downgrade(events_scope);
+        let cached = cached.clone();
         tycho_util::sync::rayon_run(move || {
             let _span = span.enter();
 
@@ -408,14 +420,7 @@ impl ValidatorSession {
                     };
 
                     let validator_info = validators.get(peer_id).expect("peer info out of sync");
-
-                    let mut signature_event = ValidationEvent {
-                        session_id: session_id.into(),
-                        block_id: &block_id,
-                        peer_id: HashBytes::wrap(peer_id.as_bytes()),
-                        signature_status: SignatureStatus::Valid,
-                        from_cache: true,
-                    };
+                    let validator_idx = validator_info.validator_idx;
 
                     if !validator_info.public_key.verify_raw(&data, &signature) {
                         tracing::warn!(
@@ -432,14 +437,16 @@ impl ValidatorSession {
 
                         metrics::counter!(METRIC_INVALID_SIGNATURES_CACHED_TOTAL).increment(1);
 
-                        signature_event.signature_status = SignatureStatus::Invalid;
-                        listeners.on_validation_event(signature_event);
+                        if let Some(scope) = events_scope.upgrade() {
+                            scope.receive_signature(validator_idx, false);
+                        }
 
-                        // TODO: Somehow mark that this validator sent an invalid signature?
                         break 'stored Default::default();
                     }
 
-                    listeners.on_validation_event(signature_event);
+                    if let Some(scope) = events_scope.upgrade() {
+                        scope.receive_signature(validator_idx, true);
+                    }
 
                     total_weight += validator_info.weight;
                     Some(signature)
@@ -452,6 +459,7 @@ impl ValidatorSession {
                 own_signature,
                 other_signatures,
                 total_weight,
+                events_scope,
             }
         })
         .await
@@ -482,6 +490,7 @@ impl fmt::Debug for DebugLogValidatorSesssion<'_> {
             .field("session_id", &self.0.inner.session_id)
             .field("public_key", &self.0.inner.key_pair.public_key)
             .field("peer_id", &self.0.inner.peer_id)
+            .field("own_validator_idx", &self.0.inner.own_validator_idx)
             .field("own_weight", &self.0.inner.own_weight)
             .field("weight_threshold", &self.0.inner.state.weight_threshold)
             .field("start_block_seqno", &self.0.inner.start_block_seqno)
@@ -498,10 +507,10 @@ struct Inner {
     client: ValidatorClient,
     key_pair: Arc<KeyPair>,
     peer_id: PeerId,
+    own_validator_idx: u16,
     own_weight: u64,
     state: Arc<SessionState>,
     min_seqno: AtomicU32,
-    listener: Arc<dyn ValidatorEventsListener>,
 }
 
 impl Inner {
@@ -639,8 +648,6 @@ impl Drop for Inner {
             session_id = ?self.session_id,
             "validator session dropped"
         );
-
-        self.listener.on_session_dropped(self.session_id.into());
     }
 }
 
@@ -652,8 +659,7 @@ struct SessionState {
     cached_signatures: TreeIndex<u32, Arc<CachedSignatures>>,
     cancelled: AtomicBool,
     cancelled_signal: Notify,
-    listener: Arc<dyn ValidatorEventsListener>,
-    session_id: ValidationSessionId,
+    events_scope: ValidatorSessionScope,
 }
 
 impl SessionState {
@@ -674,14 +680,6 @@ impl SessionState {
         let data = Block::build_data_for_sign(&block.block_id);
 
         let validator_info = self.validators.get(peer_id).expect("peer info out of sync");
-        let mut signature_event = ValidationEvent {
-            session_id: self.session_id.into(),
-            block_id: &block.block_id,
-            peer_id: HashBytes::wrap(peer_id.as_bytes()),
-            signature_status: SignatureStatus::Valid,
-            from_cache: false,
-        };
-
         if !validator_info
             .public_key
             .verify_raw(&data, signature.as_ref())
@@ -700,8 +698,9 @@ impl SessionState {
             // TODO: Collect statistics on invalid signatures to slash the malicious validator
             metrics::counter!(METRIC_INVALID_SIGNATURES_IN_TOTAL).increment(1);
 
-            signature_event.signature_status = SignatureStatus::Invalid;
-            self.listener.on_validation_event(signature_event);
+            if let Some(scope) = block.events_scope.upgrade() {
+                scope.receive_signature(validator_info.validator_idx, false);
+            }
 
             return Err(ValidationError::InvalidSignature);
         }
@@ -737,8 +736,11 @@ impl SessionState {
             block.validated.load(Ordering::Relaxed)
         };
 
-        if record_event && !was_sealed {
-            self.listener.on_validation_event(signature_event);
+        if record_event
+            && !was_sealed
+            && let Some(scope) = block.events_scope.upgrade()
+        {
+            scope.receive_signature(validator_info.validator_idx, true);
         }
 
         Ok(())
@@ -754,6 +756,7 @@ struct BlockSignaturesBuilder {
     own_signature: Arc<[u8; 64]>,
     other_signatures: SignatureSlotsMap,
     total_weight: u64,
+    events_scope: Weak<BlockValidationScope>,
 }
 
 impl BlockSignaturesBuilder {
@@ -767,6 +770,7 @@ impl BlockSignaturesBuilder {
             total_weight: AtomicU64::new(self.total_weight),
             validated: AtomicBool::new(self.total_weight >= weight_threshold),
             cancelled: CancellationToken::new(),
+            events_scope: self.events_scope,
         })
     }
 }
@@ -778,6 +782,7 @@ struct BlockSignatures {
     total_weight: AtomicU64,
     validated: AtomicBool,
     cancelled: CancellationToken,
+    events_scope: Weak<BlockValidationScope>,
 }
 
 impl Drop for BlockSignatures {

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use tokio::task::AbortHandle;
+use tycho_crypto::ed25519;
 use tycho_slasher_traits::ValidatorEventsListener;
+use tycho_types::prelude::*;
 
 use self::collector::ValidatorEventsCollector;
 
@@ -12,18 +14,28 @@ pub mod collector {
     // TODO: mod mempool_events;
 }
 
+mod util;
+
+pub struct SlasherParams {
+    pub node_keys: Arc<ed25519::KeyPair>,
+    pub initial_mc_seqno: u32,
+}
+
 // NOTE: Stub
 pub struct Slasher {
+    #[allow(unused)]
+    node_keys: Arc<ed25519::KeyPair>,
     validator_events_collector: Arc<ValidatorEventsCollector>,
     validator_events_task_handle: AbortHandle,
 }
 
 impl Slasher {
-    pub fn new() -> Self {
+    pub fn new(node_keys: Arc<ed25519::KeyPair>) -> Self {
         let collector = Arc::new(ValidatorEventsCollector::default());
         let collector_task = tokio::task::spawn(process_validator_events(collector.clone()));
 
         Self {
+            node_keys,
             validator_events_collector: collector,
             validator_events_task_handle: collector_task.abort_handle(),
         }
@@ -51,11 +63,11 @@ async fn process_validator_events(collector: Arc<ValidatorEventsCollector>) {
 
     let mut latest_block_seqno = collector.subscribe_to_latest_block_seqno();
 
+    // TODO: Use more sensible initial seqno.
     let mut processed_upto = 0u32;
     let mut buffer = Vec::with_capacity(BATCH_STEP as _);
     loop {
-        let current_seqno = *latest_block_seqno.borrow_and_update();
-        if current_seqno <= processed_upto + BATCH_STEP {
+        if *latest_block_seqno.borrow_and_update() <= processed_upto + BATCH_STEP {
             latest_block_seqno
                 .changed()
                 .await
@@ -64,10 +76,20 @@ async fn process_validator_events(collector: Arc<ValidatorEventsCollector>) {
         }
 
         buffer.clear();
-        collector.take_batch(current_seqno, &mut buffer);
+        collector.take_batch(processed_upto + BATCH_STEP, &mut buffer);
+        buffer.retain(|item| item.seqno > processed_upto);
+
+        let mut buffer = buffer.as_slice();
+        while let Some(first) = buffer.first() {
+            let session_id = first.session_id;
+            let batch_size = buffer
+                .iter()
+                .take_while(|item| item.session_id == session_id)
+                .count();
+        }
 
         // TODO: Build a voting matrix from completed blocks
 
-        processed_upto = current_seqno;
+        processed_upto += BATCH_STEP;
     }
 }
