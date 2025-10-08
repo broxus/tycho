@@ -30,6 +30,20 @@ pub struct RoundTaskState {
     pub responder: Responder,
     pub downloader: Downloader,
 }
+impl RoundTaskState {
+    pub fn init_responder(&self, head: &DagHead, round_ctx: &RoundCtx) {
+        self.responder.init(
+            &self.store,
+            &self.consensus_round,
+            &self.peer_schedule,
+            &self.downloader,
+            head,
+            round_ctx,
+            #[cfg(feature = "mock-feedback")]
+            &self.top_known_anchor,
+        );
+    }
+}
 
 pub struct RoundTaskReady {
     pub state: RoundTaskState,
@@ -53,14 +67,6 @@ impl RoundTaskReady {
             &net.peer_schedule,
             consensus_round.receiver(),
             conf,
-        );
-        net.responder.init(
-            store,
-            consensus_round,
-            &net.peer_schedule,
-            &downloader,
-            #[cfg(feature = "mock-feedback")]
-            &bind.top_known_anchor,
         );
         Self {
             state: RoundTaskState {

@@ -355,6 +355,10 @@ impl Engine {
             start_span.in_scope(|| tracing::warn!("mempool engine run stopped"));
         });
         let mut round_ctx = RoundCtx::new(&self.ctx, self.dag.top().round());
+        self.round_task.state.init_responder(
+            &self.dag.head(&self.round_task.state.peer_schedule), // reproducible first loop
+            &round_ctx,
+        );
         let db_clean_task: Task<Never> = self.db_cleaner.new_task(
             self.round_task.state.consensus_round.receiver(),
             self.round_task.state.top_known_anchor.receiver(),
