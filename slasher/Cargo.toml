@@ -11,11 +11,14 @@ license.workspace = true
 
 [dependencies]
 # crates.io deps
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
-scopeguard = { workspace = true}
+scopeguard = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
+tycho-crypto = { workspace = true }
 tycho-types = { workspace = true }
 
 # local deps
