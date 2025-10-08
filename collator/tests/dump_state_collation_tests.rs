@@ -129,7 +129,7 @@ async fn test_collation_process_on_dump() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
     tycho_util::test::init_logger("test_collation_process_on_dump", "debug");
 
-    let dump_path = Path::new("../test/data/dump_1_8000000000000000_373/"); // TODO: insert real dump
+    let dump_path = Path::new("../test/data/dump/"); // TODO: insert real dump
 
     let (storage, mq_adapter, _temp_dir, mc_block_id) =
         load_storage_from_dump(dump_path).await.unwrap();
@@ -242,7 +242,7 @@ async fn test_collation_process_on_dump() {
             println!();
             println!("Ctrl-C received, shutting down the test");
         },
-        _ = tokio::time::sleep(tokio::time::Duration::from_secs(200)) => {
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
             println!();
             println!("Test timeout elapsed");
         }
