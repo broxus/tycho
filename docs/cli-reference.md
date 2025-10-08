@@ -57,6 +57,7 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho tool bc gen-proposal set-elector-code`↴](#tycho-tool-bc-gen-proposal-set-elector-code)
 * [`tycho tool bc gen-proposal set-config-code`↴](#tycho-tool-bc-gen-proposal-set-config-code)
 * [`tycho tool bc gen-proposal-vote`↴](#tycho-tool-bc-gen-proposal-vote)
+* [`tycho tool check-cells-db`↴](#tycho-tool-check-cells-db)
 * [`tycho elect`↴](#tycho-elect)
 * [`tycho elect run`↴](#tycho-elect-run)
 * [`tycho elect once`↴](#tycho-elect-once)
@@ -604,6 +605,7 @@ Work with blockchain stuff
 * `gen-zerostate` — Generate a zero state for a network
 * `gen-account` — Generate an account state
 * `bc` — Blockchain stuff
+* `check-cells-db` — Check that the cells database is consistent
 
 
 
@@ -973,6 +975,19 @@ Create proposal voting payload
 
 
 
+## `tycho tool check-cells-db`
+
+Check that the cells database is consistent
+
+**Usage:** `tycho tool check-cells-db [OPTIONS] --cells-db-path <CELLS_DB_PATH>`
+
+###### **Options:**
+
+* `-c`, `--cells-db-path <CELLS_DB_PATH>` — Path to the cells database directory
+* `--temp-dir-path <TEMP_DIR_PATH>` — Optional path for the temporary directory
+
+
+
 ## `tycho elect`
 
 Participate in validator elections
@@ -1161,4 +1176,3 @@ Print a CLI help for all subcommands as Markdown
     This document was generated automatically by
     <a href="https://crates.io/crates/clap-markdown"><code>clap-markdown</code></a>.
 </i></small>
-
