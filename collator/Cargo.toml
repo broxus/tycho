@@ -23,6 +23,10 @@ required-features = ["test"]
 name = "collation_tests"
 required-features = ["test"]
 
+[[test]]
+name = "dump_state_collation_tests"
+required-features = ["test"]
+
 [dependencies]
 # crates.io deps
 ahash = { workspace = true }
