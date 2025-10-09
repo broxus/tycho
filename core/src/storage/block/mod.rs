@@ -39,7 +39,7 @@ pub struct BlockStorage {
     block_connection_storage: Arc<BlockConnectionStorage>,
     block_subscriptions: SlotSubscriptions<BlockId, BlockStuff>,
     store_block_data: tokio::sync::RwLock<()>,
-    pub(crate) blob_storage: blobs::BlobStorage,
+    pub(crate) blob_storage: Arc<blobs::BlobStorage>,
 }
 
 impl BlockStorage {
@@ -73,7 +73,8 @@ impl BlockStorage {
             &config.blobs_root,
             config.blob_db_config.pre_create_cas_tree,
         )
-        .await?;
+        .await
+        .map(Arc::new)?;
 
         Ok(Self {
             blocks_cache,
@@ -471,14 +472,20 @@ impl BlockStorage {
         let BlockGcStats {
             mc_blocks_removed,
             total_blocks_removed,
-        } = blobs::remove_blocks(
-            self.blob_storage.db().clone(),
-            &self.blob_storage,
-            max_blocks_per_batch,
-            mc_seqno,
-            shard_heights,
-            Some(&cancelled),
-        )?;
+        } = tokio::task::spawn_blocking({
+            let blob_storage = self.blob_storage.clone();
+            let cancelled = cancelled.clone();
+            move || {
+                blobs::remove_blocks(
+                    &blob_storage,
+                    max_blocks_per_batch,
+                    mc_seqno,
+                    shard_heights,
+                    Some(&cancelled),
+                )
+            }
+        })
+        .await??;
 
         tracing::info!(
             total_cached_handles_removed,
@@ -717,7 +724,6 @@ mod tests {
 
         // Remove some blocks
         let stats = blobs::remove_blocks(
-            blocks.db().clone(),
             &blocks.blob_storage,
             None,
             70,
@@ -769,7 +775,6 @@ mod tests {
 
         // Remove single block
         let stats = blobs::remove_blocks(
-            blocks.db().clone(),
             &blocks.blob_storage,
             None,
             71,
@@ -783,7 +788,6 @@ mod tests {
 
         // Remove no blocks
         let stats = blobs::remove_blocks(
-            blocks.db().clone(),
             &blocks.blob_storage,
             None,
             71,
