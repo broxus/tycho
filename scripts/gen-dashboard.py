@@ -2527,7 +2527,21 @@ def validator() -> RowPanel:
 
 def mempool_onchain_stats_and_bans() -> RowPanel:
     label_selectors = ['peer_id=~"$peer_id"']
+    by_labels = ["instance", "peer_id"]
     legend_format = "{{peer_id}} <- {{instance}}"
+    def counter_with_defaults(metric_field, title):
+        return create_counter_panel(
+            expr_sum_increase(
+                f"tycho_mempool_onchain_stats_{metric_field}",
+                label_selectors=label_selectors,
+                range_selector="$__interval",
+                by_labels=by_labels,
+            ),
+            title,
+            labels_selectors=label_selectors,
+            legend_format=legend_format,
+            by_labels=by_labels,
+        )
     metrics = [
         create_gauge_panel(
             "tycho_mempool_moderator_banned",
@@ -2548,6 +2562,22 @@ def mempool_onchain_stats_and_bans() -> RowPanel:
             legend_format="{{instance}} {{kind}} {{peer_id}}",
             by_labels=["instance", "kind", "peer_id"],
         ),
+        create_gauge_panel(
+            "tycho_mempool_onchain_stats_last_round",
+            "Last observed point round",
+            labels=label_selectors,
+            legend_format=legend_format,
+        ),
+        # tycho_mempool_onchain_stats_filled_rounds trust me it's here (suppress check-metrics warn)
+        counter_with_defaults("filled_rounds", "Rounds filled in stats"),
+        counter_with_defaults("was_leader", "Leader role accomplished"),
+        counter_with_defaults("was_not_leader", "Leader role skipped"),
+        counter_with_defaults("skipped_rounds", "Skipped rounds"),
+        counter_with_defaults("valid_points", "Valid points"),
+        counter_with_defaults("equivocated", "Equivocated points"),
+        counter_with_defaults("invalid_points", "Invalid points"),
+        counter_with_defaults("ill_formed_points", "Ill-formed points"),
+        counter_with_defaults("references_skipped", "References skipped"),
     ]
     return create_row("Mempool onchain stats and bans", metrics)
 
