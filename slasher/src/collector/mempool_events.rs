@@ -85,7 +85,7 @@ impl MempoolEventsCache for MempoolStatsCache {
                             match occupied.get_mut().merge_with(&stats) {
                                 Ok(()) => {}
                                 Err(error) => {
-                                    tracing::error!(%error, %peer, "cannot merge stats, skipping");
+                                    panic!("cannot merge stats: {error}, {peer}")
                                 }
                             }
                         }
