@@ -11,7 +11,7 @@ use tracing::Instrument;
 use tycho_consensus::prelude::*;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver};
-use tycho_slasher_traits::MempoolEventsListener;
+use tycho_slasher_traits::{MempoolEventsCache, MempoolEventsListener};
 
 use crate::mempool::impls::common::cache::Cache;
 use crate::mempool::impls::common::v_set_adapter::VSetAdapter;
@@ -29,6 +29,7 @@ pub struct MempoolAdapterStdImpl {
     mempool_db: Arc<MempoolDb>,
     input_buffer: InputBuffer,
     stats_tx: Arc<dyn MempoolEventsListener>,
+    stats_rx: Arc<dyn MempoolEventsCache>,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
 }
 
@@ -48,6 +49,7 @@ impl MempoolAdapterStdImpl {
         mempool_db: Arc<MempoolDb>,
         moderator: Moderator,
         stats_tx: Arc<dyn MempoolEventsListener>,
+        stats_rx: Arc<dyn MempoolEventsCache>,
         mempool_node_config: &MempoolNodeConfig,
     ) -> Result<Self> {
         let config_builder = MempoolConfigBuilder::new(mempool_node_config);
@@ -70,6 +72,7 @@ impl MempoolAdapterStdImpl {
             input_buffer: InputBuffer::default(),
 
             stats_tx,
+            stats_rx,
             top_known_anchor: RoundWatch::default(),
         })
     }
