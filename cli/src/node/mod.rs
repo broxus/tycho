@@ -113,6 +113,7 @@ impl Node {
                     mempool_db,
                     moderator.clone(),
                     slasher.mempool_events_listener(),
+                    slasher.mempool_events_cache(),
                     &node_config.mempool.node,
                 )?),
             };

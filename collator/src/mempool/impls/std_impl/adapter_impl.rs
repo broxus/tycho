@@ -33,12 +33,51 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     }
 
     async fn handle_signed_mc_block(&self, mc_block_seqno: BlockSeqno) -> Result<()> {
-        let mut config_guard = self.config.lock().await;
+        let lower_top_id = self.top_known_anchor.get().0;
 
-        for ctx in config_guard.state_update_queue.signed(mc_block_seqno)? {
-            self.process_state_update(&mut config_guard, &ctx).await?;
-            self.top_known_anchor
-                .set_max_raw(ctx.top_processed_to_anchor_id);
+        let Some(upper_top_id) = ({
+            let mut upper_top_id = None;
+            let mut config_guard = self.config.lock().await;
+
+            for ctx in config_guard.state_update_queue.signed(mc_block_seqno)? {
+                self.process_state_update(&mut config_guard, &ctx).await?;
+                upper_top_id = Some(ctx.top_processed_to_anchor_id);
+                self.top_known_anchor
+                    .set_max_raw(ctx.top_processed_to_anchor_id);
+            }
+
+            upper_top_id
+        }) else {
+            return Ok(());
+        };
+
+        let stats = (self.stats_rx).get_stats(lower_top_id..=upper_top_id).await;
+        for (peer_id, stats) in stats {
+            macro_rules! emit_counters {
+                    ($prefix:literal, $stats:expr, $labels:expr, [ $($field:ident),* $(,)? ]) => {
+                        $(
+                            metrics::counter!(concat!($prefix, stringify!($field)), $labels)
+                                .increment(u64::from($stats.$field));
+                        )*
+                    };
+                }
+            let labels = [("peer_id", format!("{:.4}", peer_id))];
+            metrics::counter!("tycho_mempool_stats_filled_rounds", &labels)
+                .increment(u64::from(stats.filled_rounds()));
+            if let Some(counters) = stats.counters() {
+                metrics::gauge!("tycho_mempool_stats_last_round", &labels)
+                    .set(f64::from(counters.last_round));
+                emit_counters!("tycho_mempool_stats_", counters, &labels, [
+                    was_leader,
+                    was_not_leader,
+                    skipped_rounds,
+                    valid_points,
+                    equivocated,
+                    invalid_points,
+                    ill_formed_points,
+                    references_skipped,
+                ]);
+            }
         }
         Ok(())
     }

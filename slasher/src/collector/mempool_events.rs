@@ -6,7 +6,9 @@ use indexmap::map::Entry as IndexMapEntry;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tycho_network::PeerId;
-use tycho_slasher_traits::{MempoolEventsCache, MempoolEventsListener, MempoolPeerStats};
+use tycho_slasher_traits::{
+    MempoolEventsCache, MempoolEventsListener, MempoolPeerStats, MempoolStatsMergeError,
+};
 use tycho_util::FastHashMap;
 
 type MempoolAnchorId = u32;
@@ -82,12 +84,7 @@ impl MempoolEventsCache for MempoolStatsCache {
                 for (peer, stats) in map_b {
                     match map_a.entry(peer) {
                         HashMapEntry::Occupied(mut occupied) => {
-                            match occupied.get_mut().merge_with(&stats) {
-                                Ok(()) => {}
-                                Err(error) => {
-                                    tracing::error!(%error, %peer, "cannot merge stats, skipping");
-                                }
-                            }
+                            merge_stats(occupied.get_mut(), &stats);
                         }
                         HashMapEntry::Vacant(vacant) => {
                             vacant.insert(stats);
@@ -99,4 +96,20 @@ impl MempoolEventsCache for MempoolStatsCache {
             return reduced.unwrap_or_default();
         }
     }
+}
+
+fn merge_stats(acc: &mut MempoolPeerStats, other: &MempoolPeerStats) {
+    let error = match acc.merge_with(other) {
+        Ok(()) => return,
+        Err(error) => error,
+    };
+    tracing::error!(
+        %error,
+        "cannot merge stats, skipping"
+    );
+    let kind = match error {
+        MempoolStatsMergeError::RoundOutOfOrder(_, _) => "rounds order",
+        MempoolStatsMergeError::OverlappingRanges(_, _) => "ranges overlap",
+    };
+    metrics::counter!("tycho_mempool_stats_merge_errors", "kind" => kind).increment(1);
 }

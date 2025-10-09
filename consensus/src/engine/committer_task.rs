@@ -5,13 +5,13 @@ use std::time::Duration;
 use itertools::Itertools;
 use tokio::sync::mpsc;
 use tokio::time::Interval;
-use tycho_slasher_traits::{MempoolEventsListener, MempoolPeerStats, MempoolStatsMergeError};
+use tycho_slasher_traits::MempoolEventsListener;
 
 use crate::dag::{Committer, HistoryConflict};
 use crate::effects::{AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task};
 use crate::engine::lifecycle::EngineError;
-use crate::engine::{ConsensusConfigExt, EngineResult, MempoolConfig, NodeConfig};
-use crate::models::{AnchorData, MempoolOutput, MempoolStatsOutput, PointInfo, Round};
+use crate::engine::{ConsensusConfigExt, EngineResult, MempoolConfig};
+use crate::models::{AnchorData, MempoolOutput, PointInfo, Round};
 use crate::moderator::Moderator;
 
 pub struct CommitterTask {
@@ -164,12 +164,10 @@ impl State {
                         .map_err(|_closed| Cancelled())?;
                 }
                 // stats should be reported for each round separately - to be grouped by consumer
-                let mut all_stats = Vec::with_capacity(anchor_rounds.len());
                 for anchor_round in anchor_rounds {
                     let (stats, events) =
                         (inner.committer).remove_committed(anchor_round, round_ctx.conf())?;
-                    all_stats.push(stats);
-                    _ = stats_tx; // TODO stats_tx.put_stats(stats.anchor_round.0, stats.data);
+                    stats_tx.put_stats(stats.anchor_round.0, stats.data);
                     for event in events {
                         inner.moderator.report(event);
                     }
@@ -177,7 +175,6 @@ impl State {
                         .send(MempoolOutput::CommitFinished(anchor_round))
                         .map_err(|_closed| Cancelled())?;
                 }
-                round_ctx.meter_stats(all_stats);
             }
 
             EngineCtx::meter_dag_len(inner.committer.dag_len());
@@ -216,74 +213,6 @@ impl RoundCtx {
                 parent: self.span(),
                 "committed {committed}"
             );
-        }
-    }
-
-    fn merge_stats(&self, acc: &mut MempoolPeerStats, other: &MempoolPeerStats) {
-        let error = match acc.merge_with(other) {
-            Ok(()) => return,
-            Err(error) => error,
-        };
-        tracing::error!(
-            parent: self.span(),
-            %error,
-            "ok only after unrecoverable gap"
-        );
-        let kind = match error {
-            MempoolStatsMergeError::RoundOutOfOrder(_, _) => "rounds order",
-            MempoolStatsMergeError::OverlappingRanges(_, _) => "ranges overlap",
-        };
-        metrics::counter!("tycho_mempool_stats_merge_errors", "kind" => kind).increment(1);
-    }
-
-    fn meter_stats(&self, all_stats: Vec<MempoolStatsOutput>) {
-        let reduced = all_stats
-            .into_iter()
-            .map(|stats| stats.data)
-            .reduce(|mut acc, other_map| {
-                for (peer_id, stats) in other_map {
-                    acc.entry(peer_id)
-                        .and_modify(|occupied| self.merge_stats(occupied, &stats))
-                        .or_insert(stats);
-                }
-                acc
-            });
-
-        let Some(reduced) = reduced else {
-            return;
-        };
-
-        if !NodeConfig::get().emit_stats_metrics {
-            return; // reduce anyway to catch merge error
-        }
-
-        macro_rules! emit_counters {
-            ($prefix:literal, $stats:expr, $labels:expr, [ $($field:ident),* $(,)? ]) => {
-                $(
-                    metrics::counter!(concat!($prefix, stringify!($field)), $labels)
-                        .increment(u64::from($stats.$field));
-                )*
-            };
-        }
-
-        for (peer_id, stats) in &reduced {
-            let labels = [("peer_id", format!("{:.4}", peer_id))];
-            metrics::counter!("tycho_mempool_stats_filled_rounds", &labels)
-                .increment(u64::from(stats.filled_rounds()));
-            if let Some(counters) = stats.counters() {
-                metrics::gauge!("tycho_mempool_stats_last_round", &labels)
-                    .set(f64::from(counters.last_round));
-                emit_counters!("tycho_mempool_stats_", counters, &labels, [
-                    was_leader,
-                    was_not_leader,
-                    skipped_rounds,
-                    valid_points,
-                    equivocated,
-                    invalid_points,
-                    ill_formed_points,
-                    references_skipped,
-                ]);
-            }
         }
     }
 }
