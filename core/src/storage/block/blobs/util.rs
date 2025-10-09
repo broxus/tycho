@@ -11,16 +11,16 @@ use weedb::rocksdb;
 use super::super::package_entry::{PackageEntryKey, PartialBlockId};
 use super::BlobStorage;
 use super::types::BlockGcStats;
-use crate::storage::{BlockFlags, CoreDb};
+use crate::storage::BlockFlags;
 
 pub fn remove_blocks(
-    db: CoreDb,
     blob_storage: &BlobStorage,
     max_blocks_per_batch: Option<usize>,
     mc_seqno: u32,
     shard_heights: ShardHeights,
     cancelled: Option<&CancellationFlag>,
 ) -> Result<BlockGcStats> {
+    let db = &blob_storage.db;
     let blocks = blob_storage.blocks().clone();
     let mut stats = BlockGcStats::default();
 
