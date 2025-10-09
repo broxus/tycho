@@ -6,7 +6,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
 use tycho_block_util::block::*;
-use tycho_block_util::dict::split_aug_dict_raw_by_shards;
+use tycho_block_util::dict::{split_aug_dict_raw_by_shards, split_dict_raw};
 use tycho_block_util::state::*;
 use tycho_storage::fs::TempFileStorage;
 use tycho_storage::kv::StoredValue;
@@ -33,7 +33,7 @@ pub type StoragePartsMap = FastHashMap<ShardIdent, Arc<dyn ShardStateStoragePart
 
 #[derive(Debug, Clone)]
 pub struct SplitAccountEntry {
-    pub shard: ShardIdent,
+    pub shard: Option<ShardIdent>,
     pub cell: Cell,
 }
 
@@ -42,8 +42,10 @@ pub trait ShardStateStoragePart: Send + Sync {
     fn cell_storage(&self) -> &Arc<CellStorage>;
     fn store_accounts_subtree(
         &self,
-        cell: &DynCell,
+        block_id: &BlockId,
+        cell: Cell,
         estimated_cell_count: usize,
+        split_depth: u8,
     ) -> Result<usize, CellStorageError>;
     fn remove_accounts_subtree(&self, root_hash: &HashBytes) -> Result<usize, CellStorageError>;
 }
@@ -65,10 +67,12 @@ impl ShardStateStoragePart for ShardStateStoragePartImpl {
 
     fn store_accounts_subtree(
         &self,
-        cell: &DynCell,
+        block_id: &BlockId,
+        cell: Cell,
         estimated_cell_count: usize,
+        split_depth: u8,
     ) -> Result<usize, CellStorageError> {
-        self.store_accounts_subtree_impl(cell, estimated_cell_count)
+        self.store_accounts_subtree_impl(block_id, cell, estimated_cell_count, split_depth)
     }
 
     fn remove_accounts_subtree(&self, root_hash: &HashBytes) -> Result<usize, CellStorageError> {
@@ -100,15 +104,51 @@ impl ShardStateStoragePartImpl {
 
     fn store_accounts_subtree_impl(
         &self,
-        cell: &DynCell,
+        block_id: &BlockId,
+        cell: Cell,
         estimated_cell_count: usize,
+        split_depth: u8,
     ) -> Result<usize, CellStorageError> {
-        let mut batch = rocksdb::WriteBatch::default();
-        let new_cells = self
-            .cell_storage
-            .store_cell(&mut batch, cell, estimated_cell_count)?;
-        self.cells_db.rocksdb().write(batch)?;
-        Ok(new_cells)
+        let raw_db = self.cells_db.rocksdb().clone();
+        let cf = self.cells_db.shard_states.get_unbounded_cf();
+        let cell_storage = self.cell_storage.clone();
+
+        let estimated_update_size_bytes = estimated_cell_count * 192; // p50 cell size in bytes
+        let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
+
+        let split_at = Self::split_accounts_subtree(cell.clone(), split_depth)
+            .map_err(|_err| CellStorageError::InvalidCell)?;
+
+        let new_cell_count = cell_storage.store_cell_mt(
+            block_id,
+            cell.as_ref(),
+            &mut batch,
+            split_at,
+            0,
+            estimated_cell_count,
+        )?;
+
+        batch.put_cf(&cf.bound(), block_id.to_vec(), cell.repr_hash().as_slice());
+
+        raw_db.write(batch)?;
+
+        Ok(new_cell_count)
+    }
+
+    fn split_accounts_subtree(
+        subtree_root_cell: Cell,
+        split_depth: u8,
+    ) -> Result<FastHashMap<HashBytes, SplitAccountEntry>> {
+        let shards = split_dict_raw(Some(subtree_root_cell), HashBytes::BITS, split_depth)
+            .context("failed to split shard accounts subtree")?;
+
+        let mut result = FastHashMap::default();
+
+        for (hash, cell) in shards {
+            result.insert(hash, SplitAccountEntry { shard: None, cell });
+        }
+
+        Ok(result)
     }
 
     fn remove_accounts_subtree_impl(
@@ -256,6 +296,12 @@ impl ShardStateStorage {
         } else {
             self.accounts_split_depth
         };
+        // when we split accounts on partitions
+        // we can split partition more and store in parallel
+        let remaining_split_depth = self
+            .accounts_split_depth
+            .saturating_sub(accounts_split_depth)
+            + 1;
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
@@ -280,9 +326,11 @@ impl ShardStateStorage {
                 tracing::debug!(accounts_split_depth, ?split_at);
 
                 cell_storage.store_cell_mt(
+                    &block_id,
                     root_cell.as_ref(),
                     &mut batch,
                     split_at,
+                    remaining_split_depth,
                     estimated_merkle_update_size,
                 )?
             };
@@ -663,7 +711,10 @@ fn split_shard_accounts(
 
     for (shard, dict) in shards {
         if let Some(cell) = dict {
-            result.insert(*cell.repr_hash(), SplitAccountEntry { shard, cell });
+            result.insert(*cell.repr_hash(), SplitAccountEntry {
+                shard: Some(shard),
+                cell,
+            });
         }
     }
 
@@ -686,7 +737,7 @@ fn init_shard_partitions_router(
     let split_at: FastHashMap<_, _> =
         split_shard_accounts(state_shard, &root_cell, part_split_depth)?
             .into_iter()
-            .map(|(hash, SplitAccountEntry { shard, .. })| (hash, shard))
+            .filter_map(|(hash, SplitAccountEntry { shard, .. })| shard.map(|s| (hash, s)))
             .collect();
 
     tracing::debug!(part_split_depth, ?split_at);

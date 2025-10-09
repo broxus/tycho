@@ -17,7 +17,7 @@ use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
 use tycho_storage::kv::refcount;
 use tycho_types::cell::*;
-use tycho_types::models::ShardIdent;
+use tycho_types::models::{BlockId, ShardIdent};
 use tycho_util::metrics::{HistogramGuard, spawn_metrics_loop};
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet, FastHasherState};
 use weedb::rocksdb::WriteBatch;
@@ -356,9 +356,11 @@ impl CellStorage {
 
     pub fn store_cell_mt(
         &self,
+        block_id: &BlockId,
         root: &DynCell,
         batch: &mut WriteBatch,
         split_at: FastHashMap<HashBytes, SplitAccountEntry>,
+        remaining_split_depth: u8,
         capacity: usize,
     ) -> Result<usize, CellStorageError> {
         type StoreResult = Result<(), CellStorageError>;
@@ -378,8 +380,10 @@ impl CellStorage {
             db: &'a D,
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
+            block_id: &'a BlockId,
             /// Subtrees to process in parallel.
             split_at: FastHashMap<HashBytes, SplitAccountEntry>,
+            remaining_split_depth: u8,
             /// State storage partitions if used
             storage_parts: Option<Arc<StoragePartsMap>>,
             /// Estimated count of cells in one partition
@@ -405,7 +409,9 @@ impl CellStorage {
                 db: &'a D,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
+                block_id: &'a BlockId,
                 split_accounts: FastHashMap<HashBytes, SplitAccountEntry>,
+                remaining_split_depth: u8,
                 storage_parts: Option<Arc<StoragePartsMap>>,
                 part_estimated_cells_count: usize,
                 capacity: usize,
@@ -414,7 +420,9 @@ impl CellStorage {
                     db,
                     raw_cache,
                     herd,
+                    block_id,
                     split_at: split_accounts,
+                    remaining_split_depth,
                     storage_parts,
                     part_estimated_cells_count,
                     new_cells_in_parts: Arc::new(AtomicUsize::new(0)),
@@ -455,19 +463,23 @@ impl CellStorage {
                         if let Some(entry) = self.split_at.get(child_hash) {
                             // if subtree should be stored in partition
                             // then store its root cell both in main db and in partition
-                            if let Some(storage_part) = self
-                                .storage_parts
-                                .as_ref()
-                                .and_then(|parts| parts.get(&entry.shard))
-                                .cloned()
+                            if let Some(shard) = entry.shard
+                                && let Some(storage_part) = self
+                                    .storage_parts
+                                    .as_ref()
+                                    .and_then(|parts| parts.get(&shard))
+                                    .cloned()
                             {
+                                let child_cell = entry.cell.clone();
                                 let part_estimated_cells_count =
                                     self.part_estimated_cells_count.max(1);
                                 let new_cells_in_parts = self.new_cells_in_parts.clone();
                                 scope.spawn(move || {
                                     let part_new_cells = storage_part.store_accounts_subtree(
-                                        child,
+                                        self.block_id,
+                                        child_cell,
                                         part_estimated_cells_count,
+                                        self.remaining_split_depth,
                                     )?;
                                     tracing::debug!(
                                         shard = %storage_part.shard(),
@@ -668,7 +680,9 @@ impl CellStorage {
             &self.cells_db,
             &herd,
             &self.raw_cells_cache,
+            block_id,
             split_at,
+            remaining_split_depth,
             self.storage_parts.clone(),
             part_estimated_cells_count,
             capacity,

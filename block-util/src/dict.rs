@@ -211,6 +211,15 @@ where
     K: DictKey,
     A: Default,
 {
+    let (dict, _) = dict.into_parts();
+    split_dict_raw(dict.into_root(), K::BITS, depth)
+}
+
+pub fn split_dict_raw(
+    dict: Option<Cell>,
+    key_bit_len: u16,
+    depth: u8,
+) -> Result<FastHashMap<HashBytes, Cell>, Error> {
     fn split_dict_impl(
         dict: Option<Cell>,
         key_bit_len: u16,
@@ -241,8 +250,7 @@ where
     let mut shards =
         FastHashMap::with_capacity_and_hasher(2usize.pow(depth as _), Default::default());
 
-    let (dict_root, _) = dict.into_parts();
-    split_dict_impl(dict_root.into_root(), K::BITS, depth, &mut shards)?;
+    split_dict_impl(dict, key_bit_len, depth, &mut shards)?;
 
     Ok(shards)
 }
