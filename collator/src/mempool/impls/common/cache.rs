@@ -4,6 +4,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use parking_lot::RwLock;
 use tokio::sync::Notify;
+use tycho_util::mem::Reclaimer;
 
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
@@ -241,17 +242,32 @@ impl Cache {
     }
 
     pub fn clear(&self, before_anchor_id: MempoolAnchorId) {
-        let data = &mut self.data.write();
+        let mut data = self.data.write();
 
-        data.anchors
-            .retain(|anchor_id, _| anchor_id >= &before_anchor_id);
+        let mut anchors_to_clean = Vec::new();
+        data.anchors.retain(|anchor_id, anchor| {
+            let retain = anchor_id >= &before_anchor_id;
+            if !retain {
+                // NOTE: Save `Arc` to drop it later when it (might) become a
+                // uniquely owned because we can't drop it in `retain`.
+                anchors_to_clean.push(anchor.clone());
+            }
+            retain
+        });
 
         data.shrink();
+
+        let is_paused = data.is_paused.then_some(true);
+
+        // NOTE: Drop the lock as soon as possible.
+        drop(data);
+
+        Reclaimer::instance().drop(anchors_to_clean);
 
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             %before_anchor_id,
-            is_paused = data.is_paused.then_some(true),
+            is_paused,
             "anchors cache was cleared",
         );
     }
