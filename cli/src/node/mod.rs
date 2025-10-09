@@ -99,6 +99,7 @@ impl Node {
                     base.overlay_service(),
                     base.storage_context(),
                     slasher.mempool_events_listener(),
+                    slasher.mempool_events_cache(),
                     &node_config.mempool,
                 )?),
             }
