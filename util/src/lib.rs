@@ -26,7 +26,7 @@ pub mod futures {
 }
 
 pub mod mem {
-    pub use self::reclaimer::Reclaimer;
+    pub use self::reclaimer::{Reclaimer, ReclaimerError};
     pub use self::slicer::{
         AllocatedMemoryConstraints, MemoryConstraint, MemoryConstraints, MemorySlicer,
         MemorySlicerGuard, MemorySlicerRange,

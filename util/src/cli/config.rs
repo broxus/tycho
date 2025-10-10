@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 pub struct ThreadPoolConfig {
     rayon_threads: NonZeroUsize,
     tokio_workers: NonZeroUsize,
+    // How many threads to use for dropping heavy objects in the background Default is 4.
+    reclaimer_threads: NonZeroUsize,
+    // How many objects to keep in the reclaimer queue before blocking the main thread. Default is 10.
+    reclaimer_queue_depth: NonZeroUsize,
 }
 
 impl ThreadPoolConfig {
@@ -27,6 +31,10 @@ impl ThreadPoolConfig {
             .worker_threads(self.tokio_workers.get())
             .build()
     }
+
+    pub fn init_reclaimer(&self) -> Result<(), crate::mem::ReclaimerError> {
+        crate::mem::Reclaimer::init(self.reclaimer_queue_depth, self.reclaimer_threads)
+    }
 }
 
 impl Default for ThreadPoolConfig {
@@ -36,6 +44,8 @@ impl Default for ThreadPoolConfig {
         Self {
             rayon_threads: total_threads,
             tokio_workers: total_threads,
+            reclaimer_threads: NonZeroUsize::new(4).unwrap(),
+            reclaimer_queue_depth: NonZeroUsize::new(10).unwrap(),
         }
     }
 }
