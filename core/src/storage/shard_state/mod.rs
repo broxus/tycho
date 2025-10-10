@@ -40,6 +40,9 @@ pub struct ShardStateStorage {
     max_new_sc_cell_count: AtomicUsize,
     state_diff_complexity_count: AtomicUsize,
 
+    // Only for metrics
+    last_state_stored: AtomicU32,
+
     accounts_split_depth: u8,
     store_shard_state_step: u32,
 }
@@ -69,6 +72,7 @@ impl ShardStateStorage {
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
             state_diff_complexity_count: AtomicUsize::new(0),
+            last_state_stored: Default::default(),
             accounts_split_depth: 5,
         }))
     }
@@ -113,28 +117,6 @@ impl ShardStateStorage {
         root_cell: Cell,
         hint: StoreStateHint,
     ) -> Result<bool> {
-        if let Some(state_diff_complexity) = hint.estimate_state_diff_complexity() {
-            self.state_diff_complexity_count
-                .fetch_add(state_diff_complexity, Ordering::Relaxed);
-        }
-
-        // Store state root only for masterchain blocks / every N shard blocks / too big state update
-        if !handle.is_masterchain()
-            && !handle
-                .id()
-                .seqno
-                .is_multiple_of(self.store_shard_state_step)
-            && self.state_diff_complexity_count.load(Ordering::Relaxed) < 5000
-        // TODO: magic number
-        {
-            return Ok(false);
-        }
-
-        // Reset state diff complexity counter when state mark as should be saved
-        self.state_diff_complexity_count.store(0, Ordering::Relaxed);
-
-        tracing::info!(block_id = ?handle.id().as_short_id(), "try store state root for block");
-
         if handle.has_state() {
             return Ok(false);
         }
@@ -148,6 +130,29 @@ impl ShardStateStorage {
         if handle.has_state() {
             return Ok(false);
         }
+
+        const STATE_DIFF_COMPLEXITY_LIMIT: usize = 15_000; // Value was obtained empirically
+
+        let mut should_store = handle.is_masterchain()  // Store all masterchain states
+            || handle.id().seqno.is_multiple_of(self.store_shard_state_step); // Regular checkpoint
+
+        if !should_store && let Some(state_diff_complexity) = hint.estimate_state_diff_complexity()
+        {
+            let prev_total = self
+                .state_diff_complexity_count
+                .fetch_add(state_diff_complexity, Ordering::Release);
+
+            let new_total = prev_total + state_diff_complexity;
+            should_store = new_total >= STATE_DIFF_COMPLEXITY_LIMIT; // Large diff
+        }
+
+        if !should_store {
+            return Ok(false);
+        }
+
+        // Reset state diff complexity counter when state mark as should be saved
+        self.state_diff_complexity_count.store(0, Ordering::Release);
+
         let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
 
         let block_id = *handle.id();
@@ -222,6 +227,14 @@ impl ShardStateStorage {
         };
 
         count.fetch_max(new_cell_count, Ordering::Release);
+
+        if !block_id.is_masterchain() {
+            let step = block_id.seqno - self.last_state_stored.load(Ordering::Acquire);
+            metrics::gauge!("tycho_storage_store_state_step").set(step as f64);
+
+            self.last_state_stored
+                .store(block_id.seqno, Ordering::Release);
+        }
 
         Ok(updated)
     }
@@ -572,10 +585,10 @@ impl StoreStateHint {
 
     fn estimate_state_diff_complexity(&self) -> Option<usize> {
         self.accounts_stat.map(|stat| {
-            const ADDED_WEIGHT: usize = 5;
+            const _ADDED_WEIGHT: usize = 5;
             const UPDATED_WEIGHT: usize = 1;
 
-            (stat.added as usize) * ADDED_WEIGHT + (stat.updated as usize) * UPDATED_WEIGHT
+            (stat.updated as usize) * UPDATED_WEIGHT
         })
     }
 }
@@ -588,7 +601,7 @@ pub struct ShardStateStorageMetrics {
 
 #[derive(Debug, Copy, Clone)]
 pub struct ShardStateAccountsStat {
-    pub added: u64,
+    pub _added: u64,
     pub updated: u64,
     pub _removed: u64,
 }

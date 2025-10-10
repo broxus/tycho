@@ -953,7 +953,7 @@ impl CollatorStdImpl {
             let hint = StoreStateHint {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
                 accounts_stat: Some(ShardStateAccountsStat {
-                    added: finalized.collation_data.added_accounts_count,
+                    _added: finalized.collation_data.added_accounts_count,
                     updated: finalized.collation_data.updated_accounts_count,
                     _removed: finalized.collation_data.removed_accounts_count,
                 }),
