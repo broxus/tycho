@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 pub struct HistogramGuard {
     name: Option<&'static str>,
     started_at: Instant,
+    armed: bool,
 }
 
 impl HistogramGuard {
@@ -11,6 +12,7 @@ impl HistogramGuard {
         Self {
             name: Some(name),
             started_at: Instant::now(),
+            armed: true,
         }
     }
 
@@ -25,19 +27,35 @@ impl HistogramGuard {
     }
 
     pub fn finish(mut self) -> Duration {
+        self.finish_internal()
+    }
+
+    pub fn finish_ref(&mut self) -> Duration {
+        self.finish_internal()
+    }
+
+    fn finish_internal(&mut self) -> Duration {
         let duration = self.started_at.elapsed();
-        if let Some(name) = self.name.take() {
-            metrics::histogram!(name).record(duration);
+        if self.armed {
+            if let Some(name) = self.name {
+                metrics::histogram!(name).record(duration);
+            }
+            self.armed = false;
         }
         duration
+    }
+
+    pub fn reset(&mut self) {
+        if self.name.is_some() {
+            self.started_at = Instant::now();
+            self.armed = true;
+        }
     }
 }
 
 impl Drop for HistogramGuard {
     fn drop(&mut self) {
-        if let Some(name) = self.name.take() {
-            metrics::histogram!(name).record(self.started_at.elapsed());
-        }
+        self.finish_internal();
     }
 }
 
@@ -49,6 +67,7 @@ where
     name: Option<&'static str>,
     started_at: Instant,
     labels: &'a T,
+    armed: bool,
 }
 
 impl<'a, T> HistogramGuardWithLabels<'a, T>
@@ -60,15 +79,34 @@ where
             name: Some(name),
             started_at: Instant::now(),
             labels,
+            armed: true,
         }
     }
 
     pub fn finish(mut self) -> Duration {
+        self.finish_internal()
+    }
+
+    pub fn finish_ref(&mut self) -> Duration {
+        self.finish_internal()
+    }
+
+    fn finish_internal(&mut self) -> Duration {
         let duration = self.started_at.elapsed();
-        if let Some(name) = self.name.take() {
-            metrics::histogram!(name, self.labels).record(duration);
+        if self.armed {
+            if let Some(name) = self.name {
+                metrics::histogram!(name, self.labels).record(duration);
+            }
+            self.armed = false;
         }
         duration
+    }
+
+    pub fn reset(&mut self) {
+        if self.name.is_some() {
+            self.started_at = Instant::now();
+            self.armed = true;
+        }
     }
 }
 
@@ -77,8 +115,6 @@ where
     &'a T: metrics::IntoLabels,
 {
     fn drop(&mut self) {
-        if let Some(name) = self.name.take() {
-            metrics::histogram!(name, self.labels).record(self.started_at.elapsed());
-        }
+        self.finish_internal();
     }
 }

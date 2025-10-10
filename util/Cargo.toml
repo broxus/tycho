@@ -17,6 +17,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 castaway = { workspace = true }
+crossbeam-deque = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
 getip = { workspace = true, optional = true }
