@@ -86,6 +86,7 @@ impl CmdRun {
             .with_relative_paths(&args.home);
 
         node_config.threads.init_global_rayon_pool()?;
+        node_config.threads.init_reclaimer()?;
 
         node_config
             .threads

@@ -4175,6 +4175,7 @@ dependencies = [
  "bytesize",
  "castaway",
  "criterion",
+ "crossbeam-deque",
  "dashmap",
  "futures-util",
  "getip",
