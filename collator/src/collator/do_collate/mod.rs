@@ -9,7 +9,7 @@ use prepare::PrepareState;
 use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::RefMcStateHandle;
-use tycho_core::storage::{NewBlockMeta, StoreStateHint};
+use tycho_core::storage::{NewBlockMeta, ShardStateAccountsStat, StoreStateHint};
 use tycho_types::models::*;
 use tycho_types::num::Tokens;
 use tycho_types::prelude::*;
@@ -949,11 +949,19 @@ impl CollatorStdImpl {
             };
             let adapter = self.state_node_adapter.clone();
             let new_state_root = finalized.new_state_root.clone();
+
             let hint = StoreStateHint {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
+                accounts_stat: Some(ShardStateAccountsStat {
+                    added: finalized.collation_data.added_accounts_count,
+                    updated: finalized.collation_data.updated_accounts_count,
+                    _removed: finalized.collation_data.removed_accounts_count,
+                }),
             };
 
-            let new_accounts_count = Some(finalized.collation_data.added_accounts_count);
+            if let Some(stats) = hint.accounts_stat {
+                tracing::info!(?stats, "accounts stats");
+            }
 
             adapter.accept_shard_block(
                 finalized.block_candidate.ref_by_mc_seqno,
@@ -962,7 +970,7 @@ impl CollatorStdImpl {
 
             async move {
                 adapter
-                    .store_state_root(&block_id, meta, new_state_root, hint, new_accounts_count)
+                    .store_state_root(&block_id, meta, new_state_root, hint)
                     .await
             }
         });

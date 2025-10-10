@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -38,7 +38,7 @@ pub struct ShardStateStorage {
     min_ref_mc_state: MinRefMcStateTracker,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
-    new_accounts_count: AtomicU64,
+    state_diff_complexity_count: AtomicUsize,
 
     accounts_split_depth: u8,
     store_shard_state_step: u32,
@@ -68,7 +68,7 @@ impl ShardStateStorage {
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
-            new_accounts_count: AtomicU64::new(0),
+            state_diff_complexity_count: AtomicUsize::new(0),
             accounts_split_depth: 5,
         }))
     }
@@ -103,7 +103,7 @@ impl ShardStateStorage {
             }
         );
 
-        self.store_state_root(handle, state.root_cell().clone(), hint, None)
+        self.store_state_root(handle, state.root_cell().clone(), hint)
             .await
     }
 
@@ -112,25 +112,28 @@ impl ShardStateStorage {
         handle: &BlockHandle,
         root_cell: Cell,
         hint: StoreStateHint,
-        new_accounts_count: Option<u64>,
     ) -> Result<bool> {
-        if let Some(new_accounts_count) = new_accounts_count {
-            self.new_accounts_count
-                .fetch_add(new_accounts_count, Ordering::Relaxed);
+        if let Some(state_diff_complexity) = hint.estimate_state_diff_complexity() {
+            self.state_diff_complexity_count
+                .fetch_add(state_diff_complexity, Ordering::Relaxed);
         }
 
-        // Store state root only for masterchain blocks and every N shard blocks
+        // Store state root only for masterchain blocks / every N shard blocks / too big state update
         if !handle.is_masterchain()
             && !handle
                 .id()
                 .seqno
                 .is_multiple_of(self.store_shard_state_step)
-            && self.new_accounts_count.load(Ordering::Relaxed) < 5000
+            && self.state_diff_complexity_count.load(Ordering::Relaxed) < 5000
+        // TODO: magic number
         {
             return Ok(false);
         }
 
-        self.new_accounts_count.store(0, Ordering::Relaxed);
+        // Reset state diff complexity counter when state mark as should be saved
+        self.state_diff_complexity_count.store(0, Ordering::Relaxed);
+
+        tracing::info!(block_id = ?handle.id().as_short_id(), "try store state root for block");
 
         if handle.has_state() {
             return Ok(false);
@@ -553,6 +556,7 @@ impl ShardStateStorage {
 #[derive(Default, Debug, Clone, Copy)]
 pub struct StoreStateHint {
     pub block_data_size: Option<usize>,
+    pub accounts_stat: Option<ShardStateAccountsStat>,
 }
 
 impl StoreStateHint {
@@ -565,12 +569,28 @@ impl StoreStateHint {
         // R-squared: 0.7035
         ((3889.9821 + 14.7480 * (block_data_size as f64).sqrt()) as usize).next_power_of_two()
     }
+
+    fn estimate_state_diff_complexity(&self) -> Option<usize> {
+        self.accounts_stat.map(|stat| {
+            const ADDED_WEIGHT: usize = 5;
+            const UPDATED_WEIGHT: usize = 1;
+
+            (stat.added as usize) * ADDED_WEIGHT + (stat.updated as usize) * UPDATED_WEIGHT
+        })
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
 pub struct ShardStateStorageMetrics {
     pub max_new_mc_cell_count: usize,
     pub max_new_sc_cell_count: usize,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ShardStateAccountsStat {
+    pub added: u64,
+    pub updated: u64,
+    pub _removed: u64,
 }
 
 #[derive(thiserror::Error, Debug)]
