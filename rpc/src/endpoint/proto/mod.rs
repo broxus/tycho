@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use std::sync::OnceLock;
-
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -10,7 +9,6 @@ use tycho_types::cell::HashBytes;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::metrics::HistogramGuard;
-
 pub use self::cache::ProtoEndpointCache;
 use self::protos::rpc::{self, Request, request, response};
 use crate::endpoint::proto::extractor::{
@@ -18,55 +16,41 @@ use crate::endpoint::proto::extractor::{
 };
 use crate::state::{LoadedAccountState, RpcState, RpcStateError};
 use crate::util::error_codes::*;
-
 mod cache;
 mod extractor;
 mod protos;
-
 macro_rules! declare_proto_methods {
-    ($($name:ident),*$(,)?) => {
-        trait RequestExt {
-            fn method_name(&self) -> &'static str;
-        }
-
-        impl RequestExt for request::Call {
-            fn method_name(&self) -> &'static str {
-                match self {
-                    $(request::Call::$name { .. } => stringify!($name)),*
-                }
-            }
-        }
+    ($($name:ident),*$(,) ?) => {
+        trait RequestExt { fn method_name(& self) -> &'static str; } impl RequestExt for
+        request::Call { fn method_name(& self) -> &'static str { match self {
+        $(request::Call::$name { .. } => stringify!($name)),* } } }
     };
 }
-
 declare_proto_methods! {
-    GetCapabilities,
-    GetLatestKeyBlock,
-    GetBlockchainConfig,
-    GetStatus,
-    GetTimings,
-    SendMessage,
-    GetContractState,
-    GetLibraryCell,
-    GetAccountsByCodeHash,
-    GetTransactionsList,
-    GetTransaction,
-    GetDstTransaction,
-    GetTransactionBlockId,
-    GetKeyBlockProof,
-    GetBlockProof,
-    GetBlockData,
+    GetCapabilities, GetLatestKeyBlock, GetBlockchainConfig, GetStatus, GetTimings,
+    SendMessage, GetContractState, GetLibraryCell, GetAccountsByCodeHash,
+    GetTransactionsList, GetTransaction, GetDstTransaction, GetTransactionBlockId,
+    GetKeyBlockProof, GetBlockProof, GetBlockData,
 }
-
-pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Request>) -> Response {
+pub async fn route(
+    State(state): State<RpcState>,
+    Protobuf(req): Protobuf<Request>,
+) -> Response {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(route)),
+        file!(),
+        61u32,
+    );
     let Some(call) = req.call else {
-        return ProtoErrorResponse {
-            code: METHOD_NOT_FOUND_CODE,
-            message: "unknown method".into(),
-        }
-        .into_response();
+        {
+            __guard.end_section(63u32);
+            return ProtoErrorResponse {
+                code: METHOD_NOT_FOUND_CODE,
+                message: "unknown method".into(),
+            }
+                .into_response();
+        };
     };
-
     let label = [("method", call.method_name())];
     let _hist = HistogramGuard::begin_with_labels("tycho_jrpc_request_time", &label);
     match call {
@@ -107,66 +91,93 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             }
         }
         request::Call::SendMessage(p) => {
-            if let Err(e) = validate_external_message(&p.message).await {
-                return ProtoErrorResponse {
-                    code: INVALID_BOC_CODE,
-                    message: e.to_string().into(),
-                }
-                .into_response();
+            if let Err(e) = {
+                __guard.end_section(110u32);
+                let __result = validate_external_message(&p.message).await;
+                __guard.start_section(110u32);
+                __result
+            } {
+                {
+                    __guard.end_section(111u32);
+                    return ProtoErrorResponse {
+                        code: INVALID_BOC_CODE,
+                        message: e.to_string().into(),
+                    }
+                        .into_response();
+                };
             }
-
-            state.broadcast_external_message(&p.message).await;
+            {
+                __guard.end_section(118u32);
+                let __result = state.broadcast_external_message(&p.message).await;
+                __guard.start_section(118u32);
+                __result
+            };
             ok_to_response(response::Result::SendMessage(()))
         }
         request::Call::GetLibraryCell(p) => {
             let Some(hash) = hash_from_bytes(p.hash) else {
-                return invalid_params_response("invalid hash");
+                {
+                    __guard.end_section(123u32);
+                    return invalid_params_response("invalid hash");
+                };
             };
-
             let res = match state.proto_cache().get_library_cell_response(&hash) {
                 Some(value) => value,
-                None => match state.get_raw_library(&hash) {
-                    Ok(cell) => state.proto_cache().insert_library_cell_response(hash, cell),
-                    Err(e) => return error_to_response(RpcStateError::Internal(e)),
-                },
+                None => {
+                    match state.get_raw_library(&hash) {
+                        Ok(cell) => {
+                            state.proto_cache().insert_library_cell_response(hash, cell)
+                        }
+                        Err(e) => {
+                            __guard.end_section(130u32);
+                            return error_to_response(RpcStateError::Internal(e));
+                        }
+                    }
+                }
             };
             res.into_response()
         }
         request::Call::GetContractState(p) => {
             let Some(address) = addr_from_bytes(p.address) else {
-                return invalid_params_response("invalid address");
+                {
+                    __guard.end_section(137u32);
+                    return invalid_params_response("invalid address");
+                };
             };
-
             let item = match state.get_account_state(&address) {
                 Ok(item) => item,
-                Err(e) => return error_to_response(e),
+                Err(e) => {
+                    __guard.end_section(142u32);
+                    return error_to_response(e);
+                }
             };
-
             let response = match &item {
-                &LoadedAccountState::NotFound { timings, .. } => response::GetContractState {
-                    state: Some(response::get_contract_state::State::NotExists(
-                        response::get_contract_state::NotExist {
-                            gen_timings: Some(
-                                response::get_contract_state::not_exist::GenTimings::Known(
-                                    response::get_contract_state::Timings {
+                &LoadedAccountState::NotFound { timings, .. } => {
+                    response::GetContractState {
+                        state: Some(
+                            response::get_contract_state::State::NotExists(response::get_contract_state::NotExist {
+                                gen_timings: Some(
+                                    response::get_contract_state::not_exist::GenTimings::Known(response::get_contract_state::Timings {
                                         gen_lt: timings.gen_lt,
                                         gen_utime: timings.gen_utime,
-                                    },
+                                    }),
                                 ),
-                            ),
-                        },
-                    )),
-                },
-                LoadedAccountState::Found { state, timings, .. }
-                    if Some(state.last_trans_lt) <= p.last_transaction_lt =>
-                {
+                            }),
+                        ),
+                    }
+                }
+                LoadedAccountState::Found {
+                    state,
+                    timings,
+                    ..
+                } if Some(state.last_trans_lt) <= p.last_transaction_lt => {
                     response::GetContractState {
-                        state: Some(response::get_contract_state::State::Unchanged(
-                            response::get_contract_state::Timings {
+                        state: Some(
+                            response::get_contract_state::State::Unchanged(response::get_contract_state::Timings {
                                 gen_lt: timings.gen_lt,
                                 gen_utime: timings.gen_utime,
-                            },
-                        )),
+                            }),
+                        ),
                     }
                 }
                 LoadedAccountState::Found { state, timings, .. } => {
@@ -174,51 +185,49 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                         gen_lt: timings.gen_lt,
                         gen_utime: timings.gen_utime,
                     };
-
                     let state = match state.load_account() {
                         Ok(Some(loaded)) => {
                             let account = match serialize_account(&loaded) {
                                 Ok(account) => account,
                                 Err(e) => {
-                                    return error_to_response(RpcStateError::Internal(e.into()));
+                                    {
+                                        __guard.end_section(183u32);
+                                        return error_to_response(RpcStateError::Internal(e.into()));
+                                    };
                                 }
                             };
-                            let last_transaction_id =
-                                response::get_contract_state::exists::LastTransactionId::Exact(
-                                    response::get_contract_state::exists::Exact {
-                                        lt: state.last_trans_lt,
-                                        hash: Bytes::copy_from_slice(
-                                            state.last_trans_hash.as_slice(),
-                                        ),
-                                    },
-                                );
-                            response::get_contract_state::State::Exists(
-                                response::get_contract_state::Exists {
-                                    account,
-                                    gen_timings: Some(timings),
-                                    last_transaction_id: Some(last_transaction_id),
-                                },
-                            )
-                        }
-                        Ok(None) => response::get_contract_state::State::NotExists(
-                            response::get_contract_state::NotExist {
-                                gen_timings: Some(
-                                    response::get_contract_state::not_exist::GenTimings::Known(
-                                        response::get_contract_state::Timings {
-                                            gen_lt: timings.gen_lt,
-                                            gen_utime: timings.gen_utime,
-                                        },
-                                    ),
+                            let last_transaction_id = response::get_contract_state::exists::LastTransactionId::Exact(response::get_contract_state::exists::Exact {
+                                lt: state.last_trans_lt,
+                                hash: Bytes::copy_from_slice(
+                                    state.last_trans_hash.as_slice(),
                                 ),
-                            },
-                        ),
-                        Err(e) => return error_to_response(RpcStateError::Internal(e.into())),
+                            });
+                            response::get_contract_state::State::Exists(response::get_contract_state::Exists {
+                                account,
+                                gen_timings: Some(timings),
+                                last_transaction_id: Some(last_transaction_id),
+                            })
+                        }
+                        Ok(None) => {
+                            response::get_contract_state::State::NotExists(response::get_contract_state::NotExist {
+                                gen_timings: Some(
+                                    response::get_contract_state::not_exist::GenTimings::Known(response::get_contract_state::Timings {
+                                        gen_lt: timings.gen_lt,
+                                        gen_utime: timings.gen_utime,
+                                    }),
+                                ),
+                            })
+                        }
+                        Err(e) => {
+                            __guard.end_section(215u32);
+                            return error_to_response(RpcStateError::Internal(e.into()));
+                        }
                     };
-
-                    response::GetContractState { state: Some(state) }
+                    response::GetContractState {
+                        state: Some(state),
+                    }
                 }
             };
-
             ok_to_response(response::Result::GetContractState(response))
         }
         request::Call::GetAccountsByCodeHash(p) => {
@@ -226,22 +235,33 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 let result = response::Result::GetAccounts(response::GetAccountsByCodeHash {
                     account: Vec::new(),
                 });
-                return ok_to_response(result);
+                {
+                    __guard.end_section(229u32);
+                    return ok_to_response(result);
+                };
             } else if p.limit > MAX_LIMIT {
-                return too_large_limit_response();
+                {
+                    __guard.end_section(231u32);
+                    return too_large_limit_response();
+                };
             }
-
             let Some(code_hash) = hash_from_bytes(p.code_hash) else {
-                return invalid_params_response("invalid code hash");
+                {
+                    __guard.end_section(235u32);
+                    return invalid_params_response("invalid code hash");
+                };
             };
-
             let continuation = match p.continuation.map(addr_from_bytes) {
                 Some(Some(continuation)) => Some(continuation),
-                Some(None) => return invalid_params_response("invalid continuation"),
+                Some(None) => {
+                    __guard.end_section(240u32);
+                    return invalid_params_response("invalid continuation");
+                }
                 None => None,
             };
-
-            match state.get_accounts_by_code_hash(&code_hash, continuation.as_ref(), None) {
+            match state
+                .get_accounts_by_code_hash(&code_hash, continuation.as_ref(), None)
+            {
                 Ok(list) => {
                     let result = response::Result::GetAccounts(response::GetAccountsByCodeHash {
                         account: list
@@ -260,16 +280,25 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 let result = response::Result::GetTransactionsList(response::GetTransactionsList {
                     transactions: Vec::new(),
                 });
-                return ok_to_response(result);
+                {
+                    __guard.end_section(263u32);
+                    return ok_to_response(result);
+                };
             } else if p.limit > MAX_LIMIT {
-                return too_large_limit_response();
+                {
+                    __guard.end_section(265u32);
+                    return too_large_limit_response();
+                };
             }
-
             let Some(account) = addr_from_bytes(p.account) else {
-                return invalid_params_response("invalid address");
+                {
+                    __guard.end_section(269u32);
+                    return invalid_params_response("invalid address");
+                };
             };
-
-            match state.get_transactions(&account, None, p.last_transaction_lt, true, None) {
+            match state
+                .get_transactions(&account, None, p.last_transaction_lt, true, None)
+            {
                 Ok(list) => {
                     let transactions = list
                         .map(|data| {
@@ -278,52 +307,69 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                         })
                         .take(p.limit as usize)
                         .collect();
-                    ok_to_response(response::Result::GetTransactionsList(
-                        response::GetTransactionsList { transactions },
-                    ))
+                    ok_to_response(
+                        response::Result::GetTransactionsList(response::GetTransactionsList {
+                            transactions,
+                        }),
+                    )
                 }
                 Err(e) => error_to_response(e),
             }
         }
         request::Call::GetTransaction(p) => {
             let Some(hash) = hash_from_bytes(p.id) else {
-                return invalid_params_response("invalid tx id");
+                {
+                    __guard.end_section(290u32);
+                    return invalid_params_response("invalid tx id");
+                };
             };
-
             match state.get_transaction(&hash, None) {
-                Ok(tx) => ok_to_response(response::Result::GetRawTransaction(
-                    response::GetRawTransaction {
-                        transaction: tx.map(|slice| Bytes::copy_from_slice(slice.as_ref())),
-                    },
-                )),
+                Ok(tx) => {
+                    ok_to_response(
+                        response::Result::GetRawTransaction(response::GetRawTransaction {
+                            transaction: tx
+                                .map(|slice| Bytes::copy_from_slice(slice.as_ref())),
+                        }),
+                    )
+                }
                 Err(e) => error_to_response(e),
             }
         }
         request::Call::GetDstTransaction(p) => {
             let Some(hash) = hash_from_bytes(p.message_hash) else {
-                return invalid_params_response("invalid msg id");
+                {
+                    __guard.end_section(304u32);
+                    return invalid_params_response("invalid msg id");
+                };
             };
-
             match state.get_dst_transaction(&hash, None) {
-                Ok(tx) => ok_to_response(response::Result::GetRawTransaction(
-                    response::GetRawTransaction {
-                        transaction: tx.map(|slice| Bytes::copy_from_slice(slice.as_ref())),
-                    },
-                )),
+                Ok(tx) => {
+                    ok_to_response(
+                        response::Result::GetRawTransaction(response::GetRawTransaction {
+                            transaction: tx
+                                .map(|slice| Bytes::copy_from_slice(slice.as_ref())),
+                        }),
+                    )
+                }
                 Err(e) => error_to_response(e),
             }
         }
         request::Call::GetTransactionBlockId(p) => {
             let Some(hash) = hash_from_bytes(p.id) else {
-                return invalid_params_response("invalid tx id");
+                {
+                    __guard.end_section(318u32);
+                    return invalid_params_response("invalid tx id");
+                };
             };
-
             match state.get_transaction_info(&hash, None) {
-                Ok(info) => ok_to_response(response::Result::GetTransactionBlockId(
-                    response::GetTransactionBlockId {
-                        block_id: info.map(|info| make_response_block_id(info.block_id)),
-                    },
-                )),
+                Ok(info) => {
+                    ok_to_response(
+                        response::Result::GetTransactionBlockId(response::GetTransactionBlockId {
+                            block_id: info
+                                .map(|info| make_response_block_id(info.block_id)),
+                        }),
+                    )
+                }
                 Err(e) => error_to_response(e),
             }
         }
@@ -331,143 +377,172 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             let res = match state.proto_cache().get_key_block_proof_response(p.seqno) {
                 Some(value) => value,
                 None => {
-                    let proof = state
-                        .get_key_block_proof(p.seqno)
-                        .await
-                        .map(|(block_id, r)| (block_id, Bytes::copy_from_slice(r.as_ref())));
-
-                    state
-                        .proto_cache()
-                        .insert_key_block_proof_response(p.seqno, proof)
+                    let proof = {
+                        __guard.end_section(336u32);
+                        let __result = state.get_key_block_proof(p.seqno).await;
+                        __guard.start_section(336u32);
+                        __result
+                    }
+                        .map(|(block_id, r)| (
+                            block_id,
+                            Bytes::copy_from_slice(r.as_ref()),
+                        ));
+                    state.proto_cache().insert_key_block_proof_response(p.seqno, proof)
                 }
             };
             res.into_response()
         }
         request::Call::GetBlockProof(p) => {
             if !state.config().allow_huge_requests {
-                return error_to_response(RpcStateError::NotSupported);
+                {
+                    __guard.end_section(348u32);
+                    return error_to_response(RpcStateError::NotSupported);
+                };
             }
-
             let Some(block_id) = get_block_id(p) else {
-                return invalid_params_response("invalid block id");
+                {
+                    __guard.end_section(352u32);
+                    return invalid_params_response("invalid block id");
+                };
             };
-
-            let proof = state.get_block_proof(&block_id).await;
-            ok_to_response(response::Result::GetBlockProof(response::BlockProof {
-                proof: proof.map(Bytes::from_owner),
-            }))
+            let proof = {
+                __guard.end_section(355u32);
+                let __result = state.get_block_proof(&block_id).await;
+                __guard.start_section(355u32);
+                __result
+            };
+            ok_to_response(
+                response::Result::GetBlockProof(response::BlockProof {
+                    proof: proof.map(Bytes::from_owner),
+                }),
+            )
         }
         request::Call::GetBlockData(p) => {
             if !state.config().allow_huge_requests {
-                return error_to_response(RpcStateError::NotSupported);
+                {
+                    __guard.end_section(362u32);
+                    return error_to_response(RpcStateError::NotSupported);
+                };
             }
-
             let Some(block_id) = get_block_id(p) else {
-                return invalid_params_response("invalid block id");
+                {
+                    __guard.end_section(366u32);
+                    return invalid_params_response("invalid block id");
+                };
             };
-
-            // TODO: Rework rate limiting for this request.
-            let _permit = state.acquire_download_block_permit().await;
-
-            let Some(data) = state.get_block_data(&block_id).await else {
-                return ok_to_response(response::Result::GetBlockData(response::BlockData {
-                    data: None,
-                }));
+            let _permit = {
+                __guard.end_section(370u32);
+                let __result = state.acquire_download_block_permit().await;
+                __guard.start_section(370u32);
+                __result
             };
-
-            tycho_util::sync::rayon_run(move || {
-                ok_to_response(response::Result::GetBlockData(response::BlockData {
-                    data: Some(Bytes::from_owner(data)),
-                }))
-            })
-            .await
+            let Some(data) = ({
+                __guard.end_section(372u32);
+                let __result = state.get_block_data(&block_id).await;
+                __guard.start_section(372u32);
+                __result
+            }) else {
+                {
+                    __guard.end_section(373u32);
+                    return ok_to_response(
+                        response::Result::GetBlockData(response::BlockData {
+                            data: None,
+                        }),
+                    );
+                };
+            };
+            {
+                __guard.end_section(383u32);
+                let __result = tycho_util::sync::rayon_run(move || {
+                        ok_to_response(
+                            response::Result::GetBlockData(response::BlockData {
+                                data: Some(Bytes::from_owner(data)),
+                            }),
+                        )
+                    })
+                    .await;
+                __guard.start_section(383u32);
+                __result
+            }
         }
     }
 }
-
-// NOTE: `RpcState` full/not-full state is determined only once at startup,
-// so it is ok to cache the response.
 fn get_capabilities(state: &RpcState) -> &'static rpc::Response {
     static RESULT: OnceLock<rpc::Response> = OnceLock::new();
-    RESULT.get_or_init(|| {
-        // FIXME: Why strings when we have enums in the proto?
-
-        let mut capabilities = vec![
-            "getCapabilities",
-            "getLatestKeyBlock",
-            "getBlockchainConfig",
-            "getStatus",
-            "getTimings",
-            "getContractState",
-            "sendMessage",
-            "getLibraryCell",
-            "getKeyBlockProof",
-        ];
-
-        if state.config().allow_huge_requests {
-            capabilities.extend(["getBlockProof", "getBlockData"]);
-        }
-
-        if state.is_full() {
-            capabilities.extend([
-                "getTransactionsList",
-                "getTransaction",
-                "getDstTransaction",
-                "getAccountsByCodeHash",
-                "getTransactionBlockId",
-            ]);
-        }
-
-        rpc::Response {
-            result: Some(response::Result::GetCapabilities(
-                response::GetCapabilities {
-                    capabilities: capabilities.into_iter().map(|s| s.into()).collect(),
-                },
-            )),
-        }
-    })
+    RESULT
+        .get_or_init(|| {
+            let mut capabilities = vec![
+                "getCapabilities", "getLatestKeyBlock", "getBlockchainConfig",
+                "getStatus", "getTimings", "getContractState", "sendMessage",
+                "getLibraryCell", "getKeyBlockProof",
+            ];
+            if state.config().allow_huge_requests {
+                capabilities.extend(["getBlockProof", "getBlockData"]);
+            }
+            if state.is_full() {
+                capabilities
+                    .extend([
+                        "getTransactionsList",
+                        "getTransaction",
+                        "getDstTransaction",
+                        "getAccountsByCodeHash",
+                        "getTransactionBlockId",
+                    ]);
+            }
+            rpc::Response {
+                result: Some(
+                    response::Result::GetCapabilities(response::GetCapabilities {
+                        capabilities: capabilities
+                            .into_iter()
+                            .map(|s| s.into())
+                            .collect(),
+                    }),
+                ),
+            }
+        })
 }
-
 fn ok_to_response(result: response::Result) -> Response {
     ProtoOkResponse::new(result).into_response()
 }
-
 fn error_to_response(e: RpcStateError) -> Response {
     let (code, message) = match e {
         RpcStateError::NotReady => (NOT_READY_CODE, Cow::Borrowed("not ready")),
-        RpcStateError::NotSupported => (NOT_SUPPORTED_CODE, Cow::Borrowed("method not supported")),
+        RpcStateError::NotSupported => {
+            (NOT_SUPPORTED_CODE, Cow::Borrowed("method not supported"))
+        }
         RpcStateError::Internal(e) => (INTERNAL_ERROR_CODE, e.to_string().into()),
         RpcStateError::BadRequest(e) => (INVALID_PARAMS_CODE, e.to_string().into()),
     };
-
-    ProtoErrorResponse { code, message }.into_response()
+    ProtoErrorResponse {
+        code,
+        message,
+    }
+        .into_response()
 }
-
 fn too_large_limit_response() -> Response {
     ProtoErrorResponse {
         code: TOO_LARGE_LIMIT_CODE,
         message: Cow::Borrowed("limit is too large"),
     }
-    .into_response()
+        .into_response()
 }
-
 fn invalid_params_response(reason: &'static str) -> Response {
     ProtoErrorResponse {
         code: INVALID_PARAMS_CODE,
         message: Cow::Borrowed(reason),
     }
-    .into_response()
+        .into_response()
 }
-
 fn addr_from_bytes(bytes: Bytes) -> Option<StdAddr> {
     (bytes.len() == 33)
-        .then(|| StdAddr::new(bytes[0] as i8, HashBytes(bytes[1..33].try_into().unwrap())))
+        .then(|| StdAddr::new(
+            bytes[0] as i8,
+            HashBytes(bytes[1..33].try_into().unwrap()),
+        ))
 }
-
 fn hash_from_bytes(bytes: Bytes) -> Option<HashBytes> {
     (bytes.len() == 32).then(|| HashBytes::from_slice(&bytes))
 }
-
 fn get_block_id(block_id: request::GetBlock) -> Option<BlockId> {
     Some(BlockId {
         shard: ShardIdent::new(block_id.workchain, block_id.shard)?,
@@ -476,7 +551,6 @@ fn get_block_id(block_id: request::GetBlock) -> Option<BlockId> {
         file_hash: hash_from_bytes(block_id.file_hash)?,
     })
 }
-
 fn make_response_block_id(id: BlockId) -> response::BlockId {
     response::BlockId {
         workchain: id.shard.workchain(),
@@ -486,10 +560,8 @@ fn make_response_block_id(id: BlockId) -> response::BlockId {
         file_hash: Bytes::copy_from_slice(id.file_hash.as_ref()),
     }
 }
-
 fn serialize_account(account: &Account) -> Result<Bytes, tycho_types::error::Error> {
     let cell = crate::models::serialize_account(account)?;
     Ok(Boc::encode(cell).into())
 }
-
 const MAX_LIMIT: u32 = 100;

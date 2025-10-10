@@ -1,6 +1,5 @@
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
-
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use serde::{Deserialize, Serialize};
@@ -9,22 +8,23 @@ use tycho_network::{Response, Service, ServiceRequest, try_handle_prefix};
 use tycho_types::models::BlockId;
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
-
-use crate::blockchain_rpc::broadcast_listener::{BroadcastListener, NoopBroadcastListener};
-use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
+use crate::blockchain_rpc::broadcast_listener::{
+    BroadcastListener, NoopBroadcastListener,
+};
+use crate::blockchain_rpc::{
+    BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE,
+};
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
 use crate::storage::{
-    ArchiveId, BlockConnection, BlockStorage, CoreStorage, KeyBlocksDirection, PersistentStateKind,
+    ArchiveId, BlockConnection, BlockStorage, CoreStorage, KeyBlocksDirection,
+    PersistentStateKind,
 };
-
 const RPC_METHOD_TIMINGS_METRIC: &str = "tycho_blockchain_rpc_method_time";
-
 #[cfg(not(test))]
-const BLOCK_DATA_CHUNK_SIZE: u32 = 1024 * 1024; // 1 MB
+const BLOCK_DATA_CHUNK_SIZE: u32 = 1024 * 1024;
 #[cfg(test)]
-const BLOCK_DATA_CHUNK_SIZE: u32 = 10; // 10 bytes so we have zillions of chunks in tests
-
+const BLOCK_DATA_CHUNK_SIZE: u32 = 10;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]
@@ -33,13 +33,11 @@ pub struct BlockchainRpcServiceConfig {
     ///
     /// Default: 8.
     pub max_key_blocks_list_len: usize,
-
     /// Whether to serve persistent states.
     ///
     /// Default: yes.
     pub serve_persistent_states: bool,
 }
-
 impl Default for BlockchainRpcServiceConfig {
     fn default() -> Self {
         Self {
@@ -48,19 +46,16 @@ impl Default for BlockchainRpcServiceConfig {
         }
     }
 }
-
 pub struct BlockchainRpcServiceBuilder<MandatoryFields> {
     config: BlockchainRpcServiceConfig,
     mandatory_fields: MandatoryFields,
 }
-
 impl<B> BlockchainRpcServiceBuilder<(B, CoreStorage)>
 where
     B: BroadcastListener,
 {
     pub fn build(self) -> BlockchainRpcService<B> {
         let (broadcast_listener, storage) = self.mandatory_fields;
-
         BlockchainRpcService {
             inner: Arc::new(Inner {
                 storage,
@@ -70,21 +65,18 @@ where
         }
     }
 }
-
 impl<T1> BlockchainRpcServiceBuilder<(T1, ())> {
     pub fn with_storage(
         self,
         storage: CoreStorage,
     ) -> BlockchainRpcServiceBuilder<(T1, CoreStorage)> {
         let (broadcast_listener, _) = self.mandatory_fields;
-
         BlockchainRpcServiceBuilder {
             config: self.config,
             mandatory_fields: (broadcast_listener, storage),
         }
     }
 }
-
 impl<T2> BlockchainRpcServiceBuilder<((), T2)> {
     pub fn with_broadcast_listener<T1>(
         self,
@@ -94,45 +86,36 @@ impl<T2> BlockchainRpcServiceBuilder<((), T2)> {
         T1: BroadcastListener,
     {
         let (_, storage) = self.mandatory_fields;
-
         BlockchainRpcServiceBuilder {
             config: self.config,
             mandatory_fields: (broadcast_listener, storage),
         }
     }
-
     pub fn without_broadcast_listener(
         self,
     ) -> BlockchainRpcServiceBuilder<(NoopBroadcastListener, T2)> {
         let (_, storage) = self.mandatory_fields;
-
         BlockchainRpcServiceBuilder {
             config: self.config,
             mandatory_fields: (NoopBroadcastListener, storage),
         }
     }
 }
-
 impl<T1, T2> BlockchainRpcServiceBuilder<(T1, T2)> {
     pub fn with_config(self, config: BlockchainRpcServiceConfig) -> Self {
         Self { config, ..self }
     }
 }
-
 #[repr(transparent)]
 pub struct BlockchainRpcService<B = NoopBroadcastListener> {
     inner: Arc<Inner<B>>,
 }
-
 impl<B> Clone for BlockchainRpcService<B> {
     #[inline]
     fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
+        Self { inner: self.inner.clone() }
     }
 }
-
 impl BlockchainRpcService<()> {
     pub fn builder() -> BlockchainRpcServiceBuilder<((), ())> {
         BlockchainRpcServiceBuilder {
@@ -141,74 +124,48 @@ impl BlockchainRpcService<()> {
         }
     }
 }
-
 macro_rules! match_request {
-     ($req_body:expr, $tag:expr, {
-        $(
-            #[meta($name:literal $(, $($args:tt)*)?)]
-            $([$raw:tt])? $ty:path as $pat:pat => $expr:expr
-        ),*$(,)?
-    }, $err:pat => $err_exr:expr) => {
-        '__match_req: {
-            let $err = match $tag {
-                $(<$ty>::TL_ID => match tl_proto::deserialize::<$ty>(&($req_body)) {
-                        Ok($pat) => break '__match_req match_request!(
-                            @expr
-                            { $name $($($args)*)? }
-                            { $($raw)? }
-                            $expr
-                        ),
-                        Err(e) => e,
-                })*
-                _ => tl_proto::TlError::UnknownConstructor,
-            };
-            $err_exr
-        }
+    (
+        $req_body:expr, $tag:expr, { $(#[meta($name:literal $(, $($args:tt)*)?)]
+        $([$raw:tt])? $ty:path as $pat:pat => $expr:expr),*$(,) ? }, $err:pat =>
+        $err_exr:expr
+    ) => {
+        '__match_req : { let $err = match $tag { $(<$ty >::TL_ID => match
+        tl_proto::deserialize::<$ty > (& ($req_body)) { Ok($pat) => break '__match_req
+        match_request!(@ expr { $name $($($args)*)? } { $($raw)? } $expr), Err(e) => e,
+        })* _ => tl_proto::TlError::UnknownConstructor, }; $err_exr }
     };
-
-    // Raw expression (just use it as is).
-    (@expr { $name:literal $($args:tt)* } { $($raw:tt)+ } $expr:expr) => {
+    (@ expr { $name:literal $($args:tt)* } { $($raw:tt)+ } $expr:expr) => {
         $expr
     };
-    // Wrapped expression (adds debug log and metrics).
-    (@expr { $name:literal $($args:tt)* } { } $expr:expr) => {{
-        match_request!(@debug $name {} { $($args)* });
-
-        let __started_at = std::time::Instant::now();
-
-        BoxFutureOrNoop::future(async move {
-            scopeguard::defer! {
-                metrics::histogram!(
-                    RPC_METHOD_TIMINGS_METRIC,
-                    "method" => $name
-                ).record(__started_at.elapsed());
-            }
-
-            Some(Response::from_tl($expr))
-        })
-    }};
-
-    // Stuff to remove trailing comma from args.
-    (@debug $name:literal { } { $(,)? }) => {
-        match_request!(@debug_impl $name)
+    (@ expr { $name:literal $($args:tt)* } {} $expr:expr) => {
+        { match_request!(@ debug $name {} { $($args)* }); let __started_at =
+        std::time::Instant::now(); BoxFutureOrNoop::future(async move {
+        scopeguard::defer! { metrics::histogram!(RPC_METHOD_TIMINGS_METRIC, "method" =>
+        $name) .record(__started_at.elapsed()); } Some(Response::from_tl($expr)) }) }
     };
-    (@debug $name:literal { $($res:tt)+ } { $(,)? }) => {
-        match_request!(@debug_impl $($res)+, $name)
+    (@ debug $name:literal {} { $(,)? }) => {
+        match_request!(@ debug_impl $name)
     };
-    (@debug $name:literal { $($res:tt)* } { $t:tt $($args:tt)* }) => {
-        match_request!(@debug $name { $($res)* $t } { $($args)* })
+    (@ debug $name:literal { $($res:tt)+ } { $(,)? }) => {
+        match_request!(@ debug_impl $($res)+, $name)
     };
-    (@debug_impl $($args:tt)*) => {
+    (@ debug $name:literal { $($res:tt)* } { $t:tt $($args:tt)* }) => {
+        match_request!(@ debug $name { $($res)* $t } { $($args)* })
+    };
+    (@ debug_impl $($args:tt)*) => {
         tracing::debug!($($args)*)
     };
 }
-
 impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
     type QueryResponse = Response;
     type OnQueryFuture = BoxFutureOrNoop<Option<Self::QueryResponse>>;
     type OnMessageFuture = BoxFutureOrNoop<()>;
-
-    #[tracing::instrument(level = "debug", name = "on_blockchain_service_query", skip_all)]
+    #[tracing::instrument(
+        level = "debug",
+        name = "on_blockchain_service_query",
+        skip_all
+    )]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
         let (constructor, body) = match try_handle_prefix(&req) {
             Ok(rest) => rest,
@@ -217,100 +174,59 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                 return BoxFutureOrNoop::Noop;
             }
         };
-
         let inner = self.inner.clone();
-
-        // NOTE: update `constructor_to_string` after adding new methods
-        match_request!(body, constructor, {
-            #[meta("ping")]
-            [raw] overlay::Ping as _ => BoxFutureOrNoop::future(async {
-                Some(Response::from_tl(overlay::Pong))
-            }),
-
-            #[meta(
-                "getNextKeyBlockIds",
-                block_id = %req.block_id,
-                max_size = req.max_size,
-            )]
-            rpc::GetNextKeyBlockIds as req => inner.handle_get_next_key_block_ids(&req),
-
-            #[meta("getBlockFull", block_id = %req.block_id)]
-            rpc::GetBlockFull as req => inner.handle_get_block_full(&req).await,
-
-            #[meta("getNextBlockFull", prev_block_id = %req.prev_block_id)]
-            rpc::GetNextBlockFull as req => inner.handle_get_next_block_full(&req).await,
-
-            #[meta(
-                "getBlockDataChunk",
-                block_id = %req.block_id,
-                offset = %req.offset,
-            )]
-            rpc::GetBlockDataChunk as req => inner.handle_get_block_data_chunk(&req).await,
-
-            #[meta("getKeyBlockProof", block_id = %req.block_id)]
-            rpc::GetKeyBlockProof as req => inner.handle_get_key_block_proof(&req).await,
-
-            #[meta("getPersistentShardStateInfo", block_id = %req.block_id)]
-            rpc::GetPersistentShardStateInfo as req => inner.handle_get_persistent_state_info(&req),
-
-            #[meta("getPersistentQueueStateInfo", block_id = %req.block_id)]
-            rpc::GetPersistentQueueStateInfo as req => inner.handle_get_queue_persistent_state_info(&req),
-
-            #[meta(
-                "getPersistentShardStateChunk",
-                block_id = %req.block_id,
-                offset = %req.offset,
-            )]
-            rpc::GetPersistentShardStateChunk as req => {
-                inner.handle_get_persistent_shard_state_chunk(&req).await
-            },
-
-            #[meta(
-                "getPersistentQueueStateChunk",
-                block_id = %req.block_id,
-                offset = %req.offset,
-            )]
-            rpc::GetPersistentQueueStateChunk as req => {
-                inner.handle_get_persistent_queue_state_chunk(&req).await
-            },
-
-            #[meta("getArchiveInfo", mc_seqno = %req.mc_seqno)]
-            rpc::GetArchiveInfo as req => inner.handle_get_archive_info(&req).await,
-
-            #[meta(
-                "getArchiveChunk",
-                archive_id = %req.archive_id,
-                offset = %req.offset,
-            )]
-            rpc::GetArchiveChunk as req => inner.handle_get_archive_chunk(&req).await,
-        }, e => {
-            tracing::debug!("failed to deserialize query: {e}");
-            BoxFutureOrNoop::Noop
-        })
+        match_request!(
+            body, constructor, { #[meta("ping")] [raw] overlay::Ping as _ =>
+            BoxFutureOrNoop::future(async { Some(Response::from_tl(overlay::Pong)) }),
+            #[meta("getNextKeyBlockIds", block_id = % req.block_id, max_size = req
+            .max_size,)] rpc::GetNextKeyBlockIds as req => inner
+            .handle_get_next_key_block_ids(& req), #[meta("getBlockFull", block_id = %
+            req.block_id)] rpc::GetBlockFull as req => inner.handle_get_block_full(& req)
+            . await, #[meta("getNextBlockFull", prev_block_id = % req.prev_block_id)]
+            rpc::GetNextBlockFull as req => inner.handle_get_next_block_full(& req).
+            await, #[meta("getBlockDataChunk", block_id = % req.block_id, offset = % req
+            .offset,)] rpc::GetBlockDataChunk as req => inner
+            .handle_get_block_data_chunk(& req). await, #[meta("getKeyBlockProof",
+            block_id = % req.block_id)] rpc::GetKeyBlockProof as req => inner
+            .handle_get_key_block_proof(& req). await,
+            #[meta("getPersistentShardStateInfo", block_id = % req.block_id)]
+            rpc::GetPersistentShardStateInfo as req => inner
+            .handle_get_persistent_state_info(& req),
+            #[meta("getPersistentQueueStateInfo", block_id = % req.block_id)]
+            rpc::GetPersistentQueueStateInfo as req => inner
+            .handle_get_queue_persistent_state_info(& req),
+            #[meta("getPersistentShardStateChunk", block_id = % req.block_id, offset = %
+            req.offset,)] rpc::GetPersistentShardStateChunk as req => { inner
+            .handle_get_persistent_shard_state_chunk(& req). await },
+            #[meta("getPersistentQueueStateChunk", block_id = % req.block_id, offset = %
+            req.offset,)] rpc::GetPersistentQueueStateChunk as req => { inner
+            .handle_get_persistent_queue_state_chunk(& req). await },
+            #[meta("getArchiveInfo", mc_seqno = % req.mc_seqno)] rpc::GetArchiveInfo as
+            req => inner.handle_get_archive_info(& req). await, #[meta("getArchiveChunk",
+            archive_id = % req.archive_id, offset = % req.offset,)] rpc::GetArchiveChunk
+            as req => inner.handle_get_archive_chunk(& req). await, }, e => {
+            tracing::debug!("failed to deserialize query: {e}"); BoxFutureOrNoop::Noop }
+        )
     }
-
-    #[tracing::instrument(level = "debug", name = "on_blockchain_service_message", skip_all)]
+    #[tracing::instrument(
+        level = "debug",
+        name = "on_blockchain_service_message",
+        skip_all
+    )]
     fn on_message(&self, mut req: ServiceRequest) -> Self::OnMessageFuture {
         use tl_proto::{BytesMeta, TlRead};
-
-        // TODO: Do nothing if `B` is `NoopBroadcastListener` via `castaway` ?
-
-        // Require message body to contain at least two constructors.
         if req.body.len() < 8 {
             return BoxFutureOrNoop::Noop;
         }
-
-        // Skip broadcast prefix
         if req.body.get_u32_le() != overlay::BroadcastPrefix::TL_ID {
             return BoxFutureOrNoop::Noop;
         }
-
-        // Read (CONSUME) the next constructor.
         match req.body.get_u32_le() {
             MessageBroadcastRef::TL_ID => {
                 match BytesMeta::read_from(&mut req.body.as_ref()) {
-                    // NOTE: `len` is 24bit integer
-                    Ok(meta) if req.body.len() == meta.prefix_len + meta.len + meta.padding => {
+                    Ok(
+                        meta,
+                    ) if req.body.len() == meta.prefix_len + meta.len + meta.padding => {
                         req.body.advance(meta.prefix_len);
                         req.body.truncate(meta.len);
                     }
@@ -319,24 +235,42 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                         return BoxFutureOrNoop::Noop;
                     }
                     Err(e) => {
-                        tracing::debug!("failed to deserialize external message broadcast: {e:?}");
+                        tracing::debug!(
+                            "failed to deserialize external message broadcast: {e:?}"
+                        );
                         return BoxFutureOrNoop::Noop;
                     }
                 }
-
                 let inner = self.inner.clone();
                 metrics::counter!("tycho_rpc_broadcast_external_message_rx_bytes_total")
                     .increment(req.body.len() as u64);
                 BoxFutureOrNoop::future(async move {
-                    if let Err(e) = validate_external_message(&req.body).await {
+                    let mut __guard = crate::__async_profile_guard__::Guard::new(
+                        concat!(module_path!(), "::async_block"),
+                        file!(),
+                        330u32,
+                    );
+                    if let Err(e) = {
+                        __guard.end_section(331u32);
+                        let __result = validate_external_message(&req.body).await;
+                        __guard.start_section(331u32);
+                        __result
+                    } {
                         tracing::debug!("invalid external message: {e:?}");
-                        return;
+                        {
+                            __guard.end_section(333u32);
+                            return;
+                        };
                     }
-
-                    inner
-                        .broadcast_listener
-                        .handle_message(req.metadata, req.body)
-                        .await;
+                    {
+                        __guard.end_section(339u32);
+                        let __result = inner
+                            .broadcast_listener
+                            .handle_message(req.metadata, req.body)
+                            .await;
+                        __guard.start_section(339u32);
+                        __result
+                    };
                 })
             }
             constructor => {
@@ -346,35 +280,31 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
         }
     }
 }
-
 struct Inner<B> {
     storage: CoreStorage,
     config: BlockchainRpcServiceConfig,
     broadcast_listener: B,
 }
-
 impl<B> Inner<B> {
     fn storage(&self) -> &CoreStorage {
         &self.storage
     }
-
     fn handle_get_next_key_block_ids(
         &self,
         req: &rpc::GetNextKeyBlockIds,
     ) -> overlay::Response<KeyBlockIds> {
         let block_handle_storage = self.storage().block_handle_storage();
-
-        let limit = std::cmp::min(req.max_size as usize, self.config.max_key_blocks_list_len);
-
+        let limit = std::cmp::min(
+            req.max_size as usize,
+            self.config.max_key_blocks_list_len,
+        );
         let get_next_key_block_ids = || {
             if !req.block_id.shard.is_masterchain() {
                 anyhow::bail!("first block id is not from masterchain");
             }
-
             let mut iterator = block_handle_storage
                 .key_blocks_iterator(KeyBlocksDirection::ForwardFrom(req.block_id.seqno))
                 .take(limit + 1);
-
             if let Some(id) = iterator.next() {
                 anyhow::ensure!(
                     id.root_hash == req.block_id.root_hash,
@@ -385,10 +315,8 @@ impl<B> Inner<B> {
                     "first block file hash mismatch"
                 );
             }
-
             Ok::<_, anyhow::Error>(iterator.take(limit).collect::<Vec<_>>())
         };
-
         match get_next_key_block_ids() {
             Ok(ids) => {
                 let incomplete = ids.len() < limit;
@@ -403,9 +331,22 @@ impl<B> Inner<B> {
             }
         }
     }
-
-    async fn handle_get_block_full(&self, req: &rpc::GetBlockFull) -> overlay::Response<BlockFull> {
-        match self.get_block_full(&req.block_id).await {
+    async fn handle_get_block_full(
+        &self,
+        req: &rpc::GetBlockFull,
+    ) -> overlay::Response<BlockFull> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(handle_get_block_full)),
+            file!(),
+            407u32,
+        );
+        let req = req;
+        match {
+            __guard.end_section(408u32);
+            let __result = self.get_block_full(&req.block_id).await;
+            __guard.start_section(408u32);
+            __result
+        } {
             Ok(block_full) => overlay::Response::Ok(block_full),
             Err(e) => {
                 tracing::warn!("get_block_full failed: {e:?}");
@@ -413,26 +354,50 @@ impl<B> Inner<B> {
             }
         }
     }
-
     async fn handle_get_next_block_full(
         &self,
         req: &rpc::GetNextBlockFull,
     ) -> overlay::Response<BlockFull> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(handle_get_next_block_full)),
+            file!(),
+            420u32,
+        );
+        let req = req;
         let block_handle_storage = self.storage().block_handle_storage();
         let block_connection_storage = self.storage().block_connection_storage();
-
         let get_next_block_full = async {
-            let next_block_id = match block_handle_storage.load_handle(&req.prev_block_id) {
-                Some(handle) if handle.has_next1() => block_connection_storage
-                    .load_connection(&req.prev_block_id, BlockConnection::Next1)
-                    .context("connection not found")?,
-                _ => return Ok(BlockFull::NotFound),
+            let mut __guard = crate::__async_profile_guard__::Guard::new(
+                concat!(module_path!(), "::async_block"),
+                file!(),
+                424u32,
+            );
+            let next_block_id = match block_handle_storage
+                .load_handle(&req.prev_block_id)
+            {
+                Some(handle) if handle.has_next1() => {
+                    block_connection_storage
+                        .load_connection(&req.prev_block_id, BlockConnection::Next1)
+                        .context("connection not found")?
+                }
+                _ => {
+                    __guard.end_section(429u32);
+                    return Ok(BlockFull::NotFound);
+                }
             };
-
-            self.get_block_full(&next_block_id).await
+            {
+                __guard.end_section(432u32);
+                let __result = self.get_block_full(&next_block_id).await;
+                __guard.start_section(432u32);
+                __result
+            }
         };
-
-        match get_next_block_full.await {
+        match {
+            __guard.end_section(435u32);
+            let __result = get_next_block_full.await;
+            __guard.start_section(435u32);
+            __result
+        } {
             Ok(block_full) => overlay::Response::Ok(block_full),
             Err(e) => {
                 tracing::warn!("get_next_block_full failed: {e:?}");
@@ -440,27 +405,37 @@ impl<B> Inner<B> {
             }
         }
     }
-
     async fn handle_get_block_data_chunk(
         &self,
         req: &rpc::GetBlockDataChunk,
     ) -> overlay::Response<Data> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(handle_get_block_data_chunk)),
+            file!(),
+            447u32,
+        );
+        let req = req;
         let block_handle_storage = self.storage().block_handle_storage();
         let block_storage = self.storage().block_storage();
-
         let handle = match block_handle_storage.load_handle(&req.block_id) {
             Some(handle) if handle.has_data() => handle,
             _ => {
                 tracing::debug!("block data not found for chunked read");
-                return overlay::Response::Err(NOT_FOUND_ERROR_CODE);
+                {
+                    __guard.end_section(455u32);
+                    return overlay::Response::Err(NOT_FOUND_ERROR_CODE);
+                };
             }
         };
-
         let offset = req.offset as u64;
-        match block_storage
-            .load_block_data_range(&handle, offset, BLOCK_DATA_CHUNK_SIZE as u64)
-            .await
-        {
+        match {
+            __guard.end_section(462u32);
+            let __result = block_storage
+                .load_block_data_range(&handle, offset, BLOCK_DATA_CHUNK_SIZE as u64)
+                .await;
+            __guard.start_section(462u32);
+            __result
+        } {
             Ok(Some(data)) => overlay::Response::Ok(Data { data }),
             Ok(None) => {
                 tracing::debug!("block data chunk not found at offset {}", offset);
@@ -472,27 +447,48 @@ impl<B> Inner<B> {
             }
         }
     }
-
     async fn handle_get_key_block_proof(
         &self,
         req: &rpc::GetKeyBlockProof,
     ) -> overlay::Response<KeyBlockProof> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(handle_get_key_block_proof)),
+            file!(),
+            479u32,
+        );
+        let req = req;
         let block_handle_storage = self.storage().block_handle_storage();
         let block_storage = self.storage().block_storage();
-
         let get_key_block_proof = async {
+            let mut __guard = crate::__async_profile_guard__::Guard::new(
+                concat!(module_path!(), "::async_block"),
+                file!(),
+                483u32,
+            );
             match block_handle_storage.load_handle(&req.block_id) {
                 Some(handle) if handle.has_proof() => {
-                    let data = block_storage.load_block_proof_raw(&handle).await?;
-                    Ok::<_, anyhow::Error>(KeyBlockProof::Found {
+                    let data = {
+                        __guard.end_section(486u32);
+                        let __result = block_storage.load_block_proof_raw(&handle).await;
+                        __guard.start_section(486u32);
+                        __result
+                    }?;
+                    Ok::<
+                        _,
+                        anyhow::Error,
+                    >(KeyBlockProof::Found {
                         proof: Bytes::from_owner(data),
                     })
                 }
                 _ => Ok(KeyBlockProof::NotFound),
             }
         };
-
-        match get_key_block_proof.await {
+        match {
+            __guard.end_section(495u32);
+            let __result = get_key_block_proof.await;
+            __guard.start_section(495u32);
+            __result
+        } {
             Ok(key_block_proof) => overlay::Response::Ok(key_block_proof),
             Err(e) => {
                 tracing::warn!("get_key_block_proof failed: {e:?}");
@@ -500,37 +496,45 @@ impl<B> Inner<B> {
             }
         }
     }
-
     async fn handle_get_archive_info(
         &self,
         req: &rpc::GetArchiveInfo,
     ) -> overlay::Response<ArchiveInfo> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(handle_get_archive_info)),
+            file!(),
+            507u32,
+        );
+        let req = req;
         let mc_seqno = req.mc_seqno;
         let node_state = self.storage.node_state();
-
         match node_state.load_last_mc_block_id() {
             Some(last_applied_mc_block) => {
                 if mc_seqno > last_applied_mc_block.seqno {
-                    return overlay::Response::Ok(ArchiveInfo::TooNew);
+                    {
+                        __guard.end_section(514u32);
+                        return overlay::Response::Ok(ArchiveInfo::TooNew);
+                    };
                 }
-
                 let block_storage = self.storage().block_storage();
-
                 let id = block_storage.get_archive_id(mc_seqno);
                 let size_res = match id {
                     ArchiveId::Found(id) => block_storage.get_archive_size(id),
                     ArchiveId::TooNew | ArchiveId::NotFound => Ok(None),
                 };
-
-                overlay::Response::Ok(match (id, size_res) {
-                    (ArchiveId::Found(id), Ok(Some(size))) if size > 0 => ArchiveInfo::Found {
-                        id: id as u64,
-                        size: NonZeroU64::new(size as _).unwrap(),
-                        chunk_size: BlockStorage::DEFAULT_BLOB_CHUNK_SIZE,
+                overlay::Response::Ok(
+                    match (id, size_res) {
+                        (ArchiveId::Found(id), Ok(Some(size))) if size > 0 => {
+                            ArchiveInfo::Found {
+                                id: id as u64,
+                                size: NonZeroU64::new(size as _).unwrap(),
+                                chunk_size: BlockStorage::DEFAULT_BLOB_CHUNK_SIZE,
+                            }
+                        }
+                        (ArchiveId::TooNew, Ok(None)) => ArchiveInfo::TooNew,
+                        _ => ArchiveInfo::NotFound,
                     },
-                    (ArchiveId::TooNew, Ok(None)) => ArchiveInfo::TooNew,
-                    _ => ArchiveInfo::NotFound,
-                })
+                )
             }
             None => {
                 tracing::warn!("get_archive_id failed: no blocks applied");
@@ -538,21 +542,39 @@ impl<B> Inner<B> {
             }
         }
     }
-
     async fn handle_get_archive_chunk(
         &self,
         req: &rpc::GetArchiveChunk,
     ) -> overlay::Response<Data> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(handle_get_archive_chunk)),
+            file!(),
+            545u32,
+        );
+        let req = req;
         let block_storage = self.storage.block_storage();
-
         let get_archive_chunk = || async {
-            let archive_slice = block_storage
-                .get_archive_chunk(req.archive_id as u32, req.offset)
-                .await?;
+            let mut __guard = crate::__async_profile_guard__::Guard::new(
+                concat!(module_path!(), "::async_block"),
+                file!(),
+                548u32,
+            );
+            let archive_slice = {
+                __guard.end_section(551u32);
+                let __result = block_storage
+                    .get_archive_chunk(req.archive_id as u32, req.offset)
+                    .await;
+                __guard.start_section(551u32);
+                __result
+            }?;
             Ok::<_, anyhow::Error>(archive_slice)
         };
-
-        match get_archive_chunk().await {
+        match {
+            __guard.end_section(555u32);
+            let __result = get_archive_chunk().await;
+            __guard.start_section(555u32);
+            __result
+        } {
             Ok(data) => overlay::Response::Ok(Data { data }),
             Err(e) => {
                 tracing::warn!("get_archive_chunk failed: {e:?}");
@@ -560,83 +582,131 @@ impl<B> Inner<B> {
             }
         }
     }
-
     fn handle_get_persistent_state_info(
         &self,
         req: &rpc::GetPersistentShardStateInfo,
     ) -> overlay::Response<PersistentStateInfo> {
         let label = [("method", "getPersistentShardStateInfo")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
-        let res = self.read_persistent_state_info(&req.block_id, PersistentStateKind::Shard);
+        let res = self
+            .read_persistent_state_info(&req.block_id, PersistentStateKind::Shard);
         overlay::Response::Ok(res)
     }
-
     fn handle_get_queue_persistent_state_info(
         &self,
         req: &rpc::GetPersistentQueueStateInfo,
     ) -> overlay::Response<PersistentStateInfo> {
-        let res = self.read_persistent_state_info(&req.block_id, PersistentStateKind::Queue);
+        let res = self
+            .read_persistent_state_info(&req.block_id, PersistentStateKind::Queue);
         overlay::Response::Ok(res)
     }
-
     async fn handle_get_persistent_shard_state_chunk(
         &self,
         req: &rpc::GetPersistentShardStateChunk,
     ) -> overlay::Response<Data> {
-        self.read_persistent_state_chunk(&req.block_id, req.offset, PersistentStateKind::Shard)
-            .await
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(
+                module_path!(), "::", stringify!(handle_get_persistent_shard_state_chunk)
+            ),
+            file!(),
+            585u32,
+        );
+        let req = req;
+        {
+            __guard.end_section(587u32);
+            let __result = self
+                .read_persistent_state_chunk(
+                    &req.block_id,
+                    req.offset,
+                    PersistentStateKind::Shard,
+                )
+                .await;
+            __guard.start_section(587u32);
+            __result
+        }
     }
-
     async fn handle_get_persistent_queue_state_chunk(
         &self,
         req: &rpc::GetPersistentQueueStateChunk,
     ) -> overlay::Response<Data> {
-        self.read_persistent_state_chunk(&req.block_id, req.offset, PersistentStateKind::Queue)
-            .await
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(
+                module_path!(), "::", stringify!(handle_get_persistent_queue_state_chunk)
+            ),
+            file!(),
+            593u32,
+        );
+        let req = req;
+        {
+            __guard.end_section(595u32);
+            let __result = self
+                .read_persistent_state_chunk(
+                    &req.block_id,
+                    req.offset,
+                    PersistentStateKind::Queue,
+                )
+                .await;
+            __guard.start_section(595u32);
+            __result
+        }
     }
 }
-
 impl<B> Inner<B> {
     async fn get_block_full(&self, block_id: &BlockId) -> anyhow::Result<BlockFull> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(get_block_full)),
+            file!(),
+            600u32,
+        );
+        let block_id = block_id;
         let block_handle_storage = self.storage().block_handle_storage();
         let block_storage = self.storage().block_storage();
-
         let handle = match block_handle_storage.load_handle(block_id) {
             Some(handle) if handle.has_all_block_parts() => handle,
-            _ => return Ok(BlockFull::NotFound),
-        };
-
-        // Get first chunk of compressed data
-        let data = match block_storage
-            .load_block_data_range(&handle, 0, BLOCK_DATA_CHUNK_SIZE as u64)
-            .await?
-        {
-            Some(data) => data,
-            None => return Ok(BlockFull::NotFound),
-        };
-
-        let data_size = if data.len() < BLOCK_DATA_CHUNK_SIZE as usize {
-            // Small block - entire data fits in one chunk
-            data.len() as u32
-        } else {
-            // Large block - need to get total size from storage
-            match block_storage.get_compressed_block_data_size(&handle)? {
-                Some(size) => size as u32,
-                None => return Ok(BlockFull::NotFound),
+            _ => {
+                __guard.end_section(606u32);
+                return Ok(BlockFull::NotFound);
             }
         };
-
+        let data = match {
+            __guard.end_section(612u32);
+            let __result = block_storage
+                .load_block_data_range(&handle, 0, BLOCK_DATA_CHUNK_SIZE as u64)
+                .await;
+            __guard.start_section(612u32);
+            __result
+        }? {
+            Some(data) => data,
+            None => {
+                __guard.end_section(615u32);
+                return Ok(BlockFull::NotFound);
+            }
+        };
+        let data_size = if data.len() < BLOCK_DATA_CHUNK_SIZE as usize {
+            data.len() as u32
+        } else {
+            match block_storage.get_compressed_block_data_size(&handle)? {
+                Some(size) => size as u32,
+                None => {
+                    __guard.end_section(625u32);
+                    return Ok(BlockFull::NotFound);
+                }
+            }
+        };
         let block = BlockData {
             data,
             size: NonZeroU32::new(data_size).expect("shouldn't happen"),
             chunk_size: NonZeroU32::new(BLOCK_DATA_CHUNK_SIZE).expect("shouldn't happen"),
         };
-
-        let (proof, queue_diff) = tokio::join!(
-            block_storage.load_block_proof_raw(&handle),
-            block_storage.load_queue_diff_raw(&handle)
-        );
-
+        let (proof, queue_diff) = {
+            __guard.end_section(635u32);
+            let __result = tokio::join!(
+                block_storage.load_block_proof_raw(& handle), block_storage
+                .load_queue_diff_raw(& handle)
+            );
+            __guard.start_section(635u32);
+            __result
+        };
         Ok(BlockFull::Found {
             block_id: *block_id,
             block,
@@ -644,7 +714,6 @@ impl<B> Inner<B> {
             queue_diff: Bytes::from_owner(queue_diff?),
         })
     }
-
     fn read_persistent_state_info(
         &self,
         block_id: &BlockId,
@@ -652,7 +721,8 @@ impl<B> Inner<B> {
     ) -> PersistentStateInfo {
         let persistent_state_storage = self.storage().persistent_state_storage();
         if self.config.serve_persistent_states
-            && let Some(info) = persistent_state_storage.get_state_info(block_id, state_kind)
+            && let Some(info) = persistent_state_storage
+                .get_state_info(block_id, state_kind)
         {
             return PersistentStateInfo::Found {
                 size: info.size,
@@ -661,32 +731,42 @@ impl<B> Inner<B> {
         }
         PersistentStateInfo::NotFound
     }
-
     async fn read_persistent_state_chunk(
         &self,
         block_id: &BlockId,
         offset: u64,
         state_kind: PersistentStateKind,
     ) -> overlay::Response<Data> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(read_persistent_state_chunk)),
+            file!(),
+            670u32,
+        );
+        let block_id = block_id;
+        let offset = offset;
+        let state_kind = state_kind;
         let persistent_state_storage = self.storage().persistent_state_storage();
-
         let persistent_state_request_validation = || {
             anyhow::ensure!(
-                self.config.serve_persistent_states,
-                "persistent states are disabled"
+                self.config.serve_persistent_states, "persistent states are disabled"
             );
             Ok::<_, anyhow::Error>(())
         };
-
         if let Err(e) = persistent_state_request_validation() {
             tracing::debug!("persistent state request validation failed: {e:?}");
-            return overlay::Response::Err(BAD_REQUEST_ERROR_CODE);
+            {
+                __guard.end_section(683u32);
+                return overlay::Response::Err(BAD_REQUEST_ERROR_CODE);
+            };
         }
-
-        match persistent_state_storage
-            .read_state_part(block_id, offset, state_kind)
-            .await
-        {
+        match {
+            __guard.end_section(688u32);
+            let __result = persistent_state_storage
+                .read_state_part(block_id, offset, state_kind)
+                .await;
+            __guard.start_section(688u32);
+            __result
+        } {
             Some(data) => overlay::Response::Ok(Data { data: data.into() }),
             None => {
                 tracing::debug!("failed to read persistent state part");

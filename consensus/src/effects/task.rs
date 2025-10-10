@@ -2,33 +2,37 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-
 use futures_util::FutureExt;
 use tokio::sync::{Semaphore, TryAcquireError};
 use tokio::task::JoinHandle;
-
 #[derive(thiserror::Error, Debug, Copy, Clone)]
 #[error("task is cancelled")]
 pub struct Cancelled();
 pub type TaskResult<R> = std::result::Result<R, Cancelled>;
-
 #[derive(Default, Clone)]
 pub struct TaskTracker(tokio_util::task::task_tracker::TaskTracker);
 pub struct TaskCtx<'a>(&'a tokio_util::task::task_tracker::TaskTracker);
-
 impl TaskTracker {
     pub fn ctx(&self) -> TaskCtx<'_> {
         TaskCtx(&self.0)
     }
-
     /// Prevents executing new spawned tasks.
     /// Does not abort already running tasks, instead waits for them to finish.
     pub async fn stop(&self) {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(stop)),
+            file!(),
+            26u32,
+        );
         self.0.close();
-        self.0.wait().await;
+        {
+            __guard.end_section(28u32);
+            let __result = self.0.wait().await;
+            __guard.start_section(28u32);
+            __result
+        };
     }
 }
-
 impl TaskCtx<'_> {
     pub fn spawn<R, F>(&self, task: F) -> Task<R>
     where
@@ -43,7 +47,6 @@ impl TaskCtx<'_> {
             completed: false,
         }
     }
-
     pub fn spawn_blocking<F, R>(&self, task: F) -> Task<R>
     where
         F: FnOnce() -> R,
@@ -59,7 +62,6 @@ impl TaskCtx<'_> {
         }
     }
 }
-
 /// Version of [`tokio_util::task::AbortOnDropHandle`] suited for use inside
 /// [`tycho_util::futures::Shared`] to call abort only once on drop
 /// much like [`tycho_util::futures::JoinTask`], but every wrapped [`tokio::task::JoinHandle`]
@@ -69,7 +71,6 @@ pub struct Task<R> {
     handle: JoinHandle<TaskResult<R>>,
     completed: bool,
 }
-
 impl<R> Task<R> {
     fn aborted() -> Self
     where
@@ -82,13 +83,11 @@ impl<R> Task<R> {
             completed: true,
         }
     }
-
     /// Note: a future of a finished handle may still return [`Poll::Pending`] on occasion
     pub fn is_finished(&self) -> bool {
         self.handle.is_finished()
     }
 }
-
 impl<T> Drop for Task<T> {
     fn drop(&mut self) {
         if !self.completed {
@@ -96,43 +95,59 @@ impl<T> Drop for Task<T> {
         }
     }
 }
-
 impl<T> Future for Task<T> {
     type Output = TaskResult<T>;
-
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let res = futures_util::ready!(self.handle.poll_unpin(cx));
         self.completed = true;
-        Poll::Ready(match res {
-            Ok(Ok(value)) => Ok(value),
-            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-            // Should only happen when task tracker is closed or on program termination
-            // Blocking task can be cancelled only until it starts running
-            Err(_) | Ok(Err(Cancelled())) => Err(Cancelled()),
-        })
+        Poll::Ready(
+            match res {
+                Ok(Ok(value)) => Ok(value),
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(_) | Ok(Err(Cancelled())) => Err(Cancelled()),
+            },
+        )
     }
 }
-
 pub struct SpawnLimit(Arc<Semaphore>);
 impl SpawnLimit {
     pub fn new(limit: usize) -> Self {
         Self(Arc::new(Semaphore::new(limit)))
     }
-
     pub async fn spawn_blocking<F, R>(&self, ctx: TaskCtx<'_>, task: F) -> Task<R>
     where
         F: FnOnce() -> R,
         F: Send + 'static,
         R: Send + 'static,
     {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(spawn_blocking)),
+            file!(),
+            128u32,
+        );
+        let ctx = ctx;
+        let task = task;
         let permit = match self.0.clone().try_acquire_owned() {
             Ok(permit) => permit,
-            Err(TryAcquireError::NoPermits) => match self.0.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_closed) => return Task::aborted(),
-            },
-            Err(TryAcquireError::Closed) => return Task::aborted(),
+            Err(TryAcquireError::NoPermits) => {
+                match {
+                    __guard.end_section(131u32);
+                    let __result = self.0.clone().acquire_owned().await;
+                    __guard.start_section(131u32);
+                    __result
+                } {
+                    Ok(permit) => permit,
+                    Err(_closed) => {
+                        __guard.end_section(133u32);
+                        return Task::aborted();
+                    }
+                }
+            }
+            Err(TryAcquireError::Closed) => {
+                __guard.end_section(135u32);
+                return Task::aborted();
+            }
         };
         ctx.spawn_blocking(move || {
             let res = task();
@@ -140,7 +155,6 @@ impl SpawnLimit {
             res
         })
     }
-
     pub fn try_spawn_blocking<F, R>(&self, ctx: TaskCtx<'_>, task: F) -> Option<Task<R>>
     where
         F: FnOnce() -> R,
@@ -151,10 +165,13 @@ impl SpawnLimit {
             Ok(permit) => permit,
             Err(TryAcquireError::Closed | TryAcquireError::NoPermits) => return None,
         };
-        Some(ctx.spawn_blocking(move || {
-            let res = task();
-            drop(permit);
-            res
-        }))
+        Some(
+            ctx
+                .spawn_blocking(move || {
+                    let res = task();
+                    drop(permit);
+                    res
+                }),
+        )
     }
 }

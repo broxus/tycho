@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-
 use anyhow::Result;
 use tycho_block_util::block::{BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
@@ -11,57 +10,58 @@ use tycho_core::blockchain_rpc::{
 };
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::proto::blockchain::{KeyBlockIds, PersistentStateInfo};
-use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta, PersistentStateKind};
-use tycho_network::{DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay};
+use tycho_core::storage::{
+    CoreStorage, CoreStorageConfig, NewBlockMeta, PersistentStateKind,
+};
+use tycho_network::{
+    DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay,
+};
 use tycho_storage::StorageContext;
 use tycho_storage::fs::MappedFile;
 use tycho_types::boc::{Boc, BocRepr};
 use tycho_types::models::{BlockId, ExtInMsgInfo, OwnedMessage, ShardIdent};
-
 use crate::network::TestNode;
-
 mod network;
 mod storage;
 mod utils;
-
 #[tokio::test]
 async fn overlay_server_msg_broadcast() -> Result<()> {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(overlay_server_msg_broadcast)),
+        file!(),
+        28u32,
+    );
     tycho_util::test::init_logger("overlay_server_msg_broadcast", "info");
-
     #[derive(Default, Clone)]
     struct BroadcastCounter {
         total_received: Arc<AtomicUsize>,
     }
-
     impl BroadcastListener for BroadcastCounter {
         type HandleMessageFut<'a> = futures_util::future::Ready<()>;
-
         fn handle_message(
             &self,
             meta: Arc<InboundRequestMeta>,
             message: bytes::Bytes,
         ) -> Self::HandleMessageFut<'_> {
             tracing::info!(
-                peer_id = %meta.peer_id,
-                remote_addr = %meta.remote_address,
-                len = message.len(),
-                "received broadcast from peer",
+                peer_id = % meta.peer_id, remote_addr = % meta.remote_address, len =
+                message.len(), "received broadcast from peer",
             );
             self.total_received.fetch_add(1, Ordering::Release);
             futures_util::future::ready(())
         }
     }
-
     struct Node {
         base: network::NodeBase,
         dht_client: DhtClient,
         blockchain_client: BlockchainRpcClient,
     }
-
     impl Node {
-        fn with_random_key(storage: CoreStorage, broadcast_counter: BroadcastCounter) -> Self {
+        fn with_random_key(
+            storage: CoreStorage,
+            broadcast_counter: BroadcastCounter,
+        ) -> Self {
             const OVERLAY_ID: OverlayId = OverlayId([0x33; 32]);
-
             let base = network::NodeBase::with_random_key();
             let public_overlay = PublicOverlay::builder(OVERLAY_ID)
                 .with_peer_resolver(base.peer_resolver.clone())
@@ -72,15 +72,15 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
                         .build(),
                 );
             base.overlay_service.add_public_overlay(&public_overlay);
-
             let dht_client = base.dht_service.make_client(&base.network);
-            let client =
-                PublicOverlayClient::new(base.network.clone(), public_overlay, Default::default());
-
+            let client = PublicOverlayClient::new(
+                base.network.clone(),
+                public_overlay,
+                Default::default(),
+            );
             let blockchain_client = BlockchainRpcClient::builder()
                 .with_public_overlay_client(client.clone())
                 .build();
-
             Self {
                 base,
                 dht_client,
@@ -88,53 +88,55 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
             }
         }
     }
-
     impl TestNode for Node {
         fn network(&self) -> &Network {
             &self.base.network
         }
-
         fn public_overlay(&self) -> &PublicOverlay {
             self.blockchain_client.overlay()
         }
-
         fn force_update_validators(&self, peers: Vec<PeerId>) {
-            self.blockchain_client
-                .overlay_client()
-                .update_validator_set(&peers);
+            self.blockchain_client.overlay_client().update_validator_set(&peers);
         }
     }
-
     let broadcast_counter = BroadcastCounter::default();
-    let (storage, _tmp_dir) = storage::init_storage().await?;
-
+    let (storage, _tmp_dir) = {
+        __guard.end_section(109u32);
+        let __result = storage::init_storage().await;
+        __guard.start_section(109u32);
+        __result
+    }?;
     let nodes = (0..10)
         .map(|_| Node::with_random_key(storage.clone(), broadcast_counter.clone()))
         .collect::<Vec<_>>();
-
     {
         let first_peer = nodes.first().unwrap();
         let first_peer_info = first_peer.base.network.sign_peer_info(0, u32::MAX);
         for node in &nodes {
-            node.dht_client
-                .add_peer(Arc::new(first_peer_info.clone()))
-                .unwrap();
+            __guard.checkpoint(118u32);
+            node.dht_client.add_peer(Arc::new(first_peer_info.clone())).unwrap();
         }
     }
-
-    network::discover(&nodes).await?;
-
+    {
+        __guard.end_section(125u32);
+        let __result = network::discover(&nodes).await;
+        __guard.start_section(125u32);
+        __result
+    }?;
     let peers = nodes
         .iter()
         .map(|x| *x.dht_client.network().peer_id())
         .collect::<Vec<PeerId>>();
-
     for node in &nodes {
+        __guard.checkpoint(132u32);
         node.force_update_validators(peers.clone());
     }
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
+    {
+        __guard.end_section(136u32);
+        let __result = tokio::time::sleep(Duration::from_secs(1)).await;
+        __guard.start_section(136u32);
+        __result
+    };
     tracing::info!("broadcasting messages...");
     let msg = BocRepr::encode(OwnedMessage {
         info: ExtInMsgInfo::default().into(),
@@ -142,146 +144,198 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
         body: Default::default(),
         layout: None,
     })?;
-
     for node in &nodes {
-        node.blockchain_client
-            .broadcast_external_message(&msg)
-            .await;
+        __guard.checkpoint(146u32);
+        {
+            __guard.end_section(149u32);
+            let __result = node.blockchain_client.broadcast_external_message(&msg).await;
+            __guard.start_section(149u32);
+            __result
+        };
     }
-
     let total_received = broadcast_counter.total_received.load(Ordering::Acquire);
-
     assert!(total_received > nodes.len() * 4 && total_received <= nodes.len() * 5);
-
     Ok(())
 }
-
 #[tokio::test]
 async fn overlay_server_with_empty_storage() -> Result<()> {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(overlay_server_with_empty_storage)),
+        file!(),
+        160u32,
+    );
     tycho_util::test::init_logger("overlay_server_with_empty_storage", "info");
-
-    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
-    let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
-
+    let (ctx, _tmp_dir) = {
+        __guard.end_section(163u32);
+        let __result = StorageContext::new_temp().await;
+        __guard.start_section(163u32);
+        __result
+    }?;
+    let storage = {
+        __guard.end_section(164u32);
+        let __result = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await;
+        __guard.start_section(164u32);
+        __result
+    }?;
     let nodes = network::make_network(storage, 10);
-
-    network::discover(&nodes).await?;
-
+    {
+        __guard.end_section(168u32);
+        let __result = network::discover(&nodes).await;
+        __guard.start_section(168u32);
+        __result
+    }?;
     tracing::info!("making overlay requests...");
-
     let node = nodes.first().unwrap();
-
     let client = BlockchainRpcClient::builder()
-        .with_public_overlay_client(PublicOverlayClient::new(
-            node.network().clone(),
-            node.public_overlay().clone(),
-            Default::default(),
-        ))
+        .with_public_overlay_client(
+            PublicOverlayClient::new(
+                node.network().clone(),
+                node.public_overlay().clone(),
+                Default::default(),
+            ),
+        )
         .build();
-
-    let result = client
-        .get_block_full(&BlockId::default(), DataRequirement::Optional)
-        .await;
+    let result = {
+        __guard.end_section(184u32);
+        let __result = client
+            .get_block_full(&BlockId::default(), DataRequirement::Optional)
+            .await;
+        __guard.start_section(184u32);
+        __result
+    };
     assert!(result.is_ok());
-
     if let Ok(response) = &result {
         assert!(response.data.is_none());
     }
-
-    let result = client
-        .get_next_block_full(&BlockId::default(), DataRequirement::Optional)
-        .await;
+    let result = {
+        __guard.end_section(193u32);
+        let __result = client
+            .get_next_block_full(&BlockId::default(), DataRequirement::Optional)
+            .await;
+        __guard.start_section(193u32);
+        __result
+    };
     assert!(result.is_ok());
-
     if let Ok(response) = &result {
         assert!(response.data.is_none());
     }
-
-    let result = client.get_next_key_block_ids(&BlockId::default(), 10).await;
+    let result = {
+        __guard.end_section(200u32);
+        let __result = client.get_next_key_block_ids(&BlockId::default(), 10).await;
+        __guard.start_section(200u32);
+        __result
+    };
     assert!(result.is_ok());
-
     if let Ok(response) = &result {
         let ids = KeyBlockIds {
             block_ids: vec![],
             incomplete: true,
         };
-        assert_eq!(response.data(), &ids);
+        assert_eq!(response.data(), & ids);
     }
-
-    let result = client.get_persistent_state_info(&BlockId::default()).await;
+    let result = {
+        __guard.end_section(211u32);
+        let __result = client.get_persistent_state_info(&BlockId::default()).await;
+        __guard.start_section(211u32);
+        __result
+    };
     assert!(result.is_ok());
-
     if let Ok(response) = &result {
-        assert_eq!(response.data(), &PersistentStateInfo::NotFound);
+        assert_eq!(response.data(), & PersistentStateInfo::NotFound);
     }
-
     tracing::info!("done!");
     Ok(())
 }
-
 #[tokio::test]
 async fn overlay_server_blocks() -> Result<()> {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(overlay_server_blocks)),
+        file!(),
+        223u32,
+    );
     tycho_util::test::init_logger("overlay_server_blocks", "info");
-
-    let (storage, _tmp_dir) = storage::init_storage().await?;
-
+    let (storage, _tmp_dir) = {
+        __guard.end_section(226u32);
+        let __result = storage::init_storage().await;
+        __guard.start_section(226u32);
+        __result
+    }?;
     let nodes = network::make_network(storage, 10);
-
-    network::discover(&nodes).await?;
-
+    {
+        __guard.end_section(230u32);
+        let __result = network::discover(&nodes).await;
+        __guard.start_section(230u32);
+        __result
+    }?;
     tracing::info!("making overlay requests...");
-
     let node = nodes.first().unwrap();
-
     let client = BlockchainRpcClient::builder()
-        .with_public_overlay_client(PublicOverlayClient::new(
-            node.network().clone(),
-            node.public_overlay().clone(),
-            Default::default(),
-        ))
+        .with_public_overlay_client(
+            PublicOverlayClient::new(
+                node.network().clone(),
+                node.public_overlay().clone(),
+                Default::default(),
+            ),
+        )
         .build();
-
     let archive_data = utils::read_file("archive_1.bin")?;
     let archive = utils::parse_archive(&archive_data).map(Arc::new)?;
-
     for block_id in archive.blocks.keys() {
+        __guard.checkpoint(247u32);
         if block_id.shard.is_masterchain() {
-            let result = client
-                .get_block_full(block_id, DataRequirement::Required)
-                .await?;
-
-            let (archive_block, archive_proof, archive_queue_diff) =
-                archive.get_entry_by_id(block_id).await?;
-
+            let result = {
+                __guard.end_section(251u32);
+                let __result = client
+                    .get_block_full(block_id, DataRequirement::Required)
+                    .await;
+                __guard.start_section(251u32);
+                __result
+            }?;
+            let (archive_block, archive_proof, archive_queue_diff) = {
+                __guard.end_section(254u32);
+                let __result = archive.get_entry_by_id(block_id).await;
+                __guard.start_section(254u32);
+                __result
+            }?;
             if let Some(block_full) = &result.data {
-                let block = BlockStuff::deserialize_checked(block_id, &block_full.block_data)?;
+                let block = BlockStuff::deserialize_checked(
+                    block_id,
+                    &block_full.block_data,
+                )?;
                 assert_eq!(block.as_ref(), archive_block.block());
-
-                let proof = BlockProofStuff::deserialize(block_id, &block_full.proof_data)?;
+                let proof = BlockProofStuff::deserialize(
+                    block_id,
+                    &block_full.proof_data,
+                )?;
                 assert_eq!(proof.as_ref().proof_for, archive_proof.as_ref().proof_for);
                 assert_eq!(proof.as_ref().root, archive_proof.as_ref().root);
-
-                let queue_diff =
-                    QueueDiffStuff::deserialize(block_id, &block_full.queue_diff_data)?;
+                let queue_diff = QueueDiffStuff::deserialize(
+                    block_id,
+                    &block_full.queue_diff_data,
+                )?;
                 assert_eq!(queue_diff.diff(), archive_queue_diff.diff());
             }
         }
     }
-
     tracing::info!("done!");
     Ok(())
 }
-
 #[tokio::test]
 async fn overlay_server_persistent_state() -> Result<()> {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(overlay_server_persistent_state)),
+        file!(),
+        276u32,
+    );
     tycho_util::test::init_logger("overlay_server_persistent_state", "info");
-
-    let (storage, _tmp_dir) = storage::init_storage().await?;
-
+    let (storage, _tmp_dir) = {
+        __guard.end_section(279u32);
+        let __result = storage::init_storage().await;
+        __guard.start_section(279u32);
+        __result
+    }?;
     let shard_states = storage.shard_state_storage();
     let persistent_states = storage.persistent_state_storage();
-
-    // Prepare zerostate
     static ZEROSTATE_BOC: &[u8] = include_bytes!("../tests/data/zerostate.boc");
     let zerostate_root = Boc::decode(ZEROSTATE_BOC)?;
     let zerostate_id = BlockId {
@@ -290,70 +344,75 @@ async fn overlay_server_persistent_state() -> Result<()> {
         root_hash: *zerostate_root.repr_hash(),
         file_hash: Boc::file_hash_blake(ZEROSTATE_BOC),
     };
-
-    // Write zerostate to db
     let (zerostate_handle, _) = storage
         .block_handle_storage()
         .create_or_load_handle(&zerostate_id, NewBlockMeta::zero_state(0, true));
-
     let zerostate = ShardStateStuff::from_root(
         &zerostate_id,
         zerostate_root,
         shard_states.min_ref_mc_state().insert_untracked(),
     )?;
-    shard_states
-        .store_state(&zerostate_handle, &zerostate, Default::default())
-        .await?;
-
+    {
+        __guard.end_section(306u32);
+        let __result = shard_states
+            .store_state(&zerostate_handle, &zerostate, Default::default())
+            .await;
+        __guard.start_section(306u32);
+        __result
+    }?;
     {
         let mut zerostate_file = storage.context().temp_files().unnamed_file().open()?;
-        std::io::copy(
-            &mut std::convert::identity(ZEROSTATE_BOC),
-            &mut zerostate_file,
-        )?;
-
-        persistent_states
-            .store_shard_state_file(0, &zerostate_handle, zerostate_file)
-            .await?;
+        std::io::copy(&mut std::convert::identity(ZEROSTATE_BOC), &mut zerostate_file)?;
+        {
+            __guard.end_section(317u32);
+            let __result = persistent_states
+                .store_shard_state_file(0, &zerostate_handle, zerostate_file)
+                .await;
+            __guard.start_section(317u32);
+            __result
+        }?;
     }
-
     assert!(zerostate_handle.has_persistent_shard_state());
-
-    persistent_states
-        .get_state_info(&zerostate_id, PersistentStateKind::Shard)
-        .unwrap();
-
-    // Prepare network
+    persistent_states.get_state_info(&zerostate_id, PersistentStateKind::Shard).unwrap();
     let nodes = network::make_network(storage.clone(), 10);
-
-    network::discover(&nodes).await?;
-
+    {
+        __guard.end_section(329u32);
+        let __result = network::discover(&nodes).await;
+        __guard.start_section(329u32);
+        __result
+    }?;
     tracing::info!("making overlay requests...");
-
     let node = nodes.first().unwrap();
-
     let client = BlockchainRpcClient::builder()
-        .with_public_overlay_client(PublicOverlayClient::new(
-            node.network().clone(),
-            node.public_overlay().clone(),
-            Default::default(),
-        ))
-        .build();
-
-    let pending_state = client
-        .find_persistent_state(&zerostate_id, PersistentStateKind::Shard)
-        .await?;
-
-    let temp_file = client
-        .download_persistent_state(
-            pending_state,
-            storage.context().temp_files().unnamed_file().open()?,
+        .with_public_overlay_client(
+            PublicOverlayClient::new(
+                node.network().clone(),
+                node.public_overlay().clone(),
+                Default::default(),
+            ),
         )
-        .await?;
-
+        .build();
+    let pending_state = {
+        __guard.end_section(345u32);
+        let __result = client
+            .find_persistent_state(&zerostate_id, PersistentStateKind::Shard)
+            .await;
+        __guard.start_section(345u32);
+        __result
+    }?;
+    let temp_file = {
+        __guard.end_section(352u32);
+        let __result = client
+            .download_persistent_state(
+                pending_state,
+                storage.context().temp_files().unnamed_file().open()?,
+            )
+            .await;
+        __guard.start_section(352u32);
+        __result
+    }?;
     let mapped = MappedFile::from_existing_file(temp_file)?;
     assert_eq!(mapped.as_slice(), ZEROSTATE_BOC);
-
     tracing::info!("done!");
     Ok(())
 }
