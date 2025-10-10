@@ -43,6 +43,7 @@ zstd-safe = { workspace = true, features = ["std", "zstdmt"] }
 zstd-sys = { workspace = true }
 
 tycho-util-proc = { workspace = true }
+crossbeam-deque = "0.8.6"
 
 [dev-dependencies]
 criterion = { workspace = true }

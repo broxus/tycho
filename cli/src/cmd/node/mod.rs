@@ -9,6 +9,7 @@ use tycho_core::node::NodeKeys;
 use tycho_util::cli::logger::{init_logger, set_abort_with_tracing};
 use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
+use tycho_util::mem::Reclaimer;
 
 pub use self::control::CmdControl;
 use crate::BaseArgs;
@@ -85,6 +86,7 @@ impl CmdRun {
             .context("failed to load node config")?
             .with_relative_paths(&args.home);
 
+        Reclaimer::init(10, 4);
         node_config.threads.init_global_rayon_pool()?;
 
         node_config
