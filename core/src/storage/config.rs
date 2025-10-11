@@ -64,7 +64,7 @@ impl Default for CoreStorageConfig {
         Self {
             cells_cache_size: ByteSize::mb(256),
             drop_interval: 3,
-            store_shard_state_step: 5,
+            store_shard_state_step: 2,
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),
