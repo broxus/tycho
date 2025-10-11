@@ -179,7 +179,7 @@ impl Default for BlocksCacheConfig {
     fn default() -> Self {
         Self {
             ttl: Duration::from_secs(300),
-            size: ByteSize::mb(500),
+            size: ByteSize::gb(4),
         }
     }
 }
