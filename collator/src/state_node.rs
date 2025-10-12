@@ -244,7 +244,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                 && !self
                     .storage
                     .shard_state_storage()
-                    .is_exist(&current_block_id)?
+                    .is_state_exist(&current_block_id)?
             {
                 metrics::counter!(METRIC_LOAD_SHARD_BLOCK_TOTAL).increment(1);
 

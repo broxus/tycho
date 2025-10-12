@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::fs::File;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -6,7 +5,6 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
-use parking_lot::Mutex;
 use tycho_block_util::block::*;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
@@ -40,12 +38,9 @@ pub struct ShardStateStorage {
     min_ref_mc_state: MinRefMcStateTracker,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
-    state_diff_complexity_count: AtomicUsize,
 
     // Only for metrics
     last_state_stored: AtomicU32,
-
-    state_refs: Arc<Mutex<VecDeque<Cell>>>,
 
     accounts_split_depth: u8,
     store_shard_state_step: u32,
@@ -64,21 +59,17 @@ impl ShardStateStorage {
     ) -> Result<Arc<Self>> {
         let cell_storage = CellStorage::new(cells_db.clone(), cache_size_bytes, drop_interval);
 
-        let state_refs = Arc::new(Mutex::new(VecDeque::with_capacity(20)));
-
         Ok(Arc::new(Self {
             cells_db,
             block_handle_storage,
             block_storage,
             temp_file_storage,
             cell_storage,
-            state_refs,
             store_shard_state_step,
             gc_lock: Default::default(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
-            state_diff_complexity_count: AtomicUsize::new(0),
             last_state_stored: Default::default(),
             accounts_split_depth: 5,
         }))
@@ -138,27 +129,12 @@ impl ShardStateStorage {
             return Ok(false);
         }
 
-        const STATE_DIFF_COMPLEXITY_LIMIT: usize = 15_000; // Value was obtained empirically
-
-        let mut should_store = handle.is_masterchain()  // Store all masterchain states
+        let should_store = handle.is_masterchain()  // Store all masterchain states
             || handle.id().seqno.is_multiple_of(self.store_shard_state_step); // Regular checkpoint
-
-        if !should_store && let Some(state_diff_complexity) = hint.estimate_state_diff_complexity()
-        {
-            let prev_total = self
-                .state_diff_complexity_count
-                .fetch_add(state_diff_complexity, Ordering::Release);
-
-            let new_total = prev_total + state_diff_complexity;
-            should_store = new_total >= STATE_DIFF_COMPLEXITY_LIMIT; // Large diff
-        }
 
         if !should_store {
             return Ok(false);
         }
-
-        // Reset state diff complexity counter when state mark as should be saved
-        self.state_diff_complexity_count.store(0, Ordering::Release);
 
         let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
 
@@ -167,7 +143,6 @@ impl ShardStateStorage {
         let cf = self.cells_db.shard_states.get_unbounded_cf();
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
-        let state_refs = self.state_refs.clone();
         let handle = handle.clone();
         let accounts_split_depth = self.accounts_split_depth;
 
@@ -212,22 +187,9 @@ impl ShardStateStorage {
 
             raw_db.write(batch)?;
 
+            Reclaimer::instance().drop(root_cell);
+
             hist.finish();
-
-            // Keep in memory last `store_shard_state_step` states alive
-            if !handle.is_masterchain() {
-                let mut state_refs = state_refs.lock();
-
-                while state_refs.len() >= 20 {
-                    if let Some(cell) = state_refs.pop_front() {
-                        Reclaimer::instance().drop(cell);
-                    }
-                }
-
-                state_refs.push_back(root_cell);
-            } else {
-                Reclaimer::instance().drop(root_cell);
-            }
 
             let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
             if updated {
@@ -320,12 +282,14 @@ impl ShardStateStorage {
             while !current_block_id
                 .seqno
                 .is_multiple_of(self.store_shard_state_step)
-                && !self.is_exist(&current_block_id)?
+                && !self.is_state_exist(&current_block_id)?
             {
                 let handle = self
                     .block_handle_storage
                     .load_handle(&current_block_id)
-                    .ok_or(ShardStateStorageError::NotFound(block_id.as_short_id()))?;
+                    .ok_or(ShardStateStorageError::BlockHandleNotFound(
+                        block_id.as_short_id(),
+                    ))?;
 
                 ref_by_mc_seqno = ref_by_mc_seqno.min(handle.meta().ref_by_mc_seqno());
 
@@ -367,7 +331,7 @@ impl ShardStateStorage {
         }
     }
 
-    pub fn is_exist(&self, block_id: &BlockId) -> Result<bool> {
+    pub fn is_state_exist(&self, block_id: &BlockId) -> Result<bool> {
         let shard_states = &self.cells_db.shard_states;
         Ok(shard_states.get(block_id.to_vec())?.is_some())
     }
@@ -590,7 +554,6 @@ impl ShardStateStorage {
 #[derive(Default, Debug, Clone, Copy)]
 pub struct StoreStateHint {
     pub block_data_size: Option<usize>,
-    pub accounts_stat: Option<ShardStateAccountsStat>,
 }
 
 impl StoreStateHint {
@@ -602,15 +565,6 @@ impl StoreStateHint {
         // y = 3889.9821 + 14.7480 × √x
         // R-squared: 0.7035
         ((3889.9821 + 14.7480 * (block_data_size as f64).sqrt()) as usize).next_power_of_two()
-    }
-
-    fn estimate_state_diff_complexity(&self) -> Option<usize> {
-        self.accounts_stat.map(|stat| {
-            const _ADDED_WEIGHT: usize = 5;
-            const UPDATED_WEIGHT: usize = 1;
-
-            (stat.updated as usize) * UPDATED_WEIGHT
-        })
     }
 }
 
@@ -636,6 +590,8 @@ pub enum ShardStateStorageError {
         expected: BlockIdShort,
         actual: BlockIdShort,
     },
+    #[error("Shard handle not found for block: {0}")]
+    BlockHandleNotFound(BlockIdShort),
 }
 
 fn split_shard_accounts(
