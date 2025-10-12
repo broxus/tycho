@@ -176,7 +176,6 @@ impl ShardStateStorage {
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
-            tracing::info!(block_id = ?block_id.as_short_id(), "stored state root for block");
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
             let hist = HistogramGuard::begin("tycho_storage_state_update_time_high");
@@ -212,7 +211,9 @@ impl ShardStateStorage {
         count.fetch_max(new_cell_count, Ordering::Release);
 
         if !block_id.is_masterchain() {
-            let step = block_id.seqno - self.last_state_stored.load(Ordering::Acquire);
+            let step = block_id
+                .seqno
+                .saturating_sub(self.last_state_stored.load(Ordering::Acquire));
             metrics::gauge!("tycho_storage_store_state_step").set(step as f64);
 
             self.last_state_stored
@@ -282,7 +283,7 @@ impl ShardStateStorage {
             while !current_block_id
                 .seqno
                 .is_multiple_of(self.store_shard_state_step)
-                && !self.is_state_exist(&current_block_id)?
+                || !self.is_state_exist(&current_block_id)?
             {
                 let handle = self
                     .block_handle_storage

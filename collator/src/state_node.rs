@@ -26,9 +26,6 @@ use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
 use crate::types::{ArcSignature, BlockStuffForSync};
 
-const METRIC_LOAD_SHARD_BLOCK_TOTAL: &str = "tycho_storage_load_shard_block_total";
-const METRIC_SHARD_BLOCK_CACHE_HIT_TOTAL: &str = "tycho_storage_shard_block_cache_hit_total";
-
 // FACTORY
 
 pub trait StateNodeAdapterFactory {
@@ -241,25 +238,20 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             let store_state_step = self.storage.shard_state_storage().store_shard_state_step();
 
             while !current_block_id.seqno.is_multiple_of(store_state_step)
-                && !self
+                || !self
                     .storage
                     .shard_state_storage()
                     .is_state_exist(&current_block_id)?
             {
-                metrics::counter!(METRIC_LOAD_SHARD_BLOCK_TOTAL).increment(1);
-
                 let block = self
                     .shard_blocks
                     .get(&current_block_id.shard)
                     .and_then(|shard_blocks| shard_blocks.get(&current_block_id.seqno).cloned());
 
                 let block = match block {
-                    Some(block) => {
-                        metrics::counter!(METRIC_SHARD_BLOCK_CACHE_HIT_TOTAL).increment(1);
-                        block
-                    }
+                    Some(block) => block,
                     None => {
-                        // Load from storage if not found in cache (required during restart)
+                        // Load from storage if not found in cache (required during restart in general)
                         let handle = self
                             .storage
                             .block_handle_storage()

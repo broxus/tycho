@@ -16,7 +16,7 @@ pub struct CoreStorageConfig {
 
     /// Minimal epoch interval when the state can be reused.
     ///
-    /// Default: 5.
+    /// Default: 3.
     pub drop_interval: u32,
 
     /// Store every Nth shard state to storage
@@ -63,7 +63,7 @@ impl Default for CoreStorageConfig {
     fn default() -> Self {
         Self {
             cells_cache_size: ByteSize::mb(256),
-            drop_interval: 5,
+            drop_interval: 3,
             store_shard_state_step: 2,
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
@@ -179,7 +179,7 @@ impl Default for BlocksCacheConfig {
     fn default() -> Self {
         Self {
             ttl: Duration::from_secs(60),
-            size: ByteSize::gb(8),
+            size: ByteSize::gb(2),
         }
     }
 }

@@ -665,7 +665,9 @@ impl CollatorStdImpl {
                     let last_task = self.store_new_state_tasks.pop().expect("shouldn't happen");
 
                     // if it is finished, then we can just reload prev state
-                    if last_task.store_new_state_task.is_finished() {
+                    if last_task.store_new_state_task.is_finished()
+                        && last_task.block_id.seqno.is_multiple_of(2)
+                    {
                         last_task.store_new_state_task.await?;
 
                         // and reload pure prev state in the working state
@@ -687,6 +689,12 @@ impl CollatorStdImpl {
                                 && unfinished_tasks.len() < self.config.merkle_chain_limit
                                 && !is_last
                             {
+                                unfinished_tasks.push(task);
+                                continue;
+                            }
+
+                            // Wait for the real task that persists state to the db
+                            if !task.block_id.seqno.is_multiple_of(2) && !is_last {
                                 unfinished_tasks.push(task);
                                 continue;
                             }
