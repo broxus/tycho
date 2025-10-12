@@ -64,9 +64,7 @@ impl ShardStateStorage {
     ) -> Result<Arc<Self>> {
         let cell_storage = CellStorage::new(cells_db.clone(), cache_size_bytes, drop_interval);
 
-        let state_refs = Arc::new(Mutex::new(VecDeque::with_capacity(
-            2 * store_shard_state_step as usize,
-        )));
+        let state_refs = Arc::new(Mutex::new(VecDeque::with_capacity(20)));
 
         Ok(Arc::new(Self {
             cells_db,
@@ -140,18 +138,6 @@ impl ShardStateStorage {
             return Ok(false);
         }
 
-        // Keep in memory last `store_shard_state_step` states alive
-        if !handle.is_masterchain() {
-            let mut state_refs = self.state_refs.lock();
-            state_refs.push_back(root_cell.clone());
-
-            while state_refs.len() >= 10 {
-                if let Some(cell) = state_refs.pop_front() {
-                    Reclaimer::instance().drop(cell);
-                }
-            }
-        }
-
         const STATE_DIFF_COMPLEXITY_LIMIT: usize = 15_000; // Value was obtained empirically
 
         let mut should_store = handle.is_masterchain()  // Store all masterchain states
@@ -181,6 +167,7 @@ impl ShardStateStorage {
         let cf = self.cells_db.shard_states.get_unbounded_cf();
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
+        let state_refs = self.state_refs.clone();
         let handle = handle.clone();
         let accounts_split_depth = self.accounts_split_depth;
 
@@ -226,6 +213,21 @@ impl ShardStateStorage {
             raw_db.write(batch)?;
 
             hist.finish();
+
+            // Keep in memory last `store_shard_state_step` states alive
+            if !handle.is_masterchain() {
+                let mut state_refs = state_refs.lock();
+
+                while state_refs.len() >= 20 {
+                    if let Some(cell) = state_refs.pop_front() {
+                        Reclaimer::instance().drop(cell);
+                    }
+                }
+
+                state_refs.push_back(root_cell);
+            } else {
+                Reclaimer::instance().drop(root_cell);
+            }
 
             let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
             if updated {

@@ -175,6 +175,9 @@ impl BlockStorage {
     }
 
     pub async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
+        metrics::gauge!("tycho_storage_blocks_cache_size")
+            .set(self.blocks_cache.weighted_size() as f64);
+
         metrics::counter!(METRIC_LOAD_BLOCK_TOTAL).increment(1);
 
         const BIG_DATA_THRESHOLD: usize = 1 << 20; // 1 MB
