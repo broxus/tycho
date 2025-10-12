@@ -1017,6 +1017,7 @@ impl CollatorStdImpl {
                 block_id,
                 finalized.new_observable_state,
                 finalized.new_state_root,
+                finalized.state_update,
                 store_new_state_task,
                 new_queue_diff_hash,
                 new_mc_data,
