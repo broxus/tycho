@@ -443,13 +443,13 @@ impl GcSubscriber {
 
             let hist = HistogramGuard::begin("tycho_gc_states_time");
 
-            // if let Err(e) = storage
-            //     .shard_state_storage()
-            //     .remove_outdated_states(target_seqno)
-            //     .await
-            // {
-            //     tracing::error!("failed to remove outdated states: {e:?}");
-            // }
+            if let Err(e) = storage
+                .shard_state_storage()
+                .remove_outdated_states(target_seqno)
+                .await
+            {
+                tracing::error!("failed to remove outdated states: {e:?}");
+            }
 
             let took = hist.finish();
             tracing::info!(

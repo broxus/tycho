@@ -134,7 +134,6 @@ impl CoreStorage {
                     cells_part_db,
                     config.cells_cache_size,
                     config.drop_interval,
-                    SHARD_PARTITIONS_SPLIT_DEPTH,
                 )),
             );
         }

@@ -1,10 +1,14 @@
 use std::fs::File;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
+use tokio::sync::OwnedMutexGuard;
 use tycho_block_util::block::*;
 use tycho_block_util::dict::{split_aug_dict_raw_by_shards, split_dict_raw};
 use tycho_block_util::state::*;
@@ -25,10 +29,6 @@ mod cell_storage;
 mod entries_buffer;
 mod store_state_raw;
 
-use bumpalo::Bump;
-
-use self::cell_storage::{CellStorage, CellStorageError};
-
 pub type StoragePartsMap = FastHashMap<ShardIdent, Arc<dyn ShardStateStoragePart>>;
 
 #[derive(Debug, Clone)]
@@ -47,13 +47,18 @@ pub trait ShardStateStoragePart: Send + Sync {
         estimated_cell_count: usize,
         split_depth: u8,
     ) -> Result<usize, CellStorageError>;
-    fn remove_accounts_subtree(&self, root_hash: &HashBytes) -> Result<usize, CellStorageError>;
+    fn remove_outdated_states_in_partition(
+        self: Arc<Self>,
+        top_blocks: TopBlocks,
+        remaining_split_depth: u8,
+    ) -> Pin<Box<dyn Future<Output = Result<usize>> + Send>>;
 }
 
 pub struct ShardStateStoragePartImpl {
     shard: ShardIdent,
     cells_db: CellsPartDb,
     cell_storage: Arc<CellStorage>,
+    gc_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ShardStateStoragePart for ShardStateStoragePartImpl {
@@ -75,8 +80,13 @@ impl ShardStateStoragePart for ShardStateStoragePartImpl {
         self.store_accounts_subtree_impl(block_id, cell, estimated_cell_count, split_depth)
     }
 
-    fn remove_accounts_subtree(&self, root_hash: &HashBytes) -> Result<usize, CellStorageError> {
-        self.remove_accounts_subtree_impl(root_hash)
+    fn remove_outdated_states_in_partition(
+        self: Arc<Self>,
+        top_blocks: TopBlocks,
+        remaining_split_depth: u8,
+    ) -> Pin<Box<dyn Future<Output = Result<usize>> + Send>> {
+        let fut = self.remove_outdated_states_impl(top_blocks, remaining_split_depth);
+        Box::pin(fut)
     }
 }
 
@@ -86,19 +96,14 @@ impl ShardStateStoragePartImpl {
         cells_db: CellsPartDb,
         cache_size_bytes: ByteSize,
         drop_interval: u32,
-        part_split_depth: u8,
     ) -> Self {
-        let cell_storage = CellStorage::new_for_shard(
-            cells_db.clone(),
-            cache_size_bytes,
-            drop_interval,
-            shard,
-            part_split_depth,
-        );
+        let cell_storage =
+            CellStorage::new_for_shard(cells_db.clone(), cache_size_bytes, drop_interval, shard);
         Self {
             shard,
             cells_db,
             cell_storage,
+            gc_lock: Default::default(),
         }
     }
 
@@ -109,6 +114,13 @@ impl ShardStateStoragePartImpl {
         estimated_cell_count: usize,
         split_depth: u8,
     ) -> Result<usize, CellStorageError> {
+        // TODO: check if subtree already stored
+
+        let guard = {
+            let _hist = HistogramGuard::begin("tycho_storage_cell_gc_lock_store_time_high");
+            self.gc_lock.clone().blocking_lock_owned()
+        };
+
         let raw_db = self.cells_db.rocksdb().clone();
         let cf = self.cells_db.shard_states.get_unbounded_cf();
         let cell_storage = self.cell_storage.clone();
@@ -116,11 +128,11 @@ impl ShardStateStoragePartImpl {
         let estimated_update_size_bytes = estimated_cell_count * 192; // p50 cell size in bytes
         let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
 
-        let split_at = Self::split_accounts_subtree(cell.clone(), split_depth)
+        let split_at = split_accounts_subtree(cell.clone(), split_depth)
             .map_err(|_err| CellStorageError::InvalidCell)?;
 
         let new_cell_count = cell_storage.store_cell_mt(
-            block_id,
+            None,
             cell.as_ref(),
             &mut batch,
             split_at,
@@ -132,38 +144,56 @@ impl ShardStateStoragePartImpl {
 
         raw_db.write(batch)?;
 
+        // NOTE: Ensure that GC lock is dropped only after storing the state.
+        drop(guard);
+
         Ok(new_cell_count)
     }
 
-    fn split_accounts_subtree(
-        subtree_root_cell: Cell,
-        split_depth: u8,
-    ) -> Result<FastHashMap<HashBytes, SplitAccountEntry>> {
-        let shards = split_dict_raw(Some(subtree_root_cell), HashBytes::BITS, split_depth)
-            .context("failed to split shard accounts subtree")?;
+    async fn remove_outdated_states_impl(
+        self: Arc<Self>,
+        top_blocks: TopBlocks,
+        remaining_split_depth: u8,
+    ) -> Result<usize> {
+        let cells_db = CellStorageDb::Part(self.cells_db.clone());
 
-        let mut result = FastHashMap::default();
+        let mut cx = RemoveOutdatedStatesContext::new(
+            cells_db.clone(),
+            self.cell_storage.clone(),
+            remaining_split_depth,
+            false,
+            self.gc_lock.clone(),
+        );
 
-        for (hash, cell) in shards {
-            result.insert(hash, SplitAccountEntry { shard: None, cell });
+        let iter = RemoveOutdatedStatesContext::create_states_iterator_to_top_blocks(
+            &cells_db,
+            &top_blocks,
+        );
+
+        let mut alloc = bumpalo_herd::Herd::new();
+
+        for item in iter {
+            // TODO: add new metrics
+            let _hist = HistogramGuard::begin("tycho_storage_state_gc_time_high");
+            let (block_id, root_hash) = item?;
+            let guard = cx.acquire_gc_lock().await;
+            let RemoveStateResult {
+                removed_cells,
+                inner_alloc,
+            } = cx.remove_state(block_id, root_hash, guard, alloc).await?;
+            alloc = inner_alloc;
+
+            tracing::debug!(removed_cells, %block_id, part_shard = %self.shard, "removed state in partition");
+
+            metrics::counter!("tycho_storage_state_gc_cells_count").increment(removed_cells as u64);
         }
 
-        Ok(result)
-    }
-
-    fn remove_accounts_subtree_impl(
-        &self,
-        root_hash: &HashBytes,
-    ) -> Result<usize, CellStorageError> {
-        let bump = Bump::new();
-        let (removed, batch) = self.cell_storage.remove_cell(&bump, root_hash)?;
-        self.cells_db.rocksdb().write(batch)?;
-        Ok(removed)
+        Ok(cx.removed_cells)
     }
 }
 
 pub struct ShardStateStorage {
-    cells_db: CellsDb,
+    cells_db: CellStorageDb,
 
     block_handle_storage: Arc<BlockHandleStorage>,
     block_storage: Arc<BlockStorage>,
@@ -180,7 +210,7 @@ pub struct ShardStateStorage {
     /// The target split depth of shard accounts cells on partitions.
     /// E.g. `3` -> `2^2=8` partitions
     part_split_depth: u8,
-    storage_parts: Arc<StoragePartsMap>,
+    storage_parts: Option<Arc<StoragePartsMap>>,
 }
 
 impl ShardStateStorage {
@@ -211,7 +241,7 @@ impl ShardStateStorage {
         );
 
         Ok(Arc::new(Self {
-            cells_db,
+            cells_db: CellStorageDb::Main(cells_db),
             block_handle_storage,
             block_storage,
             temp_file_storage,
@@ -222,8 +252,44 @@ impl ShardStateStorage {
             max_new_sc_cell_count: AtomicUsize::new(0),
             accounts_split_depth: 4,
             part_split_depth,
-            storage_parts,
+            storage_parts: Some(storage_parts),
         }))
+    }
+
+    fn new_for_shard(
+        cells_db: CellsPartDb,
+        block_handle_storage: Arc<BlockHandleStorage>,
+        block_storage: Arc<BlockStorage>,
+        temp_file_storage: TempFileStorage,
+        cache_size_bytes: ByteSize,
+        drop_interval: u32,
+        part_shard: ShardIdent,
+    ) -> Result<Arc<Self>> {
+        let cell_storage = CellStorage::new_for_shard(
+            cells_db.clone(),
+            cache_size_bytes,
+            drop_interval,
+            part_shard,
+        );
+
+        Ok(Arc::new(Self {
+            cells_db: CellStorageDb::Part(cells_db),
+            block_handle_storage,
+            block_storage,
+            temp_file_storage,
+            cell_storage,
+            gc_lock: Default::default(),
+            min_ref_mc_state: MinRefMcStateTracker::new(),
+            max_new_mc_cell_count: AtomicUsize::new(0),
+            max_new_sc_cell_count: AtomicUsize::new(0),
+            accounts_split_depth: 4,
+            part_split_depth: 0,
+            storage_parts: None,
+        }))
+    }
+
+    fn uses_partitions(&self) -> bool {
+        self.part_split_depth > 0
     }
 
     pub fn metrics(&self) -> ShardStateStorageMetrics {
@@ -284,24 +350,17 @@ impl ShardStateStorage {
 
         let block_id = *handle.id();
         let raw_db = self.cells_db.rocksdb().clone();
-        let cf = self.cells_db.shard_states.get_unbounded_cf();
+        let cf = self.cells_db.shard_states().get_unbounded_cf();
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
 
-        // split accounts to store in partitions
-        // otherwise split to store in parallel
-        let accounts_split_depth = if self.part_split_depth > 0 {
-            self.part_split_depth
-        } else {
-            self.accounts_split_depth
-        };
-        // when we split accounts on partitions
-        // we can split partition more and store in parallel
-        let remaining_split_depth = self
-            .accounts_split_depth
-            .saturating_sub(accounts_split_depth)
-            + 1;
+        // calculate split depth to store accounts in partitions
+        // or to store in main in parallel
+        let (accounts_split_depth, remaining_split_depth) =
+            calc_split_depth(self.accounts_split_depth, self.part_split_depth);
+
+        // TODO: split store by partitions here, not in CellStorage
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
@@ -326,7 +385,7 @@ impl ShardStateStorage {
                 tracing::debug!(accounts_split_depth, ?split_at);
 
                 cell_storage.store_cell_mt(
-                    &block_id,
+                    Some(&block_id),
                     root_cell.as_ref(),
                     &mut batch,
                     split_at,
@@ -434,7 +493,7 @@ impl ShardStateStorage {
     }
 
     pub fn load_state_root_hash(&self, block_id: &BlockId) -> Result<HashBytes> {
-        let shard_states = &self.cells_db.shard_states;
+        let shard_states = &self.cells_db.shard_states();
         let shard_state = shard_states.get(block_id.to_vec())?;
         match shard_state {
             Some(root) => Ok(HashBytes::from_slice(&root[..32])),
@@ -456,109 +515,87 @@ impl ShardStateStorage {
             target_block_id = %top_blocks.mc_block,
             "started states GC",
         );
+        // TODO: add overall metric for main db and partitions
         let started_at = Instant::now();
 
-        let raw = self.cells_db.rocksdb();
+        // calculate split depth
+        let (accounts_split_depth, remaining_split_depth) =
+            calc_split_depth(self.accounts_split_depth, self.part_split_depth);
 
-        // Manually get required column factory and r/w options
-        let snapshot = raw.snapshot();
-        let shard_states_cf = self.cells_db.shard_states.get_unbounded_cf();
-        let mut states_read_options = self.cells_db.shard_states.new_read_config();
-        states_read_options.set_snapshot(&snapshot);
+        // run remove tasks in partitions
+        let mut part_store_tasks = FuturesUnordered::new();
+        if let Some(store_parts) = &self.storage_parts {
+            for (_, store_part) in store_parts.iter() {
+                let store_part = store_part.clone();
+                part_store_tasks.push(tokio::spawn(
+                    store_part.remove_outdated_states_in_partition(
+                        top_blocks.clone(),
+                        remaining_split_depth,
+                    ),
+                ));
+            }
+        }
+
+        // remove state data in main db
+        let mut cx = RemoveOutdatedStatesContext::new(
+            self.cells_db.clone(),
+            self.cell_storage.clone(),
+            accounts_split_depth,
+            self.uses_partitions(),
+            self.gc_lock.clone(),
+        );
+
+        let iter = RemoveOutdatedStatesContext::create_states_iterator_to_top_blocks(
+            &self.cells_db,
+            &top_blocks,
+        );
 
         let mut alloc = bumpalo_herd::Herd::new();
 
-        // Create iterator
-        let mut iter = raw.raw_iterator_cf_opt(&shard_states_cf.bound(), states_read_options);
-        iter.seek_to_first();
-
-        // Iterate all states and remove outdated
-        let mut removed_states = 0usize;
-        let mut removed_cells = 0usize;
-        loop {
+        for item in iter {
             let _hist = HistogramGuard::begin("tycho_storage_state_gc_time_high");
-            let (key, value) = match iter.item() {
-                Some(item) => item,
-                None => match iter.status() {
-                    Ok(()) => break,
-                    Err(e) => return Err(e.into()),
-                },
-            };
+            let (block_id, root_hash) = item?;
+            let guard = cx.acquire_gc_lock().await;
+            let RemoveStateResult {
+                removed_cells,
+                inner_alloc,
+            } = cx.remove_state(block_id, root_hash, guard, alloc).await?;
+            alloc = inner_alloc;
 
-            let block_id = BlockId::from_slice(key);
-            let root_hash = HashBytes::from_slice(value);
-
-            // Skip blocks from zero state and top blocks
-            if block_id.seqno == 0
-                || top_blocks.contains_shard_seqno(&block_id.shard, block_id.seqno)
-            {
-                iter.next();
-                continue;
-            }
-
-            alloc.reset();
-
-            let guard = {
-                let _h = HistogramGuard::begin("tycho_storage_cell_gc_lock_remove_time_high");
-                self.gc_lock.clone().lock_owned().await
-            };
-
-            let db = self.cells_db.clone();
-            let cell_storage = self.cell_storage.clone();
-            let key = key.to_vec();
-            let accounts_split_depth = self.accounts_split_depth;
-            let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
-                let in_mem_remove =
-                    HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
-
-                let (stats, mut batch) = if block_id.is_masterchain() {
-                    cell_storage.remove_cell(alloc.get().as_bump(), &root_hash)?
-                } else {
-                    // NOTE: We use epoch `0` here so that cells of old states
-                    // will not be used by recent loads.
-                    let root_cell = Cell::from(cell_storage.load_cell(&root_hash, 0)? as Arc<_>);
-
-                    let split_at =
-                        split_shard_accounts(&block_id.shard, &root_cell, accounts_split_depth)?
-                            .into_keys()
-                            .collect::<FastHashSet<HashBytes>>();
-                    cell_storage.remove_cell_mt(&alloc, &root_hash, split_at)?
-                };
-
-                in_mem_remove.finish();
-
-                batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
-                db.raw()
-                    .rocksdb()
-                    .write_opt(batch, db.cells.write_config())?;
-
-                // NOTE: Ensure that guard is dropped only after writing the batch.
-                drop(guard);
-
-                Ok::<_, anyhow::Error>((stats, alloc))
-            })
-            .await??;
-
-            removed_cells += total;
-            alloc = inner_alloc; // Reuse allocation without passing alloc by ref
-
-            tracing::debug!(removed_cells = total, %block_id);
-
-            removed_states += 1;
-            iter.next();
+            tracing::debug!(removed_cells, %block_id, "removed state");
 
             metrics::counter!("tycho_storage_state_gc_count").increment(1);
-            metrics::counter!("tycho_storage_state_gc_cells_count").increment(1);
+            metrics::counter!("tycho_storage_state_gc_cells_count").increment(removed_cells as u64);
             if block_id.is_masterchain() {
                 metrics::gauge!("tycho_gc_states_seqno").set(block_id.seqno as f64);
             }
-            tracing::debug!(removed_states, removed_cells, %block_id, "removed state");
+        }
+
+        // wait for all remove tasks in partitions
+        while let Some(remove_res) = part_store_tasks.next().await {
+            match remove_res {
+                Ok(Ok(removed_cells)) => {
+                    cx.removed_cells += removed_cells;
+                }
+                Ok(Err(remove_error)) => {
+                    tracing::error!(
+                        ?remove_error,
+                        "error in remove_outdated_states_in_partition method"
+                    );
+                }
+                Err(join_error) => {
+                    tracing::error!(
+                        ?join_error,
+                        "error executing remove_outdated_states_in_partition task"
+                    );
+                }
+            }
         }
 
         // Done
         tracing::info!(
-            removed_states,
-            removed_cells,
+            removed_states = cx.removed_states,
+            removed_cells = cx.removed_cells,
             block_id = %top_blocks.mc_block,
             elapsed_sec = started_at.elapsed().as_secs_f64(),
             "finished states GC",
@@ -569,7 +606,7 @@ impl ShardStateStorage {
     /// Searches for an edge with the least referenced masterchain block
     ///
     /// Returns `None` if all states are recent enough
-    pub async fn compute_recent_blocks(&self, mut mc_seqno: u32) -> Result<Option<TopBlocks>> {
+    async fn compute_recent_blocks(&self, mut mc_seqno: u32) -> Result<Option<TopBlocks>> {
         // 0. Adjust masterchain seqno with minimal referenced masterchain state
         if let Some(min_ref_mc_seqno) = self.min_ref_mc_state.seqno()
             && min_ref_mc_seqno < mc_seqno
@@ -631,7 +668,7 @@ impl ShardStateStorage {
         mc_seqno: u32,
         snapshot: &rocksdb::Snapshot<'_>,
     ) -> Result<Option<BlockId>> {
-        let shard_states = &self.cells_db.shard_states;
+        let shard_states = self.cells_db.shard_states();
 
         let mut bound = BlockId {
             shard: ShardIdent::MASTERCHAIN,
@@ -654,6 +691,157 @@ impl ShardStateStorage {
 
         Ok(iter.key().map(BlockId::from_slice))
     }
+}
+
+#[derive(Clone)]
+struct RemoveOutdatedStatesContext {
+    cells_db: CellStorageDb,
+    cell_storage: Arc<CellStorage>,
+
+    split_depth: u8,
+    /// Indicates that accounts are splitted by partitions
+    split_by_partitions: bool,
+
+    gc_lock: Arc<tokio::sync::Mutex<()>>,
+
+    // alloc: bumpalo_herd::Herd,
+    removed_cells: usize,
+    removed_states: usize,
+}
+
+impl RemoveOutdatedStatesContext {
+    fn new(
+        cells_db: CellStorageDb,
+        cell_storage: Arc<CellStorage>,
+        split_depth: u8,
+        split_by_partitions: bool,
+        gc_lock: Arc<tokio::sync::Mutex<()>>,
+    ) -> Self {
+        Self {
+            cells_db,
+            cell_storage,
+            split_depth,
+            split_by_partitions,
+            gc_lock,
+            removed_cells: 0,
+            removed_states: 0,
+        }
+    }
+
+    async fn acquire_gc_lock(&self) -> OwnedMutexGuard<()> {
+        let _h = HistogramGuard::begin("tycho_storage_cell_gc_lock_remove_time_high");
+        self.gc_lock.clone().lock_owned().await
+    }
+
+    fn create_states_iterator_to_top_blocks(
+        cells_db: &CellStorageDb,
+        top_blocks: &TopBlocks,
+    ) -> impl Iterator<Item = Result<(BlockId, HashBytes), weedb::rocksdb::Error>> {
+        let raw = cells_db.rocksdb();
+
+        // Manually get required column factory and r/w options
+        let snapshot = raw.snapshot();
+        let shard_states_cf = cells_db.shard_states().get_unbounded_cf();
+        let mut states_read_options = cells_db.shard_states().new_read_config();
+        states_read_options.set_snapshot(&snapshot);
+
+        // Create iterator
+        let iter = raw.iterator_cf_opt(
+            &shard_states_cf.bound(),
+            states_read_options,
+            rocksdb::IteratorMode::Start,
+        );
+        // skip zerostae and stae equal or above top blocks
+
+        // TODO: return None when top_blocks to be able to stop iterator
+        iter.flat_map(|item| match item {
+            Ok((key, value)) => {
+                let block_id = BlockId::from_slice(&key);
+                if block_id.seqno == 0
+                    || top_blocks.contains_shard_seqno(&block_id.shard, block_id.seqno)
+                {
+                    None
+                } else {
+                    Some(Ok((block_id, HashBytes::from_slice(&value))))
+                }
+            }
+            Err(err) => Some(Err(err)),
+        })
+    }
+
+    fn blocking_remove_state(
+        &mut self,
+        block_id: BlockId,
+        root_hash: HashBytes,
+        guard: OwnedMutexGuard<()>,
+        mut alloc: bumpalo_herd::Herd,
+    ) -> Result<RemoveStateResult> {
+        alloc.reset();
+
+        let in_mem_remove = HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
+
+        let (removed_cells, mut batch) = if block_id.is_masterchain() {
+            self.cell_storage
+                .remove_cell(alloc.get().as_bump(), &root_hash)?
+        } else {
+            // NOTE: We use epoch `0` here so that cells of old states
+            // will not be used by recent loads.
+            let root_cell = Cell::from(self.cell_storage.load_cell(&root_hash, 0)? as Arc<_>);
+
+            let split_at = split_shard_accounts(&block_id.shard, root_cell, self.split_depth)?
+                .into_keys()
+                .collect::<FastHashSet<HashBytes>>();
+            // TODO: pass stop_at_split into
+            self.cell_storage.remove_cell_mt(
+                &alloc,
+                &root_hash,
+                split_at,
+                self.split_by_partitions,
+            )?
+        };
+
+        in_mem_remove.finish();
+
+        let db = &self.cells_db;
+        batch.delete_cf(
+            &db.shard_states().get_unbounded_cf().bound(),
+            block_id.to_vec(),
+        );
+        db.rocksdb().write_opt(batch, db.cells().write_config())?;
+
+        // NOTE: Ensure that guard is dropped only after writing the batch.
+        drop(guard);
+
+        self.removed_cells += removed_cells;
+        self.removed_states += 1;
+
+        Ok(RemoveStateResult {
+            removed_cells,
+            inner_alloc: alloc,
+        })
+    }
+
+    async fn remove_state(
+        &mut self,
+        block_id: BlockId,
+        root_hash: HashBytes,
+        guard: OwnedMutexGuard<()>,
+        alloc: bumpalo_herd::Herd,
+    ) -> Result<RemoveStateResult> {
+        let mut this = self.clone();
+        let (this, res) = tokio::task::spawn_blocking(move || {
+            let res = this.blocking_remove_state(block_id, root_hash, guard, alloc)?;
+            Ok::<_, anyhow::Error>((this, res))
+        })
+        .await??;
+        *self = this;
+        Ok(res)
+    }
+}
+
+struct RemoveStateResult {
+    removed_cells: usize,
+    inner_alloc: bumpalo_herd::Herd,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -688,6 +876,39 @@ pub enum ShardStateStorageError {
         expected: BlockIdShort,
         actual: BlockIdShort,
     },
+}
+
+/// Calculates `(target_split_depth, remaining_split_depth)`:
+/// * `target_split_depth` - target accounts split depth. Returns `part_split_depth` when `part_split_depth > 0` (partitions used).
+/// * `remaining_split_depth` - remaining accounts split depth inside partitions when partitions used.
+///   When we split accounts on partitions we can split accounts inside partition more and store in parallel.
+fn calc_split_depth(accounts_split_depth: u8, part_split_depth: u8) -> (u8, u8) {
+    let target_split_depth = if part_split_depth > 0 {
+        part_split_depth
+    } else {
+        accounts_split_depth
+    };
+    let mut remaining_split_depth = accounts_split_depth.saturating_sub(target_split_depth);
+    if accounts_split_depth >= part_split_depth {
+        remaining_split_depth += 1;
+    }
+    (target_split_depth, remaining_split_depth)
+}
+
+fn split_accounts_subtree(
+    subtree_root_cell: Cell,
+    split_depth: u8,
+) -> Result<FastHashMap<HashBytes, SplitAccountEntry>> {
+    let shards = split_dict_raw(Some(subtree_root_cell), HashBytes::BITS, split_depth)
+        .context("failed to split shard accounts subtree")?;
+
+    let mut result = FastHashMap::default();
+
+    for (hash, cell) in shards {
+        result.insert(hash, SplitAccountEntry { shard: None, cell });
+    }
+
+    Ok(result)
 }
 
 fn split_shard_accounts(

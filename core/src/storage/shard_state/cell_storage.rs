@@ -26,40 +26,28 @@ use weedb::{BoundedCfHandle, Table, rocksdb};
 use super::{SplitAccountEntry, StoragePartsMap};
 use crate::storage::{CellsDb, CellsPartDb, tables};
 
-pub struct CellStorage {
-    cells_db: CellStorageDb,
-    cells_cache: Arc<CellsIndex>,
-    raw_cells_cache: Arc<RawCellsCache>,
-    drop_interval: u32,
-    /// Contains the shard of the state partition when used in `ShardStateStoragePart`
-    part_shard: Option<ShardIdent>,
-    /// The target split depth of shard accounts cells on partitions
-    part_split_depth: u8,
-    /// State storage partitions
-    storage_parts: Option<Arc<StoragePartsMap>>,
-}
-
-type CellsIndex = FastDashMap<HashBytes, CachedCell>;
-
-struct CachedCell {
-    epoch: u32,
-    weak: Weak<StorageCell>,
-}
-
 /// The abstraction over `CellsDb` and `CellsShardDb`
-trait CellsDbOps: Send + Sync {
+pub(super) trait CellsDbOps: Send + Sync {
+    fn shard_states(&self) -> &Table<tables::ShardStates>;
     fn cells(&self) -> &Table<tables::Cells>;
     fn temp_cells(&self) -> &Table<tables::TempCells>;
     fn rocksdb(&self) -> &Arc<rocksdb::DB>;
 }
 
 #[derive(Clone)]
-enum CellStorageDb {
+pub(super) enum CellStorageDb {
     Main(CellsDb),
     Part(CellsPartDb),
 }
 
 impl CellsDbOps for CellStorageDb {
+    fn shard_states(&self) -> &Table<tables::ShardStates> {
+        match self {
+            Self::Main(db) => &db.shard_states,
+            Self::Part(db) => &db.shard_states,
+        }
+    }
+
     fn cells(&self) -> &Table<tables::Cells> {
         match self {
             Self::Main(db) => &db.cells,
@@ -80,6 +68,26 @@ impl CellsDbOps for CellStorageDb {
             Self::Part(db) => db.rocksdb(),
         }
     }
+}
+
+pub struct CellStorage {
+    cells_db: CellStorageDb,
+    cells_cache: Arc<CellsIndex>,
+    raw_cells_cache: Arc<RawCellsCache>,
+    drop_interval: u32,
+    /// Contains the shard of the state partition when used in `ShardStateStoragePart`
+    part_shard: Option<ShardIdent>,
+    /// The target split depth of shard accounts cells on partitions
+    part_split_depth: u8,
+    /// State storage partitions
+    storage_parts: Option<Arc<StoragePartsMap>>,
+}
+
+type CellsIndex = FastDashMap<HashBytes, CachedCell>;
+
+struct CachedCell {
+    epoch: u32,
+    weak: Weak<StorageCell>,
 }
 
 impl CellStorage {
@@ -105,14 +113,13 @@ impl CellStorage {
         cache_size_bytes: ByteSize,
         drop_interval: u32,
         part_shard: ShardIdent,
-        part_split_depth: u8,
     ) -> Arc<Self> {
         Self::new_inner(
             CellStorageDb::Part(cells_db),
             cache_size_bytes,
             drop_interval,
             Some(part_shard),
-            part_split_depth,
+            0,
             None,
         )
     }
@@ -356,7 +363,7 @@ impl CellStorage {
 
     pub fn store_cell_mt(
         &self,
-        block_id: &BlockId,
+        block_id: Option<&BlockId>,
         root: &DynCell,
         batch: &mut WriteBatch,
         split_at: FastHashMap<HashBytes, SplitAccountEntry>,
@@ -380,7 +387,7 @@ impl CellStorage {
             db: &'a D,
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
-            block_id: &'a BlockId,
+            block_id: Option<&'a BlockId>,
             /// Subtrees to process in parallel.
             split_at: FastHashMap<HashBytes, SplitAccountEntry>,
             remaining_split_depth: u8,
@@ -409,7 +416,7 @@ impl CellStorage {
                 db: &'a D,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
-                block_id: &'a BlockId,
+                block_id: Option<&'a BlockId>,
                 split_accounts: FastHashMap<HashBytes, SplitAccountEntry>,
                 remaining_split_depth: u8,
                 storage_parts: Option<Arc<StoragePartsMap>>,
@@ -476,7 +483,7 @@ impl CellStorage {
                                 let new_cells_in_parts = self.new_cells_in_parts.clone();
                                 scope.spawn(move || {
                                     let part_new_cells = storage_part.store_accounts_subtree(
-                                        self.block_id,
+                                        self.block_id.unwrap(),
                                         child_cell,
                                         part_estimated_cells_count,
                                         self.remaining_split_depth,
@@ -969,6 +976,7 @@ impl CellStorage {
         herd: &Herd,
         root: &HashBytes,
         split_at: FastHashSet<HashBytes>,
+        split_by_partitions: bool,
     ) -> Result<(usize, WriteBatch), CellStorageError> {
         type RemoveResult = Result<(), CellStorageError>;
 
@@ -983,6 +991,8 @@ impl CellStorage {
             raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
             split_at: FastHashSet<HashBytes>,
+            /// Indicates that accounts are splitted by partitions
+            split_by_partitions: bool,
             // TODO: Use `&'a HashBytes` for key?
             // Pros:
             //   - Less `memcpy` calls;
@@ -1003,12 +1013,14 @@ impl CellStorage {
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
                 split_at: FastHashSet<HashBytes>,
+                split_by_partitions: bool,
             ) -> Self {
                 Self {
                     db,
                     raw_cache,
                     herd,
                     split_at,
+                    split_by_partitions,
                     transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
                         128,
                         Default::default(),
@@ -1042,8 +1054,11 @@ impl CellStorage {
                     };
 
                     for child_hash in iter.by_ref() {
-                        // Skip cell to remove it later in parallel
-                        if self.split_at.contains(child_hash) {
+                        let split_at_reached = self.split_at.contains(child_hash);
+
+                        // do not try to remove subtree in parallel if split is by partitions
+                        if split_at_reached && !self.split_by_partitions {
+                            // Skip cell to remove it later in parallel
                             let mut delayed_removes = self.delayed_removes.lock().unwrap();
                             match delayed_removes.entry(*child_hash) {
                                 hash_map::Entry::Vacant(entry) => {
@@ -1068,10 +1083,14 @@ impl CellStorage {
                             continue 'outer;
                         }
 
-                        // Process the current cell.
+                        // Process the current cell
+                        // even if it is a subtree root for partition
                         let refs = self.remove_cell(child_hash, &mut alloc)?;
 
-                        if let Some(refs) = refs {
+                        if let Some(refs) = refs
+                            // do not remove child cells if current is a subtree root for partition
+                            && !(split_at_reached && self.split_by_partitions)
+                        {
                             // And proceed to its refs if any.
                             stack.push(refs.iter());
                             continue 'outer;
@@ -1198,7 +1217,13 @@ impl CellStorage {
             }
         }
 
-        let ctx = RemoveContext::new(&self.cells_db, herd, &self.raw_cells_cache, split_at);
+        let ctx = RemoveContext::new(
+            &self.cells_db,
+            herd,
+            &self.raw_cells_cache,
+            split_at,
+            split_by_partitions,
+        );
 
         std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
 
