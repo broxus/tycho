@@ -103,8 +103,8 @@ impl CollatorStdImpl {
         let snapshot_start = std::time::Instant::now();
 
         // Measure cloning of each component separately with detailed metrics
-        let _externals_snapshot = reader_state.externals.clone_with_metrics(&labels);
-        let _internals_snapshot = reader_state.internals.clone_with_metrics(&labels);
+        // let _externals_snapshot = reader_state.externals.clone_with_metrics(&labels);
+        // let _internals_snapshot = reader_state.internals.clone_with_metrics(&labels);
 
         let snapshot_elapsed = snapshot_start.elapsed();
 

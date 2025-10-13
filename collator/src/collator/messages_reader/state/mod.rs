@@ -13,7 +13,7 @@ use crate::types::processed_upto::{
 pub mod external;
 pub mod internal;
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct ReaderState {
     pub externals: ExternalsReaderState,
     pub internals: InternalsReaderState,
