@@ -7,7 +7,6 @@ use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockIdShort, IntAddr, MsgInfo, ShardIdent, StdAddr};
 use tycho_util::FastHashSet;
 
-use super::{GetNextMessageGroupMode, MessagesReaderMetrics, MessagesReaderStage};
 use crate::collator::error::CollatorError;
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, IncludeAllMessages,
@@ -16,6 +15,9 @@ use crate::collator::messages_buffer::{
 use crate::collator::messages_reader::state::ShardReaderState;
 use crate::collator::messages_reader::state::internal::{
     DebugInternalsRangeReaderState, InternalsPartitionReaderState, InternalsRangeReaderState,
+};
+use crate::collator::messages_reader::{
+    GetNextMessageGroupMode, MessagesReaderMetrics, MessagesReaderStage,
 };
 use crate::collator::types::{
     ConcurrentQueueStatistics, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff,
