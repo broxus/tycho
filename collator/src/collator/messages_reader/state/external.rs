@@ -11,7 +11,7 @@ use crate::mempool::MempoolAnchorId;
 use crate::types::DebugIter;
 use crate::types::processed_upto::{BlockSeqno, ExternalsRangeInfo};
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct ExternalsReaderState {
     /// We fully read each externals range
     /// because we unable to get remaning messages info
@@ -28,45 +28,6 @@ pub struct ExternalsReaderState {
 
     /// last read to anchor chain time
     pub last_read_to_anchor_chain_time: Option<u64>,
-}
-
-impl ExternalsReaderState {
-    /// Clone with detailed timing metrics
-    pub fn clone_with_metrics(&self, labels: &[(&str, String)]) -> Self {
-        let ranges_start = std::time::Instant::now();
-        let ranges = self.ranges.clone();
-        let ranges_elapsed = ranges_start.elapsed();
-
-        let partitions_start = std::time::Instant::now();
-        let by_partitions = self.by_partitions.clone();
-        let partitions_elapsed = partitions_start.elapsed();
-
-        // Convert labels to Vec to avoid lifetime issues
-        let labels_vec: Vec<(String, String)> = labels
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect();
-
-        // Record metrics using the same pattern as other metrics in the codebase
-        metrics::histogram!("tycho_collator_externals_ranges_clone_time", &labels_vec)
-            .record(ranges_elapsed.as_millis() as f64);
-        metrics::histogram!(
-            "tycho_collator_externals_partitions_clone_time",
-            &labels_vec
-        )
-        .record(partitions_elapsed.as_millis() as f64);
-
-        println!(
-            "Cloned ExternalsReaderState: ranges_elapsed = {:?}, partitions_elapsed = {:?}",
-            ranges_elapsed, partitions_elapsed
-        );
-
-        Self {
-            ranges,
-            by_partitions,
-            last_read_to_anchor_chain_time: self.last_read_to_anchor_chain_time,
-        }
-    }
 }
 
 impl ExternalsReaderState {
@@ -102,7 +63,6 @@ pub struct ExternalsReaderStateByPartition {
     pub curr_processed_offset: u32,
 }
 
-#[derive(Clone)]
 pub struct ExternalsRangeReaderState {
     /// Range info
     pub range: ExternalsReaderRange,
@@ -163,7 +123,6 @@ impl ExternalsReaderRange {
     }
 }
 
-#[derive(Clone)]
 pub struct ExternalsRangeReaderStateByPartition {
     /// Buffer to store external messages
     /// before collect them to the next execution group
