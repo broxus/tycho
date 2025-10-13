@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Cursor;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -40,7 +40,6 @@ pub struct ShardStateStorage {
     min_ref_mc_state: MinRefMcStateTracker,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
-    updated_accounts_count: AtomicU64,
 
     accounts_split_depth: u8,
     store_shard_state_step: u32,
@@ -70,7 +69,6 @@ impl ShardStateStorage {
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
-            updated_accounts_count: AtomicU64::new(0),
             accounts_split_depth: 5,
         }))
     }
@@ -139,23 +137,8 @@ impl ShardStateStorage {
             return Ok(false);
         }
 
-        const UPDATED_ACCOUNTS_LIMIT: u64 = 15_000; // Value was obtained empirically
-
-        let mut should_store = handle.is_masterchain()  // Store all masterchain states
+        let should_store = handle.is_masterchain()  // Store all masterchain states
             || handle.id().seqno.is_multiple_of(self.store_shard_state_step); // Regular checkpoint
-
-        if let Some(updated_accounts) = hint.updated_accounts {
-            let old_total = self
-                .updated_accounts_count
-                .fetch_add(updated_accounts, Ordering::Release);
-            let new_total = old_total.saturating_add(updated_accounts);
-
-            if new_total >= UPDATED_ACCOUNTS_LIMIT {
-                // Large diff
-                should_store = true;
-                self.updated_accounts_count.store(0, Ordering::Release);
-            }
-        }
 
         if !should_store {
             return Ok(false);
@@ -586,7 +569,6 @@ impl ShardStateStorage {
 #[derive(Default, Debug, Clone, Copy)]
 pub struct StoreStateHint {
     pub block_data_size: Option<usize>,
-    pub updated_accounts: Option<u64>,
 }
 
 impl StoreStateHint {
