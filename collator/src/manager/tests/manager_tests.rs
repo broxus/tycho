@@ -4251,6 +4251,9 @@ impl StateNodeAdapter for TestStateNodeAdapter {
     fn set_sync_context(&self, _sync_context: CollatorSyncContext) {
         unreachable!()
     }
+    fn store_shard_state_step(&self) -> u32 {
+        unreachable!()
+    }
 }
 
 fn build_out_msg_description<V: InternalMessageValue>(

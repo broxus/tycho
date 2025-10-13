@@ -95,6 +95,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Handle sync context update
     fn set_sync_context(&self, sync_context: CollatorSyncContext);
     fn load_init_block_id(&self) -> Option<BlockId>;
+    fn store_shard_state_step(&self) -> u32;
 }
 
 pub struct StateNodeAdapterStdImpl {
@@ -521,6 +522,10 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
     fn load_init_block_id(&self) -> Option<BlockId> {
         self.storage.node_state().load_init_mc_block_id()
+    }
+
+    fn store_shard_state_step(&self) -> u32 {
+        self.storage.shard_state_storage().store_shard_state_step()
     }
 }
 

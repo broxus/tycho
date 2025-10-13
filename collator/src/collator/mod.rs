@@ -664,9 +664,11 @@ impl CollatorStdImpl {
                     // get last store task
                     let last_task = self.store_new_state_tasks.pop().expect("shouldn't happen");
 
+                    let store_state_step = self.state_node_adapter.store_shard_state_step();
+
                     // if it is finished, then we can just reload prev state
                     if last_task.store_new_state_task.is_finished()
-                        && last_task.block_id.seqno.is_multiple_of(2)
+                        && last_task.block_id.seqno.is_multiple_of(store_state_step)
                     {
                         last_task.store_new_state_task.await?;
 
@@ -694,7 +696,7 @@ impl CollatorStdImpl {
                             }
 
                             // Wait for the real task that persists state to the db
-                            if !task.block_id.seqno.is_multiple_of(2) && !is_last {
+                            if !task.block_id.seqno.is_multiple_of(store_state_step) && !is_last {
                                 unfinished_tasks.push(task);
                                 continue;
                             }

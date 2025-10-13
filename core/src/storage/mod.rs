@@ -24,8 +24,7 @@ pub use self::persistent_state::{
     QueueDiffReader, QueueStateReader, QueueStateWriter, ShardStateReader, ShardStateWriter,
 };
 pub use self::shard_state::{
-    ShardStateAccountsStat, ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics,
-    StoreStateHint,
+    ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics, StoreStateHint,
 };
 
 pub mod tables;

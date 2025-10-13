@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -38,9 +38,7 @@ pub struct ShardStateStorage {
     min_ref_mc_state: MinRefMcStateTracker,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
-
-    // Only for metrics
-    last_state_stored: AtomicU32,
+    updated_accounts_count: AtomicU64,
 
     accounts_split_depth: u8,
     store_shard_state_step: u32,
@@ -70,7 +68,7 @@ impl ShardStateStorage {
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
-            last_state_stored: Default::default(),
+            updated_accounts_count: AtomicU64::new(0),
             accounts_split_depth: 5,
         }))
     }
@@ -129,8 +127,23 @@ impl ShardStateStorage {
             return Ok(false);
         }
 
-        let should_store = handle.is_masterchain()  // Store all masterchain states
+        const UPDATED_ACCOUNTS_LIMIT: u64 = 15_000; // Value was obtained empirically
+
+        let mut should_store = handle.is_masterchain()  // Store all masterchain states
             || handle.id().seqno.is_multiple_of(self.store_shard_state_step); // Regular checkpoint
+
+        if let Some(updated_accounts) = hint.updated_accounts {
+            let old_total = self
+                .updated_accounts_count
+                .fetch_add(updated_accounts, Ordering::Release);
+            let new_total = old_total.saturating_add(updated_accounts);
+
+            if new_total >= UPDATED_ACCOUNTS_LIMIT {
+                // Large diff
+                should_store = true;
+                self.updated_accounts_count.store(0, Ordering::Release);
+            }
+        }
 
         if !should_store {
             return Ok(false);
@@ -209,16 +222,6 @@ impl ShardStateStorage {
         };
 
         count.fetch_max(new_cell_count, Ordering::Release);
-
-        if !block_id.is_masterchain() {
-            let step = block_id
-                .seqno
-                .saturating_sub(self.last_state_stored.load(Ordering::Acquire));
-            metrics::gauge!("tycho_storage_store_state_step").set(step as f64);
-
-            self.last_state_stored
-                .store(block_id.seqno, Ordering::Release);
-        }
 
         Ok(updated)
     }
@@ -555,6 +558,7 @@ impl ShardStateStorage {
 #[derive(Default, Debug, Clone, Copy)]
 pub struct StoreStateHint {
     pub block_data_size: Option<usize>,
+    pub updated_accounts: Option<u64>,
 }
 
 impl StoreStateHint {
@@ -573,13 +577,6 @@ impl StoreStateHint {
 pub struct ShardStateStorageMetrics {
     pub max_new_mc_cell_count: usize,
     pub max_new_sc_cell_count: usize,
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct ShardStateAccountsStat {
-    pub _added: u64,
-    pub updated: u64,
-    pub _removed: u64,
 }
 
 #[derive(thiserror::Error, Debug)]
