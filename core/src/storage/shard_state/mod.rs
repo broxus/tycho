@@ -41,12 +41,19 @@ pub trait ShardStateStoragePart: Send + Sync {
     fn shard(&self) -> ShardIdent;
     fn cell_storage(&self) -> &Arc<CellStorage>;
     fn store_accounts_subtree(
-        &self,
+        self: Arc<Self>,
         block_id: &BlockId,
         cell: Cell,
         estimated_cell_count: usize,
         split_depth: u8,
-    ) -> Result<usize, CellStorageError>;
+    ) -> Pin<Box<dyn Future<Output = Result<usize>> + Send>>;
+    fn blocking_store_accounts_subtree(
+        self: Arc<Self>,
+        block_id: &BlockId,
+        cell: Cell,
+        estimated_cell_count: usize,
+        split_depth: u8,
+    ) -> Result<usize>;
     fn remove_outdated_states_in_partition(
         self: Arc<Self>,
         top_blocks: TopBlocks,
@@ -70,14 +77,31 @@ impl ShardStateStoragePart for ShardStateStoragePartImpl {
         &self.cell_storage
     }
 
-    fn store_accounts_subtree(
-        &self,
+    fn blocking_store_accounts_subtree(
+        self: Arc<Self>,
         block_id: &BlockId,
         cell: Cell,
         estimated_cell_count: usize,
         split_depth: u8,
-    ) -> Result<usize, CellStorageError> {
+    ) -> Result<usize> {
         self.store_accounts_subtree_impl(block_id, cell, estimated_cell_count, split_depth)
+    }
+
+    fn store_accounts_subtree(
+        self: Arc<Self>,
+        block_id: &BlockId,
+        cell: Cell,
+        estimated_cell_count: usize,
+        split_depth: u8,
+    ) -> Pin<Box<dyn Future<Output = Result<usize>> + Send>> {
+        let block_id = *block_id;
+        let fut = async move {
+            tokio::task::spawn_blocking(move || {
+                self.store_accounts_subtree_impl(&block_id, cell, estimated_cell_count, split_depth)
+            })
+            .await?
+        };
+        Box::pin(fut)
     }
 
     fn remove_outdated_states_in_partition(
@@ -108,12 +132,12 @@ impl ShardStateStoragePartImpl {
     }
 
     fn store_accounts_subtree_impl(
-        &self,
+        self: Arc<Self>,
         block_id: &BlockId,
         cell: Cell,
         estimated_cell_count: usize,
         split_depth: u8,
-    ) -> Result<usize, CellStorageError> {
+    ) -> Result<usize> {
         // TODO: check if subtree already stored
 
         let guard = {
@@ -129,15 +153,15 @@ impl ShardStateStoragePartImpl {
         let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
 
         let split_at = split_accounts_subtree(cell.clone(), split_depth)
-            .map_err(|_err| CellStorageError::InvalidCell)?;
+            .map_err(|_err| CellStorageError::InvalidCell)?; // TODO: remove if anyhow used
 
         let new_cell_count = cell_storage.store_cell_mt(
-            None,
             cell.as_ref(),
             &mut batch,
             split_at,
-            0,
+            false,
             estimated_cell_count,
+            vec![|| Ok(())],
         )?;
 
         batch.put_cf(&cf.bound(), block_id.to_vec(), cell.repr_hash().as_slice());
@@ -146,6 +170,14 @@ impl ShardStateStoragePartImpl {
 
         // NOTE: Ensure that GC lock is dropped only after storing the state.
         drop(guard);
+
+        tracing::debug!(
+            shard = %self.shard,
+            %block_id,
+            subtree_root_hash = %cell.repr_hash(),
+            new_cell_count,
+            "stored subtree in storage part"
+        );
 
         Ok(new_cell_count)
     }
@@ -355,12 +387,55 @@ impl ShardStateStorage {
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
 
+        let estimated_merkle_update_size = hint.estimate_cell_count();
+
         // calculate split depth to store accounts in partitions
         // or to store in main in parallel
         let (accounts_split_depth, remaining_split_depth) =
             calc_split_depth(self.accounts_split_depth, self.part_split_depth);
 
-        // TODO: split store by partitions here, not in CellStorage
+        let uses_partitions = self.uses_partitions();
+
+        // estimate partition cells count
+        let part_estimated_cells_count = if self.part_split_depth > 0 {
+            let denom = 1 << (self.part_split_depth.saturating_add(1));
+            (estimated_merkle_update_size / denom.max(1)).max(1)
+        } else {
+            estimated_merkle_update_size
+        };
+
+        let mut split_at = FastHashMap::default();
+
+        // run store tasks in partitions
+        // let mut part_store_tasks = FuturesUnordered::new();
+        if !block_id.is_masterchain() {
+            split_at = split_shard_accounts(&block_id.shard, &root_cell, accounts_split_depth)?;
+
+            tracing::debug!(accounts_split_depth, remaining_split_depth, ?split_at);
+
+            // if let Some(store_parts) = &self.storage_parts {
+            //     // estimate partition cells count
+            //     let denom = 1 << (self.part_split_depth.saturating_add(1));
+            //     let part_estimated_cells_count =
+            //         (estimated_merkle_update_size / denom.max(1)).max(1);
+
+            //     for v in split_at.values() {
+            //         if let Some(shard) = &v.shard
+            //             && let Some(store_part) = store_parts.get(shard)
+            //         {
+            //             let store_part = store_part.clone();
+            //             part_store_tasks.push(tokio::spawn(store_part.store_accounts_subtree(
+            //                 &block_id,
+            //                 v.cell.clone(),
+            //                 part_estimated_cells_count,
+            //                 remaining_split_depth,
+            //             )));
+            //         }
+            //     }
+            // }
+        }
+
+        let storage_parts = self.storage_parts.clone();
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
@@ -379,20 +454,46 @@ impl ShardStateStorage {
                     estimated_merkle_update_size,
                 )?
             } else {
-                let split_at =
-                    split_shard_accounts(&block_id.shard, &root_cell, accounts_split_depth)?;
+                let new_cells_in_parts = Arc::new(AtomicUsize::default());
+                let mut part_tasks = vec![];
+                if let Some(store_parts) = &storage_parts {
+                    for v in split_at.values() {
+                        if let Some(shard) = &v.shard
+                            && let Some(store_part) = store_parts.get(shard)
+                        {
+                            let store_part = store_part.clone();
+                            let child_cell = v.cell.clone();
+                            let new_cells_in_parts = new_cells_in_parts.clone();
+                            part_tasks.push(move || {
+                                let new_cells_count = store_part.blocking_store_accounts_subtree(
+                                    &block_id,
+                                    child_cell,
+                                    part_estimated_cells_count,
+                                    remaining_split_depth,
+                                )?;
+                                new_cells_in_parts.fetch_add(new_cells_count, Ordering::Relaxed);
+                                Ok::<_, anyhow::Error>(())
+                            });
+                        }
+                    }
+                }
 
-                tracing::debug!(accounts_split_depth, ?split_at);
-
-                cell_storage.store_cell_mt(
-                    Some(&block_id),
+                let new_cells_count = cell_storage.store_cell_mt(
                     root_cell.as_ref(),
                     &mut batch,
                     split_at,
-                    remaining_split_depth,
+                    uses_partitions,
                     estimated_merkle_update_size,
-                )?
+                    part_tasks,
+                )?;
+
+                let new_cells_total = new_cells_count + new_cells_in_parts.load(Ordering::Relaxed);
+
+                new_cells_total
             };
+
+            // wait for all store tasks in partitions
+            // while let Some(remove_res) = part_store_tasks. {
 
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
@@ -791,7 +892,7 @@ impl RemoveOutdatedStatesContext {
             let split_at = split_shard_accounts(&block_id.shard, root_cell, self.split_depth)?
                 .into_keys()
                 .collect::<FastHashSet<HashBytes>>();
-            // TODO: pass stop_at_split into
+
             self.cell_storage.remove_cell_mt(
                 &alloc,
                 &root_hash,

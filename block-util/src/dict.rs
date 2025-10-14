@@ -183,6 +183,14 @@ where
             if prefix_len > 0 {
                 builder.store_uint(shard.prefix() >> (64 - prefix_len), prefix_len)?;
             }
+            tracing::debug!(
+                depth,
+                %shard,
+                hash = ?dict.dict().root().as_ref().map(|c| c.repr_hash()),
+                left_shard = %left_shard_ident,
+                right_shard = %right_shard_ident,
+                "split_aug_dict step",
+            );
             dict.split_by_prefix(&builder.as_data_slice())?
         };
 

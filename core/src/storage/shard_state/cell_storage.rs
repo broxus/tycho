@@ -1,7 +1,7 @@
 use std::cell::UnsafeCell;
 use std::collections::hash_map;
 use std::mem::{ManuallyDrop, MaybeUninit};
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread::Scope;
 use std::time::Duration;
@@ -17,7 +17,7 @@ use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
 use tycho_storage::kv::refcount;
 use tycho_types::cell::*;
-use tycho_types::models::{BlockId, ShardIdent};
+use tycho_types::models::ShardIdent;
 use tycho_util::metrics::{HistogramGuard, spawn_metrics_loop};
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet, FastHasherState};
 use weedb::rocksdb::WriteBatch;
@@ -363,12 +363,12 @@ impl CellStorage {
 
     pub fn store_cell_mt(
         &self,
-        block_id: Option<&BlockId>,
         root: &DynCell,
         batch: &mut WriteBatch,
         split_at: FastHashMap<HashBytes, SplitAccountEntry>,
-        remaining_split_depth: u8,
+        split_by_partitions: bool,
         capacity: usize,
+        part_tasks: Vec<impl FnOnce() -> Result<(), anyhow::Error> + Send>,
     ) -> Result<usize, CellStorageError> {
         type StoreResult = Result<(), CellStorageError>;
 
@@ -387,16 +387,10 @@ impl CellStorage {
             db: &'a D,
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
-            block_id: Option<&'a BlockId>,
             /// Subtrees to process in parallel.
             split_at: FastHashMap<HashBytes, SplitAccountEntry>,
-            remaining_split_depth: u8,
-            /// State storage partitions if used
-            storage_parts: Option<Arc<StoragePartsMap>>,
-            /// Estimated count of cells in one partition
-            part_estimated_cells_count: usize,
-            /// Sum of new added cells in partitions
-            new_cells_in_parts: Arc<AtomicUsize>,
+            /// Indicates that accounts are splitted by partitions
+            split_by_partitions: bool,
             // TODO: Use `&'a HashBytes` for key?
             // Pros:
             //   - Less `memcpy` calls;
@@ -416,23 +410,16 @@ impl CellStorage {
                 db: &'a D,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
-                block_id: Option<&'a BlockId>,
                 split_accounts: FastHashMap<HashBytes, SplitAccountEntry>,
-                remaining_split_depth: u8,
-                storage_parts: Option<Arc<StoragePartsMap>>,
-                part_estimated_cells_count: usize,
+                split_by_partitions: bool,
                 capacity: usize,
             ) -> Self {
                 Self {
                     db,
                     raw_cache,
                     herd,
-                    block_id,
                     split_at: split_accounts,
-                    remaining_split_depth,
-                    storage_parts,
-                    part_estimated_cells_count,
-                    new_cells_in_parts: Arc::new(AtomicUsize::new(0)),
+                    split_by_partitions,
                     transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
                         capacity,
                         Default::default(),
@@ -467,37 +454,11 @@ impl CellStorage {
 
                     for child in &mut *iter {
                         let child_hash = child.repr_hash();
-                        if let Some(entry) = self.split_at.get(child_hash) {
+                        if self.split_at.contains_key(child_hash) {
                             // if subtree should be stored in partition
-                            // then store its root cell both in main db and in partition
-                            if let Some(shard) = entry.shard
-                                && let Some(storage_part) = self
-                                    .storage_parts
-                                    .as_ref()
-                                    .and_then(|parts| parts.get(&shard))
-                                    .cloned()
-                            {
-                                let child_cell = entry.cell.clone();
-                                let part_estimated_cells_count =
-                                    self.part_estimated_cells_count.max(1);
-                                let new_cells_in_parts = self.new_cells_in_parts.clone();
-                                scope.spawn(move || {
-                                    let part_new_cells = storage_part.store_accounts_subtree(
-                                        self.block_id.unwrap(),
-                                        child_cell,
-                                        part_estimated_cells_count,
-                                        self.remaining_split_depth,
-                                    )?;
-                                    tracing::debug!(
-                                        shard = %storage_part.shard(),
-                                        child_hash = %child.repr_hash(),
-                                        part_new_cells,
-                                        "stored subtree in storage part"
-                                    );
-                                    new_cells_in_parts.fetch_add(part_new_cells, Ordering::Relaxed);
-                                    Ok::<_, CellStorageError>(())
-                                });
-
+                            // then store its root cell in main db as well
+                            // but do not store children
+                            if self.split_by_partitions {
                                 self.insert_cell(child, &mut alloc, depth)?;
 
                                 continue;
@@ -667,35 +628,27 @@ impl CellStorage {
                         batch.merge_cf(cells_cf, key.as_slice(), &buffer);
                     }
 
-                    let new_cells_in_parts = self.new_cells_in_parts.load(Ordering::Relaxed);
-
-                    total + new_cells_in_parts
+                    total
                 })
             }
         }
-
-        // estimate partition cells count
-        let part_estimated_cells_count = if self.part_split_depth > 0 {
-            let denom = 1 << (self.part_split_depth.saturating_add(1));
-            (capacity / denom.max(1)).max(1)
-        } else {
-            capacity
-        };
 
         let herd = Herd::new();
         let ctx = StoreContext::new(
             &self.cells_db,
             &herd,
             &self.raw_cells_cache,
-            block_id,
             split_at,
-            remaining_split_depth,
-            self.storage_parts.clone(),
-            part_estimated_cells_count,
+            split_by_partitions,
             capacity,
         );
 
-        std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
+        std::thread::scope(|scope| {
+            for task in part_tasks {
+                scope.spawn(task);
+            }
+            ctx.traverse_cell(root, scope)
+        })?;
 
         Ok(ctx.finalize(batch))
     }
@@ -1574,6 +1527,7 @@ impl StorageCell {
         };
 
         tracing::debug!(
+            storage_shard = ?self.cell_storage.part_shard,
             index,
             child_cell = %child_hash,
             ?child_shard_router,

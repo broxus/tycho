@@ -708,12 +708,12 @@ mod test {
             let mut batch = WriteBatch::new();
 
             let traversed = cell_storage.store_cell_mt(
-                None,
                 new_dict_cell.as_ref(),
                 &mut batch,
                 Default::default(),
-                0,
+                false,
                 MODIFY_COUNT * 3,
+                vec![|| Ok(())],
             )?;
 
             cell_keys.push(*cell_hash);
