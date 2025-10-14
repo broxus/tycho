@@ -138,7 +138,8 @@ impl ShardStateStorage {
         }
 
         let should_store = handle.is_masterchain()  // Store all masterchain states
-            || handle.id().seqno.is_multiple_of(self.store_shard_state_step); // Regular checkpoint
+            || handle.id().seqno.is_multiple_of(self.store_shard_state_step) // Regular checkpoint
+            || hint.is_top_block == Some(true); // Top block
 
         if !should_store {
             return Ok(false);
@@ -569,6 +570,7 @@ impl ShardStateStorage {
 #[derive(Default, Debug, Clone, Copy)]
 pub struct StoreStateHint {
     pub block_data_size: Option<usize>,
+    pub is_top_block: Option<bool>,
 }
 
 impl StoreStateHint {

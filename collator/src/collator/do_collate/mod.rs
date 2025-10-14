@@ -1043,6 +1043,7 @@ impl CollatorStdImpl {
 
             let hint = StoreStateHint {
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
+                is_top_block: None,
             };
 
             adapter.accept_shard_block(

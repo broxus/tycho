@@ -132,6 +132,7 @@ where
             // Apply state
             self.compute_and_store_state_update(
                 &cx.block,
+                cx.is_top_block,
                 &handle,
                 prev_root_cell,
                 old_split_at,
@@ -185,6 +186,7 @@ where
     async fn compute_and_store_state_update(
         &self,
         block: &BlockStuff,
+        is_top_block: bool,
         handle: &BlockHandle,
         prev_root: Cell,
         split_at: ahash::HashSet<HashBytes>,
@@ -215,6 +217,7 @@ where
         state_storage
             .store_state(handle, &new_state, StoreStateHint {
                 block_data_size: Some(block.data_size()),
+                is_top_block: Some(is_top_block),
             })
             .await
             .context("Failed to store new state")?;
