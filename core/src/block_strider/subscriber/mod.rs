@@ -29,6 +29,8 @@ pub struct BlockSubscriberContext {
     pub mc_is_key_block: bool,
     /// Whether the `block` from this context is a key block.
     pub is_key_block: bool,
+    /// Whether the `block` from this context is a top block.
+    pub is_top_block: bool,
     /// Parsed block data.
     pub block: BlockStuff,
     /// Serialized block data.
