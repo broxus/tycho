@@ -194,6 +194,7 @@ where
                 mc_block_id,
                 mc_is_key_block: is_key_block,
                 is_key_block,
+                is_top_block: false,
                 block: block.clone(),
                 archive_data,
                 delayed,
@@ -217,12 +218,15 @@ where
             ));
         }
 
+        let shard_heights = ShardHeights::from(shard_heights);
+
         // Start processing shard blocks in parallel
         let mut process_futures = FuturesUnordered::new();
         while let Some(blocks) = download_futures.next().await.transpose()? {
             process_futures.push(Box::pin(self.process_shard_blocks(
                 &mc_block_id,
                 is_key_block,
+                &shard_heights,
                 blocks,
             )));
         }
@@ -243,7 +247,6 @@ where
         delayed_handle.join().await?;
 
         // Commit only when everything is ok.
-        let shard_heights = ShardHeights::from(shard_heights);
         self.state.commit_master(CommitMasterBlock {
             block_id: &mc_block_id,
             is_key_block,
@@ -318,6 +321,7 @@ where
         &self,
         mc_block_id: &BlockId,
         mc_is_key_block: bool,
+        top_blocks: &ShardHeights,
         mut blocks: Vec<BlockStuffAug>,
     ) -> Result<()> {
         let start_preparing_block = |block: BlockStuffAug| {
@@ -327,6 +331,7 @@ where
                 mc_block_id: *mc_block_id,
                 mc_is_key_block,
                 is_key_block: false,
+                is_top_block: top_blocks.contains(block.id()),
                 block: block.data,
                 archive_data: block.archive_data,
                 delayed,
