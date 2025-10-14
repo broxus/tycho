@@ -361,8 +361,16 @@ impl BlockStorage {
     }
 
     pub async fn load_queue_diff(&self, handle: &BlockHandle) -> Result<QueueDiffStuff> {
-        let raw_diff = self.load_queue_diff_raw(handle).await?;
-        QueueDiffStuff::deserialize(handle.id(), &raw_diff)
+        const BIG_DATA_THRESHOLD: usize = 100 << 10; // 100 kib
+
+        let data = self.load_queue_diff_raw(handle).await?;
+
+        if data.len() < BIG_DATA_THRESHOLD {
+            QueueDiffStuff::deserialize(handle.id(), &data)
+        } else {
+            let handle = handle.clone();
+            rayon_run(move || QueueDiffStuff::deserialize(handle.id(), data.as_ref())).await
+        }
     }
 
     pub async fn load_queue_diff_raw(&self, handle: &BlockHandle) -> Result<Bytes> {
