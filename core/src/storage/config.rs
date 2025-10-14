@@ -21,7 +21,7 @@ pub struct CoreStorageConfig {
 
     /// Store every Nth shard state to storage
     ///
-    /// Default: 2.
+    /// Default: 3.
     pub store_shard_state_step: u32,
 
     /// Archives storage config.
@@ -64,7 +64,7 @@ impl Default for CoreStorageConfig {
         Self {
             cells_cache_size: ByteSize::mb(256),
             drop_interval: 3,
-            store_shard_state_step: 2,
+            store_shard_state_step: 3,
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),
@@ -165,13 +165,13 @@ pub enum BlocksGcType {
 pub struct BlocksCacheConfig {
     /// Entry TTL.
     ///
-    /// Default: `5 min`.
+    /// Default: `1 min`.
     #[serde(with = "serde_helpers::humantime")]
     pub ttl: Duration,
 
     /// Cache capacity in bytes.
     ///
-    /// Default: `500 MB`.
+    /// Default: `2 GB`.
     pub size: ByteSize,
 }
 

@@ -127,7 +127,7 @@ impl ShardStateStorage {
             return Ok(false);
         }
 
-        const UPDATED_ACCOUNTS_LIMIT: u64 = 15_000; // Value was obtained empirically
+        const UPDATED_ACCOUNTS_LIMIT: u64 = 12_000; // Value was obtained empirically
 
         let mut should_store = handle.is_masterchain()  // Store all masterchain states
             || handle.id().seqno.is_multiple_of(self.store_shard_state_step); // Regular checkpoint
