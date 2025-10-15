@@ -342,6 +342,9 @@ impl CollatorStdImpl {
                         "Error when store new state: {:?}", err,
                     );
                 }
+
+                // NOTE: State update can be quite huge so drop it outside of tokio.
+                Reclaimer::instance().drop(cx.state_update);
             }
         });
 
@@ -1013,8 +1016,11 @@ impl CollatorStdImpl {
             });
 
             // Keep only the last `merkle_chain_limit` states alive
-            if self.store_state_refs.len() == self.config.merkle_chain_limit {
-                self.store_state_refs.pop_front();
+            if self.store_state_refs.len() == self.config.merkle_chain_limit
+                && let Some(old_ref) = self.store_state_refs.pop_front()
+            {
+                // NOTE: State update can be quite huge so drop it outside of tokio.
+                Reclaimer::instance().drop(old_ref);
             }
             self.store_state_refs
                 .push_back(new_observable_state_root.clone());
@@ -1028,7 +1034,6 @@ impl CollatorStdImpl {
         };
 
         let state_node_adapter = self.state_node_adapter.clone();
-
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         self.delayed_working_state.future = Some(Box::pin(async move {
             let _histogram = HistogramGuard::begin_with_labels(
