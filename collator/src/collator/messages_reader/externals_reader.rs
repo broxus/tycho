@@ -16,8 +16,9 @@ use crate::collator::messages_buffer::{
 };
 use crate::collator::messages_reader::InternalsRangeReaderKind;
 use crate::collator::messages_reader::state::external::{
-    DebugExternalsRangeReaderState, ExternalKey, ExternalsRangeReaderState,
-    ExternalsRangeReaderStateByPartition, ExternalsReaderRange, ExternalsReaderState,
+    DebugExternalsRangeReaderState, ExternalKey, ExternalsPartitionRangeReaderState,
+    ExternalsPartitionReaderState, ExternalsRangeReaderState, ExternalsReaderRange,
+    ExternalsReaderState,
 };
 use crate::collator::messages_reader::state::internal::DebugInternalsRangeReaderState;
 use crate::collator::types::{
@@ -36,34 +37,27 @@ pub(super) mod tests;
 //=========
 // EXTERNALS READER
 //=========
-pub(super) struct FinalizedExternalsReader {
-    pub externals_reader_state: ExternalsReaderState,
-    pub anchors_cache: AnchorsCache,
-}
-
-pub(super) struct ExternalsReader {
+pub(super) struct ExternalsReader<'a> {
     for_shard_id: ShardIdent,
     block_seqno: BlockSeqno,
     next_chain_time: u64,
     msgs_exec_params: MsgsExecutionParamsStuff,
     /// Target limits for filling message group from the buffer
     buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
-    anchors_cache: AnchorsCache,
-    /// Should not read `.ranges` after reader creation because they moved into `.range_readers`
-    reader_state: ExternalsReaderState,
-    range_readers: BTreeMap<BlockSeqno, ExternalsRangeReader>,
+    anchors_cache: &'a mut AnchorsCache,
+    state: &'a mut ExternalsReaderState,
     all_ranges_fully_read: bool,
 }
 
-impl ExternalsReader {
+impl<'a> ExternalsReader<'a> {
     pub fn new(
         for_shard_id: ShardIdent,
         block_seqno: BlockSeqno,
         next_chain_time: u64,
         msgs_exec_params: MsgsExecutionParamsStuff,
         buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
-        anchors_cache: AnchorsCache,
-        mut reader_state: ExternalsReaderState,
+        anchors_cache: &'a mut AnchorsCache,
+        reader_state: &'a mut ExternalsReaderState,
     ) -> Self {
         // init minimal partitions count in the state if not exist
         for par_id in buffer_limits_by_partitions.keys() {
@@ -77,13 +71,9 @@ impl ExternalsReader {
             msgs_exec_params,
             buffer_limits_by_partitions,
             anchors_cache,
-            reader_state,
-            range_readers: Default::default(),
+            state: reader_state,
             all_ranges_fully_read: false,
         };
-
-        // create existing range readers
-        reader.create_existing_range_readers();
 
         reader
     }
@@ -92,57 +82,86 @@ impl ExternalsReader {
         self.all_ranges_fully_read = false;
     }
 
-    pub fn finalize(mut self) -> Result<FinalizedExternalsReader> {
+    pub fn finalize(&mut self) -> Result<()> {
         // collect range reader states
-        let mut range_readers = self.range_readers.into_iter().peekable();
-        let mut max_processed_offsets = BTreeMap::<QueuePartitionIdx, u32>::new();
-        while let Some((seqno, mut range_reader)) = range_readers.next() {
-            // update offset in the last range reader state for partition
-            // if current offset is greater than the maximum stored one among all ranges
-            for (par_id, par) in &self.reader_state.by_partitions {
-                let range_reader_state_by_partition = range_reader
-                    .reader_state
-                    .get_state_by_partition_mut(*par_id)?;
-                let max_processed_offset = max_processed_offsets
-                    .entry(*par_id)
-                    .and_modify(|max| {
-                        *max = range_reader_state_by_partition.processed_offset.max(*max);
-                    })
-                    .or_insert(range_reader_state_by_partition.processed_offset);
+        // let mut range_readers = std::mem::take(&mut self.range_readers)
+        //     .into_iter()
+        //     .peekable();
+        // let mut max_processed_offsets = BTreeMap::<QueuePartitionIdx, u32>::new();
+        // while let Some((seqno, mut range_reader)) = range_readers.next() {
+        //     // update offset in the last range reader state for partition
+        //     // if current offset is greater than the maximum stored one among all ranges
+        //     for (par_id, par) in self.state_by_partitions.iter() {
+        //         let range_reader_state_by_partition = range_reader
+        //             .reader_state
+        //             .get_state_by_partition_mut(*par_id)?;
+        //         let max_processed_offset = max_processed_offsets
+        //             .entry(*par_id)
+        //             .and_modify(|max| {
+        //                 *max = range_reader_state_by_partition.processed_offset.max(*max);
+        //             })
+        //             .or_insert(range_reader_state_by_partition.processed_offset);
+        //
+        //         if par.curr_processed_offset > *max_processed_offset
+        //             && range_readers.peek().is_none()
+        //         {
+        //             range_reader_state_by_partition.processed_offset = par.curr_processed_offset;
+        //         }
+        //     }
+        //
+        //     // self.reader_state
+        //     //     .ranges
+        //     //     .insert(seqno, range_reader.reader_state);
+        // }
 
-                if par.curr_processed_offset > *max_processed_offset
-                    && range_readers.peek().is_none()
-                {
-                    range_reader_state_by_partition.processed_offset = par.curr_processed_offset;
-                }
-            }
-
-            self.reader_state
-                .ranges
-                .insert(seqno, range_reader.reader_state);
-        }
-
-        // return updated externals reader state
-        Ok(FinalizedExternalsReader {
-            externals_reader_state: self.reader_state,
-            anchors_cache: self.anchors_cache,
-        })
+        Ok(())
     }
 
+    // fn create_existing_range_readers(&mut self) {
+    //     while let Some((seqno, range_reader_state)) = self.state.ranges.pop_first() {
+    //         let reader = self.create_existing_externals_range_reader(range_reader_state, seqno);
+    //         self.range_readers.insert(seqno, reader);
+    //     }
+    // }
+    //
+    // #[tracing::instrument(skip_all)]
+    // fn create_existing_externals_range_reader(
+    //     &self,
+    //     range_reader_state: ExternalsRangeReaderState,
+    //     seqno: BlockSeqno,
+    // ) -> ExternalsRangeReader {
+    //     let reader = ExternalsRangeReader {
+    //         for_shard_id: self.for_shard_id,
+    //         seqno,
+    //         buffer_limits_by_partitions: self.buffer_limits_by_partitions.clone(),
+    //         fully_read: range_reader_state.range.current_position == range_reader_state.range.to,
+    //         reader_state: range_reader_state,
+    //     };
+    //
+    //     tracing::debug!(target: tracing_targets::COLLATOR,
+    //         seqno = reader.seqno,
+    //         fully_read = reader.fully_read,
+    //         reader_state = ?DebugExternalsRangeReaderState(&reader.reader_state),
+    //         "externals reader: created existing range reader",
+    //     );
+    //
+    //     reader
+    // }
+
     pub fn open_ranges_limit_reached(&self) -> bool {
-        self.range_readers.len() >= self.msgs_exec_params.current().open_ranges_limit()
+        self.state.ranges.len() >= self.msgs_exec_params.current().open_ranges_limit()
     }
 
     pub fn reader_state(&self) -> &ExternalsReaderState {
-        &self.reader_state
+        self.state
     }
 
     pub fn get_partition_ids(&self) -> Vec<QueuePartitionIdx> {
-        self.reader_state.by_partitions.keys().copied().collect()
+        self.state.by_partitions.keys().copied().collect()
     }
 
-    pub(super) fn drop_last_read_to_anchor_chain_time(&mut self) {
-        self.reader_state.last_read_to_anchor_chain_time = None;
+    pub fn drop_last_read_to_anchor_chain_time(&mut self) {
+        self.state.last_read_to_anchor_chain_time = None;
     }
 
     fn get_buffer_limits_by_partition(
@@ -166,27 +185,22 @@ impl ExternalsReader {
     }
 
     pub fn has_non_zero_processed_offset(&self) -> bool {
-        self.range_readers.values().any(|r| {
-            r.reader_state
-                .by_partitions
-                .values()
-                .any(|par| par.processed_offset > 0)
-        })
+        self.state
+            .ranges
+            .values()
+            .any(|r| r.by_partitions.values().any(|par| par.processed_offset > 0))
     }
 
     pub fn last_range_offset_reached(&self, par_id: &QueuePartitionIdx) -> bool {
-        self.reader_state
+        self.state
             .by_partitions
             .get(par_id)
             .map(|state_by_partition| {
-                self.get_last_range_reader().map(|(_, r)| {
-                    r.reader_state
-                        .by_partitions
-                        .get(par_id)
-                        .map(|range_state_by_partition| {
-                            range_state_by_partition.processed_offset
-                                <= state_by_partition.curr_processed_offset
-                        })
+                self.get_last_range_state().map(|(_, r)| {
+                    r.by_partitions.get(par_id).map(|range_state_by_partition| {
+                        range_state_by_partition.processed_offset
+                            <= state_by_partition.curr_processed_offset
+                    })
                 })
             })
             .and_then(|res| res.ok())
@@ -195,12 +209,12 @@ impl ExternalsReader {
     }
 
     pub fn last_range_offsets_reached_in_all_partitions(&self) -> bool {
-        self.get_last_range_reader()
+        self.get_last_range_state()
             .map(|(_, r)| {
-                r.reader_state.by_partitions.iter().all(|(par_id, par)| {
+                r.by_partitions.iter().all(|(par_id, par)| {
                     par.processed_offset
                         <= self
-                            .reader_state
+                            .state
                             .by_partitions
                             .get(par_id)
                             .unwrap()
@@ -211,10 +225,9 @@ impl ExternalsReader {
     }
 
     pub fn get_last_range_reader_offsets_by_partitions(&self) -> Vec<(QueuePartitionIdx, u32)> {
-        self.get_last_range_reader()
+        self.get_last_range_state()
             .map(|(_, r)| {
-                r.reader_state
-                    .by_partitions
+                r.by_partitions
                     .iter()
                     .map(|(par_id, par)| (*par_id, par.processed_offset))
                     .collect::<Vec<_>>()
@@ -223,10 +236,11 @@ impl ExternalsReader {
     }
 
     pub fn count_messages_in_buffers_by_partitions(&self) -> BTreeMap<QueuePartitionIdx, usize> {
-        self.range_readers
+        self.state
+            .ranges
             .values()
             .fold(BTreeMap::new(), |mut curr, r| {
-                for (par_id, par) in &r.reader_state.by_partitions {
+                for (par_id, par) in &r.by_partitions {
                     let sum = curr.entry(*par_id).or_default();
                     *sum = sum.saturating_add(par.buffer.msgs_count());
                 }
@@ -235,9 +249,8 @@ impl ExternalsReader {
     }
 
     pub fn has_messages_in_buffers(&self) -> bool {
-        self.range_readers.values().any(|v| {
-            v.reader_state
-                .by_partitions
+        self.state.ranges.values().any(|v| {
+            v.by_partitions
                 .values()
                 .any(|par| par.buffer.msgs_count() > 0)
         })
@@ -252,15 +265,16 @@ impl ExternalsReader {
     }
 
     pub fn check_all_ranges_read_and_collected(&self) -> bool {
-        self.range_readers.values().all(|v| v.fully_read) && !self.has_messages_in_buffers()
+        self.state.ranges.values().all(|v| v.fully_read_calculated)
+            && !self.has_messages_in_buffers()
     }
 
     pub fn all_read_externals_collected(&self) -> bool {
-        self.range_readers.values().all(|r| {
-            r.reader_state.by_partitions.iter().all(|(par_id, s)| {
+        self.state.ranges.values().all(|r| {
+            r.by_partitions.iter().all(|(par_id, s)| {
                 s.buffer.msgs_count() == 0
                     && self
-                        .reader_state
+                        .state
                         .by_partitions
                         .get(par_id)
                         .map(|r_s| r_s.curr_processed_offset)
@@ -274,10 +288,10 @@ impl ExternalsReader {
         self.anchors_cache.has_pending_externals()
     }
 
-    pub fn retain_only_last_range_reader(&mut self) -> Result<()> {
-        let (last_seqno, last_range_reader) = self.range_readers.pop_last().context(
-            "externals reader should have at least one range reader when retain_only_last_range_reader() called",
-        )?;
+    pub fn retain_only_last_range_state(&mut self) -> Result<()> {
+        let last_seqno = *self.state.ranges.last_key_value().context(
+            "externals reader should have at least one range state when retain_only_last_range_state() called",
+        )?.0;
 
         if last_seqno < self.block_seqno {
             // set that not all ranges fully read
@@ -285,46 +299,45 @@ impl ExternalsReader {
             self.all_ranges_fully_read = false;
         }
 
-        self.range_readers.clear();
-        self.range_readers.insert(last_seqno, last_range_reader);
+        // Remove all ranges except the last one
+        self.state.ranges.retain(|&seqno, _| seqno == last_seqno);
         Ok(())
     }
 
     pub fn set_from_to_current_position_in_last_range_reader(&mut self) -> Result<()> {
-        let last_range_reader = self.get_last_range_reader_mut()?;
-        last_range_reader.reader_state.range.from =
-            last_range_reader.reader_state.range.current_position;
+        let last_range_reader = self.get_last_range_state_mut()?;
+        last_range_reader.range.from = last_range_reader.range.current_position;
         Ok(())
     }
 
-    pub fn pop_first_range_reader(&mut self) -> Option<(BlockSeqno, ExternalsRangeReader)> {
-        self.range_readers.pop_first()
-    }
+    // pub fn pop_first_range_reader(&mut self) -> Option<(BlockSeqno, ExternalsRangeReader)> {
+    //     self.range_readers.pop_first()
+    // }
 
-    pub fn set_range_readers(
-        &mut self,
-        mut range_readers: BTreeMap<BlockSeqno, ExternalsRangeReader>,
-    ) {
-        self.range_readers.append(&mut range_readers);
-    }
+    // pub fn set_range_readers(
+    //     &mut self,
+    //     mut range_readers: BTreeMap<BlockSeqno, ExternalsRangeReader>,
+    // ) {
+    //     self.range_readers.append(&mut range_readers);
+    // }
 
-    pub fn get_last_range_reader(&self) -> Result<(&BlockSeqno, &ExternalsRangeReader)> {
-        self.range_readers
+    pub fn get_last_range_state(&self) -> Result<(&BlockSeqno, &ExternalsRangeReaderState)> {
+        self.state
+            .ranges
             .last_key_value()
             .context("externals reader should have at least one range reader")
     }
 
-    pub fn get_last_range_reader_mut(&mut self) -> Result<&mut ExternalsRangeReader> {
-        let (&last_seqno, _) = self.get_last_range_reader()?;
-        Ok(self.range_readers.get_mut(&last_seqno).unwrap())
+    pub fn get_last_range_state_mut(&mut self) -> Result<&mut ExternalsRangeReaderState> {
+        let (&last_seqno, _) = self.get_last_range_state()?;
+        Ok(self.state.ranges.get_mut(&last_seqno).unwrap())
     }
 
     pub fn increment_curr_processed_offset(&mut self, par_id: &QueuePartitionIdx) -> Result<()> {
-        let reader_state_by_partition = self
-            .reader_state
-            .by_partitions
-            .get_mut(par_id)
-            .with_context(|| format!("externals reader state not exists for partition {par_id}"))?;
+        let reader_state_by_partition =
+            self.state.by_partitions.get_mut(par_id).with_context(|| {
+                format!("externals reader state not exists for partition {par_id}")
+            })?;
         reader_state_by_partition.curr_processed_offset += 1;
         Ok(())
     }
@@ -335,13 +348,12 @@ impl ExternalsReader {
         par_id: QueuePartitionIdx,
         drop_skip_offset: bool,
     ) -> Result<()> {
-        let reader_state_by_partition = self.reader_state.get_state_by_partition_mut(par_id)?;
+        let reader_state_by_partition = self.get_state_by_partition_mut(par_id)?;
         reader_state_by_partition.curr_processed_offset = 0;
 
-        let last_range_reader = self.get_last_range_reader_mut()?;
-        let last_range_reader_by_partition = last_range_reader
-            .reader_state
-            .get_state_by_partition_mut(par_id)?;
+        let last_range_reader = self.get_last_range_state_mut()?;
+        let last_range_reader_by_partition =
+            last_range_reader.get_state_by_partition_mut(par_id)?;
         last_range_reader_by_partition.processed_offset = 0;
 
         if drop_skip_offset {
@@ -355,15 +367,11 @@ impl ExternalsReader {
         &mut self,
         par_id: QueuePartitionIdx,
     ) -> Result<()> {
-        let curr_processed_offset = self
-            .reader_state
-            .get_state_by_partition(par_id)?
-            .curr_processed_offset;
+        let curr_processed_offset = self.get_state_by_partition(par_id)?.curr_processed_offset;
 
-        let last_range_reader = self.get_last_range_reader_mut()?;
-        let last_range_reader_by_partition = last_range_reader
-            .reader_state
-            .get_state_by_partition_mut(par_id)?;
+        let last_range_reader = self.get_last_range_state_mut()?;
+        let last_range_reader_by_partition =
+            last_range_reader.get_state_by_partition_mut(par_id)?;
         // update processed offset only if current is greater
         // because this method could be called on refill before the processed_offset reached
         if curr_processed_offset > last_range_reader_by_partition.processed_offset {
@@ -375,55 +383,25 @@ impl ExternalsReader {
     }
 
     pub fn set_processed_to_current_position(&mut self, par_id: QueuePartitionIdx) -> Result<()> {
-        let (_, last_range_reader) = self.get_last_range_reader()?;
-        let current_position = last_range_reader.reader_state.range.current_position;
+        let (_, last_range_reader) = self.get_last_range_state()?;
+        let current_position = last_range_reader.range.current_position;
 
-        let reader_state_by_partition = self.reader_state.get_state_by_partition_mut(par_id)?;
+        let reader_state_by_partition = self.get_state_by_partition_mut(par_id)?;
         reader_state_by_partition.processed_to = current_position;
 
         Ok(())
     }
 
-    fn create_existing_range_readers(&mut self) {
-        while let Some((seqno, range_reader_state)) = self.reader_state.ranges.pop_first() {
-            let reader = self.create_existing_externals_range_reader(range_reader_state, seqno);
-            self.range_readers.insert(seqno, reader);
-        }
-    }
-
-    #[tracing::instrument(skip_all)]
-    fn create_existing_externals_range_reader(
-        &self,
-        range_reader_state: ExternalsRangeReaderState,
-        seqno: BlockSeqno,
-    ) -> ExternalsRangeReader {
-        let reader = ExternalsRangeReader {
-            for_shard_id: self.for_shard_id,
-            seqno,
-            buffer_limits_by_partitions: self.buffer_limits_by_partitions.clone(),
-            fully_read: range_reader_state.range.current_position == range_reader_state.range.to,
-            reader_state: range_reader_state,
-        };
-
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            seqno = reader.seqno,
-            fully_read = reader.fully_read,
-            reader_state = ?DebugExternalsRangeReaderState(&reader.reader_state),
-            "externals reader: created existing range reader",
-        );
-
-        reader
-    }
-
-    fn create_append_next_range_reader(&mut self) {
-        let reader = self.create_next_externals_range_reader();
+    fn create_append_next_range_state(&mut self) {
+        let range_state = self.create_next_externals_range_state();
         if self
-            .range_readers
-            .insert(self.block_seqno, reader)
+            .state
+            .ranges
+            .insert(self.block_seqno, range_state)
             .is_some()
         {
             panic!(
-                "externals range reader should not already exist (for_shard_id: {}, seqno: {})",
+                "externals range state should not already exist (for_shard_id: {}, seqno: {})",
                 self.for_shard_id, self.block_seqno
             )
         };
@@ -431,18 +409,11 @@ impl ExternalsReader {
     }
 
     #[tracing::instrument(skip_all)]
-    fn create_next_externals_range_reader(&self) -> ExternalsRangeReader {
-        let from = self
-            .range_readers
-            .values()
-            .last()
-            .map(|r| r.reader_state.range.to)
-            .unwrap_or_default();
-
-        // create range reader states by partitions
+    fn create_next_externals_range_state(&self) -> ExternalsRangeReaderState {
+        // create range states by partitions
         let mut by_partitions = BTreeMap::new();
-        for (par_id, par) in &self.reader_state.by_partitions {
-            by_partitions.insert(*par_id, ExternalsRangeReaderStateByPartition {
+        for (par_id, par) in self.state.by_partitions.iter() {
+            by_partitions.insert(*par_id, ExternalsPartitionRangeReaderState {
                 buffer: Default::default(),
                 skip_offset: par.curr_processed_offset,
                 processed_offset: par.curr_processed_offset,
@@ -450,30 +421,33 @@ impl ExternalsReader {
             });
         }
 
-        let reader = ExternalsRangeReader {
-            for_shard_id: self.for_shard_id,
-            seqno: self.block_seqno,
-            fully_read: false,
-            buffer_limits_by_partitions: self.buffer_limits_by_partitions.clone(),
-            reader_state: ExternalsRangeReaderState {
-                range: ExternalsReaderRange {
-                    from,
-                    to: from,
-                    current_position: from,
-                    chain_time: self.next_chain_time,
-                },
-                by_partitions,
+        let from = self
+            .state
+            .ranges
+            .values()
+            .last()
+            .map(|r| r.range.to)
+            .unwrap_or_default();
+
+        let reader_state = ExternalsRangeReaderState {
+            range: ExternalsReaderRange {
+                from,
+                to: from,
+                current_position: from,
+                chain_time: self.next_chain_time,
             },
+            by_partitions,
+            fully_read_calculated: false,
         };
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            seqno = reader.seqno,
-            fully_read = reader.fully_read,
-            reader_state = ?DebugExternalsRangeReaderState(&reader.reader_state),
-            "externals reader: created next range reader",
+            seqno = self.block_seqno,
+            fully_read = reader_state.fully_read_calculated,
+            reader_state = ?DebugExternalsRangeReaderState(&reader_state),
+            "externals reader: created next range state",
         );
 
-        reader
+        reader_state
     }
 
     pub fn read_into_buffers(
@@ -492,13 +466,13 @@ impl ExternalsReader {
         }
 
         let processed_to_by_partitions: BTreeMap<_, _> = self
-            .reader_state
+            .state
             .by_partitions
             .iter()
             .map(|(par_id, par)| (*par_id, par.processed_to))
             .collect();
 
-        let mut ranges_seqno: VecDeque<_> = self.range_readers.keys().copied().collect();
+        let mut ranges_seqno: VecDeque<_> = self.state.ranges.keys().copied().collect();
         let mut last_seqno = 0;
 
         let mut last_ext_read_res_opt = None;
@@ -509,17 +483,24 @@ impl ExternalsReader {
         'main_loop: loop {
             let mut all_ranges_fully_read = true;
             while let Some(seqno) = ranges_seqno.pop_front() {
-                let range_reader = self.range_readers.get_mut(&seqno).unwrap_or_else(||
+                // let range_reader = self.range_readers.get_mut(&seqno).unwrap_or_else(||
+                //     panic!(
+                //         "externals range reader should exist (for_shard_id: {}, seqno: {}, block_seqno: {})",
+                //         self.for_shard_id, seqno, self.block_seqno,
+                //     )
+                // );
+
+                let mut reader_state = self.state.ranges.get_mut(&seqno).unwrap_or_else(||
                     panic!(
-                        "externals range reader should exist (for_shard_id: {}, seqno: {}, block_seqno: {})",
+                        "externals range reader state should exists (for_shard_id: {}, seqno: {}, block_seqno: {})",
                         self.for_shard_id, seqno, self.block_seqno,
                     )
                 );
 
                 tracing::trace!(target: tracing_targets::COLLATOR,
                     seqno,
-                    fully_read = range_reader.fully_read,
-                    range_reader_state = ?DebugExternalsRangeReaderState(&range_reader.reader_state),
+                    fully_read = reader_state.fully_read_calculated,
+                    range_reader_state = ?DebugExternalsRangeReaderState(&reader_state),
                     "externals reader: try to read externals from range,"
                 );
 
@@ -527,7 +508,7 @@ impl ExternalsReader {
                 last_seqno = seqno;
 
                 // skip fully read ranges
-                if range_reader.fully_read {
+                if reader_state.fully_read_calculated {
                     continue;
                 }
 
@@ -541,17 +522,16 @@ impl ExternalsReader {
                 // Current offset is updated after reading and before importing,
                 // so if current offset == skip offset here, it will be greater on importing,
                 // and in this case we need to read messages
-                if self.reader_state.by_partitions.iter().all(|(par_id, s)| {
+                if self.state.by_partitions.iter().all(|(par_id, s)| {
                     s.curr_processed_offset
-                        < range_reader
-                            .reader_state
+                        < reader_state
                             .by_partitions
                             .get(par_id)
                             .map(|s| s.skip_offset)
                             .unwrap_or_default()
                 }) {
                     tracing::trace!(target: tracing_targets::COLLATOR,
-                        externals_reader_state = ?DebugIter(self.reader_state.by_partitions.iter()),
+                        externals_reader_state = ?DebugIter(self.state.by_partitions.iter()),
                         "externals reader: skip offset not reached in all partitions",
                     );
                     all_ranges_fully_read = false;
@@ -566,7 +546,9 @@ impl ExternalsReader {
                         ReadNextExternalsMode::ToPreviuosReadTo
                     };
 
-                let mut read_res = range_reader.read_externals_into_buffers(
+                let mut read_res = self.read_externals_into_buffers(
+                    &mut reader_state,
+                    seqno,
                     &mut self.anchors_cache,
                     read_mode,
                     partition_router,
@@ -579,18 +561,17 @@ impl ExternalsReader {
                 // if range was not fully read then buffer is full
                 // and we should continue to read current range
                 // next time the method is called
-                if !range_reader.fully_read {
+                if !reader_state.fully_read_calculated {
                     all_ranges_fully_read = false;
                 } else if seqno == self.block_seqno {
                     // if current range is a last one and fully read
                     // then set current position to the end of the last imported anchor
                     if let Some(anchor_info) = self.anchors_cache.last_imported_anchor_info() {
-                        range_reader.reader_state.range.current_position = ExternalKey {
+                        reader_state.range.current_position = ExternalKey {
                             anchor_id: anchor_info.id,
                             msgs_offset: anchor_info.all_exts_count as u64,
                         };
-                        range_reader.reader_state.range.to =
-                            range_reader.reader_state.range.current_position;
+                        reader_state.range.to = reader_state.range.current_position;
                     }
                 }
 
@@ -609,7 +590,7 @@ impl ExternalsReader {
                 // if buffers are full but current range was not fully read
                 // this is actual for refill when we need to read from multiple ranges
                 if max_fill_state_by_count == BufferFillStateByCount::IsFull
-                    && !range_reader.fully_read
+                    && !reader_state.fully_read_calculated
                 {
                     break 'main_loop;
                 }
@@ -629,7 +610,7 @@ impl ExternalsReader {
                                 break;
                             }
 
-                            self.create_append_next_range_reader();
+                            self.create_append_next_range_state();
                             ranges_seqno.push_back(self.block_seqno);
                         } else {
                             // do not create next range reader on refill
@@ -666,7 +647,7 @@ impl ExternalsReader {
         if let Some(read_res) = last_ext_read_res_opt {
             // update last read to anchor chain time only from the last range read result
             if let Some(ct) = read_res.last_read_to_anchor_chain_time {
-                self.reader_state.last_read_to_anchor_chain_time = Some(ct);
+                self.state.last_read_to_anchor_chain_time = Some(ct);
             }
         }
 
@@ -686,19 +667,15 @@ impl ExternalsReader {
 
         let buffer_limits = self.get_buffer_limits_by_partition(par_id)?;
 
-        let curr_processed_offset = self
-            .reader_state
-            .get_state_by_partition(par_id)?
-            .curr_processed_offset;
+        let curr_processed_offset = self.get_state_by_partition(par_id)?.curr_processed_offset;
 
         // find actual chain time from range readers according to current processed offset
         // to check expired externals in buffers during collect
         let mut next_chain_time = 0;
-        for reader in self.range_readers.values() {
-            let range_reader_state_by_partition =
-                reader.reader_state.get_state_by_partition(par_id)?;
-            if curr_processed_offset > range_reader_state_by_partition.skip_offset {
-                next_chain_time = reader.reader_state.range.chain_time;
+        for state in self.state.ranges.values() {
+            let range_state_by_partition = state.get_state_by_partition(par_id)?;
+            if curr_processed_offset > range_state_by_partition.skip_offset {
+                next_chain_time = state.range.chain_time;
             }
         }
         if next_chain_time == 0 {
@@ -710,28 +687,33 @@ impl ExternalsReader {
             self.msgs_exec_params.current().externals_expire_timeout as u64 * 1000;
         let mut expired_msgs_count = 0;
 
-        // extract range readers from state to use previous readers buffers and stats
-        // to check for account skip on collecting messages from the next
-        let mut range_readers = BTreeMap::<BlockSeqno, ExternalsRangeReader>::new();
-        while let Some((seqno, mut reader)) = self.pop_first_range_reader() {
-            let range_reader_state_by_partition =
-                reader.reader_state.get_state_by_partition_mut(par_id)?;
+        // To avoid pop and use mut iteration, first collect all seqnos in order
+        let seqnos: Vec<BlockSeqno> = self.state.ranges.keys().cloned().collect();
+
+        // Now iterate over the collected seqnos
+        for &seqno in &seqnos {
+            // Get mutable reference to the current state
+            let state = self
+                .state
+                .ranges
+                .get_mut(&seqno)
+                .expect("range state should exist");
+
+            let range_state_by_partition = state.get_state_by_partition_mut(par_id)?;
 
             // skip up to skip offset
-            if curr_processed_offset > range_reader_state_by_partition.skip_offset {
+            if curr_processed_offset > range_state_by_partition.skip_offset {
                 // setup messages filter
                 // do not check for expired externals if check chain time was not changed
                 // or if minimal chain time in buffer is above the threshold
                 let mut msg_filter = MsgFilter::IncludeAll(IncludeAllMessages);
-                if matches!(range_reader_state_by_partition.last_expire_check_on_ct, Some(last) if next_chain_time > last)
-                    || range_reader_state_by_partition
-                        .last_expire_check_on_ct
-                        .is_none()
+                if matches!(range_state_by_partition.last_expire_check_on_ct, Some(last) if next_chain_time > last)
+                    || range_state_by_partition.last_expire_check_on_ct.is_none()
                 {
-                    range_reader_state_by_partition.last_expire_check_on_ct = Some(next_chain_time);
+                    range_state_by_partition.last_expire_check_on_ct = Some(next_chain_time);
                     let chain_time_threshold_ms =
                         next_chain_time.saturating_sub(externals_expire_timeout_ms);
-                    if range_reader_state_by_partition.buffer.min_ext_chain_time()
+                    if range_state_by_partition.buffer.min_ext_chain_time()
                         < chain_time_threshold_ms
                     {
                         msg_filter = MsgFilter::SkipExpiredExternals(SkipExpiredExternals {
@@ -746,157 +728,23 @@ impl ExternalsReader {
                     ops_count,
                     collected_count,
                     ..
-                } = range_reader_state_by_partition.buffer.fill_message_group(
+                } = range_state_by_partition.buffer.fill_message_group(
                     msg_group,
                     buffer_limits.slots_count,
                     buffer_limits.slot_vert_size,
                     already_skipped_accounts,
                     |account_id| {
-                        let mut check_ops_count = 0;
-
-                        let dst_addr =
-                            IntAddr::from((self.for_shard_id.workchain() as i8, *account_id));
-
-                        // check by msg group from previous partition (e.g. from partition 0 when collecting from 1)
-                        for msg_group in prev_msg_groups.values() {
-                            if msg_group.messages_count() > 0 {
-                                check_ops_count.saturating_add_assign(1);
-                                if msg_group.contains_account(account_id) {
-                                    tracing::trace!(target: tracing_targets::COLLATOR,
-                                        partition_id = %par_id,
-                                        account_id = %get_short_hash_string(account_id),
-                                        "external messages skipped for account - msg_group of prev partition",
-                                    );
-                                    return (true, check_ops_count);
-                                }
-                            }
-                        }
-
-                        // check by previous partitions
-                        // NOTE: we can consider all readers and full stats from previous partitions
-                        //      (e.g. from 0 when processing 1) even on refill because when account A
-                        //      is moved from partition 0 to 1 all remaning messages for account A
-                        //      always a from previous blocks so we cannot wrongly read in advance
-                        for prev_par_reader in prev_partitions_readers.values() {
-                            // check buffers in previous partition
-                            for prev_par_range_reader in prev_par_reader.range_readers().values() {
-                                if prev_par_range_reader.reader_state.buffer.msgs_count() > 0 {
-                                    check_ops_count.saturating_add_assign(1);
-                                    if prev_par_range_reader
-                                        .reader_state
-                                        .buffer
-                                        .account_messages_count(account_id)
-                                        > 0
-                                    {
-                                        tracing::trace!(target: tracing_targets::COLLATOR,
-                                            partition_id = %par_id,
-                                            account_id = %get_short_hash_string(account_id),
-                                            "external messages skipped for account - prev partition range reader buffer",
-                                        );
-                                        return (true, check_ops_count);
-                                    }
-                                }
-                            }
-
-                            // check stats in previous partition
-                            check_ops_count.saturating_add_assign(1);
-                            if let Some(remaning_msgs_stats) = &prev_par_reader.remaning_msgs_stats
-                                && remaning_msgs_stats.statistics().contains_key(&dst_addr)
-                            {
-                                tracing::trace!(target: tracing_targets::COLLATOR,
-                                    partition_id = %par_id,
-                                    account_id = %get_short_hash_string(account_id),
-                                    "external messages skipped for account - prev partition reader remaning stats",
-                                );
-                                return (true, check_ops_count);
-                            }
-                        }
-
-                        // check by previous externals ranges
-                        for prev_reader in range_readers.values() {
-                            // check buffer
-                            let buffer = &prev_reader
-                                .reader_state
-                                .get_state_by_partition(par_id)
-                                .unwrap()
-                                .buffer;
-                            if buffer.msgs_count() > 0 {
-                                check_ops_count.saturating_add_assign(1);
-                                if buffer.account_messages_count(account_id) > 0 {
-                                    tracing::trace!(target: tracing_targets::COLLATOR,
-                                        partition_id = %par_id,
-                                        account_id = %get_short_hash_string(account_id),
-                                        "external messages skipped for account - prev externals range reader buffer",
-                                    );
-                                    return (true, check_ops_count);
-                                }
-                            }
-                        }
-
-                        // check by current partition internals reader
-                        if let Some(curr_partition_reader) = curr_partition_reader {
-                            // check current partition internals range readers
-                            for curr_par_range_reader in curr_partition_reader.range_readers().values()
-                            {
-                                // we omit internals range reader for new messages
-                                if matches!(curr_par_range_reader.kind, InternalsRangeReaderKind::NewMessages) {
-                                    break;
-                                }
-
-                                // NOTE: we use only range readers which skip offset is below current offset.
-                                //      It is required on refill not to take into account messages from next ranges.
-                                //      E.g. we collated blocks 10, 11, 12. Then on refill, when current offset corresponds
-                                //      to block 11 we should not take into account messages from block 12.
-                                if curr_processed_offset <= curr_par_range_reader.reader_state.skip_offset {
-                                    break;
-                                }
-
-                                // check buffer
-                                if curr_par_range_reader.reader_state.buffer.msgs_count() > 0 {
-                                    check_ops_count.saturating_add_assign(1);
-                                    if curr_par_range_reader
-                                        .reader_state
-                                        .buffer
-                                        .account_messages_count(account_id)
-                                        > 0
-                                    {
-                                        tracing::trace!(target: tracing_targets::COLLATOR,
-                                            partition_id = %par_id,
-                                            account_id = %get_short_hash_string(account_id),
-                                            rr_seqno = curr_par_range_reader.seqno,
-                                            rr_kind = ?curr_par_range_reader.kind,
-                                            reader_state = ?DebugInternalsRangeReaderState(&curr_par_range_reader.reader_state),
-                                            "external messages skipped for account - current partition range reader buffer",
-                                        );
-                                        return (true, check_ops_count);
-                                    }
-                                }
-
-                                // check in remaning stats
-                                check_ops_count.saturating_add_assign(1);
-                                if curr_par_range_reader
-                                    .reader_state.contains_account_addr_in_remaning_msgs_stats(&dst_addr)
-                                {
-                                    tracing::trace!(target: tracing_targets::COLLATOR,
-                                        partition_id = %par_id,
-                                        account_id = %get_short_hash_string(account_id),
-                                        rr_seqno = curr_par_range_reader.seqno,
-                                        rr_kind = ?curr_par_range_reader.kind,
-                                        reader_state = ?DebugInternalsRangeReaderState(&curr_par_range_reader.reader_state),
-                                        remaming_msgs_stats = ?curr_par_range_reader
-                                            .reader_state
-                                            .remaning_msgs_stats.as_ref()
-                                            .map(|stats| DebugIter(stats.statistics().iter().map(|(addr, count)|
-                                                (get_short_addr_string(addr), *count)
-                                            ))),
-                                        "external messages skipped for account - current partition range reader remaning stats",
-                                    );
-                                    return (true, check_ops_count);
-                                }
-                            }
-                        }
-
-                        (false, check_ops_count)
+                        should_skip_external_account(
+                            par_id,
+                            account_id,
+                            prev_msg_groups,
+                            prev_partitions_readers,
+                            curr_partition_reader,
+                            &seqnos,
+                            seqno,
+                            curr_processed_offset,
+                            state,
+                        )
                     },
                     msg_filter,
                 );
@@ -907,18 +755,14 @@ impl ExternalsReader {
                 res.collected_count.saturating_add_assign(collected_count);
             }
 
-            let range_reader_processed_offset = range_reader_state_by_partition.processed_offset;
-
-            range_readers.insert(seqno, reader);
+            let range_processed_offset = range_state_by_partition.processed_offset;
 
             // collect messages from the next range
             // only when current range processed offset is reached
-            if curr_processed_offset <= range_reader_processed_offset {
+            if curr_processed_offset <= range_processed_offset {
                 break;
             }
         }
-        // return range readers to state
-        self.set_range_readers(range_readers);
 
         // metrics: expired externals
         res.metrics.expired_ext_msgs_count += expired_msgs_count;
@@ -937,51 +781,53 @@ impl ExternalsReader {
 
         Ok(res)
     }
-}
 
-#[derive(Default)]
-pub(super) struct CollectExternalsResult {
-    pub metrics: MessagesReaderMetrics,
-    pub collected_count: usize,
-}
-
-pub(super) struct ExternalsRangeReader {
-    for_shard_id: ShardIdent,
-    seqno: BlockSeqno,
-    /// Target limits for filling message group from the buffer
-    buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
-    reader_state: ExternalsRangeReaderState,
-    fully_read: bool,
-}
-
-impl ExternalsRangeReader {
-    pub fn reader_state(&self) -> &ExternalsRangeReaderState {
-        &self.reader_state
+    pub fn get_state_by_partition_mut<T: Into<QueuePartitionIdx>>(
+        &mut self,
+        par_id: T,
+    ) -> anyhow::Result<&mut ExternalsPartitionReaderState> {
+        let par_id = par_id.into();
+        self.state
+            .by_partitions
+            .get_mut(&par_id)
+            .with_context(|| format!("externals reader state not exists for partition {par_id}"))
     }
 
-    fn get_buffer_limits_by_partition(
+    pub fn get_state_by_partition<T: Into<QueuePartitionIdx>>(
         &self,
-        partitions_id: &QueuePartitionIdx,
-    ) -> Result<&MessagesBufferLimits> {
-        self.buffer_limits_by_partitions
-            .get(partitions_id)
-
-            .with_context(|| format!(
-                "externals range reader does not contain buffer limits for partition {} (for_shard_id: {}, seqno: {})",
-                partitions_id, self.for_shard_id, self.seqno,
-            ))
+        par_id: T,
+    ) -> anyhow::Result<&ExternalsPartitionReaderState> {
+        let par_id = par_id.into();
+        self.state
+            .by_partitions
+            .get(&par_id)
+            .with_context(|| format!("externals reader state not exists for partition {par_id}"))
     }
+
+    // fn get_buffer_limits_by_partition(
+    //     &self,
+    //     partitions_id: &QueuePartitionIdx,
+    // ) -> anyhow::Result<&MessagesBufferLimits> {
+    //     self.buffer_limits_by_partitions
+    //         .get(partitions_id)
+    //
+    //         .with_context(|| format!(
+    //             "externals range reader does not contain buffer limits for partition {} (for_shard_id: {}, seqno: {})",
+    //             partitions_id, self.for_shard_id, self.seqno,
+    //         ))
+    // }
 
     pub fn get_max_buffers_fill_state(
         &self,
+        reader_state: &ExternalsRangeReaderState,
     ) -> Result<(BufferFillStateByCount, BufferFillStateBySlots)> {
         let mut fill_state_by_count = BufferFillStateByCount::NotFull;
         let mut fill_state_by_slots = BufferFillStateBySlots::CanNotFill;
 
-        for (par_id, par) in &self.reader_state.by_partitions {
-            let buffer_limits = self.get_buffer_limits_by_partition(par_id)?;
+        for (par_id, par) in &reader_state.by_partitions {
+            let buffer_limits = self.get_buffer_limits_by_partition(*par_id)?;
             let (par_fill_state_by_count, par_fill_state_by_slots) =
-                par.buffer.check_is_filled(buffer_limits);
+                par.buffer.check_is_filled(&buffer_limits);
             if par_fill_state_by_count == BufferFillStateByCount::IsFull {
                 fill_state_by_count = BufferFillStateByCount::IsFull;
             }
@@ -1002,9 +848,174 @@ impl ExternalsRangeReader {
         Ok((fill_state_by_count, fill_state_by_slots))
     }
 
+    fn should_skip_external_account<V: InternalMessageValue>(
+        par_id: QueuePartitionIdx,
+        account_id: HashBytes,
+        prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
+        prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
+        curr_partition_reader: Option<&InternalsPartitionReader<V>>,
+        seqnos: &[BlockSeqno],
+        seqno: BlockSeqno,
+        curr_processed_offset: u32,
+    ) -> (bool, u64) {
+        let mut check_ops_count = 0;
+
+        let dst_addr = IntAddr::from((for_shard_id.workchain() as i8, account_id));
+
+        // check by msg group from previous partition (e.g. from partition 0 when collecting from 1)
+        for msg_group in prev_msg_groups.values() {
+            if msg_group.messages_count() > 0 {
+                check_ops_count.saturating_add_assign(1);
+                if msg_group.contains_account(&account_id) {
+                    tracing::trace!(target: tracing_targets::COLLATOR,
+                        partition_id = %par_id,
+                        account_id = %get_short_hash_string(&account_id),
+                        "external messages skipped for account - msg_group of prev partition",
+                    );
+                    return (true, check_ops_count);
+                }
+            }
+        }
+
+        // check by previous partitions
+        // NOTE: we can consider all readers and full stats from previous partitions
+        //      (e.g. from 0 when processing 1) even on refill because when account A
+        //      is moved from partition 0 to 1 all remaning messages for account A
+        //      always a from previous blocks so we cannot wrongly read in advance
+        for prev_par_reader in prev_partitions_readers.values() {
+            // check buffers in previous partition
+            for prev_par_range_reader in prev_par_reader.range_readers().values() {
+                if prev_par_range_reader.reader_state.buffer.msgs_count() > 0 {
+                    check_ops_count.saturating_add_assign(1);
+                    if prev_par_range_reader
+                        .reader_state
+                        .buffer
+                        .account_messages_count(&account_id)
+                        > 0
+                    {
+                        tracing::trace!(target: tracing_targets::COLLATOR,
+                            partition_id = %par_id,
+                            account_id = %get_short_hash_string(&account_id),
+                            "external messages skipped for account - prev partition range reader buffer",
+                        );
+                        return (true, check_ops_count);
+                    }
+                }
+            }
+
+            // check stats in previous partition
+            check_ops_count.saturating_add_assign(1);
+            if let Some(remaning_msgs_stats) = &prev_par_reader.remaning_msgs_stats
+                && remaning_msgs_stats.statistics().contains_key(&dst_addr)
+            {
+                tracing::trace!(target: tracing_targets::COLLATOR,
+                    partition_id = %par_id,
+                    account_id = %get_short_hash_string(&account_id),
+                    "external messages skipped for account - prev partition reader remaning stats",
+                );
+                return (true, check_ops_count);
+            }
+        }
+
+        // check by previous externals ranges (those with seqno < current seqno)
+        for &prev_seqno in seqnos {
+            if prev_seqno >= seqno {
+                break; // since seqnos are sorted, stop when reaching current
+            }
+            let prev_state = state
+                .ranges
+                .get(&prev_seqno)
+                .expect("prev state should exist");
+
+            // check buffer
+            let buffer = &prev_state.get_state_by_partition(par_id).unwrap().buffer;
+            if buffer.msgs_count() > 0 {
+                check_ops_count.saturating_add_assign(1);
+                if buffer.account_messages_count(&account_id) > 0 {
+                    tracing::trace!(target: tracing_targets::COLLATOR,
+                        partition_id = %par_id,
+                        account_id = %get_short_hash_string(&account_id),
+                        "external messages skipped for account - prev externals range reader buffer",
+                    );
+                    return (true, check_ops_count);
+                }
+            }
+        }
+
+        // check by current partition internals reader
+        if let Some(curr_partition_reader) = curr_partition_reader {
+            // check current partition internals range readers
+            for curr_par_range_reader in curr_partition_reader.range_readers().values() {
+                // we omit internals range reader for new messages
+                if matches!(
+                    curr_par_range_reader.kind,
+                    InternalsRangeReaderKind::NewMessages
+                ) {
+                    break;
+                }
+
+                // NOTE: we use only range readers which skip offset is below current offset.
+                //      It is required on refill not to take into account messages from next ranges.
+                //      E.g. we collated blocks 10, 11, 12. Then on refill, when current offset corresponds
+                //      to block 11 we should not take into account messages from block 12.
+                if curr_processed_offset <= curr_par_range_reader.reader_state.skip_offset {
+                    break;
+                }
+
+                // check buffer
+                if curr_par_range_reader.reader_state.buffer.msgs_count() > 0 {
+                    check_ops_count.saturating_add_assign(1);
+                    if curr_par_range_reader
+                        .reader_state
+                        .buffer
+                        .account_messages_count(account_id)
+                        > 0
+                    {
+                        tracing::trace!(target: tracing_targets::COLLATOR,
+                            partition_id = %par_id,
+                            account_id = %get_short_hash_string(account_id),
+                            rr_seqno = curr_par_range_reader.seqno,
+                            rr_kind = ?curr_par_range_reader.kind,
+                            reader_state = ?DebugInternalsRangeReaderState(&curr_par_range_reader.reader_state),
+                            "external messages skipped for account - current partition range reader buffer",
+                        );
+                        return (true, check_ops_count);
+                    }
+                }
+
+                // check in remaning stats
+                check_ops_count.saturating_add_assign(1);
+                if curr_par_range_reader
+                    .reader_state
+                    .contains_account_addr_in_remaning_msgs_stats(&dst_addr)
+                {
+                    tracing::trace!(target: tracing_targets::COLLATOR,
+                        partition_id = %par_id,
+                        account_id = %get_short_hash_string(account_id),
+                        rr_seqno = curr_par_range_reader.seqno,
+                        rr_kind = ?curr_par_range_reader.kind,
+                        reader_state = ?DebugInternalsRangeReaderState(&curr_par_range_reader.reader_state),
+                        remaming_msgs_stats = ?curr_par_range_reader
+                            .reader_state
+                            .remaning_msgs_stats.as_ref()
+                            .map(|stats| DebugIter(stats.statistics().iter().map(|(addr, count)|
+                                (get_short_addr_string(addr), *count)
+                            ))),
+                        "external messages skipped for account - current partition range reader remaning stats",
+                    );
+                    return (true, check_ops_count);
+                }
+            }
+        }
+
+        (false, check_ops_count)
+    }
+
     #[tracing::instrument(skip_all)]
     fn read_externals_into_buffers(
         &mut self,
+        state: &mut ExternalsRangeReaderState,
+        state_seqno: BlockSeqno,
         anchors_cache: &mut AnchorsCache,
         read_mode: ReadNextExternalsMode,
         partition_router: &PartitionRouter,
@@ -1013,12 +1024,12 @@ impl ExternalsRangeReader {
     ) -> Result<ReadExternalsRangeResult> {
         let labels = [("workchain", self.for_shard_id.workchain().to_string())];
 
-        let next_chain_time = self.reader_state.range.chain_time;
+        let next_chain_time = state.range.chain_time;
 
         tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
             next_chain_time,
             ?read_mode,
-            fully_read = self.fully_read,
+            fully_read = state.fully_read_calculated,
             "read externals",
         );
 
@@ -1028,15 +1039,15 @@ impl ExternalsRangeReader {
             .read_ext_messages_timer
             .start();
 
-        let was_read_to = self.reader_state.range.current_position;
-        let prev_to = self.reader_state.range.to;
+        let was_read_to = state.range.current_position;
+        let prev_to = state.range.to;
 
         let mut prev_to_reached = false;
 
         // check if buffer is full
         // or we can already fill required slots
         let (mut max_fill_state_by_count, mut max_fill_state_by_slots) =
-            self.get_max_buffers_fill_state()?;
+            self.get_max_buffers_fill_state(&state)?;
         let mut has_filled_buffer = matches!(
             (&max_fill_state_by_count, &max_fill_state_by_slots),
             (BufferFillStateByCount::IsFull, _) | (_, BufferFillStateBySlots::CanFill)
@@ -1063,7 +1074,7 @@ impl ExternalsRangeReader {
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "no next entry in anchors cache",
                     );
-                    self.fully_read = true;
+                    state.fully_read_calculated = true;
                     break;
                 }
             };
@@ -1151,9 +1162,9 @@ impl ExternalsRangeReader {
                     anchor_id,
                     msgs_offset: msgs_read_offset_in_last_anchor,
                 };
-                self.reader_state.range.current_position = curr_ext_key;
-                if self.reader_state.range.current_position > self.reader_state.range.to {
-                    self.reader_state.range.to = self.reader_state.range.current_position;
+                state.range.current_position = curr_ext_key;
+                if state.range.current_position > state.range.to {
+                    state.range.to = state.range.current_position;
                 }
 
                 // try read next anchor
@@ -1180,9 +1191,9 @@ impl ExternalsRangeReader {
                         anchor_id,
                         msgs_offset: msgs_read_offset_in_last_anchor,
                     };
-                    self.reader_state.range.current_position = curr_ext_key;
-                    if self.reader_state.range.current_position > self.reader_state.range.to {
-                        self.reader_state.range.to = self.reader_state.range.current_position;
+                    state.range.current_position = curr_ext_key;
+                    if state.range.current_position > state.range.to {
+                        state.range.to = state.range.current_position;
                     }
 
                     // check if prev_to reached
@@ -1201,13 +1212,12 @@ impl ExternalsRangeReader {
                         let processed_to =
                             processed_to_by_partitions.get(&target_partition).unwrap();
                         if &curr_ext_key > processed_to {
-                            let reader_state_by_partition = self
-                                .reader_state
+                            let reader_state_by_partition = state
                                 .by_partitions
                                 .get_mut(&target_partition)
                                 .with_context(|| format!(
                                     "target partition {} should exist in range reader state (seqno={})",
-                                    target_partition, self.seqno,
+                                    target_partition, state_seqno,
                                 ))?;
                             reader_state_by_partition
                                 .buffer
@@ -1239,7 +1249,7 @@ impl ExternalsRangeReader {
                         // check if buffer is full
                         // or we can already fill required slots
                         (max_fill_state_by_count, max_fill_state_by_slots) =
-                            self.get_max_buffers_fill_state()?;
+                            self.get_max_buffers_fill_state(&state)?;
                         has_filled_buffer = matches!(
                             (&max_fill_state_by_count, &max_fill_state_by_slots),
                             (BufferFillStateByCount::IsFull, _)
@@ -1277,7 +1287,7 @@ impl ExternalsRangeReader {
                     "stopped reading externals when prev_to reached: ({}, {})",
                     prev_to.anchor_id, prev_to.msgs_offset,
                 );
-                self.fully_read = true;
+                state.fully_read_calculated = true;
                 break;
             }
 
@@ -1289,13 +1299,13 @@ impl ExternalsRangeReader {
 
         if matches!(max_fill_state_by_slots, BufferFillStateBySlots::CanFill) {
             tracing::debug!(target: tracing_targets::COLLATOR,
-                reader_state = ?DebugExternalsRangeReaderState(&self.reader_state),
+                reader_state = ?DebugExternalsRangeReaderState(&state),
                 "externals reader: can fully fill all slots in message group",
             );
         } else if matches!(max_fill_state_by_count, BufferFillStateByCount::IsFull) {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 max_msgs_limits = ?DebugIter(self.buffer_limits_by_partitions.iter().map(|(par_id, limits)| (par_id, limits.max_count))),
-                reader_state = ?DebugExternalsRangeReaderState(&self.reader_state),
+                reader_state = ?DebugExternalsRangeReaderState(&state),
                 "externals reader: messages buffers filled up to limits",
             );
         }
@@ -1356,8 +1366,14 @@ impl ExternalsRangeReader {
     }
 }
 
+#[derive(Default)]
+pub(super) struct CollectExternalsResult {
+    pub metrics: MessagesReaderMetrics,
+    pub collected_count: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReadNextExternalsMode {
+pub enum ReadNextExternalsMode {
     ToTheEnd,
     ToPreviuosReadTo,
 }
@@ -1366,13 +1382,13 @@ enum ReadNextExternalsMode {
 struct ReadExternalsRangeResult {
     /// The chain time of the last read anchor.
     /// Used to calc externals time diff.
-    last_read_to_anchor_chain_time: Option<u64>,
+    pub last_read_to_anchor_chain_time: Option<u64>,
 
     /// Shows if messages buffer is fully filled in any partition
-    max_fill_state_by_count: BufferFillStateByCount,
+    pub max_fill_state_by_count: BufferFillStateByCount,
 
     /// Shows if we can fill all slots in message group from almost one buffer
-    max_fill_state_by_slots: BufferFillStateBySlots,
+    pub max_fill_state_by_slots: BufferFillStateBySlots,
 
-    metrics_by_partitions: MessagesReaderMetricsByPartitions,
+    pub metrics_by_partitions: MessagesReaderMetricsByPartitions,
 }

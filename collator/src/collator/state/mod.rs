@@ -1,8 +1,8 @@
 use crate::collator::messages_reader::state::ShardReaderState;
-use crate::collator::messages_reader::state::external::ExternalsRangeReaderStateByPartition;
+use crate::collator::messages_reader::state::external::ExternalsPartitionRangeReaderState;
 use crate::types::processed_upto::ShardRangeInfo;
 
-pub struct DisplayRangeReaderStateByPartition<'a>(pub &'a ExternalsRangeReaderStateByPartition);
+pub struct DisplayRangeReaderStateByPartition<'a>(pub &'a ExternalsPartitionRangeReaderState);
 
 impl std::fmt::Debug for DisplayRangeReaderStateByPartition<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
