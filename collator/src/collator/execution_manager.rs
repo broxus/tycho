@@ -1,13 +1,15 @@
 use std::cmp;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use humantime::format_duration;
 use rayon::prelude::*;
 use tycho_executor::{Executor, ExecutorInspector, ExecutorParams, ParsedConfig, TxError};
-use tycho_types::cell::{CellSlice, CellSliceParts, HashBytes};
+use tycho_types::boc::Boc;
+use tycho_types::cell::{CellSlice, CellSliceParts, HashBytes, UsageTree};
 use tycho_types::models::*;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
@@ -52,6 +54,7 @@ impl MessagesExecutor {
                 workchain_id: shard_id.workchain().try_into().unwrap(),
                 shard_accounts,
                 items: Default::default(),
+                _emulate_network_delay: Default::default(),
             },
             wu_params_execute,
         }
@@ -99,6 +102,8 @@ impl MessagesExecutor {
         &mut self,
         msg_group: MessageGroup,
         execute_wu: &mut ExecuteWu,
+        usage_tree: &UsageTree,
+        _emulate_network_delay: bool,
     ) -> Result<ExecutedGroup> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute messages group");
 
@@ -128,6 +133,13 @@ impl MessagesExecutor {
         // collect touched account ids for accounts with executed transactions only
         let mut touched_account_ids = FastHashSet::default();
 
+        // set that we should emulate network delay on the next get account stuff
+        if !self.shard_id.is_masterchain() && _emulate_network_delay {
+            self.accounts_cache
+                ._emulate_network_delay
+                .fetch_or(true, Ordering::Relaxed);
+        }
+
         let accounts_cache = Arc::new(&self.accounts_cache);
         let result = msg_group
             .into_par_iter()
@@ -139,6 +151,7 @@ impl MessagesExecutor {
                     min_next_lt,
                     &config,
                     &params,
+                    usage_tree,
                 )
             })
             .collect_vec_list();
@@ -214,8 +227,9 @@ impl MessagesExecutor {
         min_next_lt: u64,
         config: &ParsedConfig,
         params: &ExecutorParams,
+        usage_tree: &UsageTree,
     ) -> Result<ExecutedTransactions> {
-        let shard_account_stuff = accounts_cache.get_account_stuff(&account_id)?;
+        let shard_account_stuff = accounts_cache.get_account_stuff(&account_id, usage_tree)?;
         Self::execute_messages(shard_account_stuff, msgs, min_next_lt, config, params)
     }
 
@@ -370,6 +384,7 @@ struct AccountsCache {
     workchain_id: i8,
     shard_accounts: ShardAccounts,
     items: FastHashMap<AccountId, Box<ShardAccountStuff>>,
+    pub _emulate_network_delay: AtomicBool,
 }
 
 impl AccountsCache {
@@ -409,14 +424,32 @@ impl AccountsCache {
     }
 
     #[tracing::instrument(skip_all)]
-    fn get_account_stuff(&self, account_id: &AccountId) -> Result<Box<ShardAccountStuff>> {
+    fn get_account_stuff(
+        &self,
+        account_id: &AccountId,
+        usage_tree: &UsageTree,
+    ) -> Result<Box<ShardAccountStuff>> {
         let _hist = HistogramGuard::begin("tycho_collator_get_account_stuff_time_high");
         if let Some(account) = self.items.get(account_id) {
             Ok(account.clone())
-        } else if self.workchain_id != -1
-            && let Some(shard_account) = self.shard_accounts.preload_full_account(account_id)?
-        {
-            ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
+        } else if self.workchain_id != -1 {
+            if self
+                ._emulate_network_delay
+                .fetch_and(false, Ordering::Relaxed)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+            if let Some(shard_account) = self
+                .shard_accounts
+                .preload_full_account(account_id, usage_tree)?
+            {
+                ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
+            } else {
+                Ok(Box::new(ShardAccountStuff::new_empty(
+                    self.workchain_id,
+                    account_id,
+                )))
+            }
         } else if let Some((_depth, shard_account)) = self.shard_accounts.get(account_id)? {
             ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
         } else {
@@ -436,13 +469,30 @@ impl AccountsCache {
 
         self.items.insert(account_stuff.account_addr, account_stuff);
     }
+
+    fn already_cached<'a>(&'a self, account_ids: impl Iterator<Item = &'a AccountId>) -> bool {
+        for account_id in account_ids {
+            if !self.items.contains_key(account_id) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
-trait LoadShardAccountFull {
-    fn preload_full_account(&self, account_id: &AccountId) -> Result<Option<ShardAccount>>;
+trait PreloadFullShardAccount {
+    fn preload_full_account(
+        &self,
+        account_id: &AccountId,
+        usage_tree: &UsageTree,
+    ) -> Result<Option<ShardAccount>>;
 }
-impl LoadShardAccountFull for ShardAccounts {
-    fn preload_full_account(&self, account_id: &AccountId) -> Result<Option<ShardAccount>> {
+impl PreloadFullShardAccount for ShardAccounts {
+    fn preload_full_account(
+        &self,
+        account_id: &AccountId,
+        usage_tree: &UsageTree,
+    ) -> Result<Option<ShardAccount>> {
         use tycho_types::cell::Load;
 
         let timer = std::time::Instant::now();
@@ -453,7 +503,15 @@ impl LoadShardAccountFull for ShardAccounts {
 
         let (range, tracked_cell) = slice_parts;
         let raw_cell = tracked_cell.clone().untrack();
-        raw_cell.touch_recursive();
+
+        // serialize account subtree
+        let boc = Boc::encode(raw_cell);
+
+        // deserialize account cell
+        let cell = Boc::decode(boc)?;
+
+        // track cell
+        let tracked_cell = usage_tree.track(&cell);
 
         let slice_parts: CellSliceParts = (range, tracked_cell);
         let mut slice = CellSlice::apply(&slice_parts)?;

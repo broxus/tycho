@@ -16,6 +16,7 @@ use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, IncludeAllMessages,
     MessageGroup, MessagesBuffer, MessagesBufferLimits,
 };
+use crate::collator::messages_reader::BufferAccountsTracker;
 use crate::collator::types::{
     ConcurrentQueueStatistics, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff,
     ParsedMessage,
@@ -56,6 +57,8 @@ pub(super) struct InternalsPartitionReader<V: InternalMessageValue> {
     pub(super) all_ranges_fully_read: bool,
 
     pub(super) remaning_msgs_stats: Option<ConcurrentQueueStatistics>,
+
+    pub _accounts_tracker: Arc<BufferAccountsTracker>,
 }
 
 pub(super) struct InternalsPartitionReaderContext {
@@ -81,6 +84,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
     pub fn new(
         cx: InternalsPartitionReaderContext,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
+        _accounts_tracker: Arc<BufferAccountsTracker>,
     ) -> Result<Self> {
         let (remaning_msgs_stats, remaning_msgs_stats_just_loaded) =
             cx.remaning_msg_stats.map_or((None, false), |stats| {
@@ -102,6 +106,8 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
             range_readers: Default::default(),
             all_ranges_fully_read: false,
             remaning_msgs_stats,
+
+            _accounts_tracker,
         };
 
         log_remaining_msgs_stats(
@@ -344,6 +350,11 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
     ) -> Result<()> {
         // create existing range readers
         while let Some((seqno, range_reader_state)) = self.reader_state.ranges.pop_first() {
+            // track accounts
+            for (account_id, _) in range_reader_state.buffer.iter() {
+                self._accounts_tracker.track(*account_id);
+            }
+
             let reader = self.create_existing_internals_range_reader(
                 range_reader_state,
                 seqno,
@@ -758,6 +769,11 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
                                 from_same_shard: Some(int_msg.item.source == self.for_shard_id),
                                 ext_msg_chain_time: None,
                             });
+
+                            // track account
+                            let dst = int_msg.item.message.info().dst.clone();
+                            let account_id = dst.as_std().map(|a| a.address).unwrap_or_default();
+                            self._accounts_tracker.track(account_id);
 
                             metrics.add_to_message_groups_timer.start();
                             range_reader.reader_state.buffer.add_message(msg);

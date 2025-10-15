@@ -1,13 +1,14 @@
 use std::collections::{BTreeMap, btree_map};
 use std::ops::Add as _;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, get_short_addr_string};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{MsgsExecutionParams, ShardIdent};
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::{FastDashSet, FastHashMap, FastHashSet};
 
 use self::externals_reader::*;
 use self::internals_reader::*;
@@ -20,6 +21,7 @@ use super::types::{
     MsgsExecutionParamsStuff,
 };
 use crate::collator::messages_buffer::DebugMessageGroup;
+use crate::collator::types::AccountId;
 use crate::internal_queue::types::{
     DiffStatistics, InternalMessageValue, PartitionRouter, QueueDiffWithMessages,
     QueueShardBoundedRange, QueueStatistics,
@@ -60,6 +62,19 @@ enum MessagesReaderStage {
     ExternalsAndNew,
 }
 
+#[derive(Default)]
+pub struct BufferAccountsTracker {
+    pub tracked_accounts: FastDashSet<AccountId>,
+    pub has_new_accounts: AtomicBool,
+}
+impl BufferAccountsTracker {
+    pub fn track(&self, account_id: AccountId) {
+        if self.tracked_accounts.insert(account_id) {
+            self.has_new_accounts.fetch_or(true, Ordering::Relaxed);
+        }
+    }
+}
+
 pub(super) struct MessagesReader<V: InternalMessageValue> {
     for_shard_id: ShardIdent,
 
@@ -77,6 +92,8 @@ pub(super) struct MessagesReader<V: InternalMessageValue> {
     internal_queue_statistics: Option<CumulativeStatistics>,
 
     readers_stages: BTreeMap<QueuePartitionIdx, MessagesReaderStage>,
+
+    pub _accounts_tracker: Arc<BufferAccountsTracker>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +206,8 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
         let msgs_exec_params = cx.msgs_exec_params.clone();
 
+        let _accounts_tracker = Arc::new(BufferAccountsTracker::default());
+
         // create externals reader
         let externals_reader = ExternalsReader::new(
             cx.for_shard_id,
@@ -198,6 +217,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             externals,
             cx.anchors_cache,
             cx.reader_state.externals,
+            _accounts_tracker.clone(),
         );
 
         let mut res = Self {
@@ -214,6 +234,8 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
             readers_stages: Default::default(),
             internal_queue_statistics: cumulative_statistics,
+
+            _accounts_tracker: _accounts_tracker.clone(),
         };
 
         // define the initial reader stage
@@ -255,6 +277,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 remaning_msg_stats,
             },
             mq_adapter.clone(),
+            _accounts_tracker.clone(),
         )?;
         res.internals_partition_readers
             .insert(MAIN_PARTITION_ID, par_reader);
@@ -295,6 +318,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 remaning_msg_stats: remaining_msg_stats,
             },
             mq_adapter,
+            _accounts_tracker.clone(),
         )?;
         res.internals_partition_readers
             .insert(LP_PARTITION_ID, par_reader);
