@@ -131,7 +131,7 @@ fn test_read_externals() {
     let print_state = |externals_reader: &ExternalsReader| {
         println!(
             "externals_reader_state.by_partitions: {:?}",
-            externals_reader.reader_state.by_partitions,
+            externals_reader.state.by_partitions,
         );
 
         for (seqno, range_reader) in &externals_reader.range_readers {
@@ -217,16 +217,10 @@ fn test_read_externals() {
     let msg_group = msg_groups.get(&QueuePartitionIdx(1)).unwrap();
     assert_eq!(msg_group.messages_count(), 4);
 
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(0)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((0, 0)));
     assert_eq!(by_par.curr_processed_offset, 1);
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(1)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(1).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((0, 0)));
     assert_eq!(by_par.curr_processed_offset, 1);
 
@@ -369,16 +363,10 @@ fn test_read_externals() {
 
     assert_eq!(metrics.read_ext_msgs_count, 18);
 
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(0)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((0, 0)));
     assert_eq!(by_par.curr_processed_offset, 1);
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(1)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(1).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((0, 0)));
     assert_eq!(by_par.curr_processed_offset, 1);
 
@@ -462,16 +450,10 @@ fn test_read_externals() {
     let msg_group = msg_groups.get(&QueuePartitionIdx(1)).unwrap();
     assert_eq!(msg_group.messages_count(), 4);
 
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(0)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((0, 0)));
     assert_eq!(by_par.curr_processed_offset, 2);
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(1)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(1).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((0, 0)));
     assert_eq!(by_par.curr_processed_offset, 2);
 
@@ -531,16 +513,10 @@ fn test_read_externals() {
     let msg_group = msg_groups.get(&QueuePartitionIdx(1)).unwrap();
     assert_eq!(msg_group.messages_count(), 2);
 
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(0)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((0, 0)));
     assert_eq!(by_par.curr_processed_offset, 3);
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(1)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(1).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((0, 0)));
     assert_eq!(by_par.curr_processed_offset, 3);
 
@@ -569,7 +545,7 @@ fn test_read_externals() {
     assert!(!externals_reader.range_readers.contains_key(&3));
 
     println!("finalize reader state after all read messages collected");
-    externals_reader.retain_only_last_range_reader().unwrap();
+    externals_reader.retain_only_last_range_state().unwrap();
     for &par_id in &par_ids {
         externals_reader
             .set_processed_to_current_position(par_id)
@@ -583,16 +559,10 @@ fn test_read_externals() {
         .unwrap();
     print_state(&externals_reader);
 
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(0)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 3);
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(1)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(1).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 3);
 
@@ -637,16 +607,10 @@ fn test_read_externals() {
         externals_reader_state,
     );
 
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(0)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 3);
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(1)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(1).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 3);
 
@@ -687,16 +651,10 @@ fn test_read_externals() {
 
     assert_eq!(metrics.read_ext_msgs_count, 17);
 
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(0)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 3);
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(1)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(1).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 3);
 
@@ -782,16 +740,10 @@ fn test_read_externals() {
     let msg_group = msg_groups.get(&QueuePartitionIdx(1)).unwrap();
     assert_eq!(msg_group.messages_count(), 4);
 
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(0)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 4);
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(1)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(1).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 4);
 
@@ -863,16 +815,10 @@ fn test_read_externals() {
         externals_reader_state,
     );
 
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(0)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 0);
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(1)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(1).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 0);
 
@@ -967,16 +913,10 @@ fn test_read_externals() {
     }
 
     // after refill and collect the state should be the same as after block 3
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(0)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 4);
-    let by_par = externals_reader
-        .reader_state
-        .get_state_by_partition(1)
-        .unwrap();
+    let by_par = externals_reader.state.get_state_by_partition(1).unwrap();
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 4);
 

@@ -21,8 +21,8 @@ use crate::types::SaturatingAddAssign;
 /// Maximum number of LT shifting in one message processing
 const MAX_ACTIONS: u64 = 256;
 
-pub struct ExecuteState {
-    pub messages_reader: MessagesReader<EnqueuedMessage>,
+pub struct ExecuteState<'a> {
+    pub messages_reader: MessagesReader<'a, EnqueuedMessage>,
     pub executor: ExecutorWrapper,
     pub prepare_msg_groups_wu: Option<PrepareMsgGroupsWu>,
     /// Accumulated messages reader metrics across all partitions
@@ -31,9 +31,9 @@ pub struct ExecuteState {
     pub execute_metrics: ExecuteMetrics,
 }
 
-impl PhaseState for ExecuteState {}
+impl<'a> PhaseState for ExecuteState<'a> {}
 
-impl Phase<ExecuteState> {
+impl<'a> Phase<ExecuteState<'a>> {
     pub fn execute_special_transactions(&mut self) -> Result<()> {
         let labels = [(
             "workchain",
@@ -290,7 +290,7 @@ impl Phase<ExecuteState> {
         Ok(())
     }
 
-    pub fn finish(self) -> (Phase<FinalizeState>, MessagesReader<EnqueuedMessage>) {
+    pub fn finish(self) -> (Phase<FinalizeState>, MessagesReader<'a, EnqueuedMessage>) {
         self.report_execute_metrics();
         let executor = self.extra.executor.executor;
         (
