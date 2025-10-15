@@ -16,10 +16,12 @@ pub mod time;
 pub mod tl;
 
 pub mod futures {
+    pub use self::await_blocking::AwaitBlocking;
     pub use self::box_future_or_noop::BoxFutureOrNoop;
     pub use self::join_task::JoinTask;
     pub use self::shared::{Shared, WeakShared, WeakSharedHandle};
 
+    mod await_blocking;
     mod box_future_or_noop;
     mod join_task;
     mod shared;

@@ -4177,6 +4177,7 @@ dependencies = [
  "criterion",
  "crossbeam-deque",
  "dashmap",
+ "futures-executor",
  "futures-util",
  "getip",
  "humantime",

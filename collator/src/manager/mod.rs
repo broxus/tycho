@@ -17,6 +17,7 @@ use tycho_types::models::{
     BlockId, BlockIdShort, CollationConfig, GlobalCapabilities, ProcessedUptoInfo, ShardIdent,
     ValidatorDescription,
 };
+use tycho_util::futures::AwaitBlocking;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 use types::{
@@ -611,7 +612,7 @@ where
 
     #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short))]
     async fn handle_collation_cancelled(
-        &self,
+        self: &Arc<Self>,
         _prev_mc_block_id: BlockId,
         next_block_id_short: BlockIdShort,
         cancel_reason: CollationCancelReason,
@@ -792,7 +793,7 @@ where
         fields(block_id = %collation_result.candidate.block.id().as_short_id()),
     )]
     pub async fn handle_collated_block_candidate(
-        &self,
+        self: &Arc<Self>,
         collation_result: BlockCollationResult,
     ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -1248,7 +1249,7 @@ where
     /// 5. Sync to received block if it is far ahead last collated and last `synced_to`
     #[tracing::instrument(skip_all, fields(block_id = %ctx.state.block_id().as_short_id(), is_last_mc_block_in_batch))]
     async fn handle_block_from_bc(
-        &self,
+        self: &Arc<Self>,
         ctx: HandledBlockFromBcCtx,
         is_last_mc_block_in_batch: bool,
     ) -> Result<()> {
@@ -1495,15 +1496,19 @@ where
     }
 
     async fn sync_to_applied_mc_block_if_exist(
-        &self,
+        self: &Arc<Self>,
         last_collated_mc_block_id: Option<BlockId>,
         applied_range: Option<(BlockSeqno, BlockSeqno)>,
     ) -> Result<()> {
         if let Some(applied_range) = applied_range {
-            if !self
-                .sync_to_applied_mc_block(applied_range, last_collated_mc_block_id)
-                .await?
-            {
+            let this = self.clone();
+
+            let res = tokio::task::spawn_blocking(move || {
+                this.sync_to_applied_mc_block(applied_range, last_collated_mc_block_id)
+            })
+            .await??;
+
+            if !res {
                 tracing::info!(target: tracing_targets::COLLATION_MANAGER,
                     last_applied_mc_block_id = %BlockIdShort {
                         shard: ShardIdent::MASTERCHAIN,
@@ -1529,7 +1534,7 @@ where
     /// Returns `false` if unable to
     /// load diff to restore queue state
     #[tracing::instrument(skip_all, fields(applied_range = ?applied_range))]
-    async fn sync_to_applied_mc_block(
+    fn sync_to_applied_mc_block(
         &self,
         applied_range: (BlockSeqno, BlockSeqno),
         last_collated_mc_block_id: Option<BlockId>,
@@ -1603,7 +1608,7 @@ where
                 &self.blocks_cache,
                 self.state_node_adapter.clone(),
             )
-            .await?;
+            .await_blocking()?;
 
         // find internals min processed_to
         let min_processed_to_by_shards =
@@ -1650,7 +1655,7 @@ where
                     &self.blocks_cache,
                     self.state_node_adapter.clone(),
                 )
-                .await?
+                .await_blocking()?
             } else {
                 FastHashMap::default()
             }
@@ -1668,7 +1673,7 @@ where
             before_tail_block_ids,
             queue_diffs_applied_to_top_blocks,
         )
-        .await?;
+        .await_blocking()?;
 
         let Some(last_mc_state) = queue_restore_res.last_mc_state else {
             return Ok(false);
@@ -1702,7 +1707,7 @@ where
 
         // notify state update to mempool
         self.notify_mc_state_update_to_mempool(mc_data.clone())
-            .await?;
+            .await_blocking()?;
 
         // when sync cancelled we do not exist sync but skip collation
         let process_state_update_mode = match cancelled.is_cancelled() {
@@ -1713,14 +1718,14 @@ where
         };
 
         self.process_mc_state_update(mc_data.clone(), process_state_update_mode)
-            .await?;
+            .await_blocking()?;
 
         // handle top processed to anchor in mempool
         self.notify_top_processed_to_anchor_to_mempool(
             mc_data.block_id.seqno,
             mc_data.top_processed_to_anchor,
         )
-        .await?;
+        .await_blocking()?;
 
         // report last "synced to" blocks to metrics
         for synced_to_block_id in queue_restore_res.synced_to_blocks_keys {

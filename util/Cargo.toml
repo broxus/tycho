@@ -19,6 +19,7 @@ bytesize = { workspace = true }
 castaway = { workspace = true }
 crossbeam-deque = { workspace = true }
 dashmap = { workspace = true }
+futures-executor = { workspace = true }
 futures-util = { workspace = true }
 getip = { workspace = true, optional = true }
 humantime = { workspace = true }
