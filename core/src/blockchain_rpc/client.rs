@@ -199,7 +199,14 @@ impl BlockchainRpcClient {
             }));
         }
 
+        let start = Instant::now();
         let timeout = self.compute_broadcast_timeout();
+        if start.elapsed().as_millis() > 1 {
+            tracing::warn!(
+                "long compute_broadcast_timeout {}ms",
+                start.elapsed().as_millis()
+            );
+        }
         tokio::time::timeout(timeout, async {
             // inner task timeout won't happen because outer task timeout is always <= inner task timeout
             while let Some(Ok(res)) = futures.next().await {
