@@ -25,7 +25,7 @@ pub struct MessagesBufferLimits {
     pub slot_vert_size: usize,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct MessagesBuffer {
     msgs: FastIndexMap<HashBytes, VecDeque<ParsedMessage>>,
     int_count: usize,
@@ -35,43 +35,6 @@ pub struct MessagesBuffer {
 }
 
 impl MessagesBuffer {
-    /// Clone with detailed timing metrics
-    pub fn clone_with_metrics(&self, labels: &[(&str, String)]) -> Self {
-        let msgs_start = std::time::Instant::now();
-        let msgs = self.msgs.clone();
-        let msgs_elapsed = msgs_start.elapsed();
-
-        let index_start = std::time::Instant::now();
-        let sorted_index = self.sorted_index.clone();
-        let index_elapsed = index_start.elapsed();
-
-        // Convert labels to Vec to avoid lifetime issues
-        let labels_vec: Vec<(String, String)> = labels
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect();
-
-        // Record metrics using the same pattern as other metrics in the codebase
-        metrics::histogram!(
-            "tycho_collator_messages_buffer_msgs_clone_time",
-            &labels_vec
-        )
-        .record(msgs_elapsed.as_millis() as f64);
-        metrics::histogram!(
-            "tycho_collator_messages_buffer_index_clone_time",
-            &labels_vec
-        )
-        .record(index_elapsed.as_millis() as f64);
-
-        Self {
-            msgs,
-            int_count: self.int_count,
-            ext_count: self.ext_count,
-            sorted_index,
-            min_ext_chain_time: None,
-        }
-    }
-
     pub fn account_messages_count(&self, account_id: &HashBytes) -> usize {
         self.msgs
             .get(account_id)
@@ -176,7 +139,7 @@ impl MessagesBuffer {
         mut msg_filter: FM,
     ) -> FillMessageGroupResult
     where
-        FA: Fn(&HashBytes) -> (bool, u64),
+        FA: Fn(HashBytes) -> (bool, u64),
         FM: MessageFilter,
     {
         // evaluate ops count for wu calculation
