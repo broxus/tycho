@@ -15,6 +15,7 @@ use tycho_types::num::Tokens;
 use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
 use tycho_util::futures::JoinTask;
+use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::time::now_millis;
@@ -1021,6 +1022,10 @@ impl CollatorStdImpl {
 
             handle_block_candidate_elapsed = histogram.finish();
         }
+
+        // NOTE: Collation data can be quite large so drop it outside of tokio.
+        Reclaimer::instance().drop(finalized.collation_data);
+
         Ok(FinalizeCollationResult {
             handle_block_candidate_elapsed,
         })
