@@ -7,7 +7,7 @@ use anyhow::Result;
 use humantime::format_duration;
 use rayon::prelude::*;
 use tycho_executor::{Executor, ExecutorInspector, ExecutorParams, ParsedConfig, TxError};
-use tycho_types::cell::HashBytes;
+use tycho_types::cell::{CellSlice, CellSliceParts, HashBytes};
 use tycho_types::models::*;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
@@ -388,6 +388,9 @@ impl AccountsCache {
                 }
             }
             Entry::Vacant(entry) => {
+                // NOTE: this method is used in special and tick-tock transactions execution
+                //      on accounts from masterchain that will not be splitted by partitions
+                //      so we do not need to preload full account
                 if let Some((_, state)) = self.shard_accounts.get(account_id)? {
                     let account_stuff =
                         ShardAccountStuff::new(self.workchain_id, account_id, state)
@@ -407,8 +410,13 @@ impl AccountsCache {
 
     #[tracing::instrument(skip_all)]
     fn get_account_stuff(&self, account_id: &AccountId) -> Result<Box<ShardAccountStuff>> {
+        let _hist = HistogramGuard::begin("tycho_collator_get_account_stuff_time_high");
         if let Some(account) = self.items.get(account_id) {
             Ok(account.clone())
+        } else if self.workchain_id != -1
+            && let Some(shard_account) = self.shard_accounts.preload_full_account(account_id)?
+        {
+            ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
         } else if let Some((_depth, shard_account)) = self.shard_accounts.get(account_id)? {
             ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
         } else {
@@ -427,6 +435,34 @@ impl AccountsCache {
         );
 
         self.items.insert(account_stuff.account_addr, account_stuff);
+    }
+}
+
+trait LoadShardAccountFull {
+    fn preload_full_account(&self, account_id: &AccountId) -> Result<Option<ShardAccount>>;
+}
+impl LoadShardAccountFull for ShardAccounts {
+    fn preload_full_account(&self, account_id: &AccountId) -> Result<Option<ShardAccount>> {
+        use tycho_types::cell::Load;
+
+        let timer = std::time::Instant::now();
+
+        let Some(slice_parts) = self.dict().get_raw_owned(account_id)? else {
+            return Ok(None);
+        };
+
+        let (range, tracked_cell) = slice_parts;
+        let raw_cell = tracked_cell.clone().untrack();
+        raw_cell.touch_recursive();
+
+        let slice_parts: CellSliceParts = (range, tracked_cell);
+        let mut slice = CellSlice::apply(&slice_parts)?;
+        let (_, shard_account) = <(DepthBalanceInfo, ShardAccount)>::load_from(&mut slice)?;
+
+        metrics::histogram!("tycho_collator_preload_full_account_time_high")
+            .record(timer.elapsed());
+
+        Ok(Some(shard_account))
     }
 }
 
