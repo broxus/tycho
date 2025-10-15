@@ -36,34 +36,29 @@ pub(super) mod tests;
 //=========
 // EXTERNALS READER
 //=========
-pub(super) struct FinalizedExternalsReader {
-    pub externals_reader_state: ExternalsReaderState,
-    pub anchors_cache: AnchorsCache,
-}
-
-pub(super) struct ExternalsReader {
+pub(super) struct ExternalsReader<'a> {
     for_shard_id: ShardIdent,
     block_seqno: BlockSeqno,
     next_chain_time: u64,
     msgs_exec_params: MsgsExecutionParamsStuff,
     /// Target limits for filling message group from the buffer
     buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
-    anchors_cache: AnchorsCache,
+    anchors_cache: &'a mut AnchorsCache,
     /// Should not read `.ranges` after reader creation because they moved into `.range_readers`
-    reader_state: ExternalsReaderState,
+    reader_state: &'a mut ExternalsReaderState,
     range_readers: BTreeMap<BlockSeqno, ExternalsRangeReader>,
     all_ranges_fully_read: bool,
 }
 
-impl ExternalsReader {
+impl<'a> ExternalsReader<'a> {
     pub fn new(
         for_shard_id: ShardIdent,
         block_seqno: BlockSeqno,
         next_chain_time: u64,
         msgs_exec_params: MsgsExecutionParamsStuff,
         buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
-        anchors_cache: AnchorsCache,
-        mut reader_state: ExternalsReaderState,
+        anchors_cache: &'a mut AnchorsCache,
+        reader_state: &'a mut ExternalsReaderState,
     ) -> Self {
         // init minimal partitions count in the state if not exist
         for par_id in buffer_limits_by_partitions.keys() {
@@ -92,9 +87,9 @@ impl ExternalsReader {
         self.all_ranges_fully_read = false;
     }
 
-    pub fn finalize(mut self) -> Result<FinalizedExternalsReader> {
+    pub fn finalize(&mut self) -> Result<()> {
         // collect range reader states
-        let mut range_readers = self.range_readers.into_iter().peekable();
+        let mut range_readers = std::mem::take(&mut self. range_readers).into_iter().peekable();
         let mut max_processed_offsets = BTreeMap::<QueuePartitionIdx, u32>::new();
         while let Some((seqno, mut range_reader)) = range_readers.next() {
             // update offset in the last range reader state for partition
@@ -122,11 +117,7 @@ impl ExternalsReader {
                 .insert(seqno, range_reader.reader_state);
         }
 
-        // return updated externals reader state
-        Ok(FinalizedExternalsReader {
-            externals_reader_state: self.reader_state,
-            anchors_cache: self.anchors_cache,
-        })
+        Ok(())
     }
 
     pub fn open_ranges_limit_reached(&self) -> bool {
@@ -134,7 +125,7 @@ impl ExternalsReader {
     }
 
     pub fn reader_state(&self) -> &ExternalsReaderState {
-        &self.reader_state
+        self.reader_state
     }
 
     pub fn get_partition_ids(&self) -> Vec<QueuePartitionIdx> {
@@ -384,17 +375,58 @@ impl ExternalsReader {
         Ok(())
     }
 
+    // fn create_existing_range_readers(&mut self) {
+    //     while let Some((seqno, range_reader_state)) = self.reader_state.ranges.pop_first() {
+    //         let reader = self.create_existing_externals_range_reader(range_reader_state, seqno);
+    //         self.range_readers.insert(seqno, reader);
+    //     }
+    // }
+
     fn create_existing_range_readers(&mut self) {
-        while let Some((seqno, range_reader_state)) = self.reader_state.ranges.pop_first() {
-            let reader = self.create_existing_externals_range_reader(range_reader_state, seqno);
+        let to_process: Vec<BlockSeqno> = self.reader_state.ranges.keys().cloned().collect();
+
+        let for_shard_id = self.for_shard_id;
+        let buffer_limits = self.buffer_limits_by_partitions.clone();
+
+        for seqno in to_process {
+            // Scoped borrow для чтения fully_read и debug
+            let fully_read = {
+                if let Some(range_reader_state) = self.reader_state.ranges.get(&seqno) {  // Immutable borrow
+                    range_reader_state.range.current_position == range_reader_state.range.to
+                } else {
+                    continue;  // Если нет — пропусти
+                }
+            };
+
+            // Для debug: отдельный scoped immutable borrow
+            let debug_state = {
+                self.reader_state.ranges.get(&seqno)
+                    .map(|state| DebugExternalsRangeReaderState(state))
+            };
+
+            let reader = ExternalsRangeReader {
+                for_shard_id,
+                seqno,
+                buffer_limits_by_partitions: buffer_limits.clone(),
+                fully_read,
+            };
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+              seqno = reader.seqno,
+              fully_read = reader.fully_read,
+              reader_state = ?debug_state,  // Теперь Option<Debug...>, или unwrap если уверен
+              "externals reader: created existing range reader",
+          );
+
+            // Insert: mut borrow на range_readers, предыдущие borrows на ranges завершены
             self.range_readers.insert(seqno, reader);
         }
     }
 
     #[tracing::instrument(skip_all)]
     fn create_existing_externals_range_reader(
-        &self,
-        range_reader_state: ExternalsRangeReaderState,
+        &mut self,
+        range_reader_state: &mut ExternalsRangeReaderState,
         seqno: BlockSeqno,
     ) -> ExternalsRangeReader {
         let reader = ExternalsRangeReader {
@@ -402,7 +434,6 @@ impl ExternalsReader {
             seqno,
             buffer_limits_by_partitions: self.buffer_limits_by_partitions.clone(),
             fully_read: range_reader_state.range.current_position == range_reader_state.range.to,
-            reader_state: range_reader_state,
         };
 
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -413,6 +444,7 @@ impl ExternalsReader {
         );
 
         reader
+        panic!("")
     }
 
     fn create_append_next_range_reader(&mut self) {

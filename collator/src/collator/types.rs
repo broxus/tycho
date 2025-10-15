@@ -1388,7 +1388,6 @@ pub struct FinalizeMessagesReaderResult {
     pub has_unprocessed_messages: bool,
     pub reader_state: ReaderState,
     pub processed_upto: ProcessedUptoInfoStuff,
-    pub anchors_cache: AnchorsCache,
 }
 
 pub struct FinalizeCollationResult {
@@ -1422,7 +1421,6 @@ pub struct CollationResult {
     pub final_result: FinalResult,
     pub finalized: FinalizeBlockResult,
     pub reader_state: ReaderState,
-    pub anchors_cache: AnchorsCache,
     pub execute_result: ExecuteResult,
 }
 
