@@ -15,6 +15,7 @@ use tycho_types::num::Tokens;
 use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
 use tycho_util::futures::JoinTask;
+use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::time::now_millis;
@@ -994,7 +995,14 @@ impl CollatorStdImpl {
                 })
                 .await?;
 
+            tokio::task::yield_now().await;
+
+            // BLOCKING: old_mc_data can be dropped here and it can take some time
             let new_mc_data = finalized.mc_data.unwrap_or(finalized.old_mc_data);
+
+            tokio::task::yield_now().await;
+
+            // BLOCKING: method can block here
 
             // spawn update PrevData and working state
             self.prepare_working_state_update(
@@ -1019,8 +1027,19 @@ impl CollatorStdImpl {
             // update next block info
             self.next_block_info = block_id.get_next_id_short();
 
+            tokio::task::yield_now().await;
+
+            // BLOCKING: Drops can be called here
+
             handle_block_candidate_elapsed = histogram.finish();
         }
+
+        tokio::task::yield_now().await;
+
+        // BLOCKING: Other drops can be called here
+
+        Reclaimer::instance().drop(finalized.collation_data);
+
         Ok(FinalizeCollationResult {
             handle_block_candidate_elapsed,
         })
