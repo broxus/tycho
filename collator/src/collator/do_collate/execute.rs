@@ -1,6 +1,8 @@
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
+use tycho_types::cell::UsageTree;
 use tycho_types::models::TickTock;
 use tycho_util::metrics::HistogramGuard;
 
@@ -84,7 +86,10 @@ impl Phase<ExecuteState> {
         Ok(())
     }
 
-    pub fn execute_incoming_messages(&mut self) -> Result<(), CollatorError> {
+    pub fn execute_incoming_messages(
+        &mut self,
+        usage_tree: &UsageTree,
+    ) -> Result<(), CollatorError> {
         let labels = [(
             "workchain",
             self.extra.executor.shard_id.workchain().to_string(),
@@ -137,11 +142,16 @@ impl Phase<ExecuteState> {
                     .execute_metrics
                     .execute_groups_vm_only_timer
                     .start();
-                let group_result = self
-                    .extra
-                    .executor
-                    .executor
-                    .execute_group(msg_group, &mut self.extra.execute_wu)?;
+                let group_result = self.extra.executor.executor.execute_group(
+                    msg_group,
+                    &mut self.extra.execute_wu,
+                    usage_tree,
+                    self.extra
+                        .messages_reader
+                        ._accounts_tracker
+                        .has_new_accounts
+                        .fetch_and(false, Ordering::Relaxed),
+                )?;
                 self.extra
                     .execute_metrics
                     .execute_groups_vm_only_timer

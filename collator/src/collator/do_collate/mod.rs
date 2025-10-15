@@ -394,7 +394,7 @@ impl CollatorStdImpl {
         }
 
         // execute incoming messages
-        execute_phase.execute_incoming_messages()?;
+        execute_phase.execute_incoming_messages(&usage_tree)?;
 
         // execute tock transaction
         if shard_id.is_masterchain() {

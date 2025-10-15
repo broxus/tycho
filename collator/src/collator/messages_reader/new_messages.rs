@@ -277,6 +277,8 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
         let for_shard_id = self.for_shard_id;
         let max_limits = self.max_limits();
 
+        let _accounts_tracker = self._accounts_tracker.clone();
+
         let range_reader = self.get_new_messages_range_reader(current_next_lt)?;
         let shard_reader_state = range_reader
             .reader_state
@@ -293,6 +295,11 @@ impl<V: InternalMessageValue> InternalsPartitionReader<V> {
 
                     // remember taken message
                     res.taken_messages.push(msg.message.key());
+
+                    // track account
+                    let dst = msg.message.info().dst.clone();
+                    let account_id = dst.as_std().map(|a| a.address).unwrap_or_default();
+                    _accounts_tracker.track(account_id);
 
                     // add message to buffer
                     res.metrics.add_to_message_groups_timer.start();
