@@ -103,6 +103,11 @@ impl MessagesExecutor {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute messages group");
 
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
+        let _hist = HistogramGuard::begin_with_labels(
+            "tycho_do_collate_one_tick_group_exec_time_high",
+            labels,
+        );
+
         let mut ext_msgs_skipped = 0;
 
         let group_horizontal_size = msg_group.len();
@@ -116,7 +121,6 @@ impl MessagesExecutor {
         let mut items = Vec::with_capacity(group_messages_count);
         let mut ext_msgs_error_count = 0;
 
-        let mut max_account_msgs_exec_time = Duration::ZERO;
         let mut total_exec_time = Duration::ZERO;
 
         let mut group_gas = 0u128;
@@ -147,7 +151,6 @@ impl MessagesExecutor {
             for executed in result {
                 self.save_subgroup_result(
                     &mut ext_msgs_skipped,
-                    &mut max_account_msgs_exec_time,
                     &mut total_exec_time,
                     &mut ext_msgs_error_count,
                     &mut group_max_vert_size,
@@ -173,7 +176,6 @@ impl MessagesExecutor {
             group_horizontal_size, group_max_vert_size, group_accounts_count,
             total_exec_time = %format_duration(total_exec_time),
             mean_account_msgs_exec_time = %format_duration(mean_account_msgs_exec_time),
-            max_account_msgs_exec_time = %format_duration(max_account_msgs_exec_time),
             group_messages_count, group_gas, group_exec_wu,
             "execute_group",
         );
@@ -191,11 +193,6 @@ impl MessagesExecutor {
             labels
         )
         .record(mean_account_msgs_exec_time);
-        metrics::histogram!(
-            "tycho_do_collate_one_tick_account_msgs_exec_max_time",
-            labels
-        )
-        .record(max_account_msgs_exec_time);
 
         Ok(ExecutedGroup {
             items,
@@ -222,7 +219,6 @@ impl MessagesExecutor {
     fn save_subgroup_result(
         &mut self,
         ext_msgs_skipped: &mut u64,
-        max_account_msgs_exec_time: &mut Duration,
         total_exec_time: &mut Duration,
         ext_msgs_error_count: &mut u64,
         group_max_vert_size: &mut usize,
@@ -233,7 +229,6 @@ impl MessagesExecutor {
     ) -> Result<()> {
         *ext_msgs_skipped += executed.ext_msgs_skipped;
 
-        *max_account_msgs_exec_time = (*max_account_msgs_exec_time).max(executed.exec_time);
         *total_exec_time += executed.exec_time;
         *group_max_vert_size = cmp::max(*group_max_vert_size, executed.transactions.len());
 
@@ -404,6 +399,11 @@ impl AccountsCache {
     }
 
     fn get_account_stuff(&self, account_id: &AccountId) -> Result<Box<ShardAccountStuff>> {
+        let labels = [("workchain", self.workchain_id.to_string())];
+        let _hist = HistogramGuard::begin_with_labels(
+            "tycho_collator_get_account_stuff_time_high",
+            &labels,
+        );
         if let Some(account) = self.items.get(account_id) {
             Ok(account.clone())
         } else if let Some((_depth, shard_account)) = self.shard_accounts.get(account_id)? {
