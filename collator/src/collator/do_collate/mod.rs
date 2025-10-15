@@ -96,15 +96,11 @@ impl CollatorStdImpl {
             resume_collation_elapsed,
             prev_shard_data,
             usage_tree,
-            reader_state,
+            mut reader_state,
             ..
         } = *working_state;
 
         let snapshot_start = std::time::Instant::now();
-
-        // Measure cloning of each component separately with detailed metrics
-        // let _externals_snapshot = reader_state.externals.clone_with_metrics(&labels);
-        // let _internals_snapshot = reader_state.internals.clone_with_metrics(&labels);
 
         let snapshot_elapsed = snapshot_start.elapsed();
 
@@ -186,7 +182,7 @@ impl CollatorStdImpl {
             top_shard_blocks_info,
         )?;
 
-        let anchors_cache = std::mem::take(&mut self.anchors_cache);
+        let mut anchors_cache = std::mem::take(&mut self.anchors_cache);
         let block_serializer_cache = self.block_serializer_cache.clone();
 
         let state = Box::new(ActualState {
@@ -216,8 +212,8 @@ impl CollatorStdImpl {
                 Self::run(
                     config,
                     mq_adapter,
-                    reader_state,
-                    anchors_cache,
+                    &mut reader_state,
+                    &mut anchors_cache,
                     block_serializer_cache,
                     state,
                     collation_session,
@@ -248,11 +244,11 @@ impl CollatorStdImpl {
         let CollationResult {
             finalized,
             reader_state,
-            anchors_cache,
             execute_result,
             final_result,
         } = match do_collate_res {
             Err(CollatorError::Cancelled(reason)) => {
+                // anchors_cache automatically rollbacks via &mut reference (no changes applied)
                 // cancel collation
                 self.listener
                     .on_cancelled(mc_block_id, next_block_id_short, reason)
@@ -269,8 +265,6 @@ impl CollatorStdImpl {
             .map(|cumulative_stats| cumulative_stats.remaining_total_for_own_shard());
 
         let last_read_to_anchor_chain_time = reader_state.externals.last_read_to_anchor_chain_time;
-
-        self.anchors_cache = anchors_cache;
 
         let block_id = *finalized.block_candidate.block.id();
         let finalize_wu = finalized.finalize_wu.clone();
@@ -375,8 +369,8 @@ impl CollatorStdImpl {
     fn run(
         collator_config: Arc<CollatorConfig>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-        reader_state: ReaderState,
-        anchors_cache: AnchorsCache,
+        reader_state: &mut ReaderState,
+        anchors_cache: &mut AnchorsCache,
         block_serializer_cache: BlockSerializerCache,
         state: Box<ActualState>,
         collation_session: Arc<CollationSessionInfo>,
@@ -400,7 +394,7 @@ impl CollatorStdImpl {
 
         let block_id_short = state.collation_data.block_id_short;
         let prepare_phase =
-            Phase::<PrepareState>::new(mq_adapter.clone(), reader_state, anchors_cache, state);
+            Phase::<PrepareState<'_>>::new(mq_adapter.clone(), reader_state, anchors_cache, state);
 
         let mut execute_phase = prepare_phase.run()?;
 
@@ -432,7 +426,6 @@ impl CollatorStdImpl {
                 has_unprocessed_messages,
                 reader_state,
                 processed_upto,
-                anchors_cache,
             },
             update_queue_task,
         ) = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
@@ -507,7 +500,6 @@ impl CollatorStdImpl {
         Ok(CollationResult {
             finalized,
             reader_state,
-            anchors_cache,
             execute_result,
             final_result,
         })

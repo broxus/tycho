@@ -3,17 +3,14 @@ use std::hash::Hash;
 
 use tycho_util::FastHashMap;
 
-/// Trait for types that support transactional operations
 pub trait Transactional {
     fn begin_transaction(&mut self);
     fn commit_transaction(&mut self);
     fn rollback_transaction(&mut self);
 }
 
-/// Optimized undo log that stores only the original state for each key
 #[derive(Debug, Default)]
 struct UndoLog<K, V> {
-    /// Stores original values: None = key didn't exist, Some(v) = key had value v
     original_state: FastHashMap<K, Option<V>>,
     active: bool,
 }
@@ -119,9 +116,7 @@ impl<K, V> TransactionalMap<K, V> {
     }
 }
 
-// ============================================
-// Methods for Clone types (primitives, String, etc)
-// ============================================
+
 impl<K, V> TransactionalMap<K, V>
 where
     K: Clone + Eq + Hash,
@@ -144,7 +139,6 @@ where
         F: FnOnce(&mut V),
     {
         if let Some(value) = self.map.get_mut(key) {
-            // Only clone if we need to record the original state
             if self.undo_log.is_active() && !self.undo_log.original_state.contains_key(key) {
                 let original = value.clone();
                 self.undo_log
@@ -178,9 +172,7 @@ where
     }
 }
 
-// ============================================
-// Methods for Transactional types (heavy non-Clone structures)
-// ============================================
+
 impl<K, V> TransactionalMap<K, V>
 where
     K: Clone + Eq + Hash,
@@ -227,10 +219,6 @@ impl<K, V> Default for TransactionalMap<K, V> {
     }
 }
 
-// ============================================
-// Implement Transactional for TransactionalMap itself
-// This allows nested TransactionalMap usage
-// ============================================
 impl<K, V> Transactional for TransactionalMap<K, V>
 where
     K: Clone + Eq + Hash,
