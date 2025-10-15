@@ -1,8 +1,8 @@
 use tycho_block_util::queue::QueueKey;
 
 use crate::collator::messages_reader::state::external::{
-    ExternalsRangeReaderState, ExternalsReaderRange, ExternalsReaderState,
-    ExternalsReaderStateByPartition,
+    ExternalsPartitionReaderState, ExternalsRangeReaderState, ExternalsReaderRange,
+    ExternalsReaderState,
 };
 use crate::collator::messages_reader::state::internal::InternalsReaderState;
 use crate::types::processed_upto::{
@@ -26,7 +26,7 @@ impl ReaderState {
             let processed_to = par.externals.processed_to.into();
             ext_reader_state
                 .by_partitions
-                .insert(*par_id, ExternalsReaderStateByPartition {
+                .insert(*par_id, ExternalsPartitionReaderState {
                     processed_to,
                     curr_processed_offset: 0,
                 });
@@ -40,6 +40,7 @@ impl ReaderState {
                     .or_insert(ExternalsRangeReaderState {
                         range: ExternalsReaderRange::from_range_info(range_info, processed_to),
                         by_partitions: [(*par_id, range_info.into())].into(),
+                        fully_read_calculated: false,
                     });
             }
         }

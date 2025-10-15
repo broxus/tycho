@@ -24,36 +24,36 @@ pub struct ExternalsReaderState {
     pub ranges: BTreeMap<BlockSeqno, ExternalsRangeReaderState>,
 
     /// Partition related externals reader state
-    pub by_partitions: BTreeMap<QueuePartitionIdx, ExternalsReaderStateByPartition>,
+    pub by_partitions: BTreeMap<QueuePartitionIdx, ExternalsPartitionReaderState>,
 
     /// last read to anchor chain time
     pub last_read_to_anchor_chain_time: Option<u64>,
 }
 
-impl ExternalsReaderState {
-    pub fn get_state_by_partition_mut<T: Into<QueuePartitionIdx>>(
-        &mut self,
-        par_id: T,
-    ) -> anyhow::Result<&mut ExternalsReaderStateByPartition> {
-        let par_id = par_id.into();
-        self.by_partitions
-            .get_mut(&par_id)
-            .with_context(|| format!("externals reader state not exists for partition {par_id}"))
-    }
-
-    pub fn get_state_by_partition<T: Into<QueuePartitionIdx>>(
-        &self,
-        par_id: T,
-    ) -> anyhow::Result<&ExternalsReaderStateByPartition> {
-        let par_id = par_id.into();
-        self.by_partitions
-            .get(&par_id)
-            .with_context(|| format!("externals reader state not exists for partition {par_id}"))
-    }
-}
+// impl ExternalsReaderState {
+//     pub fn get_state_by_partition_mut<T: Into<QueuePartitionIdx>>(
+//         &mut self,
+//         par_id: T,
+//     ) -> anyhow::Result<&mut ExternalsReaderStateByPartition> {
+//         let par_id = par_id.into();
+//         self.by_partitions
+//             .get_mut(&par_id)
+//             .with_context(|| format!("externals reader state not exists for partition {par_id}"))
+//     }
+//
+//     pub fn get_state_by_partition<T: Into<QueuePartitionIdx>>(
+//         &self,
+//         par_id: T,
+//     ) -> anyhow::Result<&ExternalsReaderStateByPartition> {
+//         let par_id = par_id.into();
+//         self.by_partitions
+//             .get(&par_id)
+//             .with_context(|| format!("externals reader state not exists for partition {par_id}"))
+//     }
+// }
 
 #[derive(Debug, Default, Clone)]
-pub struct ExternalsReaderStateByPartition {
+pub struct ExternalsPartitionReaderState {
     /// The last processed external message from all ranges
     pub processed_to: ExternalKey,
 
@@ -67,14 +67,15 @@ pub struct ExternalsRangeReaderState {
     /// Range info
     pub range: ExternalsReaderRange,
     /// Partition related externals range reader state
-    pub by_partitions: BTreeMap<QueuePartitionIdx, ExternalsRangeReaderStateByPartition>,
+    pub by_partitions: BTreeMap<QueuePartitionIdx, ExternalsPartitionRangeReaderState>,
+    pub fully_read_calculated: bool,
 }
 
 impl ExternalsRangeReaderState {
     pub fn get_state_by_partition_mut<T: Into<QueuePartitionIdx>>(
         &mut self,
         par_id: T,
-    ) -> anyhow::Result<&mut ExternalsRangeReaderStateByPartition> {
+    ) -> anyhow::Result<&mut ExternalsPartitionRangeReaderState> {
         let par_id = par_id.into();
         self.by_partitions.get_mut(&par_id).with_context(|| {
             format!("externals range reader state not exists for partition {par_id}")
@@ -84,7 +85,7 @@ impl ExternalsRangeReaderState {
     pub fn get_state_by_partition<T: Into<QueuePartitionIdx>>(
         &self,
         par_id: T,
-    ) -> anyhow::Result<&ExternalsRangeReaderStateByPartition> {
+    ) -> anyhow::Result<&ExternalsPartitionRangeReaderState> {
         let par_id = par_id.into();
         self.by_partitions.get(&par_id).with_context(|| {
             format!("externals range reader state not exists for partition {par_id}")
@@ -123,7 +124,7 @@ impl ExternalsReaderRange {
     }
 }
 
-pub struct ExternalsRangeReaderStateByPartition {
+pub struct ExternalsPartitionRangeReaderState {
     /// Buffer to store external messages
     /// before collect them to the next execution group
     pub buffer: MessagesBuffer,
@@ -140,7 +141,7 @@ pub struct ExternalsRangeReaderStateByPartition {
     pub last_expire_check_on_ct: Option<u64>,
 }
 
-impl ExternalsRangeReaderStateByPartition {
+impl ExternalsPartitionRangeReaderState {
     pub fn check_buffer_fill_state(
         &self,
         buffer_limits: &MessagesBufferLimits,
@@ -149,7 +150,7 @@ impl ExternalsRangeReaderStateByPartition {
     }
 }
 
-impl From<&ExternalsRangeInfo> for ExternalsRangeReaderStateByPartition {
+impl From<&ExternalsRangeInfo> for ExternalsPartitionRangeReaderState {
     fn from(value: &ExternalsRangeInfo) -> Self {
         Self {
             buffer: Default::default(),
@@ -160,10 +161,8 @@ impl From<&ExternalsRangeInfo> for ExternalsRangeReaderStateByPartition {
     }
 }
 
-impl From<(&ExternalsReaderRange, &ExternalsRangeReaderStateByPartition)> for ExternalsRangeInfo {
-    fn from(
-        (range, state): (&ExternalsReaderRange, &ExternalsRangeReaderStateByPartition),
-    ) -> Self {
+impl From<(&ExternalsReaderRange, &ExternalsPartitionRangeReaderState)> for ExternalsRangeInfo {
+    fn from((range, state): (&ExternalsReaderRange, &ExternalsPartitionRangeReaderState)) -> Self {
         Self {
             from: range.from.into(),
             to: range.to.into(),

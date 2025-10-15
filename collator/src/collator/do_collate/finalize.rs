@@ -65,9 +65,9 @@ pub struct FinalizeBlockContext {
 }
 
 impl Phase<FinalizeState> {
-    pub fn finalize_messages_reader(
+    pub fn finalize_messages_reader<'a>(
         &mut self,
-        messages_reader: MessagesReader<EnqueuedMessage>,
+        messages_reader: MessagesReader<'a, EnqueuedMessage>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     ) -> Result<
         (
@@ -162,7 +162,6 @@ impl Phase<FinalizeState> {
             queue_diff_with_msgs,
             reader_state,
             processed_upto,
-            anchors_cache,
         } = messages_reader.finalize(
             self.extra.executor.min_next_lt(),
             &other_updated_top_shard_diffs_info,
@@ -280,7 +279,6 @@ impl Phase<FinalizeState> {
                 has_unprocessed_messages,
                 reader_state,
                 processed_upto,
-                anchors_cache,
             },
             update_queue_task,
         ))
