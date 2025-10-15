@@ -2993,6 +2993,14 @@ def collator_execution_manager() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_execute_ticktock_time", "Execute ticktock time"
         ),
+        create_heatmap_panel(
+            "tycho_collator_get_account_stuff_time_high",
+            "Time to get account stuff",
+        ),
+        create_heatmap_panel(
+            "tycho_collator_preload_full_account_time_high",
+            "Time to preload full account",
+        ),
     ]
     return create_row("collator: Execution Manager", metrics)
 
