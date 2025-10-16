@@ -532,7 +532,7 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
 
     // Param 8
     params.set_global_version(&GlobalVersion {
-        version: 32,
+        version: 100,
         capabilities: GlobalCapabilities::from([
             GlobalCapability::CapCreateStatsEnabled,
             GlobalCapability::CapBounceMsgBody,
@@ -667,38 +667,38 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
     // Param 22 (masterchain)
     params.set_block_limits(true, &BlockLimits {
         bytes: BlockParamLimits {
-            underload: 131072,
-            soft_limit: 524288,
-            hard_limit: 1048576,
-        },
-        gas: BlockParamLimits {
-            underload: 900000,
-            soft_limit: 1200000,
-            hard_limit: 2000000,
-        },
-        lt_delta: BlockParamLimits {
             underload: 1000,
             soft_limit: 5000,
             hard_limit: 10000,
+        },
+        gas: BlockParamLimits {
+            underload: 900000,
+            soft_limit: 15000000,
+            hard_limit: 20000000,
+        },
+        lt_delta: BlockParamLimits {
+            underload: 1000,
+            soft_limit: 10000,
+            hard_limit: 30000,
         },
     })?;
 
     // Param 23 (basechain)
     params.set_block_limits(false, &BlockLimits {
         bytes: BlockParamLimits {
-            underload: 131072,
-            soft_limit: 524288,
-            hard_limit: 1048576,
+            underload: 1000,
+            soft_limit: 10000,
+            hard_limit: 20000,
         },
         gas: BlockParamLimits {
             underload: 900000,
-            soft_limit: 1200000,
-            hard_limit: 80_000_000,
+            soft_limit: 15000000,
+            hard_limit: 80000000,
         },
         lt_delta: BlockParamLimits {
             underload: 1000,
-            soft_limit: 5000,
-            hard_limit: 10000,
+            soft_limit: 20000,
+            hard_limit: 50000,
         },
     })?;
 
@@ -742,8 +742,8 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
             group_vert_size: 10,
             externals_expire_timeout: 58,
             open_ranges_limit: 20,
-            par_0_int_msgs_count_limit: 50_000,
-            par_0_ext_msgs_count_limit: 50_000,
+            par_0_int_msgs_count_limit: 100_000,
+            par_0_ext_msgs_count_limit: 10_000_000,
             group_slots_fractions,
             range_messages_limit: 10_000,
         },
