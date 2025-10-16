@@ -226,13 +226,23 @@ impl BlockchainRpcClient {
             self.inner.config.min_broadcast_timeout,
         );
 
-        if let Some(prev_time) = self
-            .inner
-            .response_tracker
-            .lock()
-            .exponentially_weighted_average()
-            .map(|x| Duration::from_millis(x as _))
-        {
+        let start = Instant::now();
+        let prev_time = {
+            let lock = self.inner.response_tracker.lock();
+            let took = start.elapsed().as_millis();
+            if took > 1 {
+                tracing::warn!("long compute_broadcast_timeout lock {took}ms")
+            }
+            let start = Instant::now();
+            let prev_time = lock
+                .exponentially_weighted_average()
+                .map(|x| Duration::from_millis(x as _));
+            if start.elapsed().as_millis() > 1 {
+                tracing::warn!("long compute_broadcast_timeout calc {took}ms")
+            }
+            prev_time
+        };
+        if let Some(prev_time) = prev_time {
             metrics::gauge!("tycho_broadcast_timeout", "kind" => "calculated").set(prev_time);
             let value = prev_time.clamp(
                 self.inner.config.min_broadcast_timeout,
