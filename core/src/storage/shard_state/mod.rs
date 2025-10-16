@@ -190,6 +190,7 @@ impl ShardStateStoragePartImpl {
         let cells_db = CellStorageDb::Part(self.cells_db.clone());
 
         let mut cx = RemoveOutdatedStatesContext::new(
+            true,
             cells_db.clone(),
             self.cell_storage.clone(),
             remaining_split_depth,
@@ -639,6 +640,7 @@ impl ShardStateStorage {
 
         // remove state data in main db
         let mut cx = RemoveOutdatedStatesContext::new(
+            false,
             self.cells_db.clone(),
             self.cell_storage.clone(),
             accounts_split_depth,
@@ -796,6 +798,8 @@ impl ShardStateStorage {
 
 #[derive(Clone)]
 struct RemoveOutdatedStatesContext {
+    in_partition: bool,
+
     cells_db: CellStorageDb,
     cell_storage: Arc<CellStorage>,
 
@@ -812,6 +816,7 @@ struct RemoveOutdatedStatesContext {
 
 impl RemoveOutdatedStatesContext {
     fn new(
+        in_partition: bool,
         cells_db: CellStorageDb,
         cell_storage: Arc<CellStorage>,
         split_depth: u8,
@@ -819,6 +824,7 @@ impl RemoveOutdatedStatesContext {
         gc_lock: Arc<tokio::sync::Mutex<()>>,
     ) -> Self {
         Self {
+            in_partition,
             cells_db,
             cell_storage,
             split_depth,
@@ -889,9 +895,12 @@ impl RemoveOutdatedStatesContext {
             // will not be used by recent loads.
             let root_cell = Cell::from(self.cell_storage.load_cell(&root_hash, 0)? as Arc<_>);
 
-            let split_at = split_shard_accounts(&block_id.shard, root_cell, self.split_depth)?
-                .into_keys()
-                .collect::<FastHashSet<HashBytes>>();
+            let split_at = if self.in_partition {
+                split_accounts_subtree(root_cell, self.split_depth)?
+            } else {
+                split_shard_accounts(&block_id.shard, root_cell, self.split_depth)?
+            };
+            let split_at = split_at.into_keys().collect::<FastHashSet<HashBytes>>();
 
             self.cell_storage.remove_cell_mt(
                 &alloc,
