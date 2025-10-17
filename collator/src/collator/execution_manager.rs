@@ -516,6 +516,8 @@ impl PreloadFullShardAccount for ShardAccounts {
         // serialize account subtree
         let boc = Boc::encode(raw_cell);
 
+        metrics::histogram!("tycho_collator_account_size_bytes").record(boc.len() as f64);
+
         // deserialize account cell
         let cell = Boc::decode(boc)?;
 
