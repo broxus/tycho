@@ -57,6 +57,7 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho tool bc gen-proposal set-elector-code`↴](#tycho-tool-bc-gen-proposal-set-elector-code)
 * [`tycho tool bc gen-proposal set-config-code`↴](#tycho-tool-bc-gen-proposal-set-config-code)
 * [`tycho tool bc gen-proposal-vote`↴](#tycho-tool-bc-gen-proposal-vote)
+* [`tycho tool check-cells-db`↴](#tycho-tool-check-cells-db)
 * [`tycho elect`↴](#tycho-elect)
 * [`tycho elect run`↴](#tycho-elect-run)
 * [`tycho elect once`↴](#tycho-elect-once)
@@ -604,6 +605,7 @@ Work with blockchain stuff
 * `gen-zerostate` — Generate a zero state for a network
 * `gen-account` — Generate an account state
 * `bc` — Blockchain stuff
+* `check-cells-db` — Check that the cells database is consistent
 
 
 
@@ -970,6 +972,19 @@ Create proposal voting payload
 * `--key <KEY>` — secret key (reads from stdin if only flag is provided)
 * `-r`, `--raw-key` — expect a raw key input (32 bytes)
 * `--query-id <QUERY_ID>` — query ID. Default: current timestamp in milliseconds
+
+
+
+## `tycho tool check-cells-db`
+
+Check that the cells database is consistent
+
+**Usage:** `tycho tool check-cells-db [OPTIONS] --cells-db-path <CELLS_DB_PATH>`
+
+###### **Options:**
+
+* `-c`, `--cells-db-path <CELLS_DB_PATH>` — Path to the cells database directory
+* `--temp-dir-path <TEMP_DIR_PATH>` — Optional path for the temporary directory
 
 
 
