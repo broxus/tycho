@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, btree_map};
 use std::ops::Add as _;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, get_short_addr_string};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{MsgsExecutionParams, ShardIdent};
@@ -62,16 +64,155 @@ enum MessagesReaderStage {
     ExternalsAndNew,
 }
 
-#[derive(Default)]
-pub struct BufferAccountsTracker {
+pub struct AccountsPreloader {
     pub tracked_accounts: FastDashSet<AccountId>,
-    pub has_new_accounts: AtomicBool,
+    pub new_accounts_count: AtomicUsize,
+    pub is_active: AtomicBool,
+    pub start_notify: Notify,
+    pub preload_queue_rx:
+        parking_lot::Mutex<tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Receiver<()>>>,
+    pub preloaded_once: AtomicBool,
+    pub cancel: CancellationToken,
 }
-impl BufferAccountsTracker {
+impl AccountsPreloader {
+    pub fn run() -> Result<Arc<Self>> {
+        let (preload_queue_tx, rx) =
+            tokio::sync::mpsc::channel::<tokio::sync::oneshot::Receiver<()>>(100);
+        let this = Arc::new(Self {
+            tracked_accounts: Default::default(),
+            new_accounts_count: Default::default(),
+            is_active: Default::default(),
+            start_notify: Default::default(),
+            preload_queue_rx: parking_lot::Mutex::new(rx),
+            preloaded_once: Default::default(),
+            cancel: Default::default(),
+        });
+
+        let inner = this.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()?;
+            rt.block_on({
+                async move {
+                    loop {
+                        // start/stop
+                        if !inner.is_active.load(Ordering::Acquire) {
+                            tokio::select! {
+                                _ = inner.start_notify.notified() => {
+                                    inner.is_active.fetch_or(true, Ordering::Release);
+                                }
+                                _ = inner.cancel.cancelled() => {
+                                    break;
+                                }
+                            }
+                        }
+
+                        // preloading accounts
+
+                        // emulate that we request up to 1000 accounts from all partitions in parallel
+                        let prev = inner
+                            .new_accounts_count
+                            .fetch_update(Ordering::Release, Ordering::Acquire, |curr| {
+                                if curr > 1000 {
+                                    Some(curr - 1000)
+                                } else {
+                                    Some(0)
+                                }
+                            })
+                            .unwrap();
+
+                        // queue request task
+                        let (loaded_tx, loaded_rx) = tokio::sync::oneshot::channel();
+                        preload_queue_tx.send(loaded_rx).await?;
+
+                        if prev > 1000 {
+                            // there are remaining accounts
+
+                            // should send request
+
+                            // emulate network delay during request
+                            tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+                        } else if prev > 0 {
+                            // no more remaining accounts
+
+                            // should send request
+
+                            // emulate network delay during request
+                            tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+                            // stop preloading
+                            inner.pause_preload();
+                        } else {
+                            // there was no any account
+
+                            // should not send request
+
+                            // stop preloading
+                            inner.pause_preload();
+                        }
+
+                        // resolve task
+                        let _ = loaded_tx.send(());
+
+                        // finish if cancelled
+                        if inner.cancel.is_cancelled() {
+                            break;
+                        }
+                    }
+
+                    Ok::<_, anyhow::Error>(())
+                }
+            })?;
+            Ok::<_, anyhow::Error>(())
+        });
+        Ok(this)
+    }
+
     pub fn track(&self, account_id: AccountId) {
         if self.tracked_accounts.insert(account_id) {
-            self.has_new_accounts.fetch_or(true, Ordering::Relaxed);
+            self.new_accounts_count.fetch_add(1, Ordering::Release);
         }
+    }
+
+    pub fn start_preload(&self) {
+        self.preloaded_once.fetch_and(false, Ordering::Release);
+        self.start_notify.notify_one();
+    }
+
+    pub fn pause_preload(&self) -> bool {
+        self.is_active.fetch_and(false, Ordering::AcqRel)
+    }
+
+    pub fn blocking_wait_preload_once(&self) {
+        // await only one preload batch
+        if self.preloaded_once.fetch_or(true, Ordering::AcqRel) {
+            return;
+        }
+
+        // get next request task and wait until it finished
+        if let Some(load_rx) = self.preload_queue_rx.lock().blocking_recv() {
+            // if there were no remaining accounts, it will return immediately
+            let _ = load_rx.blocking_recv();
+        }
+    }
+
+    pub fn stop_preload(&self) {
+        // stop preloading
+        let was_active = self.pause_preload();
+
+        // drain tasks queue
+        let mut preload_queue_rx = self.preload_queue_rx.lock();
+        let mut remaining_tasks = vec![];
+        if was_active || !preload_queue_rx.is_empty() {
+            preload_queue_rx.blocking_recv_many(&mut remaining_tasks, 100);
+        }
+    }
+}
+
+impl Drop for AccountsPreloader {
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }
 
@@ -93,7 +234,7 @@ pub(super) struct MessagesReader<V: InternalMessageValue> {
 
     readers_stages: BTreeMap<QueuePartitionIdx, MessagesReaderStage>,
 
-    pub _accounts_tracker: Arc<BufferAccountsTracker>,
+    pub _accounts_preloader: Arc<AccountsPreloader>,
 }
 
 #[derive(Debug, Clone)]
@@ -206,7 +347,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
 
         let msgs_exec_params = cx.msgs_exec_params.clone();
 
-        let _accounts_tracker = Arc::new(BufferAccountsTracker::default());
+        let _accounts_preloader = AccountsPreloader::run()?;
 
         // create externals reader
         let externals_reader = ExternalsReader::new(
@@ -217,7 +358,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             externals,
             cx.anchors_cache,
             cx.reader_state.externals,
-            _accounts_tracker.clone(),
+            _accounts_preloader.clone(),
         );
 
         let mut res = Self {
@@ -235,7 +376,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
             readers_stages: Default::default(),
             internal_queue_statistics: cumulative_statistics,
 
-            _accounts_tracker: _accounts_tracker.clone(),
+            _accounts_preloader: _accounts_preloader.clone(),
         };
 
         // define the initial reader stage
@@ -277,7 +418,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 remaning_msg_stats,
             },
             mq_adapter.clone(),
-            _accounts_tracker.clone(),
+            _accounts_preloader.clone(),
         )?;
         res.internals_partition_readers
             .insert(MAIN_PARTITION_ID, par_reader);
@@ -318,7 +459,7 @@ impl<V: InternalMessageValue> MessagesReader<V> {
                 remaning_msg_stats: remaining_msg_stats,
             },
             mq_adapter,
-            _accounts_tracker.clone(),
+            _accounts_preloader.clone(),
         )?;
         res.internals_partition_readers
             .insert(LP_PARTITION_ID, par_reader);

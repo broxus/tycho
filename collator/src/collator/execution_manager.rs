@@ -18,6 +18,7 @@ use super::messages_buffer::MessageGroup;
 use super::types::{
     AccountId, ExecutedTransaction, ParsedMessage, ShardAccountStuff, SkippedTransaction,
 };
+use crate::collator::messages_reader::AccountsPreloader;
 use crate::collator::work_units::ExecuteWu;
 use crate::tracing_targets;
 
@@ -43,6 +44,8 @@ impl MessagesExecutor {
         params: Arc<ExecutorParams>,
         shard_accounts: ShardAccounts,
         wu_params_execute: WorkUnitsParamsExecute,
+
+        _accounts_preloader: Arc<AccountsPreloader>,
     ) -> Self {
         Self {
             shard_id,
@@ -54,7 +57,8 @@ impl MessagesExecutor {
                 workchain_id: shard_id.workchain().try_into().unwrap(),
                 shard_accounts,
                 items: Default::default(),
-                _emulate_network_delay: Default::default(),
+
+                _accounts_preloader,
             },
             wu_params_execute,
         }
@@ -103,7 +107,6 @@ impl MessagesExecutor {
         msg_group: MessageGroup,
         execute_wu: &mut ExecuteWu,
         usage_tree: &UsageTree,
-        _emulate_network_delay: bool,
     ) -> Result<ExecutedGroup> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute messages group");
 
@@ -137,13 +140,6 @@ impl MessagesExecutor {
 
         // collect touched account ids for accounts with executed transactions only
         let mut touched_account_ids = FastHashSet::default();
-
-        // set that we should emulate network delay on the next get account stuff
-        if !self.shard_id.is_masterchain() && _emulate_network_delay {
-            self.accounts_cache
-                ._emulate_network_delay
-                .fetch_or(true, Ordering::Relaxed);
-        }
 
         let accounts_cache = Arc::new(&self.accounts_cache);
         let result = msg_group
@@ -389,7 +385,8 @@ struct AccountsCache {
     workchain_id: i8,
     shard_accounts: ShardAccounts,
     items: FastHashMap<AccountId, Box<ShardAccountStuff>>,
-    pub _emulate_network_delay: AtomicBool,
+
+    pub _accounts_preloader: Arc<AccountsPreloader>,
 }
 
 impl AccountsCache {
@@ -443,16 +440,11 @@ impl AccountsCache {
         if let Some(account) = self.items.get(account_id) {
             Ok(account.clone())
         } else if self.workchain_id != -1 {
-            if self
-                ._emulate_network_delay
-                .fetch_and(false, Ordering::Relaxed)
-            {
-                std::thread::sleep(std::time::Duration::from_millis(30));
-            }
             if let Some(shard_account) = self.shard_accounts.preload_full_account(
                 account_id,
                 usage_tree,
                 self.workchain_id,
+                &self._accounts_preloader,
             )? {
                 ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
             } else {
@@ -497,6 +489,7 @@ trait PreloadFullShardAccount {
         account_id: &AccountId,
         usage_tree: &UsageTree,
         workchain_id: i8,
+        _accounts_preloader: &AccountsPreloader,
     ) -> Result<Option<ShardAccount>>;
 }
 impl PreloadFullShardAccount for ShardAccounts {
@@ -505,10 +498,13 @@ impl PreloadFullShardAccount for ShardAccounts {
         account_id: &AccountId,
         usage_tree: &UsageTree,
         workchain_id: i8,
+        _accounts_preloader: &AccountsPreloader,
     ) -> Result<Option<ShardAccount>> {
         use tycho_types::cell::Load;
 
         let timer = std::time::Instant::now();
+
+        _accounts_preloader.blocking_wait_preload_once();
 
         let Some(slice_parts) = self.dict().get_raw_owned(account_id)? else {
             return Ok(None);
