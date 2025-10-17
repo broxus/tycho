@@ -83,7 +83,7 @@ NODES_TOTAL=4                # Total nodes described in network config
 ACTIVE_NODES=(1 2 3)         # Nodes launched initially
 MAX_TRIES=100                # Attempts for RPC call tries
 BLOCK_AGE_LIMIT=10           # Seconds
-DIFF_TAIL_THRESHOLD=50       # Trigger threshold for node‑4 launch
+DIFF_TAIL_THRESHOLD=20       # Trigger threshold for node‑4 launch
 KEYS_PATH="${TMP_DIR}/keys.json"
 
 cd $REPO_ROOT
@@ -109,6 +109,23 @@ just init_node_config --force
 
 jq '.starter.custom_boot_offset="0s"' \
    ./config.json > ./config.json.tmp && mv ./config.json.tmp ./config.json
+
+
+#######################################
+# Patch zerostate.json with custom params 22 and 23
+#######################################
+log "🔧 Patching zerostate.json with custom BlockLimits"
+
+jq '.params."22" = {
+      "bytes": { "underload": 1000, "soft_limit": 5000, "hard_limit": 10000 },
+      "gas": { "underload": 900000, "soft_limit": 15000000, "hard_limit": 20000000 },
+      "lt_delta": { "underload": 1000, "soft_limit": 10000, "hard_limit": 30000 }
+    } |
+    .params."23" = {
+      "bytes": { "underload": 1000, "soft_limit": 10000, "hard_limit": 20000 },
+      "gas": { "underload": 900000, "soft_limit": 15000000, "hard_limit": 80000000 },
+      "lt_delta": { "underload": 1000, "soft_limit": 20000, "hard_limit": 50000 }
+    }' ./zerostate.json > ./zerostate.json.tmp && mv ./zerostate.json.tmp ./zerostate.json
 
 just gen_network "$NODES_TOTAL" --force
 
