@@ -3003,6 +3003,12 @@ def collator_execution_manager() -> RowPanel:
             "Time to preload full account",
             labels=['workchain=~"$workchain"'],
         ),
+        create_heatmap_quantile_panel(
+            "tycho_collator_account_size_bytes",
+            "Account size",
+            UNITS.BYTES_IEC,
+            quantile="0.95",
+        ),
     ]
     return create_row("collator: Execution Manager", metrics)
 
