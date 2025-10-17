@@ -95,6 +95,9 @@ impl AccountsPreloader {
                 .build()?;
             rt.block_on({
                 async move {
+                    const BATCH_SIZE: usize = 1000;
+                    const BATCH_DOWNLOAD_TIME_MS: u64 = 30;
+
                     loop {
                         // start/stop
                         if !inner.is_active.load(Ordering::Acquire) {
@@ -110,12 +113,13 @@ impl AccountsPreloader {
 
                         // preloading accounts
 
-                        // emulate that we request up to 1000 accounts from all partitions in parallel
+                        // emulate that we request limited number of accounts from all partitions in parallel
+                        let cross_batch_size = BATCH_SIZE * 4;
                         let prev = inner
                             .new_accounts_count
                             .fetch_update(Ordering::Release, Ordering::Acquire, |curr| {
-                                if curr > 1000 {
-                                    Some(curr - 1000)
+                                if curr > cross_batch_size {
+                                    Some(curr - cross_batch_size)
                                 } else {
                                     Some(0)
                                 }
@@ -126,20 +130,26 @@ impl AccountsPreloader {
                         let (loaded_tx, loaded_rx) = tokio::sync::oneshot::channel();
                         preload_queue_tx.send(loaded_rx).await?;
 
-                        if prev > 1000 {
+                        if prev > cross_batch_size {
                             // there are remaining accounts
 
                             // should send request
 
                             // emulate network delay during request
-                            tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                BATCH_DOWNLOAD_TIME_MS,
+                            ))
+                            .await;
                         } else if prev > 0 {
                             // no more remaining accounts
 
                             // should send request
 
                             // emulate network delay during request
-                            tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                BATCH_DOWNLOAD_TIME_MS,
+                            ))
+                            .await;
 
                             // stop preloading
                             inner.pause_preload();
