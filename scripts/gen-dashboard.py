@@ -1460,12 +1460,12 @@ def collator_execution_metrics() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_do_collate_one_tick_account_msgs_exec_mean_time",
-            "MEAN exec time in group",
+            "MEAN one account msgs exec time in group",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_one_tick_account_msgs_exec_max_time",
-            "MAX exec time in group",
+            "tycho_do_collate_one_tick_group_exec_time_high",
+            "One exec tick group exec time",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
@@ -2996,10 +2996,12 @@ def collator_execution_manager() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_get_account_stuff_time_high",
             "Time to get account stuff",
+            labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_collator_preload_full_account_time_high",
             "Time to preload full account",
+            labels=['workchain=~"$workchain"'],
         ),
     ]
     return create_row("collator: Execution Manager", metrics)

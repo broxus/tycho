@@ -108,6 +108,11 @@ impl MessagesExecutor {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute messages group");
 
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
+        let _hist = HistogramGuard::begin_with_labels(
+            "tycho_do_collate_one_tick_group_exec_time_high",
+            labels,
+        );
+
         let mut ext_msgs_skipped = 0;
 
         let group_horizontal_size = msg_group.len();
@@ -429,7 +434,12 @@ impl AccountsCache {
         account_id: &AccountId,
         usage_tree: &UsageTree,
     ) -> Result<Box<ShardAccountStuff>> {
-        let _hist = HistogramGuard::begin("tycho_collator_get_account_stuff_time_high");
+        let labels = [("workchain", self.workchain_id.to_string())];
+        let _hist = HistogramGuard::begin_with_labels(
+            "tycho_collator_get_account_stuff_time_high",
+            &labels,
+        );
+
         if let Some(account) = self.items.get(account_id) {
             Ok(account.clone())
         } else if self.workchain_id != -1 {
@@ -439,10 +449,11 @@ impl AccountsCache {
             {
                 std::thread::sleep(std::time::Duration::from_millis(30));
             }
-            if let Some(shard_account) = self
-                .shard_accounts
-                .preload_full_account(account_id, usage_tree)?
-            {
+            if let Some(shard_account) = self.shard_accounts.preload_full_account(
+                account_id,
+                usage_tree,
+                self.workchain_id,
+            )? {
                 ShardAccountStuff::new(self.workchain_id, account_id, shard_account).map(Box::new)
             } else {
                 Ok(Box::new(ShardAccountStuff::new_empty(
@@ -485,6 +496,7 @@ trait PreloadFullShardAccount {
         &self,
         account_id: &AccountId,
         usage_tree: &UsageTree,
+        workchain_id: i8,
     ) -> Result<Option<ShardAccount>>;
 }
 impl PreloadFullShardAccount for ShardAccounts {
@@ -492,6 +504,7 @@ impl PreloadFullShardAccount for ShardAccounts {
         &self,
         account_id: &AccountId,
         usage_tree: &UsageTree,
+        workchain_id: i8,
     ) -> Result<Option<ShardAccount>> {
         use tycho_types::cell::Load;
 
@@ -517,7 +530,8 @@ impl PreloadFullShardAccount for ShardAccounts {
         let mut slice = CellSlice::apply(&slice_parts)?;
         let (_, shard_account) = <(DepthBalanceInfo, ShardAccount)>::load_from(&mut slice)?;
 
-        metrics::histogram!("tycho_collator_preload_full_account_time_high")
+        let labels = [("workchain", workchain_id.to_string())];
+        metrics::histogram!("tycho_collator_preload_full_account_time_high", &labels)
             .record(timer.elapsed());
 
         Ok(Some(shard_account))
