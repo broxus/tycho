@@ -18,7 +18,7 @@ use crate::collator::messages_buffer::{
     MessageGroup, MessagesBufferLimits, MsgFilter, SkipExpiredExternals,
 };
 use crate::collator::messages_reader::{
-    BufferAccountsTracker, DebugInternalsRangeReaderState, InternalsRangeReaderKind,
+    AccountsPreloader, DebugInternalsRangeReaderState, InternalsRangeReaderKind,
 };
 use crate::collator::types::{
     AnchorsCache, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff, ParsedMessage,
@@ -53,7 +53,7 @@ pub(super) struct ExternalsReader {
     range_readers: BTreeMap<BlockSeqno, ExternalsRangeReader>,
     all_ranges_fully_read: bool,
 
-    pub _accounts_tracker: Arc<BufferAccountsTracker>,
+    pub _accounts_preloader: Arc<AccountsPreloader>,
 }
 
 impl ExternalsReader {
@@ -66,7 +66,7 @@ impl ExternalsReader {
         anchors_cache: AnchorsCache,
         mut reader_state: ExternalsReaderState,
 
-        _accounts_tracker: Arc<BufferAccountsTracker>,
+        _accounts_preloader: Arc<AccountsPreloader>,
     ) -> Self {
         // init minimal partitions count in the state if not exist
         for par_id in buffer_limits_by_partitions.keys() {
@@ -84,7 +84,7 @@ impl ExternalsReader {
             range_readers: Default::default(),
             all_ranges_fully_read: false,
 
-            _accounts_tracker,
+            _accounts_preloader,
         };
 
         // create existing range readers
@@ -394,7 +394,7 @@ impl ExternalsReader {
             // track accounts
             for (_, by_par) in range_reader_state.by_partitions.iter() {
                 for (account_id, _) in by_par.buffer.iter() {
-                    self._accounts_tracker.track(*account_id);
+                    self._accounts_preloader.track(*account_id);
                 }
             }
 
@@ -584,7 +584,7 @@ impl ExternalsReader {
                     partition_router,
                     &processed_to_by_partitions,
                     externals_expire_timeout,
-                    self._accounts_tracker.clone(),
+                    self._accounts_preloader.clone(),
                 )?;
 
                 metrics_by_partitions.append(std::mem::take(&mut read_res.metrics_by_partitions));
@@ -1024,7 +1024,7 @@ impl ExternalsRangeReader {
         processed_to_by_partitions: &BTreeMap<QueuePartitionIdx, ExternalKey>,
         externals_expire_timeout: u64,
 
-        _accounts_tracker: Arc<BufferAccountsTracker>,
+        _accounts_preloader: Arc<AccountsPreloader>,
     ) -> Result<ReadExternalsRangeResult> {
         let labels = [("workchain", self.for_shard_id.workchain().to_string())];
 
@@ -1219,7 +1219,7 @@ impl ExternalsRangeReader {
                             // track account
                             let dst = ext_msg.info.dst.clone();
                             let account_id = dst.as_std().map(|a| a.address).unwrap_or_default();
-                            _accounts_tracker.track(account_id);
+                            _accounts_preloader.track(account_id);
 
                             let reader_state_by_partition = self
                                 .reader_state

@@ -129,6 +129,10 @@ impl Phase<ExecuteState> {
                 ));
             }
 
+            self.extra
+                .messages_reader
+                ._accounts_preloader
+                .pause_preload();
             let timer = std::time::Instant::now();
             let msg_group_opt = self.extra.messages_reader.get_next_message_group(
                 GetNextMessageGroupMode::Continue,
@@ -137,6 +141,11 @@ impl Phase<ExecuteState> {
             fill_msgs_total_elapsed += timer.elapsed();
 
             if let Some(msg_group) = msg_group_opt {
+                self.extra
+                    .messages_reader
+                    ._accounts_preloader
+                    .start_preload();
+
                 // Execute messages group
                 self.extra
                     .execute_metrics
@@ -146,11 +155,6 @@ impl Phase<ExecuteState> {
                     msg_group,
                     &mut self.extra.execute_wu,
                     usage_tree,
-                    self.extra
-                        .messages_reader
-                        ._accounts_tracker
-                        .has_new_accounts
-                        .fetch_and(false, Ordering::Relaxed),
                 )?;
                 self.extra
                     .execute_metrics
@@ -231,6 +235,11 @@ impl Phase<ExecuteState> {
                 break;
             }
         }
+
+        self.extra
+            .messages_reader
+            ._accounts_preloader
+            .stop_preload();
 
         self.extra.execute_metrics.execute_incoming_msgs_elapsed = histogram.finish();
 
