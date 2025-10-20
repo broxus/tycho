@@ -3727,6 +3727,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "bumpalo-herd",
  "bytes",
  "bytesize",
  "clap",
