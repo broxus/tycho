@@ -96,7 +96,7 @@ impl AccountsPreloader {
             rt.block_on({
                 async move {
                     const BATCH_SIZE: usize = 1000;
-                    const BATCH_DOWNLOAD_TIME_MS: u64 = 30;
+                    const BATCH_DOWNLOAD_TIME_MS: u64 = 20;
 
                     loop {
                         // start/stop
