@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::Parser;
 use tycho_core::block_strider::{
     ArchiveBlockProvider, BlockProviderExt, BlockSaver, BlockchainBlockProvider, ColdBootType,
-    PrintSubscriber, StorageBlockProvider,
+    NoopSubscriber, PrintSubscriber, ShardStateApplier, StorageBlockProvider,
 };
 use tycho_light_node::CmdRun;
 use tycho_util::cli::logger::init_logger;
@@ -58,10 +58,14 @@ async fn main() -> anyhow::Result<()> {
 
     // will only save blocks and wont apply them to state
     // it's faster than StateApplier and ok for testing purposes when we don't need state
-    let block_saver = BlockSaver::new(node.storage().clone());
+    let subscriber = BlockSaver::new(node.storage().clone());
+    // but if you want to test with block applying uncomment the next line
+    // and comment the previous one
+    // let subscriber = ShardStateApplier::new(node.storage().clone(), NoopSubscriber);
+
     node.run(
         archive_block_provider.chain((blockchain_block_provider, storage_block_provider)),
-        (block_saver, PrintSubscriber),
+        (subscriber, PrintSubscriber),
     )
     .await?;
 
