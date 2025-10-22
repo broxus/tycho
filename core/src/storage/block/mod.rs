@@ -506,11 +506,6 @@ impl BlockStorage {
 
     // === Internal ===
 
-    #[cfg(test)]
-    pub fn db(&self) -> &CoreDb {
-        self.blob_storage.db()
-    }
-
     #[cfg(any(test, feature = "test"))]
     pub fn blob_storage(&self) -> &blobs::BlobStorage {
         &self.blob_storage

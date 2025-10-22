@@ -123,10 +123,6 @@ impl BlobStorage {
         Ok(storage)
     }
 
-    pub fn core_db(&self) -> &CoreDb {
-        &self.db
-    }
-
     /// Ensures consistency between data stored in `RocksDB` and `CAS`.
     ///
     /// For archives we sync events and check `CAS` to contain all committed data:
@@ -859,10 +855,6 @@ impl BlobStorage {
         let archives = self.archives.clone();
 
         CommitArchiveTask::new(db, block_handle_storage, archive_id, blocks, archives)
-    }
-
-    pub fn db(&self) -> &CoreDb {
-        &self.db
     }
 }
 
