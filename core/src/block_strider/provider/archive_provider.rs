@@ -15,6 +15,7 @@ use tycho_block_util::block::{BlockIdRelation, BlockStuffAug};
 use tycho_storage::fs::MappedFile;
 use tycho_types::models::BlockId;
 
+use crate::block_strider::RetryConfig;
 use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive, PendingArchiveResponse};
 use crate::overlay_client::{Neighbour, PunishReason};
@@ -24,12 +25,19 @@ use crate::storage::CoreStorage;
 #[serde(default)]
 pub struct ArchiveBlockProviderConfig {
     pub max_archive_to_memory_size: ByteSize,
+
+    /// Retry getting next block config.
+    pub retry_config: RetryConfig,
 }
 
 impl Default for ArchiveBlockProviderConfig {
     fn default() -> Self {
         Self {
             max_archive_to_memory_size: ByteSize::mb(100),
+            retry_config: RetryConfig {
+                attempts: 10,
+                interval: Duration::from_secs(1),
+            },
         }
     }
 }
@@ -68,7 +76,7 @@ impl ArchiveBlockProvider {
 
         loop {
             let Some((archive_key, info)) = this.get_archive(next_mc_seqno).await else {
-                tracing::info!(mc_seqno = next_mc_seqno, "archive block provider finished");
+                tracing::warn!(prev_block_id = ?block_id, "archive not found");
                 break None;
             };
 

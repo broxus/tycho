@@ -15,10 +15,10 @@ use tycho_types::models::*;
 use tycho_util::serde_helpers;
 use tycho_util::sync::rayon_run;
 
-use crate::block_strider::BlockProvider;
 use crate::block_strider::provider::{
     BoxBlockProvider, CheckProof, OptionalBlockStuff, ProofChecker,
 };
+use crate::block_strider::{BlockProvider, RetryConfig};
 use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::{Neighbour, PunishReason};
 use crate::storage::CoreStorage;
@@ -29,18 +29,6 @@ use crate::storage::CoreStorage;
 #[serde(default)]
 #[non_exhaustive]
 pub struct BlockchainBlockProviderConfig {
-    /// Polling interval for `get_next_block` method.
-    ///
-    /// Default: 1 second.
-    #[serde(with = "serde_helpers::humantime")]
-    pub get_next_block_polling_interval: Duration,
-
-    /// Polling interval for `get_block` method.
-    ///
-    /// Default: 1 second.
-    #[serde(with = "serde_helpers::humantime")]
-    pub get_block_polling_interval: Duration,
-
     /// Timeout of `get_next_block` for the primary logic (get full block request).
     /// Ignored if no fallback.
     ///
@@ -54,15 +42,20 @@ pub struct BlockchainBlockProviderConfig {
     /// Default: 60 seconds.
     #[serde(with = "serde_helpers::humantime")]
     pub get_block_timeout: Duration,
+
+    /// Retry getting next block config.
+    pub retry_config: RetryConfig,
 }
 
 impl Default for BlockchainBlockProviderConfig {
     fn default() -> Self {
         Self {
-            get_next_block_polling_interval: Duration::from_secs(1),
-            get_block_polling_interval: Duration::from_secs(1),
             get_next_block_timeout: Duration::from_secs(120),
             get_block_timeout: Duration::from_secs(60),
+            retry_config: RetryConfig {
+                attempts: 10,
+                interval: Duration::from_secs(1),
+            },
         }
     }
 }
@@ -106,8 +99,7 @@ impl BlockchainBlockProvider {
         }
 
         let primary = || {
-            loop_with_timeout(
-                self.config.get_next_block_polling_interval,
+            request_with_timeout(
                 self.config.get_next_block_timeout,
                 self.fallback.is_some(),
                 || {
@@ -140,30 +132,30 @@ impl BlockchainBlockProvider {
             )
         };
 
-        loop {
-            // Primary
-            if !self.use_fallback.load(Ordering::Relaxed)
-                && let res @ Some(_) = primary().await
-            {
+        // Primary
+        if !self.use_fallback.load(Ordering::Relaxed)
+            && let res @ Some(_) = primary().await
+        {
+            return res;
+        }
+
+        // Fallback
+        if let Some(fallback) = &self.fallback {
+            tracing::debug!(%prev_block_id, "get_next_block_full fallback");
+            self.use_fallback.store(true, Ordering::Relaxed);
+            if let res @ Some(_) = fallback.get_next_block(prev_block_id).await {
                 return res;
             }
-
-            // Fallback
-            if let Some(fallback) = &self.fallback {
-                tracing::debug!(%prev_block_id, "get_next_block_full fallback");
-                self.use_fallback.store(true, Ordering::Relaxed);
-                if let res @ Some(_) = fallback.get_next_block(prev_block_id).await {
-                    return res;
-                }
-            }
-
-            // Reset fallback
-            self.use_fallback.store(false, Ordering::Relaxed);
-
-            // Schedule next cleanup
-            self.cleanup_fallback_at
-                .store(prev_block_id.seqno.saturating_add(1), Ordering::Release);
         }
+
+        // Reset fallback
+        self.use_fallback.store(false, Ordering::Relaxed);
+
+        // Schedule next cleanup
+        self.cleanup_fallback_at
+            .store(prev_block_id.seqno.saturating_add(1), Ordering::Release);
+
+        None
     }
 
     async fn get_block_impl(&self, block_id_relation: &BlockIdRelation) -> OptionalBlockStuff {
@@ -173,8 +165,7 @@ impl BlockchainBlockProvider {
         } = block_id_relation;
 
         let primary = || {
-            loop_with_timeout(
-                self.config.get_block_polling_interval,
+            request_with_timeout(
                 self.config.get_block_timeout,
                 self.fallback.is_some(),
                 || {
@@ -205,28 +196,28 @@ impl BlockchainBlockProvider {
             )
         };
 
-        loop {
-            // Primary
-            if !self.use_fallback.load(Ordering::Relaxed)
-                && let res @ Some(_) = primary().await
-            {
+        // Primary
+        if !self.use_fallback.load(Ordering::Relaxed)
+            && let res @ Some(_) = primary().await
+        {
+            return res;
+        }
+
+        // Fallback
+        if let Some(fallback) = &self.fallback {
+            tracing::debug!(%block_id, "get_block_full fallback");
+            self.use_fallback.store(true, Ordering::Relaxed);
+            if let res @ Some(_) = fallback.get_block(block_id_relation).await {
                 return res;
             }
-
-            // Fallback
-            if let Some(fallback) = &self.fallback {
-                tracing::debug!(%block_id, "get_block_full fallback");
-                self.use_fallback.store(true, Ordering::Relaxed);
-                if let res @ Some(_) = fallback.get_block(block_id_relation).await {
-                    return res;
-                }
-            }
-
-            // Reset fallback
-            self.use_fallback.store(false, Ordering::Relaxed);
-
-            // NOTE: Don't schedule next cleanup for fallback, get_next is enough for that.
         }
+
+        // Reset fallback
+        self.use_fallback.store(false, Ordering::Relaxed);
+
+        // NOTE: Don't schedule next cleanup for fallback, get_next is enough for that.
+
+        None
     }
 
     #[tracing::instrument(
@@ -353,8 +344,7 @@ impl Future for BlockchainBlockProviderCleanupFut<'_> {
     }
 }
 
-async fn loop_with_timeout<E, EFut, P, PFut, R, T>(
-    interval: Duration,
+async fn request_with_timeout<E, EFut, P, PFut, R, T>(
     timeout: Duration,
     use_timeout: bool,
     request: E,
@@ -366,28 +356,16 @@ where
     P: Fn(R) -> PFut,
     PFut: Future<Output = Option<T>>,
 {
-    // TODO: Backoff?
-    let mut interval = tokio::time::interval(interval);
-
     let mut timeout = pin!(if use_timeout {
         Either::Left(tokio::time::sleep(timeout))
     } else {
         Either::Right(futures_util::future::pending::<()>())
     });
 
-    loop {
-        tokio::select! {
-            res = request() => {
-                if let res @ Some(_) = process(res).await {
-                    return res;
-                }
-            },
-            _ = &mut timeout => return None,
-        }
-
-        tokio::select! {
-            _ = interval.tick() => {},
-            _ = &mut timeout => return None,
-        }
+    tokio::select! {
+        res = request() => {
+            process(res).await
+        },
+        _ = &mut timeout => None,
     }
 }
