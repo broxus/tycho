@@ -315,10 +315,15 @@ impl Node {
         let block_strider = base.build_strider(
             collator
                 .new_sync_point(CollatorSyncContext::Historical)
-                .chain(archive_block_provider)
+                .chain(archive_block_provider.clone())
                 .chain(collator.new_sync_point(CollatorSyncContext::Recent))
                 .chain((
-                    blockchain_block_provider,
+                    blockchain_block_provider
+                        .retry(self.base.base_config.blockchain_block_provider.retry_config)
+                        .cycle(
+                            archive_block_provider
+                                .retry(self.base.base_config.archive_block_provider.retry_config),
+                        ),
                     storage_block_provider,
                     collator_block_provider,
                 )),

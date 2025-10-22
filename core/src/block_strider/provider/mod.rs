@@ -556,7 +556,7 @@ pub struct RetryConfig {
     /// Default: 1.
     pub attempts: usize,
 
-    /// Polling interval for downloading archive.
+    /// Polling interval.
     ///
     /// Default: 1 second.
     #[serde(with = "serde_helpers::humantime")]
