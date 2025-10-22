@@ -84,7 +84,7 @@ impl CoreStorage {
         .await?;
         let block_storage = Arc::new(block_storage);
 
-        const SHARD_PARTITIONS_SPLIT_DEPTH: u8 = 2; // TODO: move to node config
+        const SHARD_PARTITIONS_SPLIT_DEPTH: u8 = 3; // TODO: move to node config
 
         let mut shards = vec![];
 
