@@ -25,6 +25,25 @@ impl PsSubscriber {
             inner: Arc::new(Inner {
                 last_key_block_utime: AtomicU32::new(last_key_block_utime),
                 storage,
+                completion_subscriber: None,
+            }),
+        }
+    }
+
+    pub fn with_completion_subscriber<S>(storage: CoreStorage, completion_subscriber: S) -> Self
+    where
+        S: PsCompletionSubscriber,
+    {
+        let last_key_block_utime = storage
+            .block_handle_storage()
+            .find_last_key_block()
+            .map_or(0, |handle| handle.gen_utime());
+
+        Self {
+            inner: Arc::new(Inner {
+                last_key_block_utime: AtomicU32::new(last_key_block_utime),
+                storage,
+                completion_subscriber: Some(Arc::new(completion_subscriber)),
             }),
         }
     }
@@ -62,6 +81,7 @@ impl StateSubscriber for PsSubscriber {
 struct Inner {
     last_key_block_utime: AtomicU32,
     storage: CoreStorage,
+    completion_subscriber: Option<Arc<dyn PsCompletionSubscriber>>,
 }
 
 impl Inner {
@@ -71,6 +91,8 @@ impl Inner {
         mc_state_handle: RefMcStateHandle,
     ) -> Result<()> {
         let block_handles = self.storage.block_handle_storage();
+
+        let mc_seqno = mc_block.id().seqno;
 
         let Some(mc_block_handle) = block_handles.load_handle(mc_block.id()) else {
             anyhow::bail!("masterchain block handle not found: {}", mc_block.id());
@@ -92,6 +114,10 @@ impl Inner {
             .persistent_state_storage()
             .rotate_persistent_states(&mc_block_handle)
             .await?;
+
+        if let Some(completion_subscriber) = &self.completion_subscriber {
+            completion_subscriber.on_state_persisted(mc_seqno);
+        }
 
         metrics::counter!("tycho_core_ps_subscriber_saved_persistent_states_count").increment(1);
 
@@ -177,4 +203,8 @@ impl Inner {
             .store_queue_state(mc_seqno, &mc_block_handle, mc_block)
             .await
     }
+}
+
+pub trait PsCompletionSubscriber: Send + Sync + 'static {
+    fn on_state_persisted(&self, mc_seqno: u32);
 }
