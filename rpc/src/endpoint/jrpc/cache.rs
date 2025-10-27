@@ -107,7 +107,7 @@ impl JrpcEndpointCache {
             }) {
                 Ok(value) => Some(Arc::new(value)),
                 Err(e) => {
-                    tracing::error!("failed to serialize blockchain config json: {e}");
+                    tracing::error!("failed to serialize blockchain config json: {e:?}");
                     None
                 }
             },
@@ -119,7 +119,7 @@ impl JrpcEndpointCache {
             match serde_json::value::to_raw_value(&LatestKeyBlockRef { block }) {
                 Ok(value) => Some(Arc::new(value)),
                 Err(e) => {
-                    tracing::error!("failed to serialize key block json: {e}");
+                    tracing::error!("failed to serialize key block json: {e:?}");
                     None
                 }
             },

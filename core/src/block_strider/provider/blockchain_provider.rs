@@ -133,7 +133,7 @@ impl BlockchainBlockProvider {
                             }
                             None => tracing::warn!(?prev_block_id, "block not found"),
                         },
-                        Err(e) => tracing::error!("failed to get next block: {e}"),
+                        Err(e) => tracing::error!("failed to get next block: {e:?}"),
                     }
                     None
                 },
@@ -198,7 +198,7 @@ impl BlockchainBlockProvider {
                             }
                             None => tracing::warn!(%block_id, "block not found"),
                         },
-                        Err(e) => tracing::error!("failed to get block: {e}"),
+                        Err(e) => tracing::error!("failed to get block: {e:?}"),
                     }
                     None
                 },
@@ -276,7 +276,7 @@ impl BlockchainBlockProvider {
                     .await
                 {
                     neighbour.punish(PunishReason::Malicious);
-                    tracing::error!("got invalid block proof: {e}");
+                    tracing::error!("got invalid block proof: {e:?}");
                     return None;
                 }
 
@@ -284,7 +284,7 @@ impl BlockchainBlockProvider {
             }
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
                 neighbour.punish(PunishReason::Malicious);
-                tracing::error!("failed to deserialize shard block or block proof: {e}");
+                tracing::error!("failed to deserialize shard block or block proof: {e:?}");
                 None
             }
         }

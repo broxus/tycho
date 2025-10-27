@@ -87,7 +87,7 @@ impl ArchiveBlockProvider {
             {
                 Ok(block) => return Some(Ok(block.clone())),
                 Err(e) => {
-                    tracing::error!(archive_key, %block_id, "invalid archive entry: {e}");
+                    tracing::error!(archive_key, %block_id, "invalid archive entry: {e:?}");
                     this.remove_archive_if_same(archive_key, &info);
                     info.from.punish(PunishReason::Malicious);
                 }
@@ -116,7 +116,7 @@ impl ArchiveBlockProvider {
             {
                 Ok(block) => return Some(Ok(block.clone())),
                 Err(e) => {
-                    tracing::error!(archive_key, %block_id, %mc_block_id, "invalid archive entry: {e}");
+                    tracing::error!(archive_key, %block_id, %mc_block_id, "invalid archive entry: {e:?}");
                     this.remove_archive_if_same(archive_key, &info);
                     info.from.punish(PunishReason::Malicious);
                 }
@@ -345,7 +345,7 @@ impl ArchiveDownloader {
                         break;
                     }
                     Err(e) => {
-                        tracing::error!(mc_seqno, "failed to preload archive {e}");
+                        tracing::error!(mc_seqno, "failed to preload archive {e:?}");
                         tokio::time::sleep(INTERVAL).await;
                     }
                 }
