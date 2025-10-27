@@ -2,6 +2,10 @@
 fun maxInt(): int
     asm "256 PUSHPOW2DEC"
 
+@pure
+fun getPreviousMcBlocks(): tuple
+    asm "PREVMCBLOKS"
+
 @inline_ref
 fun cell?.hashEq(self, expectedVsetHash: int): bool {
     if (self == null) {
