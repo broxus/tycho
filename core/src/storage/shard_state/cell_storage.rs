@@ -322,7 +322,6 @@ impl CellStorage {
         split_at: FastHashMap<HashBytes, SplitAccountEntry>,
         split_by_partitions: bool,
         capacity: usize,
-        part_tasks: Vec<impl FnOnce() -> Result<(), anyhow::Error> + Send>,
     ) -> Result<usize, CellStorageError> {
         type StoreResult = Result<(), CellStorageError>;
 
@@ -597,12 +596,7 @@ impl CellStorage {
             capacity,
         );
 
-        std::thread::scope(|scope| {
-            for task in part_tasks {
-                scope.spawn(task);
-            }
-            ctx.traverse_cell(root, scope)
-        })?;
+        std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
 
         Ok(ctx.finalize(batch))
     }
