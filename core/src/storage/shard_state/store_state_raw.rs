@@ -713,7 +713,6 @@ mod test {
                 Default::default(),
                 false,
                 MODIFY_COUNT * 3,
-                vec![|| Ok(())],
             )?;
 
             cell_keys.push(*cell_hash);

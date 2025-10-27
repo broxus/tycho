@@ -119,7 +119,7 @@ bitflags::bitflags! {
         const HAS_PROOF = 1 << 1;
         const HAS_QUEUE_DIFF = 1 << 2;
 
-        const HAS_STATE = 1 << 3;
+        const HAS_STATE_MAIN = 1 << 3;
         const HAS_PERSISTENT_SHARD_STATE = 1 << 4;
         const HAS_PERSISTENT_QUEUE_STATE = 1 << 5;
 
@@ -130,6 +130,8 @@ bitflags::bitflags! {
         const IS_COMMITTED = 1 << 10;
         const IS_KEY_BLOCK = 1 << 11;
         const IS_PERSISTENT = 1 << 12;
+
+        const HAS_STATE_PARTS = 1 << 13;
 
         const IS_REMOVED = 1 << 15;
 
