@@ -1086,7 +1086,10 @@ async fn transactions_gc(
         let gc_range = match find_closest_key_block_lt(&core_storage, target_utime).await {
             Ok(lt) => lt,
             Err(e) => {
-                tracing::error!(target_utime, "failed to find the closest key block lt: {e}");
+                tracing::error!(
+                    target_utime,
+                    "failed to find the closest key block lt: {e:?}"
+                );
                 continue;
             }
         };
@@ -1133,7 +1136,7 @@ pub async fn watch_blacklisted_accounts(config_path: PathBuf, accounts: Blacklis
         match BlackListConfig::load_from(&config_path) {
             Ok(config) => accounts.update(config.accounts),
             Err(e) => {
-                tracing::error!("failed to load blacklist config: {e}");
+                tracing::error!("failed to load blacklist config: {e:?}");
             }
         }
     }

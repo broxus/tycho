@@ -49,7 +49,7 @@ impl StateSubscriber for PsSubscriber {
                 let state_handle = cx.state.ref_mc_state_handle().clone();
                 tokio::spawn(async move {
                     if let Err(e) = inner.save_impl(block, state_handle).await {
-                        tracing::error!("failed to save persistent states: {e}");
+                        tracing::error!("failed to save persistent states: {e:?}");
                     }
                 });
             }

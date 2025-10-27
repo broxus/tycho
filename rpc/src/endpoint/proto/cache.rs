@@ -116,7 +116,7 @@ impl ProtoEndpointCache {
                 }),
             ))),
             Err(e) => {
-                tracing::error!("failed to serialize blockchain config proto: {e}");
+                tracing::error!("failed to serialize blockchain config proto: {e:?}");
                 None
             }
         });
@@ -130,7 +130,7 @@ impl ProtoEndpointCache {
                 },
             )))),
             Err(e) => {
-                tracing::error!("failed to serialize key block proto: {e}");
+                tracing::error!("failed to serialize key block proto: {e:?}");
                 None
             }
         });

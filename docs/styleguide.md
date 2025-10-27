@@ -85,6 +85,23 @@ Always specify the `target` explicitly. A good default value to use is the crate
 
 **Rationale:** This makes the events structured – one of the major value add propositions of the tracing ecosystem. Structured events allow for immediately actionable data without additional post-processing, especially when using some of the more advanced tracing subscribers. Of particular interest would be those that output events as JSON, or those that publish data to distributed event collection systems such as opentelemetry. Maintaining this rule will also usually result in faster execution (when logs at the relevant level are enabled.)
 
+### Error Formatting
+
+Always log errors with the `Debug` formatter (`{error:?}`) instead of the `Display` formatter (`{error}`) so that chained causes remain visible.
+
+```
+Display: while committing transaction 42
+
+vs
+
+Debug:   while committing transaction 42
+
+Caused by:
+ 0: CAS operation failed
+ 1: CAS manager I/O: disk full while writing segment 17
+ 2: disk full while writing segment 17
+```
+
 ### Spans
 
 Use the [spans](https://docs.rs/tracing/latest/tracing/#spans) to introduce context and grouping to and between events instead of manually adding such information as part of the events themselves. Most of the subscribers ingesting spans also provide a built-in timing facility, so prefer using spans for measuring the amount of time a section of code needs to execute.

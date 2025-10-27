@@ -917,7 +917,7 @@ async fn download_with_retries(
                 return Ok((h, res.data));
             }
             Err(e) => {
-                tracing::error!("failed to download {name}: {e}");
+                tracing::error!("failed to download {name}: {e:?}");
                 retries += 1;
                 if retries >= max_retries || !neighbour.is_reliable() {
                     return Err(e);

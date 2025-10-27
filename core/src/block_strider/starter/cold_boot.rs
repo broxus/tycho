@@ -614,13 +614,13 @@ impl StarterInner {
                         }
                         Err(e) => {
                             neighbour.punish(PunishReason::Malicious);
-                            tracing::error!("got invalid block proof: {e}");
+                            tracing::error!("got invalid block proof: {e:?}");
                         }
                     }
                 }
                 (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
                     neighbour.punish(PunishReason::Malicious);
-                    tracing::error!("failed to deserialize shard block or block proof: {e}");
+                    tracing::error!("failed to deserialize shard block or block proof: {e:?}");
                 }
             }
 
@@ -722,7 +722,7 @@ impl StarterInner {
             {
                 Ok(file) => file,
                 Err(e) => {
-                    tracing::error!(attempt, "failed to download persistent shard state: {e}");
+                    tracing::error!(attempt, "failed to download persistent shard state: {e:?}");
                     continue;
                 }
             };
@@ -809,7 +809,7 @@ impl StarterInner {
             {
                 Ok(file) => file,
                 Err(e) => {
-                    tracing::error!(attempt, "failed to download persistent queue state: {e}");
+                    tracing::error!(attempt, "failed to download persistent queue state: {e:?}");
                     continue;
                 }
             };
@@ -896,7 +896,7 @@ async fn download_block_proof_task(
                         return WithArchiveData::new(proof, data);
                     }
                     Err(e) => {
-                        tracing::error!(%block_id, "failed to deserialize block proof: {e}");
+                        tracing::error!(%block_id, "failed to deserialize block proof: {e:?}");
                         handle.reject();
                     }
                 }
