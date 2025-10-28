@@ -1,0 +1,30 @@
+[package]
+name = "tycho-rpc-subscriptions"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+dashmap = { workspace = true }
+smallvec = { workspace = true }
+tycho-types = { workspace = true }
+tycho-util = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+crossbeam-queue = { workspace = true }
+bytesize = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+alloc-metrics = { workspace = true }
+hdrhistogram = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+
+[lints]
+workspace = true
