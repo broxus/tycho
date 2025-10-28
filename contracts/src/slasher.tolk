@@ -27,17 +27,22 @@ fun onInternalMessage(in: InMessage) {
 
     match (op) {
         SLASHER_AGGREGATE_STATS_OP => {
-            val slasher = lazy Slasher.load();
+            var slasher = lazy Slasher.load();
             val validatorsToPunish = slasher.runVoteAggregation();
             slasher.clearVotes();
-            sendMessageBack(in.senderAddress, SLASHER_AGGREGATED_VALIDATORS_TAG, queryId, validatorsToPunish as slice);
+            sendMessageBack(
+                in.senderAddress,
+                SLASHER_AGGREGATED_VALIDATORS_TAG,
+                queryId,
+                validatorsToPunish.toCell().beginParse() //todo: fix?
+            );
         }
     }
 }
 
 fun onExternalMessage(inMsg: slice) {
     acceptExternalMessage();
-    val storage = lazy Slasher.load();
+    var storage = lazy Slasher.load();
     storage.processValidatorStatistics(inMsg);
 }
 
@@ -59,11 +64,22 @@ fun sendMessageBack(dest: address, answerTag: uint32, queryId: uint64, body: sli
 get fun getPunishedValidators(): tuple {
     val data = lazy Slasher.load();
     if (data.punishedValidators == null) {
-        return [];
+        return createEmptyList();
     }
 
+    var punishedValidators = createEmptyList();
     val punished = data.punishedValidators!.load();
-    return [punished.blockSeqno, punished.validators] as tuple;
+
+    var iterNext = -1;
+    do {
+        val (validatorId, votes, found) = data.votes.uDictGetNext(32, iterNext);
+        if (found) {
+            iterNext = validatorId!;
+            listPrepend(validatorId!, punishedValidators);
+        }
+    } while (found);
+
+    return [punished.blockSeqno, punishedValidators] as tuple;
 }
 
 get fun getCurrentVotes(): tuple {
@@ -79,5 +95,5 @@ get fun getCurrentVotes(): tuple {
         }
     } while (found);
 
-    votersList
+    return votersList;
 }
