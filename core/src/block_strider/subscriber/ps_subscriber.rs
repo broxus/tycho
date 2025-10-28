@@ -64,11 +64,21 @@ struct Inner {
     last_key_block_utime: AtomicU32,
     storage: CoreStorage,
     completion_subscriber: Option<Arc<dyn PsCompletionSubscriber>>,
-    prev_state_task: tokio::sync::Mutex<Option<JoinHandle<Result<()>>>>,
+    prev_state_task: tokio::sync::Mutex<Option<StorePersistentStateTask>>,
 }
 
 impl Inner {
     async fn handle_state_impl(self: &Arc<Self>, cx: &StateSubscriberContext) -> Result<()> {
+        // Check if the previous persistent state save task has finished.
+        // This allows us to detect errors early without waiting for the next key block
+        let mut prev_task = self.prev_state_task.lock().await;
+        if let Some(task) = &mut *prev_task
+            && task.is_finished()
+        {
+            task.join().await?;
+        }
+        drop(prev_task);
+
         if cx.is_key_block {
             let block_info = cx.block.load_info()?;
 
@@ -80,36 +90,19 @@ impl Inner {
             if is_persistent && cx.block.id().seqno != 0 {
                 let mut prev_task = self.prev_state_task.lock().await;
                 if let Some(task) = &mut *prev_task {
-                    task.await??;
-                }
-
-                if let Some(task) = &mut *prev_task {
-                    let result = task
-                        .await
-                        .map_err(|e| {
-                            if e.is_panic() {
-                                std::panic::resume_unwind(e.into_panic());
-                            }
-                            anyhow::Error::from(e)
-                        })
-                        .and_then(std::convert::identity);
-
-                    if let Err(e) = &result {
-                        tracing::error!(
-                            mc_seqno = cx.mc_block_id.seqno,
-                            "failed to save previous persistent state: {e:?}"
-                        );
-                    }
-
-                    result?;
+                    task.join().await?;
                 }
 
                 let block = cx.block.clone();
                 let inner = self.clone();
                 let state_handle = cx.state.ref_mc_state_handle().clone();
-                *prev_task = Some(tokio::spawn(async move {
-                    inner.save_impl(block, state_handle).await
-                }));
+
+                *prev_task = Some(StorePersistentStateTask {
+                    mc_seqno: cx.mc_block_id.seqno,
+                    handle: Some(tokio::spawn(async move {
+                        inner.save_impl(block, state_handle).await
+                    })),
+                });
             }
         }
 
@@ -233,6 +226,49 @@ impl Inner {
         persistent_states
             .store_queue_state(mc_seqno, &mc_block_handle, mc_block)
             .await
+    }
+}
+
+struct StorePersistentStateTask {
+    mc_seqno: u32,
+    handle: Option<JoinHandle<Result<()>>>,
+}
+
+impl StorePersistentStateTask {
+    async fn join(&mut self) -> Result<()> {
+        // NOTE: Await on reference to make sure that the task is cancel safe
+        if let Some(handle) = &mut self.handle {
+            let result = handle
+                .await
+                .map_err(|e| {
+                    if e.is_panic() {
+                        std::panic::resume_unwind(e.into_panic());
+                    }
+                    anyhow::Error::from(e)
+                })
+                .and_then(std::convert::identity);
+
+            self.handle = None;
+
+            if let Err(e) = &result {
+                tracing::error!(
+                    mc_seqno = self.mc_seqno,
+                    "failed to save persistent state: {e:?}"
+                );
+            }
+
+            return result;
+        }
+
+        Ok(())
+    }
+
+    fn is_finished(&self) -> bool {
+        if let Some(handle) = &self.handle {
+            return handle.is_finished();
+        }
+
+        false
     }
 }
 
