@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::Result;
+use futures_util::future::BoxFuture;
+use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::RefMcStateHandle;
 
@@ -16,16 +18,13 @@ pub struct PsSubscriber {
 
 impl PsSubscriber {
     pub fn new(storage: CoreStorage) -> Self {
-        let last_key_block_utime = storage
-            .block_handle_storage()
-            .find_last_key_block()
-            .map_or(0, |handle| handle.gen_utime());
-
+        let last_key_block_utime = Self::find_last_key_block_utime(&storage);
         Self {
             inner: Arc::new(Inner {
                 last_key_block_utime: AtomicU32::new(last_key_block_utime),
                 storage,
-                completion_subscriber: None,
+                completion_subscriber: Default::default(),
+                prev_state_task: Default::default(),
             }),
         }
     }
@@ -34,47 +33,30 @@ impl PsSubscriber {
     where
         S: PsCompletionSubscriber,
     {
-        let last_key_block_utime = storage
-            .block_handle_storage()
-            .find_last_key_block()
-            .map_or(0, |handle| handle.gen_utime());
-
+        let last_key_block_utime = Self::find_last_key_block_utime(&storage);
         Self {
             inner: Arc::new(Inner {
                 last_key_block_utime: AtomicU32::new(last_key_block_utime),
                 storage,
                 completion_subscriber: Some(Arc::new(completion_subscriber)),
+                prev_state_task: Default::default(),
             }),
         }
+    }
+
+    fn find_last_key_block_utime(storage: &CoreStorage) -> u32 {
+        storage
+            .block_handle_storage()
+            .find_last_key_block()
+            .map_or(0, |handle| handle.gen_utime())
     }
 }
 
 impl StateSubscriber for PsSubscriber {
-    type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
+    type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        if cx.is_key_block {
-            let block_info = cx.block.load_info().unwrap();
-
-            let prev_utime = self
-                .inner
-                .last_key_block_utime
-                .swap(block_info.gen_utime, Ordering::Relaxed);
-            let is_persistent = BlockStuff::compute_is_persistent(block_info.gen_utime, prev_utime);
-
-            if is_persistent && cx.block.id().seqno != 0 {
-                let block = cx.block.clone();
-                let inner = self.inner.clone();
-                let state_handle = cx.state.ref_mc_state_handle().clone();
-                tokio::spawn(async move {
-                    if let Err(e) = inner.save_impl(block, state_handle).await {
-                        tracing::error!("failed to save persistent states: {e:?}");
-                    }
-                });
-            }
-        }
-
-        futures_util::future::ready(Ok(()))
+        Box::pin(self.inner.handle_state_impl(cx))
     }
 }
 
@@ -82,9 +64,58 @@ struct Inner {
     last_key_block_utime: AtomicU32,
     storage: CoreStorage,
     completion_subscriber: Option<Arc<dyn PsCompletionSubscriber>>,
+    prev_state_task: tokio::sync::Mutex<Option<JoinHandle<Result<()>>>>,
 }
 
 impl Inner {
+    async fn handle_state_impl(self: &Arc<Self>, cx: &StateSubscriberContext) -> Result<()> {
+        if cx.is_key_block {
+            let block_info = cx.block.load_info()?;
+
+            let prev_utime = self
+                .last_key_block_utime
+                .swap(block_info.gen_utime, Ordering::Relaxed);
+            let is_persistent = BlockStuff::compute_is_persistent(block_info.gen_utime, prev_utime);
+
+            if is_persistent && cx.block.id().seqno != 0 {
+                let mut prev_task = self.prev_state_task.lock().await;
+                if let Some(task) = &mut *prev_task {
+                    task.await??;
+                }
+
+                if let Some(task) = &mut *prev_task {
+                    let result = task
+                        .await
+                        .map_err(|e| {
+                            if e.is_panic() {
+                                std::panic::resume_unwind(e.into_panic());
+                            }
+                            anyhow::Error::from(e)
+                        })
+                        .and_then(std::convert::identity);
+
+                    if let Err(e) = &result {
+                        tracing::error!(
+                            mc_seqno = cx.mc_block_id.seqno,
+                            "failed to save previous persistent state: {e:?}"
+                        );
+                    }
+
+                    result?;
+                }
+
+                let block = cx.block.clone();
+                let inner = self.clone();
+                let state_handle = cx.state.ref_mc_state_handle().clone();
+                *prev_task = Some(tokio::spawn(async move {
+                    inner.save_impl(block, state_handle).await
+                }));
+            }
+        }
+
+        Ok(())
+    }
+
     async fn save_impl(
         &self,
         mc_block: BlockStuff,
