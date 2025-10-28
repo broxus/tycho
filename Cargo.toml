@@ -26,11 +26,13 @@ members = [
     "util",
     "util-proc",
     "wu-tuner",
+    "rpc-subscriptions",
 ]
 
 [workspace.dependencies]
 # crates.io deps
 ahash = "0.8"
+alloc-metrics = "0.1.1"
 anyhow = "1.0.79"
 arc-swap = "1.6.0"
 async-trait = "0.1"
@@ -50,6 +52,7 @@ clap-markdown = "0.1.4"
 crc32c = "0.6"
 criterion = "0.7.0"
 crossbeam-deque = "0.8.6"
+crossbeam-queue = "0.3.12"
 dashmap = "6.1.0"
 dirs = "6.0.0"
 ed25519 = "2.0"
@@ -59,6 +62,7 @@ fdlimit = "0.3.0"
 futures-executor = "0.3"
 futures-util = "0.3"
 getip = "0.2.0"
+hdrhistogram = "7.5.4"
 hex = "0.4"
 humantime = "2"
 indexmap = "2.2"
@@ -84,6 +88,7 @@ quinn = { version = "0.11.9", default-features = false, features = [
 quote = "1.0"
 object_store = "0.12"
 rand = "0.9"
+rand_distr = "0.5"
 rand_pcg = { version = "0.9" }
 rayon = "1.10"
 reqwest = { version = "0.12", default-features = false }
@@ -137,6 +142,7 @@ tycho-crypto = { version = "0.4", features = ["tl-proto", "serde", "rand9"] }
 tycho-executor = "0.3.1"
 tycho-types = { version = "0.3.1", features = ["tycho", "stats"] }
 tycho-vm = "0.3.1"
+uuid = "1.18.1"
 walkdir = "2.5.0"
 weedb = "0.6.0"
 zstd-safe = "7.2"

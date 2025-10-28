@@ -45,6 +45,8 @@ tycho-util = { workspace = true }
 [dev-dependencies]
 tycho-network = { workspace = true }
 tycho-util = { workspace = true, features = ["test"] }
+tycho-storage = { workspace = true, features = ["test"] }
+tycho-core = { workspace = true, features = ["test"] }
 
 [features]
 default = ["http2"]
