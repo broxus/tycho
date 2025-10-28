@@ -11,16 +11,12 @@ license.workspace = true
 # crates.io deps
 anyhow = { workspace = true }
 clap = { workspace = true }
-rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing = { workspace = true }
 tycho-crypto = { workspace = true }
 tycho-types = { workspace = true, features = ["rand9"] }
-
-# local deps
-tycho-block-util = { workspace = true }
 tycho-core = { workspace = true }
 tycho-network = { workspace = true }
 tycho-rpc = { workspace = true }
