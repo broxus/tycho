@@ -1,5 +1,7 @@
 import "@stdlib/gas-payments"
 import "@stdlib/common"
+import "@stdlib/lisp-lists"
+import "@stdlib/tvm-dicts"
 
 import "slasher-base"
 import "interface/slasher"
@@ -25,8 +27,9 @@ fun onInternalMessage(in: InMessage) {
 
     match (op) {
         SLASHER_AGGREGATE_STATS_OP => {
-            val slasher = Slasher.load();
+            val slasher = lazy Slasher.load();
             val validatorsToPunish = slasher.runVoteAggregation();
+            slasher.clearVotes();
             sendMessageBack(in.senderAddress, SLASHER_AGGREGATED_VALIDATORS_TAG, queryId, validatorsToPunish as slice);
         }
     }
@@ -60,6 +63,21 @@ get fun getPunishedValidators(): tuple {
     }
 
     val punished = data.punishedValidators!.load();
-    return [punished.blockSeqno, punished.validators];
+    return [punished.blockSeqno, punished.validators] as tuple;
+}
 
+get fun getCurrentVotes(): tuple {
+    val data = lazy Slasher.load();
+
+    var votersList = createEmptyList();
+    var iterNext = -1;
+    do {
+        val (validatorId, votes, found) = data.votes.uDictGetNext(32, iterNext);
+        if (found) {
+            iterNext = validatorId!;
+            listPrepend([validatorId!, votes], votersList);
+        }
+    } while (found);
+
+    votersList
 }
