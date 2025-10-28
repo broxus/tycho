@@ -1,5 +1,7 @@
 import "@stdlib/common"
 import "@stdlib/tvm-dicts"
+import "@stdlib/lisp-lists"
+
 import "interface/slasher"
 
 import "lib/config-params"
@@ -19,7 +21,7 @@ struct Slasher {
 
 struct PunishedValidators {
     blockSeqno: uint32,
-    validators: tuple,
+    validators: dict,
 }
 
 struct SignedValidatorInfo {
@@ -42,10 +44,10 @@ fun Slasher.getCurrentMcBLock(): uint32 {
     val prevMcBlocks = getPreviousMcBlocks();
     val prevBlocks = prevMcBlocks.first() as tuple;
     val seqno = prevBlocks.get<uint32>(3);
-    seqno
+    return seqno;
 }
 
-fun Slasher.processValidatorStatistics(self, body: slice): int {
+fun Slasher.processValidatorStatistics(mutate self, body: slice): int {
     val validatorId = body.loadUint(32);
     val startBlockSeqno = body.loadUint(64);
     var validationMask = body.loadBits(BLOCKS_TO_TRACK);
@@ -78,11 +80,11 @@ fun Slasher.processValidatorStatistics(self, body: slice): int {
 
     }.toCell();
 
-    val validator = CurrentVset.getValidatorDescription(validatorId);
-    if (!validator) {
+    var validator = CurrentVset.getValidatorDescription(validatorId);
+    if (validator == null) {
         return SLASHER_UNKNOWN_VALIDATOR_ERROR;
     }
-    val description = ValidatorDescr.readFromSlice(validator!);
+    val description = ValidatorDescr.readFromSlice(mutate validator!);
 
     if (!isSliceSignatureValid(signedData.beginParse(), signature, description.pubkey)) {
         return SLASHER_INVALID_SIGNATURE_ERROR;
@@ -104,20 +106,23 @@ fun Slasher.processValidatorStatistics(self, body: slice): int {
         }
     }
 
-    val (votes, found) = self.votes.uDictGet(32, validatorId);
+    var (votes, found) = self.votes.uDictGet(32, validatorId);
     if (found && weight > 0) {
-        val total = votes as uint16 + weight;
-        self.votes.uDictSet(32, validatorId, total);
+        val prevVotes = votes!.loadUint(16);
+        val total = prevVotes + weight;
+        self.votes.uDictSet(32, validatorId, total.toCell().beginParse());
     }
 
     self.save();
+    return 0; //todo: code
 }
 
 
-fun Slasher.runVoteAggregation(self): tuple {
+fun Slasher.runVoteAggregation(mutate self): tuple {
     var iterNext = -1;
 
-    val punishedValidators = createEmptyTuple();
+    var punishedValidators = createEmptyDict();
+    var punishedValidatorsList = createEmptyList();
 
     do {
         var (validatorId, totalVotesCs, found) = self.votes.uDictGetNext(32, iterNext);
@@ -125,7 +130,8 @@ fun Slasher.runVoteAggregation(self): tuple {
             iterNext = validatorId!;
             var score = totalVotesCs!.loadUint(32);
             if (score > BLOCKS_TO_TRACK / 2) {
-                punishedValidators.push(validatorId);
+                punishedValidators.uDictSet(32, validatorId!, createEmptyCell().beginParse()); //todo: fix?
+                punishedValidatorsList.push(validatorId!);
             }
         }
     } while (found);
@@ -140,10 +146,10 @@ fun Slasher.runVoteAggregation(self): tuple {
     self.punishedValidators = pv.toCell();
     self.save();
 
-    return punishedValidators;
+    return punishedValidatorsList;
 }
 
-fun Slasher.clearVotes(self) {
+fun Slasher.clearVotes(mutate self) {
     self.votes = null;
     self.save();
 }
