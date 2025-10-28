@@ -142,3 +142,8 @@ fun Slasher.runVoteAggregation(self): tuple {
 
     return punishedValidators;
 }
+
+fun Slasher.clearVotes(self) {
+    self.votes = null;
+    self.save();
+}
