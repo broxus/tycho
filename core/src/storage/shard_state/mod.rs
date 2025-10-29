@@ -139,12 +139,29 @@ impl ShardStateStoragePartImpl {
         estimated_cell_count: usize,
         split_depth: u8,
     ) -> Result<usize> {
-        // TODO: check if subtree already stored
+        // check if subtree already stored
+        let check_if_subtree_already_stored = || {
+            let mut already_stored = false;
+            if let Some(value) = self.cells_db.shard_states.get(block_id.to_vec())? {
+                let existing_hash = HashBytes::from_slice(value.as_ref());
+                already_stored = *cell.repr_hash() == existing_hash;
+            }
+            Ok::<_, anyhow::Error>(already_stored)
+        };
 
-        let guard = {
+        if check_if_subtree_already_stored()? {
+            return Ok(0);
+        }
+
+        let _guard = {
             let _hist = HistogramGuard::begin("tycho_storage_cell_gc_lock_store_time_high");
             self.gc_lock.clone().blocking_lock_owned()
         };
+
+        // Double check if subtree already stored
+        if check_if_subtree_already_stored()? {
+            return Ok(0);
+        }
 
         let raw_db = self.cells_db.rocksdb().clone();
         let cf = self.cells_db.shard_states.get_unbounded_cf();
@@ -176,9 +193,6 @@ impl ShardStateStoragePartImpl {
         );
 
         Reclaimer::instance().drop(cell);
-
-        // NOTE: Ensure that GC lock is dropped only after storing the state.
-        drop(guard);
 
         Ok(new_cell_count)
     }
@@ -412,68 +426,90 @@ impl ShardStateStorage {
         let mut new_cell_count = 0;
         let mut updated = false;
         if !handle.has_state_main() {
-            // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
-            let raw_db = self.cells_db.rocksdb().clone();
-            let cf = self.cells_db.shard_states().get_unbounded_cf();
-            let cell_storage = self.cell_storage.clone();
+            let root_hash = *root_cell.repr_hash();
+
             let block_handle_storage = self.block_handle_storage.clone();
             let handle = handle.clone();
-            let gc_lock = gc_lock.take();
-            (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
-                let root_hash = *root_cell.repr_hash();
-                let estimated_merkle_update_size = hint.estimate_cell_count();
 
-                let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
-                let mut batch =
-                    rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
-
-                let in_mem_store =
-                    HistogramGuard::begin("tycho_storage_cell_in_mem_store_time_high");
-
-                let new_cell_count = if block_id.is_masterchain() {
-                    cell_storage.store_cell(
-                        &mut batch,
-                        root_cell.as_ref(),
-                        estimated_merkle_update_size,
-                    )?
-                } else {
-                    cell_storage.store_cell_mt(
-                        root_cell.as_ref(),
-                        &mut batch,
-                        split_at,
-                        uses_partitions,
-                        estimated_merkle_update_size,
-                    )?
-                };
-
-                in_mem_store.finish();
-
-                batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
-
-                let hist = HistogramGuard::begin("tycho_storage_state_update_time_high");
-                metrics::histogram!("tycho_storage_state_update_size_bytes")
-                    .record(batch.size_in_bytes() as f64);
-                metrics::histogram!("tycho_storage_state_update_size_predicted_bytes")
-                    .record(estimated_update_size_bytes as f64);
-
-                raw_db.write(batch)?;
-
-                Reclaimer::instance().drop(root_cell);
-
-                hist.finish();
-
+            let update_block_handle = move || {
                 // update block handle flags that main state stored
                 let updated = handle.meta().add_flags(BlockFlags::HAS_STATE_MAIN);
                 if updated {
                     block_handle_storage.store_handle(&handle, false);
                 }
+                updated
+            };
+
+            // check if state already stored
+            let mut already_stored = false;
+            if let Some(value) = self.cells_db.shard_states().get(block_id.to_vec())? {
+                let existing_hash = HashBytes::from_slice(value.as_ref());
+                already_stored = root_hash == existing_hash;
+            }
+
+            if already_stored {
+                // update block handle flags that main state stored
+                updated = update_block_handle();
 
                 // NOTE: Ensure that GC lock is dropped only after storing the state.
-                drop(gc_lock);
+                drop(gc_lock.take());
+            } else {
+                // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
+                let raw_db = self.cells_db.rocksdb().clone();
+                let cf = self.cells_db.shard_states().get_unbounded_cf();
+                let cell_storage = self.cell_storage.clone();
+                let gc_lock = gc_lock.take();
+                (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
+                    let estimated_merkle_update_size = hint.estimate_cell_count();
+                    let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
+                    let mut batch =
+                        rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
 
-                Ok::<_, anyhow::Error>((new_cell_count, updated))
-            })
-            .await??;
+                    let in_mem_store =
+                        HistogramGuard::begin("tycho_storage_cell_in_mem_store_time_high");
+
+                    let new_cell_count = if block_id.is_masterchain() {
+                        cell_storage.store_cell(
+                            &mut batch,
+                            root_cell.as_ref(),
+                            estimated_merkle_update_size,
+                        )?
+                    } else {
+                        cell_storage.store_cell_mt(
+                            root_cell.as_ref(),
+                            &mut batch,
+                            split_at,
+                            uses_partitions,
+                            estimated_merkle_update_size,
+                        )?
+                    };
+
+                    in_mem_store.finish();
+
+                    batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
+
+                    let hist = HistogramGuard::begin("tycho_storage_state_update_time_high");
+                    metrics::histogram!("tycho_storage_state_update_size_bytes")
+                        .record(batch.size_in_bytes() as f64);
+                    metrics::histogram!("tycho_storage_state_update_size_predicted_bytes")
+                        .record(estimated_update_size_bytes as f64);
+
+                    raw_db.write(batch)?;
+
+                    Reclaimer::instance().drop(root_cell);
+
+                    hist.finish();
+
+                    // update block handle flags that main state stored
+                    let updated = update_block_handle();
+
+                    // NOTE: Ensure that GC lock is dropped only after storing the state.
+                    drop(gc_lock);
+
+                    Ok::<_, anyhow::Error>((new_cell_count, updated))
+                })
+                .await??;
+            }
         }
 
         // wait for all store tasks in partitions
