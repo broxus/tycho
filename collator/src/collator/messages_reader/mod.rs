@@ -75,7 +75,7 @@ pub(super) struct MessagesReader<'a, V: InternalMessageValue> {
     new_messages: NewMessagesState<V>,
 
     externals_reader: ExternalsReader<'a>,
-    internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
+    internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsPartitionReader<'a, V>>,
 
     /// Cumulative queue stats
     internal_queue_statistics: Option<CumulativeStatistics>,
@@ -225,12 +225,18 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         let initial_reader_stage = MessagesReaderStage::ExistingAndExternals;
 
         // create internals readers by partitions
-        // let mut partition_reader_states = std::mem::take(&mut cx.reader_state.internals.partitions);
-        let mut partition_reader_states = &mut cx.reader_state.internals.partitions;
+        let partition_reader_states = &mut cx.reader_state.internals.partitions;
 
-        let par_reader_state = partition_reader_states
+        partition_reader_states
             .entry(MAIN_PARTITION_ID)
             .or_default();
+        partition_reader_states.entry(LP_PARTITION_ID).or_default();
+
+        let main_ptr = partition_reader_states.get_mut(&MAIN_PARTITION_ID).unwrap() as *mut _;
+        let lp_ptr = partition_reader_states.get_mut(&LP_PARTITION_ID).unwrap() as *mut _;
+
+        let main_state = unsafe { &mut *main_ptr };
+        let lp_state = unsafe { &mut *lp_ptr };
 
         let mut remaning_msg_stats = None;
         if let Some(internal_queue_statistics) = res.internal_queue_statistics.as_mut() {
@@ -257,7 +263,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                 mc_state_gen_lt: cx.mc_state_gen_lt,
                 prev_state_gen_lt: cx.prev_state_gen_lt,
                 mc_top_shards_end_lts: cx.mc_top_shards_end_lts.clone(),
-                reader_state: par_reader_state,
+                reader_state: main_state,
                 remaning_msg_stats,
             },
             mq_adapter.clone(),
@@ -268,8 +274,6 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             .insert(MAIN_PARTITION_ID, initial_reader_stage);
 
         // low-priority partition 1
-
-        let par_reader_state = partition_reader_states.entry(LP_PARTITION_ID).or_default();
 
         let mut remaining_msg_stats = None;
         if let Some(internal_queue_statistics) = res.internal_queue_statistics.as_mut() {
@@ -296,7 +300,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                 mc_state_gen_lt: cx.mc_state_gen_lt,
                 prev_state_gen_lt: cx.prev_state_gen_lt,
                 mc_top_shards_end_lts: cx.mc_top_shards_end_lts,
-                reader_state: par_reader_state,
+                reader_state: lp_state,
                 remaning_msg_stats: remaining_msg_stats,
             },
             mq_adapter,
@@ -504,22 +508,22 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                 .internals_partition_readers
                 .get_mut(&MAIN_PARTITION_ID)
                 .unwrap();
-            if let Ok(last_int_range_reader) = par_reader.get_last_range_reader_mut()
-                && last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages
-            {
-                last_int_range_reader
-                    .reader_state
-                    .buffer
-                    .remove_messages_by_accounts(&moved_from_par_0_accounts);
-            }
+            // if let Ok(last_int_range_reader) = par_reader.get_last_range_reader_mut()
+            //     && last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages
+            // {
+            //     last_int_range_reader
+            //         .reader_state
+            //         .buffer
+            //         .remove_messages_by_accounts(&moved_from_par_0_accounts);
+            // }
         }
 
         // collect internals reader state
-        for (par_id, par_reader) in self.internals_partition_readers {
-            internals_reader_state
-                .partitions
-                .insert(par_id, par_reader.finalize(current_next_lt)?);
-        }
+        // for (par_id, par_reader) in self.internals_partition_readers {
+        //     internals_reader_state
+        //         .partitions
+        //         .insert(par_id, par_reader.finalize(current_next_lt)?);
+        // }
 
         // collect externals reader state
         // let FinalizedExternalsReader {
@@ -805,53 +809,54 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
     where
         F: FnMut() -> bool,
     {
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            internals_processed_offsets = ?DebugIter(self.internals_partition_readers
-                .iter()
-                .map(|(par_id, par_r)| {
-                    (
-                        par_id,
-                        par_r.get_last_range_reader()
-                            .map(|(_, r)| r.reader_state.processed_offset)
-                            .unwrap_or_default(),
-                    )
-                })),
-            externals_processed_offset = ?self.externals_reader.get_last_range_reader_offsets_by_partitions(),
-            "start: refill messages buffer and skip groups upto",
-        );
-
-        loop {
-            // stop refill when collation cancelled
-            if is_cancelled() {
-                return Ok(());
-            }
-
-            let msg_group = self.get_next_message_group(
-                GetNextMessageGroupMode::Refill,
-                0, // can pass 0 because new messages reader was not initialized in this case
-            )?;
-            if msg_group.is_none() {
-                // on restart from a new genesis we will not be able to refill buffer with externals
-                // so we stop refilling when there is no more groups in buffer
-                break;
-            }
-        }
-
-        // next time we should read next message group like we did not make refill before
-        // so we need to reset flags and states that control the read flow
-        self.reset_read_state();
-
-        for par_reader in self.internals_partition_readers.values() {
-            log_remaining_msgs_stats(
-                par_reader,
-                false,
-                "internals partition reader remaning_msgs_stats after refill",
-            );
-        }
-
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "finished: refill messages buffer and skip groups upto",
-        );
+        // !!!
+        // tracing::debug!(target: tracing_targets::COLLATOR,
+        //     internals_processed_offsets = ?DebugIter(self.internals_partition_readers
+        //         .iter()
+        //         .map(|(par_id, par_r)| {
+        //             (
+        //                 par_id,
+        //                 par_r.get_last_range_reader()
+        //                     .map(|(_, r)| r.reader_state.processed_offset)
+        //                     .unwrap_or_default(),
+        //             )
+        //         })),
+        //     externals_processed_offset = ?self.externals_reader.get_last_range_reader_offsets_by_partitions(),
+        //     "start: refill messages buffer and skip groups upto",
+        // );
+        //
+        // loop {
+        //     // stop refill when collation cancelled
+        //     if is_cancelled() {
+        //         return Ok(());
+        //     }
+        //
+        //     let msg_group = self.get_next_message_group(
+        //         GetNextMessageGroupMode::Refill,
+        //         0, // can pass 0 because new messages reader was not initialized in this case
+        //     )?;
+        //     if msg_group.is_none() {
+        //         // on restart from a new genesis we will not be able to refill buffer with externals
+        //         // so we stop refilling when there is no more groups in buffer
+        //         break;
+        //     }
+        // }
+        //
+        // // next time we should read next message group like we did not make refill before
+        // // so we need to reset flags and states that control the read flow
+        // self.reset_read_state();
+        //
+        // for par_reader in self.internals_partition_readers.values() {
+        //     log_remaining_msgs_stats(
+        //         par_reader,
+        //         false,
+        //         "internals partition reader remaning_msgs_stats after refill",
+        //     );
+        // }
+        //
+        // tracing::debug!(target: tracing_targets::COLLATOR,
+        //     "finished: refill messages buffer and skip groups upto",
+        // );
 
         Ok(())
     }
@@ -1482,16 +1487,16 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         if *par_reader_stage == MessagesReaderStage::ExistingAndExternals
             && par_reader.all_read_existing_messages_collected()
         {
-            // log only first time
-            if !all_internals_collected_before {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    partition_id = %par_reader.partition_id,
-                    int_processed_to = ?par_reader.reader_state().processed_to,
-                    int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
-                    last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
-                    "all read existing internals collected from partition",
-                );
-            }
+            // log only first time !!!
+            // if !all_internals_collected_before {
+            //     tracing::debug!(target: tracing_targets::COLLATOR,
+            //         partition_id = %par_reader.partition_id,
+            //         int_processed_to = ?par_reader.reader_state().processed_to,
+            //         int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
+            //         last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
+            //         "all read existing internals collected from partition",
+            //     );
+            // }
 
             if read_mode != GetNextMessageGroupMode::Refill {
                 // switch to the "collect only already read externals" stage
@@ -1571,15 +1576,16 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             }
 
             // log only first time
-            if !all_internals_collected_before {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    partition_id = %par_reader.partition_id,
-                    int_processed_to = ?par_reader.reader_state().processed_to,
-                    int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
-                    last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
-                    "all new internals collected from partition",
-                );
-            }
+            // !!!
+            // if !all_internals_collected_before {
+            //     tracing::debug!(target: tracing_targets::COLLATOR,
+            //         partition_id = %par_reader.partition_id,
+            //         int_processed_to = ?par_reader.reader_state().processed_to,
+            //         int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
+            //         last_range_reader_state = ?par_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugInternalsRangeReaderState(&r.reader_state))),
+            //         "all new internals collected from partition",
+            //     );
+            // }
         }
 
         Ok(res)
