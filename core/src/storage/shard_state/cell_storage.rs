@@ -404,13 +404,9 @@ impl CellStorage {
                     for child in &mut *iter {
                         let child_hash = child.repr_hash();
                         if self.split_at.contains_key(child_hash) {
-                            // if subtree should be stored in partition
-                            // then store its root cell in main db as well
-                            // but do not store children
+                            // skip if subtree should be stored in partition
                             if self.split_by_partitions {
-                                self.insert_cell(child, &mut alloc, depth)?;
-
-                                continue;
+                                continue 'outer;
                             }
 
                             // skip cell to store it in parallel
@@ -423,8 +419,7 @@ impl CellStorage {
                                     drop(delayed_additions);
 
                                     // Spawn processing.
-                                    // TODO: Handle error properly.
-                                    scope.spawn(|| self.traverse_cell(child, scope).unwrap());
+                                    scope.spawn(|| self.traverse_cell(child, scope));
                                 }
                                 hash_map::Entry::Occupied(mut entry) => {
                                     // Other thread will add this subtree only once,
@@ -948,42 +943,39 @@ impl CellStorage {
 
                     for child_hash in iter.by_ref() {
                         let split_at_reached = self.split_at.contains(child_hash);
+                        if split_at_reached {
+                            if self.split_by_partitions {
+                                // do not try to remove subtree in parallel if split is by partitions
+                                // subtree will be removed from partition in a separate task
+                                continue 'outer;
+                            } else {
+                                // Skip cell to remove it later in parallel
+                                let mut delayed_removes = self.delayed_removes.lock().unwrap();
+                                match delayed_removes.entry(*child_hash) {
+                                    hash_map::Entry::Vacant(entry) => {
+                                        // This subtree will be removed by another thread,
+                                        // so no removes is needed on first occurrence.
+                                        entry.insert(0);
+                                        drop(delayed_removes);
 
-                        // do not try to remove subtree in parallel if split is by partitions
-                        if split_at_reached && !self.split_by_partitions {
-                            // Skip cell to remove it later in parallel
-                            let mut delayed_removes = self.delayed_removes.lock().unwrap();
-                            match delayed_removes.entry(*child_hash) {
-                                hash_map::Entry::Vacant(entry) => {
-                                    // This subtree will be removed by another thread,
-                                    // so no removes is needed on first occurrence.
-                                    entry.insert(0);
-                                    drop(delayed_removes);
+                                        // Spawn processing.
+                                        scope.spawn(|| self.traverse_cell(child_hash, scope));
+                                    }
+                                    hash_map::Entry::Occupied(mut entry) => {
+                                        // Other thread will remove this subtree only once,
+                                        // so we need to adjust references to keep them in sync.
+                                        *entry.get_mut() += 1;
+                                    }
+                                }
 
-                                    // Spawn processing.
-                                    // TODO: Handle error properly.
-                                    scope.spawn(|| {
-                                        self.traverse_cell(child_hash, scope).unwrap();
-                                    });
-                                }
-                                hash_map::Entry::Occupied(mut entry) => {
-                                    // Other thread will remove this subtree only once,
-                                    // so we need to adjust references to keep them in sync.
-                                    *entry.get_mut() += 1;
-                                }
+                                continue 'outer;
                             }
-
-                            continue 'outer;
                         }
 
                         // Process the current cell
-                        // even if it is a subtree root for partition
                         let refs = self.remove_cell(child_hash, &mut alloc)?;
 
-                        if let Some(refs) = refs
-                            // do not remove child cells if current is a subtree root for partition
-                            && !(split_at_reached && self.split_by_partitions)
-                        {
+                        if let Some(refs) = refs {
                             // And proceed to its refs if any.
                             stack.push(refs.iter());
                             continue 'outer;
