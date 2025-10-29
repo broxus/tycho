@@ -6,9 +6,10 @@ use futures_util::future::BoxFuture;
 use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::RefMcStateHandle;
+use tycho_types::models::BlockId;
 
 use crate::block_strider::{StateSubscriber, StateSubscriberContext};
-use crate::storage::{BlockHandle, CoreStorage};
+use crate::storage::{BlockHandle, CoreStorage, PersistentStateKind};
 
 /// Persistent state subscriber.
 #[derive(Clone)]
@@ -139,10 +140,6 @@ impl Inner {
             .rotate_persistent_states(&mc_block_handle)
             .await?;
 
-        if let Some(completion_subscriber) = &self.completion_subscriber {
-            completion_subscriber.on_state_persisted(mc_seqno);
-        }
-
         metrics::counter!("tycho_core_ps_subscriber_saved_persistent_states_count").increment(1);
 
         Ok(())
@@ -170,6 +167,10 @@ impl Inner {
             persistent_states
                 .store_shard_state(mc_seqno, &block_handle, mc_state_handle.clone())
                 .await?;
+
+            if let Some(completion_subscriber) = &self.completion_subscriber {
+                completion_subscriber.on_state_persisted(&block_id, PersistentStateKind::Shard);
+            }
         }
 
         // NOTE: We intentionally store the masterchain state last to ensure that
@@ -177,7 +178,14 @@ impl Inner {
         //       other nodes with the incomplete set of persistent states.
         persistent_states
             .store_shard_state(mc_seqno, &mc_block_handle, mc_state_handle)
-            .await
+            .await?;
+
+        if let Some(completion_subscriber) = &self.completion_subscriber {
+            completion_subscriber
+                .on_state_persisted(mc_block_handle.id(), PersistentStateKind::Shard);
+        }
+
+        Ok(())
     }
 
     async fn save_persistent_queue_states(
@@ -221,11 +229,23 @@ impl Inner {
             persistent_states
                 .store_queue_state(mc_seqno, &block_handle, block)
                 .await?;
+
+            if let Some(completion_subscriber) = &self.completion_subscriber {
+                completion_subscriber
+                    .on_state_persisted(&block_handle.id(), PersistentStateKind::Queue);
+            }
         }
 
         persistent_states
             .store_queue_state(mc_seqno, &mc_block_handle, mc_block)
-            .await
+            .await?;
+
+        if let Some(completion_subscriber) = &self.completion_subscriber {
+            completion_subscriber
+                .on_state_persisted(&mc_block_handle.id(), PersistentStateKind::Queue);
+        }
+
+        Ok(())
     }
 }
 
@@ -273,5 +293,5 @@ impl StorePersistentStateTask {
 }
 
 pub trait PsCompletionSubscriber: Send + Sync + 'static {
-    fn on_state_persisted(&self, mc_seqno: u32);
+    fn on_state_persisted(&self, block_id: &BlockId, kind: PersistentStateKind);
 }
