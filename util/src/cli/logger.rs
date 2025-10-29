@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::io::IsTerminal;
 use std::num::NonZeroUsize;
+use std::ops::Not;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::time::Duration;
@@ -23,8 +24,8 @@ impl LoggerTargets {
         crate::serde_helpers::load_json_from_file(path)
     }
 
-    pub fn build_subscriber(&self) -> tracing_subscriber::filter::EnvFilter {
-        let mut builder = tracing_subscriber::filter::EnvFilter::default();
+    pub fn build_subscriber(&self) -> EnvFilter {
+        let mut builder = EnvFilter::default();
         for item in &self.directives {
             builder = builder.add_directive(item.clone());
         }
@@ -76,9 +77,18 @@ pub struct LoggerConfig {
 impl Default for LoggerConfig {
     fn default() -> Self {
         Self {
-            outputs: vec![LoggerOutput::Stderr(LoggerStderrOutput)],
+            outputs: vec![LoggerOutput::Stderr(STDERR)],
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LogFormat {
+    #[default]
+    Auto,
+    Human,
+    Json,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,30 +110,50 @@ impl LoggerOutput {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggerStderrOutput;
+pub const STDERR: LoggerStderrOutput = LoggerStderrOutput {
+    format: LogFormat::Auto,
+};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct LoggerStderrOutput {
+    #[serde(default)]
+    pub format: LogFormat,
+}
 
 impl LoggerStderrOutput {
-    #[allow(clippy::unused_self)]
     pub fn as_layer<S>(&self) -> Box<dyn Layer<S> + Send + Sync + 'static>
     where
         S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
     {
-        if is_systemd_child() {
-            fmt::layer().without_time().with_ansi(false).boxed()
-        } else if !std::io::stdout().is_terminal() {
-            fmt::layer().with_ansi(false).boxed()
-        } else {
-            fmt::layer().boxed()
+        match self.format {
+            LogFormat::Human | LogFormat::Auto => human_layer(),
+            LogFormat::Json => tracing_stackdriver::layer()
+                .with_writer(std::io::stderr)
+                .boxed(),
         }
+    }
+}
+
+fn human_layer<S>() -> Box<dyn Layer<S> + Send + Sync + 'static>
+where
+    S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    if is_systemd_child() {
+        fmt::layer().without_time().with_ansi(false).boxed()
+    } else if !std::io::stdout().is_terminal() {
+        fmt::layer().with_ansi(false).boxed()
+    } else {
+        fmt::layer().boxed()
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggerFileOutput {
     pub dir: PathBuf,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "<&bool>::not")]
     pub human_readable: bool,
+    #[serde(default)]
+    pub format: Option<LogFormat>,
     #[serde(default = "log_file_prefix")]
     pub file_prefix: String,
     #[serde(default = "max_log_files")]
@@ -131,6 +161,16 @@ pub struct LoggerFileOutput {
 }
 
 impl LoggerFileOutput {
+    fn resolved_format(&self) -> LogFormat {
+        let format = self.format.unwrap_or_default();
+
+        match format {
+            LogFormat::Human => LogFormat::Human,
+            LogFormat::Auto if self.human_readable => LogFormat::Human,
+            LogFormat::Json | LogFormat::Auto => LogFormat::Json,
+        }
+    }
+
     pub fn as_layer<S>(&self) -> Result<Box<dyn Layer<S> + Send + Sync + 'static>>
     where
         S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
@@ -141,14 +181,15 @@ impl LoggerFileOutput {
             .max_log_files(self.max_files.get())
             .build(&self.dir)?;
 
-        Ok(if self.human_readable {
-            fmt::layer()
+        Ok(match self.resolved_format() {
+            LogFormat::Human => fmt::layer()
                 .without_time()
                 .with_ansi(false)
                 .with_writer(writer)
-                .boxed()
-        } else {
-            tracing_stackdriver::layer().with_writer(writer).boxed()
+                .boxed(),
+            LogFormat::Json | LogFormat::Auto => {
+                tracing_stackdriver::layer().with_writer(writer).boxed()
+            }
         })
     }
 }
@@ -187,7 +228,7 @@ pub fn init_logger_simple(default_filter: &str) {
 
     tracing_subscriber::registry()
         .with(EnvFilter::try_new(filter).expect("tracing directives"))
-        .with(LoggerStderrOutput.as_layer())
+        .with(STDERR.as_layer())
         .init();
 }
 
@@ -282,8 +323,7 @@ pub fn init_logger(config: &LoggerConfig, logger_targets: Option<PathBuf>) -> Re
                 }
 
                 tracing::info!("stopped watching for changes in logger config");
-            })
-            .unwrap();
+            })?;
     }
 
     Ok(())
@@ -302,4 +342,67 @@ pub fn set_abort_with_tracing() {
         #[allow(clippy::exit)]
         std::process::exit(1);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_stderr_default_format() {
+        let output: LoggerOutput = serde_json::from_str(r#"{ "type": "Stderr" }"#).unwrap();
+        match output {
+            LoggerOutput::Stderr(stderr) => assert_eq!(stderr.format, LogFormat::Auto),
+            LoggerOutput::File(_) => panic!("expected stderr output"),
+        }
+    }
+
+    #[test]
+    fn resolves_file_format_from_legacy() {
+        let output: LoggerOutput = serde_json::from_str(
+            r#"{
+                "type": "File",
+                "dir": "/var/log/tycho",
+                "human_readable": true
+            }"#,
+        )
+        .unwrap();
+        match output {
+            LoggerOutput::File(file) => assert_eq!(file.resolved_format(), LogFormat::Human),
+            LoggerOutput::Stderr(_) => panic!("expected file"),
+        }
+    }
+
+    #[test]
+    fn format_has_more_prio_than_human_readable() {
+        let output: LoggerOutput = serde_json::from_str(
+            r#"{
+                "type": "File",
+                "dir": "/var/log/tycho",
+                "human_readable": true,
+                "format": "json"
+            }"#,
+        )
+        .unwrap();
+        match output {
+            LoggerOutput::File(file) => assert_eq!(file.resolved_format(), LogFormat::Json),
+            LoggerOutput::Stderr(_) => panic!("expected file"),
+        }
+    }
+
+    #[test]
+    fn resolves_auto_to_boolean_default() {
+        let output: LoggerOutput = serde_json::from_str(
+            r#"{
+                "type": "File",
+                "dir": "/var/log/tycho",
+                "format": "auto"
+            }"#,
+        )
+        .unwrap();
+        match output {
+            LoggerOutput::File(file) => assert_eq!(file.resolved_format(), LogFormat::Json),
+            LoggerOutput::Stderr(_) => panic!("expected file"),
+        }
+    }
 }
