@@ -14,6 +14,7 @@ use tycho_util::io::ByteOrderRead;
 use tycho_util::progress_bar::*;
 use weedb::{BoundedCfHandle, rocksdb};
 
+use super::ShardStateEntry;
 use super::cell_storage::*;
 use super::entries_buffer::*;
 use crate::storage::db::{CellStorageDb, CellsDbOps};
@@ -213,15 +214,19 @@ impl StoreStateContext {
         ctx.clear_temp_cells(&self.cells_db)?;
 
         let shard_state_key = block_id.to_vec();
+        let entry = ShardStateEntry {
+            root_hash: HashBytes(*root_hash),
+            partitions: None,
+        };
         self.cells_db
             .shard_states()
-            .insert(&shard_state_key, root_hash)?;
+            .insert(&shard_state_key, entry.to_vec())?;
 
         pg.complete();
 
         // Load stored shard state
         match self.cells_db.shard_states().get(shard_state_key)? {
-            Some(root) => Ok(HashBytes::from_slice(&root[..32])),
+            Some(value) => Ok(ShardStateEntry::from_slice(value.as_ref()).root_hash),
             None => Err(StoreStateError::NotFound.into()),
         }
     }
@@ -621,7 +626,8 @@ mod test {
             let (_, value) = state?;
 
             // check that state actually exists
-            let cell = cell_storage.load_cell(&HashBytes::from_slice(value.as_ref()), 0)?;
+            let entry = ShardStateEntry::from_slice(value.as_ref());
+            let cell = cell_storage.load_cell(&entry.root_hash, 0)?;
 
             let (_, batch) = cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
