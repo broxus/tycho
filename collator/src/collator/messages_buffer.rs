@@ -139,7 +139,7 @@ impl MessagesBuffer {
         mut msg_filter: FM,
     ) -> FillMessageGroupResult
     where
-        FA: Fn(HashBytes) -> (bool, u64),
+        FA: Fn(&HashBytes) -> (bool, u64),
         FM: MessageFilter,
     {
         // evaluate ops count for wu calculation
