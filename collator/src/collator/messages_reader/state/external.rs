@@ -30,27 +30,27 @@ pub struct ExternalsReaderState {
     pub last_read_to_anchor_chain_time: Option<u64>,
 }
 
-// impl ExternalsReaderState {
-//     pub fn get_state_by_partition_mut<T: Into<QueuePartitionIdx>>(
-//         &mut self,
-//         par_id: T,
-//     ) -> anyhow::Result<&mut ExternalsReaderStateByPartition> {
-//         let par_id = par_id.into();
-//         self.by_partitions
-//             .get_mut(&par_id)
-//             .with_context(|| format!("externals reader state not exists for partition {par_id}"))
-//     }
-//
-//     pub fn get_state_by_partition<T: Into<QueuePartitionIdx>>(
-//         &self,
-//         par_id: T,
-//     ) -> anyhow::Result<&ExternalsReaderStateByPartition> {
-//         let par_id = par_id.into();
-//         self.by_partitions
-//             .get(&par_id)
-//             .with_context(|| format!("externals reader state not exists for partition {par_id}"))
-//     }
-// }
+impl ExternalsReaderState {
+    pub fn get_state_by_partition_mut<T: Into<QueuePartitionIdx>>(
+        &mut self,
+        par_id: T,
+    ) -> anyhow::Result<&mut ExternalsPartitionReaderState> {
+        let par_id = par_id.into();
+        self.by_partitions
+            .get_mut(&par_id)
+            .with_context(|| format!("externals reader state not exists for partition {par_id}"))
+    }
+
+    pub fn get_state_by_partition<T: Into<QueuePartitionIdx>>(
+        &self,
+        par_id: T,
+    ) -> anyhow::Result<&ExternalsPartitionReaderState> {
+        let par_id = par_id.into();
+        self.by_partitions
+            .get(&par_id)
+            .with_context(|| format!("externals reader state not exists for partition {par_id}"))
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct ExternalsPartitionReaderState {
