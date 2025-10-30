@@ -16,7 +16,6 @@ const BLOCKS_TO_TRACK: uint8 = 100;
 struct Slasher {
     votes: dict;
     punishedValidators: Cell<PunishedValidators>?;
-
 }
 
 struct PunishedValidators {
@@ -33,7 +32,7 @@ struct SignedValidatorInfo {
 
 
 fun Slasher.load(): Slasher {
-    return Slasher.fromCell(contract.getData())
+    return Slasher.fromCell(contract.getData());
 }
 
 fun Slasher.save(self) {
@@ -42,6 +41,7 @@ fun Slasher.save(self) {
 
 fun Slasher.getCurrentMcBLock(): uint32 {
     val prevMcBlocks = getPreviousMcBlocks();
+    debug.print(prevMcBlocks);
     val prevBlocks = prevMcBlocks.first() as tuple;
     val seqno = prevBlocks.get<uint32>(3);
     return seqno;
@@ -54,6 +54,8 @@ fun Slasher.processValidatorStatistics(mutate self, body: slice): int {
     var validatorSignatureInfo = body.loadBits(BLOCKS_TO_TRACK * 2);
 
     val currentBlockSeqno = Slasher.getCurrentMcBLock();
+
+    debug.print(currentBlockSeqno);
 
 
     if (startBlockSeqno + BLOCKS_TO_TRACK > currentBlockSeqno) {
@@ -110,7 +112,8 @@ fun Slasher.processValidatorStatistics(mutate self, body: slice): int {
     if (found && weight > 0) {
         val prevVotes = votes!.loadUint(16);
         val total = prevVotes + weight;
-        self.votes.uDictSet(32, validatorId, total.toCell().beginParse());
+        val slice = beginCell().storeInt(total, 32).endCell().beginParse();
+        self.votes.uDictSet(32, validatorId, slice);
     }
 
     self.save();
@@ -118,7 +121,7 @@ fun Slasher.processValidatorStatistics(mutate self, body: slice): int {
 }
 
 
-fun Slasher.runVoteAggregation(mutate self): tuple {
+fun Slasher.runVoteAggregation(mutate self): cell {
     var iterNext = -1;
 
     var punishedValidators = createEmptyDict();
@@ -130,7 +133,7 @@ fun Slasher.runVoteAggregation(mutate self): tuple {
             iterNext = validatorId!;
             var score = totalVotesCs!.loadUint(32);
             if (score > BLOCKS_TO_TRACK / 2) {
-                punishedValidators.uDictSet(32, validatorId!, createEmptyCell().beginParse()); //todo: fix?
+                punishedValidators.uDictSet(32, validatorId!, createEmptySlice()); //todo: fix?
                 punishedValidatorsList.push(validatorId!);
             }
         }
@@ -146,7 +149,7 @@ fun Slasher.runVoteAggregation(mutate self): tuple {
     self.punishedValidators = pv.toCell();
     self.save();
 
-    return punishedValidatorsList;
+    return self.punishedValidators
 }
 
 fun Slasher.clearVotes(mutate self) {
