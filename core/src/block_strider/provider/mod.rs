@@ -106,11 +106,7 @@ impl<B: BlockProvider> BlockProviderExt for B {
     }
 
     fn cycle<T: BlockProvider>(self, other: T) -> CycleBlockProvider<Self, T> {
-        CycleBlockProvider {
-            left: self,
-            right: other,
-            is_right: AtomicBool::new(false),
-        }
+        CycleBlockProvider::new(self, other)
     }
 
     fn retry(self, config: RetryConfig) -> RetryBlockProvider<Self> {
@@ -228,6 +224,39 @@ pub struct CycleBlockProvider<T1, T2> {
     left: T1,
     right: T2,
     is_right: AtomicBool,
+    switch_at: AtomicU32,
+}
+
+impl<T1, T2> CycleBlockProvider<T1, T2> {
+    pub fn new(left: T1, right: T2) -> Self {
+        Self {
+            left,
+            right,
+            is_right: AtomicBool::new(false),
+            switch_at: AtomicU32::new(u32::MAX),
+        }
+    }
+
+    /// Determine which provider to use based on the current state and scheduled switch.
+    ///
+    /// This method implements the next logic:
+    /// - If a switch is scheduled (`switch_at` != `u32::MAX`) and the seqno has been reached,
+    ///   returns the NEW provider even though `is_right` hasn't been updated yet
+    /// - Otherwise returns the current provider
+    ///
+    /// This ensures that:
+    /// - Shard blocks are fetched from the same provider as their master block
+    /// - Parallel processing of master blocks use the correct provider during the switching transition
+    fn choose_provider(&self, mc_seqno: u32) -> bool {
+        let is_right = self.is_right.load(Ordering::Acquire);
+        let switch_at = self.switch_at.load(Ordering::Acquire);
+
+        if switch_at != u32::MAX && switch_at <= mc_seqno {
+            !is_right
+        } else {
+            is_right
+        }
+    }
 }
 
 impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<T1, T2> {
@@ -236,8 +265,8 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<
     type CleanupFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        Box::pin(async {
-            let is_right = self.is_right.load(Ordering::Acquire);
+        Box::pin(async move {
+            let is_right = self.choose_provider(prev_block_id.seqno);
 
             let res = if !is_right {
                 self.left.get_next_block(prev_block_id).await
@@ -249,8 +278,11 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<
                 return res;
             }
 
+            // Schedule switch but dont switch immediately
+            self.switch_at
+                .store(prev_block_id.seqno.saturating_add(1), Ordering::Release);
+
             let is_right = !is_right;
-            self.is_right.store(is_right, Ordering::Release);
 
             if !is_right {
                 self.left.get_next_block(prev_block_id).await
@@ -261,7 +293,9 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
-        if self.is_right.load(Ordering::Acquire) {
+        let is_right = self.choose_provider(block_id_relation.mc_block_id.seqno);
+
+        if is_right {
             Box::pin(self.right.get_block(block_id_relation))
         } else {
             Box::pin(self.left.get_block(block_id_relation))
@@ -270,6 +304,15 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<
 
     fn cleanup_until(&self, mc_seqno: u32) -> Self::CleanupFut<'_> {
         Box::pin(async move {
+            let switch_at = self.switch_at.load(Ordering::Acquire);
+            if switch_at <= mc_seqno {
+                let is_right = !self.is_right.load(Ordering::Acquire);
+
+                // Commit the switch: update is_right and clear the schedule
+                self.is_right.store(is_right, Ordering::Release);
+                self.switch_at.store(u32::MAX, Ordering::Release);
+            }
+
             let cleanup_left = self.left.cleanup_until(mc_seqno);
             let cleanup_right = self.right.cleanup_until(mc_seqno);
             match futures_util::future::join(cleanup_left, cleanup_right).await {
@@ -556,7 +599,7 @@ pub struct RetryConfig {
     /// Default: 1.
     pub attempts: usize,
 
-    /// Polling interval for downloading archive.
+    /// Polling interval.
     ///
     /// Default: 1 second.
     #[serde(with = "serde_helpers::humantime")]
@@ -709,6 +752,11 @@ mod test {
             .unwrap()
             .unwrap();
 
+        cycle_provider
+            .cleanup_until(get_default_block_id().seqno + 1)
+            .await
+            .unwrap();
+
         assert!(cycle_provider.is_right.load(Ordering::Acquire));
 
         // Cycle switch
@@ -726,6 +774,12 @@ mod test {
             .await
             .unwrap()
             .unwrap();
+
+        cycle_provider
+            .cleanup_until(get_default_block_id().seqno + 1)
+            .await
+            .unwrap();
+
         assert!(!cycle_provider.is_right.load(Ordering::Acquire));
 
         cycle_provider
