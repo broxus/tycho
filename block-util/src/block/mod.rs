@@ -31,6 +31,18 @@ pub fn shard_ident_at_depth(workchain: i32, account: &HashBytes, depth: u8) -> S
     ShardIdent::new(workchain, (prefix & mask) | tag).expect("computed prefix should be valid")
 }
 
+pub struct DisplayShardPrefix<'a>(pub &'a u64);
+impl std::fmt::Display for DisplayShardPrefix<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("{:016x}", self.0))
+    }
+}
+impl std::fmt::Debug for DisplayShardPrefix<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
