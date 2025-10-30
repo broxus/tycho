@@ -31,7 +31,7 @@ mod cell_storage;
 mod entries_buffer;
 mod store_state_raw;
 
-pub type StoragePartsMap = FastHashMap<ShardIdent, Arc<dyn ShardStateStoragePart>>;
+pub type StoragePartsMap = FastHashMap<ShardPrefix, Arc<dyn ShardStateStoragePart>>;
 
 #[derive(Debug, Clone)]
 pub struct SplitAccountEntry {
@@ -412,7 +412,7 @@ impl ShardStateStorage {
 
                 for v in split_at.values() {
                     if let Some(shard) = &v.shard
-                        && let Some(storage_part) = storage_parts.get(shard)
+                        && let Some(storage_part) = storage_parts.get(&shard.prefix())
                     {
                         let storage_part = storage_part.clone();
                         part_store_tasks.push(tokio::spawn(storage_part.store_accounts_subtree(
@@ -1230,12 +1230,7 @@ fn init_shard_partitions_router(
     // build router map
     let split_at: FastHashMap<_, _> = partitions_info
         .into_iter()
-        .map(|p| {
-            (
-                p.hash,
-                ShardIdent::new(state_shard.workchain(), p.prefix).expect("should be correct"),
-            )
-        })
+        .map(|p| (p.hash, p.prefix))
         .collect();
 
     tracing::debug!(%state_shard, ?split_at);

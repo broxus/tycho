@@ -128,7 +128,7 @@ impl CoreStorage {
             cells_part_db.normalize_version()?;
             cells_part_db.apply_migrations().await?;
             storage_parts.insert(
-                shard,
+                shard.prefix(),
                 Arc::new(ShardStateStoragePartImpl::new(
                     shard,
                     cells_part_db,

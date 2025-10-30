@@ -772,11 +772,11 @@ impl CellStorage {
 
         // load cell from separate storage partition if required
         if self.part_shard.is_none()
-            && let Some(CellShardRouter::Shard { shard }) = &shard_router
+            && let Some(CellShardRouter::Shard { shard_prefix }) = &shard_router
             && let Some(storage_part) = self
                 .storage_parts
                 .as_ref()
-                .and_then(|parts| parts.get(shard))
+                .and_then(|parts| parts.get(shard_prefix))
                 .cloned()
         {
             let cell = storage_part
@@ -1251,24 +1251,32 @@ pub enum CellStorageError {
     Internal(#[from] rocksdb::Error),
 }
 
+pub type ShardPrefix = u64;
+pub type ShardStatePartitionsMap = FastHashMap<HashBytes, ShardPrefix>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CellShardRouter {
     /// Cell belongs to specified shard, stored in a separate partition
-    Shard { shard: ShardIdent },
+    Shard { shard_prefix: ShardPrefix },
     /// Defines that specified child is a root cell for shard accounts,
     /// defines roots in descending cells to split on shard partitions
-    ChildIsShardAccountsRoot(u8, Arc<FastHashMap<HashBytes, ShardIdent>>),
+    ChildIsShardAccountsRoot(u8, Arc<ShardStatePartitionsMap>),
     /// Cell belongs to shard accounts subtree,
     /// defines roots in descending cells to split on shard partitions
-    SplitOnPartitionsAt(Arc<FastHashMap<HashBytes, ShardIdent>>),
+    SplitOnPartitionsAt(Arc<ShardStatePartitionsMap>),
 }
 
 impl CellShardRouter {
     fn eq_by_inner_refs(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Shard { shard }, Self::Shard { shard: other_shard }) if shard == other_shard => {
-                true
-            }
+            (
+                Self::Shard {
+                    shard_prefix: shard,
+                },
+                Self::Shard {
+                    shard_prefix: other_shard,
+                },
+            ) if shard == other_shard => true,
             (
                 Self::ChildIsShardAccountsRoot(idx, map),
                 Self::ChildIsShardAccountsRoot(other_idx, other_map),
@@ -1432,9 +1440,9 @@ impl StorageCell {
         let child_shard_router = match &self.shard_router {
             Some(CellShardRouter::ChildIsShardAccountsRoot(idx, map)) => {
                 if *idx == index {
-                    if let Some(child_shard) = map.get(&child_hash) {
+                    if let Some(child_prefix) = map.get(&child_hash) {
                         Some(CellShardRouter::Shard {
-                            shard: *child_shard,
+                            shard_prefix: *child_prefix,
                         })
                     } else {
                         Some(CellShardRouter::SplitOnPartitionsAt(map.clone()))
@@ -1446,7 +1454,7 @@ impl StorageCell {
             Some(CellShardRouter::SplitOnPartitionsAt(map)) => {
                 if let Some(child_shard) = map.get(&child_hash) {
                     Some(CellShardRouter::Shard {
-                        shard: *child_shard,
+                        shard_prefix: *child_shard,
                     })
                 } else {
                     self.shard_router.clone()
