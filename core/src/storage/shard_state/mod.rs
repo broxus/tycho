@@ -873,7 +873,8 @@ impl RemoveOutdatedStatesContext {
     fn create_states_iterator_to_top_blocks(
         cells_db: &CellStorageDb,
         top_blocks: &TopBlocks,
-    ) -> impl Iterator<Item = Result<(BlockId, ShardStateEntry), weedb::rocksdb::Error>> {
+    ) -> impl Iterator<Item = Result<Option<(BlockId, ShardStateEntry)>, weedb::rocksdb::Error>>
+    {
         let raw = cells_db.rocksdb();
 
         // Manually get required column factory and r/w options
@@ -890,19 +891,22 @@ impl RemoveOutdatedStatesContext {
         );
         // skip zerostae and stae equal or above top blocks
 
-        // TODO: return None when top_blocks to be able to stop iterator
-        iter.flat_map(|item| match item {
+        // return None when top_blocks reached to be able to stop iterator
+        iter.map(|item| match item {
             Ok((key, value)) => {
                 let block_id = BlockId::from_slice(&key);
                 if block_id.seqno == 0
                     || top_blocks.contains_shard_seqno(&block_id.shard, block_id.seqno)
                 {
-                    None
+                    Ok(None)
                 } else {
-                    Some(Ok((block_id, ShardStateEntry::from_slice(value.as_ref()))))
+                    Ok(Some((
+                        block_id,
+                        ShardStateEntry::from_slice(value.as_ref()),
+                    )))
                 }
             }
-            Err(err) => Some(Err(err)),
+            Err(err) => Err(err),
         })
     }
 
@@ -1007,8 +1011,12 @@ impl RemoveOutdatedStatesContext {
         let mut alloc = bumpalo_herd::Herd::new();
 
         for item in iter {
+            let Some((block_id, entry)) = item? else {
+                break;
+            };
+
             let _hist = HistogramGuard::begin("tycho_storage_state_gc_time_high");
-            let (block_id, entry) = item?;
+
             let guard = self.acquire_gc_lock().await;
             let RemoveStateResult {
                 removed_cells,
