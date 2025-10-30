@@ -31,7 +31,7 @@ mod cell_storage;
 mod entries_buffer;
 mod store_state_raw;
 
-pub type StoragePartsMap = FastHashMap<ShardIdent, Arc<dyn ShardStateStoragePart>>;
+pub type StoragePartsMap = FastHashMap<ShardPrefix, Arc<dyn ShardStateStoragePart>>;
 
 #[derive(Debug, Clone)]
 pub struct SplitAccountEntry {
@@ -40,7 +40,7 @@ pub struct SplitAccountEntry {
 }
 
 pub trait ShardStateStoragePart: Send + Sync {
-    fn shard(&self) -> ShardIdent;
+    fn shard_prefix(&self) -> ShardPrefix;
     fn cell_storage(&self) -> &Arc<CellStorage>;
     fn store_accounts_subtree(
         self: Arc<Self>,
@@ -64,15 +64,15 @@ pub trait ShardStateStoragePart: Send + Sync {
 }
 
 pub struct ShardStateStoragePartImpl {
-    shard: ShardIdent,
+    shard_prefix: ShardPrefix,
     cells_db: CellsPartDb,
     cell_storage: Arc<CellStorage>,
     gc_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ShardStateStoragePart for ShardStateStoragePartImpl {
-    fn shard(&self) -> ShardIdent {
-        self.shard
+    fn shard_prefix(&self) -> ShardPrefix {
+        self.shard_prefix
     }
 
     fn cell_storage(&self) -> &Arc<CellStorage> {
@@ -118,15 +118,19 @@ impl ShardStateStoragePart for ShardStateStoragePartImpl {
 
 impl ShardStateStoragePartImpl {
     pub fn new(
-        shard: ShardIdent,
+        shard_prefix: ShardPrefix,
         cells_db: CellsPartDb,
         cache_size_bytes: ByteSize,
         drop_interval: u32,
     ) -> Self {
-        let cell_storage =
-            CellStorage::new_for_shard(cells_db.clone(), cache_size_bytes, drop_interval, shard);
+        let cell_storage = CellStorage::new_for_shard(
+            cells_db.clone(),
+            cache_size_bytes,
+            drop_interval,
+            shard_prefix,
+        );
         Self {
-            shard,
+            shard_prefix,
             cells_db,
             cell_storage,
             gc_lock: Default::default(),
@@ -190,7 +194,7 @@ impl ShardStateStoragePartImpl {
         raw_db.write(batch)?;
 
         tracing::debug!(
-            shard = %self.shard,
+            shard = %DisplayShardPrefix(&self.shard_prefix),
             %block_id,
             subtree_root_hash = %cell.repr_hash(),
             new_cell_count,
@@ -218,8 +222,14 @@ impl ShardStateStoragePartImpl {
         );
 
         cx.remove_outdated_states(&top_blocks, |removed_cells, block_id| {
-            tracing::debug!(removed_cells, %block_id, part_shard = %self.shard, "removed state in partition");
-        }).await?;
+            tracing::debug!(
+                removed_cells,
+                %block_id,
+                part_shard = %DisplayShardPrefix(&self.shard_prefix),
+                "removed state in partition",
+            );
+        })
+        .await?;
 
         metrics::counter!("tycho_storage_state_gc_cells_count").increment(cx.removed_cells as u64);
 
@@ -412,7 +422,7 @@ impl ShardStateStorage {
 
                 for v in split_at.values() {
                     if let Some(shard) = &v.shard
-                        && let Some(storage_part) = storage_parts.get(shard)
+                        && let Some(storage_part) = storage_parts.get(&shard.prefix())
                     {
                         let storage_part = storage_part.clone();
                         part_store_tasks.push(tokio::spawn(storage_part.store_accounts_subtree(
@@ -1229,12 +1239,7 @@ fn init_shard_partitions_router(
     // build router map
     let split_at: FastHashMap<_, _> = partitions_info
         .into_iter()
-        .map(|p| {
-            (
-                p.hash,
-                ShardIdent::new(state_shard.workchain(), p.prefix).expect("should be correct"),
-            )
-        })
+        .map(|p| (p.hash, p.prefix))
         .collect();
 
     tracing::debug!(%state_shard, ?split_at);

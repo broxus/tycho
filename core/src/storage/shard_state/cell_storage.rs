@@ -15,9 +15,9 @@ use bytesize::ByteSize;
 use dashmap::Map;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
+use tycho_block_util::block::DisplayShardPrefix;
 use tycho_storage::kv::refcount;
 use tycho_types::cell::*;
-use tycho_types::models::ShardIdent;
 use tycho_util::metrics::{HistogramGuard, spawn_metrics_loop};
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet, FastHasherState};
 use weedb::rocksdb::WriteBatch;
@@ -32,8 +32,8 @@ pub struct CellStorage {
     cells_cache: Arc<CellsIndex>,
     raw_cells_cache: Arc<RawCellsCache>,
     drop_interval: u32,
-    /// Contains the shard of the state partition when used in `ShardStateStoragePart`
-    part_shard: Option<ShardIdent>,
+    /// Contains the shard prefix of the state partition when used in `ShardStateStoragePart`
+    part_shard_prefix: Option<ShardPrefix>,
     /// State storage partitions
     storage_parts: Option<Arc<StoragePartsMap>>,
 }
@@ -65,13 +65,13 @@ impl CellStorage {
         cells_db: CellsPartDb,
         cache_size_bytes: ByteSize,
         drop_interval: u32,
-        part_shard: ShardIdent,
+        part_shard_prefix: ShardPrefix,
     ) -> Arc<Self> {
         Self::new_inner(
             CellStorageDb::Part(cells_db),
             cache_size_bytes,
             drop_interval,
-            Some(part_shard),
+            Some(part_shard_prefix),
             None,
         )
     }
@@ -80,7 +80,7 @@ impl CellStorage {
         cells_db: CellStorageDb,
         cache_size_bytes: ByteSize,
         drop_interval: u32,
-        part_shard: Option<ShardIdent>,
+        part_shard_prefix: Option<ShardPrefix>,
         storage_parts: Option<Arc<StoragePartsMap>>,
     ) -> Arc<Self> {
         let cells_cache = Default::default();
@@ -97,7 +97,7 @@ impl CellStorage {
             cells_cache,
             raw_cells_cache,
             drop_interval,
-            part_shard,
+            part_shard_prefix,
             storage_parts,
         })
     }
@@ -746,7 +746,7 @@ impl CellStorage {
             };
 
         tracing::trace!(
-            storage_shard = ?self.part_shard,
+            storage_shard = ?self.part_shard_prefix.as_ref().map(DisplayShardPrefix),
             %hash,
             load_router = ?shard_router,
             "try load cell",
@@ -761,7 +761,7 @@ impl CellStorage {
             && !need_replace_cell_in_cache(&cell.shard_router, &shard_router)
         {
             tracing::trace!(
-                storage_shard = ?self.part_shard,
+                storage_shard = ?self.part_shard_prefix.as_ref().map(DisplayShardPrefix),
                 %hash,
                 cell_shard_router = ?cell.shard_router,
                 load_router = ?shard_router,
@@ -771,12 +771,12 @@ impl CellStorage {
         }
 
         // load cell from separate storage partition if required
-        if self.part_shard.is_none()
-            && let Some(CellShardRouter::Shard { shard }) = &shard_router
+        if self.part_shard_prefix.is_none()
+            && let Some(CellShardRouter::Shard { shard_prefix }) = &shard_router
             && let Some(storage_part) = self
                 .storage_parts
                 .as_ref()
-                .and_then(|parts| parts.get(shard))
+                .and_then(|parts| parts.get(shard_prefix))
                 .cloned()
         {
             let cell = storage_part
@@ -842,7 +842,7 @@ impl CellStorage {
         };
 
         tracing::trace!(
-            storage_shard = ?self.part_shard,
+            storage_shard = ?self.part_shard_prefix.as_ref().map(DisplayShardPrefix),
             %hash,
             cell_shard_router = ?cell.shard_router,
             load_router = ?shard_router,
@@ -1251,24 +1251,32 @@ pub enum CellStorageError {
     Internal(#[from] rocksdb::Error),
 }
 
+pub type ShardPrefix = u64;
+pub type ShardStatePartitionsMap = FastHashMap<HashBytes, ShardPrefix>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CellShardRouter {
     /// Cell belongs to specified shard, stored in a separate partition
-    Shard { shard: ShardIdent },
+    Shard { shard_prefix: ShardPrefix },
     /// Defines that specified child is a root cell for shard accounts,
     /// defines roots in descending cells to split on shard partitions
-    ChildIsShardAccountsRoot(u8, Arc<FastHashMap<HashBytes, ShardIdent>>),
+    ChildIsShardAccountsRoot(u8, Arc<ShardStatePartitionsMap>),
     /// Cell belongs to shard accounts subtree,
     /// defines roots in descending cells to split on shard partitions
-    SplitOnPartitionsAt(Arc<FastHashMap<HashBytes, ShardIdent>>),
+    SplitOnPartitionsAt(Arc<ShardStatePartitionsMap>),
 }
 
 impl CellShardRouter {
     fn eq_by_inner_refs(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Shard { shard }, Self::Shard { shard: other_shard }) if shard == other_shard => {
-                true
-            }
+            (
+                Self::Shard {
+                    shard_prefix: shard,
+                },
+                Self::Shard {
+                    shard_prefix: other_shard,
+                },
+            ) if shard == other_shard => true,
             (
                 Self::ChildIsShardAccountsRoot(idx, map),
                 Self::ChildIsShardAccountsRoot(other_idx, other_map),
@@ -1432,9 +1440,9 @@ impl StorageCell {
         let child_shard_router = match &self.shard_router {
             Some(CellShardRouter::ChildIsShardAccountsRoot(idx, map)) => {
                 if *idx == index {
-                    if let Some(child_shard) = map.get(&child_hash) {
+                    if let Some(child_prefix) = map.get(&child_hash) {
                         Some(CellShardRouter::Shard {
-                            shard: *child_shard,
+                            shard_prefix: *child_prefix,
                         })
                     } else {
                         Some(CellShardRouter::SplitOnPartitionsAt(map.clone()))
@@ -1446,20 +1454,22 @@ impl StorageCell {
             Some(CellShardRouter::SplitOnPartitionsAt(map)) => {
                 if let Some(child_shard) = map.get(&child_hash) {
                     Some(CellShardRouter::Shard {
-                        shard: *child_shard,
+                        shard_prefix: *child_shard,
                     })
                 } else {
                     self.shard_router.clone()
                 }
             }
-            Some(CellShardRouter::Shard { .. }) if self.cell_storage.part_shard.is_none() => {
+            Some(CellShardRouter::Shard { .. })
+                if self.cell_storage.part_shard_prefix.is_none() =>
+            {
                 self.shard_router.clone()
             }
             Some(CellShardRouter::Shard { .. }) | None => None,
         };
 
         tracing::trace!(
-            storage_shard = ?self.cell_storage.part_shard,
+            storage_shard = ?self.cell_storage.part_shard_prefix.as_ref().map(DisplayShardPrefix),
             index,
             child_cell = %child_hash,
             ?child_shard_router,
