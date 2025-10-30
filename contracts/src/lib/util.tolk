@@ -4,7 +4,7 @@ fun maxInt(): int
 
 @pure
 fun getPreviousMcBlocks(): tuple
-    asm "PREVMCBLOKS"
+    asm "PREVMCBLOCKS"
 
 @inline_ref
 fun cell?.hashEq(self, expectedVsetHash: int): bool {

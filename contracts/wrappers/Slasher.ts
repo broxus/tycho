@@ -12,10 +12,10 @@ export type SlasherData = {
 
 export function loadSlasherData(cs: Slice): SlasherData {
     return {
-        votes: Dictionary.loadDirect(
+        votes: Dictionary.load(
             Dictionary.Keys.Int(32),
             Dictionary.Values.Int(32),
-            cs.loadRef()
+            cs
         ),
         punishedValidators: loadPunishedValidators(cs)
 
@@ -25,8 +25,12 @@ export function loadSlasherData(cs: Slice): SlasherData {
 export function storeSlasherData(src: SlasherData): (builder: Builder) => void {
     return (builder: Builder) =>
         builder
-            .storeRef(beginCell().storeDictDirect(src.votes).endCell())
-            .storeRef(beginCell().store(storePunishedValidators(src.punishedValidators)).endCell())
+            .storeDict(src.votes)
+            .storeMaybeRef(
+                src.punishedValidators != null
+                    ? beginCell().store(storePunishedValidators(src.punishedValidators))
+                    : null
+            )
 
 }
 
@@ -36,25 +40,31 @@ export type PunishedValidators = {
     punishedValidators: Dictionary<number, Cell>;
 }
 
-export function loadPunishedValidators(cs: Slice): PunishedValidators {
-
-    let mc_seqno = cs.loadInt(32);
-    let punishedValidators = cs.loadDict(Dictionary.Keys.Int(32), Dictionary.Values.Cell());
-    return {
-        mc_seqno,
-        punishedValidators
+export function loadPunishedValidators(cs: Slice): PunishedValidators | null {
+    if (cs.remainingBits === 0) {
+        return null;
     }
+
+    let ref = cs.loadMaybeRef();
+    if (ref != null) {
+        let mc_seqno = cs.loadInt(32);
+        let punishedValidators = cs.loadDict(Dictionary.Keys.Int(32), Dictionary.Values.Cell());
+        return {
+            mc_seqno,
+            punishedValidators
+        }
+    }
+
+    return null;
+
 }
 
-export function storePunishedValidators(pv: PunishedValidators | null): (builder: Builder) => void {
-    return (builder: Builder) => {
-        if (pv != null) {
-            builder
-                .storeUint(pv.mc_seqno, 32)
-                .storeRef(beginCell().storeDictDirect(pv.punishedValidators).endCell())
-        }
-        return builder;
-    }
+export function storePunishedValidators(pv: PunishedValidators): (builder: Builder) => void {
+    return (builder: Builder) =>
+        builder
+            .storeUint(pv.mc_seqno, 32)
+            .storeDict(pv.punishedValidators)
+
 }
 
 export class Slasher implements Contract {
@@ -74,4 +84,6 @@ export class Slasher implements Contract {
         assert(state.state.data != null);
         return loadSlasherData(Cell.fromBoc(state.state.data)[0].asSlice());
     }
+
+
 }

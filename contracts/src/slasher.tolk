@@ -1,7 +1,7 @@
-import "@stdlib/gas-payments"
 import "@stdlib/common"
 import "@stdlib/lisp-lists"
 import "@stdlib/tvm-dicts"
+import "@stdlib/gas-payments"
 
 import "slasher-base"
 import "interface/slasher"
@@ -34,7 +34,7 @@ fun onInternalMessage(in: InMessage) {
                 in.senderAddress,
                 SLASHER_AGGREGATED_VALIDATORS_TAG,
                 queryId,
-                validatorsToPunish.toCell().beginParse() //todo: fix?
+                validatorsToPunish.beginParse()
             );
         }
     }
