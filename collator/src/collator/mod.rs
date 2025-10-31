@@ -642,6 +642,7 @@ impl CollatorStdImpl {
 
         // update collation session info to refer to a correct subset in collated block
         self.collation_session = collation_session;
+
         let mut working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
 
@@ -666,8 +667,12 @@ impl CollatorStdImpl {
                     // get last store task
                     let last_task = self.store_new_state_tasks.pop().expect("shouldn't happen");
 
+                    let store_state_step = self.state_node_adapter.store_shard_state_step();
+
                     // if it is finished, then we can just reload prev state
-                    if last_task.store_new_state_task.is_finished() {
+                    if last_task.store_new_state_task.is_finished()
+                        && last_task.block_id.seqno.is_multiple_of(store_state_step)
+                    {
                         last_task.store_new_state_task.await?;
 
                         // and reload pure prev state in the working state
@@ -689,6 +694,12 @@ impl CollatorStdImpl {
                                 && unfinished_tasks.len() < self.config.merkle_chain_limit
                                 && !is_last
                             {
+                                unfinished_tasks.push(task);
+                                continue;
+                            }
+
+                            // Wait for the real task that persists state to the db
+                            if !task.block_id.seqno.is_multiple_of(store_state_step) && !is_last {
                                 unfinished_tasks.push(task);
                                 continue;
                             }
