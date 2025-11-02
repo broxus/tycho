@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use clap::Args;
 use tycho_core::block_strider::{
     BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt, ColdBootType,
-    FileZerostateProvider, GcSubscriber, MetricsSubscriber, PersistentBlockStriderState, Starter,
-    StarterConfig,
+    FileZerostateProvider, GcSubscriber, MetricsSubscriber, PersistentBlockStriderState,
+    PsCompletionHandler, Starter, StarterConfig,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener,
@@ -229,11 +229,12 @@ impl<C> Node<C> {
         &self,
         boot_type: ColdBootType,
         import_zerostate: Option<Vec<PathBuf>>,
+        completion_state_handler: Option<Box<dyn PsCompletionHandler>>,
     ) -> Result<BlockId> {
         self.wait_for_neighbours().await;
 
         let init_block_id = self
-            .boot(boot_type, import_zerostate)
+            .boot(boot_type, import_zerostate, completion_state_handler)
             .await
             .context("failed to init node")?;
 
@@ -258,17 +259,24 @@ impl<C> Node<C> {
         &self,
         boot_type: ColdBootType,
         zerostates: Option<Vec<PathBuf>>,
+        completion_state_handler: Option<Box<dyn PsCompletionHandler>>,
     ) -> Result<BlockId> {
         let node_state = self.storage.node_state();
 
         let last_mc_block_id = match node_state.load_last_mc_block_id() {
             Some(block_id) => block_id,
             None => {
-                Starter::builder()
+                let mut starter = Starter::builder()
                     .with_storage(self.storage.clone())
                     .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
                     .with_zerostate_id(self.zerostate)
-                    .with_config(self.starter_config.clone())
+                    .with_config(self.starter_config.clone());
+
+                if let Some(handler) = completion_state_handler {
+                    starter = starter.with_completion_state_handler(handler);
+                }
+
+                starter
                     .build()
                     .cold_boot(boot_type, zerostates.map(FileZerostateProvider))
                     .await?

@@ -18,8 +18,8 @@ use tycho_util::futures::JoinTask;
 use tycho_util::sync::rayon_run;
 use tycho_util::time::now_sec;
 
-use super::{ColdBootType, StarterInner, ZerostateProvider};
-use crate::block_strider::{CheckProof, ProofChecker};
+use super::{ColdBootType, PsCompletionHandler, StarterInner, ZerostateProvider};
+use crate::block_strider::{CheckProof, ProofChecker, PsCompletionContext};
 use crate::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
@@ -460,6 +460,15 @@ impl StarterInner {
             persistent_states
                 .store_shard_state(0, &handle, state.ref_mc_state_handle().clone())
                 .await?;
+
+            let cx = PsCompletionContext {
+                block_id: handle.id(),
+                storage: &self.storage,
+                kind: PersistentStateKind::Shard,
+            };
+            self.completion_state_handler
+                .on_state_persisted(&cx)
+                .await?;
         }
 
         tracing::info!("imported zerostates");
@@ -703,9 +712,16 @@ impl StarterInner {
                 } else {
                     StoreZeroStateFrom::State(state.clone())
                 };
-                if let Err(e) = try_save_persistent(handle, from).await {
-                    tracing::error!(%block_id, "failed to store persistent shard state: {e:?}");
-                }
+                try_save_persistent(handle, from).await?;
+
+                let cx = PsCompletionContext {
+                    block_id: handle.id(),
+                    kind: PersistentStateKind::Shard,
+                    storage: &self.storage,
+                };
+                self.completion_state_handler
+                    .on_state_persisted(&cx)
+                    .await?;
             }
 
             remove_state_file.await;
@@ -753,11 +769,22 @@ impl StarterInner {
             };
 
             let from = StoreZeroStateFrom::File(state_file);
-            try_save_persistent(&block_handle, from)
-                .await
-                .context("failed to store persistent shard state")?;
+            try_save_persistent(&block_handle, from).await?;
+
+            let cx = PsCompletionContext {
+                block_id: block_handle.id(),
+                kind: PersistentStateKind::Shard,
+                storage: &self.storage,
+            };
+            self.completion_state_handler
+                .on_state_persisted(&cx)
+                .await?;
 
             remove_state_file.await;
+
+            self.completion_state_handler
+                .on_state_persisted(&cx)
+                .await?;
 
             tracing::info!("using the downloaded shard state");
             return Ok((block_handle, state));
@@ -821,6 +848,15 @@ impl StarterInner {
             try_save_persistent(block_handle, state_file)
                 .await
                 .with_context(|| "failed to store persistent queue state")?;
+
+            let cx = PsCompletionContext {
+                block_id: block_handle.id(),
+                kind: PersistentStateKind::Queue,
+                storage: &self.storage,
+            };
+            self.completion_state_handler
+                .on_state_persisted(&cx)
+                .await?;
 
             remove_state_file.await;
 
