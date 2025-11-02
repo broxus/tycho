@@ -6,31 +6,36 @@ use futures_util::future::BoxFuture;
 use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::RefMcStateHandle;
-use tycho_types::models::BlockId;
 
-use crate::block_strider::{StateSubscriber, StateSubscriberContext};
+use crate::block_strider::subscriber::{PsCompletionContext, PsCompletionSubscriber};
+use crate::block_strider::{NoopSubscriber, StateSubscriber, StateSubscriberContext};
 use crate::storage::{BlockHandle, CoreStorage, PersistentStateKind};
 
 /// Persistent state subscriber.
 #[derive(Clone)]
-pub struct PsSubscriber {
-    inner: Arc<Inner>,
+pub struct PsSubscriber<S> {
+    inner: Arc<Inner<S>>,
 }
 
-impl PsSubscriber {
+impl PsSubscriber<NoopSubscriber> {
     pub fn new(storage: CoreStorage) -> Self {
         let last_key_block_utime = Self::find_last_key_block_utime(&storage);
         Self {
             inner: Arc::new(Inner {
                 last_key_block_utime: AtomicU32::new(last_key_block_utime),
                 storage,
-                completion_subscriber: Default::default(),
+                completion_subscriber: NoopSubscriber,
                 prev_state_task: Default::default(),
             }),
         }
     }
+}
 
-    pub fn with_completion_subscriber<S>(storage: CoreStorage, completion_subscriber: S) -> Self
+impl<S> PsSubscriber<S>
+where
+    S: PsCompletionSubscriber,
+{
+    pub fn with_completion_subscriber(storage: CoreStorage, completion_subscriber: S) -> Self
     where
         S: PsCompletionSubscriber,
     {
@@ -39,7 +44,7 @@ impl PsSubscriber {
             inner: Arc::new(Inner {
                 last_key_block_utime: AtomicU32::new(last_key_block_utime),
                 storage,
-                completion_subscriber: Some(Arc::new(completion_subscriber)),
+                completion_subscriber,
                 prev_state_task: Default::default(),
             }),
         }
@@ -53,7 +58,10 @@ impl PsSubscriber {
     }
 }
 
-impl StateSubscriber for PsSubscriber {
+impl<S> StateSubscriber for PsSubscriber<S>
+where
+    S: PsCompletionSubscriber,
+{
     type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
@@ -61,14 +69,17 @@ impl StateSubscriber for PsSubscriber {
     }
 }
 
-struct Inner {
+struct Inner<S> {
     last_key_block_utime: AtomicU32,
     storage: CoreStorage,
-    completion_subscriber: Option<Arc<dyn PsCompletionSubscriber>>,
+    completion_subscriber: S,
     prev_state_task: tokio::sync::Mutex<Option<StorePersistentStateTask>>,
 }
 
-impl Inner {
+impl<S> Inner<S>
+where
+    S: PsCompletionSubscriber,
+{
     async fn handle_state_impl(self: &Arc<Self>, cx: &StateSubscriberContext) -> Result<()> {
         // Check if the previous persistent state save task has finished.
         // This allows us to detect errors early without waiting for the next key block
@@ -116,8 +127,6 @@ impl Inner {
         mc_state_handle: RefMcStateHandle,
     ) -> Result<()> {
         let block_handles = self.storage.block_handle_storage();
-
-        let mc_seqno = mc_block.id().seqno;
 
         let Some(mc_block_handle) = block_handles.load_handle(mc_block.id()) else {
             anyhow::bail!("masterchain block handle not found: {}", mc_block.id());
@@ -168,9 +177,12 @@ impl Inner {
                 .store_shard_state(mc_seqno, &block_handle, mc_state_handle.clone())
                 .await?;
 
-            if let Some(completion_subscriber) = &self.completion_subscriber {
-                completion_subscriber.on_state_persisted(&block_id, PersistentStateKind::Shard);
-            }
+            let cx = PsCompletionContext {
+                block_id: &block_id,
+                storage: &self.storage,
+                kind: PersistentStateKind::Shard,
+            };
+            self.completion_subscriber.on_state_persisted(&cx).await?;
         }
 
         // NOTE: We intentionally store the masterchain state last to ensure that
@@ -180,10 +192,12 @@ impl Inner {
             .store_shard_state(mc_seqno, &mc_block_handle, mc_state_handle)
             .await?;
 
-        if let Some(completion_subscriber) = &self.completion_subscriber {
-            completion_subscriber
-                .on_state_persisted(mc_block_handle.id(), PersistentStateKind::Shard);
-        }
+        let cx = PsCompletionContext {
+            block_id: mc_block_handle.id(),
+            storage: &self.storage,
+            kind: PersistentStateKind::Shard,
+        };
+        self.completion_subscriber.on_state_persisted(&cx).await?;
 
         Ok(())
     }
@@ -230,20 +244,24 @@ impl Inner {
                 .store_queue_state(mc_seqno, &block_handle, block)
                 .await?;
 
-            if let Some(completion_subscriber) = &self.completion_subscriber {
-                completion_subscriber
-                    .on_state_persisted(&block_handle.id(), PersistentStateKind::Queue);
-            }
+            let cx = PsCompletionContext {
+                block_id: block_handle.id(),
+                storage: &self.storage,
+                kind: PersistentStateKind::Queue,
+            };
+            self.completion_subscriber.on_state_persisted(&cx).await?;
         }
 
         persistent_states
             .store_queue_state(mc_seqno, &mc_block_handle, mc_block)
             .await?;
 
-        if let Some(completion_subscriber) = &self.completion_subscriber {
-            completion_subscriber
-                .on_state_persisted(&mc_block_handle.id(), PersistentStateKind::Queue);
-        }
+        let cx = PsCompletionContext {
+            block_id: mc_block_handle.id(),
+            storage: &self.storage,
+            kind: PersistentStateKind::Queue,
+        };
+        self.completion_subscriber.on_state_persisted(&cx).await?;
 
         Ok(())
     }
@@ -290,8 +308,4 @@ impl StorePersistentStateTask {
 
         false
     }
-}
-
-pub trait PsCompletionSubscriber: Send + Sync + 'static {
-    fn on_state_persisted(&self, block_id: &BlockId, kind: PersistentStateKind);
 }

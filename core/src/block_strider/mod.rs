@@ -35,8 +35,8 @@ pub use self::subscriber::{
     ArchiveSubscriber, ArchiveSubscriberContext, ArchiveSubscriberExt, BlockSubscriber,
     BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, DelayedTasks,
     DelayedTasksJoinHandle, DelayedTasksSpawner, GcSubscriber, ManualGcTrigger, MetricsSubscriber,
-    NoopSubscriber, PsCompletionSubscriber, PsSubscriber, StateSubscriber, StateSubscriberContext,
-    StateSubscriberExt,
+    NoopSubscriber, PsCompletionContext, PsCompletionSubscriber, PsSubscriber, StateSubscriber,
+    StateSubscriberContext, StateSubscriberExt,
 };
 use crate::storage::CoreStorage;
 
