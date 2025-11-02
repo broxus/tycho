@@ -48,21 +48,21 @@ pub enum PersistentStateKind {
 }
 
 impl PersistentStateKind {
-    fn make_file_name(&self, block_id: &BlockId) -> PathBuf {
+    pub fn make_file_name(&self, block_id: &BlockId) -> PathBuf {
         match self {
             Self::Shard => ShardStateWriter::file_name(block_id),
             Self::Queue => QueueStateWriter::file_name(block_id),
         }
     }
 
-    fn make_temp_file_name(&self, block_id: &BlockId) -> PathBuf {
+    pub fn make_temp_file_name(&self, block_id: &BlockId) -> PathBuf {
         match self {
             Self::Shard => ShardStateWriter::temp_file_name(block_id),
             Self::Queue => QueueStateWriter::temp_file_name(block_id),
         }
     }
 
-    fn from_extension(extension: &str) -> Option<Self> {
+    pub fn from_extension(extension: &str) -> Option<Self> {
         match extension {
             ShardStateWriter::FILE_EXTENSION => Some(Self::Shard),
             QueueStateWriter::FILE_EXTENSION => Some(Self::Queue),
