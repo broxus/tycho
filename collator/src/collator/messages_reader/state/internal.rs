@@ -109,9 +109,11 @@ impl InternalsRangeReaderState {
             }
         }
     }
-}
 
-impl InternalsRangeReaderState {
+    pub fn is_fully_read(&self) -> bool {
+        self.shards.values().all(|s| s.is_fully_read())
+    }
+
     pub fn from_range_info(range_info: &InternalsRangeStuff, processed_to: &ProcessedTo) -> Self {
         let mut res = Self {
             buffer: Default::default(),
