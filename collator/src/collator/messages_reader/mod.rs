@@ -20,6 +20,9 @@ use super::types::{
     MsgsExecutionParamsStuff,
 };
 use crate::collator::messages_buffer::DebugMessageGroup;
+use crate::collator::messages_reader::internals_range_reader::{
+    InternalsRangeReader, InternalsRangeReaderKind,
+};
 use crate::collator::messages_reader::state::external::DebugExternalsRangeReaderState;
 use crate::collator::messages_reader::state::internal::{
     DebugInternalsRangeReaderState, InternalsReaderState,
@@ -39,6 +42,7 @@ mod internals_reader;
 mod new_messages;
 pub mod state;
 
+mod internals_range_reader;
 #[cfg(test)]
 #[path = "../tests/messages_reader_tests.rs"]
 pub(super) mod tests;
@@ -397,38 +401,18 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             || self.has_pending_externals_in_cache();
 
         // collect internals partition readers states
-        let mut internals_reader_state = InternalsReaderState::default();
-        for (_par_id, par_reader) in self.internals_partition_readers.iter_mut() {
+        for internals_reader in self.internals_partition_readers.values_mut() {
             // check pending internals in iterators
             if !has_unprocessed_messages {
-                has_unprocessed_messages = par_reader.check_has_pending_internals_in_iterators()?;
+                has_unprocessed_messages =
+                    internals_reader.check_has_pending_internals_in_iterators()?;
             }
 
             // TODO: we should consider all partitions for this logic
             //      otherwise if we drop processing offset only in one partition
             //      when messages from other partitions are not collected
             //      then it will cause incorrect messages refill after sync
-            // // handle last new messages range reader
-            // if let Ok((_, last_int_range_reader)) = par_reader.get_last_range_reader() {
-            //     if last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages {
-            //         // if skip offset in new messages reader and last externals range reader are same
-            //         // then we can drop processed offset both in internals and externals readers
-            //         let last_ext_range_reader = self
-            //             .externals_reader
-            //             .get_last_range_reader()?
-            //             .1
-            //             .reader_state()
-            //             .get_state_by_partition(*par_id)?;
-
-            //         if last_int_range_reader.reader_state.skip_offset
-            //             == last_ext_range_reader.skip_offset
-            //         {
-            //             par_reader.drop_processing_offset(true)?;
-            //             self.externals_reader
-            //                 .drop_processing_offset(*par_id, true)?;
-            //         }
-            //     }
-            // }
+            try_sync_processing_offsets(internals_reader, &mut self.externals_reader)?;
         }
 
         // build queue diff
@@ -504,26 +488,31 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             }
 
             // remove moved accounts from partition 0 buffer
-            let par_reader = self
+            let internals_reader = self
                 .internals_partition_readers
                 .get_mut(&MAIN_PARTITION_ID)
                 .unwrap();
-            // if let Ok(last_int_range_reader) = par_reader.get_last_range_reader_mut()
-            //     && last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages
-            // {
-            //     last_int_range_reader
-            //         .reader_state
-            //         .buffer
-            //         .remove_messages_by_accounts(&moved_from_par_0_accounts);
-            // }
+
+            if let Ok(last_int_range_reader) = internals_reader.get_last_range_reader_mut()
+                && last_int_range_reader.kind == InternalsRangeReaderKind::NewMessages
+            {
+                let seqno = last_int_range_reader.seqno;
+                let state = internals_reader.get_state_by_seqno_mut(seqno)?;
+                state
+                    .buffer
+                    .remove_messages_by_accounts(&moved_from_par_0_accounts);
+            }
         }
 
         // collect internals reader state
-        // for (par_id, par_reader) in self.internals_partition_readers {
-        //     internals_reader_state
-        //         .partitions
-        //         .insert(par_id, par_reader.finalize(current_next_lt)?);
-        // }
+        for internals_reader in self.internals_partition_readers.values_mut() {
+            internals_reader.finalize(current_next_lt)?;
+            // internals_reader_state
+            //     .partitions
+            //     .insert(par_id, );
+        }
+
+        self.externals_reader.finalize()?;
 
         // collect externals reader state
         // let FinalizedExternalsReader {
@@ -536,52 +525,52 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         // };
 
         // get current queue diff messages stats and merge with aggregated stats
-        // let queue_diff_msgs_stats = DiffStatistics::from_diff(
-        //     &queue_diff_with_msgs,
-        //     self.for_shard_id,
-        //     min_messages,
-        //     max_messages,
-        // );
-        //
-        // if let Some(internal_queue_statistics) = self.internal_queue_statistics.as_mut() {
-        //     tracing::trace!(target: tracing_targets::COLLATOR,
-        //         queue_diff_msgs_stats = ?DebugDiffStatistics(&queue_diff_msgs_stats)
-        //     );
-        //
-        //     // add new diff stats to cumulative stats
-        //     internal_queue_statistics.add_diff_stats(
-        //         self.for_shard_id,
-        //         *queue_diff_msgs_stats.max_message(),
-        //         queue_diff_msgs_stats,
-        //     );
-        //
-        //     log_cumulative_remaining_msgs_stats(
-        //         internal_queue_statistics,
-        //         "cumulative remaning_msgs_stats after add_diff_stats",
-        //     );
-        // }
-        //
-        // // let mut processed_upto = reader_state.get_updated_processed_upto();
-        //
-        // let current_msgs_exec_params = self.msgs_exec_params.current().clone();
-        //
-        // Self::msgs_exec_params_metrics(&current_msgs_exec_params)?;
-        //
-        // // processed_upto.msgs_exec_params = Some(current_msgs_exec_params);
-        //
+        let queue_diff_msgs_stats = DiffStatistics::from_diff(
+            &queue_diff_with_msgs,
+            self.for_shard_id,
+            min_messages,
+            max_messages,
+        );
+
+        if let Some(internal_queue_statistics) = self.internal_queue_statistics.as_mut() {
+            tracing::trace!(target: tracing_targets::COLLATOR,
+                queue_diff_msgs_stats = ?DebugDiffStatistics(&queue_diff_msgs_stats)
+            );
+
+            // add new diff stats to cumulative stats
+            internal_queue_statistics.add_diff_stats(
+                self.for_shard_id,
+                *queue_diff_msgs_stats.max_message(),
+                queue_diff_msgs_stats,
+            );
+
+            log_cumulative_remaining_msgs_stats(
+                internal_queue_statistics,
+                "cumulative remaning_msgs_stats after add_diff_stats",
+            );
+        }
+
+        // let mut processed_upto = reader_state.get_updated_processed_upto();
+
+        let current_msgs_exec_params = self.msgs_exec_params.current().clone();
+
+        Self::msgs_exec_params_metrics(&current_msgs_exec_params)?;
+
+        // processed_upto.msgs_exec_params = Some(current_msgs_exec_params);
+
         // reader_state.msgs_exec_params = Some(current_msgs_exec_params);
-        //
-        // // add updated cumulative stats
+
+        // add updated cumulative stats
         // reader_state.internals.cumulative_statistics = self.internal_queue_statistics;
-        //
-        // Ok(FinalizedMessagesReader {
-        //     has_unprocessed_messages,
-        //     reader_state,
-        //     processed_upto,
-        //     queue_diff_with_msgs,
-        // })
-        //
-        panic!("finalize not implemented");
+
+        Ok(FinalizedMessagesReader {
+            has_unprocessed_messages,
+            reader_state,
+            processed_upto,
+            queue_diff_with_msgs,
+        })
+
+        // panic!("finalize not implemented");
     }
 
     fn collect_internals_processed_to(&self) -> ProcessedToByPartitions {
@@ -1447,16 +1436,15 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             }
 
             // log only first time
-            // !!!
-            // if !all_read_externals_collected_before {
-            //     tracing::debug!(target: tracing_targets::COLLATOR,
-            //         has_pending_externals = externals_reader.has_pending_externals(),
-            //         ext_reader_states = ?externals_reader.reader_state().by_partitions,
-            //         last_range_reader_state = ?externals_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugExternalsRangeReaderState(r.reader_state()))),
-            //         "all read externals collected when collecting from partition_id={}",
-            //         par_reader.partition_id,
-            //     );
-            // }
+            if !all_read_externals_collected_before {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    has_pending_externals = externals_reader.has_pending_externals(),
+                    ext_reader_states = ?externals_reader.reader_state().by_partitions,
+                    // last_range_reader_state = ?externals_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugExternalsRangeReaderState(r.reader_state()))),
+                    "all read externals collected when collecting from partition_id={}",
+                    par_reader.partition_id,
+                );
+            }
         }
 
         let partition_id = par_reader.partition_id;
@@ -1544,8 +1532,8 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             if read_mode != GetNextMessageGroupMode::Refill {
                 // switch to the "new messages processing" stage
                 // if all existing messages read (last range reader was created in current block)
-                let (last_seqno, _) = par_reader.get_last_range_reader()?;
-                if last_seqno == &par_reader.block_seqno {
+                let &InternalsRangeReader { seqno, .. } = par_reader.get_last_range_reader()?;
+                if seqno == par_reader.block_seqno {
                     update_reader_stage(par_reader_stage, MessagesReaderStage::ExternalsAndNew);
                 } else {
                     // otherwise return to the reading of existing messages
@@ -1590,6 +1578,37 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
 
         Ok(res)
     }
+}
+
+fn try_sync_processing_offsets<V: InternalMessageValue>(
+    par_reader: &mut InternalsPartitionReader<V>,
+    externals_reader: &mut ExternalsReader<'_>,
+) -> Result<()> {
+    let last_int_range_reader = match par_reader.get_last_range_reader() {
+        Ok(reader) => reader,
+        Err(_) => return Ok(()),
+    };
+
+    let &InternalsRangeReader { seqno, kind, .. } = last_int_range_reader;
+
+    // if skip offset in new messages reader and last externals range reader are same
+    // then we can drop processed offset both in internals and externals readers
+    if kind != InternalsRangeReaderKind::NewMessages {
+        return Ok(());
+    }
+
+    let par_id = par_reader.partition_id;
+    let last_int_skip_offset = &par_reader.get_state_by_seqno(seqno)?.skip_offset;
+
+    let (_, last_ext_range_reader) = externals_reader.get_last_range_state()?;
+    let last_ext_partition_state = last_ext_range_reader.get_state_by_partition(par_id)?;
+
+    if *last_int_skip_offset == last_ext_partition_state.skip_offset {
+        par_reader.drop_processing_offset(true)?;
+        externals_reader.drop_processing_offset(par_id, true)?;
+    }
+
+    Ok(())
 }
 
 fn log_cumulative_remaining_msgs_stats(stats: &CumulativeStatistics, msg: &str) {

@@ -16,7 +16,7 @@ use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, FillMessageGroupResult, IncludeAllMessages,
     MessageGroup, MessagesBufferLimits, MsgFilter, SkipExpiredExternals,
 };
-use crate::collator::messages_reader::InternalsRangeReaderKind;
+use crate::collator::messages_reader::internals_range_reader::InternalsRangeReaderKind;
 use crate::collator::messages_reader::state::external::{
     DebugExternalsRangeReaderState, ExternalKey, ExternalsPartitionRangeReaderState,
     ExternalsPartitionReaderState, ExternalsRangeReaderState, ExternalsReaderRange,
@@ -85,32 +85,35 @@ impl<'a> ExternalsReader<'a> {
     }
 
     pub fn finalize(&mut self) -> Result<()> {
-        // let mut max_processed_offsets = BTreeMap::<QueuePartitionIdx, u32>::new();
-        // while let Some((seqno, mut range_reader)) = self.state.next() {
-        //     // update offset in the last range reader state for partition
-        //     // if current offset is greater than the maximum stored one among all ranges
-        //     for (par_id, par) in self.state_by_partitions.iter() {
-        //         let range_reader_state_by_partition = range_reader
-        //             .reader_state
-        //             .get_state_by_partition_mut(*par_id)?;
-        //         let max_processed_offset = max_processed_offsets
-        //             .entry(*par_id)
-        //             .and_modify(|max| {
-        //                 *max = range_reader_state_by_partition.processed_offset.max(*max);
-        //             })
-        //             .or_insert(range_reader_state_by_partition.processed_offset);
-        //
-        //         if par.curr_processed_offset > *max_processed_offset
-        //             && range_readers.peek().is_none()
-        //         {
-        //             range_reader_state_by_partition.processed_offset = par.curr_processed_offset;
-        //         }
-        //     }
+        let mut max_processed_offsets = BTreeMap::<QueuePartitionIdx, u32>::new();
 
-        // self.reader_state
-        //     .ranges
-        //     .insert(seqno, range_reader.reader_state);
-        // }
+        let seqnos: Vec<_> = self.state.ranges.keys().copied().collect();
+
+        let mut seqnos_iter = seqnos.into_iter().peekable();
+
+        while let Some(seqno) = seqnos_iter.next() {
+            let is_last = seqnos_iter.peek().is_none();
+
+            let range_state = self.state.ranges.get_mut(&seqno).unwrap();
+
+            // update offset in the last range reader state for partition
+            // if current offset is greater than the maximum stored one among all ranges
+            for (par_id, par) in self.state.by_partitions.iter() {
+                let range_reader_state_by_partition =
+                    range_state.get_state_by_partition_mut(*par_id)?;
+
+                let max_processed_offset = max_processed_offsets
+                    .entry(*par_id)
+                    .and_modify(|max| {
+                        *max = range_reader_state_by_partition.processed_offset.max(*max);
+                    })
+                    .or_insert(range_reader_state_by_partition.processed_offset);
+
+                if par.curr_processed_offset > *max_processed_offset && is_last {
+                    range_reader_state_by_partition.processed_offset = par.curr_processed_offset;
+                }
+            }
+        }
 
         Ok(())
     }
@@ -263,17 +266,6 @@ impl<'a> ExternalsReader<'a> {
         last_range_reader.range.from = last_range_reader.range.current_position;
         Ok(())
     }
-
-    // pub fn pop_first_range_reader(&mut self) -> Option<(BlockSeqno, ExternalsRangeReader)> {
-    //     self.range_readers.pop_first()
-    // }
-
-    // pub fn set_range_readers(
-    //     &mut self,
-    //     mut range_readers: BTreeMap<BlockSeqno, ExternalsRangeReader>,
-    // ) {
-    //     self.range_readers.append(&mut range_readers);
-    // }
 
     pub fn get_last_range_state(&self) -> Result<(&BlockSeqno, &ExternalsRangeReaderState)> {
         self.state
