@@ -187,12 +187,29 @@ impl StorageContext {
         P: AsRef<Path>,
         T: NamedTables<Context = TableContext> + 'static,
     {
-        let subdir = subdir.as_ref();
-        tracing::debug!(subdir = %subdir.display(), "opening RocksDB instance");
+        self.open_preconfigured_partition(subdir, None)
+    }
+
+    pub fn open_preconfigured_partition<P, T>(
+        &self,
+        dir_path: P,
+        partition_id: Option<u64>,
+    ) -> Result<weedb::WeeDb<T>>
+    where
+        P: AsRef<Path>,
+        T: NamedTables<Context = TableContext> + 'static,
+    {
+        let dir_path = dir_path.as_ref();
+        tracing::debug!(dir_path = %dir_path.display(), "opening RocksDB instance");
 
         let this = self.inner.as_ref();
 
-        let db_dir = this.root_dir.create_subdir(subdir)?;
+        let db_dir = if dir_path.is_relative() {
+            this.root_dir.create_subdir(dir_path)?
+        } else {
+            Dir::new(dir_path)?
+        };
+
         let db =
             weedb::WeeDb::<T>::builder_prepared(db_dir.path(), this.rocksdb_table_context.clone())
                 .with_metrics_enabled(this.config.rocksdb_enable_metrics)
@@ -200,7 +217,9 @@ impl StorageContext {
                 .build()?;
 
         if let Some(name) = db.db_name() {
-            self.add_rocksdb_instance(name, db.raw());
+            let name_w_part = partition_id.map(|id| format!("{}-{:016x}", name, id));
+            let name = name_w_part.unwrap_or_else(|| name.to_owned());
+            self.add_rocksdb_instance(&name, db.raw());
         }
 
         tracing::debug!(current_rocksdb_buffer_usage = ?self.rocksdb_table_context().buffer_usage());

@@ -1,10 +1,11 @@
-use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
+use tycho_block_util::block::{DisplayShardPrefix, split_shard_ident};
 use tycho_storage::StorageContext;
 use tycho_storage::kv::ApplyMigrations;
-use tycho_types::models::ShardIdent;
 
 pub use self::block::{
     ArchiveId, BlockGcStats, BlockStorage, BlockStorageConfig, MaybeExistingHandle, OpenStats,
@@ -84,59 +85,8 @@ impl CoreStorage {
         .await?;
         let block_storage = Arc::new(block_storage);
 
-        const SHARD_PARTITIONS_SPLIT_DEPTH: u8 = 2; // TODO: move to node config
-
-        let mut shards = vec![];
-
-        // TODO: make a helper, pass workchain id from outside
-        struct SplitShardCx {
-            shard: ShardIdent,
-            remaining_split_depth: u8,
-        }
-        let mut split_queue = VecDeque::new();
-        split_queue.push_back(SplitShardCx {
-            shard: ShardIdent::new_full(0),
-            remaining_split_depth: SHARD_PARTITIONS_SPLIT_DEPTH,
-        });
-        while let Some(shard_split_cx) = split_queue.pop_front() {
-            if shard_split_cx.remaining_split_depth > 0
-                && let Some((left, right)) = shard_split_cx.shard.split()
-            {
-                let remaining_split_depth = shard_split_cx.remaining_split_depth.saturating_sub(1);
-                if remaining_split_depth > 0 {
-                    split_queue.push_back(SplitShardCx {
-                        shard: left,
-                        remaining_split_depth,
-                    });
-                    split_queue.push_back(SplitShardCx {
-                        shard: right,
-                        remaining_split_depth,
-                    });
-                } else {
-                    shards.push(left);
-                    shards.push(right);
-                }
-            }
-        }
-
-        let mut storage_parts = StoragePartsMap::default();
-        for shard in shards {
-            let cells_part_db: CellsPartDb = ctx.open_preconfigured(format!(
-                "cells-parts/cells-part-{0}",
-                shard.to_string().replace(":", "_")
-            ))?;
-            cells_part_db.normalize_version()?;
-            cells_part_db.apply_migrations().await?;
-            storage_parts.insert(
-                shard.prefix(),
-                Arc::new(ShardStateStoragePartImpl::new(
-                    shard.prefix(),
-                    cells_part_db,
-                    config.cells_cache_size,
-                    config.drop_interval,
-                )),
-            );
-        }
+        // try init state partitions if configured
+        let (part_split_depth, storage_parts) = try_init_state_partitions(&ctx, &config).await?;
 
         let shard_state_storage = ShardStateStorage::new(ShardStateStorageContext {
             cells_db: cells_db.clone(),
@@ -145,8 +95,8 @@ impl CoreStorage {
             temp_file_storage: ctx.temp_files().clone(),
             cache_size_bytes: config.cells_cache_size,
             drop_interval: config.drop_interval,
-            part_split_depth: SHARD_PARTITIONS_SPLIT_DEPTH,
-            storage_parts: Arc::new(storage_parts),
+            part_split_depth,
+            storage_parts,
         })?;
         let persistent_state_storage = PersistentStateStorage::new(
             cells_db.clone(),
@@ -233,4 +183,43 @@ struct Inner {
     shard_state_storage: Arc<ShardStateStorage>,
     node_state_storage: NodeStateStorage,
     persistent_state_storage: PersistentStateStorage,
+}
+
+async fn try_init_state_partitions(
+    ctx: &StorageContext,
+    config: &CoreStorageConfig,
+) -> Result<(u8, Arc<StoragePartsMap>)> {
+    let Some(state_parts_config) = &config.state_parts else {
+        return Ok(Default::default());
+    };
+
+    let mut storage_parts = StoragePartsMap::default();
+
+    // NOTE: workchain_id does not matter because we use only shard prefixes
+    let shards = split_shard_ident(0, state_parts_config.split_depth);
+    for shard in shards {
+        let shard_prefix = shard.prefix();
+        let path = match state_parts_config.part_dirs.get(&shard_prefix) {
+            Some(p) => p.clone(),
+            None => PathBuf::from_str(&format!(
+                "cells-parts/cells-part-{}",
+                DisplayShardPrefix(&shard_prefix)
+            ))?,
+        };
+        let cells_part_db: CellsPartDb =
+            ctx.open_preconfigured_partition(path, Some(shard_prefix))?;
+        cells_part_db.normalize_version()?;
+        cells_part_db.apply_migrations().await?;
+        storage_parts.insert(
+            shard_prefix,
+            Arc::new(ShardStateStoragePartImpl::new(
+                shard_prefix,
+                cells_part_db,
+                config.cells_cache_size,
+                config.drop_interval,
+            )),
+        );
+    }
+
+    Ok((state_parts_config.split_depth, Arc::new(storage_parts)))
 }

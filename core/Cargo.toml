@@ -77,6 +77,7 @@ tycho-crypto = { workspace = true }
 tycho-network = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
 similar-asserts = { workspace = true }
 
 [features]
