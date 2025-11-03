@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use tycho_types::cell::HashBytes;
 use tycho_types::models::ShardIdent;
 
@@ -13,6 +15,44 @@ mod block_id_ext;
 mod block_proof_stuff;
 mod block_stuff;
 mod top_blocks;
+
+pub fn split_shard_ident(workchain: i32, depth: u8) -> Vec<ShardIdent> {
+    assert!(
+        depth <= ShardIdent::MAX_SPLIT_DEPTH,
+        "split depth is too big",
+    );
+    struct SplitShardCx {
+        shard: ShardIdent,
+        remaining_split_depth: u8,
+    }
+    let mut split_queue = VecDeque::new();
+    split_queue.push_back(SplitShardCx {
+        shard: ShardIdent::new_full(workchain),
+        remaining_split_depth: depth,
+    });
+    let mut shards = vec![];
+    while let Some(shard_split_cx) = split_queue.pop_front() {
+        if shard_split_cx.remaining_split_depth > 0
+            && let Some((left, right)) = shard_split_cx.shard.split()
+        {
+            let remaining_split_depth = shard_split_cx.remaining_split_depth.saturating_sub(1);
+            if remaining_split_depth > 0 {
+                split_queue.push_back(SplitShardCx {
+                    shard: left,
+                    remaining_split_depth,
+                });
+                split_queue.push_back(SplitShardCx {
+                    shard: right,
+                    remaining_split_depth,
+                });
+            } else {
+                shards.push(left);
+                shards.push(right);
+            }
+        }
+    }
+    shards
+}
 
 pub fn shard_ident_at_depth(workchain: i32, account: &HashBytes, depth: u8) -> ShardIdent {
     assert!(

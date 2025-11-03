@@ -4012,6 +4012,7 @@ dependencies = [
  "rand 0.9.1",
  "scopeguard",
  "serde",
+ "serde_json",
  "sha2",
  "similar-asserts",
  "smallvec",
