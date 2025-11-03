@@ -20,7 +20,6 @@ use tycho_core::storage::{CoreStorage, NewBlockMeta};
 use tycho_crypto::ed25519;
 use tycho_network::PeerId;
 use tycho_storage::StorageContext;
-use tycho_storage::fs::Dir;
 use tycho_types::cell::HashBytes;
 use tycho_util::cli::logger::init_logger;
 use tycho_util::cli::metrics::init_metrics;
@@ -132,7 +131,7 @@ impl CmdRun {
         let mut restarts_remain: u8 = self.restarts.unwrap_or_default().unwrap_or_default();
 
         let mempool = Mempool::new(self, node_config).await?;
-        let file_storage = Mempool::file_storage(&mempool.storage)?;
+        let file_storage = mempool.mempool_db.file_storage()?;
 
         loop {
             let (engine_stop_tx, mut engine_stop_rx) = oneshot::channel();
@@ -170,7 +169,7 @@ struct Mempool {
     net_args: EngineNetworkArgs,
     init_peers: InitPeers,
 
-    storage: CoreStorage,
+    mempool_db: Arc<MempoolDb>,
     input_buffer: InputBuffer,
     merged_conf: MempoolMergedConfig,
 }
@@ -229,7 +228,7 @@ impl Mempool {
 
         // Setup storage
 
-        let storage = {
+        let core_storage = {
             let ctx = StorageContext::new(node_config.storage.clone())
                 .await
                 .context("failed to create storage context")?;
@@ -241,8 +240,9 @@ impl Mempool {
                 .await
                 .context("failed to create storage")?
         };
+        let mempool_db = MempoolDb::open(core_storage.context().clone())?;
 
-        let mut last_anchor_file = LastAnchorFile::reopen_in(&Self::file_storage(&storage)?)?;
+        let mut last_anchor_file = LastAnchorFile::reopen_in(&mempool_db.file_storage()?)?;
         let last_anchor_opt = last_anchor_file.read_opt()?;
         last_anchor_file.update(
             cmd.top_known_anchor
@@ -252,13 +252,13 @@ impl Mempool {
         )?;
 
         tracing::info!(
-            root_dir = %storage.context().root_dir().path().display(),
+            root_dir = %core_storage.context().root_dir().path().display(),
             "initialized storage"
         );
 
         let mc_zerostate = load_mc_zerostate(
             FileZerostateProvider(cmd.import_zerostate),
-            &storage,
+            &core_storage,
             &global_config.zerostate,
         )
         .await?;
@@ -289,14 +289,10 @@ impl Mempool {
             net_args,
             init_peers,
 
-            storage,
+            mempool_db,
             input_buffer,
             merged_conf,
         })
-    }
-
-    pub fn file_storage(storage: &CoreStorage) -> Result<Dir> {
-        storage.context().root_dir().create_subdir("mempool_files")
     }
 
     pub fn boot(
@@ -305,18 +301,16 @@ impl Mempool {
     ) -> Result<(EngineSession, AnchorConsumer)> {
         let local_id = self.net_args.network.peer_id();
 
-        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
+        let (anchors_tx, anchors_rx) = mpsc::unbounded_channel();
         let mut anchor_consumer = AnchorConsumer::default();
-        anchor_consumer.add(*local_id, committed_rx);
+        anchor_consumer.add(*local_id, anchors_rx);
 
         let bind = EngineBinding {
-            mempool_db: MempoolDb::open(
-                self.storage.context().clone(),
-                anchor_consumer.commit_round.clone(),
-            )?,
+            mempool_db: self.mempool_db.clone(),
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: anchor_consumer.top_known_anchor.clone(),
-            output: committed_tx,
+            commit_finished: anchor_consumer.commit_finished.clone(),
+            anchors_tx,
         };
 
         let session = EngineSession::new(

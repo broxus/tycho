@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use bumpalo::Bump;
 use tycho_consensus::prelude::{
     AnchorStageRole, ConsensusConfigExt, MempoolAdapterStore, MempoolConfigBuilder, MempoolDb,
-    MempoolNodeConfig, RoundWatch,
+    MempoolNodeConfig,
 };
 use tycho_storage::StorageContext;
 use tycho_types::models::{ConsensusConfig, GenesisInfo};
@@ -17,7 +17,7 @@ pub struct DumpAnchors {
 #[allow(dead_code, reason = "not yet used")] // FIXME bind code and remove this
 impl DumpAnchors {
     pub fn new(storage_context: &StorageContext) -> Result<Self> {
-        let mempool_db = MempoolDb::open(storage_context.clone(), RoundWatch::default())
+        let mempool_db = MempoolDb::open(storage_context.clone())
             .context("failed to create mempool adapter storage")?;
         Ok(Self {
             store: MempoolAdapterStore::new(mempool_db),

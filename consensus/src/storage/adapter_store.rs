@@ -29,12 +29,6 @@ impl MempoolAdapterStore {
         Self(mempool_db)
     }
 
-    /// allows to remove no more needed data before sync and store of newly created dag part
-    pub fn report_new_start(&self, next_expected_anchor: u32) {
-        // set as committed because every anchor is repeatable by stored history (if it exists)
-        self.0.commit_finished.set_max_raw(next_expected_anchor);
-    }
-
     /// Next must call [`Self::set_committed`] for GC as watch notification is deferred
     pub fn expand_anchor_history<'b>(
         &self,
@@ -72,13 +66,6 @@ impl MempoolAdapterStore {
                 .expect("DB set committed");
         }
         payloads
-    }
-
-    /// may skip [`Self::expand_anchor_history`] part, but never skip this one
-    pub fn set_committed_round(&self, anchor_round: Round) {
-        // commit is finished when history payloads is read from DB and marked committed,
-        // so that data may be removed consistently with any settings
-        self.0.commit_finished.set_max(anchor_round);
     }
 
     pub fn expand_anchor_history_arena_size(&self, history: &[PointInfo]) -> usize {

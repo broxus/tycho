@@ -31,7 +31,7 @@ pub type EngineResult<T> = std::result::Result<T, EngineError>;
 pub struct Engine {
     dag: DagFront,
     committer_run: CommitterTask,
-    output: mpsc::UnboundedSender<MempoolOutput>,
+    anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
     round_task: RoundTaskReady,
     db_cleaner: DbCleaner,
     peer_schedule_updater: Task<Never>,
@@ -64,7 +64,12 @@ impl Engine {
         let round_ctx = RoundCtx::new(&engine_ctx, Round::BOTTOM);
 
         let store = MempoolStore::new(bind.mempool_db.clone());
-        let db_cleaner = DbCleaner::new(bind.mempool_db.clone());
+        let db_cleaner = DbCleaner::new(
+            bind.mempool_db.clone(),
+            bind.top_known_anchor.receiver(),
+            bind.commit_finished.receiver(),
+            consensus_round.receiver(),
+        );
 
         // Dag, created at genesis, will at first extend up to its greatest length
         // (in case last broadcast is within it) without data,
@@ -103,7 +108,7 @@ impl Engine {
         Self {
             dag,
             committer_run,
-            output: bind.output.clone(),
+            anchors_tx: bind.anchors_tx.clone(),
             db_cleaner,
             round_task,
             peer_schedule_updater,
@@ -360,11 +365,7 @@ impl Engine {
             &self.dag.head(&self.round_task.state.peer_schedule), // reproducible first loop
             &round_ctx,
         );
-        let db_clean_task: Task<Never> = self.db_cleaner.new_task(
-            self.round_task.state.consensus_round.receiver(),
-            self.round_task.state.top_known_anchor.receiver(),
-            &round_ctx,
-        );
+        let db_clean_task: Task<Never> = self.db_cleaner.run(&round_ctx);
 
         // Boxed for just not to move a Copy to other thread by mistake
         let mut full_history_bottom: Box<Option<Round>> = Box::new(None);
@@ -410,7 +411,7 @@ impl Engine {
                     self.round_task.state.top_known_anchor.receiver(),
                     old_dag_top_round,
                     &mut is_paused,
-                    &self.output,
+                    &self.anchors_tx,
                     &round_ctx,
                 ) {
                     Ok(pause_at) => next_round.min(pause_at),
@@ -418,7 +419,7 @@ impl Engine {
                         collator_sync.await?;
                         let committer_update = self.committer_run.update_task(
                             full_history_bottom.take(),
-                            self.output.clone(),
+                            self.anchors_tx.clone(),
                             &round_ctx,
                         );
                         committer_update.await?;
@@ -468,7 +469,7 @@ impl Engine {
                     _ = self.committer_run.interval.tick() => {
                         self.committer_run.update_task(
                             full_history_bottom.take(),
-                            self.output.clone(),
+                            self.anchors_tx.clone(),
                             &round_ctx,
                         ).await?;
                     },
@@ -486,7 +487,7 @@ fn collator_feedback(
     mut top_known_anchor_recv: RoundWatcher<TopKnownAnchor>,
     old_dag_top_round: Round,
     is_paused: &mut bool,
-    committed_info_tx: &mpsc::UnboundedSender<MempoolOutput>,
+    anchors_tx: &mpsc::UnboundedSender<MempoolOutput>,
     round_ctx: &RoundCtx,
 ) -> Result<Round, BoxFuture<'static, TaskResult<()>>> {
     let top_known_anchor = top_known_anchor_recv.get();
@@ -503,7 +504,7 @@ fn collator_feedback(
                 "enter pause by collator feedback",
             );
             *is_paused = true;
-            committed_info_tx.send(MempoolOutput::Paused).ok();
+            anchors_tx.send(MempoolOutput::Paused).ok();
         }
 
         let timeout =
@@ -543,7 +544,7 @@ fn collator_feedback(
             "exit from pause by collator feedback",
         );
         *is_paused = false;
-        committed_info_tx.send(MempoolOutput::Running).ok();
+        anchors_tx.send(MempoolOutput::Running).ok();
         Ok(pause_at)
     } else {
         Ok(pause_at)

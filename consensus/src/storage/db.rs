@@ -7,32 +7,27 @@ use weedb::WeeDb;
 use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
 
 use super::{POINT_KEY_LEN, format_point_key};
-use crate::engine::round_watch::{Commit, RoundWatch};
 use crate::storage::tables::MempoolTables;
 
 pub struct MempoolDb {
-    // NOTE: Context should have at least the lifetime of the created DB.
-    #[allow(unused)]
-    pub(super) ctx: StorageContext,
+    #[allow(unused, reason = "context must have at least the lifetime of the DB")]
+    ctx: StorageContext,
     pub(super) db: WeeDb<MempoolTables>,
-    pub(super) commit_finished: RoundWatch<Commit>,
 }
 
 impl MempoolDb {
     /// Opens an existing or creates a new mempool `RocksDB` instance.
-    pub fn open(
-        ctx: StorageContext,
-        commit_finished: RoundWatch<Commit>,
-    ) -> anyhow::Result<Arc<Self>> {
+    pub fn open(ctx: StorageContext) -> anyhow::Result<Arc<Self>> {
         let db = ctx.open_preconfigured(MempoolTables::NAME)?;
 
         // TODO: Add migrations here if needed. However, it might require making this method `async`.
 
-        Ok(Arc::new(Self {
-            db,
-            ctx,
-            commit_finished,
-        }))
+        Ok(Arc::new(Self { db, ctx }))
+    }
+
+    #[cfg(any(test, feature = "test"))]
+    pub fn file_storage(&self) -> anyhow::Result<tycho_storage::fs::Dir> {
+        self.ctx.root_dir().create_subdir("mempool_files")
     }
 
     /// delete all stored data up to provided value (exclusive);
