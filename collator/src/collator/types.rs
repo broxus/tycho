@@ -1386,7 +1386,7 @@ impl AnchorsCache {
 pub struct FinalizeMessagesReaderResult {
     pub queue_diff: SerializedQueueDiff,
     pub has_unprocessed_messages: bool,
-    pub reader_state: ReaderState,
+    // pub reader_state: ReaderState,
     pub processed_upto: ProcessedUptoInfoStuff,
 }
 

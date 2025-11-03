@@ -50,6 +50,15 @@ impl ExternalsReaderState {
             .get(&par_id)
             .with_context(|| format!("externals reader state not exists for partition {par_id}"))
     }
+
+    pub fn get_range_state_by_seqno(
+        &mut self,
+        seqno: BlockSeqno,
+    ) -> anyhow::Result<&ExternalsRangeReaderState> {
+        self.ranges
+            .get(&seqno)
+            .with_context(|| format!("externals range reader state not exists for seqno {seqno}"))
+    }
 }
 
 #[derive(Debug, Default, Clone)]
