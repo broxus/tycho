@@ -37,7 +37,9 @@ impl BlockHandleStorage {
     }
 
     pub fn set_has_shard_state(&self, handle: &BlockHandle) -> bool {
-        let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
+        let updated = handle
+            .meta()
+            .add_flags(BlockFlags::HAS_STATE_MAIN.union(BlockFlags::HAS_STATE_PARTS));
         if updated {
             self.store_handle(handle, false);
         }
