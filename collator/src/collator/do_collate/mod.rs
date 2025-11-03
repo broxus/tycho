@@ -424,11 +424,13 @@ impl CollatorStdImpl {
             FinalizeMessagesReaderResult {
                 queue_diff,
                 has_unprocessed_messages,
-                reader_state,
+                // reader_state,
                 processed_upto,
             },
             update_queue_task,
         ) = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
+
+        let r = reader_state;
 
         // Use unified helper methods for min_processed_to calculation
         let all_shards_processed_to = build_all_shards_processed_to_by_partitions(
