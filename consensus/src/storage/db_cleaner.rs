@@ -4,16 +4,31 @@ use futures_util::never::Never;
 
 use super::{POINT_KEY_LEN, fill_point_prefix};
 use crate::effects::{Cancelled, Ctx, RoundCtx, Task};
-use crate::engine::round_watch::{Consensus, RoundWatcher, TopKnownAnchor};
+use crate::engine::round_watch::{Commit, Consensus, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
 use crate::models::Round;
 use crate::storage::MempoolDb;
 
-pub struct DbCleaner(Arc<MempoolDb>);
+pub struct DbCleaner {
+    mempool_db: Arc<MempoolDb>,
+    top_known_anchor: RoundWatcher<TopKnownAnchor>,
+    commit_finished: RoundWatcher<Commit>,
+    consensus_round: RoundWatcher<Consensus>,
+}
 
 impl DbCleaner {
-    pub fn new(mempool_db: Arc<MempoolDb>) -> Self {
-        Self(mempool_db)
+    pub fn new(
+        mempool_db: Arc<MempoolDb>,
+        top_known_anchor: RoundWatcher<TopKnownAnchor>,
+        commit_finished: RoundWatcher<Commit>,
+        consensus_round: RoundWatcher<Consensus>,
+    ) -> Self {
+        Self {
+            mempool_db,
+            top_known_anchor,
+            commit_finished,
+            consensus_round,
+        }
     }
 
     fn least_to_keep(
@@ -39,28 +54,22 @@ impl DbCleaner {
         (conf.genesis_round).max(least_to_keep - remainder)
     }
 
-    pub fn new_task(
-        self,
-        mut consensus_round: RoundWatcher<Consensus>,
-        mut top_known_anchor: RoundWatcher<TopKnownAnchor>,
-        round_ctx: &RoundCtx,
-    ) -> Task<Never> {
+    pub fn run(mut self, round_ctx: &RoundCtx) -> Task<Never> {
         let task_ctx = round_ctx.task();
         let round_ctx = round_ctx.clone();
-        let mut committed_round = self.0.commit_finished.receiver();
 
         task_ctx.spawn(async move {
-            let mut consensus = consensus_round.get();
-            let mut committed = committed_round.get();
-            let mut top_known = top_known_anchor.get();
+            let mut consensus = self.consensus_round.get();
+            let mut committed = self.commit_finished.get();
+            let mut top_known = self.top_known_anchor.get();
             let mut prev_least_to_keep =
                 Self::least_to_keep(consensus, committed, top_known, round_ctx.conf());
             loop {
                 tokio::select! {
                     biased;
-                    new_consensus = consensus_round.next() => consensus = new_consensus?,
-                    new_committed = committed_round.next() => committed = new_committed?,
-                    new_top_known = top_known_anchor.next() => top_known = new_top_known?,
+                    new_consensus = self.consensus_round.next() => consensus = new_consensus?,
+                    new_committed = self.commit_finished.next() => committed = new_committed?,
+                    new_top_known = self.top_known_anchor.next() => top_known = new_top_known?,
                 }
 
                 metrics::gauge!("tycho_mempool_consensus_current_round").set(consensus.0);
@@ -77,7 +86,7 @@ impl DbCleaner {
                     .set(consensus.diff_f64(new_least_to_keep));
 
                 if prev_least_to_keep < new_least_to_keep {
-                    let db = self.0.clone();
+                    let db = self.mempool_db.clone();
                     let task = round_ctx.task().spawn_blocking(move || {
                         let mut up_to_exclusive = [0_u8; POINT_KEY_LEN];
                         fill_point_prefix(new_least_to_keep.0, &mut up_to_exclusive);

@@ -5,7 +5,7 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{Network, OverlayService, PeerResolver, PrivateOverlay};
 
 use crate::effects::{AltFormat, TaskTracker};
-use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
+use crate::engine::round_watch::{Commit, RoundWatch, TopKnownAnchor};
 use crate::engine::{InputBuffer, MempoolMergedConfig};
 use crate::intercom::{Dispatcher, InitPeers, PeerSchedule, Responder};
 use crate::models::MempoolOutput;
@@ -16,7 +16,8 @@ pub struct EngineBinding {
     pub mempool_db: Arc<MempoolDb>,
     pub input_buffer: InputBuffer,
     pub top_known_anchor: RoundWatch<TopKnownAnchor>,
-    pub output: mpsc::UnboundedSender<MempoolOutput>,
+    pub commit_finished: RoundWatch<Commit>,
+    pub anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
 }
 
 #[derive(Clone)]

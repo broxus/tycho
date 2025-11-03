@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use bumpalo::Bump;
 use tokio::sync::mpsc;
-use tycho_consensus::prelude::{AnchorData, MempoolAdapterStore, MempoolDb, MempoolOutput};
+use tycho_consensus::prelude::{
+    AnchorData, Commit, MempoolAdapterStore, MempoolDb, MempoolOutput, RoundWatch,
+};
 use tycho_types::models::ConsensusConfig;
 use tycho_util::time::now_millis;
 
@@ -20,6 +22,7 @@ pub struct StdAnchorHandler {
 struct Shuttle {
     cache: Arc<Cache>,
     store: MempoolAdapterStore,
+    commit_finished: RoundWatch<Commit>,
     parser: Parser,
     first_after_gap: Option<MempoolAnchorId>,
 }
@@ -35,7 +38,12 @@ impl StdAnchorHandler {
         }
     }
 
-    pub async fn run(mut self, cache: Arc<Cache>, mempool_db: Arc<MempoolDb>) {
+    pub async fn run(
+        mut self,
+        cache: Arc<Cache>,
+        mempool_db: Arc<MempoolDb>,
+        commit_finished: RoundWatch<Commit>,
+    ) {
         scopeguard::defer!(tracing::warn!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             "handle anchors task stopped"
@@ -43,6 +51,7 @@ impl StdAnchorHandler {
         let mut shuttle = Shuttle {
             cache,
             store: MempoolAdapterStore::new(mempool_db),
+            commit_finished,
             parser: Parser::new(self.deduplicate_rounds),
             first_after_gap: None,
         };
@@ -61,7 +70,8 @@ impl StdAnchorHandler {
         match output {
             MempoolOutput::NextAnchor(committed) => return shuttle.handle(committed).await,
             MempoolOutput::CommitFinished(round) => {
-                shuttle.store.set_committed_round(round);
+                // history payloads are read from DB and marked committed, so ready to be removed
+                shuttle.commit_finished.set_max(round);
             }
             MempoolOutput::NewStartAfterGap(anchors_full_bottom) => {
                 shuttle.reset(self.deduplicate_rounds, anchors_full_bottom.0);
@@ -78,7 +88,8 @@ impl Shuttle {
         self.cache.reset();
         self.parser = Parser::new(deduplicate_rounds);
         let first_to_execute = anchors_full_bottom.saturating_add(deduplicate_rounds as u32);
-        self.store.report_new_start(first_to_execute);
+        // set as committed because every anchor is repeatable, i.e. enough tail is preserved
+        self.commit_finished.set_max_raw(first_to_execute);
         self.first_after_gap = Some(first_to_execute);
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,

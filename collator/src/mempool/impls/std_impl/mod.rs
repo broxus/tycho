@@ -48,6 +48,9 @@ impl MempoolAdapterStdImpl {
     ) -> Result<Self> {
         let config_builder = MempoolConfigBuilder::new(mempool_node_config);
 
+        let mempool_db =
+            MempoolDb::open(storage_context.clone()).context("failed to create mempool db")?;
+
         Ok(Self {
             cache: Default::default(),
             net_args: EngineNetworkArgs {
@@ -61,8 +64,7 @@ impl MempoolAdapterStdImpl {
                 state_update_queue: Default::default(),
                 engine_session: None,
             }),
-            mempool_db: MempoolDb::open(storage_context.clone(), RoundWatch::default())
-                .context("failed to create mempool adapter storage")?,
+            mempool_db,
             input_buffer: InputBuffer::default(),
             top_known_anchor: RoundWatch::default(),
         })
@@ -173,7 +175,7 @@ impl MempoolAdapterStdImpl {
     ) -> Result<EngineSession> {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Starting mempool engine...");
 
-        let (anchor_tx, anchor_rx) = mpsc::unbounded_channel();
+        let (anchors_tx, anchors_rx) = mpsc::unbounded_channel();
 
         self.input_buffer.apply_config(&merged_conf.conf.consensus);
 
@@ -181,11 +183,14 @@ impl MempoolAdapterStdImpl {
         self.top_known_anchor
             .set_max_raw(ctx.top_processed_to_anchor_id);
 
+        let commit_finished = RoundWatch::default();
+
         let bind = EngineBinding {
             mempool_db: self.mempool_db.clone(),
             input_buffer: self.input_buffer.clone(),
             top_known_anchor: self.top_known_anchor.clone(),
-            output: anchor_tx,
+            commit_finished: commit_finished.clone(),
+            anchors_tx,
         };
 
         // actual oldest sync round will be not less than this
@@ -221,13 +226,13 @@ impl MempoolAdapterStdImpl {
             engine_stop_tx,
         );
 
-        let mut anchor_task = StdAnchorHandler::new(&merged_conf.conf.consensus, anchor_rx)
-            .run(self.cache.clone(), self.mempool_db.clone())
+        let mut anchors_task = StdAnchorHandler::new(&merged_conf.conf.consensus, anchors_rx)
+            .run(self.cache.clone(), self.mempool_db.clone(), commit_finished)
             .boxed();
 
         tokio::spawn(async move {
             tokio::select! {
-                () = &mut anchor_task => {}, // just poll
+                () = &mut anchors_task => {}, // just poll
                 engine_result = &mut engine_stop_rx => match engine_result {
                     Ok(()) => tracing::info!(
                         target: tracing_targets::MEMPOOL_ADAPTER,

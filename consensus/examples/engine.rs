@@ -140,10 +140,10 @@ fn make_network(
         let dht_config = dht_config.clone();
 
         let top_known_anchor = anchor_consumer.top_known_anchor.clone();
-        let commit_round = anchor_consumer.commit_round.clone();
+        let commit_finished = anchor_consumer.commit_finished.clone();
 
-        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        anchor_consumer.add(peer_id, committed_rx);
+        let (anchors_tx, anchors_rx) = mpsc::unbounded_channel();
+        anchor_consumer.add(peer_id, anchors_rx);
 
         let handle = std::thread::Builder::new()
             .name(format!("engine-{peer_id:.4}"))
@@ -186,14 +186,15 @@ fn make_network(
                             StorageContext::new_temp().await.expect("new storage");
 
                         let bind = EngineBinding {
-                            mempool_db: MempoolDb::open(ctx, commit_round).unwrap(),
+                            mempool_db: MempoolDb::open(ctx).unwrap(),
                             input_buffer: InputBuffer::new_stub(
                                 cli.payload_step,
                                 cli.steps_until_full,
                                 &merged_conf.conf.consensus,
                             ),
-                            output: committed_tx,
                             top_known_anchor,
+                            commit_finished,
+                            anchors_tx,
                         };
 
                         let (engine_stop_tx, engine_stop_rx) = oneshot::channel();

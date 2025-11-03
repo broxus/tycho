@@ -28,14 +28,14 @@ pub struct AnchorConsumer {
     // Simulates mempool adapter that commits right after collator feedback (may occur in practice
     // if local collation is a bit lagging and the top known block is received from network)
     // Just because it does not require much code and keeps sender alive to avoid panic
-    pub commit_round: RoundWatch<Commit>,
+    pub commit_finished: RoundWatch<Commit>,
     pub common_anchor_count: Arc<AtomicUsize>,
 }
 
 impl AnchorConsumer {
-    pub fn add(&mut self, peer_id: PeerId, committed: UnboundedReceiver<MempoolOutput>) {
+    pub fn add(&mut self, peer_id: PeerId, anchors_rx: UnboundedReceiver<MempoolOutput>) {
         self.streams
-            .insert(peer_id, UnboundedReceiverStream::new(committed));
+            .insert(peer_id, UnboundedReceiverStream::new(anchors_rx));
     }
 
     pub async fn drain(mut self, mut file: LastAnchorFile) {
@@ -75,11 +75,14 @@ impl AnchorConsumer {
             MempoolOutput::CommitFinished(round) => {
                 // while MempoolAdapter sets commit_round at this event,
                 // here in simulation we check that every NextAnchor is followed by CommitFinished
-                assert!(self.commit_round.get() >= round, "anchor was not received");
+                assert!(
+                    self.commit_finished.get() >= round,
+                    "anchor was not received"
+                );
                 return;
             }
         };
-        self.commit_round.set_max(round);
+        self.commit_finished.set_max(round);
         self.top_known_anchor.set_max(round);
         file.update(round.0).expect("update last anchor file");
     }
@@ -102,7 +105,10 @@ impl AnchorConsumer {
             MempoolOutput::CommitFinished(round) => {
                 // while MempoolAdapter sets commit_round at this event,
                 // here in simulation we check that every NextAnchor is followed by CommitFinished
-                assert!(self.commit_round.get() >= round, "anchor was not received");
+                assert!(
+                    self.commit_finished.get() >= round,
+                    "anchor was not received"
+                );
                 return;
             }
         };
@@ -218,7 +224,7 @@ impl AnchorConsumer {
         tracing::debug!("Anchor hashmap len: {}", self.anchors.len());
         tracing::trace!("History hashmap len: {}", self.history.len());
 
-        self.commit_round.set_max(anchor_round);
+        self.commit_finished.set_max(anchor_round);
         if let Some(top_common_anchor) = common_anchors.last() {
             self.top_known_anchor.set_max_raw(*top_common_anchor);
             tracing::info!(
