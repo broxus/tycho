@@ -1,4 +1,5 @@
 use tycho_block_util::queue::QueueKey;
+use tycho_core::storage::PersistentStateKind::Queue;
 
 use crate::collator::messages_reader::state::external::{
     ExternalsPartitionReaderState, ExternalsRangeReaderState, ExternalsReaderRange,
@@ -141,6 +142,14 @@ impl ShardReaderState {
             to: range_info.to,
             current_position,
         }
+    }
+
+    pub fn is_fully_read(&self) -> bool {
+        self.current_position >= QueueKey::max_for_lt(self.to)
+    }
+
+    pub fn set_fully_read(&mut self) {
+        self.current_position = QueueKey::max_for_lt(self.to);
     }
 }
 
