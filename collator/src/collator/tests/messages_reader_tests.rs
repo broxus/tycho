@@ -830,8 +830,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
         F: Fn(IntMsgInfo, Cell) -> V,
     {
         let TestWorkingState {
-            anchors_cache,
-            reader_state,
+            mut anchors_cache,
+            mut reader_state,
             ..
         } = self.primary_working_state.take().unwrap();
 
@@ -1073,8 +1073,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
         let FinalizedMessagesReader {
             has_unprocessed_messages,
             queue_diff_with_msgs,
-            reader_state,
-            anchors_cache,
+            // reader_state,
+            // anchors_cache,
             ..
         } = primary_messages_reader.finalize(self.curr_lt, &other_shards_top_block_diffs)?;
 

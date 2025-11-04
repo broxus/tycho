@@ -35,7 +35,8 @@ use crate::collator::do_collate::work_units::{DoCollateWu, ExecuteWu, FinalizeWu
 use crate::collator::messages_reader::MetricsTimer;
 use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::messages_reader::state::external::ExternalKey;
-use crate::internal_queue::types::message::InternalMessageValue;
+use crate::internal_queue::types::diff::QueueDiffWithMessages;
+use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValue};
 use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
 use crate::internal_queue::types::stats::{
     AccountStatistics, DiffStatistics, QueueStatistics, SeparatedStatisticsByPartitions,
@@ -1384,10 +1385,11 @@ impl AnchorsCache {
 }
 
 pub struct FinalizeMessagesReaderResult {
-    pub queue_diff: SerializedQueueDiff,
+    // pub queue_diff: SerializedQueueDiff,
     pub has_unprocessed_messages: bool,
     // pub reader_state: ReaderState,
-    pub processed_upto: ProcessedUptoInfoStuff,
+    // pub processed_upto: ProcessedUptoInfoStuff,
+    pub queue_diff_with_msgs: QueueDiffWithMessages<EnqueuedMessage>,
 }
 
 pub struct FinalizeCollationResult {
@@ -1420,7 +1422,7 @@ pub struct FinalizeBlockResult {
 pub struct CollationResult {
     pub final_result: FinalResult,
     pub finalized: FinalizeBlockResult,
-    pub reader_state: ReaderState,
+    // pub reader_state: ReaderState,
     pub execute_result: ExecuteResult,
 }
 

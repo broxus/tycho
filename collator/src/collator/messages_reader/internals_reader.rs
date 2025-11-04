@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, get_short_addr_string};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockIdShort, IntAddr, MsgInfo, ShardIdent, StdAddr};
@@ -252,33 +252,55 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
         !has_pending_new_messages && !self.has_messages_in_buffers()
     }
 
-    pub fn reader_state(&self) -> &InternalsPartitionReaderState {
-        &self.reader_state
-    }
-
     pub fn range_readers(&self) -> &BTreeMap<BlockSeqno, InternalsRangeReader<V>> {
         &self.range_readers
     }
 
     pub fn retain_only_last_range_reader(&mut self) -> Result<()> {
-        let (last_seqno, last_range_reader) = self
+        let last_seqno = self
             .range_readers
-            .pop_last()
+            .last_key_value()
+            .map(|(k, _)| *k)
             .context("partition reader should have at least one range reader when retain_only_last_range_reader() called")?;
 
-        self.range_readers.clear();
-        self.range_readers.insert(last_seqno, last_range_reader);
+        self.range_readers.retain(|&seqno, _| seqno == last_seqno);
+        self.reader_state
+            .ranges
+            .retain(|&seqno, _| seqno == last_seqno);
         Ok(())
     }
 
-    pub fn insert_range_reader(&mut self, seqno: BlockSeqno, reader: InternalsRangeReader<V>) {
-        self.range_readers.insert(seqno, reader);
+    pub fn insert_range_reader(
+        &mut self,
+        seqno: BlockSeqno,
+        reader: InternalsRangeReader<V>,
+    ) -> Result<(), CollatorError> {
+        if self.range_readers.insert(seqno, reader).is_some() {
+            return Err(anyhow!(
+                "Range reader already exists (shard: {}, seqno: {})",
+                self.for_shard_id,
+                seqno
+            )
+            .into());
+        }
+        Ok(())
     }
 
-    pub fn insert_reader_state(&mut self, seqno: BlockSeqno, reader: InternalsRangeReaderState) {
-        self.reader_state.ranges.insert(seqno, reader);
+    pub fn insert_range_state(
+        &mut self,
+        seqno: BlockSeqno,
+        state: InternalsRangeReaderState,
+    ) -> Result<(), CollatorError> {
+        if self.reader_state.ranges.insert(seqno, state).is_some() {
+            return Err(anyhow!(
+                "Range reader state already exists (shard: {}, seqno: {})",
+                self.for_shard_id,
+                seqno
+            )
+            .into());
+        }
+        Ok(())
     }
-
     pub fn get_last_range_reader(&self) -> Result<&InternalsRangeReader<V>> {
         self.range_readers
             .last_key_value()
@@ -370,7 +392,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
         } = &mut self.reader_state;
 
         for (seqno, mut range_reader_state) in ranges {
-            let reader = create_existing_internals_range_reader(
+            let reader = create_existing_range_reader(
                 self.for_shard_id,
                 &self.partition_id,
                 self.mq_adapter.clone(),
@@ -393,25 +415,33 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
             self.msgs_exec_params.current().range_messages_limit
         };
 
-        let reader = self.create_next_internals_range_reader(Some(range_max_messages))?;
-        let reader_seqno = reader.seqno;
+        let (reader, state) = self.create_next_range(Some(range_max_messages))?;
+        let seqno = reader.seqno;
         // we should add created range reader using calculated reader seqno instead of current block seqno
         // otherwise the next range will exeed the max blocks limit
-        if self.range_readers.insert(reader_seqno, reader).is_some() {
+        if self.range_readers.insert(seqno, reader).is_some() {
             panic!(
                 "internals range reader should not already exist (for_shard_id: {}, seqno: {})",
                 self.for_shard_id, self.block_seqno,
             )
         };
+
+        if self.reader_state.ranges.insert(seqno, state).is_some() {
+            panic!(
+                "internals range reader state should not already exist (for_shard_id: {}, seqno: {})",
+                self.for_shard_id, self.block_seqno,
+            )
+        };
+
         self.all_ranges_fully_read = false;
-        Ok(reader_seqno)
+        Ok(seqno)
     }
 
     #[tracing::instrument(skip_all)]
-    fn create_next_internals_range_reader(
+    fn create_next_range(
         &self,
         range_max_messages: Option<u32>,
-    ) -> Result<InternalsRangeReader<V>, CollatorError> {
+    ) -> Result<(InternalsRangeReader<V>, InternalsRangeReaderState), CollatorError> {
         let last_range_reader_info_opt = self
             .get_last_range_state()
             .map(|(seqno, state)| {
@@ -505,7 +535,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
             });
         }
 
-        let mut range_reader_state = InternalsRangeReaderState {
+        let mut state = InternalsRangeReaderState {
             buffer: Default::default(),
 
             msgs_stats: None,
@@ -521,7 +551,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
         load_msg_stats(
             self.partition_id,
             self.mq_adapter.clone(),
-            &mut range_reader_state,
+            &mut state,
             &ranges,
         )?;
 
@@ -538,12 +568,12 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
         tracing::debug!(target: tracing_targets::COLLATOR,
             partition_id = %reader.partition_id,
             seqno = reader.seqno,
-            fully_read = range_reader_state.is_fully_read(),
-            reader_state = ?DebugInternalsRangeReaderState(&range_reader_state),
+            fully_read = state.is_fully_read(),
+            reader_state = ?DebugInternalsRangeReaderState(&state),
             "internals reader: created next range reader state",
         );
 
-        Ok(reader)
+        Ok((reader, state))
     }
 
     pub fn read_existing_messages_into_buffers(
@@ -887,14 +917,10 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
         if last_seqno < self.block_seqno {
             // we should look thru the whole range to check for pending messages
             // so we do not pass `range_max_messages` to force use the prev block end lt
-            let mut range_reader = self.create_next_internals_range_reader(None)?;
-            let state = self
-                .reader_state
-                .ranges
-                .get_mut(&range_reader.seqno)
-                .unwrap();
+            let (mut range_reader, mut state) = self.create_next_range(None)?;
+
             if !state.is_fully_read() {
-                range_reader.init(state, &self.mq_adapter)?;
+                range_reader.init(&mut state, &self.mq_adapter)?;
 
                 // check if has pending internals in iterator
                 let Some(iterator) = range_reader.iterator_opt.as_mut() else {
@@ -1049,7 +1075,7 @@ pub(super) struct CollectInternalsResult {
 }
 
 #[tracing::instrument(skip_all)]
-fn create_existing_internals_range_reader<V: InternalMessageValue>(
+fn create_existing_range_reader<V: InternalMessageValue>(
     for_shard_id: ShardIdent,
     partition_id: &QueuePartitionIdx,
     mq_adapter: Arc<dyn MessageQueueAdapter<V>>,

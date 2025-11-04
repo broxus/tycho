@@ -187,8 +187,8 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
                 "created new messages reader",
             );
 
-            self.insert_range_reader(seqno, reader);
-            self.insert_reader_state(seqno, state);
+            self.insert_range_reader(seqno, reader)?;
+            self.insert_range_state(seqno, state)?;
 
             self.all_ranges_fully_read = false;
         } else {
