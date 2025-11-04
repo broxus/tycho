@@ -665,28 +665,18 @@ impl std::fmt::Debug for DebugMessagesBuffer<'_> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum BufferFillStateByCount {
     IsFull,
+    #[default]
     NotFull,
 }
 
-impl Default for BufferFillStateByCount {
-    fn default() -> Self {
-        Self::NotFull
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum BufferFillStateBySlots {
     CanFill,
+    #[default]
     CanNotFill,
-}
-
-impl Default for BufferFillStateBySlots {
-    fn default() -> Self {
-        Self::CanNotFill
-    }
 }
 
 impl MessagesBuffer {

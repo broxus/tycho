@@ -32,7 +32,7 @@ pub async fn test() {
     let fourth_success_rate = [0.8, 0.2];
     let fifth_success_rate = [0.0, 1.0];
 
-    let indices = vec![
+    let indices = [
         WeightedIndex::new(first_success_rate).unwrap(),
         WeightedIndex::new(second_success_rate).unwrap(),
         WeightedIndex::new(third_success_rate).unwrap(),
