@@ -13,6 +13,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::Instrument;
 use tycho_network::{PeerId, Request};
 use tycho_util::FastHashMap;
+use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
@@ -203,6 +204,8 @@ impl Downloader {
                 "not downloaded",
             );
         }
+
+        Reclaimer::instance().drop(task);
 
         Ok(downloaded)
     }
