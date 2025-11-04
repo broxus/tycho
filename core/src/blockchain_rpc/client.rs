@@ -188,8 +188,8 @@ impl BlockchainRpcClient {
             let validator = validator.clone();
             let request = request.clone();
             let this = self.inner.clone();
-            // we are not using `JoinTask` here because we want to measure the time taken by the broadcast
-            futures.push(tokio::spawn(async move {
+
+            futures.push(JoinTask::new(async move {
                 let start = Instant::now();
                 let res = client.send_to_validator(validator, request).await;
                 this.response_tracker
@@ -202,7 +202,7 @@ impl BlockchainRpcClient {
         let timeout = self.compute_broadcast_timeout();
         tokio::time::timeout(timeout, async {
             // inner task timeout won't happen because outer task timeout is always <= inner task timeout
-            while let Some(Ok(res)) = futures.next().await {
+            while let Some(res) = futures.next().await {
                 if let Err(e) = res {
                     tracing::warn!("failed to broadcast external message: {e}");
                 } else {
