@@ -42,17 +42,16 @@ impl Default for WuTunerConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
 pub enum WuTuneType {
+    // FIXME: Look ma, no Option
+    #[default]
     No,
-    Rpc { secret: HashBytes, rpc: String },
-}
-
-impl Default for WuTuneType {
-    fn default() -> Self {
-        Self::No
-    }
+    Rpc {
+        secret: HashBytes,
+        rpc: String,
+    },
 }
 
 impl WuTunerConfig {
