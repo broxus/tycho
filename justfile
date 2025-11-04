@@ -72,7 +72,7 @@ test_cov:
     fi
 
 check_dashboard:
-    /usr/bin/env python ./scripts/check-metrics.py
+    ./scripts/run-py.sh ./scripts/check-metrics.py
 
 # Generates a Grafana panel JSON.
 gen_dashboard:
@@ -81,6 +81,12 @@ gen_dashboard:
         ./scripts/install-python-deps.sh
     fi
     /usr/bin/env python ./scripts/gen-dashboard.py
+
+fmt_py:
+    ./scripts/run-py.sh -m ruff format .
+
+check_format_py:
+    ./scripts/run-py.sh -m ruff format --check .
 
 update_rpc_proto:
     cargo run -p tycho-gen-protos
