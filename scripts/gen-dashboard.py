@@ -2514,6 +2514,25 @@ def mempool_onchain_stats_and_bans() -> RowPanel:
         )
     metrics = [
         create_gauge_panel(
+            "tycho_mempool_moderator_banned",
+            "Banned",
+            unit_format=UNITS.YES_NO,
+            labels=label_selectors,
+            legend_format=legend_format,
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                f"tycho_mempool_moderator_event",
+                label_selectors=['kind=~"$kind"', 'peer_id=~"$peer_id"'],
+                range_selector="$__interval",
+                by_labels=["instance", "kind", "peer_id"],
+            ),
+            "Moderator event",
+            labels_selectors=['kind=~"$kind"', 'peer_id=~"$peer_id"'],
+            legend_format="{{instance}} {{kind}} {{peer_id}}",
+            by_labels=["instance", "kind", "peer_id"],
+        ),
+        create_gauge_panel(
             "tycho_mempool_onchain_stats_last_round",
             "Last observed point round",
             labels=label_selectors,

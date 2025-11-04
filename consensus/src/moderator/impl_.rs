@@ -9,6 +9,7 @@ use crate::effects::{Ctx, RoundCtx};
 use crate::engine::{MempoolConfig, NodeConfig};
 use crate::models::UnixTime;
 use crate::moderator::ban::core::BanCore;
+use crate::moderator::stored::RecordAction;
 use crate::moderator::{JournalEvent, JournalRecord, RecordData, RecordKey};
 use crate::storage::{JournalStore, MempoolDb};
 
@@ -115,6 +116,9 @@ impl ModeratorTrait for ModeratorInner {
 
     fn report_blocking(&self, events: Vec<JournalEvent>, round_ctx: &RoundCtx) {
         let records = self.events_to_records_and_maybe_ban(events);
+        for record in &records {
+            meter_event(&record.data);
+        }
         self.journal_store
             .store_records(&records, round_ctx.conf())
             .expect("store records");
@@ -170,6 +174,9 @@ impl ModeratorInner {
             tokio::select! {
                 Some(new_conf) = conf_rx.recv() => conf = new_conf,
                 Some(records) = delayed_db_writes_rx.recv() => {
+                    for record in &records {
+                        meter_event(&record.data);
+                    }
                     journal_store
                         .store_records(&records, &conf)
                         .expect("store delayed journal record");
@@ -178,4 +185,20 @@ impl ModeratorInner {
             }
         }
     }
+}
+
+/// Meters only events that account for bans. To be Used right before DB write.
+fn meter_event(record_data: &RecordData) {
+    match record_data.action() {
+        RecordAction::CountPenalty | RecordAction::StoreAndCountPenalty => {}
+        RecordAction::Store => return,
+    }
+    let RecordData::Event(event) = record_data else {
+        return;
+    };
+    let labels = [
+        ("kind", format!("{:?}", event.tag())),
+        ("peer_id", format!("{:.4}", record_data.peer_id())),
+    ];
+    metrics::counter!("tycho_mempool_moderator_event", &labels).increment(1);
 }

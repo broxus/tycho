@@ -189,6 +189,7 @@ async fn updater(
                     hash_map::Entry::Vacant(vacant) => {
                         vacant.insert(ban.until);
                         network.known_peers().ban(&ban.peer_id);
+                        meter_banned(&ban.peer_id, true);
                         true
                     }
                 };
@@ -209,6 +210,7 @@ async fn updater(
                 }
                 last_bans.remove(&unban.peer_id);
                 network.known_peers().remove(&unban.peer_id);
+                meter_banned(&unban.peer_id, false);
 
                 let record = JournalRecord {
                     key: RecordKey::new(),
@@ -222,4 +224,10 @@ async fn updater(
             else => unreachable!("Ban core updater loop break")
         }
     }
+}
+
+/// Meters when peer gets (un)banned on network layer, not when ban is written to DB
+fn meter_banned(peer_id: &PeerId, is_banned: bool) {
+    let labels = [("peer_id", format!("{:.4}", peer_id))];
+    metrics::gauge!("tycho_mempool_moderator_banned", &labels).set(is_banned as u8);
 }
