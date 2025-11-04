@@ -152,6 +152,9 @@ impl ModeratorTrait for ModeratorInner {
 
     fn report_blocking(&self, events: Vec<JournalEvent>, round_ctx: &RoundCtx) {
         let full_items = self.events_to_items_and_maybe_ban(events);
+        for full_item in &full_items {
+            meter_event(&full_item.item);
+        }
         self.journal_store
             .store_records(batch(&full_items), round_ctx.conf().point_max_bytes)
             .expect("store records");
@@ -207,6 +210,9 @@ impl ModeratorInner {
             tokio::select! {
                 Some(new_conf) = mempool_conf_rx.recv() => conf = new_conf,
                 Some(full_items) = delayed_db_writes_rx.recv() => {
+                    for full_item in &full_items {
+                        meter_event(&full_item.item);
+                    }
                     let conf_point_max_bytes = conf.point_max_bytes;
                     let journal_store = journal_store.clone();
                     let result = tokio::task::spawn_blocking(move ||
@@ -229,4 +235,19 @@ impl ModeratorInner {
         }
         tracing::warn!("Mempool moderator delayed db writer shut down");
     }
+}
+
+/// Meters only events that account for bans. To be Used right before DB write.
+fn meter_event(item: &JournalItem) {
+    if !item.action().is_ban_related() {
+        return;
+    }
+    let JournalItem::Event(event) = item else {
+        return;
+    };
+    let labels = [
+        ("kind", format!("{:?}", event.tag())),
+        ("peer_id", format!("{:.4}", item.peer_id())),
+    ];
+    metrics::counter!("tycho_mempool_moderator_event", &labels).increment(1);
 }

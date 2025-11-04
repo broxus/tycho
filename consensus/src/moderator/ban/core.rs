@@ -148,6 +148,7 @@ async fn updater(
                     }
                 };
                 if is_new {
+                    meter_banned(&ban.peer_id, true);
                     network.known_peers().ban(&ban.peer_id);
                 }
             },
@@ -162,6 +163,7 @@ async fn updater(
                     continue; // newer ban is enqueued, don't toggle known peer
                 }
                 network.known_peers().remove(&unban.peer_id);
+                meter_banned(&unban.peer_id, false);
 
                 let item_full = JournalItemFull {
                     key: RecordKey::new(),
@@ -173,4 +175,10 @@ async fn updater(
         }
     }
     tracing::warn!("Mempool ban core updater shut down");
+}
+
+/// Meters when peer gets (un)banned on network layer, not when ban is written to DB
+fn meter_banned(peer_id: &PeerId, is_banned: bool) {
+    let labels = [("peer_id", format!("{:.4}", peer_id))];
+    metrics::gauge!("tycho_mempool_moderator_banned", &labels).set(is_banned as u8);
 }

@@ -2510,6 +2510,33 @@ def validator() -> RowPanel:
     return create_row("Validator", metrics)
 
 
+def mempool_onchain_stats_and_bans() -> RowPanel:
+    label_selectors = ['peer_id=~"$peer_id"']
+    legend_format = "{{peer_id}} <- {{instance}}"
+    metrics = [
+        create_gauge_panel(
+            "tycho_mempool_moderator_banned",
+            "Banned",
+            unit_format=UNITS.YES_NO,
+            labels=label_selectors,
+            legend_format=legend_format,
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                f"tycho_mempool_moderator_event",
+                label_selectors=['kind=~"$kind"', 'peer_id=~"$peer_id"'],
+                range_selector="$__interval",
+                by_labels=["instance", "kind", "peer_id"],
+            ),
+            "Moderator event",
+            labels_selectors=['kind=~"$kind"', 'peer_id=~"$peer_id"'],
+            legend_format="{{instance}} {{kind}} {{peer_id}}",
+            by_labels=["instance", "kind", "peer_id"],
+        ),
+    ]
+    return create_row("Mempool onchain stats and bans", metrics)
+
+
 def mempool_rounds() -> RowPanel:
     metrics = [
         create_gauge_panel(
@@ -3320,6 +3347,7 @@ dashboard = Dashboard(
         collator_misc_operations_metrics(),
         collator_commit_block_metrics(),
         validator(),
+        mempool_onchain_stats_and_bans(),
         mempool_rounds(),
         mempool_payload_rates(),
         mempool_engine_rates(),
