@@ -57,7 +57,7 @@ pub struct FinalizeBlockContext {
     pub collation_session: Arc<CollationSessionInfo>,
     pub wu_used_from_last_anchor: u64,
     pub usage_tree: UsageTree,
-    pub queue_diff: SerializedQueueDiff,
+    pub serialized_diff: SerializedQueueDiff,
     pub collator_config: Arc<CollatorConfig>,
     pub processed_upto: ProcessedUptoInfoStuff,
     pub diff_tail_len: u32,
@@ -69,22 +69,8 @@ impl Phase<FinalizeState> {
         &mut self,
         messages_reader: MessagesReader<'a, EnqueuedMessage>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    ) -> Result<
-        (
-            FinalizeMessagesReaderResult,
-            impl FnOnce() -> Result<Duration> + use<>,
-        ),
-        CollatorError,
-    > {
+    ) -> Result<FinalizeMessagesReaderResult, CollatorError> {
         let labels = [("workchain", self.state.shard_id.workchain().to_string())];
-
-        let prev_hash = self
-            .state
-            .prev_shard_data
-            .prev_queue_diff_hashes()
-            .first()
-            .cloned()
-            .unwrap_or_default();
 
         // get top other updated shard blocks ids
         let top_other_updated_shard_blocks_ids =
@@ -160,128 +146,30 @@ impl Phase<FinalizeState> {
         let FinalizedMessagesReader {
             has_unprocessed_messages,
             queue_diff_with_msgs,
-            reader_state,
-            processed_upto,
+            // reader_state,
+            // processed_upto,
         } = messages_reader.finalize(
             self.extra.executor.min_next_lt(),
             &other_updated_top_shard_diffs_info,
         )?;
 
-        // log updated processed upto
-        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto = {:?}", processed_upto);
-
-        // report actual ranges count to metrics
-        for (par_id, par) in &processed_upto.partitions {
-            let labels = [
-                ("workchain", self.state.shard_id.workchain().to_string()),
-                ("par_id", par_id.to_string()),
-            ];
-            metrics::gauge!("tycho_do_collate_processed_upto_ext_ranges", &labels)
-                .set(par.externals.ranges.len() as f64);
-            metrics::gauge!("tycho_do_collate_processed_upto_int_ranges", &labels)
-                .set(par.internals.ranges.len() as f64);
-        }
-
-        // build diff
-        let (min_message, max_message) = {
-            let messages = &queue_diff_with_msgs.messages;
-            match messages.first_key_value().zip(messages.last_key_value()) {
-                Some(((min, _), (max, _))) => (*min, *max),
-                None => (
-                    QueueKey::min_for_lt(self.state.collation_data.start_lt),
-                    QueueKey::max_for_lt(self.state.collation_data.next_lt),
-                ),
-            }
-        };
-
-        let queue_diff = QueueDiffStuff::builder(
-            self.state.shard_id,
-            self.state.collation_data.block_id_short.seqno,
-            &prev_hash,
-        )
-        .with_processed_to(reader_state.internals.get_min_processed_to_by_shards())
-        .with_messages(
-            &min_message,
-            &max_message,
-            queue_diff_with_msgs.messages.keys().map(|k| &k.hash),
-        )
-        .with_router(
-            queue_diff_with_msgs
-                .partition_router
-                .to_router_partitions_src(),
-            queue_diff_with_msgs
-                .partition_router
-                .to_router_partitions_dst(),
-        )
-        .serialize();
-
-        self.extra.finalize_metrics.create_queue_diff_elapsed =
-            histogram_create_queue_diff.finish();
-
-        let queue_diff_hash = *queue_diff.hash();
-        tracing::info!(target: tracing_targets::COLLATOR, queue_diff_hash = %queue_diff_hash);
-
         let queue_diff_messages_count = queue_diff_with_msgs.messages.len();
-
-        // create update queue task but do not run it
-        let update_queue_task = {
-            let block_id_short = self.state.collation_data.block_id_short;
-            let labels = labels.clone();
-            let span = tracing::Span::current();
-            move || {
-                let _span = span.enter();
-
-                let histogram = HistogramGuard::begin_with_labels(
-                    "tycho_do_collate_build_statistics_time_high",
-                    &labels,
-                );
-
-                let statistics = DiffStatistics::from_diff(
-                    &queue_diff_with_msgs,
-                    block_id_short.shard,
-                    min_message,
-                    max_message,
-                );
-
-                histogram.finish();
-
-                // apply queue diff
-                let histogram = HistogramGuard::begin_with_labels(
-                    "tycho_do_collate_apply_queue_diff_time_high",
-                    &labels,
-                );
-
-                // check only uncommitted diffs because the last committed diff
-                // may not be sequential after sync on a block ahead
-                mq_adapter
-                    .apply_diff(
-                        queue_diff_with_msgs,
-                        block_id_short,
-                        &queue_diff_hash,
-                        statistics,
-                        Some(DiffZone::Uncommitted),
-                    )
-                    .context("finalize")?;
-                let apply_queue_diff_elapsed = histogram.finish();
-
-                Ok(apply_queue_diff_elapsed)
-            }
-        };
 
         self.extra.finalize_wu.calculate_queue_diff_wu(
             &self.state.collation_config.work_units_params.finalize,
             queue_diff_messages_count as u64,
         );
 
-        Ok((
+        Ok(
             FinalizeMessagesReaderResult {
-                queue_diff,
+                queue_diff_with_msgs,
+                // queue_diff,
                 has_unprocessed_messages,
-                reader_state,
-                processed_upto,
+                // reader_state,
+                // processed_upto,
             },
-            update_queue_task,
-        ))
+            // update_queue_task,
+        )
     }
 
     pub fn finalize_block(
@@ -294,7 +182,7 @@ impl Phase<FinalizeState> {
             collation_session,
             wu_used_from_last_anchor,
             usage_tree,
-            queue_diff,
+            serialized_diff: queue_diff,
             collator_config,
             processed_upto,
             diff_tail_len,

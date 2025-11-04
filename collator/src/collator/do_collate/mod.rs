@@ -7,7 +7,7 @@ use humantime::format_duration;
 use phase::{ActualState, Phase};
 use prepare::PrepareState;
 use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
-use tycho_block_util::queue::QueueKey;
+use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::RefMcStateHandle;
 use tycho_core::storage::{NewBlockMeta, StoreStateHint};
 use tycho_types::models::*;
@@ -31,17 +31,19 @@ use crate::collator::do_collate::work_units::{DoCollateWu, WuEvent, WuEventData}
 use crate::collator::error::{CollationCancelReason, CollatorError};
 use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::types::{FinalizeMetrics, PartialValueFlow, RandSeed};
-use crate::internal_queue::types::diff::DiffZone;
+use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
 use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
+use crate::internal_queue::types::stats::DiffStatistics;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{
-    build_all_shards_processed_to_by_partitions, find_min_processed_to_by_shards,
+    ProcessedUptoInfoStuff, build_all_shards_processed_to_by_partitions,
+    find_min_processed_to_by_shards,
 };
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
-    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ShardDescriptionShort,
+    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort,
     ShardDescriptionShortExt, TopBlockDescription, TopShardBlockInfo,
 };
 
@@ -55,6 +57,12 @@ mod finalize;
 mod phase;
 mod prepare;
 pub mod work_units;
+
+struct CollationOutput {
+    reader_state: ReaderState,
+    anchors_cache: AnchorsCache,
+    result: Result<CollationResult, CollatorError>,
+}
 
 pub struct FinalizeCollationCtx {
     /// Do we have unprocessed messages in internals
@@ -209,7 +217,7 @@ impl CollatorStdImpl {
             move || {
                 let _span = span.enter();
 
-                Self::run(
+                let result = Self::run(
                     config,
                     mq_adapter,
                     &mut reader_state,
@@ -219,7 +227,13 @@ impl CollatorStdImpl {
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
-                )
+                );
+
+                CollationOutput {
+                    reader_state,
+                    anchors_cache,
+                    result,
+                }
             }
         });
 
@@ -239,11 +253,17 @@ impl CollatorStdImpl {
                 std::future::pending::<()>().await;
             } => {}
         }
-        let do_collate_res = do_collate_res.unwrap();
+        let CollationOutput {
+            mut reader_state,
+            anchors_cache: mut restored_anchors_cache,
+            result: do_collate_res,
+        } = do_collate_res.unwrap();
+
+        self.anchors_cache = restored_anchors_cache;
 
         let CollationResult {
             finalized,
-            reader_state,
+            // reader_state,
             execute_result,
             final_result,
         } = match do_collate_res {
@@ -393,6 +413,15 @@ impl CollatorStdImpl {
             .clone();
 
         let block_id_short = state.collation_data.block_id_short;
+        let next_lt = state.collation_data.next_lt;
+        let start_lt = state.collation_data.start_lt;
+        let prev_diff_hash = state
+            .prev_shard_data
+            .prev_queue_diff_hashes()
+            .first()
+            .cloned()
+            .unwrap_or_default();
+
         let prepare_phase =
             Phase::<PrepareState<'_>>::new(mq_adapter.clone(), reader_state, anchors_cache, state);
 
@@ -420,22 +449,50 @@ impl CollatorStdImpl {
         finalize_phase.extra.finalize_metrics.total_timer.start();
 
         // finalize messages reader
-        let (
-            FinalizeMessagesReaderResult {
-                queue_diff,
-                has_unprocessed_messages,
-                // reader_state,
-                processed_upto,
-            },
-            update_queue_task,
-        ) = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
+        let FinalizeMessagesReaderResult {
+            queue_diff_with_msgs,
+            has_unprocessed_messages,
+            // reader_state,
+            // processed_upto,
+        } = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
 
-        let r = reader_state;
+        let (min_message, max_message) = {
+            let messages = &queue_diff_with_msgs.messages;
+            match messages.first_key_value().zip(messages.last_key_value()) {
+                Some(((min, _), (max, _))) => (*min, *max),
+                None => (
+                    QueueKey::min_for_lt(start_lt),
+                    QueueKey::max_for_lt(next_lt),
+                ),
+            }
+        };
+
+        let serialized_diff = serialize_diff(
+            &queue_diff_with_msgs,
+            &min_message,
+            &max_message,
+            &block_id_short,
+            &prev_diff_hash,
+            reader_state.internals.get_min_processed_to_by_shards(),
+        );
+
+        let update_queue_task = create_apply_diff_task(
+            &mq_adapter,
+            queue_diff_with_msgs,
+            &block_id_short,
+            min_message,
+            max_message,
+            *serialized_diff.hash(),
+        )?;
+
+        let processed_upto = reader_state.get_updated_processed_upto();
+        let internal_processed_upto_by_partitions =
+            processed_upto.get_internals_processed_to_by_partitions();
 
         // Use unified helper methods for min_processed_to calculation
         let all_shards_processed_to = build_all_shards_processed_to_by_partitions(
             block_id_short,
-            processed_upto.get_internals_processed_to_by_partitions(),
+            internal_processed_upto_by_partitions,
             mc_data
                 .processed_upto
                 .get_internals_processed_to_by_partitions(),
@@ -466,7 +523,7 @@ impl CollatorStdImpl {
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
-                    queue_diff,
+                    serialized_diff,
                     collator_config,
                     processed_upto,
                     diff_tail_len,
@@ -501,7 +558,7 @@ impl CollatorStdImpl {
 
         Ok(CollationResult {
             finalized,
-            reader_state,
+            // reader_state,
             execute_result,
             final_result,
         })
@@ -1333,4 +1390,93 @@ pub fn is_first_block_after_prev_master(
     }
 
     false
+}
+
+fn serialize_diff(
+    queue_diff_with_msgs: &QueueDiffWithMessages<EnqueuedMessage>,
+    min_message: &QueueKey,
+    max_message: &QueueKey,
+    block_id_short: &BlockIdShort,
+    prev_hash: &HashBytes,
+    processed_to: ProcessedTo,
+) -> SerializedQueueDiff {
+    let queue_diff =
+        QueueDiffStuff::builder(block_id_short.shard, block_id_short.seqno, &prev_hash)
+            .with_processed_to(processed_to)
+            .with_messages(
+                &min_message,
+                &max_message,
+                queue_diff_with_msgs.messages.keys().map(|k| &k.hash),
+            )
+            .with_router(
+                queue_diff_with_msgs
+                    .partition_router
+                    .to_router_partitions_src(),
+                queue_diff_with_msgs
+                    .partition_router
+                    .to_router_partitions_dst(),
+            )
+            .serialize();
+
+    queue_diff
+}
+
+fn create_apply_diff_task(
+    mq_adapter: &Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+    queue_diff_with_msgs: QueueDiffWithMessages<EnqueuedMessage>,
+    block_id_short: &BlockIdShort,
+    min_message: QueueKey,
+    max_message: QueueKey,
+    diff_hash: HashBytes,
+) -> Result<impl FnOnce() -> Result<Duration>> {
+    // create update queue task but do not run it
+    let update_queue_task = {
+        let labels = [
+            ("workchain", block_id_short.shard.workchain().to_string()),
+            // ("par_id", par_id.to_string()),
+        ];
+        // let block_id_short = self.state.collation_data.block_id_short;
+        // let labels = labels.clone();
+        let span = tracing::Span::current();
+        move || {
+            let _span = span.enter();
+
+            let histogram = HistogramGuard::begin_with_labels(
+                "tycho_do_collate_build_statistics_time_high",
+                &labels,
+            );
+
+            let statistics = DiffStatistics::from_diff(
+                &queue_diff_with_msgs,
+                block_id_short.shard,
+                min_message,
+                max_message,
+            );
+
+            histogram.finish();
+
+            // apply queue diff
+            let histogram = HistogramGuard::begin_with_labels(
+                "tycho_do_collate_apply_queue_diff_time_high",
+                &labels,
+            );
+
+            // check only uncommitted diffs because the last committed diff
+            // may not be sequential after sync on a block ahead
+            mq_adapter
+                .apply_diff(
+                    queue_diff_with_msgs,
+                    *block_id_short,
+                    &diff_hash,
+                    statistics,
+                    Some(DiffZone::Uncommitted),
+                )
+                .context("finalize")?;
+            let apply_queue_diff_elapsed = histogram.finish();
+
+            Ok(apply_queue_diff_elapsed)
+        }
+    };
+
+    Ok(update_queue_task)
 }
