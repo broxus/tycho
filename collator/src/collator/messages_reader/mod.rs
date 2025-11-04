@@ -49,8 +49,8 @@ pub(super) mod tests;
 
 pub(super) struct FinalizedMessagesReader<V: InternalMessageValue> {
     pub has_unprocessed_messages: bool,
-    pub reader_state: ReaderState,
-    pub processed_upto: ProcessedUptoInfoStuff,
+    // pub reader_state: ReaderState,
+    // pub processed_upto: ProcessedUptoInfoStuff,
     pub queue_diff_with_msgs: QueueDiffWithMessages<V>,
 }
 
@@ -565,8 +565,8 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
 
         Ok(FinalizedMessagesReader {
             has_unprocessed_messages,
-            reader_state,
-            processed_upto,
+            // reader_state,
+            // processed_upto,
             queue_diff_with_msgs,
         })
 
