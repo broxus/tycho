@@ -120,7 +120,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
                     // check buffers in previous partition
                     for prev_par_range_reader in prev_par_reader.range_readers().values() {
                         let reader_state = prev_par_reader
-                            .reader_state()
+                            .state()
                             .ranges
                             .get(&prev_par_range_reader.seqno)
                             .unwrap();
