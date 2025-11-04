@@ -1,20 +1,28 @@
 import "@ton/test-utils";
-import {address, beginCell, Cell, Dictionary, toNano} from "@ton/core";
-import {TychoExecutor} from "@tychosdk/emulator";
-import {ConfigParams, makeValidatorSet, ValidatorAccount} from "../wrappers/util";
-import {compile} from "@ton/blueprint";
-import {Blockchain, createShardAccount, SmartContract} from "@ton/sandbox";
-import {Slasher, storeSlasherData} from "../wrappers/Slasher";
+import { address, beginCell, Cell, Dictionary, toNano } from "@ton/core";
+import { cryptoWithSignatureId, TychoExecutor } from "@tychosdk/emulator";
+import { ConfigParams, makeValidatorSet, simpleInternal, ValidatorAccount, ValidatorData } from "../wrappers/util";
+import { compile } from "@ton/blueprint";
+import { Blockchain, createShardAccount, SmartContract } from "@ton/sandbox";
+import { Slasher, storeSlasherData } from "../wrappers/Slasher";
 
 const SLASHER_ADDR = address(
     "-1:8888888888888888888888888888888888888888888888888888888888888888"
 );
+
+const ELECTOR_ADDR = address(
+    "-1:3333333333333333333333333333333333333333333333333333333333333333"
+);
+
+const SLASHER_AGGREGATE_STATS_OP = 100;
 
 describe("Slasher", () => {
     let code: Cell;
     let executor: TychoExecutor;
 
     let validators: ValidatorAccount[];
+    let crypto: ReturnType<typeof cryptoWithSignatureId>;
+    let globalId: number;
 
     const config = new ConfigParams(TychoExecutor.defaultConfig);
 
@@ -32,7 +40,7 @@ describe("Slasher", () => {
         validators = Array(4)
             .fill(null)
             .map((_, i) =>
-                ValidatorAccount.makeStub(address(`-1:${`e${i}`.repeat(32)}`))
+                ValidatorAccount.makeStub(address(`-1:${`e${i}`.repeat(32)}`), i)
             );
 
         let currentVset = makeValidatorSet({
@@ -40,7 +48,10 @@ describe("Slasher", () => {
             utimeUntil: 10,
             accounts: validators,
         });
-        config.setCurrentVset(currentVset)
+
+        config.setCurrentVset(currentVset);
+        globalId = config.getGlobalId();
+        crypto = cryptoWithSignatureId(globalId);
 
         blockchain = await Blockchain.create({
             config: config.toCell(),
@@ -98,13 +109,67 @@ describe("Slasher", () => {
 
     it("should update votes", async () => {
 
-        for (let [index, validator] of validators.entries()) {
-            await slasher.receiveMessage(validator.createVoteMessage(index, slasher.address, 0))
+        for (let validator of validators) {
+            let accounts: ValidatorData[] = validators
+                .filter(x => x.validatorId != validator.validatorId)
+                .map(x => {
+                    return {
+                        validatorId: x.validatorId,
+                        signatureInfo: Array(100).fill({ validSignatures: false, invalidSignatures: true })
+                    }
+                });
+
+            await slasher.receiveMessage(validator.createVoteMessage(slasher.address, 0, accounts, crypto))
         }
 
         const data = await getters(blockchain, slasher).getData();
         expect(data.votes.size).toBe(4);
-    })
+        for (let votes of data.votes.values()) {
+            expect(votes).toBe(100);
+        }
+    });
+
+    it("should select validators", async () => {
+        for (let validator of validators) {
+            let accounts: ValidatorData[] = validators
+                .filter(x => x.validatorId != validator.validatorId)
+                .map(x => {
+                    return {
+                        validatorId: x.validatorId,
+                        signatureInfo: Array(100).fill({ validSignatures: false, invalidSignatures: true })
+                    }
+                });
+
+            await slasher.receiveMessage(validator.createVoteMessage(slasher.address, 0, accounts, crypto))
+        }
+
+
+        let transaction = await slasher.receiveMessage(
+            simpleInternal({
+                src: ELECTOR_ADDR,
+                dest: SLASHER_ADDR,
+                bounce: false,
+                bounced: false,
+                value: toNano(1),
+                body: beginCell()
+                    .storeUint(SLASHER_AGGREGATE_STATS_OP, 32)
+                    .storeUint(0, 32)
+                    .endCell(),
+            })
+        );
+
+        expect(transaction.outMessages.size).toBe(1);
+        for (let m of transaction.outMessages.values()) {
+            if (m.info.type == "internal") {
+                expect(m.info.dest.toRawString()).toEqual(ELECTOR_ADDR.toRawString());
+            }
+        }
+
+        const data = await getters(blockchain, slasher).getData();
+
+        expect(data.punishedValidators).not.toBeNull();
+        expect(data.punishedValidators!.list.size).toBe(4);
+    });
 
 });
 

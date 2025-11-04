@@ -119,6 +119,7 @@ const VALIDATOR_SET_TAG = 0x12;
 export type ValidatorSet = {
     utimeSince: number;
     utimeUntil: number;
+    total: number,
     main: number;
     totalWeight: bigint;
     validators: Dictionary<number, ValidatorDescr>;
@@ -131,11 +132,11 @@ export async function makeStubValidatorSet(args: {
 }): Promise<ValidatorSet> {
     let validators = Dictionary.empty(Dictionary.Keys.Uint(16), {
         parse: loadValidatorDescr,
-        serialize: storeValidatorDescr,
+        serialize: uncurry(storeValidatorDescr),
     });
 
     for (let i = 0; i < args.validatorCount; i++) {
-        validators.set(i, {
+        validators = validators.set(i, {
             pubkey: await getSecureRandomBytes(32).then(bufferToBigInt),
             weight: 1n,
             adnlAddr: null,
@@ -145,6 +146,7 @@ export async function makeStubValidatorSet(args: {
     return {
         utimeSince: args.utimeSince,
         utimeUntil: args.utimeUntil,
+        total: args.validatorCount,
         main: args.validatorCount,
         totalWeight: BigInt(args.validatorCount),
         validators,
@@ -158,11 +160,11 @@ export function makeValidatorSet(args: {
 }): ValidatorSet {
     let validators = Dictionary.empty(Dictionary.Keys.Uint(16), {
         parse: loadValidatorDescr,
-        serialize: storeValidatorDescr,
+        serialize: uncurry(storeValidatorDescr),
     });
 
-    for (const [index, account] of args.accounts.entries()) {
-        validators.set(index, {
+    for (const account of args.accounts) {
+        validators = validators.set(account.validatorId, {
             pubkey: bufferToBigInt(account.keyPair.publicKey),
             weight: 1n,
             adnlAddr: null,
@@ -172,11 +174,11 @@ export function makeValidatorSet(args: {
     return {
         utimeSince: args.utimeSince,
         utimeUntil: args.utimeUntil,
+        total: args.accounts.length,
         main: args.accounts.length,
         totalWeight: BigInt(args.accounts.length),
         validators,
     };
-
 }
 
 export function loadValidatorSet(cs: Slice): ValidatorSet {
@@ -188,11 +190,12 @@ export function loadValidatorSet(cs: Slice): ValidatorSet {
     return {
         utimeSince: cs.loadUint(32),
         utimeUntil: cs.loadUint(32),
+        total: cs.loadUint(16),
         main: cs.loadUint(16),
         totalWeight: cs.loadUintBig(64),
         validators: cs.loadDict(Dictionary.Keys.Uint(16), {
             parse: loadValidatorDescr,
-            serialize: storeValidatorDescr,
+            serialize: uncurry(storeValidatorDescr),
         }),
     };
 }
@@ -212,7 +215,7 @@ export function storeValidatorSet(
 }
 
 const VALIDATOR_DESCR_TAG_SIMPLE = 0x53;
-const VALIDATOR_DESCR_TAG_WITH_ADDR = 0x53;
+const VALIDATOR_DESCR_TAG_WITH_ADDR = 0x73;
 const PUBKEY_TAG_ED25519 = 0x8e81278a;
 
 export type ValidatorDescr = {
@@ -229,6 +232,11 @@ export function loadValidatorDescr(cs: Slice): ValidatorDescr {
             break;
         default:
             throw new UnknownTagError({tag, bits: 8});
+    }
+
+    const keyTag = cs.loadUint(32);
+    if (keyTag !== PUBKEY_TAG_ED25519) {
+        throw new Error(`Unsupported pubkey tag: ${keyTag}`);
     }
 
     const withAddr = tag === VALIDATOR_DESCR_TAG_WITH_ADDR;
@@ -249,6 +257,7 @@ export function storeValidatorDescr(
                 : VALIDATOR_DESCR_TAG_SIMPLE,
             8
         );
+
         builder.storeUint(PUBKEY_TAG_ED25519, 32);
         builder.storeUint(d.pubkey, 256);
         builder.storeUint(d.weight, 64);
@@ -257,6 +266,7 @@ export function storeValidatorDescr(
         }
     };
 }
+
 
 export type VsetInfo = {
     prevHash: bigint | undefined;
@@ -282,22 +292,24 @@ export function loadConfigDict(configCellOrBase64: string | Cell) {
 }
 
 export class ValidatorAccount {
+    public validatorId: number;
     public keyPair: KeyPair;
     public address: Address;
 
-    public static makeStub(addr: Address | string) {
+    public static makeStub(addr: Address | string, id: number): ValidatorAccount {
         if (!(addr instanceof Address)) {
             addr = address(addr);
         }
 
         let keyPair = keyPairFromSeed(addr.hash);
-        return new ValidatorAccount(addr, keyPair);
+        return new ValidatorAccount(addr, keyPair, id);
     }
 
 
-    private constructor(address: Address, keyPair: KeyPair) {
+    private constructor(address: Address, keyPair: KeyPair, validatorId: number) {
         this.address = address;
         this.keyPair = keyPair;
+        this.validatorId = validatorId;
     }
 
     public createStakeMessage(
@@ -313,18 +325,50 @@ export class ValidatorAccount {
         });
     }
 
-    public createVoteMessage(id: number, slasherAddress: Address, startBlockSeqno: number): Message {
+    public createVoteMessage(
+        slasherAddress: Address,
+        startBlockSeqno: number,
+        validators: ValidatorData[],
+        crypto: Crypto,
+    ): Message {
         let builder = new Builder();
-        builder.storeUint(id, 32);
+        builder.storeUint(this.validatorId, 16);
         builder.storeUint(startBlockSeqno, 64);
         for (let i = 0; i < 100; i++) {
             builder.storeBit(true);
         }
-        for (let i = 0; i < 100; i++) {
-            builder.storeBit(true); //got valid signature
-            builder.storeBit(false);
+
+
+        let dict = Dictionary.empty(
+            Dictionary.Keys.Uint(16),
+            Dictionary.Values.Cell()
+        );
+
+        for (let validator of validators) {
+            let b = new Builder();
+            for (let signature of validator.signatureInfo) {
+                if (signature.validSignatures) {
+                    b.storeBit(true);
+                } else {
+                    b.storeBit(false);
+                }
+
+                if (signature.invalidSignature) {
+                    b.storeBit(true);
+                } else {
+                    b.storeBit(false);
+                }
+            }
+
+            dict = dict.set(validator.validatorId, b.asCell());
         }
-        console.log(1023 - builder.availableBits)
+
+        builder.storeDict(dict);
+        let cell = builder.asCell();
+
+        const signature = crypto.sign(cell.hash(), this.keyPair.secretKey);
+        builder.storeBuffer(signature);
+
 
         return simpleExternal({
             dest: slasherAddress,
@@ -357,6 +401,17 @@ export class ValidatorAccount {
             .endCell();
     }
 }
+
+export type ValidatorData = {
+    validatorId: number,
+    signatureInfo: SignatureInfo[]
+}
+
+export type SignatureInfo = {
+    validSignatures: boolean,
+    invalidSignature: boolean,
+}
+
 
 export type ParticipateInElections = {
     stake: bigint;
@@ -427,4 +482,8 @@ export class UnknownTagError extends Error {
                 .padStart(Math.ceil(args.bits / 8), "0")}`
         );
     }
+}
+
+export function uncurry<T>(f: (src: T) => (builder: Builder) => void) {
+    return (src: T, builder: Builder) => f(src)(builder)
 }

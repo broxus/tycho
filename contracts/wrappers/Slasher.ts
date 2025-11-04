@@ -13,7 +13,7 @@ export type SlasherData = {
 export function loadSlasherData(cs: Slice): SlasherData {
     return {
         votes: Dictionary.load(
-            Dictionary.Keys.Int(32),
+            Dictionary.Keys.Int(16),
             Dictionary.Values.Int(32),
             cs
         ),
@@ -37,7 +37,7 @@ export function storeSlasherData(src: SlasherData): (builder: Builder) => void {
 /// Validators punished for specified master block (as a timestamp)
 export type PunishedValidators = {
     mc_seqno: number;
-    punishedValidators: Dictionary<number, Cell>;
+    list: Dictionary<number, Buffer>;
 }
 
 export function loadPunishedValidators(cs: Slice): PunishedValidators | null {
@@ -47,11 +47,12 @@ export function loadPunishedValidators(cs: Slice): PunishedValidators | null {
 
     let ref = cs.loadMaybeRef();
     if (ref != null) {
-        let mc_seqno = cs.loadInt(32);
-        let punishedValidators = cs.loadDict(Dictionary.Keys.Int(32), Dictionary.Values.Cell());
+        let slice = ref.beginParse();
+        let mc_seqno = slice.loadInt(32);
+        let punishedValidators = slice.loadDict(Dictionary.Keys.Int(16), Dictionary.Values.Buffer(0));
         return {
             mc_seqno,
-            punishedValidators
+            list: punishedValidators
         }
     }
 
@@ -63,7 +64,7 @@ export function storePunishedValidators(pv: PunishedValidators): (builder: Build
     return (builder: Builder) =>
         builder
             .storeUint(pv.mc_seqno, 32)
-            .storeDict(pv.punishedValidators)
+            .storeDict(pv.list)
 
 }
 
@@ -84,6 +85,4 @@ export class Slasher implements Contract {
         assert(state.state.data != null);
         return loadSlasherData(Cell.fromBoc(state.state.data)[0].asSlice());
     }
-
-
 }
