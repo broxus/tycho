@@ -1,18 +1,15 @@
 use std::sync::atomic;
 use std::sync::atomic::AtomicU32;
 use std::time::Duration;
-
 use ahash::HashMapExt;
 use futures_util::StreamExt;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::time::DelayQueue;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
-
 use crate::effects::AltFormat;
 use crate::engine::MempoolConfig;
 use crate::models::{PeerCount, PointInfo, Round, UnixTime, ValidPoint};
-
 /// NOTE see [`Threshold::reached()`] for comments on limited usability
 pub struct Threshold {
     round: Round,
@@ -22,14 +19,12 @@ pub struct Threshold {
     sender: mpsc::Sender<PointInfo>,
     work: Mutex<ThresholdWork>,
 }
-
 struct ThresholdWork {
     is_reached: bool,
     ready: FastHashMap<PeerId, PointInfo>,
     delayed: DelayQueue<PointInfo>,
     receiver: mpsc::Receiver<PointInfo>,
 }
-
 impl Threshold {
     pub fn new(round: Round, peer_count: PeerCount, conf: &MempoolConfig) -> Self {
         let (sender, receiver) = mpsc::channel(peer_count.full());
@@ -44,7 +39,9 @@ impl Threshold {
             round,
             target_count,
             count: AtomicU32::new(count.pack()),
-            clock_skew: UnixTime::from_millis(conf.consensus.clock_skew_millis.get() as _),
+            clock_skew: UnixTime::from_millis(
+                conf.consensus.clock_skew_millis.get() as _,
+            ),
             sender,
             work: Mutex::new(ThresholdWork {
                 is_reached: false,
@@ -54,26 +51,20 @@ impl Threshold {
             }),
         }
     }
-
     /// used both in between and during calls to [`Self::reached`]
     pub fn count(&self) -> ThresholdCount {
         ThresholdCount::unpack(self.count.load(atomic::Ordering::Relaxed))
     }
-
     pub fn add(&self, valid: &ValidPoint) {
         assert_eq!(valid.info().round(), self.round, "point round mismatch");
-        // count no matter if threshold is already reached;
-        // increase counter before send to reduce it upon receive;
         ThresholdCount::add_one_in_channel(&self.count);
         match self.sender.try_send(valid.info().clone()) {
             Ok(()) => {}
             Err(e) => {
-                // consider impossible
                 panic!("cannot add {:?} to threshold: {e}", valid.info().id().alt())
             }
         };
     }
-
     /// **WARNING** lock design is simple and is suited **only** for current use cases
     ///     that do not overlap during each Engine round task:
     /// * `.reached()` is used for current dag round in [`Collector`](crate::intercom::Collector)
@@ -81,74 +72,68 @@ impl Threshold {
     /// * [`Self::get_reached()`] is used for previous dag round to produce point
     ///   after `.reached()` was awaited
     pub async fn reached(&self) {
-        let mut work = self.work.lock().await;
-
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(reached)),
+            file!(),
+            83u32,
+        );
+        let mut work = {
+            __guard.end_section(84u32);
+            let __result = self.work.lock().await;
+            __guard.start_section(84u32);
+            __result
+        };
         if work.is_reached {
-            return;
-        }
-
-        let ThresholdWork {
-            ready,
-            delayed,
-            receiver,
-            ..
-        } = &mut *work;
-
-        // use last value and update when some point doesn't fit
-        let mut max_time = UnixTime::now() + self.clock_skew;
-
-        while ready.len() < self.target_count {
-            let (info, is_from_channel) = tokio::select! {
-                Some(info) = receiver.recv() => {
-                    let mut to_delay = info.time() - max_time;
-                    if to_delay.millis() > 0 {
-                        max_time = UnixTime::now() + self.clock_skew;
-                        to_delay = info.time() - max_time;
-                    }
-
-                    if to_delay.millis() > 0 {
-                        delayed.insert(info, Duration::from_millis(to_delay.millis()));
-                        ThresholdCount::set_decrease(&self.count, ready, delayed, true as u8);
-                        continue;
-                    } else {
-                        (info, true)
-                    }
-                },
-                Some(expired) = delayed.next() => (expired.into_inner(), false)
+            {
+                __guard.end_section(87u32);
+                return;
             };
-
-            Self::push_ready(ready, info);
-            ThresholdCount::set_decrease(&self.count, ready, delayed, is_from_channel as u8);
         }
-
+        let ThresholdWork { ready, delayed, receiver, .. } = &mut *work;
+        let mut max_time = UnixTime::now() + self.clock_skew;
+        while ready.len() < self.target_count {
+            __guard.checkpoint(100u32);
+            let (info, is_from_channel) = {
+                __guard.end_section(101u32);
+                let __result = tokio::select! {
+                    Some(info) = receiver.recv() => { let mut to_delay = info.time() -
+                    max_time; if to_delay.millis() > 0 { max_time = UnixTime::now() +
+                    self.clock_skew; to_delay = info.time() - max_time; } if to_delay
+                    .millis() > 0 { delayed.insert(info, Duration::from_millis(to_delay
+                    .millis())); ThresholdCount::set_decrease(& self.count, ready,
+                    delayed, true as u8); continue; } else { (info, true) } },
+                    Some(expired) = delayed.next() => (expired.into_inner(), false)
+                };
+                __guard.start_section(101u32);
+                __result
+            };
+            Self::push_ready(ready, info);
+            ThresholdCount::set_decrease(
+                &self.count,
+                ready,
+                delayed,
+                is_from_channel as u8,
+            );
+        }
         work.is_reached = true;
     }
-
     /// use only after [`Self::reached()`] was awaited to completion
     pub fn get_reached(&self) -> Vec<PointInfo> {
         let mut work = match self.work.try_lock() {
             Ok(guard) => guard,
             Err(e) => panic!("threshold lock must be released: {e}"),
         };
-
-        assert!(
-            work.is_reached,
-            "threshold was not reached, cannot get its contents"
-        );
-
+        assert!(work.is_reached, "threshold was not reached, cannot get its contents");
         let max_time = UnixTime::now() + self.clock_skew;
-
         loop {
             let Some(next_key) = work.delayed.peek() else {
                 break;
             };
-            // manually re-check expiration
             let info = work.delayed.remove(&next_key).into_inner();
             let to_delay = info.time() - max_time;
             if to_delay.millis() > 0 {
-                work.delayed
-                    .insert(info, Duration::from_millis(to_delay.millis()));
-                break; // peek is ordered by duration, so others are left delayed anyway
+                work.delayed.insert(info, Duration::from_millis(to_delay.millis()));
+                break;
             } else {
                 Self::push_ready(&mut work.ready, info);
             }
@@ -160,46 +145,37 @@ impl Threshold {
                 .expect("cannot overflow");
             let to_delay = info.time() - max_time;
             if to_delay.millis() > 0 {
-                work.delayed
-                    .insert(info, Duration::from_millis(to_delay.millis()));
+                work.delayed.insert(info, Duration::from_millis(to_delay.millis()));
             } else {
                 Self::push_ready(&mut work.ready, info);
             }
         }
-
         ThresholdCount::set_decrease(
             &self.count,
             &work.ready,
             &work.delayed,
             removed_from_channel,
         );
-
         work.ready.values().cloned().collect()
     }
-
     fn push_ready(ready: &mut FastHashMap<PeerId, PointInfo>, info: PointInfo) {
         ready
             .entry(*info.author())
             .and_modify(|old| {
                 panic!(
                     "cannot add to threshold same author twice: exists {:?} new digest {}",
-                    old.id().alt(),
-                    info.digest().alt()
+                    old.id().alt(), info.digest().alt()
                 )
             })
             .or_insert(info);
     }
 }
-
-// u8 is safe because: all items are unique by peer, all peers are in v_set, and v_set fits u8;
-// every item is either ready or delayed or in channel
 pub struct ThresholdCount {
     pub target: u8,
     pub ready: u8,
     pub delayed: u8,
     pub in_channel: u8,
 }
-
 impl ThresholdCount {
     fn add_one_in_channel(count: &AtomicU32) {
         count
@@ -214,7 +190,6 @@ impl ThresholdCount {
             )
             .expect("threshold in-channel counter overflow");
     }
-
     fn set_decrease(
         count: &AtomicU32,
         ready: &FastHashMap<PeerId, PointInfo>,
@@ -231,17 +206,17 @@ impl ThresholdCount {
                     let mut count = ThresholdCount::unpack(packed);
                     count.ready = ready_len;
                     count.delayed = delayed_len;
-                    count.in_channel = count.in_channel.checked_sub(removed_from_channel)?;
+                    count.in_channel = count
+                        .in_channel
+                        .checked_sub(removed_from_channel)?;
                     Some(count.pack())
                 },
             )
             .expect("threshold in-channel underflow");
     }
-
     fn pack(&self) -> u32 {
         u32::from_be_bytes([self.target, self.ready, self.delayed, self.in_channel])
     }
-
     fn unpack(packed: u32) -> Self {
         let [target, ready, delayed, in_channel] = packed.to_be_bytes();
         Self {
@@ -251,7 +226,6 @@ impl ThresholdCount {
             in_channel,
         }
     }
-
     pub fn total(&self) -> u8 {
         match self
             .ready
@@ -259,142 +233,123 @@ impl ThresholdCount {
             .and_then(|all| all.checked_add(self.in_channel))
         {
             Some(total) => total,
-            None => panic!("threshold total count overflow: {self}"), // cannot happen
+            None => panic!("threshold total count overflow: {self}"),
         }
     }
 }
-
 impl std::fmt::Display for ThresholdCount {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}+{}+{}/{}",
-            self.ready, self.delayed, self.in_channel, self.target
-        )
+        write!(f, "{}+{}+{}/{}", self.ready, self.delayed, self.in_channel, self.target)
     }
 }
-
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
     use std::time::Duration;
-
     use tycho_crypto::ed25519::KeyPair;
-
     use super::*;
     use crate::dag::threshold::Threshold;
     use crate::models::{
         Cert, DagPoint, Link, PeerCount, Point, PointData, PointStatusValidated, UnixTime,
     };
     use crate::test_utils::default_test_config;
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test() {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(test)),
+            file!(),
+            292u32,
+        );
         let total_peers = 10;
         let round = Round(5);
-
         let conf = default_test_config().conf;
-
         let peer_count = PeerCount::try_from(total_peers).expect("cannot fail");
-
         let thresh = Arc::new(Threshold::new(round, peer_count, &conf));
-
         let handle = tokio::spawn({
             let thresh = thresh.clone();
             async move {
+                let mut __guard = crate::__async_profile_guard__::Guard::new(
+                    concat!(module_path!(), "::async_block"),
+                    file!(),
+                    304u32,
+                );
                 println!("start count {}", thresh.count());
-                thresh.reached().await;
+                {
+                    __guard.end_section(306u32);
+                    let __result = thresh.reached().await;
+                    __guard.start_section(306u32);
+                    __result
+                };
                 let count = thresh.count();
                 println!("reached {count}");
                 assert!(count.ready as usize >= peer_count.majority());
             }
         });
-
         let now = UnixTime::now();
-
         for i in 1..=total_peers {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            __guard.checkpoint(315u32);
+            {
+                __guard.end_section(316u32);
+                let __result = tokio::time::sleep(Duration::from_millis(100)).await;
+                __guard.start_section(316u32);
+                __result
+            };
             let dag_point = new_valid_point(round, now, &conf);
             let valid = dag_point.valid().expect("created as valid");
             thresh.add(valid);
             println!("added #{i} total count {}", thresh.count());
         }
-
-        handle.await.expect("join handle");
-
-        // threshold state changes only when someone calls `.reached()` or `.get_reached()`
-
+        {
+            __guard.end_section(323u32);
+            let __result = handle.await;
+            __guard.start_section(323u32);
+            __result
+        }
+            .expect("join handle");
         {
             let mut work = thresh.work.try_lock().expect("no one holds the lock now");
             let count = thresh.count();
-
             assert_eq!(count.ready as usize, work.ready.len(), "ready count");
-
             assert_eq!(count.delayed as usize, work.delayed.len(), "delayed count");
-
             let mut channel_contents = Vec::new();
             while let Ok(info) = work.receiver.try_recv() {
+                __guard.checkpoint(336u32);
                 channel_contents.push(info);
             }
-
             assert_eq!(
-                count.in_channel as usize,
-                channel_contents.len(),
-                "in-channel count"
+                count.in_channel as usize, channel_contents.len(), "in-channel count"
             );
-
-            // return items directly to leave counter untouched
             for info in channel_contents {
-                (thresh.sender.try_send(info)).expect("failed to return item to channel");
+                __guard.checkpoint(347u32);
+                (thresh.sender.try_send(info))
+                    .expect("failed to return item to channel");
             }
         }
-
         let result = thresh.get_reached();
-
         let count = thresh.count();
-
         println!("result items: {}", result.len());
         println!("final count: {count}");
-
-        assert!(
-            result.len() >= peer_count.majority(),
-            "must be reached, {count}"
-        );
-
+        assert!(result.len() >= peer_count.majority(), "must be reached, {count}");
         assert_eq!(
-            count.ready as usize,
-            result.len(),
+            count.ready as usize, result.len(),
             "threshold can change its state only when called"
         );
-
         assert_eq!(
-            count.total() as usize,
-            total_peers,
-            "all sent items must be counted"
+            count.total() as usize, total_peers, "all sent items must be counted"
         );
-
         let thresh = Arc::into_inner(thresh).expect("must be single reference");
         let work = thresh.work.into_inner();
-
         assert_eq!(count.ready as usize, work.ready.len(), "ready count");
-
         assert_eq!(count.delayed as usize, work.delayed.len(), "delayed count");
-
-        assert_eq!(
-            count.in_channel, 0,
-            "all items must be drained from channel"
-        );
+        assert_eq!(count.in_channel, 0, "all items must be drained from channel");
     }
-
     fn new_valid_point(round: Round, now: UnixTime, conf: &MempoolConfig) -> DagPoint {
         let status = PointStatusValidated {
             is_valid: true,
             ..Default::default()
         };
         let keypair = rand::random::<KeyPair>();
-
         let delay = UnixTime::from_millis(rand::random_range(1000..8000));
-
         let point = Point::new(
             &keypair,
             PeerId::from(keypair.public_key),
@@ -411,7 +366,6 @@ mod test {
             },
             conf,
         );
-
         DagPoint::new_valid(point.info().clone(), Cert::default(), &status)
     }
 }

@@ -4,31 +4,25 @@
 //! - For each archive entry:
 //!  * Archive entry header ([`ArchiveEntryHeader`] as TL)
 //!  * Archive entry data
-
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::Arc;
-
 use anyhow::Result;
 use bytes::Bytes;
 use tycho_types::models::BlockId;
 use tycho_util::FastHashMap;
-
 pub use self::proto::{
     ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX, ArchiveEntryHeader, ArchiveEntryType,
 };
 pub use self::reader::{ArchiveEntry, ArchiveReader, ArchiveReaderError, ArchiveVerifier};
 use crate::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};
 use crate::queue::{QueueDiffStuff, QueueDiffStuffAug};
-
 mod proto;
 mod reader;
-
 pub struct Archive {
     pub mc_block_ids: BTreeMap<u32, BlockId>,
     pub blocks: FastHashMap<BlockId, ArchiveDataEntry>,
 }
-
 impl Archive {
     pub fn new<T>(data: T) -> Result<Self>
     where
@@ -36,94 +30,89 @@ impl Archive {
     {
         let data = Bytes::from(data);
         let reader = ArchiveReader::new(&data)?;
-
         let mut res = Archive {
             mc_block_ids: Default::default(),
             blocks: Default::default(),
         };
-
         for entry_data in reader {
             let entry = entry_data?;
-
             let id = entry.block_id;
             if id.is_masterchain() {
                 res.mc_block_ids.insert(id.seqno, id);
             }
-
             let parsed = res.blocks.entry(id).or_default();
-
             match entry.ty {
                 ArchiveEntryType::Block => {
-                    anyhow::ensure!(parsed.block.is_none(), "duplicate block data for: {id}");
+                    anyhow::ensure!(
+                        parsed.block.is_none(), "duplicate block data for: {id}"
+                    );
                     parsed.block = Some(data.slice_ref(entry.data));
                 }
                 ArchiveEntryType::Proof => {
-                    anyhow::ensure!(parsed.proof.is_none(), "duplicate block proof for: {id}");
+                    anyhow::ensure!(
+                        parsed.proof.is_none(), "duplicate block proof for: {id}"
+                    );
                     parsed.proof = Some(data.slice_ref(entry.data));
                 }
                 ArchiveEntryType::QueueDiff => {
                     anyhow::ensure!(
-                        parsed.queue_diff.is_none(),
-                        "duplicate queue diff for: {id}"
+                        parsed.queue_diff.is_none(), "duplicate queue diff for: {id}"
                     );
                     parsed.queue_diff = Some(data.slice_ref(entry.data));
                 }
             }
         }
-
         Ok(res)
     }
-
     pub fn check_mc_blocks_range(&self) -> Result<()> {
-        match (
-            self.mc_block_ids.first_key_value(),
-            self.mc_block_ids.last_key_value(),
-        ) {
+        match (self.mc_block_ids.first_key_value(), self.mc_block_ids.last_key_value()) {
             (Some((first_seqno, _)), Some((last_seqno, _))) => {
                 if (last_seqno - first_seqno + 1) != self.mc_block_ids.len() as u32 {
                     anyhow::bail!("archive does not contain some mc blocks")
                 }
-
                 Ok(())
             }
-            _ => {
-                anyhow::bail!("archive is empty")
-            }
+            _ => anyhow::bail!("archive is empty"),
         }
     }
-
     /// NOTE: Takes up to a magnitude of seconds to run on large blocks.
     pub async fn get_entry_by_id(
         self: &Arc<Self>,
         id: &BlockId,
     ) -> Result<(BlockStuffAug, BlockProofStuffAug, QueueDiffStuffAug), ArchiveError> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(get_entry_by_id)),
+            file!(),
+            99u32,
+        );
+        let id = id;
         let this = self.clone();
         let id = *id;
-
-        let (block, proof, queue_diff) = tycho_util::sync::rayon_run(move || {
-            let mut block_res = None;
-            let mut proof_res = None;
-            let mut diff_res = None;
-            rayon::scope(|s| {
-                s.spawn(|_| {
-                    proof_res = Some(this.get_proof_by_id(&id));
-                    diff_res = Some(this.get_queue_diff_by_id(&id));
-                });
-
-                block_res = Some(this.get_block_by_id(&id));
-            });
-
-            (
-                block_res.expect("scope must finish"),
-                proof_res.expect("scope must finish"),
-                diff_res.expect("scope must finish"),
-            )
-        })
-        .await;
-
+        let (block, proof, queue_diff) = {
+            __guard.end_section(122u32);
+            let __result = tycho_util::sync::rayon_run(move || {
+                    let mut block_res = None;
+                    let mut proof_res = None;
+                    let mut diff_res = None;
+                    rayon::scope(|s| {
+                        s.spawn(|_| {
+                            proof_res = Some(this.get_proof_by_id(&id));
+                            diff_res = Some(this.get_queue_diff_by_id(&id));
+                        });
+                        block_res = Some(this.get_block_by_id(&id));
+                    });
+                    (
+                        block_res.expect("scope must finish"),
+                        proof_res.expect("scope must finish"),
+                        diff_res.expect("scope must finish"),
+                    )
+                })
+                .await;
+            __guard.start_section(122u32);
+            __result
+        };
         Ok((block?, proof?, queue_diff?))
     }
-
     /// NOTE: Takes up to a magnitude of seconds to run on large blocks.
     pub fn get_block_by_id(&self, id: &BlockId) -> Result<BlockStuffAug, ArchiveError> {
         let entry = self.blocks.get(id).ok_or(ArchiveError::OutOfRange)?;
@@ -136,8 +125,10 @@ impl Archive {
                 Ok(WithArchiveData::new::<Bytes>(block, data.clone()))
             })
     }
-
-    pub fn get_proof_by_id(&self, id: &BlockId) -> Result<BlockProofStuffAug, ArchiveError> {
+    pub fn get_proof_by_id(
+        &self,
+        id: &BlockId,
+    ) -> Result<BlockProofStuffAug, ArchiveError> {
         let entry = self.blocks.get(id).ok_or(ArchiveError::OutOfRange)?;
         entry
             .proof
@@ -148,8 +139,10 @@ impl Archive {
                 Ok(WithArchiveData::new::<Bytes>(proof, data.clone()))
             })
     }
-
-    pub fn get_queue_diff_by_id(&self, id: &BlockId) -> Result<QueueDiffStuffAug, ArchiveError> {
+    pub fn get_queue_diff_by_id(
+        &self,
+        id: &BlockId,
+    ) -> Result<QueueDiffStuffAug, ArchiveError> {
         let entry = self.blocks.get(id).ok_or(ArchiveError::OutOfRange)?;
         entry
             .queue_diff
@@ -161,14 +154,12 @@ impl Archive {
             })
     }
 }
-
 #[derive(Default)]
 pub struct ArchiveDataEntry {
     pub block: Option<Bytes>,
     pub proof: Option<Bytes>,
     pub queue_diff: Option<Bytes>,
 }
-
 #[derive(Clone)]
 pub enum ArchiveData {
     /// The raw data is known.
@@ -176,7 +167,6 @@ pub enum ArchiveData {
     /// Raw data is not known (due to nondeterministic serialization).
     Existing,
 }
-
 impl ArchiveData {
     /// Assumes that the object is constructed with known raw data.
     pub fn as_new_archive_data(&self) -> Result<&[u8], WithArchiveDataError> {
@@ -185,7 +175,6 @@ impl ArchiveData {
             ArchiveData::Existing => Err(WithArchiveDataError),
         }
     }
-
     /// Assumes that the object is constructed with known raw data.
     pub fn clone_new_archive_data(&self) -> Result<Bytes, WithArchiveDataError> {
         match self {
@@ -194,7 +183,6 @@ impl ArchiveData {
         }
     }
 }
-
 /// Parsed data wrapper, augmented with the optional raw data.
 ///
 /// Stores the raw data only in the context of the archive parser, or received block.
@@ -207,7 +195,6 @@ pub struct WithArchiveData<T> {
     pub data: T,
     pub archive_data: ArchiveData,
 }
-
 impl<T> WithArchiveData<T> {
     /// Constructs a new object from the context with known raw data.
     pub fn new<A>(data: T, archive_data: A) -> Self
@@ -219,7 +206,6 @@ impl<T> WithArchiveData<T> {
             archive_data: ArchiveData::New(Bytes::from(archive_data)),
         }
     }
-
     /// Constructs a new object from the context without known raw data.
     pub fn loaded(data: T) -> Self {
         Self {
@@ -227,31 +213,25 @@ impl<T> WithArchiveData<T> {
             archive_data: ArchiveData::Existing,
         }
     }
-
     /// Assumes that the object is constructed with known raw data.
     pub fn as_new_archive_data(&self) -> Result<&[u8], WithArchiveDataError> {
         self.archive_data.as_new_archive_data()
     }
-
     /// Assumes that the object is constructed with known raw data.
     pub fn clone_new_archive_data(&self) -> Result<Bytes, WithArchiveDataError> {
         self.archive_data.clone_new_archive_data()
     }
 }
-
 impl<T> std::ops::Deref for WithArchiveData<T> {
     type Target = T;
-
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
         &self.data
     }
 }
-
 #[derive(Debug, Copy, Clone, thiserror::Error)]
 #[error("archive data not loaded")]
 pub struct WithArchiveDataError;
-
 #[derive(thiserror::Error, Debug)]
 pub enum ArchiveError {
     #[error("block id is out of range")]
@@ -263,20 +243,14 @@ pub enum ArchiveError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     pub fn correct_context() {
         const DATA: &[u8] = &[1, 2, 3];
-
         assert_eq!(
-            WithArchiveData::new((), DATA.to_vec())
-                .as_new_archive_data()
-                .unwrap(),
-            DATA
+            WithArchiveData::new((), DATA.to_vec()).as_new_archive_data().unwrap(), DATA
         );
         assert!(WithArchiveData::loaded(()).as_new_archive_data().is_err());
     }

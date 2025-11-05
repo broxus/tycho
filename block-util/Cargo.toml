@@ -29,6 +29,7 @@ rayon = { workspace = true }
 thiserror = { workspace = true }
 tl-proto = { workspace = true }
 tycho-types = { workspace = true, features = ["blake3", "rayon"] }
+tracing = { workspace = true }
 
 # local deps
 tycho-storage-traits = { workspace = true, optional = true }

@@ -1,21 +1,20 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use tycho_crypto::ed25519;
 use tycho_network::{
-    DhtClient, DhtService, Network, OverlayService, PeerInfo, PeerResolver, PublicOverlay, Router,
+    DhtClient, DhtService, Network, OverlayService, PeerInfo, PeerResolver,
+    PublicOverlay, Router,
 };
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::models::{BlockId, ValidatorSet};
-
 pub use self::config::NodeBaseConfig;
 pub use self::keys::NodeKeys;
 use crate::block_strider::{
-    ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriber, BlockchainBlockProvider,
-    ColdBootType, FileZerostateProvider, PersistentBlockStriderState, QueueStateHandler, Starter,
-    StorageBlockProvider,
+    ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriber,
+    BlockchainBlockProvider, ColdBootType, FileZerostateProvider,
+    PersistentBlockStriderState, QueueStateHandler, Starter, StorageBlockProvider,
 };
 use crate::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BroadcastListener, SelfBroadcastListener,
@@ -23,26 +22,20 @@ use crate::blockchain_rpc::{
 use crate::global_config::{GlobalConfig, ZerostateId};
 use crate::overlay_client::{PublicOverlayClient, ValidatorsResolver};
 use crate::storage::{CoreStorage, CoreStorageConfig};
-
 mod config;
 mod keys;
-
 pub struct NodeBase {
     pub base_config: NodeBaseConfig,
     pub global_config: GlobalConfig,
-
     pub keypair: Arc<ed25519::KeyPair>,
     pub network: Network,
     pub dht_client: DhtClient,
     pub peer_resolver: PeerResolver,
     pub overlay_service: OverlayService,
-
     pub storage_context: StorageContext,
     pub core_storage: CoreStorage,
-
     pub blockchain_rpc_client: BlockchainRpcClient,
 }
-
 impl NodeBase {
     pub fn builder<'a>(
         base_config: &'a NodeBaseConfig,
@@ -50,7 +43,6 @@ impl NodeBase {
     ) -> NodeBaseBuilder<'a, ()> {
         NodeBaseBuilder::new(base_config, global_config)
     }
-
     /// Wait for some peers and boot the node.
     pub async fn init(
         &self,
@@ -58,30 +50,54 @@ impl NodeBase {
         import_zerostate: Option<Vec<PathBuf>>,
         queue_state_handler: Option<Box<dyn QueueStateHandler>>,
     ) -> Result<BlockId> {
-        self.wait_for_neighbours(3).await;
-
-        let init_block_id = self
-            .boot(boot_type, import_zerostate, queue_state_handler)
-            .await
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(init)),
+            file!(),
+            60u32,
+        );
+        let boot_type = boot_type;
+        let import_zerostate = import_zerostate;
+        let queue_state_handler = queue_state_handler;
+        {
+            __guard.end_section(61u32);
+            let __result = self.wait_for_neighbours(3).await;
+            __guard.start_section(61u32);
+            __result
+        };
+        let init_block_id = {
+            __guard.end_section(65u32);
+            let __result = self
+                .boot(boot_type, import_zerostate, queue_state_handler)
+                .await;
+            __guard.start_section(65u32);
+            __result
+        }
             .context("failed to init node")?;
-
-        tracing::info!(%init_block_id, "node initialized");
-
+        tracing::info!(% init_block_id, "node initialized");
         Ok(init_block_id)
     }
-
     /// Wait for at least `count` public overlay peers to resolve.
     pub async fn wait_for_neighbours(&self, count: usize) {
-        // Ensure that there are some neighbours
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(wait_for_neighbours)),
+            file!(),
+            74u32,
+        );
+        let count = count;
         tracing::info!("waiting for initial neighbours");
-        self.blockchain_rpc_client
-            .overlay_client()
-            .neighbours()
-            .wait_for_peers(count)
-            .await;
+        {
+            __guard.end_section(81u32);
+            let __result = self
+                .blockchain_rpc_client
+                .overlay_client()
+                .neighbours()
+                .wait_for_peers(count)
+                .await;
+            __guard.start_section(81u32);
+            __result
+        };
         tracing::info!("found initial neighbours");
     }
-
     /// Initialize the node and return the init block id.
     pub async fn boot(
         &self,
@@ -89,8 +105,15 @@ impl NodeBase {
         zerostates: Option<Vec<PathBuf>>,
         queue_state_handler: Option<Box<dyn QueueStateHandler>>,
     ) -> Result<BlockId> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(boot)),
+            file!(),
+            91u32,
+        );
+        let boot_type = boot_type;
+        let zerostates = zerostates;
+        let queue_state_handler = queue_state_handler;
         let node_state = self.core_storage.node_state();
-
         let last_mc_block_id = match node_state.load_last_mc_block_id() {
             Some(block_id) => block_id,
             None => {
@@ -99,52 +122,58 @@ impl NodeBase {
                     .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
                     .with_zerostate_id(self.global_config.zerostate)
                     .with_config(self.base_config.starter.clone());
-
                 if let Some(handler) = queue_state_handler {
                     starter = starter.with_queue_state_handler(handler);
                 }
-
-                starter
-                    .build()
-                    .cold_boot(boot_type, zerostates.map(FileZerostateProvider))
-                    .await?
+                {
+                    __guard.end_section(110u32);
+                    let __result = starter
+                        .build()
+                        .cold_boot(boot_type, zerostates.map(FileZerostateProvider))
+                        .await;
+                    __guard.start_section(110u32);
+                    __result
+                }?
             }
         };
-
-        tracing::info!(
-            %last_mc_block_id,
-            "boot finished"
-        );
-
+        tracing::info!(% last_mc_block_id, "boot finished");
         Ok(last_mc_block_id)
     }
-
     pub fn validator_resolver(&self) -> &ValidatorsResolver {
-        self.blockchain_rpc_client
-            .overlay_client()
-            .validators_resolver()
+        self.blockchain_rpc_client.overlay_client().validators_resolver()
     }
-
     /// Update current validator targets with the specified set.
     pub fn update_validator_set(&self, vset: &ValidatorSet) {
         self.validator_resolver().update_validator_set(vset);
     }
-
     /// Update current validator targets using the validator set from the provider
-    pub async fn update_validator_set_from_shard_state(&self, block_id: &BlockId) -> Result<()> {
-        // notify subscriber with an initial validators list
-        let mc_state = self
-            .core_storage
-            .shard_state_storage()
-            .load_state(block_id.seqno, block_id)
-            .await?;
-
+    pub async fn update_validator_set_from_shard_state(
+        &self,
+        block_id: &BlockId,
+    ) -> Result<()> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(
+                module_path!(), "::", stringify!(update_validator_set_from_shard_state)
+            ),
+            file!(),
+            134u32,
+        );
+        let block_id = block_id;
+        let mc_state = {
+            __guard.end_section(140u32);
+            let __result = self
+                .core_storage
+                .shard_state_storage()
+                .load_state(block_id.seqno, block_id)
+                .await;
+            __guard.start_section(140u32);
+            __result
+        }?;
         let config = mc_state.config_params()?;
         let current_vset = config.get_current_validator_set()?;
         self.update_validator_set(&current_vset);
         Ok(())
     }
-
     pub fn build_archive_block_provider(&self) -> ArchiveBlockProvider {
         ArchiveBlockProvider::new(
             self.blockchain_rpc_client.clone(),
@@ -152,7 +181,6 @@ impl NodeBase {
             self.base_config.archive_block_provider.clone(),
         )
     }
-
     pub fn build_blockchain_block_provider(&self) -> BlockchainBlockProvider {
         BlockchainBlockProvider::new(
             self.blockchain_rpc_client.clone(),
@@ -160,11 +188,9 @@ impl NodeBase {
             self.base_config.blockchain_block_provider.clone(),
         )
     }
-
     pub fn build_storage_block_provider(&self) -> StorageBlockProvider {
         StorageBlockProvider::new(self.core_storage.clone())
     }
-
     /// Creates a new [`BlockStrider`] using options from the base config.
     pub fn build_strider<P, S>(
         &self,
@@ -179,7 +205,6 @@ impl NodeBase {
             self.global_config.zerostate.as_block_id(),
             self.core_storage.clone(),
         );
-
         BlockStrider::builder()
             .with_state(state)
             .with_provider(provider)
@@ -187,22 +212,22 @@ impl NodeBase {
             .build()
     }
 }
-
 pub struct NodeBaseBuilder<'a, Step = ()> {
     base_config: &'a NodeBaseConfig,
     global_config: &'a GlobalConfig,
     step: Step,
 }
-
 impl<'a> NodeBaseBuilder<'a, ()> {
-    pub fn new(base_config: &'a NodeBaseConfig, global_config: &'a GlobalConfig) -> Self {
+    pub fn new(
+        base_config: &'a NodeBaseConfig,
+        global_config: &'a GlobalConfig,
+    ) -> Self {
         Self {
             base_config,
             global_config,
             step: (),
         }
     }
-
     pub fn init_network(
         self,
         public_addr: SocketAddr,
@@ -214,7 +239,6 @@ impl<'a> NodeBaseBuilder<'a, ()> {
             self.base_config,
             &self.global_config.bootstrap_peers,
         )?;
-
         Ok(NodeBaseBuilder {
             base_config: self.base_config,
             global_config: self.global_config,
@@ -222,14 +246,23 @@ impl<'a> NodeBaseBuilder<'a, ()> {
         })
     }
 }
-
 impl<'a> NodeBaseBuilder<'a, init::Step0> {
-    // TODO: Add some options here if needed.
     pub async fn init_storage(self) -> Result<NodeBaseBuilder<'a, init::Step1>> {
-        let store =
-            ConfiguredStorage::new(&self.base_config.storage, &self.base_config.core_storage)
-                .await?;
-
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(init_storage)),
+            file!(),
+            228u32,
+        );
+        let store = {
+            __guard.end_section(231u32);
+            let __result = ConfiguredStorage::new(
+                    &self.base_config.storage,
+                    &self.base_config.core_storage,
+                )
+                .await;
+            __guard.start_section(231u32);
+            __result
+        }?;
         Ok(NodeBaseBuilder {
             base_config: self.base_config,
             global_config: self.global_config,
@@ -240,7 +273,6 @@ impl<'a> NodeBaseBuilder<'a, init::Step0> {
         })
     }
 }
-
 impl<'a> NodeBaseBuilder<'a, init::Step1> {
     pub fn init_blockchain_rpc<RL, SL>(
         self,
@@ -251,14 +283,17 @@ impl<'a> NodeBaseBuilder<'a, init::Step1> {
         RL: BroadcastListener,
         SL: SelfBroadcastListener,
     {
-        let (_, blockchain_rpc_client) = self.step.prev_step.net.add_blockchain_rpc(
-            &self.global_config.zerostate,
-            self.step.store.core_storage.clone(),
-            remote_broadcast_listener,
-            self_broadcast_listener,
-            self.base_config,
-        );
-
+        let (_, blockchain_rpc_client) = self
+            .step
+            .prev_step
+            .net
+            .add_blockchain_rpc(
+                &self.global_config.zerostate,
+                self.step.store.core_storage.clone(),
+                remote_broadcast_listener,
+                self_broadcast_listener,
+                self.base_config,
+            );
         Ok(NodeBaseBuilder {
             base_config: self.base_config,
             global_config: self.global_config,
@@ -269,13 +304,11 @@ impl<'a> NodeBaseBuilder<'a, init::Step1> {
         })
     }
 }
-
 impl NodeBaseBuilder<'_, init::Final> {
     pub fn build(self) -> Result<NodeBase> {
         let net = self.step.prev_step.prev_step.net;
         let store = self.step.prev_step.store;
         let blockchain_rpc_client = self.step.blockchain_rpc_client;
-
         Ok(NodeBase {
             base_config: self.base_config.clone(),
             global_config: self.global_config.clone(),
@@ -290,112 +323,91 @@ impl NodeBaseBuilder<'_, init::Final> {
         })
     }
 }
-
 impl<'a, Step> NodeBaseBuilder<'a, Step> {
     pub fn base_config(&self) -> &'a NodeBaseConfig {
         self.base_config
     }
-
     pub fn global_config(&self) -> &'a GlobalConfig {
         self.global_config
     }
 }
-
 impl<Step: AsRef<init::Step0>> NodeBaseBuilder<'_, Step> {
     pub fn keypair(&self) -> &Arc<ed25519::KeyPair> {
         &self.step.as_ref().net.keypair
     }
-
     pub fn network(&self) -> &Network {
         &self.step.as_ref().net.network
     }
-
     pub fn dht_client(&self) -> &DhtClient {
         &self.step.as_ref().net.dht_client
     }
-
     pub fn peer_resolver(&self) -> &PeerResolver {
         &self.step.as_ref().net.peer_resolver
     }
-
     pub fn overlay_service(&self) -> &OverlayService {
         &self.step.as_ref().net.overlay_service
     }
 }
-
 impl<Step: AsRef<init::Step1>> NodeBaseBuilder<'_, Step> {
     pub fn storage_context(&self) -> &StorageContext {
         &self.step.as_ref().store.context
     }
-
     pub fn core_storage(&self) -> &CoreStorage {
         &self.step.as_ref().store.core_storage
     }
 }
-
 impl<Step: AsRef<init::Step2>> NodeBaseBuilder<'_, Step> {
     pub fn blockchain_rpc_client(&self) -> &BlockchainRpcClient {
         &self.step.as_ref().blockchain_rpc_client
     }
 }
-
 pub mod init {
     use super::*;
-
     pub type Final = Step2;
-
     /// Node with network.
     pub struct Step0 {
         pub(super) net: ConfiguredNetwork,
     }
-
     impl AsRef<Step0> for Step0 {
         #[inline]
         fn as_ref(&self) -> &Step0 {
             self
         }
     }
-
     /// Node with network and storage.
     pub struct Step1 {
         pub(super) prev_step: Step0,
         pub(super) store: ConfiguredStorage,
     }
-
     impl AsRef<Step0> for Step1 {
         #[inline]
         fn as_ref(&self) -> &Step0 {
             &self.prev_step
         }
     }
-
     impl AsRef<Step1> for Step1 {
         #[inline]
         fn as_ref(&self) -> &Step1 {
             self
         }
     }
-
     /// Node with network, storage and public overlay.
     pub struct Step2 {
         pub(super) prev_step: Step1,
         pub(super) blockchain_rpc_client: BlockchainRpcClient,
     }
-
     impl AsRef<Step0> for Step2 {
         #[inline]
         fn as_ref(&self) -> &Step0 {
             &self.prev_step.prev_step
         }
     }
-
     impl AsRef<Step1> for Step2 {
         #[inline]
         fn as_ref(&self) -> &Step1 {
             &self.prev_step
         }
     }
-
     impl AsRef<Step2> for Step2 {
         #[inline]
         fn as_ref(&self) -> &Step2 {
@@ -403,7 +415,6 @@ pub mod init {
         }
     }
 }
-
 pub struct ConfiguredNetwork {
     pub keypair: Arc<ed25519::KeyPair>,
     pub network: Network,
@@ -411,7 +422,6 @@ pub struct ConfiguredNetwork {
     pub peer_resolver: PeerResolver,
     pub overlay_service: OverlayService,
 }
-
 impl ConfiguredNetwork {
     pub fn new(
         public_addr: SocketAddr,
@@ -419,56 +429,42 @@ impl ConfiguredNetwork {
         base_config: &NodeBaseConfig,
         bootstrap_peers: &[PeerInfo],
     ) -> Result<Self> {
-        // Setup network
         let keypair = Arc::new(ed25519::KeyPair::from(secret_key));
         let local_id = keypair.public_key.into();
-
         let (dht_tasks, dht_service) = DhtService::builder(local_id)
             .with_config(base_config.dht.clone())
             .build();
-
         let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
             .with_config(base_config.overlay.clone())
             .with_dht_service(dht_service.clone())
             .build();
-
         let router = Router::builder()
             .route(dht_service.clone())
             .route(overlay_service.clone())
             .build();
-
         let local_addr = SocketAddr::from((base_config.local_ip, base_config.port));
-
         let network = Network::builder()
             .with_config(base_config.network.clone())
             .with_private_key(secret_key.to_bytes())
             .with_remote_addr(public_addr)
             .build(local_addr, router)
             .context("failed to build node network")?;
-
         dht_tasks.spawn(&network);
         overlay_tasks.spawn(&network);
-
         let dht_client = dht_service.make_client(&network);
         let peer_resolver = dht_service
             .make_peer_resolver()
             .with_config(base_config.peer_resolver.clone())
             .build(&network);
-
         let mut bootstrap_peer_count = 0usize;
         for peer in bootstrap_peers {
             let is_new = dht_client.add_peer(Arc::new(peer.clone()))?;
             bootstrap_peer_count += is_new as usize;
         }
-
         tracing::info!(
-            %local_id,
-            %local_addr,
-            %public_addr,
-            bootstrap_peers = bootstrap_peer_count,
-            "initialized network"
+            % local_id, % local_addr, % public_addr, bootstrap_peers =
+            bootstrap_peer_count, "initialized network"
         );
-
         Ok(Self {
             keypair,
             network,
@@ -477,7 +473,6 @@ impl ConfiguredNetwork {
             overlay_service,
         })
     }
-
     pub fn add_blockchain_rpc<BL, SL>(
         &self,
         zerostate: &ZerostateId,
@@ -495,56 +490,69 @@ impl ConfiguredNetwork {
             .with_storage(storage)
             .with_broadcast_listener(remote_broadcast_listener)
             .build();
-
-        let public_overlay = PublicOverlay::builder(zerostate.compute_public_overlay_id())
+        let public_overlay = PublicOverlay::builder(
+                zerostate.compute_public_overlay_id(),
+            )
             .named("blockchain_rpc")
             .with_peer_resolver(self.peer_resolver.clone())
             .build(blockchain_rpc_service.clone());
         self.overlay_service.add_public_overlay(&public_overlay);
-
         let blockchain_rpc_client = BlockchainRpcClient::builder()
             .with_config(base_config.blockchain_rpc_client.clone())
-            .with_public_overlay_client(PublicOverlayClient::new(
-                self.network.clone(),
-                public_overlay,
-                base_config.public_overlay_client.clone(),
-            ))
+            .with_public_overlay_client(
+                PublicOverlayClient::new(
+                    self.network.clone(),
+                    public_overlay,
+                    base_config.public_overlay_client.clone(),
+                ),
+            )
             .with_self_broadcast_listener(self_broadcast_listener)
             .build();
-
         tracing::info!(
-            overlay_id = %blockchain_rpc_client.overlay().overlay_id(),
+            overlay_id = % blockchain_rpc_client.overlay().overlay_id(),
             "initialized blockchain rpc"
         );
-
         (blockchain_rpc_service, blockchain_rpc_client)
     }
 }
-
 pub struct ConfiguredStorage {
     pub context: StorageContext,
     pub core_storage: CoreStorage,
 }
-
 impl ConfiguredStorage {
     pub async fn new(
         storage_config: &StorageConfig,
         core_storage_config: &CoreStorageConfig,
     ) -> Result<Self> {
-        let context = StorageContext::new(storage_config.clone())
-            .await
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(new)),
+            file!(),
+            533u32,
+        );
+        let storage_config = storage_config;
+        let core_storage_config = core_storage_config;
+        let context = {
+            __guard.end_section(535u32);
+            let __result = StorageContext::new(storage_config.clone()).await;
+            __guard.start_section(535u32);
+            __result
+        }
             .context("failed to create storage context")?;
-        let core_storage = CoreStorage::open(context.clone(), core_storage_config.clone())
-            .await
+        let core_storage = {
+            __guard.end_section(538u32);
+            let __result = CoreStorage::open(
+                    context.clone(),
+                    core_storage_config.clone(),
+                )
+                .await;
+            __guard.start_section(538u32);
+            __result
+        }
             .context("failed to create storage")?;
         tracing::info!(
-            root_dir = %core_storage.context().root_dir().path().display(),
+            root_dir = % core_storage.context().root_dir().path().display(),
             "initialized storage"
         );
-
-        Ok(Self {
-            context,
-            core_storage,
-        })
+        Ok(Self { context, core_storage })
     }
 }

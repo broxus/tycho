@@ -3701,6 +3701,7 @@ dependencies = [
  "rayon",
  "thiserror 2.0.12",
  "tl-proto",
+ "tracing",
  "tycho-storage-traits",
  "tycho-types",
  "tycho-util",

@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use futures_util::future::BoxFuture;
@@ -24,73 +23,61 @@ use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
-
 pub use self::storage::*;
 use crate::config::{BlackListConfig, RpcConfig, RpcStorageConfig, TransactionsGcConfig};
 use crate::endpoint::{JrpcEndpointCache, ProtoEndpointCache, RpcEndpoint};
 use crate::models::{GenTimings, StateTimings};
-
 mod db;
 mod storage;
 pub mod tables;
-
 const RPC_DB_SUBDIR: &str = "rpc";
-
-pub struct RpcStateBuilder<MandatoryFields = (CoreStorage, BlockchainRpcClient, ZerostateId)> {
+pub struct RpcStateBuilder<
+    MandatoryFields = (CoreStorage, BlockchainRpcClient, ZerostateId),
+> {
     config: RpcConfig,
     mandatory_fields: MandatoryFields,
 }
-
 impl RpcStateBuilder {
     pub fn build(self) -> Result<RpcState> {
         let (core_storage, blockchain_rpc_client, zerostate_id) = self.mandatory_fields;
-
         let gc_notify = Arc::new(Notify::new());
-
         let mut gc_handle = None;
         let mut blacklisted_accounts = None::<BlacklistedAccounts>;
         let mut blacklist_watcher_handle = None;
-
         let rpc_storage = match &self.config.storage {
-            RpcStorageConfig::Full {
-                gc, blacklist_path, ..
-            } => {
+            RpcStorageConfig::Full { gc, blacklist_path, .. } => {
                 let db = core_storage.context().open_preconfigured(RPC_DB_SUBDIR)?;
                 let rpc_storage = Arc::new(RpcStorage::new(db));
-
                 if let Some(config) = gc {
-                    gc_handle = Some(tokio::spawn(transactions_gc(
-                        config.clone(),
-                        core_storage.clone(),
-                        rpc_storage.clone(),
-                        gc_notify.clone(),
-                    )));
+                    gc_handle = Some(
+                        tokio::spawn(
+                            transactions_gc(
+                                config.clone(),
+                                core_storage.clone(),
+                                rpc_storage.clone(),
+                                gc_notify.clone(),
+                            ),
+                        ),
+                    );
                 }
-
                 if let Some(path) = blacklist_path {
                     let accounts = BlacklistedAccounts::default();
                     blacklisted_accounts = Some(accounts.clone());
-                    blacklist_watcher_handle = Some(tokio::spawn(watch_blacklisted_accounts(
-                        path.clone(),
-                        accounts,
-                    )));
+                    blacklist_watcher_handle = Some(
+                        tokio::spawn(watch_blacklisted_accounts(path.clone(), accounts)),
+                    );
                 }
-
                 Some(rpc_storage)
             }
             RpcStorageConfig::StateOnly => None,
         };
-
-        let download_block_semaphore =
-            tokio::sync::Semaphore::new(self.config.max_parallel_block_downloads);
-
-        let run_get_method_semaphore = Arc::new(tokio::sync::Semaphore::new(
-            self.config.run_get_method.max_vms,
-        ));
-
-        // NOTE: Only a stub here.
+        let download_block_semaphore = tokio::sync::Semaphore::new(
+            self.config.max_parallel_block_downloads,
+        );
+        let run_get_method_semaphore = Arc::new(
+            tokio::sync::Semaphore::new(self.config.run_get_method.max_vms),
+        );
         let parsed_config = Arc::new(LatestBlockchainConfig::default());
-
         Ok(RpcState {
             inner: Arc::new(Inner {
                 config: self.config,
@@ -127,58 +114,52 @@ impl RpcStateBuilder {
         })
     }
 }
-
 impl<T2, T3> RpcStateBuilder<((), T2, T3)> {
-    pub fn with_storage(self, storage: CoreStorage) -> RpcStateBuilder<(CoreStorage, T2, T3)> {
+    pub fn with_storage(
+        self,
+        storage: CoreStorage,
+    ) -> RpcStateBuilder<(CoreStorage, T2, T3)> {
         let (_, bc_rpc_client, zerostate_id) = self.mandatory_fields;
-
         RpcStateBuilder {
             config: self.config,
             mandatory_fields: (storage, bc_rpc_client, zerostate_id),
         }
     }
 }
-
 impl<T1, T3> RpcStateBuilder<(T1, (), T3)> {
     pub fn with_blockchain_rpc_client(
         self,
         client: BlockchainRpcClient,
     ) -> RpcStateBuilder<(T1, BlockchainRpcClient, T3)> {
         let (storage, _, zerostate_id) = self.mandatory_fields;
-
         RpcStateBuilder {
             config: self.config,
             mandatory_fields: (storage, client, zerostate_id),
         }
     }
 }
-
 impl<T1, T2> RpcStateBuilder<(T1, T2, ())> {
     pub fn with_zerostate_id(
         self,
         zerostate_id: ZerostateId,
     ) -> RpcStateBuilder<(T1, T2, ZerostateId)> {
         let (storage, client, _) = self.mandatory_fields;
-
         RpcStateBuilder {
             config: self.config,
             mandatory_fields: (storage, client, zerostate_id),
         }
     }
 }
-
 impl<T1, T2, T3> RpcStateBuilder<(T1, T2, T3)> {
     pub fn with_config(self, config: RpcConfig) -> RpcStateBuilder<(T1, T2, T3)> {
         RpcStateBuilder { config, ..self }
     }
 }
-
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct RpcState {
     inner: Arc<Inner>,
 }
-
 impl RpcState {
     pub fn builder() -> RpcStateBuilder<((), (), ())> {
         RpcStateBuilder {
@@ -186,128 +167,198 @@ impl RpcState {
             mandatory_fields: ((), (), ()),
         }
     }
-
     pub async fn init_simple(
         mc_block_id: &BlockId,
         node: &NodeBase,
         config: &RpcConfig,
     ) -> Result<(RpcBlockSubscriber, RpcStateSubscriber)> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(init_simple)),
+            file!(),
+            194u32,
+        );
+        let mc_block_id = mc_block_id;
+        let node = node;
+        let config = config;
         let rpc_state = RpcState::builder()
             .with_config(config.clone())
             .with_storage(node.core_storage.clone())
             .with_blockchain_rpc_client(node.blockchain_rpc_client.clone())
             .with_zerostate_id(node.global_config.zerostate)
             .build()?;
-
-        rpc_state.init(mc_block_id).await?;
-
-        let endpoint = rpc_state
-            .bind_endpoint()
-            .await
+        {
+            __guard.end_section(202u32);
+            let __result = rpc_state.init(mc_block_id).await;
+            __guard.start_section(202u32);
+            __result
+        }?;
+        let endpoint = {
+            __guard.end_section(206u32);
+            let __result = rpc_state.bind_endpoint().await;
+            __guard.start_section(206u32);
+            __result
+        }
             .context("failed to setup RPC server endpoint")?;
-
-        tracing::info!(listen_addr = %config.listen_addr, "RPC server started");
+        tracing::info!(listen_addr = % config.listen_addr, "RPC server started");
         tokio::task::spawn(async move {
-            if let Err(e) = endpoint.serve().await {
+            let mut __guard = crate::__async_profile_guard__::Guard::new(
+                concat!(module_path!(), "::async_block"),
+                file!(),
+                210u32,
+            );
+            if let Err(e) = {
+                __guard.end_section(211u32);
+                let __result = endpoint.serve().await;
+                __guard.start_section(211u32);
+                __result
+            } {
                 tracing::error!("RPC server failed: {e:?}");
             }
             tracing::info!("RPC server stopped");
         });
-
         Ok(rpc_state.split())
     }
-
     pub fn split(self) -> (RpcBlockSubscriber, RpcStateSubscriber) {
         let block_subscriber = RpcBlockSubscriber {
             inner: self.inner.clone(),
         };
-
-        let state_subscriber = RpcStateSubscriber { inner: self.inner };
-
+        let state_subscriber = RpcStateSubscriber {
+            inner: self.inner,
+        };
         (block_subscriber, state_subscriber)
     }
-
     pub async fn init(&self, mc_block_id: &BlockId) -> Result<()> {
-        self.inner.init(mc_block_id).await
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(init)),
+            file!(),
+            230u32,
+        );
+        let mc_block_id = mc_block_id;
+        {
+            __guard.end_section(231u32);
+            let __result = self.inner.init(mc_block_id).await;
+            __guard.start_section(231u32);
+            __result
+        }
     }
-
-    pub async fn acquire_download_block_permit(&self) -> tokio::sync::SemaphorePermit<'_> {
-        // NOTE: We are not closing this semaphore explicitly.
-        self.inner.download_block_semaphore.acquire().await.unwrap()
+    pub async fn acquire_download_block_permit(
+        &self,
+    ) -> tokio::sync::SemaphorePermit<'_> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(acquire_download_block_permit)),
+            file!(),
+            234u32,
+        );
+        {
+            __guard.end_section(236u32);
+            let __result = self.inner.download_block_semaphore.acquire().await;
+            __guard.start_section(236u32);
+            __result
+        }
+            .unwrap()
     }
-
     pub async fn acquire_run_get_method_permit(&self) -> RunGetMethodPermit {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(acquire_run_get_method_permit)),
+            file!(),
+            239u32,
+        );
         let config = &self.config().run_get_method;
         if config.max_vms == 0 {
-            return RunGetMethodPermit::Disabled;
+            {
+                __guard.end_section(242u32);
+                return RunGetMethodPermit::Disabled;
+            };
         }
-
         let fut = self.inner.run_get_method_semaphore.clone().acquire_owned();
-        match tokio::time::timeout(config.max_wait_for_vm, fut).await {
+        match {
+            __guard.end_section(246u32);
+            let __result = tokio::time::timeout(config.max_wait_for_vm, fut).await;
+            __guard.start_section(246u32);
+            __result
+        } {
             Ok(Ok(permit)) => RunGetMethodPermit::Acquired(permit),
             Ok(Err(_)) => RunGetMethodPermit::Disabled,
             Err(_) => RunGetMethodPermit::Timeout,
         }
     }
-
     pub async fn bind_socket(&self) -> std::io::Result<TcpListener> {
-        TcpListener::bind(self.config().listen_addr).await
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(bind_socket)),
+            file!(),
+            253u32,
+        );
+        {
+            __guard.end_section(254u32);
+            let __result = TcpListener::bind(self.config().listen_addr).await;
+            __guard.start_section(254u32);
+            __result
+        }
     }
-
     pub async fn bind_endpoint(&self) -> Result<RpcEndpoint> {
-        RpcEndpoint::builder().bind(self.clone()).await
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(bind_endpoint)),
+            file!(),
+            257u32,
+        );
+        {
+            __guard.end_section(258u32);
+            let __result = RpcEndpoint::builder().bind(self.clone()).await;
+            __guard.start_section(258u32);
+            __result
+        }
     }
-
     pub fn config(&self) -> &RpcConfig {
         &self.inner.config
     }
-
     pub fn is_ready(&self) -> bool {
         self.inner.is_ready.load(Ordering::Acquire)
     }
-
     pub fn is_full(&self) -> bool {
         self.inner.rpc_storage.is_some()
     }
-
     pub fn load_timings(&self) -> arc_swap::Guard<Arc<StateTimings>> {
         self.inner.timings.load()
     }
-
     pub fn jrpc_cache(&self) -> &JrpcEndpointCache {
         &self.inner.jrpc_cache
     }
-
     pub fn proto_cache(&self) -> &ProtoEndpointCache {
         &self.inner.proto_cache
     }
-
     pub fn zerostate_id(&self) -> &ZerostateId {
         &self.inner.zerostate_id
     }
-
     pub fn get_latest_mc_info(&self) -> LatestMcInfo {
         self.inner.mc_info.read().clone()
     }
-
     pub fn rpc_storage_snapshot(&self) -> Option<RpcSnapshot> {
         let rpc_storage = self.inner.rpc_storage.as_ref()?;
         rpc_storage.load_snapshot()
     }
-
     pub async fn broadcast_external_message(&self, message: &[u8]) {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(broadcast_external_message)),
+            file!(),
+            298u32,
+        );
+        let message = message;
         metrics::counter!("tycho_rpc_broadcast_external_message_tx_bytes_total")
             .increment(message.len() as u64);
-        self.inner
-            .blockchain_rpc_client
-            .broadcast_external_message(message)
-            .await;
+        {
+            __guard.end_section(304u32);
+            let __result = self
+                .inner
+                .blockchain_rpc_client
+                .broadcast_external_message(message)
+                .await;
+            __guard.start_section(304u32);
+            __result
+        };
     }
-
     pub fn get_unpacked_blockchain_config(&self) -> Arc<LatestBlockchainConfig> {
         self.inner.blockchain_config.load_full()
     }
-
     pub fn get_brief_block_info(
         &self,
         block_id: &BlockIdShort,
@@ -316,11 +367,8 @@ impl RpcState {
         let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
-        storage
-            .get_brief_block_info(block_id, snapshot)
-            .map_err(RpcStateError::Internal)
+        storage.get_brief_block_info(block_id, snapshot).map_err(RpcStateError::Internal)
     }
-
     pub fn get_brief_shards_descr(
         &self,
         mc_seqno: u32,
@@ -333,14 +381,12 @@ impl RpcState {
             .get_brief_shards_descr(mc_seqno, snapshot)
             .map_err(RpcStateError::Internal)
     }
-
     pub fn get_libraries(&self) -> Dict<HashBytes, LibDescr> {
         match self.inner.mc_accounts.read().as_ref() {
             Some(cache) => cache.libraries.clone(),
             None => Dict::new(),
         }
     }
-
     pub fn get_raw_library(&self, hash: &HashBytes) -> Result<Option<Cell>> {
         let guard = self.inner.mc_accounts.read();
         match guard.as_ref() {
@@ -348,14 +394,12 @@ impl RpcState {
             None => Ok(None),
         }
     }
-
     pub fn get_account_state(
         &self,
         address: &StdAddr,
     ) -> Result<LoadedAccountState, RpcStateError> {
         self.inner.get_account_state(address)
     }
-
     pub fn get_accounts_by_code_hash(
         &self,
         code_hash: &HashBytes,
@@ -369,7 +413,6 @@ impl RpcState {
             .get_accounts_by_code_hash(code_hash, continuation, snapshot)
             .map_err(RpcStateError::Internal)
     }
-
     pub fn get_known_mc_blocks_range(
         &self,
         snapshot: Option<&RpcSnapshot>,
@@ -377,11 +420,8 @@ impl RpcState {
         let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
-        storage
-            .get_known_mc_blocks_range(snapshot)
-            .map_err(RpcStateError::Internal)
+        storage.get_known_mc_blocks_range(snapshot).map_err(RpcStateError::Internal)
     }
-
     pub fn get_blocks_by_mc_seqno(
         &self,
         mc_seqno: u32,
@@ -394,7 +434,6 @@ impl RpcState {
             .get_blocks_by_mc_seqno(mc_seqno, snapshot)
             .map_err(RpcStateError::Internal)
     }
-
     pub fn get_block_transactions(
         &self,
         block_id: &BlockIdShort,
@@ -409,7 +448,6 @@ impl RpcState {
             .get_block_transactions(block_id, reverse, cursor, snapshot)
             .map_err(RpcStateError::Internal)
     }
-
     pub fn get_block_transaction_ids(
         &self,
         block_id: &BlockIdShort,
@@ -424,7 +462,6 @@ impl RpcState {
             .get_block_transaction_ids(block_id, reverse, cursor, snapshot)
             .map_err(RpcStateError::Internal)
     }
-
     pub fn get_transactions(
         &self,
         account: &StdAddr,
@@ -440,7 +477,6 @@ impl RpcState {
             .get_transactions(account, start_lt, end_lt, reverse, snapshot)
             .map_err(RpcStateError::Internal)
     }
-
     pub fn get_transaction(
         &self,
         hash: &HashBytes,
@@ -449,11 +485,8 @@ impl RpcState {
         let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
-        storage
-            .get_transaction(hash, snapshot)
-            .map_err(RpcStateError::Internal)
+        storage.get_transaction(hash, snapshot).map_err(RpcStateError::Internal)
     }
-
     pub fn get_transaction_ext<'a>(
         &'a self,
         hash: &HashBytes,
@@ -462,11 +495,8 @@ impl RpcState {
         let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
-        storage
-            .get_transaction_ext(hash, snapshot)
-            .map_err(RpcStateError::Internal)
+        storage.get_transaction_ext(hash, snapshot).map_err(RpcStateError::Internal)
     }
-
     pub fn get_transaction_info(
         &self,
         hash: &HashBytes,
@@ -475,11 +505,8 @@ impl RpcState {
         let Some(storage) = &self.inner.rpc_storage else {
             return Err(RpcStateError::NotSupported);
         };
-        storage
-            .get_transaction_info(hash, snapshot)
-            .map_err(RpcStateError::Internal)
+        storage.get_transaction_info(hash, snapshot).map_err(RpcStateError::Internal)
     }
-
     pub fn get_src_transaction<'a>(
         &'a self,
         account: &StdAddr,
@@ -493,7 +520,6 @@ impl RpcState {
             .get_src_transaction(account, message_lt, snapshot)
             .map_err(RpcStateError::Internal)
     }
-
     pub fn get_dst_transaction<'a>(
         &'a self,
         in_msg_hash: &HashBytes,
@@ -506,90 +532,135 @@ impl RpcState {
             .get_dst_transaction(in_msg_hash, snapshot)
             .map_err(RpcStateError::Internal)
     }
-
-    // TODO: Add snapshot support.
     pub async fn get_key_block_proof(
         &self,
         key_block_seqno: u32,
     ) -> Option<(BlockId, impl AsRef<[u8]> + Send + Sync + 'static)> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(get_key_block_proof)),
+            file!(),
+            514u32,
+        );
+        let key_block_seqno = key_block_seqno;
         let blocks = self.inner.core_storage.block_storage();
         let handles = self.inner.core_storage.block_handle_storage();
-
         let handle = handles.load_key_block_handle(key_block_seqno)?;
-        let data = blocks.load_block_proof_raw(&handle).await.ok()?;
+        let data = {
+            __guard.end_section(519u32);
+            let __result = blocks.load_block_proof_raw(&handle).await;
+            __guard.start_section(519u32);
+            __result
+        }
+            .ok()?;
         Some((*handle.id(), data))
     }
-
-    // TODO: Remove.
     pub async fn get_block_proof(
         &self,
         block_id: &BlockId,
     ) -> Option<impl AsRef<[u8]> + Send + Sync + 'static> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(get_block_proof)),
+            file!(),
+            527u32,
+        );
+        let block_id = block_id;
         let blocks = self.inner.core_storage.block_storage();
         let handles = self.inner.core_storage.block_handle_storage();
-
         let handle = handles.load_handle(block_id)?;
-        blocks.load_block_proof_raw(&handle).await.ok()
+        {
+            __guard.end_section(532u32);
+            let __result = blocks.load_block_proof_raw(&handle).await;
+            __guard.start_section(532u32);
+            __result
+        }
+            .ok()
     }
-
-    // TODO: Remove.
     pub async fn get_block_data(
         &self,
         block_id: &BlockId,
     ) -> Option<impl AsRef<[u8]> + Send + Sync + 'static> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(get_block_data)),
+            file!(),
+            539u32,
+        );
+        let block_id = block_id;
         let blocks = self.inner.core_storage.block_storage();
         let handles = self.inner.core_storage.block_handle_storage();
-
         let handle = handles.load_handle(block_id)?;
-        blocks.load_block_data_decompressed(&handle).await.ok()
+        {
+            __guard.end_section(544u32);
+            let __result = blocks.load_block_data_decompressed(&handle).await;
+            __guard.start_section(544u32);
+            __result
+        }
+            .ok()
     }
 }
-
 pub struct RpcStateSubscriber {
     inner: Arc<Inner>,
 }
-
 impl StateSubscriber for RpcStateSubscriber {
     type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
-
-    fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        futures_util::future::ready(self.inner.update_accounts_cache(&cx.block, &cx.state))
+    fn handle_state<'a>(
+        &'a self,
+        cx: &'a StateSubscriberContext,
+    ) -> Self::HandleStateFut<'a> {
+        futures_util::future::ready(
+            self.inner.update_accounts_cache(&cx.block, &cx.state),
+        )
     }
 }
-
 pub struct RpcBlockSubscriber {
     inner: Arc<Inner>,
 }
-
 impl BlockSubscriber for RpcBlockSubscriber {
     type Prepared = JoinHandle<Result<()>>;
-
     type PrepareBlockFut<'a> = futures_util::future::Ready<Result<Self::Prepared>>;
     type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
-
-    fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
+    fn prepare_block<'a>(
+        &'a self,
+        cx: &'a BlockSubscriberContext,
+    ) -> Self::PrepareBlockFut<'a> {
         let handle = tokio::task::spawn({
             let inner = self.inner.clone();
             let mc_block_id = cx.mc_block_id;
             let block = cx.block.clone();
-            async move { inner.update(&mc_block_id, &block).await }
+            async move {
+                let mut __guard = crate::__async_profile_guard__::Guard::new(
+                    concat!(module_path!(), "::async_block"),
+                    file!(),
+                    575u32,
+                );
+                {
+                    __guard.end_section(575u32);
+                    let __result = inner.update(&mc_block_id, &block).await;
+                    __guard.start_section(575u32);
+                    __result
+                }
+            }
         });
-
         futures_util::future::ready(Ok(handle))
     }
-
     fn handle_block<'a>(
         &'a self,
         ctx: &'a BlockSubscriberContext,
         prepared: Self::Prepared,
     ) -> Self::HandleBlockFut<'a> {
         Box::pin(async move {
-            prepared.await??;
+            let mut __guard = crate::__async_profile_guard__::Guard::new(
+                concat!(module_path!(), "::async_block"),
+                file!(),
+                586u32,
+            );
+            {
+                __guard.end_section(587u32);
+                let __result = prepared.await;
+                __guard.start_section(587u32);
+                __result
+            }??;
             if ctx.block.id().is_masterchain() {
                 self.inner.update_mc_info(&ctx.block)?;
-
-                // NOTE: Update snapshot only for masterchain because it is handled last.
-                // It is updated only after processing all shards and mc block.
                 if let Some(rpc_storage) = &self.inner.rpc_storage {
                     rpc_storage.update_snapshot();
                 }
@@ -598,13 +669,11 @@ impl BlockSubscriber for RpcBlockSubscriber {
         })
     }
 }
-
 pub enum RunGetMethodPermit {
     Acquired(tokio::sync::OwnedSemaphorePermit),
     Timeout,
     Disabled,
 }
-
 struct Inner {
     config: RpcConfig,
     core_storage: CoreStorage,
@@ -621,27 +690,22 @@ struct Inner {
     jrpc_cache: JrpcEndpointCache,
     proto_cache: ProtoEndpointCache,
     zerostate_id: ZerostateId,
-    // GC
     gc_notify: Arc<Notify>,
     gc_handle: Option<JoinHandle<()>>,
-    // RPC blacklist
     blacklisted_accounts: Option<BlacklistedAccounts>,
     blacklist_watcher_handle: Option<JoinHandle<()>>,
 }
-
 #[derive(Clone)]
 pub struct LatestMcInfo {
     pub block_id: Arc<BlockId>,
     pub timings: GenTimings,
     pub state_hash: HashBytes,
 }
-
 pub struct LatestBlockchainConfig {
     pub raw: BlockchainConfigParams,
     pub unpacked: tycho_vm::UnpackedConfig,
     pub modifiers: tycho_vm::BehaviourModifiers,
 }
-
 impl Default for LatestBlockchainConfig {
     fn default() -> Self {
         Self {
@@ -659,50 +723,65 @@ impl Default for LatestBlockchainConfig {
         }
     }
 }
-
 impl Inner {
     async fn init(self: &Arc<Self>, mc_block_id: &BlockId) -> Result<()> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(init)),
+            file!(),
+            664u32,
+        );
+        let mc_block_id = mc_block_id;
         anyhow::ensure!(mc_block_id.is_masterchain(), "not a masterchain state");
-
         let blocks = self.core_storage.block_storage();
         let block_handles = self.core_storage.block_handle_storage();
         let shard_states = self.core_storage.shard_state_storage();
-
-        // Try to init the latest known key block cache
         'key_block: {
-            // NOTE: `+ 1` here because the `mc_block_id` might be a key block and we should use it
-            let Some(handle) = block_handles.find_prev_key_block(mc_block_id.seqno + 1) else {
-                break 'key_block;
+            let Some(handle) = block_handles.find_prev_key_block(mc_block_id.seqno + 1)
+            else {
+                {
+                    __guard.end_section(675u32);
+                    __guard.start_section(675u32);
+                    break 'key_block;
+                };
             };
-
             if handle.has_data() {
-                let key_block = blocks.load_block_data(&handle).await?;
+                let key_block = {
+                    __guard.end_section(679u32);
+                    let __result = blocks.load_block_data(&handle).await;
+                    __guard.start_section(679u32);
+                    __result
+                }?;
                 self.update_mc_block_cache(&key_block)?;
             } else {
-                let state = shard_states
-                    .load_state(handle.id().seqno, handle.id())
-                    .await?;
+                let state = {
+                    __guard.end_section(684u32);
+                    let __result = shard_states
+                        .load_state(handle.id().seqno, handle.id())
+                        .await;
+                    __guard.start_section(684u32);
+                    __result
+                }?;
                 let state = state.as_ref();
-
                 let Some(extra) = state.load_custom()? else {
                     anyhow::bail!("masterchain state without extra");
                 };
-
                 self.update_config(state.global_id, state.seqno, &extra.config);
                 tracing::warn!("no key block found during initialization");
             }
         }
-
-        let mut mc_state = shard_states
-            .load_state(mc_block_id.seqno, mc_block_id)
-            .await?;
+        let mut mc_state = {
+            __guard.end_section(698u32);
+            let __result = shard_states.load_state(mc_block_id.seqno, mc_block_id).await;
+            __guard.start_section(698u32);
+            __result
+        }?;
         self.update_timings(mc_state.as_ref().gen_utime, mc_state.as_ref().seqno);
-
         if let Some(rpc_storage) = &self.rpc_storage {
             let node_instance_id = self.core_storage.node_state().load_instance_id();
             let rpc_instance_id = rpc_storage.load_instance_id();
-
-            let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
+            let make_cached_accounts = |
+                state: &ShardStateStuff,
+            | -> Result<CachedAccounts> {
                 let state_info = state.as_ref();
                 Ok(CachedAccounts {
                     libraries: Default::default(),
@@ -714,69 +793,77 @@ impl Inner {
                     },
                 })
             };
-
             let shards = mc_state.shards()?.clone();
-
-            if node_instance_id != rpc_instance_id || self.config.storage.is_force_reindex() {
-                // Reset masterchain accounts.
-                // NOTE: Consume shard state to prevent if from being fully loaded.
-                rpc_storage
-                    .reset_accounts(mc_state, self.config.shard_split_depth)
-                    .await?;
-
+            if node_instance_id != rpc_instance_id
+                || self.config.storage.is_force_reindex()
+            {
+                {
+                    __guard.end_section(725u32);
+                    let __result = rpc_storage
+                        .reset_accounts(mc_state, self.config.shard_split_depth)
+                        .await;
+                    __guard.start_section(725u32);
+                    __result
+                }?;
                 for item in shards.latest_blocks() {
+                    __guard.checkpoint(727u32);
                     let block_id = item?;
-
-                    let state = shard_states
-                        .load_state(mc_block_id.seqno, &block_id)
-                        .await?;
-
-                    // Reset shard accounts.
-                    // NOTE: Consume shard state to prevent if from being fully loaded.
-                    rpc_storage
-                        .reset_accounts(state, self.config.shard_split_depth)
-                        .await?;
+                    let state = {
+                        __guard.end_section(732u32);
+                        let __result = shard_states
+                            .load_state(mc_block_id.seqno, &block_id)
+                            .await;
+                        __guard.start_section(732u32);
+                        __result
+                    }?;
+                    {
+                        __guard.end_section(738u32);
+                        let __result = rpc_storage
+                            .reset_accounts(state, self.config.shard_split_depth)
+                            .await;
+                        __guard.start_section(738u32);
+                        __result
+                    }?;
                 }
-
-                // Rewrite RPC instance id
                 rpc_storage.store_instance_id(node_instance_id);
-
-                // Reload mc state.
-                mc_state = shard_states
-                    .load_state(mc_block_id.seqno, mc_block_id)
-                    .await?;
+                mc_state = {
+                    __guard.end_section(747u32);
+                    let __result = shard_states
+                        .load_state(mc_block_id.seqno, mc_block_id)
+                        .await;
+                    __guard.start_section(747u32);
+                    __result
+                }?;
             }
-
-            // Fill config.
             if let Some(config) = load_blockchain_config(&mc_state) {
                 self.blockchain_config.store(config);
             }
-
-            // Fill masterchain cache
             *self.mc_accounts.write() = Some(make_cached_accounts(&mc_state)?);
-
             for item in shards.latest_blocks() {
+                __guard.checkpoint(758u32);
                 let block_id = item?;
-                let state = shard_states
-                    .load_state(mc_block_id.seqno, &block_id)
-                    .await?;
-
-                // Fill accounts cache.
+                let state = {
+                    __guard.end_section(762u32);
+                    let __result = shard_states
+                        .load_state(mc_block_id.seqno, &block_id)
+                        .await;
+                    __guard.start_section(762u32);
+                    __result
+                }?;
                 self.sc_accounts
                     .write()
                     .insert(block_id.shard, make_cached_accounts(&state)?);
             }
         }
-
         self.is_ready.store(true, Ordering::Release);
         Ok(())
     }
-
-    fn get_account_state(&self, address: &StdAddr) -> Result<LoadedAccountState, RpcStateError> {
+    fn get_account_state(
+        &self,
+        address: &StdAddr,
+    ) -> Result<LoadedAccountState, RpcStateError> {
         let is_masterchain = address.is_masterchain();
-
         if is_masterchain {
-            // Search in masterchain cache
             match &*self.mc_accounts.read() {
                 None => Err(RpcStateError::NotReady),
                 Some(cache) => {
@@ -787,91 +874,81 @@ impl Inner {
         } else {
             let cache = self.sc_accounts.read();
             let mc_info = self.mc_info.read().clone();
-
             let mut state = Err(RpcStateError::NotReady);
-
-            // Search in all shard caches
             let mut gen_utime = 0;
             let mut found = false;
             for (shard, cache) in &*cache {
-                if !shard.contains_account(&address.address) || cache.timings.gen_utime < gen_utime
+                if !shard.contains_account(&address.address)
+                    || cache.timings.gen_utime < gen_utime
                 {
                     continue;
                 }
-
                 gen_utime = cache.timings.gen_utime;
                 state = cache.get(mc_info.clone(), &address.address);
                 found = true;
             }
-
-            // Handle case when account is not found in any shard
             if !found && gen_utime > 0 {
                 state = Ok(LoadedAccountState::NotFound {
                     mc_block_id: mc_info.block_id,
                     timings: mc_info.timings,
                 });
             }
-
-            // Done
             state
         }
     }
-
     async fn update(&self, mc_block_id: &BlockId, block: &BlockStuff) -> Result<()> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(update)),
+            file!(),
+            820u32,
+        );
+        let mc_block_id = mc_block_id;
+        let block = block;
         let _histogram = HistogramGuard::begin("tycho_rpc_state_update_time");
-
         let is_masterchain = block.id().is_masterchain();
         if is_masterchain {
             self.update_mc_block_cache(block)?;
         }
-
         if let Some(rpc_storage) = &self.rpc_storage {
-            rpc_storage
-                .update(
-                    mc_block_id,
-                    block.clone(),
-                    self.blacklisted_accounts.as_ref(),
-                )
-                .await?;
+            {
+                __guard.end_section(835u32);
+                let __result = rpc_storage
+                    .update(
+                        mc_block_id,
+                        block.clone(),
+                        self.blacklisted_accounts.as_ref(),
+                    )
+                    .await;
+                __guard.start_section(835u32);
+                __result
+            }?;
         }
         Ok(())
     }
-
     fn update_mc_block_cache(&self, block: &BlockStuff) -> Result<()> {
-        // Update timings
         {
-            // TODO: Add `OnceLock` for block `info` and `custom``
             let info = block.load_info()?;
             self.update_timings(info.gen_utime, info.seqno);
-
             if !info.key_block {
                 return Ok(());
             }
         }
-
-        // Send a new KeyBlock notification to run GC
         if self.config.storage.gc_is_enabled() {
             self.gc_notify.notify_waiters();
         }
-
         let custom = block.load_custom()?;
-
-        // Try to update cached config:
         if let Some(ref config) = custom.config {
             self.update_config(block.as_ref().global_id, block.id().seqno, config);
         } else {
             tracing::error!("key block without config");
         }
-
         self.jrpc_cache.handle_key_block(block.as_ref());
         self.proto_cache.handle_key_block(block.as_ref());
         Ok(())
     }
-
     fn update_mc_info(&self, block: &BlockStuff) -> Result<()> {
         let info = block.load_info()?;
         let state_update = block.block().state_update.load()?;
-
         let block_id = Arc::new(*block.id());
         *self.mc_info.write() = LatestMcInfo {
             block_id,
@@ -883,33 +960,34 @@ impl Inner {
         };
         Ok(())
     }
-
     fn update_timings(&self, mc_gen_utime: u32, seqno: u32) {
         let time_diff = now_sec() as i64 - mc_gen_utime as i64;
-        self.timings.store(Arc::new(StateTimings {
-            last_mc_block_seqno: seqno,
-            last_mc_utime: mc_gen_utime,
-            mc_time_diff: time_diff,
-            smallest_known_lt: self.rpc_storage.as_ref().map(|s| s.min_tx_lt()),
-        }));
+        self.timings
+            .store(
+                Arc::new(StateTimings {
+                    last_mc_block_seqno: seqno,
+                    last_mc_utime: mc_gen_utime,
+                    mc_time_diff: time_diff,
+                    smallest_known_lt: self.rpc_storage.as_ref().map(|s| s.min_tx_lt()),
+                }),
+            );
     }
-
     fn update_config(&self, global_id: i32, seqno: u32, config: &BlockchainConfig) {
         self.jrpc_cache.handle_config(global_id, seqno, config);
         self.proto_cache.handle_config(global_id, seqno, config);
     }
-
-    fn update_accounts_cache(&self, block: &BlockStuff, state: &ShardStateStuff) -> Result<()> {
-        let _histogram = HistogramGuard::begin("tycho_rpc_state_update_accounts_cache_time");
-
+    fn update_accounts_cache(
+        &self,
+        block: &BlockStuff,
+        state: &ShardStateStuff,
+    ) -> Result<()> {
+        let _histogram = HistogramGuard::begin(
+            "tycho_rpc_state_update_accounts_cache_time",
+        );
         let shard = block.id().shard;
-
-        // TODO: Get `gen_utime` from somewhere else.
         let block_info = block.load_info()?;
-
         let accounts = state.state().load_accounts()?.dict().clone();
         let libraries = state.state().libraries.clone();
-
         let cached = CachedAccounts {
             libraries,
             accounts,
@@ -919,81 +997,53 @@ impl Inner {
                 gen_utime: block_info.gen_utime,
             },
         };
-
         if shard.is_masterchain() {
-            // Fill config.
             if let Some(config) = load_blockchain_config(state) {
                 self.blockchain_config.store(config);
             }
-
-            // Update accounts cache.
             *self.mc_accounts.write() = Some(cached);
         } else {
             let mut cache = self.sc_accounts.write();
-
             cache.insert(shard, cached);
             if block_info.after_merge || block_info.after_split {
                 tracing::debug!("clearing shard states cache after shards merge/split");
-
                 match block_info.load_prev_ref()? {
-                    // Block after split
-                    //       |
-                    //       *  - block A
-                    //      / \
-                    //     *   *  - blocks B', B"
                     PrevBlockRef::Single(..) => {
-                        // Compute parent shard of the B' or B"
                         let parent = shard
                             .merge()
                             .ok_or(tycho_types::error::Error::InvalidData)?;
-
                         let opposite = shard.opposite().expect("after split");
-
-                        // Remove parent shard state
                         if cache.contains_key(&shard) && cache.contains_key(&opposite) {
                             cache.remove(&parent);
                         }
                     }
-
-                    // Block after merge
-                    //     *   *  - blocks A', A"
-                    //      \ /
-                    //       *  - block B
-                    //       |
                     PrevBlockRef::AfterMerge { .. } => {
-                        // Compute parent shard of the B' or B"
                         let (left, right) = shard
                             .split()
                             .ok_or(tycho_types::error::Error::InvalidData)?;
-
-                        // Find and remove all parent shards
                         cache.remove(&left);
                         cache.remove(&right);
                     }
                 }
             }
         }
-
         Ok(())
     }
 }
-
 impl Drop for Inner {
     fn drop(&mut self) {
         if let Some(handle) = self.gc_handle.take() {
             handle.abort();
         }
-
         if let Some(handle) = self.blacklist_watcher_handle.take() {
             handle.abort();
         }
     }
 }
-
-fn load_blockchain_config(mc_state: &ShardStateStuff) -> Option<Arc<LatestBlockchainConfig>> {
+fn load_blockchain_config(
+    mc_state: &ShardStateStuff,
+) -> Option<Arc<LatestBlockchainConfig>> {
     let extra = mc_state.state_extra().ok()?;
-
-    // Fill config.
     let now = mc_state.as_ref().gen_utime;
     match tycho_vm::SmcInfoTonV6::unpack_config_partial(&extra.config.params, now) {
         Ok(unpacked) => {
@@ -1006,28 +1056,25 @@ fn load_blockchain_config(mc_state: &ShardStateStuff) -> Option<Arc<LatestBlockc
                     .contains(GlobalCapability::CapSignatureWithId)
                     .then_some(global_id);
             }
-
-            Some(Arc::new(LatestBlockchainConfig {
-                raw: extra.config.params.clone(),
-                unpacked,
-                modifiers,
-            }))
+            Some(
+                Arc::new(LatestBlockchainConfig {
+                    raw: extra.config.params.clone(),
+                    unpacked,
+                    modifiers,
+                }),
+            )
         }
         Err(e) => {
             tracing::error!(
-                block_id = %mc_state.block_id(),
+                block_id = % mc_state.block_id(),
                 "failed to unpack blockchain config: {e:?}",
             );
             None
         }
     }
 }
-
 pub enum LoadedAccountState {
-    NotFound {
-        mc_block_id: Arc<BlockId>,
-        timings: GenTimings,
-    },
+    NotFound { mc_block_id: Arc<BlockId>, timings: GenTimings },
     Found {
         mc_block_id: Arc<BlockId>,
         state: ShardAccount,
@@ -1035,14 +1082,12 @@ pub enum LoadedAccountState {
         timings: GenTimings,
     },
 }
-
 struct CachedAccounts {
     libraries: Dict<HashBytes, LibDescr>,
     accounts: ShardAccountsDict,
     mc_ref_hanlde: RefMcStateHandle,
     timings: GenTimings,
 }
-
 impl CachedAccounts {
     fn get(
         &self,
@@ -1050,89 +1095,129 @@ impl CachedAccounts {
         account: &HashBytes,
     ) -> Result<LoadedAccountState, RpcStateError> {
         match self.accounts.get(account) {
-            Ok(Some((_, state))) => Ok(LoadedAccountState::Found {
-                mc_block_id: mc_info.block_id,
-                state,
-                mc_ref_handle: self.mc_ref_hanlde.clone(),
-                timings: self.timings.max_by_lt(mc_info.timings),
-            }),
-            Ok(None) => Ok(LoadedAccountState::NotFound {
-                mc_block_id: mc_info.block_id,
-                timings: self.timings.max_by_lt(mc_info.timings),
-            }),
+            Ok(Some((_, state))) => {
+                Ok(LoadedAccountState::Found {
+                    mc_block_id: mc_info.block_id,
+                    state,
+                    mc_ref_handle: self.mc_ref_hanlde.clone(),
+                    timings: self.timings.max_by_lt(mc_info.timings),
+                })
+            }
+            Ok(None) => {
+                Ok(LoadedAccountState::NotFound {
+                    mc_block_id: mc_info.block_id,
+                    timings: self.timings.max_by_lt(mc_info.timings),
+                })
+            }
             Err(e) => Err(RpcStateError::Internal(e.into())),
         }
     }
 }
-
 type ShardAccountsDict = Dict<HashBytes, (DepthBalanceInfo, ShardAccount)>;
-
-// TODO: Use only rpc storage to find closest key block LT.
 async fn transactions_gc(
     config: TransactionsGcConfig,
     core_storage: CoreStorage,
     rpc_storage: Arc<RpcStorage>,
     gc_notify: Arc<Notify>,
 ) {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(transactions_gc)),
+        file!(),
+        1076u32,
+    );
+    let config = config;
+    let core_storage = core_storage;
+    let rpc_storage = rpc_storage;
+    let gc_notify = gc_notify;
     let Ok(tx_ttl_sec) = config.tx_ttl.as_secs().try_into() else {
-        return;
+        {
+            __guard.end_section(1078u32);
+            return;
+        };
     };
-
     loop {
-        // Wait for a new KeyBlock notification
-        gc_notify.notified().await;
-
+        __guard.checkpoint(1081u32);
+        {
+            __guard.end_section(1083u32);
+            let __result = gc_notify.notified().await;
+            __guard.start_section(1083u32);
+            __result
+        };
         let target_utime = now_sec().saturating_sub(tx_ttl_sec);
-        let gc_range = match find_closest_key_block_lt(&core_storage, target_utime).await {
+        let gc_range = match {
+            __guard.end_section(1086u32);
+            let __result = find_closest_key_block_lt(&core_storage, target_utime).await;
+            __guard.start_section(1086u32);
+            __result
+        } {
             Ok(lt) => lt,
             Err(e) => {
                 tracing::error!(
-                    target_utime,
-                    "failed to find the closest key block lt: {e:?}"
+                    target_utime, "failed to find the closest key block lt: {e:?}"
                 );
-                continue;
+                {
+                    __guard.end_section(1093u32);
+                    __guard.start_section(1093u32);
+                    continue;
+                };
             }
         };
-
-        if let Err(e) = rpc_storage
-            .remove_old_transactions(gc_range.mc_seqno, gc_range.lt, config.keep_tx_per_account)
-            .await
-        {
+        if let Err(e) = {
+            __guard.end_section(1099u32);
+            let __result = rpc_storage
+                .remove_old_transactions(
+                    gc_range.mc_seqno,
+                    gc_range.lt,
+                    config.keep_tx_per_account,
+                )
+                .await;
+            __guard.start_section(1099u32);
+            __result
+        } {
             tracing::error!(
-                target_utime,
-                mc_seqno = gc_range.mc_seqno,
-                min_lt = gc_range.lt,
+                target_utime, mc_seqno = gc_range.mc_seqno, min_lt = gc_range.lt,
                 "failed to remove old transactions: {e:?}"
             );
         }
     }
 }
-
-pub async fn watch_blacklisted_accounts(config_path: PathBuf, accounts: BlacklistedAccounts) {
+pub async fn watch_blacklisted_accounts(
+    config_path: PathBuf,
+    accounts: BlacklistedAccounts,
+) {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(watch_blacklisted_accounts)),
+        file!(),
+        1111u32,
+    );
+    let config_path = config_path;
+    let accounts = accounts;
     tracing::info!(
-        config_path = %config_path.display(),
+        config_path = % config_path.display(),
         "started watching for changes in rpc blacklist config"
     );
-
     let get_metadata = || {
-        std::fs::metadata(&config_path)
-            .ok()
-            .and_then(|m| m.modified().ok())
+        std::fs::metadata(&config_path).ok().and_then(|m| m.modified().ok())
     };
-
     let mut last_modified = None;
-
     let mut interval = tokio::time::interval(Duration::from_secs(10));
     loop {
-        interval.tick().await;
-
+        __guard.checkpoint(1126u32);
+        {
+            __guard.end_section(1127u32);
+            let __result = interval.tick().await;
+            __guard.start_section(1127u32);
+            __result
+        };
         let modified = get_metadata();
         if last_modified == modified {
-            continue;
+            {
+                __guard.end_section(1131u32);
+                __guard.start_section(1131u32);
+                continue;
+            };
         }
         last_modified = modified;
-
-        // Handle
         match BlackListConfig::load_from(&config_path) {
             Ok(config) => accounts.update(config.accounts),
             Err(e) => {
@@ -1141,30 +1226,45 @@ pub async fn watch_blacklisted_accounts(config_path: PathBuf, accounts: Blacklis
         }
     }
 }
-
-async fn find_closest_key_block_lt(storage: &CoreStorage, utime: u32) -> Result<GcRange> {
+async fn find_closest_key_block_lt(
+    storage: &CoreStorage,
+    utime: u32,
+) -> Result<GcRange> {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(find_closest_key_block_lt)),
+        file!(),
+        1145u32,
+    );
+    let storage = storage;
+    let utime = utime;
     let block_handle_storage = storage.block_handle_storage();
-
-    // Find the key block with max seqno which was preduced not later than `utime`
     let handle = 'last_key_block: {
-        let iter = block_handle_storage.key_blocks_iterator(KeyBlocksDirection::Backward);
+        let iter = block_handle_storage
+            .key_blocks_iterator(KeyBlocksDirection::Backward);
         for key_block_id in iter {
+            __guard.checkpoint(1151u32);
             let handle = block_handle_storage
                 .load_handle(&key_block_id)
                 .with_context(|| format!("key block not found: {key_block_id}"))?;
-
             if handle.gen_utime() <= utime {
-                break 'last_key_block handle;
+                {
+                    __guard.end_section(1157u32);
+                    __guard.start_section(1157u32);
+                    break 'last_key_block handle;
+                };
             }
         }
-
-        return Ok(GcRange::default());
+        {
+            __guard.end_section(1161u32);
+            return Ok(GcRange::default());
+        };
     };
-
-    // Load block proof
-    let block_proof = storage.block_storage().load_block_proof(&handle).await?;
-
-    // Read `start_lt` from virtual block info
+    let block_proof = {
+        __guard.end_section(1165u32);
+        let __result = storage.block_storage().load_block_proof(&handle).await;
+        __guard.start_section(1165u32);
+        __result
+    }?;
     let (virt_block, _) = block_proof.virtualize_block()?;
     let info = virt_block.info.load()?;
     Ok(GcRange {
@@ -1172,13 +1272,11 @@ async fn find_closest_key_block_lt(storage: &CoreStorage, utime: u32) -> Result<
         lt: info.start_lt,
     })
 }
-
 #[derive(Default)]
 struct GcRange {
     mc_seqno: u32,
     lt: u64,
 }
-
 #[derive(Debug, thiserror::Error)]
 pub enum RpcStateError {
     #[error("not ready")]
@@ -1190,61 +1288,56 @@ pub enum RpcStateError {
     #[error(transparent)]
     BadRequest(#[from] BadRequestError),
 }
-
 impl RpcStateError {
     pub fn internal<E: Into<anyhow::Error>>(error: E) -> Self {
         Self::Internal(error.into())
     }
-
     pub fn bad_request<E: Into<anyhow::Error>>(error: E) -> Self {
         Self::BadRequest(BadRequestError(error.into()))
     }
 }
-
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
 pub struct BadRequestError(anyhow::Error);
-
 impl From<anyhow::Error> for BadRequestError {
     #[inline]
     fn from(value: anyhow::Error) -> Self {
         Self(value)
     }
 }
-
 impl From<axum::extract::rejection::QueryRejection> for BadRequestError {
     #[inline]
     fn from(value: axum::extract::rejection::QueryRejection) -> Self {
         Self(anyhow::Error::msg(value.body_text()))
     }
 }
-
 impl From<axum::extract::rejection::JsonRejection> for BadRequestError {
     #[inline]
     fn from(value: axum::extract::rejection::JsonRejection) -> Self {
         Self(anyhow::Error::msg(value.body_text()))
     }
 }
-
 #[cfg(test)]
 mod test {
     use std::str::FromStr;
-
     use tycho_block_util::block::BlockStuffAug;
     use tycho_core::block_strider::DelayedTasks;
     use tycho_core::blockchain_rpc::BlockchainRpcService;
     use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
     use tycho_core::storage::CoreStorageConfig;
     use tycho_network::{
-        BoxCloneService, Network, NetworkConfig, OverlayId, PublicOverlay, Response, ServiceExt,
-        ServiceRequest, service_query_fn,
+        BoxCloneService, Network, NetworkConfig, OverlayId, PublicOverlay, Response,
+        ServiceExt, ServiceRequest, service_query_fn,
     };
     use tycho_storage::StorageContext;
-
     use super::*;
-
     fn echo_service() -> BoxCloneService<ServiceRequest, Response> {
         let handle = |request: ServiceRequest| async move {
+            let mut __guard = crate::__async_profile_guard__::Guard::new(
+                concat!(module_path!(), "::async_block"),
+                file!(),
+                1247u32,
+            );
             tracing::trace!("received: {}", request.body.escape_ascii());
             let response = Response {
                 version: Default::default(),
@@ -1254,80 +1347,80 @@ mod test {
         };
         service_query_fn(handle).boxed_clone()
     }
-
     fn make_network() -> Result<Network> {
         Network::builder()
             .with_config(NetworkConfig::default())
             .with_random_private_key()
             .build("127.0.0.1:0", echo_service())
     }
-
     fn get_block() -> BlockStuffAug {
         let block_data = include_bytes!("../../../core/tests/data/block.bin");
-
         let root = Boc::decode(block_data).unwrap();
         let block = root.parse::<Block>().unwrap();
-
         let block_id = {
             let block_id_str = include_str!("../../../core/tests/data/block_id.txt");
             let block_id_str = block_id_str.trim_end();
             BlockId::from_str(block_id_str).unwrap()
         };
-
         BlockStuff::from_block_and_root(&block_id, block, root, block_data.len())
             .with_archive_data(block_data.as_slice())
     }
-
     fn get_empty_block() -> BlockStuffAug {
         let block_data = include_bytes!("../../../core/tests/data/empty_block.bin");
-
         let root = Boc::decode(block_data).unwrap();
         let block = root.parse::<Block>().unwrap();
-
         let block_id = BlockId {
             root_hash: *root.repr_hash(),
             ..Default::default()
         };
-
         BlockStuff::from_block_and_root(&block_id, block, root, block_data.len())
             .with_archive_data(block_data.as_slice())
     }
-
     #[tokio::test]
     async fn rpc_state_handle_block() -> Result<()> {
-        tycho_util::test::init_logger("rpc_state_handle_block", "debug");
-
-        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
-        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
-
-        let config = RpcConfig::default();
-
-        let network = make_network()?;
-
-        let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID).build(
-            BlockchainRpcService::builder()
-                .with_storage(storage.clone())
-                .without_broadcast_listener()
-                .build(),
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(rpc_state_handle_block)),
+            file!(),
+            1297u32,
         );
-
+        tycho_util::test::init_logger("rpc_state_handle_block", "debug");
+        let (ctx, _tmp_dir) = {
+            __guard.end_section(1300u32);
+            let __result = StorageContext::new_temp().await;
+            __guard.start_section(1300u32);
+            __result
+        }?;
+        let storage = {
+            __guard.end_section(1301u32);
+            let __result = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await;
+            __guard.start_section(1301u32);
+            __result
+        }?;
+        let config = RpcConfig::default();
+        let network = make_network()?;
+        let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID)
+            .build(
+                BlockchainRpcService::builder()
+                    .with_storage(storage.clone())
+                    .without_broadcast_listener()
+                    .build(),
+            );
         let blockchain_rpc_client = BlockchainRpcClient::builder()
-            .with_public_overlay_client(PublicOverlayClient::new(
-                network,
-                public_overlay,
-                PublicOverlayClientConfig::default(),
-            ))
+            .with_public_overlay_client(
+                PublicOverlayClient::new(
+                    network,
+                    public_overlay,
+                    PublicOverlayClientConfig::default(),
+                ),
+            )
             .build();
-
         let rpc_state = RpcState::builder()
             .with_config(config)
             .with_storage(storage)
             .with_blockchain_rpc_client(blockchain_rpc_client)
             .with_zerostate_id(ZerostateId::default())
             .build()?;
-
         let block = get_block();
-
         let (delayed_handle, delayed) = DelayedTasks::new();
         let ctx = BlockSubscriberContext {
             mc_block_id: BlockId::default(),
@@ -1337,67 +1430,84 @@ mod test {
             archive_data: block.archive_data,
             delayed,
         };
-
         let (block_subscriber, _) = rpc_state.clone().split();
         let delayed_handle = delayed_handle.spawn();
-        let prepared = block_subscriber.prepare_block(&ctx).await?;
-
-        block_subscriber.handle_block(&ctx, prepared).await?;
-        delayed_handle.join().await?;
-
+        let prepared = {
+            __guard.end_section(1343u32);
+            let __result = block_subscriber.prepare_block(&ctx).await;
+            __guard.start_section(1343u32);
+            __result
+        }?;
+        {
+            __guard.end_section(1345u32);
+            let __result = block_subscriber.handle_block(&ctx, prepared).await;
+            __guard.start_section(1345u32);
+            __result
+        }?;
+        {
+            __guard.end_section(1346u32);
+            let __result = delayed_handle.join().await;
+            __guard.start_section(1346u32);
+            __result
+        }?;
         let account = HashBytes::from_str(
             "b06c29df56964af1aeb3bbda73ea5685bc54f4131c1c8559ba2c6f971976cd2b",
         )?;
-
         let new_code_hash = HashBytes::from_str(
             "fc42205fe8c1c08846c1222c81eb416bdbf403253f6079691e04d52ce4400f8f",
         )?;
-
         let account_by_code_hash = rpc_state
             .get_accounts_by_code_hash(&new_code_hash, None, None)?
             .last()
             .unwrap();
-
         assert_eq!(account, account_by_code_hash.address);
-
         Ok(())
     }
-
     #[tokio::test]
     async fn rpc_state_handle_empty_block() -> Result<()> {
-        tycho_util::test::init_logger("rpc_state_handle_empty_block", "debug");
-
-        let config = RpcConfig::default();
-
-        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
-        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
-
-        let network = make_network()?;
-
-        let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID).build(
-            BlockchainRpcService::builder()
-                .with_storage(storage.clone())
-                .without_broadcast_listener()
-                .build(),
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(rpc_state_handle_empty_block)),
+            file!(),
+            1367u32,
         );
-
+        tycho_util::test::init_logger("rpc_state_handle_empty_block", "debug");
+        let config = RpcConfig::default();
+        let (ctx, _tmp_dir) = {
+            __guard.end_section(1372u32);
+            let __result = StorageContext::new_temp().await;
+            __guard.start_section(1372u32);
+            __result
+        }?;
+        let storage = {
+            __guard.end_section(1373u32);
+            let __result = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await;
+            __guard.start_section(1373u32);
+            __result
+        }?;
+        let network = make_network()?;
+        let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID)
+            .build(
+                BlockchainRpcService::builder()
+                    .with_storage(storage.clone())
+                    .without_broadcast_listener()
+                    .build(),
+            );
         let blockchain_rpc_client = BlockchainRpcClient::builder()
-            .with_public_overlay_client(PublicOverlayClient::new(
-                network,
-                public_overlay,
-                PublicOverlayClientConfig::default(),
-            ))
+            .with_public_overlay_client(
+                PublicOverlayClient::new(
+                    network,
+                    public_overlay,
+                    PublicOverlayClientConfig::default(),
+                ),
+            )
             .build();
-
         let rpc_state = RpcState::builder()
             .with_config(config)
             .with_storage(storage)
             .with_blockchain_rpc_client(blockchain_rpc_client)
             .with_zerostate_id(ZerostateId::default())
             .build()?;
-
         let block = get_empty_block();
-
         let (delayed_handle, delayed) = DelayedTasks::new();
         let ctx = BlockSubscriberContext {
             mc_block_id: BlockId::default(),
@@ -1407,16 +1517,27 @@ mod test {
             archive_data: block.archive_data,
             delayed,
         };
-
         let (block_subscriber, _) = rpc_state.clone().split();
         let delayed_handle = delayed_handle.spawn();
-        let prepared = block_subscriber.prepare_block(&ctx).await?;
-
-        block_subscriber.handle_block(&ctx, prepared).await?;
-        delayed_handle.join().await?;
-
+        let prepared = {
+            __guard.end_section(1413u32);
+            let __result = block_subscriber.prepare_block(&ctx).await;
+            __guard.start_section(1413u32);
+            __result
+        }?;
+        {
+            __guard.end_section(1415u32);
+            let __result = block_subscriber.handle_block(&ctx, prepared).await;
+            __guard.start_section(1415u32);
+            __result
+        }?;
+        {
+            __guard.end_section(1416u32);
+            let __result = delayed_handle.join().await;
+            __guard.start_section(1416u32);
+            __result
+        }?;
         Ok(())
     }
-
     static PUBLIC_OVERLAY_ID: OverlayId = OverlayId([1; 32]);
 }

@@ -1,11 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tycho_types::cell::HashBytes;
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct WuTunerConfig {
@@ -22,7 +20,6 @@ pub struct WuTunerConfig {
     pub target_wu_price: u16,
     pub adaptive_wu_price: bool,
 }
-
 impl Default for WuTunerConfig {
     fn default() -> Self {
         Self {
@@ -41,67 +38,75 @@ impl Default for WuTunerConfig {
         }
     }
 }
-
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
 pub enum WuTuneType {
-    // FIXME: Look ma, no Option
     #[default]
     No,
-    Rpc {
-        secret: HashBytes,
-        rpc: String,
-    },
+    Rpc { secret: HashBytes, rpc: String },
 }
-
 impl WuTunerConfig {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         tycho_util::serde_helpers::load_json_from_file(path)
     }
-
     pub async fn watch_changes(
         path: PathBuf,
         config_sender: tokio::sync::watch::Sender<Arc<WuTunerConfig>>,
     ) {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(watch_changes)),
+            file!(),
+            65u32,
+        );
+        let path = path;
+        let config_sender = config_sender;
         tracing::info!(
-            config_path = %path.display(),
+            config_path = % path.display(),
             "Started watching for changes in WuTuner config",
         );
-        scopeguard::defer!({
-            tracing::info!("Stopped watching for changes in WuTuner config");
-        });
-
+        scopeguard::defer!(
+            { tracing::info!("Stopped watching for changes in WuTuner config"); }
+        );
         let config_path = path.clone();
         let get_metadata = move || {
-            std::fs::metadata(&config_path)
-                .ok()
-                .and_then(|m| m.modified().ok())
+            std::fs::metadata(&config_path).ok().and_then(|m| m.modified().ok())
         };
-
         let mut last_modified = get_metadata();
-
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
-            interval.tick().await;
-
+            __guard.checkpoint(84u32);
+            {
+                __guard.end_section(85u32);
+                let __result = interval.tick().await;
+                __guard.start_section(85u32);
+                __result
+            };
             let modified = get_metadata();
             if last_modified == modified {
-                continue;
+                {
+                    __guard.end_section(89u32);
+                    __guard.start_section(89u32);
+                    continue;
+                };
             }
             last_modified = modified;
-
             match WuTunerConfig::from_file(&path) {
                 Ok(config) => {
                     if let Err(err) = config_sender.send(Arc::new(config)) {
-                        tracing::warn!(?err, "Error send WuTuner config update");
-                        break;
+                        tracing::warn!(? err, "Error send WuTuner config update");
+                        {
+                            __guard.end_section(97u32);
+                            __guard.start_section(97u32);
+                            break;
+                        };
                     }
-                    tracing::info!(config_path = %path.display(), "Reloaded WuTuner config");
+                    tracing::info!(
+                        config_path = % path.display(), "Reloaded WuTuner config"
+                    );
                 }
                 Err(err) => {
                     tracing::warn!(
-                        config_path = %path.display(),
-                        ?err,
+                        config_path = % path.display(), ? err,
                         "Error reading WuTuner config from file",
                     );
                 }

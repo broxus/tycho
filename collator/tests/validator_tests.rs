@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::time::Duration;
-
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use tycho_collator::validator::{
@@ -12,41 +11,37 @@ use tycho_network::{DhtClient, PeerInfo};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockId, ShardIdent, ValidatorDescription};
 use tycho_util::futures::JoinTask;
-
 mod common;
-
 struct ValidatorNode {
     dht_client: DhtClient,
     peer_info: Arc<PeerInfo>,
     validator: ValidatorStdImpl,
     descr: BriefValidatorDescr,
 }
-
 impl ValidatorNode {
     fn generate(zerostate_id: &BlockId, rng: &mut impl rand::Rng) -> Self {
         let secret_key = rng.random::<ed25519::SecretKey>();
         let keypair = Arc::new(ed25519::KeyPair::from(&secret_key));
-
-        let validator_network = common::make_validator_network(&secret_key, zerostate_id);
+        let validator_network = common::make_validator_network(
+            &secret_key,
+            zerostate_id,
+        );
         let validator_descr = BriefValidatorDescr {
             peer_id: *validator_network.network.peer_id(),
             public_key: keypair.public_key,
             weight: 1,
         };
-
         let network = &validator_network.network;
         let dht_client = validator_network
             .peer_resolver
             .dht_service()
             .make_client(network);
         let peer_info = Arc::new(network.sign_peer_info(0, u32::MAX));
-
         let validator = ValidatorStdImpl::new(
             validator_network,
             keypair.clone(),
             ValidatorStdImplConfig::default(),
         );
-
         Self {
             dht_client,
             peer_info,
@@ -55,7 +50,6 @@ impl ValidatorNode {
         }
     }
 }
-
 fn generate_network(
     zerostate_id: &BlockId,
     node_count: usize,
@@ -64,7 +58,6 @@ fn generate_network(
     let nodes = (0..node_count)
         .map(|_| ValidatorNode::generate(zerostate_id, rng))
         .collect::<Vec<_>>();
-
     for i in 0..nodes.len() {
         for j in 0..nodes.len() {
             if i == j {
@@ -72,42 +65,41 @@ fn generate_network(
             }
             let left = &nodes[i];
             let right = &nodes[j];
-
             left.dht_client.add_peer(right.peer_info.clone()).unwrap();
             right.dht_client.add_peer(left.peer_info.clone()).unwrap();
         }
     }
-
     nodes
 }
-
 fn make_description(seqno: u32, nodes: &[ValidatorNode]) -> Vec<ValidatorDescription> {
     let mut validators = Vec::with_capacity(nodes.len());
     let mut prev_total_weight = 0;
     for node in nodes {
-        validators.push(ValidatorDescription {
-            public_key: HashBytes(*node.descr.public_key.as_bytes()),
-            weight: 1,
-            adnl_addr: Some(HashBytes(*node.descr.peer_id.as_bytes())),
-            mc_seqno_since: seqno,
-            prev_total_weight,
-        });
+        validators
+            .push(ValidatorDescription {
+                public_key: HashBytes(*node.descr.public_key.as_bytes()),
+                weight: 1,
+                adnl_addr: Some(HashBytes(*node.descr.peer_id.as_bytes())),
+                mc_seqno_since: seqno,
+                prev_total_weight,
+            });
         prev_total_weight += node.descr.weight;
     }
-
     validators
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn validator_signatures_match() -> Result<()> {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(validator_signatures_match)),
+        file!(),
+        102u32,
+    );
     tycho_util::test::init_logger(
         "validator_signatures_match",
         "info,tycho_collator::validator=trace",
     );
-
     const NODE_COUNT: usize = 13;
     const SESSION_COUNT: usize = 5;
-
     let zerostate_id = BlockId {
         shard: ShardIdent::MASTERCHAIN,
         seqno: 0,
@@ -115,76 +107,95 @@ async fn validator_signatures_match() -> Result<()> {
         file_hash: HashBytes::ZERO,
     };
     let nodes = generate_network(&zerostate_id, NODE_COUNT, &mut rand::rng());
-
     let mut block_id = BlockId {
         seqno: 1,
         ..zerostate_id
     };
     for session_seqno in (0..).step_by(1000).take(SESSION_COUNT) {
+        __guard.checkpoint(123u32);
         let session_id = (session_seqno, 0);
-
-        tracing::info!(?session_id, %block_id, "adding session");
-
+        tracing::info!(? session_id, % block_id, "adding session");
         let validators = make_description(block_id.seqno, &nodes);
         for node in &nodes {
-            node.validator.add_session(AddSession {
-                shard_ident: zerostate_id.shard,
-                session_id,
-                start_block_seqno: block_id.seqno,
-                validators: &validators,
-            })?;
+            __guard.checkpoint(129u32);
+            node.validator
+                .add_session(AddSession {
+                    shard_ident: zerostate_id.shard,
+                    session_id,
+                    start_block_seqno: block_id.seqno,
+                    validators: &validators,
+                })?;
         }
-
         for _ in 0..10 {
-            tracing::info!(%block_id, ?session_id, "validating block");
-
+            __guard.checkpoint(138u32);
+            tracing::info!(% block_id, ? session_id, "validating block");
             let mut futures = futures_util::stream::FuturesOrdered::new();
             for node in &nodes {
+                __guard.checkpoint(142u32);
                 let peer_id = node.descr.peer_id;
                 let validator = node.validator.clone();
-                futures.push_back(JoinTask::new(async move {
-                    let res = validator.validate(session_id, &block_id).await;
-                    (peer_id, res)
-                }));
+                futures
+                    .push_back(
+                        JoinTask::new(async move {
+                            let mut __guard = crate::__async_profile_guard__::Guard::new(
+                                concat!(module_path!(), "::async_block"),
+                                file!(),
+                                145u32,
+                            );
+                            let res = {
+                                __guard.end_section(146u32);
+                                let __result = validator
+                                    .validate(session_id, &block_id)
+                                    .await;
+                                __guard.start_section(146u32);
+                                __result
+                            };
+                            (peer_id, res)
+                        }),
+                    );
             }
-
-            while let Some((peer_id, res)) = futures.next().await {
-                let status = res.with_context(|| {
-                    format!("failed to validate block {block_id} for {peer_id}")
-                })?;
+            while let Some((peer_id, res)) = {
+                __guard.end_section(151u32);
+                let __result = futures.next().await;
+                __guard.start_section(151u32);
+                __result
+            } {
+                __guard.checkpoint(151u32);
+                let status = res
+                    .with_context(|| {
+                        format!("failed to validate block {block_id} for {peer_id}")
+                    })?;
                 let status = BriefStatus::from(&status);
                 let BriefStatus::Complete(signature_count) = status else {
                     panic!("must not be skipped");
                 };
                 assert!(signature_count > (NODE_COUNT * 2) / 3);
-
-                tracing::info!(%peer_id, ?status, "validation completed");
+                tracing::info!(% peer_id, ? status, "validation completed");
             }
-
             for node in &nodes {
+                __guard.checkpoint(164u32);
                 node.validator
                     .cancel_validation(&block_id.as_short_id(), Some(session_id))?;
             }
-
             block_id.seqno += 1;
         }
     }
-
     Ok(())
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn malicious_validators_are_ignored() -> Result<()> {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(malicious_validators_are_ignored)),
+        file!(),
+        177u32,
+    );
     tycho_util::test::init_logger(
         "malicious_validators_are_ignored",
         "info,tycho_collator::validator=trace",
     );
-
     const NODE_COUNT: usize = 13;
     const MALICIOUS_NODE_COUNT: usize = 3;
-
     const SESSION_COUNT: usize = 5;
-
     let zerostate_id = BlockId {
         shard: ShardIdent::MASTERCHAIN,
         seqno: 0,
@@ -192,101 +203,144 @@ async fn malicious_validators_are_ignored() -> Result<()> {
         file_hash: HashBytes::ZERO,
     };
     let nodes = generate_network(&zerostate_id, NODE_COUNT, &mut rand::rng());
-
     let mut block_id = BlockId {
         seqno: 1,
         ..zerostate_id
     };
     for session_seqno in (0..).step_by(1000).take(SESSION_COUNT) {
+        __guard.checkpoint(200u32);
         let session_id = (session_seqno, 0);
-
-        tracing::info!(?session_id, %block_id, "adding session");
-
+        tracing::info!(? session_id, % block_id, "adding session");
         let validators = make_description(block_id.seqno, &nodes);
         for node in &nodes {
-            node.validator.add_session(AddSession {
-                shard_ident: zerostate_id.shard,
-                session_id,
-                start_block_seqno: block_id.seqno,
-                validators: &validators,
-            })?;
+            __guard.checkpoint(206u32);
+            node.validator
+                .add_session(AddSession {
+                    shard_ident: zerostate_id.shard,
+                    session_id,
+                    start_block_seqno: block_id.seqno,
+                    validators: &validators,
+                })?;
         }
-
         for _ in 0..10 {
-            tracing::info!(%block_id, ?session_id, "validating block");
-
+            __guard.checkpoint(215u32);
+            tracing::info!(% block_id, ? session_id, "validating block");
             let mut good_validators = futures_util::stream::FuturesOrdered::new();
             let mut bad_validators = futures_util::stream::FuturesOrdered::new();
-
             for (i, node) in nodes.iter().enumerate() {
+                __guard.checkpoint(221u32);
                 let peer_id = node.descr.peer_id;
                 let validator = node.validator.clone();
-
                 let is_malicious = i < MALICIOUS_NODE_COUNT;
                 if is_malicious {
-                    bad_validators.push_back(JoinTask::new(async move {
-                        let mut block_id = block_id;
-                        block_id.root_hash = rand::random();
-
-                        let res = validator.validate(session_id, &block_id).await;
-                        (peer_id, res)
-                    }));
+                    bad_validators
+                        .push_back(
+                            JoinTask::new(async move {
+                                let mut __guard = crate::__async_profile_guard__::Guard::new(
+                                    concat!(module_path!(), "::async_block"),
+                                    file!(),
+                                    227u32,
+                                );
+                                let mut block_id = block_id;
+                                block_id.root_hash = rand::random();
+                                let res = {
+                                    __guard.end_section(231u32);
+                                    let __result = validator
+                                        .validate(session_id, &block_id)
+                                        .await;
+                                    __guard.start_section(231u32);
+                                    __result
+                                };
+                                (peer_id, res)
+                            }),
+                        );
                 } else {
-                    good_validators.push_back(JoinTask::new(async move {
-                        let res = validator.validate(session_id, &block_id).await;
-                        (peer_id, res)
-                    }));
+                    good_validators
+                        .push_back(
+                            JoinTask::new(async move {
+                                let mut __guard = crate::__async_profile_guard__::Guard::new(
+                                    concat!(module_path!(), "::async_block"),
+                                    file!(),
+                                    235u32,
+                                );
+                                let res = {
+                                    __guard.end_section(236u32);
+                                    let __result = validator
+                                        .validate(session_id, &block_id)
+                                        .await;
+                                    __guard.start_section(236u32);
+                                    __result
+                                };
+                                (peer_id, res)
+                            }),
+                        );
                 }
             }
-
-            while let Some((peer_id, res)) = good_validators.next().await {
-                let status = res.with_context(|| {
-                    format!("failed to validate block {block_id} for {peer_id}")
-                })?;
-
+            while let Some((peer_id, res)) = {
+                __guard.end_section(242u32);
+                let __result = good_validators.next().await;
+                __guard.start_section(242u32);
+                __result
+            } {
+                __guard.checkpoint(242u32);
+                let status = res
+                    .with_context(|| {
+                        format!("failed to validate block {block_id} for {peer_id}")
+                    })?;
                 match &status {
                     ValidationStatus::Complete(res) => {
                         assert!(res.signatures.len() > (NODE_COUNT * 2) / 3);
                     }
                     ValidationStatus::Skipped => panic!("good validator skipped block"),
                 }
-
-                tracing::info!(%peer_id, status = ?BriefStatus::from(&status), "validation completed");
+                tracing::info!(
+                    % peer_id, status = ? BriefStatus::from(& status),
+                    "validation completed"
+                );
             }
-
             for node in &nodes {
+                __guard.checkpoint(257u32);
                 node.validator
                     .cancel_validation(&block_id.as_short_id(), Some(session_id))?;
             }
-
-            while let Some((peer_id, res)) = bad_validators.next().await {
-                let status = res.with_context(|| {
-                    format!("failed to validate block {block_id} for {peer_id}")
-                })?;
-
+            while let Some((peer_id, res)) = {
+                __guard.end_section(262u32);
+                let __result = bad_validators.next().await;
+                __guard.start_section(262u32);
+                __result
+            } {
+                __guard.checkpoint(262u32);
+                let status = res
+                    .with_context(|| {
+                        format!("failed to validate block {block_id} for {peer_id}")
+                    })?;
                 match &status {
-                    ValidationStatus::Complete(_) => panic!("bad validator completed block"),
-                    ValidationStatus::Skipped => tracing::info!(%peer_id, "validation skipped"),
+                    ValidationStatus::Complete(_) => {
+                        panic!("bad validator completed block")
+                    }
+                    ValidationStatus::Skipped => {
+                        tracing::info!(% peer_id, "validation skipped")
+                    }
                 }
             }
-
             block_id.seqno += 1;
         }
     }
-
     Ok(())
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn network_gets_stuck_without_signatures() -> Result<()> {
+    let mut __guard = crate::__async_profile_guard__::Guard::new(
+        concat!(module_path!(), "::", stringify!(network_gets_stuck_without_signatures)),
+        file!(),
+        281u32,
+    );
     tycho_util::test::init_logger(
         "network_gets_stuck_without_signatures",
         "info,tycho_collator::validator=trace",
     );
-
     const NODE_COUNT: usize = 13;
     const STUCK_DURATION: Duration = Duration::from_secs(10);
-
     let zerostate_id = BlockId {
         shard: ShardIdent::MASTERCHAIN,
         seqno: 0,
@@ -294,70 +348,93 @@ async fn network_gets_stuck_without_signatures() -> Result<()> {
         file_hash: HashBytes::ZERO,
     };
     let nodes = generate_network(&zerostate_id, NODE_COUNT, &mut rand::rng());
-
     let block_id = BlockId {
         seqno: 1,
         ..zerostate_id
     };
     let session_id = (0, 0);
-
     let validators = make_description(block_id.seqno, &nodes);
     for node in &nodes {
-        node.validator.add_session(AddSession {
-            shard_ident: zerostate_id.shard,
-            session_id,
-            start_block_seqno: block_id.seqno,
-            validators: &validators,
-        })?;
+        __guard.checkpoint(305u32);
+        node.validator
+            .add_session(AddSession {
+                shard_ident: zerostate_id.shard,
+                session_id,
+                start_block_seqno: block_id.seqno,
+                validators: &validators,
+            })?;
     }
-
     let malicious_node_count = (NODE_COUNT / 3) + 1;
-
     let mut good_validators = futures_util::stream::FuturesOrdered::new();
     let mut bad_validators = futures_util::stream::FuturesOrdered::new();
-
     for (i, node) in nodes.iter().enumerate() {
+        __guard.checkpoint(319u32);
         let peer_id = node.descr.peer_id;
         let validator = node.validator.clone();
-
         let is_malicious = i < malicious_node_count;
         if is_malicious {
-            bad_validators.push_back(JoinTask::new(async move {
-                let mut block_id = block_id;
-                block_id.root_hash = rand::random();
-
-                let res = validator.validate(session_id, &block_id).await;
-                (peer_id, res)
-            }));
+            bad_validators
+                .push_back(
+                    JoinTask::new(async move {
+                        let mut __guard = crate::__async_profile_guard__::Guard::new(
+                            concat!(module_path!(), "::async_block"),
+                            file!(),
+                            325u32,
+                        );
+                        let mut block_id = block_id;
+                        block_id.root_hash = rand::random();
+                        let res = {
+                            __guard.end_section(329u32);
+                            let __result = validator
+                                .validate(session_id, &block_id)
+                                .await;
+                            __guard.start_section(329u32);
+                            __result
+                        };
+                        (peer_id, res)
+                    }),
+                );
         } else {
-            good_validators.push_back(JoinTask::new(async move {
-                let res = validator.validate(session_id, &block_id).await;
-                (peer_id, res)
-            }));
+            good_validators
+                .push_back(
+                    JoinTask::new(async move {
+                        let mut __guard = crate::__async_profile_guard__::Guard::new(
+                            concat!(module_path!(), "::async_block"),
+                            file!(),
+                            333u32,
+                        );
+                        let res = {
+                            __guard.end_section(334u32);
+                            let __result = validator
+                                .validate(session_id, &block_id)
+                                .await;
+                            __guard.start_section(334u32);
+                            __result
+                        };
+                        (peer_id, res)
+                    }),
+                );
         }
     }
-
-    tokio::select! {
-        _ = good_validators.next() => {
-            panic!("good validator completed block");
-        }
-        _ = bad_validators.next() => {
-            panic!("malicious validator got block from the stuck network");
-        }
-        _ = tokio::time::sleep(STUCK_DURATION) => {
-            tracing::info!("network got stuck as expected");
-        }
+    {
+        __guard.end_section(340u32);
+        let __result = tokio::select! {
+            _ = good_validators.next() => { panic!("good validator completed block"); } _
+            = bad_validators.next() => {
+            panic!("malicious validator got block from the stuck network"); } _ =
+            tokio::time::sleep(STUCK_DURATION) => {
+            tracing::info!("network got stuck as expected"); }
+        };
+        __guard.start_section(340u32);
+        __result
     }
-
     Ok(())
 }
-
 #[derive(Debug, PartialEq, Eq)]
 enum BriefStatus {
     Skipped,
     Complete(usize),
 }
-
 impl From<&ValidationStatus> for BriefStatus {
     fn from(value: &ValidationStatus) -> Self {
         match value {

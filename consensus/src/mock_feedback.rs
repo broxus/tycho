@@ -1,5 +1,4 @@
 use std::time::Duration;
-
 use futures_util::StreamExt;
 use futures_util::never::Never;
 use futures_util::stream::FuturesUnordered;
@@ -7,29 +6,21 @@ use itertools::Itertools;
 use tl_proto::{TlRead, TlWrite};
 use tokio::time::MissedTickBehavior;
 use tycho_network::{PeerId, Request};
-
 use crate::effects::{Cancelled, TaskResult};
 use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
 use crate::intercom::{Dispatcher, InitPeers, WeakPeerSchedule};
 use crate::models::Round;
-
 #[derive(TlRead, TlWrite)]
-#[tl(
-    boxed,
-    id = "roundBoxed",
-    scheme_inline = "roundBoxed round:int = RoundBoxed;"
-)]
+#[tl(boxed, id = "roundBoxed", scheme_inline = "roundBoxed round:int = RoundBoxed;")]
 pub struct RoundBoxed {
     pub round: Round,
 }
-
 pub struct MockFeedbackSender {
     dispatcher: Dispatcher,
     peer_schedule: WeakPeerSchedule,
     top_known_anchor: RoundWatch<TopKnownAnchor>,
     window: Window,
 }
-
 impl MockFeedbackSender {
     pub fn new(
         dispatcher: Dispatcher,
@@ -38,8 +29,8 @@ impl MockFeedbackSender {
         init_peers: &InitPeers,
         peer_id: &PeerId,
     ) -> Self {
-        let Some((index, _)) = (init_peers.curr_v_subset.iter()).find_position(|a| *a == peer_id)
-        else {
+        let Some((index, _)) = (init_peers.curr_v_subset.iter())
+            .find_position(|a| *a == peer_id) else {
             panic!("local peer id not found in init peer set")
         };
         Self {
@@ -53,55 +44,60 @@ impl MockFeedbackSender {
             },
         }
     }
-
     pub async fn run(self) -> TaskResult<Never> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(run)),
+            file!(),
+            57u32,
+        );
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
         let mut send_futures = FuturesUnordered::new();
-
         loop {
-            tokio::select! {
-                next = send_futures.next() => match next {
-                    Some(_) => continue,
-                    None => {
-                        interval.tick().await;
-                    },
-                },
-                _ = interval.tick() => {},
+            __guard.checkpoint(63u32);
+            {
+                __guard.end_section(64u32);
+                let __result = tokio::select! {
+                    next = send_futures.next() => match next { Some(_) => continue, None
+                    => { interval.tick(). await; }, }, _ = interval.tick() => {},
+                };
+                __guard.start_section(64u32);
+                __result
             }
-
             if !self.window.is_active(tycho_util::time::now_sec()) {
-                continue;
+                {
+                    __guard.end_section(75u32);
+                    __guard.start_section(75u32);
+                    continue;
+                };
             }
-
             let request = Request::from_tl(RoundBoxed {
                 round: self.top_known_anchor.get(),
             });
             let Some(peer_schedule) = self.peer_schedule.upgrade() else {
-                return Err(Cancelled());
+                {
+                    __guard.end_section(82u32);
+                    return Err(Cancelled());
+                };
             };
             let receivers = {
                 let guard = peer_schedule.read();
                 guard.data.broadcast_receivers().clone()
             };
-
             send_futures.clear();
-
             for peer_id in &receivers {
+                __guard.checkpoint(91u32);
                 let future = self.dispatcher.send_feedback(peer_id, &request);
                 send_futures.push(future);
             }
         }
     }
 }
-
 struct Window {
     v_set_size: u32,
     group_size: u32,
     index: u32,
 }
-
 impl Window {
     /// wrapping groups of both `group_size` size and step, over `v_set_size` set
     fn is_active(&self, now: u32) -> bool {
@@ -114,11 +110,9 @@ impl Window {
         }
     }
 }
-
 #[cfg(test)]
 mod test {
     use super::*;
-
     #[test]
     fn test_wrap() {
         let window = Window {
@@ -126,11 +120,10 @@ mod test {
             group_size: 3,
             index: 0,
         };
-
-        assert!(window.is_active(20)); //  0,1,2
-        assert!(window.is_active(21)); //  3,4,0
-        assert!(!window.is_active(22)); // 1,2,3
-        assert!(window.is_active(23)); //  4,0,1
-        assert!(!window.is_active(24)); // 2,3,4
+        assert!(window.is_active(20));
+        assert!(window.is_active(21));
+        assert!(! window.is_active(22));
+        assert!(window.is_active(23));
+        assert!(! window.is_active(24));
     }
 }

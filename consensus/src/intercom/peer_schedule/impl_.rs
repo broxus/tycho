@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::ops::Deref;
 use std::sync::{Arc, Weak};
-
 use arc_swap::{ArcSwap, Guard};
 use futures_util::StreamExt;
 use futures_util::never::Never;
@@ -15,32 +14,20 @@ use tycho_network::{
     KnownPeerHandle, PeerId, PrivateOverlay, PrivateOverlayEntriesEvent,
     PrivateOverlayEntriesReadGuard,
 };
-
 use crate::effects::{AltFmt, AltFormat, Cancelled, Task, TaskResult, TaskTracker};
 use crate::engine::MempoolMergedConfig;
 use crate::intercom::peer_schedule::locked::PeerScheduleLocked;
 use crate::intercom::peer_schedule::stateless::PeerScheduleStateless;
 use crate::models::Round;
-// As validators are elected for wall-clock time range,
-// the round of validator set switch is not known beforehand
-// and will be determined by the time in anchor vertices:
-// it must reach some predefined time range,
-// when the new set is supposed to be online and start to request points,
-// and a (relatively high) predefined number of support rounds must follow
-// for the anchor chain to be committed by majority and for the new nodes to gather data.
-// The switch will occur for validator sets as a whole.
-
 #[derive(Clone)]
 pub struct PeerSchedule(Arc<PeerScheduleInner>);
 #[derive(Clone)]
 pub struct WeakPeerSchedule(Weak<PeerScheduleInner>);
-
 struct PeerScheduleInner {
     locked: RwLock<PeerScheduleLocked>,
     atomic: ArcSwap<PeerScheduleStateless>,
     task_tracker: TaskTracker,
 }
-
 #[derive(Copy, Clone, PartialEq, std::fmt::Debug)]
 pub enum PeerState {
     /// Not yet ready to connect or already disconnected; always includes local peer id.
@@ -48,7 +35,6 @@ pub enum PeerState {
     /// remote peer ready to connect
     Resolved,
 }
-
 #[cfg_attr(any(feature = "test", test), derive(Clone))]
 pub struct InitPeers {
     pub prev_start_round: u32,
@@ -59,7 +45,6 @@ pub struct InitPeers {
     pub curr_v_subset: Vec<PeerId>,
     pub next_v_set: Vec<PeerId>,
 }
-
 impl InitPeers {
     #[cfg(any(feature = "test", test))]
     pub fn new(curr_v_subset: Vec<PeerId>) -> Self {
@@ -74,7 +59,6 @@ impl InitPeers {
         }
     }
 }
-
 impl PeerSchedule {
     pub fn new(
         local_keys: Arc<KeyPair>,
@@ -82,13 +66,14 @@ impl PeerSchedule {
         task_tracker: &TaskTracker,
     ) -> Self {
         let local_id = PeerId::from(local_keys.public_key);
-        Self(Arc::new(PeerScheduleInner {
-            locked: RwLock::new(PeerScheduleLocked::new(local_id, overlay)),
-            atomic: ArcSwap::from_pointee(PeerScheduleStateless::new(local_keys)),
-            task_tracker: task_tracker.clone(),
-        }))
+        Self(
+            Arc::new(PeerScheduleInner {
+                locked: RwLock::new(PeerScheduleLocked::new(local_id, overlay)),
+                atomic: ArcSwap::from_pointee(PeerScheduleStateless::new(local_keys)),
+                task_tracker: task_tracker.clone(),
+            }),
+        )
     }
-
     pub fn init(&self, merged_conf: &MempoolMergedConfig, init: &InitPeers) {
         let genesis_round = merged_conf.conf.genesis_round;
         let mut locked = self.write();
@@ -100,9 +85,7 @@ impl PeerSchedule {
             "Init genesis pseudo validator subset",
         );
         self.apply_scheduled_impl(&mut locked, genesis_round.prev());
-
         let after_genesis = merged_conf.conf.genesis_round.next();
-
         if init.curr_start_round > after_genesis.0 {
             let prev_start = Round(init.prev_start_round).max(after_genesis);
             self.set_next_subset(
@@ -114,7 +97,6 @@ impl PeerSchedule {
             );
             self.apply_scheduled_impl(&mut locked, prev_start);
         }
-
         let curr_start = Round(init.curr_start_round).max(after_genesis);
         self.set_next_subset(
             &mut locked,
@@ -123,17 +105,14 @@ impl PeerSchedule {
             &init.curr_v_subset,
             "Init current validator subset",
         );
-
         if !init.next_v_set.is_empty() {
             self.apply_scheduled_impl(&mut locked, curr_start);
             tracing::info!(vset_len = init.next_v_set.len(), "Init next validator set");
             locked.set_next_set(self.downgrade(), &init.next_v_set);
         }
     }
-
     pub fn set_peers(&self, peers: &InitPeers) {
         let mut locked = self.write();
-
         self.set_next_subset(
             &mut locked,
             &peers.prev_v_set,
@@ -142,7 +121,6 @@ impl PeerSchedule {
             "Apply prev validator subset",
         );
         self.apply_scheduled_impl(&mut locked, Round(peers.prev_start_round));
-
         self.set_next_subset(
             &mut locked,
             &peers.curr_v_set,
@@ -150,26 +128,20 @@ impl PeerSchedule {
             &peers.curr_v_subset,
             "Apply current validator subset",
         );
-
         if !peers.next_v_set.is_empty() {
-            // current v_set is applied when DAG is advanced unless there is a next one
             self.apply_scheduled_impl(&mut locked, Round(peers.curr_start_round));
             tracing::info!(
-                vset_len = peers.next_v_set.len(),
-                "Apply next validator set"
+                vset_len = peers.next_v_set.len(), "Apply next validator set"
             );
             locked.set_next_set(self.downgrade(), &peers.next_v_set);
         }
     }
-
     pub fn read(&self) -> RwLockReadGuard<'_, RawRwLock, PeerScheduleLocked> {
         self.0.locked.read()
     }
-
     fn write(&self) -> RwLockWriteGuard<'_, RawRwLock, PeerScheduleLocked> {
         self.0.locked.write()
     }
-
     fn set_next_subset(
         &self,
         locked: &mut PeerScheduleLocked,
@@ -180,83 +152,62 @@ impl PeerSchedule {
     ) {
         if next_round <= locked.data.curr_epoch_start() || working_subset.is_empty() {
             tracing::trace!(
-                message,
-                set_round = next_round.0,
-                curr_start = locked.data.curr_epoch_start().0,
-                len = working_subset.len(),
-                vset_len = validator_set.len(),
-                note = "cannot schedule outdated round"
+                message, set_round = next_round.0, curr_start = locked.data
+                .curr_epoch_start().0, len = working_subset.len(), vset_len =
+                validator_set.len(), note = "cannot schedule outdated round"
             );
             return;
         }
-
         tracing::info!(
-            message, // field name "message" is used by macros to display a nameless value
-            len = working_subset.len(),
-            vset_len = validator_set.len(),
+            message, len = working_subset.len(), vset_len = validator_set.len(),
             start_round = next_round.0,
         );
-
         locked.set_next_set(self.downgrade(), validator_set);
-
         locked.data.set_next_subset(working_subset);
         locked.data.next_epoch_start = Some(next_round);
-
-        // atomic part is updated under lock too
         self.update_atomic(|stateless| {
             stateless.set_next_peers(working_subset);
             stateless.next_epoch_start = Some(next_round);
         });
-
         tracing::info!(
             "peer schedule next subset updated for {next_round:?} {:?}, trace: {:?}",
-            self.atomic().alt(),
-            tracing::enabled!(tracing::Level::TRACE).then_some(&locked.data),
+            self.atomic().alt(), tracing::enabled!(tracing::Level::TRACE) .then_some(&
+            locked.data),
         );
     }
-
     pub fn apply_scheduled(&self, current: Round) {
         if (self.atomic().next_epoch_start).is_none_or(|scheduled| scheduled > current) {
-            return; // will double-check because arc-swap is racy with `self.set_next_subset()`
+            return;
         }
         let mut locked = self.write();
         self.apply_scheduled_impl(&mut locked, current);
     }
-
     /// on peer set change
     fn apply_scheduled_impl(&self, locked: &mut PeerScheduleLocked, current: Round) {
         if (locked.data.next_epoch_start).is_none_or(|scheduled| scheduled > current) {
             return;
         }
-
         tracing::debug!(
-            "peer schedule before rotation for {current:?}: {:?}, trace: {:?}",
-            self.atomic().alt(),
-            tracing::enabled!(tracing::Level::TRACE).then_some(&locked.data),
+            "peer schedule before rotation for {current:?}: {:?}, trace: {:?}", self
+            .atomic().alt(), tracing::enabled!(tracing::Level::TRACE) .then_some(& locked
+            .data),
         );
-
-        // rotate only after previous data is cleaned
         locked.forget_oldest(self.downgrade());
         locked.data.rotate();
-
-        // atomic part is updated under lock too
         self.update_atomic(|stateless| {
             stateless.forget_oldest();
             stateless.rotate();
         });
         tracing::info!(
-            "peer schedule rotated for {current:?} {:?}, trace: {:?}",
-            self.atomic().alt(),
-            tracing::enabled!(tracing::Level::TRACE).then_some(&locked.data),
+            "peer schedule rotated for {current:?} {:?}, trace: {:?}", self.atomic()
+            .alt(), tracing::enabled!(tracing::Level::TRACE) .then_some(& locked.data),
         );
     }
-
     /// in-time snapshot if consistency with peer state is not needed;
     /// in case lock is taken - use this under lock too
     pub fn atomic(&self) -> Guard<Arc<PeerScheduleStateless>> {
         self.0.atomic.load()
     }
-
     /// atomic part is updated under write lock
     fn update_atomic<F>(&self, fun: F)
     where
@@ -266,25 +217,25 @@ impl PeerSchedule {
         fun(&mut inner);
         self.0.atomic.store(Arc::new(inner));
     }
-
     pub fn downgrade(&self) -> WeakPeerSchedule {
         WeakPeerSchedule(Arc::downgrade(&self.0))
     }
 }
-
 impl WeakPeerSchedule {
     pub fn upgrade(&self) -> Option<PeerSchedule> {
         self.0.upgrade().map(PeerSchedule)
     }
-
     pub async fn run_updater(self) -> TaskResult<Never> {
+        let mut __guard = crate::__async_profile_guard__::Guard::new(
+            concat!(module_path!(), "::", stringify!(run_updater)),
+            file!(),
+            280u32,
+        );
         tracing::info!("starting peer schedule updates");
         scopeguard::defer!(tracing::warn!("peer schedule updater stopped"));
-
         let (local_id, mut rx) = match self.upgrade() {
             Some(strong) => {
                 let mut guard = strong.write();
-
                 guard.resolve_peers_task = None;
                 let local_id = guard.local_id;
                 let (rx, resolved_waiters) = {
@@ -292,22 +243,37 @@ impl WeakPeerSchedule {
                     let rx = entries.subscribe();
                     (rx, Self::resolved_waiters(&local_id, &entries))
                 };
-                guard.resolve_peers_task = self.clone().new_resolve_task(resolved_waiters);
-
+                guard.resolve_peers_task = self
+                    .clone()
+                    .new_resolve_task(resolved_waiters);
                 (local_id, rx)
             }
             None => {
                 tracing::warn!("peer schedule dropped, cannot create updater");
-                return Err(Cancelled());
+                {
+                    __guard.end_section(301u32);
+                    return Err(Cancelled());
+                };
             }
         };
-
         loop {
-            match rx.recv().await {
-                Ok(ref event @ PrivateOverlayEntriesEvent::Removed(peer)) if peer != local_id => {
+            __guard.checkpoint(305u32);
+            match {
+                __guard.end_section(306u32);
+                let __result = rx.recv().await;
+                __guard.start_section(306u32);
+                __result
+            } {
+                Ok(
+                    ref event @ PrivateOverlayEntriesEvent::Removed(peer),
+                ) if peer != local_id => {
                     let Some(strong) = self.upgrade() else {
                         tracing::warn!("peer schedule dropped, stopping updater");
-                        break Err(Cancelled());
+                        {
+                            __guard.end_section(310u32);
+                            __guard.start_section(310u32);
+                            break Err(Cancelled());
+                        };
                     };
                     let mut guard = strong.write();
                     let restart = guard.set_state(&peer, PeerState::Unknown);
@@ -317,14 +283,14 @@ impl WeakPeerSchedule {
                             let entries = guard.overlay.read_entries();
                             Self::resolved_waiters(&local_id, &entries)
                         };
-                        guard.resolve_peers_task = self.clone().new_resolve_task(resolved_waiters);
+                        guard.resolve_peers_task = self
+                            .clone()
+                            .new_resolve_task(resolved_waiters);
                     }
                     drop(guard);
                     tracing::info!(
-                        event = display(event.alt()),
-                        peer = display(peer.alt()),
-                        resolve_restarted = restart,
-                        "peer schedule update"
+                        event = display(event.alt()), peer = display(peer.alt()),
+                        resolve_restarted = restart, "peer schedule update"
                     );
                 }
                 Ok(
@@ -332,8 +298,7 @@ impl WeakPeerSchedule {
                     | PrivateOverlayEntriesEvent::Removed(peer_id)),
                 ) => {
                     tracing::debug!(
-                        event = display(event.alt()),
-                        peer = display(peer_id.alt()),
+                        event = display(event.alt()), peer = display(peer_id.alt()),
                         "peer schedule update ignored"
                     );
                 }
@@ -341,7 +306,11 @@ impl WeakPeerSchedule {
                     tracing::error!(
                         "peer info updates channel closed, cannot maintain node connectivity"
                     );
-                    break Err(Cancelled());
+                    {
+                        __guard.end_section(344u32);
+                        __guard.start_section(344u32);
+                        break Err(Cancelled());
+                    };
                 }
                 Err(broadcast::error::RecvError::Lagged(amount)) => {
                     tracing::error!(
@@ -353,22 +322,33 @@ impl WeakPeerSchedule {
             }
         }
     }
-
     pub(super) fn resolved_waiters(
         local_id: &PeerId,
         entries: &PrivateOverlayEntriesReadGuard<'_>,
-    ) -> FuturesUnordered<impl Future<Output = KnownPeerHandle> + Sized + Send + 'static> {
+    ) -> FuturesUnordered<
+        impl Future<Output = KnownPeerHandle> + Sized + Send + 'static,
+    > {
         let fut = FuturesUnordered::new();
         for entry in entries.choose_multiple(&mut rng(), entries.len()) {
-            // skip updates on self
             if !(entry.peer_id == local_id || entry.resolver_handle.is_resolved()) {
                 let handle = entry.resolver_handle.clone();
-                fut.push(async move { handle.wait_resolved().await });
+                fut.push(async move {
+                    let mut __guard = crate::__async_profile_guard__::Guard::new(
+                        concat!(module_path!(), "::async_block"),
+                        file!(),
+                        366u32,
+                    );
+                    {
+                        __guard.end_section(366u32);
+                        let __result = handle.wait_resolved().await;
+                        __guard.start_section(366u32);
+                        __result
+                    }
+                });
             }
         }
         fut
     }
-
     pub fn new_resolve_task(
         self,
         mut resolved_waiters: FuturesUnordered<
@@ -386,30 +366,55 @@ impl WeakPeerSchedule {
             return None;
         };
         let task_ctx = peer_schedule.0.task_tracker.ctx();
-        Some(task_ctx.spawn(async move {
-            tracing::info!("peer schedule resolve task started");
-            scopeguard::defer!(tracing::info!("peer schedule resolve task stopped"));
-            while let Some(known_peer_handle) = resolved_waiters.next().await {
-                let Some(peer_schedule) = self.upgrade() else {
-                    tracing::warn!("peer schedule is dropped, cannot apply resolve update");
-                    return Err(Cancelled());
-                };
-                _ = peer_schedule
-                    .write()
-                    .set_state(&known_peer_handle.peer_info().id, PeerState::Resolved);
-                gauge.decrement(1);
-            }
-            Ok(())
-        }))
+        Some(
+            task_ctx
+                .spawn(async move {
+                    let mut __guard = crate::__async_profile_guard__::Guard::new(
+                        concat!(module_path!(), "::async_block"),
+                        file!(),
+                        389u32,
+                    );
+                    tracing::info!("peer schedule resolve task started");
+                    scopeguard::defer!(
+                        tracing::info!("peer schedule resolve task stopped")
+                    );
+                    while let Some(known_peer_handle) = {
+                        __guard.end_section(392u32);
+                        let __result = resolved_waiters.next().await;
+                        __guard.start_section(392u32);
+                        __result
+                    } {
+                        __guard.checkpoint(392u32);
+                        let Some(peer_schedule) = self.upgrade() else {
+                            tracing::warn!(
+                                "peer schedule is dropped, cannot apply resolve update"
+                            );
+                            {
+                                __guard.end_section(395u32);
+                                return Err(Cancelled());
+                            };
+                        };
+                        _ = peer_schedule
+                            .write()
+                            .set_state(
+                                &known_peer_handle.peer_info().id,
+                                PeerState::Resolved,
+                            );
+                        gauge.decrement(1);
+                    }
+                    Ok(())
+                }),
+        )
     }
 }
-
 impl AltFormat for PrivateOverlayEntriesEvent {}
 impl std::fmt::Display for AltFmt<'_, PrivateOverlayEntriesEvent> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match AltFormat::unpack(self) {
-            PrivateOverlayEntriesEvent::Added(_) => "Added",
-            PrivateOverlayEntriesEvent::Removed(_) => "Removed",
-        })
+        f.write_str(
+            match AltFormat::unpack(self) {
+                PrivateOverlayEntriesEvent::Added(_) => "Added",
+                PrivateOverlayEntriesEvent::Removed(_) => "Removed",
+            },
+        )
     }
 }
