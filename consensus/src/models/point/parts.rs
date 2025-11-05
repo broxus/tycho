@@ -6,6 +6,7 @@ use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 
 #[derive(Clone, Copy, TlWrite, TlRead, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
 pub struct Digest([u8; 32]);
 
 impl Display for Digest {
@@ -35,9 +36,9 @@ impl Digest {
         Self(blake3::hash(bytes).into())
     }
 
-    // TODO encode DB key with TL and remove this method
-    pub fn wrap(value: [u8; 32]) -> Self {
-        Self(value)
+    pub fn wrap(bytes: &[u8; 32]) -> &Self {
+        // SAFETY: `[u8; 32]` has the same layout as `Digest`
+        unsafe { &*(bytes as *const [u8; 32]).cast::<Self>() }
     }
 
     pub fn inner(&self) -> &[u8; 32] {
@@ -46,6 +47,7 @@ impl Digest {
 }
 
 #[derive(Clone, TlWrite, TlRead, PartialEq)]
+#[repr(transparent)]
 pub struct Signature([u8; 64]);
 
 impl Display for Signature {
@@ -84,7 +86,27 @@ impl Signature {
             None => false,
         }
     }
+
+    fn wrap(bytes: &[u8; 64]) -> &Self {
+        // SAFETY: `[u8; 64]` has the same layout as `Signature`
+        unsafe { &*(bytes as *const [u8; 64]).cast::<Self>() }
+    }
 }
+
+macro_rules! impl_tl_read_bare_ref {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl<'a> TlRead<'a> for &'a $ty {
+            type Repr = tl_proto::Bare;
+
+            #[inline]
+            fn read_from(packet: &mut &'a [u8]) -> tl_proto::TlResult<Self> {
+                <_>::read_from(packet).map(<$ty>::wrap)
+            }
+        }
+    )+};
+}
+
+impl_tl_read_bare_ref! { Digest, Signature }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, TlRead, TlWrite)]
 pub struct Round(pub u32);
@@ -108,47 +130,9 @@ impl Round {
             .map(Round)
             .expect("DAG round number overflow, inner type exhausted")
     }
-
-    // For metrics. Handle other subtraction cases individually. Addition is meaningless.
-    pub fn diff_f64(self, rhs: Self) -> f64 {
-        diff_f64(self.0, rhs.0)
-    }
 }
 
-fn diff_f64<T>(lhs: T, rhs: T) -> f64
-where
-    T: Sub<Output = T> + Ord,
-    u32: TryFrom<T>,
-{
-    if lhs >= rhs {
-        u32::try_from(lhs - rhs).map_or(f64::INFINITY, f64::from)
-    } else {
-        -u32::try_from(rhs - lhs).map_or(f64::INFINITY, f64::from)
-    }
-}
-
-// Impls for types of config values. One also may unwrap `u32` from `Round` and use it as amount.
-macro_rules! impl_round_add_sub {
-    ($($ty:ty),*$(,)?) => {
-        $(impl Add<$ty> for Round {
-            type Output = Self;
-            #[inline]
-            fn add(self, rhs: $ty) -> Self {
-                Self(self.0.saturating_add(rhs as _))
-            }
-        }
-        impl Sub<$ty> for Round {
-            type Output = Self;
-            #[inline]
-            fn sub(self, rhs: $ty) -> Self {
-                Self(self.0.saturating_sub(rhs as _))
-            }
-        })*
-    };
-}
-impl_round_add_sub! { u8, u16, u32 }
-
-#[derive(Copy, Clone, TlRead, TlWrite, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, TlRead, TlWrite)]
 pub struct UnixTime(u64);
 
 impl UnixTime {
@@ -167,24 +151,6 @@ impl UnixTime {
     pub fn millis(&self) -> u64 {
         self.0
     }
-
-    pub fn diff_f64(self, rhs: Self) -> f64 {
-        diff_f64(self.0, rhs.0)
-    }
-}
-
-impl Add for UnixTime {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self::Output {
-        Self(self.0.saturating_add(rhs.0))
-    }
-}
-
-impl Sub for UnixTime {
-    type Output = Self;
-    fn sub(self, rhs: Self) -> Self::Output {
-        Self(self.0.saturating_sub(rhs.0))
-    }
 }
 
 impl Display for UnixTime {
@@ -192,3 +158,44 @@ impl Display for UnixTime {
         std::fmt::Display::fmt(&self.0, f)
     }
 }
+
+macro_rules! impl_add_sub {
+    ($ty:ty, $($rhs:ty => $cast:ident),+ $(,)?) => {$(
+        impl Add<$rhs> for $ty {
+            type Output = Self;
+            #[inline]
+            fn add(self, rhs: $rhs) -> Self {
+                Self(self.0.saturating_add(rhs.$cast()))
+            }
+        }
+        impl Sub<$rhs> for $ty {
+            type Output = Self;
+            #[inline]
+            fn sub(self, rhs: $rhs) -> Self {
+                Self(self.0.saturating_sub(rhs.$cast()))
+            }
+        }
+    )+};
+}
+
+macro_rules! impl_diff_64 {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl $ty {
+            /// For metrics
+            pub fn diff_f64(self, rhs: Self) -> f64 {
+                if self >= rhs {
+                    u32::try_from(self.0 - rhs.0).map_or(f64::INFINITY, f64::from)
+                } else {
+                    -u32::try_from(rhs.0 - self.0).map_or(f64::INFINITY, f64::from)
+                }
+            }
+        }
+    )+};
+}
+
+// Impls for types of config values. One also may unwrap `u32` from `Round` and use it as amount.
+impl_add_sub! { Round, u8 => into, u16 => into, u32 => into, }
+
+impl_add_sub! { UnixTime, UnixTime => millis, }
+
+impl_diff_64! { Round, UnixTime }

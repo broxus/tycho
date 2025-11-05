@@ -379,14 +379,14 @@ impl MempoolStoreImpl for MempoolDb {
             round_buf.copy_from_slice(&key[..4]);
             digest_buf.copy_from_slice(&key[4..]);
             let round = Round(u32::from_be_bytes(round_buf));
-            let digest = Digest::wrap(digest_buf);
+            let digest = Digest::wrap(&digest_buf);
 
             match status {
                 PointStatusStored::Exists => {
-                    result.push(PointRestoreSelect::NeedsVerify(round, digest));
+                    result.push(PointRestoreSelect::NeedsVerify(round, *digest));
                 }
                 PointStatusStored::NotFound(status) => {
-                    let ready = PointRestore::NotFound(round, digest, status);
+                    let ready = PointRestore::NotFound(round, *digest, status);
                     result.push(PointRestoreSelect::Ready(ready));
                 }
                 PointStatusStored::Validated(status) => {
