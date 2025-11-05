@@ -27,8 +27,8 @@ pub struct PointRead<'tl> {
 #[derive(TlRead)]
 #[tl(boxed, id = "consensus.point", scheme = "proto.tl")]
 pub struct PointRawRead<'tl> {
-    pub digest: Digest,
-    pub signature: Signature,
+    pub digest: &'tl Digest,
+    pub signature: &'tl Signature,
     pub body: RawBytes<'tl, tl_proto::Boxed>,
 }
 

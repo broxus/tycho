@@ -139,11 +139,11 @@ impl Point {
 
         let raw = PointRawRead::<'_>::read_from(&mut &serialized[..])?;
 
-        if !(raw.signature).verifies(raw.author()?, &raw.digest) {
+        if !(raw.signature).verifies(raw.author()?, raw.digest) {
             return Ok(Err(PointIntegrityError::BadSig));
         };
 
-        if raw.digest != Digest::new(raw.body.as_ref()) {
+        if *raw.digest != Digest::new(raw.body.as_ref()) {
             return Ok(Err(PointIntegrityError::BadHash));
         };
 
@@ -217,15 +217,15 @@ pub mod test_point {
     pub fn prev_point_data() -> (Digest, Vec<(PeerId, Signature)>) {
         let mut buf = [0; Digest::MAX_TL_BYTES];
         rand::rng().fill_bytes(&mut buf);
-        let digest = Digest::wrap(buf);
+        let digest = Digest::wrap(&buf);
         let mut evidence = Vec::with_capacity(PEERS);
         for _ in 0..PEERS {
             let key_pair = new_key_pair();
-            let sig = Signature::new(&key_pair, &digest);
+            let sig = Signature::new(&key_pair, digest);
             let peer_id = PeerId::from(key_pair.public_key);
             evidence.push((peer_id, sig));
         }
-        (digest, evidence)
+        (*digest, evidence)
     }
 
     pub fn point(key_pair: &KeyPair, payload: &[Bytes], conf: &MempoolConfig) -> Point {
@@ -239,7 +239,7 @@ pub mod test_point {
             let peer_id = PeerId::from(key_pair.public_key);
             if i > 0 {
                 rand::rng().fill_bytes(&mut buf);
-                includes.insert(peer_id, Digest::wrap(buf));
+                includes.insert(peer_id, *Digest::wrap(&buf));
             }
             evidence.insert(peer_id, Signature::new(&key_pair, &prev_digest));
         }
@@ -294,6 +294,7 @@ mod tests {
         let info_2 = tl_proto::deserialize::<PointInfo>(&info_b).context("point info")?;
 
         ensure!(point.info() == &info_2, "compare deserialized info");
+
         Ok(())
     }
 
