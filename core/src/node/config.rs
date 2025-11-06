@@ -11,6 +11,8 @@ use crate::block_strider::{
 };
 use crate::blockchain_rpc::{BlockchainRpcClientConfig, BlockchainRpcServiceConfig};
 use crate::overlay_client::PublicOverlayClientConfig;
+#[cfg(feature = "s3")]
+use crate::s3::S3ClientConfig;
 use crate::storage::CoreStorageConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
@@ -57,6 +59,9 @@ pub struct NodeBaseConfig {
     pub archive_block_provider: ArchiveBlockProviderConfig,
 
     pub blockchain_block_provider: BlockchainBlockProviderConfig,
+
+    #[cfg(feature = "s3")]
+    pub s3_client: S3ClientConfig,
 }
 
 impl Default for NodeBaseConfig {
@@ -77,6 +82,9 @@ impl Default for NodeBaseConfig {
             blockchain_rpc_service: BlockchainRpcServiceConfig::default(),
             blockchain_block_provider: BlockchainBlockProviderConfig::default(),
             archive_block_provider: ArchiveBlockProviderConfig::default(),
+
+            #[cfg(feature = "s3")]
+            s3_client: S3ClientConfig::default(),
         }
     }
 }

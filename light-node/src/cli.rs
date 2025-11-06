@@ -14,6 +14,8 @@ use tycho_core::blockchain_rpc::{
 };
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::overlay_client::PublicOverlayClient;
+#[cfg(feature = "s3")]
+use tycho_core::s3::S3Client;
 use tycho_core::storage::CoreStorage;
 use tycho_crypto::ed25519;
 use tycho_network::{
@@ -105,6 +107,9 @@ pub struct Node<C> {
     run_handle: Option<tokio::task::JoinHandle<()>>,
 
     config: NodeConfig<C>,
+
+    #[cfg(feature = "s3")]
+    s3_client: S3Client,
 }
 
 impl<C> Node<C> {
@@ -210,6 +215,9 @@ impl<C> Node<C> {
             "initialized blockchain rpc"
         );
 
+        #[cfg(feature = "s3")]
+        let s3_client = S3Client::new(&node_config.s3_client)?;
+
         Ok(Self {
             zerostate,
             network,
@@ -222,6 +230,9 @@ impl<C> Node<C> {
             rpc_config: node_config.rpc,
             starter_config: node_config.starter,
             run_handle: None,
+
+            #[cfg(feature = "s3")]
+            s3_client,
         })
     }
 
@@ -271,6 +282,11 @@ impl<C> Node<C> {
                     .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
                     .with_zerostate_id(self.zerostate)
                     .with_config(self.starter_config.clone());
+
+                #[cfg(feature = "s3")]
+                {
+                    starter = starter.with_s3(self.s3_client.clone());
+                }
 
                 if let Some(handler) = completion_state_handler {
                     starter = starter.with_completion_state_handler(handler);

@@ -81,6 +81,7 @@ quinn = { version = "0.11.9", default-features = false, features = [
     "rustls",
 ] }
 quote = "1.0"
+object_store = "0.12"
 rand = "0.9"
 rand_pcg = { version = "0.9" }
 rayon = "1.10"

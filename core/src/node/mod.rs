@@ -22,6 +22,8 @@ use crate::blockchain_rpc::{
 };
 use crate::global_config::{GlobalConfig, ZerostateId};
 use crate::overlay_client::{PublicOverlayClient, ValidatorsResolver};
+#[cfg(feature = "s3")]
+use crate::s3::S3Client;
 use crate::storage::{CoreStorage, CoreStorageConfig};
 
 mod config;
@@ -41,6 +43,9 @@ pub struct NodeBase {
     pub core_storage: CoreStorage,
 
     pub blockchain_rpc_client: BlockchainRpcClient,
+
+    #[cfg(feature = "s3")]
+    pub s3_client: S3Client,
 }
 
 impl NodeBase {
@@ -99,6 +104,11 @@ impl NodeBase {
                     .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
                     .with_zerostate_id(self.global_config.zerostate)
                     .with_config(self.base_config.starter.clone());
+
+                #[cfg(feature = "s3")]
+                {
+                    starter = starter.with_s3(self.s3_client.clone());
+                }
 
                 if let Some(handler) = queue_state_handler {
                     starter = starter.with_queue_state_handler(handler);
@@ -270,7 +280,8 @@ impl<'a> NodeBaseBuilder<'a, init::Step1> {
     }
 }
 
-impl NodeBaseBuilder<'_, init::Final> {
+#[cfg(not(feature = "s3"))]
+impl<'a> NodeBaseBuilder<'a, init::Final> {
     pub fn build(self) -> Result<NodeBase> {
         let net = self.step.prev_step.prev_step.net;
         let store = self.step.prev_step.store;
@@ -287,6 +298,50 @@ impl NodeBaseBuilder<'_, init::Final> {
             storage_context: store.context,
             core_storage: store.core_storage,
             blockchain_rpc_client,
+        })
+    }
+}
+
+#[cfg(feature = "s3")]
+impl<'a> NodeBaseBuilder<'a, init::Step2> {
+    pub fn init_s3(self) -> Result<NodeBaseBuilder<'a, init::Step3>> {
+        let s3_client = S3Client::new(&self.base_config.s3_client)?;
+
+        Ok(NodeBaseBuilder {
+            base_config: self.base_config,
+            global_config: self.global_config,
+            step: init::Step3 {
+                prev_step: self.step,
+                s3_client,
+            },
+        })
+    }
+}
+
+#[cfg(feature = "s3")]
+impl NodeBaseBuilder<'_, init::Final> {
+    pub fn build(self) -> Result<NodeBase> {
+        let net = self.step.prev_step.prev_step.prev_step.net;
+        let store = self.step.prev_step.prev_step.store;
+        let blockchain_rpc_client = self.step.prev_step.blockchain_rpc_client;
+
+        #[cfg(feature = "s3")]
+        let s3_client = self.step.s3_client;
+
+        Ok(NodeBase {
+            base_config: self.base_config.clone(),
+            global_config: self.global_config.clone(),
+            keypair: net.keypair,
+            network: net.network,
+            dht_client: net.dht_client,
+            peer_resolver: net.peer_resolver,
+            overlay_service: net.overlay_service,
+            storage_context: store.context,
+            core_storage: store.core_storage,
+            blockchain_rpc_client,
+
+            #[cfg(feature = "s3")]
+            s3_client,
         })
     }
 }
@@ -342,6 +397,10 @@ impl<Step: AsRef<init::Step2>> NodeBaseBuilder<'_, Step> {
 pub mod init {
     use super::*;
 
+    #[cfg(feature = "s3")]
+    pub type Final = Step3;
+
+    #[cfg(not(feature = "s3"))]
     pub type Final = Step2;
 
     /// Node with network.
@@ -399,6 +458,45 @@ pub mod init {
     impl AsRef<Step2> for Step2 {
         #[inline]
         fn as_ref(&self) -> &Step2 {
+            self
+        }
+    }
+
+    /// Node with network, storage, public overlay and S3 client.
+    #[cfg(feature = "s3")]
+    pub struct Step3 {
+        pub(super) prev_step: Step2,
+        pub(super) s3_client: S3Client,
+    }
+
+    #[cfg(feature = "s3")]
+    impl AsRef<Step0> for Step3 {
+        #[inline]
+        fn as_ref(&self) -> &Step0 {
+            &self.prev_step.prev_step.prev_step
+        }
+    }
+
+    #[cfg(feature = "s3")]
+    impl AsRef<Step1> for Step3 {
+        #[inline]
+        fn as_ref(&self) -> &Step1 {
+            &self.prev_step.prev_step
+        }
+    }
+
+    #[cfg(feature = "s3")]
+    impl AsRef<Step2> for Step3 {
+        #[inline]
+        fn as_ref(&self) -> &Step2 {
+            &self.prev_step
+        }
+    }
+
+    #[cfg(feature = "s3")]
+    impl AsRef<Step3> for Step3 {
+        #[inline]
+        fn as_ref(&self) -> &Step3 {
             self
         }
     }

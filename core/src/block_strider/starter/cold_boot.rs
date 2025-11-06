@@ -78,6 +78,14 @@ impl StarterInner {
 
                 *last_key_block.id()
             }
+            #[cfg(feature = "s3")]
+            ColdBootType::PersistentFromS3 => {
+                let Some(s3_client) = &self.s3_client else {
+                    anyhow::bail!("S3 client not initialized");
+                };
+
+                todo!()
+            }
         };
 
         self.storage
@@ -781,10 +789,6 @@ impl StarterInner {
                 .await?;
 
             remove_state_file.await;
-
-            self.completion_state_handler
-                .on_state_persisted(&cx)
-                .await?;
 
             tracing::info!("using the downloaded shard state");
             return Ok((block_handle, state));
