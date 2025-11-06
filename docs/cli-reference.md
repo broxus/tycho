@@ -205,7 +205,7 @@ Run a Tycho node
 * `--wu-tuner-config <WU_TUNER_CONFIG>` — Path to the work units tuner config
 * `--cold-boot <COLD_BOOT>` — Overwrite cold boot type. Default: `latest-persistent`
 
-  Possible values: `genesis`, `latest-persistent`
+  Possible values: `genesis`, `latest-persistent`, `persistent-from-s3`
 
 * `--single-node` — Pass this flag if you used `just gen_network 1` for manual tests
 

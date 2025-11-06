@@ -19,6 +19,8 @@ use tycho_util::sync::rayon_run;
 use tycho_util::time::now_sec;
 
 use super::{ColdBootType, PsCompletionHandler, StarterInner, ZerostateProvider};
+#[cfg(feature = "s3-sync")]
+use crate::block_strider::starter::s3_sync::S3Starter;
 use crate::block_strider::{CheckProof, ProofChecker, PsCompletionContext};
 use crate::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::PunishReason;
@@ -77,6 +79,15 @@ impl StarterInner {
                 }
 
                 *last_key_block.id()
+            }
+            #[cfg(feature = "s3-sync")]
+            ColdBootType::PersistentFromS3 => {
+                let s3_starter = S3Starter::new(&self.config.s3_config, &self.storage)?;
+
+                // Choose the suitable key block with persistent state
+                let _key_block = s3_starter.choose_key_block().await?;
+
+                todo!("download start blocks and states")
             }
         };
 

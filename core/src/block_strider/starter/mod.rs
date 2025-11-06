@@ -13,12 +13,17 @@ use tycho_types::models::{
 };
 use tycho_util::serde_helpers;
 
+#[cfg(feature = "s3-sync")]
+pub use self::s3_sync::S3FileKind;
 use crate::block_strider::PsCompletionContext;
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
 use crate::storage::{CoreStorage, QueueStateReader};
 
 mod cold_boot;
+
+#[cfg(feature = "s3-sync")]
+mod s3_sync;
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +33,49 @@ pub struct StarterConfig {
     /// Default: None
     #[serde(with = "serde_helpers::humantime")]
     pub custom_boot_offset: Option<Duration>,
+
+    /// TODO
+    ///
+    /// Default: None
+    #[cfg(feature = "s3-sync")]
+    #[serde(default)]
+    pub s3_config: S3Config,
+}
+
+#[cfg(feature = "s3-sync")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3Config {
+    pub seqno: Option<u32>,
+    pub bucket_name: String,
+    pub s3_provider: S3ProviderConfig,
+}
+
+#[cfg(feature = "s3-sync")]
+impl Default for S3Config {
+    fn default() -> Self {
+        Self {
+            seqno: None,
+            bucket_name: "archives".to_string(),
+            s3_provider: S3ProviderConfig::Gcs {
+                credentials_path: "credentials.json".to_owned(),
+            },
+        }
+    }
+}
+
+#[cfg(feature = "s3-sync")]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum S3ProviderConfig {
+    #[serde(rename = "aws")]
+    Aws {
+        endpoint: String,
+        access_key_id: String,
+        secret_access_key: String,
+        allow_http: bool,
+    },
+
+    #[serde(rename = "gcs")]
+    Gcs { credentials_path: String },
 }
 
 pub struct StarterBuilder<
@@ -182,6 +230,8 @@ impl Starter {
 pub enum ColdBootType {
     Genesis,
     LatestPersistent,
+    #[cfg(feature = "s3-sync")]
+    PersistentFromS3,
 }
 
 struct StarterInner {

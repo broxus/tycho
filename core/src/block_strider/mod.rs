@@ -20,6 +20,8 @@ pub use self::provider::{
     BlockchainBlockProvider, BlockchainBlockProviderConfig, ChainBlockProvider, CheckProof,
     EmptyBlockProvider, OptionalBlockStuff, ProofChecker, RetryConfig, StorageBlockProvider,
 };
+#[cfg(feature = "s3-sync")]
+pub use self::starter::S3FileKind;
 pub use self::starter::{
     ColdBootType, FileZerostateProvider, PsCompletionHandler, QueueStateHandler, Starter,
     StarterBuilder, StarterConfig, ValidateQueueState, ZerostateProvider,
