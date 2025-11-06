@@ -1,11 +1,10 @@
 import "@stdlib/common"
+import "@stdlib/gas-payments"
 import "@stdlib/lisp-lists"
 import "@stdlib/tvm-dicts"
-import "@stdlib/gas-payments"
-
 import "slasher-base"
 import "interface/slasher"
-
+import "lib/util"
 
 fun onInternalMessage(in: InMessage) {
     var body = in.body;
@@ -46,7 +45,6 @@ fun onExternalMessage(inMsg: slice) {
     storage.processValidatorStatistics(inMsg);
 }
 
-
 /// Sends message back to the query source.
 ///
 /// Attaches all remaining message value.
@@ -70,12 +68,12 @@ get fun getPunishedValidators(): tuple {
     var punishedValidators = createEmptyList();
     val punished = data.punishedValidators!.load();
 
-    var iterNext = -1;
+    var iterNext = maxInt();
     do {
-        val (validatorId, votes, found) = data.votes.uDictGetNext(32, iterNext);
+        val (validatorId, votes, found) = data.votes.uDictGetPrev(16, iterNext);
         if (found) {
             iterNext = validatorId!;
-            listPrepend(validatorId!, punishedValidators);
+            punishedValidators = listPrepend(validatorId!, punishedValidators);
         }
     } while (found);
 
@@ -86,14 +84,13 @@ get fun getCurrentVotes(): tuple {
     val data = lazy Slasher.load();
 
     var votersList = createEmptyList();
-    var iterNext = -1;
+    var iterNext = maxInt();
     do {
-        val (validatorId, votes, found) = data.votes.uDictGetNext(32, iterNext);
+        var (validatorId, votes, found) = data.votes.uDictGetPrev(16, iterNext);
         if (found) {
             iterNext = validatorId!;
-            listPrepend([validatorId!, votes], votersList);
+            votersList = listPrepend([validatorId!, votes!.loadUint(32)], votersList);
         }
     } while (found);
-
     return votersList;
 }

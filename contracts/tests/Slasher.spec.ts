@@ -58,20 +58,23 @@ describe("Slasher", () => {
             executor,
         });
 
+        const hexString = BigInt(123).toString(16);
+        const buffer = Buffer.from(hexString, 'hex');
+
         blockchain.prevBlocks = {
             lastMcBlocks: [{
                 workchain: -1,
-                seqno: 1,
+                seqno: 100,
                 shard: BigInt("0"),
-                fileHash: Buffer.from([]),
-                rootHash: Buffer.from([])
+                fileHash: buffer,
+                rootHash: buffer
             }],
             prevKeyBlock: {
                 workchain: -1,
-                seqno: 1,
+                seqno: 100,
                 shard: BigInt("0"),
-                fileHash: Buffer.from([]),
-                rootHash: Buffer.from([])
+                fileHash: buffer,
+                rootHash: buffer
             }
         }
 
@@ -122,10 +125,18 @@ describe("Slasher", () => {
             await slasher.receiveMessage(validator.createVoteMessage(slasher.address, 0, accounts, crypto))
         }
 
+
         const data = await getters(blockchain, slasher).getData();
+
         expect(data.votes.size).toBe(4);
         for (let votes of data.votes.values()) {
             expect(votes).toBe(100);
+        }
+
+        let votes = await getters(blockchain, slasher).getVotes();
+        expect(votes.length).toBe(4);
+        for (let vote of votes) {
+            expect(vote.votes).toBe(100);
         }
     });
 
@@ -167,8 +178,12 @@ describe("Slasher", () => {
 
         const data = await getters(blockchain, slasher).getData();
 
+
         expect(data.punishedValidators).not.toBeNull();
         expect(data.punishedValidators!.list.size).toBe(4);
+
+        let votes = await getters(blockchain, slasher).getVotes();
+        expect(votes.length).toBe(0);
     });
 
 });

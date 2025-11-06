@@ -1,4 +1,15 @@
-import {Address, beginCell, Builder, Cell, Contract, ContractProvider, Dictionary, Slice} from "@ton/core";
+import {
+    Address,
+    beginCell,
+    Builder,
+    Cell,
+    Contract,
+    ContractProvider,
+    Dictionary,
+    Slice,
+    Tuple,
+    TupleReader
+} from "@ton/core";
 import assert from "assert";
 
 
@@ -85,4 +96,26 @@ export class Slasher implements Contract {
         assert(state.state.data != null);
         return loadSlasherData(Cell.fromBoc(state.state.data)[0].asSlice());
     }
+
+    async getVotes(provider: ContractProvider): Promise<Vote[]> {
+        let result = await provider.get("getCurrentVotes", []);
+        let tupleVotes = result.stack.readLispList();
+        let votes = [];
+        for (let t of tupleVotes) {
+            let x = t as Tuple;
+            let reader = new TupleReader(x.items);
+
+            votes.push({
+                validatorId: reader.readNumber(),
+                votes: reader.readNumber(),
+
+            });
+        }
+        return votes;
+    }
+}
+
+export type Vote = {
+    validatorId: number,
+    votes: number,
 }

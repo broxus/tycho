@@ -35,11 +35,10 @@ fun Slasher.save(self) {
 }
 
 fun Slasher.getCurrentMcBLock(): uint32 {
-    // val prevMcBlocks = getPreviousMcBlocks();
-    // debug.print(prevMcBlocks);
-    // val prevBlocks = prevMcBlocks.first() as tuple;
-    // val seqno = prevBlocks.get<uint32>(3);
-    return 100;
+    val prevMcBlocks = getPreviousMcBlocks();
+    val prevBlocks = prevMcBlocks.first() as tuple;
+    val seqno = prevBlocks.get<uint32>(3);
+    return seqno;
 }
 
 fun Slasher.processValidatorStatistics(mutate self, body: slice): int {
