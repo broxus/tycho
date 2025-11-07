@@ -22,10 +22,29 @@ pub enum PointIntegrityError {
     /// do not use the author from point's body
     #[error("signature does not match author")]
     BadSig,
-    #[error("bad signature in evidence map")]
-    EvidenceSig(Point),
-    #[error("unusable due to some maps issue")]
-    BadMaps(Point), // TODO: separate error for each violation
+}
+
+#[derive(Debug, Copy, Clone, thiserror::Error)]
+pub enum StructureIssue {
+    #[error("{0:?} map must not contain author")]
+    AuthorInMap(PointMap),
+    #[error("bad {0:?} link through {1:?} map")]
+    Link(AnchorStageRole, PointMap),
+    #[error("Evidence map contains bad signature")]
+    EvidenceSig,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum PointMap {
+    Evidence, // r+0
+    Includes, // r-1
+    Witness,  // r-2
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AnchorStageRole {
+    Trigger,
+    Proof,
 }
 
 #[derive(Clone)]
@@ -40,6 +59,9 @@ impl Debug for Point {
         f.debug_tuple("Point").field(&self.info).finish()
     }
 }
+
+type ParseResult =
+    Result<Result<Result<Point, (Point, StructureIssue)>, PointIntegrityError>, TlError>;
 
 impl Point {
     pub fn max_byte_size(consensus_config: &ConsensusConfig) -> usize {
@@ -130,13 +152,7 @@ impl Point {
         })
     }
 
-    pub fn parse(serialized: Vec<u8>) -> Result<Result<Self, PointIntegrityError>, TlError> {
-        fn is_evidence_ok(info: &PointInfo) -> bool {
-            info.prev_digest().is_none_or(|prev_proof| {
-                (info.evidence().iter()).all(|(peer, sig)| sig.verifies(peer, prev_proof))
-            })
-        }
-
+    pub fn parse(serialized: Vec<u8>) -> ParseResult {
         let raw = PointRawRead::<'_>::read_from(&mut &serialized[..])?;
 
         if !(raw.signature).verifies(raw.author()?, raw.digest) {
@@ -149,15 +165,10 @@ impl Point {
 
         let point = Self::from_bytes(serialized)?;
 
-        if !point.info().has_well_formed_maps() {
-            return Ok(Err(PointIntegrityError::BadMaps(point)));
-        }
-
-        if !is_evidence_ok(point.info()) {
-            return Ok(Err(PointIntegrityError::EvidenceSig(point)));
-        }
-
-        Ok(Ok(point))
+        Ok(Ok(match point.info().check_structure() {
+            Ok(()) => Ok(point),
+            Err(issue) => Err((point, issue)),
+        }))
     }
 
     pub fn serialized(&self) -> &[u8] {
@@ -286,7 +297,9 @@ mod tests {
         let conf = default_test_config().conf;
         let point = point(&new_key_pair(), &payload(&conf), &conf);
 
-        let point_2 = Point::parse(point.serialized().to_vec()).context("parse point bytes")??;
+        let point_2 = Point::parse(point.serialized().to_vec())
+            .context("parse point bytes")??
+            .map_err(|(_, err)| err)?;
         ensure!(point == point_2, "point serde roundtrip");
 
         let mut info_b = Vec::<u8>::with_capacity(point.info().max_size_hint());

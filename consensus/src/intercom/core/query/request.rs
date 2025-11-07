@@ -2,7 +2,7 @@ use bytes::{Buf, Bytes};
 use tl_proto::{RawBytes, TlError, TlRead, TlWrite};
 use tycho_network::Request;
 
-use crate::models::{Point, PointId, Round};
+use crate::models::{Point, PointId, Round, StructureIssue};
 
 #[derive(Copy, Clone, Debug, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
@@ -16,7 +16,7 @@ pub enum QueryRequestTag {
 }
 
 pub enum QueryRequest {
-    Broadcast(Point),
+    Broadcast(Point, Option<StructureIssue>),
     Signature(Round),
     Download(PointId),
 }

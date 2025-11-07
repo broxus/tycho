@@ -16,7 +16,7 @@ use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
     AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, Link, PeerCount, PointId, PointInfo,
-    Round, UnixTime,
+    PointMap, Round, StructureIssue, UnixTime,
 };
 use crate::storage::MempoolStore;
 // Note on equivocation.
@@ -31,13 +31,6 @@ use crate::storage::MempoolStore;
 // Anyway, no more than one of equivocated points may become a vertex.
 
 pub struct Verifier;
-
-#[derive(Debug, Copy, Clone)]
-pub enum PointMap {
-    Evidence, // r+0
-    Includes, // r-1
-    Witness,  // r-2
-}
 
 #[derive(thiserror::Error, Debug)]
 pub enum VerifyError {
@@ -66,6 +59,8 @@ pub enum VerifyFailReason {
 pub enum IllFormedReason {
     #[error("ill-formed after load from DB")]
     AfterLoadFromDb, // TODO describe all reasons and save them to DB, then remove this stub
+    #[error("structure issue: {0}")]
+    Structure(StructureIssue),
     #[error("point before genesis cannot exist in this overlay")]
     BeforeGenesis,
     #[error("too large payload: {0} bytes")]
