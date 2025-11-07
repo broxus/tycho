@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use futures_util::future::BoxFuture;
@@ -124,7 +123,8 @@ impl Service<ServiceRequest> for Responder {
 
 impl ResponderInner {
     async fn handle_query(self: Arc<Self>, req: ServiceRequest) -> Option<Response> {
-        let task_start = Instant::now();
+        let mut response = QueryResponse::new();
+
         let ResponderInner {
             state,
             head,
@@ -143,6 +143,8 @@ impl ResponderInner {
                 return None;
             }
         };
+
+        response.set_tag(raw_query.tag);
 
         let tag = raw_query.tag;
 
@@ -222,22 +224,17 @@ impl ResponderInner {
                         (state.broadcast_filter).clean(point.info().round(), head, round_ctx);
                     } // else: engine is not paused, let it do its work
                 }
-                QueryResponse::broadcast(task_start)
+                response.broadcast()
             }
-            QueryRequest::Signature(round) => QueryResponse::signature(
-                task_start,
-                Signer::signature_response(
-                    peer_id,
-                    round,
-                    &state.broadcast_filter,
-                    head,
-                    round_ctx,
-                ),
-            ),
-            QueryRequest::Download(point_id) => QueryResponse::download(
-                task_start,
-                Uploader::find(peer_id, point_id, &state.store, head, round_ctx).await,
-            ),
+            QueryRequest::Signature(round) => response.signature(Signer::signature_response(
+                peer_id,
+                round,
+                &state.broadcast_filter,
+                head,
+                round_ctx,
+            )),
+            QueryRequest::Download(point_id) => response
+                .download(Uploader::find(peer_id, point_id, &state.store, head, round_ctx).await),
         })
     }
 }
