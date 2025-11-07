@@ -200,13 +200,13 @@ impl StorageContext {
         P: AsRef<Path>,
         T: NamedTables<Context = TableContext> + 'static,
     {
-        self.open_preconfigured_partition(subdir, None)
+        self.open_preconfigured_part(subdir, None)
     }
 
-    pub fn open_preconfigured_partition<P, T>(
+    pub fn open_preconfigured_part<P, T>(
         &self,
         dir_path: P,
-        partition_id: Option<u64>,
+        part_id: Option<u64>,
     ) -> Result<weedb::WeeDb<T>>
     where
         P: AsRef<Path>,
@@ -231,7 +231,7 @@ impl StorageContext {
                 .build()?;
 
         if let Some(name) = db.db_name() {
-            let name_w_part = partition_id.map(|id| format!("{}-{:016x}", name, id));
+            let name_w_part = part_id.map(|id| format!("{}-{:016x}", name, id));
             let name = name_w_part.unwrap_or_else(|| name.to_owned());
             self.add_rocksdb_instance(&name, db.raw());
         }

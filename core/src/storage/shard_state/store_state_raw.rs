@@ -216,7 +216,7 @@ impl StoreStateContext {
         let shard_state_key = block_id.to_vec();
         let entry = ShardStateEntry {
             root_hash: HashBytes(*root_hash),
-            partitions: None,
+            parts_info: None,
         };
         self.cells_db
             .shard_states()

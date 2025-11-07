@@ -54,10 +54,20 @@ impl BlockHandleStorage {
         updated
     }
 
-    pub fn set_has_persistent_shard_state(&self, handle: &BlockHandle) -> bool {
+    pub fn set_has_persistent_shard_state_main(&self, handle: &BlockHandle) -> bool {
         let updated = handle
             .meta()
-            .add_flags(BlockFlags::HAS_PERSISTENT_SHARD_STATE);
+            .add_flags(BlockFlags::HAS_PERSISTENT_SHARD_STATE_MAIN);
+        if updated {
+            self.store_handle(handle, false);
+        }
+        updated
+    }
+
+    pub fn set_has_persistent_shard_state_parts(&self, handle: &BlockHandle) -> bool {
+        let updated = handle
+            .meta()
+            .add_flags(BlockFlags::HAS_PERSISTENT_SHARD_STATE_PARTS);
         if updated {
             self.store_handle(handle, false);
         }

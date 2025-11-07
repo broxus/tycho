@@ -2,9 +2,11 @@ use std::collections::hash_map;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use smallvec::SmallVec;
+use tycho_block_util::block::DisplayShardPrefix;
 use tycho_storage::fs::Dir;
 use tycho_storage::kv::refcount;
 use tycho_types::cell::{CellDescriptor, HashBytes};
@@ -13,12 +15,19 @@ use tycho_util::FastHashMap;
 use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::sync::CancellationFlag;
 
-use crate::storage::CellsDb;
+use crate::storage::db::{CellStorageDb, CellsDbOps};
+use crate::storage::persistent_state::ShardStatePartsPrunedData;
+use crate::storage::shard_state::ShardPrefix;
+use crate::storage::{CellsDb, CellsPartDb};
 
 pub struct ShardStateWriter<'a> {
-    db: &'a CellsDb,
+    db: CellStorageDb,
     states_dir: &'a Dir,
     block_id: &'a BlockId,
+    /// Contains the shard prefix when used to store part file
+    part_shard_prefix: Option<ShardPrefix>,
+    /// Map of puned parts branches to write into main file
+    pruned_parts: Option<Arc<ShardStatePartsPrunedData>>,
 }
 
 impl<'a> ShardStateWriter<'a> {
@@ -29,19 +38,66 @@ impl<'a> ShardStateWriter<'a> {
     // Partially written BOC file.
     const FILE_EXTENSION_TEMP: &'static str = "boc.temp";
 
-    pub fn file_name(block_id: &BlockId) -> PathBuf {
-        PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION)
+    fn build_file_name_base(block_id: &BlockId, part_shard_prefix: Option<&ShardPrefix>) -> String {
+        part_shard_prefix.map_or_else(
+            || block_id.to_string(),
+            |prefix| format!("{}_part_{}", block_id, DisplayShardPrefix(prefix)),
+        )
     }
 
-    pub fn temp_file_name(block_id: &BlockId) -> PathBuf {
-        PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
+    pub fn file_name(block_id: &BlockId, part_shard_prefix: Option<&ShardPrefix>) -> PathBuf {
+        let base = Self::build_file_name_base(block_id, part_shard_prefix);
+        PathBuf::from(base).with_extension(Self::FILE_EXTENSION)
     }
 
-    pub fn new(db: &'a CellsDb, states_dir: &'a Dir, block_id: &'a BlockId) -> Self {
+    pub fn temp_file_name(block_id: &BlockId, part_shard_prefix: Option<&ShardPrefix>) -> PathBuf {
+        let base = Self::build_file_name_base(block_id, part_shard_prefix);
+        PathBuf::from(base).with_extension(Self::FILE_EXTENSION_TEMP)
+    }
+
+    pub fn new(
+        db: CellsDb,
+        states_dir: &'a Dir,
+        block_id: &'a BlockId,
+        pruned_parts: Option<Arc<ShardStatePartsPrunedData>>,
+    ) -> Self {
+        Self::new_ext(
+            CellStorageDb::Main(db),
+            states_dir,
+            block_id,
+            None,
+            pruned_parts,
+        )
+    }
+
+    pub fn new_for_shard(
+        db: CellsPartDb,
+        states_dir: &'a Dir,
+        block_id: &'a BlockId,
+        part_shard_prefix: ShardPrefix,
+    ) -> Self {
+        Self::new_ext(
+            CellStorageDb::Part(db),
+            states_dir,
+            block_id,
+            Some(part_shard_prefix),
+            None,
+        )
+    }
+
+    pub fn new_ext(
+        db: CellStorageDb,
+        states_dir: &'a Dir,
+        block_id: &'a BlockId,
+        part_shard_prefix: Option<ShardPrefix>,
+        pruned_parts: Option<Arc<ShardStatePartsPrunedData>>,
+    ) -> Self {
         Self {
             db,
             states_dir,
             block_id,
+            part_shard_prefix,
+            pruned_parts,
         }
     }
 
@@ -50,7 +106,7 @@ impl<'a> ShardStateWriter<'a> {
         mut boc_file: File,
         _cancelled: Option<&CancellationFlag>,
     ) -> Result<()> {
-        let temp_file_name = Self::temp_file_name(self.block_id);
+        let temp_file_name = Self::temp_file_name(self.block_id, self.part_shard_prefix.as_ref());
         scopeguard::defer! {
             self.states_dir.remove_file(&temp_file_name).ok();
         }
@@ -81,12 +137,15 @@ impl<'a> ShardStateWriter<'a> {
         // Atomically rename the file
         self.states_dir
             .file(&temp_file_name)
-            .rename(Self::file_name(self.block_id))
+            .rename(Self::file_name(
+                self.block_id,
+                self.part_shard_prefix.as_ref(),
+            ))
             .map_err(Into::into)
     }
 
     pub fn write(&self, root_hash: &HashBytes, cancelled: Option<&CancellationFlag>) -> Result<()> {
-        let temp_file_name = Self::temp_file_name(self.block_id);
+        let temp_file_name = Self::temp_file_name(self.block_id, self.part_shard_prefix.as_ref());
         scopeguard::defer! {
             self.states_dir.remove_file(&temp_file_name).ok();
         }
@@ -201,7 +260,10 @@ impl<'a> ShardStateWriter<'a> {
 
         self.states_dir
             .file(&temp_file_name)
-            .rename(Self::file_name(self.block_id))
+            .rename(Self::file_name(
+                self.block_id,
+                self.part_shard_prefix.as_ref(),
+            ))
             .map_err(Into::into)
     }
 
@@ -225,8 +287,8 @@ impl<'a> ShardStateWriter<'a> {
         let mut file = self.states_dir.unnamed_file().open()?;
 
         let raw = self.db.rocksdb().as_ref();
-        let read_options = self.db.cells.read_config();
-        let cf = self.db.cells.cf();
+        let read_options = self.db.cells().read_config();
+        let cf = self.db.cells().cf();
 
         let mut references_buffer = SmallVec::<[[u8; 32]; 4]>::with_capacity(4);
 
@@ -254,6 +316,25 @@ impl<'a> ShardStateWriter<'a> {
 
             match data {
                 StackItem::New(hash) => {
+                    // write pruned cell instead of part branch
+                    let hash_bytes = HashBytes::from(hash);
+                    if let Some(pruned_parts) = &self.pruned_parts
+                        && let Some(pruned_cell) = pruned_parts.get(&hash_bytes)
+                    {
+                        stack.push((
+                            index,
+                            StackItem::Loaded(LoadedCell {
+                                hash,
+                                descriptor: pruned_cell.descriptor(),
+                                data: SmallVec::from_slice(pruned_cell.data()),
+                                // write no references for pruned cell
+                                indices: SmallVec::new(),
+                            }),
+                        ));
+                        references_buffer.clear();
+                        continue;
+                    }
+
                     let value = raw
                         .get_pinned_cf_opt(&cf, hash, read_options)?
                         .ok_or(CellWriterError::CellNotFound)?;

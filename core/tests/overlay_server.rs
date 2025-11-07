@@ -317,7 +317,7 @@ async fn overlay_server_persistent_state() -> Result<()> {
         )?;
 
         persistent_states
-            .store_shard_state_file(0, &zerostate_handle, zerostate_file)
+            .store_shard_state_file(0, &zerostate_handle, zerostate_file, None)
             .await?;
     }
 

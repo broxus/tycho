@@ -684,7 +684,7 @@ impl<B> Inner<B> {
         }
 
         match persistent_state_storage
-            .read_state_part(block_id, offset, state_kind)
+            .read_state_chunk(block_id, offset, state_kind)
             .await
         {
             Some(data) => overlay::Response::Ok(Data { data: data.into() }),
