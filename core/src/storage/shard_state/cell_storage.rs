@@ -32,9 +32,9 @@ pub struct CellStorage {
     cells_cache: Arc<CellsIndex>,
     raw_cells_cache: Arc<RawCellsCache>,
     drop_interval: u32,
-    /// Contains the shard prefix of the state partition when used in `ShardStateStoragePart`
+    /// Contains the shard prefix of the state part when used in `ShardStateStoragePart`
     part_shard_prefix: Option<ShardPrefix>,
-    /// State storage partitions
+    /// State storage parts
     storage_parts: Option<Arc<StoragePartsMap>>,
 }
 
@@ -320,7 +320,7 @@ impl CellStorage {
         root: &DynCell,
         batch: &mut WriteBatch,
         split_at: FastHashMap<HashBytes, SplitAccountEntry>,
-        split_by_partitions: bool,
+        split_on_parts: bool,
         capacity: usize,
     ) -> Result<usize, CellStorageError> {
         type StoreResult = Result<(), CellStorageError>;
@@ -342,8 +342,8 @@ impl CellStorage {
             raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
             split_at: FastHashMap<HashBytes, SplitAccountEntry>,
-            /// Indicates that accounts are splitted by partitions
-            split_by_partitions: bool,
+            /// Indicates that accounts are splitted on parts
+            split_on_parts: bool,
             // TODO: Use `&'a HashBytes` for key?
             // Pros:
             //   - Less `memcpy` calls;
@@ -364,7 +364,7 @@ impl CellStorage {
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
                 split_accounts: FastHashMap<HashBytes, SplitAccountEntry>,
-                split_by_partitions: bool,
+                split_on_parts: bool,
                 capacity: usize,
             ) -> Self {
                 Self {
@@ -372,7 +372,7 @@ impl CellStorage {
                     raw_cache,
                     herd,
                     split_at: split_accounts,
-                    split_by_partitions,
+                    split_on_parts,
                     transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
                         capacity,
                         Default::default(),
@@ -408,8 +408,8 @@ impl CellStorage {
                     for child in &mut *iter {
                         let child_hash = child.repr_hash();
                         if self.split_at.contains_key(child_hash) {
-                            // skip if subtree should be stored in partition
-                            if self.split_by_partitions {
+                            // skip if subtree should be stored in the part
+                            if self.split_on_parts {
                                 continue 'outer;
                             }
 
@@ -587,7 +587,7 @@ impl CellStorage {
             &herd,
             &self.raw_cells_cache,
             split_at,
-            split_by_partitions,
+            split_on_parts,
             capacity,
         );
 
@@ -774,7 +774,7 @@ impl CellStorage {
             return Ok(cell);
         }
 
-        // load cell from separate storage partition if required
+        // load cell from separate storage part if required
         if self.part_shard_prefix.is_none()
             && let Some(CellShardRouter::Shard { shard_prefix }) = &shard_router
             && let Some(storage_part) = self
@@ -789,7 +789,7 @@ impl CellStorage {
             return Ok(cell);
         }
 
-        // fallback: if no shard partition storage, do not inherit router
+        // fallback: if no shard storage part, do not inherit router
         let target_shard_router = match &shard_router {
             Some(CellShardRouter::Shard { .. }) => None,
             _ => shard_router.clone(),
@@ -868,7 +868,7 @@ impl CellStorage {
         herd: &Herd,
         root: &HashBytes,
         split_at: FastHashSet<HashBytes>,
-        split_by_partitions: bool,
+        split_on_parts: bool,
     ) -> Result<(usize, WriteBatch), CellStorageError> {
         type RemoveResult = Result<(), CellStorageError>;
 
@@ -883,8 +883,8 @@ impl CellStorage {
             raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
             split_at: FastHashSet<HashBytes>,
-            /// Indicates that accounts are splitted by partitions
-            split_by_partitions: bool,
+            /// Indicates that accounts are splitted on parts
+            split_on_parts: bool,
             // TODO: Use `&'a HashBytes` for key?
             // Pros:
             //   - Less `memcpy` calls;
@@ -905,14 +905,14 @@ impl CellStorage {
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
                 split_at: FastHashSet<HashBytes>,
-                split_by_partitions: bool,
+                split_on_parts: bool,
             ) -> Self {
                 Self {
                     db,
                     raw_cache,
                     herd,
                     split_at,
-                    split_by_partitions,
+                    split_on_parts,
                     transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
                         128,
                         Default::default(),
@@ -948,9 +948,9 @@ impl CellStorage {
                     for child_hash in iter.by_ref() {
                         let split_at_reached = self.split_at.contains(child_hash);
                         if split_at_reached {
-                            if self.split_by_partitions {
-                                // do not try to remove subtree in parallel if split is by partitions
-                                // subtree will be removed from partition in a separate task
+                            if self.split_on_parts {
+                                // do not try to remove subtree in parallel if splitted on parts
+                                // subtree will be removed from the part in a separate task
                                 continue 'outer;
                             } else {
                                 // Skip cell to remove it later in parallel
@@ -1111,7 +1111,7 @@ impl CellStorage {
             herd,
             &self.raw_cells_cache,
             split_at,
-            split_by_partitions,
+            split_on_parts,
         );
 
         std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
@@ -1256,18 +1256,18 @@ pub enum CellStorageError {
 }
 
 pub type ShardPrefix = u64;
-pub type ShardStatePartitionsMap = FastHashMap<HashBytes, ShardPrefix>;
+pub type ShardStatePartsMap = FastHashMap<HashBytes, ShardPrefix>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CellShardRouter {
-    /// Cell belongs to specified shard, stored in a separate partition
+    /// Cell belongs to specified shard, stored in a separate part
     Shard { shard_prefix: ShardPrefix },
     /// Defines that specified child is a root cell for shard accounts,
-    /// defines roots in descending cells to split on shard partitions
-    ChildIsShardAccountsRoot(u8, Arc<ShardStatePartitionsMap>),
+    /// defines roots in descending cells to split on shard parts
+    ChildIsShardAccountsRoot(u8, Arc<ShardStatePartsMap>),
     /// Cell belongs to shard accounts subtree,
-    /// defines roots in descending cells to split on shard partitions
-    SplitOnPartitionsAt(Arc<ShardStatePartitionsMap>),
+    /// defines roots in descending cells to split on shard parts
+    SplitOnPartsAt(Arc<ShardStatePartsMap>),
 }
 
 impl CellShardRouter {
@@ -1285,7 +1285,7 @@ impl CellShardRouter {
                 Self::ChildIsShardAccountsRoot(idx, map),
                 Self::ChildIsShardAccountsRoot(other_idx, other_map),
             ) if idx == other_idx && Arc::ptr_eq(map, other_map) => true,
-            (Self::SplitOnPartitionsAt(map), Self::SplitOnPartitionsAt(other_map))
+            (Self::SplitOnPartsAt(map), Self::SplitOnPartsAt(other_map))
                 if Arc::ptr_eq(map, other_map) =>
             {
                 true
@@ -1449,13 +1449,13 @@ impl StorageCell {
                             shard_prefix: *child_prefix,
                         })
                     } else {
-                        Some(CellShardRouter::SplitOnPartitionsAt(map.clone()))
+                        Some(CellShardRouter::SplitOnPartsAt(map.clone()))
                     }
                 } else {
                     None
                 }
             }
-            Some(CellShardRouter::SplitOnPartitionsAt(map)) => {
+            Some(CellShardRouter::SplitOnPartsAt(map)) => {
                 if let Some(child_shard) = map.get(&child_hash) {
                     Some(CellShardRouter::Shard {
                         shard_prefix: *child_shard,

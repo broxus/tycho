@@ -85,8 +85,8 @@ impl CoreStorage {
         .await?;
         let block_storage = Arc::new(block_storage);
 
-        // try init state partitions if configured
-        let (part_split_depth, storage_parts) = try_init_state_partitions(&ctx, &config).await?;
+        // try init state parts if configured
+        let (part_split_depth, storage_parts) = try_init_state_parts(&ctx, &config).await?;
 
         let shard_state_storage = ShardStateStorage::new(ShardStateStorageContext {
             cells_db: cells_db.clone(),
@@ -206,7 +206,7 @@ struct Inner {
     persistent_state_storage: PersistentStateStorage,
 }
 
-async fn try_init_state_partitions(
+async fn try_init_state_parts(
     ctx: &StorageContext,
     config: &CoreStorageConfig,
 ) -> Result<(u8, Arc<StoragePartsMap>)> {
@@ -227,8 +227,7 @@ async fn try_init_state_partitions(
                 DisplayShardPrefix(&shard_prefix)
             ))?,
         };
-        let cells_part_db: CellsPartDb =
-            ctx.open_preconfigured_partition(path, Some(shard_prefix))?;
+        let cells_part_db: CellsPartDb = ctx.open_preconfigured_part(path, Some(shard_prefix))?;
         cells_part_db.normalize_version()?;
         cells_part_db.apply_migrations().await?;
         storage_parts.insert(

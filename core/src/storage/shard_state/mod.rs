@@ -7,6 +7,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use bytes::Buf;
 use bytesize::ByteSize;
+pub(super) use cell_storage::CellShardRouter;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tokio::sync::OwnedMutexGuard;
@@ -22,6 +23,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
+pub(super) use self::cell_storage::ShardPrefix;
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
 use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CellsPartDb};
@@ -42,6 +44,7 @@ pub struct SplitAccountEntry {
 pub trait ShardStateStoragePart: Send + Sync {
     fn shard_prefix(&self) -> ShardPrefix;
     fn cell_storage(&self) -> &Arc<CellStorage>;
+    fn cells_db(&self) -> &CellsPartDb;
     fn store_accounts_subtree(
         self: Arc<Self>,
         block_id: &BlockId,
@@ -56,7 +59,7 @@ pub trait ShardStateStoragePart: Send + Sync {
         estimated_cell_count: usize,
         split_depth: u8,
     ) -> Result<usize>;
-    fn remove_outdated_states_in_partition(
+    fn remove_outdated_states_in_part(
         self: Arc<Self>,
         top_blocks: TopBlocks,
         remaining_split_depth: u8,
@@ -77,6 +80,10 @@ impl ShardStateStoragePart for ShardStateStoragePartImpl {
 
     fn cell_storage(&self) -> &Arc<CellStorage> {
         &self.cell_storage
+    }
+
+    fn cells_db(&self) -> &CellsPartDb {
+        &self.cells_db
     }
 
     fn blocking_store_accounts_subtree(
@@ -106,7 +113,7 @@ impl ShardStateStoragePart for ShardStateStoragePartImpl {
         Box::pin(fut)
     }
 
-    fn remove_outdated_states_in_partition(
+    fn remove_outdated_states_in_part(
         self: Arc<Self>,
         top_blocks: TopBlocks,
         remaining_split_depth: u8,
@@ -187,7 +194,7 @@ impl ShardStateStoragePartImpl {
 
         let entry = ShardStateEntry {
             root_hash: *cell.repr_hash(),
-            partitions: None,
+            parts_info: None,
         };
         batch.put_cf(&cf.bound(), block_id.to_vec(), entry.to_vec());
 
@@ -226,7 +233,7 @@ impl ShardStateStoragePartImpl {
                 removed_cells,
                 %block_id,
                 part_shard = %DisplayShardPrefix(&self.shard_prefix),
-                "removed state in partition",
+                "removed state in part",
             );
         })
         .await?;
@@ -263,8 +270,8 @@ pub struct ShardStateStorage {
 
     accounts_split_depth: u8,
 
-    /// The target split depth of shard accounts cells on partitions.
-    /// E.g. `3` -> `2^2=8` partitions
+    /// The target split depth of shard accounts cells on parts.
+    /// E.g. `3` -> `2^2=8` parts
     part_split_depth: u8,
     storage_parts: Option<Arc<StoragePartsMap>>,
 }
@@ -312,8 +319,16 @@ impl ShardStateStorage {
         }))
     }
 
-    fn uses_partitions(&self) -> bool {
+    fn uses_parts(&self) -> bool {
         self.part_split_depth > 0
+    }
+
+    pub fn cell_storage(&self) -> &Arc<CellStorage> {
+        &self.cell_storage
+    }
+
+    pub fn storage_parts(&self) -> Option<&Arc<StoragePartsMap>> {
+        self.storage_parts.as_ref()
     }
 
     pub fn metrics(&self) -> ShardStateStorageMetrics {
@@ -330,10 +345,6 @@ impl ShardStateStorage {
 
     pub fn min_ref_mc_state(&self) -> &MinRefMcStateTracker {
         &self.min_ref_mc_state
-    }
-
-    pub fn cell_storage(&self) -> &Arc<CellStorage> {
-        &self.cell_storage
     }
 
     pub async fn store_state(
@@ -383,7 +394,7 @@ impl ShardStateStorage {
 
         let estimated_merkle_update_size = hint.estimate_cell_count();
 
-        // calculate split depth to store accounts in partitions
+        // calculate split depth to store accounts in parts
         // or to store in main in parallel
         let (accounts_split_depth, remaining_split_depth) =
             calc_split_depth(self.accounts_split_depth, self.part_split_depth);
@@ -395,37 +406,38 @@ impl ShardStateStorage {
             FastHashMap::default()
         };
 
-        // compute partitions info for ShardStateEntry
-        let partitions_info =
-            if !block_id.is_masterchain() && self.uses_partitions() && !split_at.is_empty() {
-                let mut partitions = Vec::new();
-                for (hash, entry) in &split_at {
-                    if let Some(shard) = &entry.shard {
-                        partitions.push(ShardStatePartition {
-                            hash: *hash,
-                            prefix: shard.prefix(),
-                        });
-                    }
+        // compute parts info for ShardStateEntry
+        let parts_info = if !block_id.is_masterchain() && self.uses_parts() && !split_at.is_empty()
+        {
+            let mut parts_info = Vec::new();
+            for (hash, entry) in &split_at {
+                if let Some(shard) = &entry.shard {
+                    parts_info.push(ShardStatePartInfo {
+                        hash: *hash,
+                        prefix: shard.prefix(),
+                    });
                 }
-                partitions.sort_unstable();
-                Some(partitions)
-            } else {
-                None
-            };
+            }
+            parts_info.sort_unstable();
+            Some(parts_info)
+        } else {
+            None
+        };
 
-        // run store tasks in partitions
+        // run store tasks in parts
         let mut part_store_tasks = FuturesUnordered::new();
         if !handle.has_state_parts() && !block_id.is_masterchain() {
             tracing::debug!(accounts_split_depth, remaining_split_depth, ?split_at);
 
             if let Some(storage_parts) = &self.storage_parts {
-                // estimate partition cells count
+                // estimate part cells count
                 let denom = 1 << (self.part_split_depth.saturating_add(1));
                 let part_estimated_cells_count =
                     (estimated_merkle_update_size / denom.max(1)).max(1);
 
                 for v in split_at.values() {
                     if let Some(shard) = &v.shard
+                    // TODO: return error if storage part is not configured
                         && let Some(storage_part) = storage_parts.get(&shard.prefix())
                     {
                         let storage_part = storage_part.clone();
@@ -462,7 +474,7 @@ impl ShardStateStorage {
             let mut already_stored = false;
             if let Some(value) = self.cells_db.shard_states().get(block_id.to_vec())? {
                 let entry = ShardStateEntry::from_slice(value.as_ref());
-                if entry.root_hash == root_hash && entry.partitions == partitions_info {
+                if entry.root_hash == root_hash && entry.parts_info == parts_info {
                     already_stored = true;
                 }
             }
@@ -478,7 +490,7 @@ impl ShardStateStorage {
                 let raw_db = self.cells_db.rocksdb().clone();
                 let cf = self.cells_db.shard_states().get_unbounded_cf();
                 let cell_storage = self.cell_storage.clone();
-                let uses_partitions = self.uses_partitions();
+                let uses_parts = self.uses_parts();
                 let gc_lock = gc_lock.take();
                 (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
                     let estimated_merkle_update_size = hint.estimate_cell_count();
@@ -500,7 +512,7 @@ impl ShardStateStorage {
                             root_cell.as_ref(),
                             &mut batch,
                             split_at,
-                            uses_partitions,
+                            uses_parts,
                             estimated_merkle_update_size,
                         )?
                     };
@@ -509,7 +521,7 @@ impl ShardStateStorage {
 
                     let entry = ShardStateEntry {
                         root_hash,
-                        partitions: partitions_info,
+                        parts_info,
                     };
                     batch.put_cf(&cf.bound(), block_id.to_vec(), entry.to_vec());
 
@@ -537,7 +549,7 @@ impl ShardStateStorage {
             }
         }
 
-        // wait for all store tasks in partitions
+        // wait for all store tasks in parts
         let mut parts_store_failed = false;
         while let Some(store_res) = part_store_tasks.next().await {
             match store_res {
@@ -638,12 +650,12 @@ impl ShardStateStorage {
         metrics::gauge!("tycho_storage_state_max_epoch").set(max_known_epoch);
 
         if !block_id.shard.is_masterchain() {
-            init_shard_partitions_router(
+            init_cell_shard_router(
                 &mut root,
                 &self.cell_storage,
                 ref_by_mc_seqno,
                 &block_id.shard,
-                shard_state.partitions,
+                shard_state.parts_info,
             )?;
         }
 
@@ -681,23 +693,21 @@ impl ShardStateStorage {
             target_block_id = %top_blocks.mc_block,
             "started states GC",
         );
-        // TODO: add overall metric for main db and partitions
+        // TODO: add overall metric for main db and parts
         let started_at = Instant::now();
 
         // calculate split depth
         let (accounts_split_depth, remaining_split_depth) =
             calc_split_depth(self.accounts_split_depth, self.part_split_depth);
 
-        // run remove tasks in partitions
+        // run remove tasks in parts
         let mut part_remove_tasks = FuturesUnordered::new();
         if let Some(storage_parts) = &self.storage_parts {
             for (_, storage_part) in storage_parts.iter() {
                 let storage_part = storage_part.clone();
                 part_remove_tasks.push(tokio::spawn(
-                    storage_part.remove_outdated_states_in_partition(
-                        top_blocks.clone(),
-                        remaining_split_depth,
-                    ),
+                    storage_part
+                        .remove_outdated_states_in_part(top_blocks.clone(), remaining_split_depth),
                 ));
             }
         }
@@ -722,7 +732,7 @@ impl ShardStateStorage {
         metrics::counter!("tycho_storage_state_gc_count").increment(cx.removed_states as u64);
         metrics::counter!("tycho_storage_state_gc_cells_count").increment(cx.removed_cells as u64);
 
-        // wait for all remove tasks in partitions
+        // wait for all remove tasks in parts
         while let Some(remove_res) = part_remove_tasks.next().await {
             match remove_res {
                 Ok(Ok(removed_cells)) => {
@@ -731,13 +741,13 @@ impl ShardStateStorage {
                 Ok(Err(remove_error)) => {
                     tracing::error!(
                         ?remove_error,
-                        "error in remove_outdated_states_in_partition method"
+                        "error in remove_outdated_states_in_part method"
                     );
                 }
                 Err(join_error) => {
                     tracing::error!(
                         ?join_error,
-                        "error executing remove_outdated_states_in_partition task"
+                        "error executing remove_outdated_states_in_part task"
                     );
                 }
             }
@@ -846,7 +856,7 @@ impl ShardStateStorage {
 
 #[derive(Clone)]
 struct RemoveOutdatedStatesContext {
-    in_partition: bool,
+    in_part: bool,
 
     cells_db: CellStorageDb,
     cell_storage: Arc<CellStorage>,
@@ -862,14 +872,14 @@ struct RemoveOutdatedStatesContext {
 
 impl RemoveOutdatedStatesContext {
     fn new(
-        in_partition: bool,
+        in_part: bool,
         cells_db: CellStorageDb,
         cell_storage: Arc<CellStorage>,
         split_depth: u8,
         gc_lock: Arc<tokio::sync::Mutex<()>>,
     ) -> Self {
         Self {
-            in_partition,
+            in_part,
             cells_db,
             cell_storage,
             split_depth,
@@ -939,17 +949,16 @@ impl RemoveOutdatedStatesContext {
             let root_cell = Cell::from(self.cell_storage.load_cell(&entry.root_hash, 0)? as Arc<_>);
 
             // try to split state
-            let (split_at, split_by_partitions) = if self.in_partition {
-                // in partition we split subtree for parallel processing
+            let (split_at, split_on_parts) = if self.in_part {
+                // in the part we split subtree for parallel processing
                 let split_at = split_accounts_subtree(root_cell, self.split_depth)?;
                 let split_at: FastHashSet<_> = split_at.into_keys().collect();
                 (split_at, false)
-            } else if let Some(partitions_info) = entry.partitions
-                && !partitions_info.is_empty()
+            } else if let Some(parts_info) = entry.parts_info
+                && !parts_info.is_empty()
             {
                 // in main tree we use stored split when exists
-                let split_at: FastHashSet<_> =
-                    partitions_info.into_iter().map(|p| p.hash).collect();
+                let split_at: FastHashSet<_> = parts_info.into_iter().map(|p| p.hash).collect();
                 (split_at, true)
             } else {
                 // otherwise in main tree we split for parallel processing
@@ -958,12 +967,8 @@ impl RemoveOutdatedStatesContext {
                 (split_at, false)
             };
 
-            self.cell_storage.remove_cell_mt(
-                &alloc,
-                &entry.root_hash,
-                split_at,
-                split_by_partitions,
-            )?
+            self.cell_storage
+                .remove_cell_mt(&alloc, &entry.root_hash, split_at, split_on_parts)?
         };
 
         in_mem_remove.finish();
@@ -1059,7 +1064,7 @@ impl StoreStateHint {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ShardStatePartition {
+pub struct ShardStatePartInfo {
     pub hash: HashBytes,
     pub prefix: u64,
 }
@@ -1067,17 +1072,17 @@ pub struct ShardStatePartition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShardStateEntry {
     pub root_hash: HashBytes,
-    pub partitions: Option<Vec<ShardStatePartition>>,
+    pub parts_info: Option<Vec<ShardStatePartInfo>>,
 }
 
 impl StoredValue for ShardStateEntry {
     /// 32 bytes root hash,
-    /// 2 bytes partitions map size
+    /// 2 bytes parts info map size
     /// (
-    ///   32 bytes partition root cell hash +
+    ///   32 bytes part root cell hash +
     ///   8 bytes shard ident prefix
-    /// ) * 16 max partitions
-    /// = 640 bytes partitions map
+    /// ) * 16 max parts
+    /// = 640 bytes parts info map
     const SIZE_HINT: usize = 32 + 2 + (32 + 8) * 16;
 
     type OnStackSlice = [u8; Self::SIZE_HINT];
@@ -1085,18 +1090,18 @@ impl StoredValue for ShardStateEntry {
     fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
         buffer.write_raw_slice(self.root_hash.as_slice());
 
-        if let Some(partitions) = self.partitions.as_ref() {
-            if partitions.is_empty() {
+        if let Some(parts_info) = self.parts_info.as_ref() {
+            if parts_info.is_empty() {
                 return;
             }
 
-            let count = partitions.len() as u16;
-            assert!(count <= 16, "too many shard state partitions");
+            let count = parts_info.len() as u16;
+            assert!(count <= 16, "too many shard state parts");
             buffer.write_raw_slice(&count.to_be_bytes());
 
-            for partition in partitions {
-                buffer.write_raw_slice(partition.hash.as_slice());
-                buffer.write_raw_slice(&partition.prefix.to_be_bytes());
+            for part_info in parts_info {
+                buffer.write_raw_slice(part_info.hash.as_slice());
+                buffer.write_raw_slice(&part_info.prefix.to_be_bytes());
             }
         }
     }
@@ -1113,7 +1118,7 @@ impl StoredValue for ShardStateEntry {
         if reader.is_empty() {
             return Self {
                 root_hash,
-                partitions: None,
+                parts_info: None,
             };
         }
 
@@ -1123,11 +1128,11 @@ impl StoredValue for ShardStateEntry {
         if count == 0 {
             return Self {
                 root_hash,
-                partitions: None,
+                parts_info: None,
             };
         }
 
-        let mut partitions = Vec::with_capacity(count as usize);
+        let mut parts_info = Vec::with_capacity(count as usize);
         for _ in 0..count {
             debug_assert!(reader.remaining() >= 32 + 8);
 
@@ -1135,12 +1140,12 @@ impl StoredValue for ShardStateEntry {
             *reader = &reader[32..];
 
             let prefix = reader.get_u64();
-            partitions.push(ShardStatePartition { hash, prefix });
+            parts_info.push(ShardStatePartInfo { hash, prefix });
         }
 
         Self {
             root_hash,
-            partitions: Some(partitions),
+            parts_info: Some(parts_info),
         }
     }
 }
@@ -1163,9 +1168,9 @@ pub enum ShardStateStorageError {
 }
 
 /// Calculates `(target_split_depth, remaining_split_depth)`:
-/// * `target_split_depth` - target accounts split depth. Returns `part_split_depth` when `part_split_depth > 0` (partitions used).
-/// * `remaining_split_depth` - remaining accounts split depth inside partitions when partitions used.
-///   When we split accounts on partitions we can split accounts inside partition more and store in parallel.
+/// * `target_split_depth` - target accounts split depth. Returns `part_split_depth` when `part_split_depth > 0` (parts used).
+/// * `remaining_split_depth` - remaining accounts split depth inside parts when parts used.
+///   When we split accounts on parts we can split accounts inside the part more and store in parallel.
 fn calc_split_depth(accounts_split_depth: u8, part_split_depth: u8) -> (u8, u8) {
     let target_split_depth = if part_split_depth > 0 {
         part_split_depth
@@ -1227,24 +1232,21 @@ pub fn split_shard_accounts(
 }
 
 #[tracing::instrument(skip_all)]
-fn init_shard_partitions_router(
+fn init_cell_shard_router(
     root_cell: &mut Cell,
     cell_storage: &Arc<CellStorage>,
     ref_by_mc_seqno: u32,
     state_shard: &ShardIdent,
-    partitions_info: Option<Vec<ShardStatePartition>>,
+    parts_info: Option<Vec<ShardStatePartInfo>>,
 ) -> Result<()> {
-    // get partitions info
-    let partitions_info = match partitions_info {
+    // get parts info
+    let parts_info = match parts_info {
         Some(p) if !p.is_empty() => p,
         _ => return Ok(()),
     };
 
     // build router map
-    let split_at: FastHashMap<_, _> = partitions_info
-        .into_iter()
-        .map(|p| (p.hash, p.prefix))
-        .collect();
+    let split_at: FastHashMap<_, _> = parts_info.into_iter().map(|p| (p.hash, p.prefix)).collect();
 
     tracing::debug!(%state_shard, ?split_at);
 
