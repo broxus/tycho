@@ -3,20 +3,21 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ahash::HashSetExt;
 use bytes::Bytes;
-use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
+use futures_util::{StreamExt, future};
 use rand::RngCore;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tracing::Instrument;
 use tycho_network::PeerId;
-use tycho_util::FastHashMap;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run_fifo;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, TaskResult};
@@ -36,6 +37,7 @@ pub struct Downloader {
 }
 
 pub enum DownloadResult {
+    NotFound,
     Verified(Point),
     IllFormed(Point, IllFormedReason),
 }
@@ -126,7 +128,7 @@ impl Downloader {
         dependers_rx: mpsc::UnboundedReceiver<PeerId>,
         verified_broadcast: oneshot::Receiver<DownloadResult>,
         ctx: DownloadCtx,
-    ) -> TaskResult<Option<DownloadResult>> {
+    ) -> TaskResult<DownloadResult> {
         let _guard = self.inner.limiter.enter(point_id.round).await;
 
         if point_id.round + ctx.conf().consensus.min_front_rounds()
@@ -148,7 +150,7 @@ impl Downloader {
         dependers_rx: mpsc::UnboundedReceiver<PeerId>,
         broadcast_result: oneshot::Receiver<DownloadResult>,
         ctx: DownloadCtx,
-    ) -> TaskResult<Option<DownloadResult>> {
+    ) -> TaskResult<DownloadResult> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_download_task_time");
         ctx.meter_start(point_id);
         let entered_span = ctx.span().clone().entered();
@@ -185,7 +187,8 @@ impl Downloader {
             query: DownloadIdQuery::new(point_id),
             point_id: *point_id,
             peer_count,
-            not_found: 0, // this node is +1 to 2F
+            // this node is +1 to 2F; count every peer uniquely, as they may be removed and resolved
+            not_found: FastHashSet::with_capacity(peer_count.majority_of_others()),
             updates,
             undone_peers,
             downloading: FuturesUnordered::new(),
@@ -198,7 +201,7 @@ impl Downloader {
 
         DownloadCtx::meter_task::<T>(&task);
 
-        if downloaded.is_none() {
+        if matches!(downloaded, DownloadResult::NotFound) {
             tracing::warn!(
                 parent: task.ctx.span(),
                 "not downloaded",
@@ -220,7 +223,7 @@ struct DownloadTask<T> {
     point_id: PointId,
 
     peer_count: PeerCount,
-    not_found: u8, // count only responses considered reliable
+    not_found: FastHashSet<PeerId>, // count only responses considered reliable
 
     updates: broadcast::Receiver<(PeerId, PeerState)>,
 
@@ -242,7 +245,7 @@ impl<T: DownloadType> DownloadTask<T> {
         &mut self,
         mut dependers_rx: mpsc::UnboundedReceiver<PeerId>,
         mut broadcast_result: oneshot::Receiver<DownloadResult>,
-    ) -> TaskResult<Option<DownloadResult>> {
+    ) -> TaskResult<DownloadResult> {
         let mut interval = tokio::time::interval(Duration::from_millis(
             self.ctx.conf().consensus.download_retry_millis.get() as _,
         ));
@@ -250,28 +253,27 @@ impl<T: DownloadType> DownloadTask<T> {
         // give equal time to every attempt, ignoring local runtime delays; do not `Burst` requests
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        let maybe_found = loop {
+        loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
-                bcast_result = &mut broadcast_result => break bcast_result.ok(),
+                bcast_result = &mut broadcast_result => break bcast_result.map_err(|_e| Cancelled()),
                 Some(depender) = dependers_rx.recv() => self.add_depender(&depender),
                 update = self.updates.recv() => self.match_peer_updates(update)?,
-                Some(out) = self.downloading.next() =>
-                    match self.verify(out).await {
-                        Some(found) => break Some(found),
-                        None => if self.not_found as usize >= self.peer_count.majority_of_others() {
-                            break None;
-                        } else if self.downloading.is_empty() {
-                            interval.reset_immediately(); // restart interval and tick immediately
-                        }
-                    },
+                Some(out) = self.downloading.next() => {
+                    if let Some(result) = self.verify(out, &mut broadcast_result).await? {
+                        break Ok(result);
+                    } else if self.not_found.len() >= self.peer_count.majority_of_others() {
+                        break Ok(DownloadResult::NotFound);
+                    } else if self.downloading.is_empty() {
+                        interval.reset_immediately(); // restart interval and tick immediately
+                    }
+                },
                 // most rare arm to make progress despite slow responding peers
                 _ = interval.tick() => self.download_random(), // first tick fires immediately
             }
-        };
+        }
         // on exit futures are dropped and receivers are cleaned,
         // senders will stay in `DagPointFuture` that owns current task
-        Ok(maybe_found)
     }
 
     fn add_depender(&mut self, peer_id: &PeerId) {
@@ -340,7 +342,11 @@ impl<T: DownloadType> DownloadTask<T> {
         }));
     }
 
-    async fn verify(&mut self, out: QueryFutureOutput) -> Option<DownloadResult> {
+    async fn verify(
+        &mut self,
+        out: QueryFutureOutput,
+        broadcast_result: &mut oneshot::Receiver<DownloadResult>,
+    ) -> TaskResult<Option<DownloadResult>> {
         // remove peer status: will not repeat request to the peer in this download task
         enum LastResponse {
             Point(Point),
@@ -351,10 +357,19 @@ impl<T: DownloadType> DownloadTask<T> {
 
         let last_response = match out.result {
             Ok(DownloadResponse::Defined(bytes)) => {
-                match rayon_run_fifo(|| Point::parse(bytes.into())).await {
-                    Ok(Ok(point)) => LastResponse::Point(point),
-                    Ok(Err(bad_point)) => LastResponse::BadPoint(bad_point),
-                    Err(tl_error) => LastResponse::TlError(tl_error),
+                let parse = std::pin::pin!(rayon_run_fifo(|| Point::parse(bytes.into())));
+                match future::select(broadcast_result, parse).await {
+                    future::Either::Left((bcast_result, _)) => {
+                        return match bcast_result {
+                            Ok(download_result) => Ok(Some(download_result)),
+                            Err(_cancelled) => Err(Cancelled()),
+                        };
+                    }
+                    future::Either::Right((parsed, _)) => match parsed {
+                        Ok(Ok(point)) => LastResponse::Point(point),
+                        Ok(Err(bad_point)) => LastResponse::BadPoint(bad_point),
+                        Err(tl_error) => LastResponse::TlError(tl_error),
+                    },
                 }
             }
             Ok(DownloadResponse::DefinedNone) => LastResponse::DefinedNone,
@@ -367,7 +382,7 @@ impl<T: DownloadType> DownloadTask<T> {
                 // apply the same retry strategy as for network errors
                 status.failed_queries = status.failed_queries.saturating_add(1);
                 tracing::trace!(peer = display(out.peer_id.alt()), "try later");
-                return None;
+                return Ok(None);
             }
             Err(QueryError::Network(network_err)) => {
                 let Some(status) = self.undone_peers.get_mut(&out.peer_id) else {
@@ -381,7 +396,7 @@ impl<T: DownloadType> DownloadTask<T> {
                     error = display(network_err),
                     "network error",
                 );
-                return None;
+                return Ok(None);
             }
         };
 
@@ -394,9 +409,9 @@ impl<T: DownloadType> DownloadTask<T> {
             out.peer_id.alt(),
         );
 
-        match last_response {
+        Ok(match last_response {
             LastResponse::DefinedNone => {
-                self.not_found = self.not_found.saturating_add(1);
+                self.not_found.insert(out.peer_id);
                 DownloadCtx::meter_not_found();
                 tracing::debug!(
                     peer = display(out.peer_id.alt()),
@@ -406,8 +421,7 @@ impl<T: DownloadType> DownloadTask<T> {
                 None
             }
             LastResponse::TlError(tl_error) => {
-                // reliable peer won't return unverifiable point
-                self.not_found = self.not_found.saturating_add(1);
+                self.not_found.insert(out.peer_id);
                 DownloadCtx::meter_unreliable();
                 tracing::warn!(
                     result = display(&tl_error),
@@ -418,7 +432,7 @@ impl<T: DownloadType> DownloadTask<T> {
             }
             LastResponse::BadPoint(bad_point) => {
                 // reliable peer won't return unverifiable point
-                self.not_found = self.not_found.saturating_add(1);
+                self.not_found.insert(out.peer_id);
                 DownloadCtx::meter_unreliable();
                 tracing::error!(
                     result = display(&bad_point),
@@ -428,7 +442,7 @@ impl<T: DownloadType> DownloadTask<T> {
                 None
             }
             LastResponse::Point(point) if point.info().id() != self.point_id => {
-                self.not_found = self.not_found.saturating_add(1);
+                self.not_found.insert(out.peer_id);
                 DownloadCtx::meter_unreliable();
                 tracing::error!(
                     peer_id = display(out.peer_id.alt()),
@@ -462,7 +476,7 @@ impl<T: DownloadType> DownloadTask<T> {
                     }
                 }
             }
-        }
+        })
     }
 
     fn match_peer_updates(
