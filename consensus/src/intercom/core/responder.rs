@@ -144,13 +144,13 @@ impl ResponderInner {
             }
         };
 
-        let raw_query_tag = raw_query.tag;
+        let tag = raw_query.tag;
 
         let medium_query = match raw_query.parse() {
             Ok(medium_query) => medium_query,
             Err(tl_error) => {
                 tracing::warn!(
-                    tag = ?raw_query_tag,
+                    ?tag,
                     peer_id = display(peer_id.alt()),
                     error = %tl_error,
                     "bad request",
@@ -162,20 +162,34 @@ impl ResponderInner {
         let query = match medium_query {
             QueryRequestMedium::Broadcast(bytes) => {
                 match rayon_run_fifo(|| Point::parse(bytes.into())).await {
-                    Ok(Ok(Ok(point))) => QueryRequest::Broadcast(point, None),
-                    Ok(Ok(Err((point, issue)))) => QueryRequest::Broadcast(point, Some(issue)),
-                    Ok(Err(bad_point)) => {
+                    Ok(Ok(Ok(point))) if point.info().author() == peer_id => {
+                        QueryRequest::Broadcast(point, None)
+                    }
+                    Ok(Ok(Ok(wrong_point))) => {
+                        let wrong_id = wrong_point.info().id();
                         tracing::error!(
-                            tag = ?raw_query_tag,
+                            ?tag,
                             peer_id = display(peer_id.alt()),
-                            error = %bad_point,
+                            author = display(wrong_id.author.alt()),
+                            round = wrong_id.round.0,
+                            digest = display(wrong_id.digest.alt()),
+                            "broadcasted other's point",
+                        );
+                        return None;
+                    }
+                    Ok(Ok(Err((point, issue)))) => QueryRequest::Broadcast(point, Some(issue)),
+                    Ok(Err(integrity_err)) => {
+                        tracing::error!(
+                            ?tag,
+                            peer_id = display(peer_id.alt()),
+                            error = %integrity_err,
                             "bad point",
                         );
                         return None;
                     }
                     Err(tl_error) => {
                         tracing::warn!(
-                            tag = ?raw_query_tag,
+                            ?tag,
                             peer_id = display(peer_id.alt()),
                             error = %tl_error,
                             "bad request",
@@ -191,7 +205,6 @@ impl ResponderInner {
         Some(match query {
             QueryRequest::Broadcast(point, maybe_issue) => {
                 let reached_threshold = state.broadcast_filter.add_check_threshold(
-                    peer_id,
                     &point,
                     maybe_issue,
                     &state.store,

@@ -88,13 +88,6 @@ impl ByAuthorItem {
         }
     }
 }
-#[derive(thiserror::Error, Debug)]
-enum CheckError {
-    #[error("sender {} is not author", .0.alt())]
-    SenderNotAuthor(PeerId),
-    #[error("failed to verify: {0}")]
-    Fail(VerifyFailReason),
-}
 
 #[derive(Default)]
 struct CacheInfo {
@@ -128,7 +121,6 @@ impl BroadcastFilter {
     #[allow(clippy::too_many_arguments)]
     pub fn add_check_threshold(
         &self,
-        sender: &PeerId,
         point: &Point,
         maybe_issue: Option<StructureIssue>,
         store: &MempoolStore,
@@ -143,9 +135,7 @@ impl BroadcastFilter {
         // have to cache every point when the node lags behind consensus;
         let prune_after = head.next().round() + NodeConfig::get().cache_future_broadcasts_rounds;
 
-        let checked = if sender != id.author {
-            Err(CheckError::SenderNotAuthor(*sender))
-        } else if let Some(issue) = maybe_issue {
+        let checked = if let Some(issue) = maybe_issue {
             let reason = IllFormedReason::Structure(issue);
             Ok(if id.round > prune_after {
                 ByAuthorItem::IllFormedPruned(id.digest, reason)
@@ -164,7 +154,7 @@ impl BroadcastFilter {
                 } else {
                     ByAuthorItem::IllFormed(point.clone(), reason)
                 }),
-                Err(VerifyError::Fail(reason)) => Err(CheckError::Fail(reason)),
+                Err(VerifyError::Fail(reason)) => Err(reason),
             }
         };
 
@@ -210,7 +200,7 @@ impl BroadcastFilter {
     fn cache(
         &self,
         id: &PointId,
-        checked: &Result<ByAuthorItem, CheckError>,
+        checked: &Result<ByAuthorItem, VerifyFailReason>,
         store: &MempoolStore,
         peer_schedule: &PeerSchedule,
         downloader: &Downloader,
