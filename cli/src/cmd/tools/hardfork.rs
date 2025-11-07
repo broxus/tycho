@@ -260,10 +260,11 @@ impl ShardStateHandler {
         let storage = self.storage.clone();
         let output = self.output_path.clone();
         tokio::task::spawn_blocking(move || {
-            let CellStorageDb::Main(db) = storage.shard_state_storage().cell_storage().db() else {
+            let CellStorageDb::Main(db) = storage.shard_state_storage().cell_storage().db().clone()
+            else {
                 unreachable!("main cell storage always use main cells db")
             };
-            let writer = ShardStateWriter::new(db, &output, handle.id());
+            let writer = ShardStateWriter::new(db, &output, handle.id(), None);
 
             let mut progress_bar = ProgressBar::builder()
                 .exact_unit("bytes")

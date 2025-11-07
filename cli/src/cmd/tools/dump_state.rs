@@ -181,6 +181,7 @@ impl Dumper {
     ) -> Result<ShardStateStuff> {
         println!("Dumping data for block {}", block_id);
         if let Err(e) = self.dump_block_data(block_id).await {
+            // TODO: consider hardfork
             if block_id.seqno == 0 {
                 println!(
                     "Skipping block data dump for zerostate block {}: {}",
@@ -213,10 +214,16 @@ impl Dumper {
         master_block_seqno: u32,
     ) -> Result<ShardStateStuff> {
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
-        let CellStorageDb::Main(db) = self.storage.shard_state_storage().cell_storage().db() else {
+        let CellStorageDb::Main(db) = self
+            .storage
+            .shard_state_storage()
+            .cell_storage()
+            .db()
+            .clone()
+        else {
             unreachable!("main cell storage always use main cells db")
         };
-        let writer = ShardStateWriter::new(db, &dir, block_id);
+        let writer = ShardStateWriter::new(db, &dir, block_id, None);
         let ref_by_mc_seqno = self
             .storage
             .block_handle_storage()
@@ -238,6 +245,7 @@ impl Dumper {
 
     async fn dump_queue_state(&self, block_id: &BlockId) -> Result<()> {
         println!("Dumping queue state for block {}", block_id);
+        // TODO: consider hardfork
         if block_id.seqno == 0 {
             // For zerostate blocks, there is no queue state to dump
             return Ok(());

@@ -87,7 +87,7 @@ async fn persistent_shard_state() -> Result<()> {
 
     let read_verify_state = || async {
         let persistent_state_data = persistent_states
-            .read_state_part(zerostate.block_id(), 0, PersistentStateKind::Shard)
+            .read_state_chunk(zerostate.block_id(), 0, PersistentStateKind::Shard)
             .await
             .unwrap();
 
@@ -103,10 +103,7 @@ async fn persistent_shard_state() -> Result<()> {
         let cached = persistent_states
             .inner
             .descriptor_cache
-            .get(&CacheKey {
-                block_id: zerostate_id,
-                kind: PersistentStateKind::Shard,
-            })
+            .get(&CacheKey::from((zerostate_id, PersistentStateKind::Shard)))
             .unwrap();
         assert_eq!(cached.mc_seqno, expected_mc_seqno);
     };
@@ -116,7 +113,11 @@ async fn persistent_shard_state() -> Result<()> {
     let expected_set = FastHashSet::from_iter([zerostate_id]);
 
     {
-        let index = persistent_states.inner.mc_seqno_to_block_ids.lock();
+        let index = persistent_states
+            .inner
+            .descriptor_cache
+            .mc_seqno_to_block_ids()
+            .lock();
         assert_eq!(index.get(&0), Some(&expected_set));
     }
 
@@ -143,10 +144,15 @@ async fn persistent_shard_state() -> Result<()> {
     }
 
     // Check if state file was reused
-    let file_name = PersistentStateKind::Shard.make_file_name(&zerostate_id);
-    let prev_file = persistent_states.inner.mc_states_dir(0).file(&file_name);
+    let file_name = PersistentStateKind::Shard.make_file_name(&zerostate_id, None);
+    let prev_file = persistent_states
+        .inner
+        .descriptor_cache
+        .mc_states_dir(0)
+        .file(&file_name);
     let new_file = persistent_states
         .inner
+        .descriptor_cache
         .mc_states_dir(new_mc_seqno)
         .file(file_name);
 
@@ -157,7 +163,11 @@ async fn persistent_shard_state() -> Result<()> {
     verify_descriptor_cache(new_mc_seqno);
 
     {
-        let index = persistent_states.inner.mc_seqno_to_block_ids.lock();
+        let index = persistent_states
+            .inner
+            .descriptor_cache
+            .mc_seqno_to_block_ids()
+            .lock();
         assert!(!index.contains_key(&0));
         assert_eq!(index.get(&new_mc_seqno), Some(&expected_set));
     }
@@ -172,7 +182,11 @@ async fn persistent_shard_state() -> Result<()> {
     let new_persistent_states = new_storage.persistent_state_storage();
 
     {
-        let index = new_persistent_states.inner.mc_seqno_to_block_ids.lock();
+        let index = new_persistent_states
+            .inner
+            .descriptor_cache
+            .mc_seqno_to_block_ids()
+            .lock();
         assert!(!index.contains_key(&0));
         assert_eq!(index.get(&new_mc_seqno), Some(&expected_set));
     }
@@ -180,10 +194,7 @@ async fn persistent_shard_state() -> Result<()> {
     let new_cached = new_persistent_states
         .inner
         .descriptor_cache
-        .get(&CacheKey {
-            block_id: zerostate_id,
-            kind: PersistentStateKind::Shard,
-        })
+        .get(&CacheKey::from((zerostate_id, PersistentStateKind::Shard)))
         .unwrap()
         .clone();
     assert_eq!(new_cached.mc_seqno, new_mc_seqno);
@@ -299,6 +310,7 @@ async fn persistent_queue_state_read_write() -> Result<()> {
     let persistent_states = storage.persistent_state_storage();
     let states_dir = persistent_states
         .inner
+        .descriptor_cache
         .prepare_persistent_states_dir(target_mc_seqno)?;
 
     let target_header = QueueStateHeader {
@@ -329,16 +341,19 @@ async fn persistent_queue_state_read_write() -> Result<()> {
     )
     .write(None)?;
 
-    persistent_states.inner.cache_state(
-        target_mc_seqno,
-        &target_block_id,
-        PersistentStateKind::Queue,
-    )?;
+    persistent_states
+        .inner
+        .descriptor_cache
+        .cache_queue_state(target_mc_seqno, &target_block_id)?;
 
     // Check storage state
     let expected_set = FastHashSet::from_iter([target_block_id]);
     {
-        let index = persistent_states.inner.mc_seqno_to_block_ids.lock();
+        let index = persistent_states
+            .inner
+            .descriptor_cache
+            .mc_seqno_to_block_ids()
+            .lock();
         assert!(!index.contains_key(&0));
         assert_eq!(index.get(&target_mc_seqno), Some(&expected_set));
     }
@@ -347,17 +362,17 @@ async fn persistent_queue_state_read_write() -> Result<()> {
         let cached = persistent_states
             .inner
             .descriptor_cache
-            .get(&CacheKey {
-                block_id: target_block_id,
-                kind: PersistentStateKind::Queue,
-            })
+            .get(&CacheKey::from((
+                target_block_id,
+                PersistentStateKind::Queue,
+            )))
             .unwrap()
             .clone();
         assert_eq!(cached.mc_seqno, target_mc_seqno);
 
         let written = tokio::fs::read(
             states_dir
-                .file(PersistentStateKind::Queue.make_file_name(&target_block_id))
+                .file(PersistentStateKind::Queue.make_file_name(&target_block_id, None))
                 .path(),
         )
         .await?;

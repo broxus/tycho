@@ -35,10 +35,10 @@ pub struct CoreStorageConfig {
     /// States GC is disabled if this field is `None`.
     pub states_gc: Option<StatesGcConfig>,
 
-    /// State partitions config.
+    /// State parts config.
     ///
-    /// State partitioning is disabled if this field is `None`.
-    pub state_parts: Option<StatePartitionsConfig>,
+    /// State split is disabled if this field is `None`.
+    pub state_parts: Option<StatePartsConfig>,
 
     /// Blocks GC config.
     ///
@@ -217,13 +217,13 @@ impl Default for BlobDbConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct StatePartitionsConfig {
-    /// State partitions split depth
+pub struct StatePartsConfig {
+    /// State parts split depth
     ///
-    /// Default: 0 -> 2^0 = 1 partition, no split.
+    /// Default: 0 -> 2^0 = 1 part, no split.
     pub split_depth: u8,
 
-    /// Map of state partitions directories.
+    /// Map of state parts directories.
     ///
     /// Default: empty, relative paths will be generated.
     #[serde(with = "serde_shard_part_dirs_map")]
@@ -297,7 +297,7 @@ mod tests {
     use super::*;
 
     #[test]
-    pub fn test_state_partitions_config() {
+    pub fn test_state_parts_config() {
         let test: &str = r#"{
             "split_depth": 2,
             "part_dirs": {
@@ -308,13 +308,13 @@ mod tests {
             }
         }"#;
 
-        let mut value = StatePartitionsConfig::default();
+        let mut value = StatePartsConfig::default();
         value
             .part_dirs
             .insert(234567890, "/dev1/node/data/cells-part".into());
         println!("test: {:?}", test);
 
-        let parsed: StatePartitionsConfig = serde_json::from_str(test).unwrap();
+        let parsed: StatePartsConfig = serde_json::from_str(test).unwrap();
         println!("parsed: {:?}", parsed);
 
         assert_eq!(parsed.split_depth, 2);
@@ -325,7 +325,7 @@ mod tests {
         let serialized = serde_json::to_string(&parsed).unwrap();
         println!("test serialized: {:?}", serialized);
 
-        let mut value = StatePartitionsConfig::default();
+        let mut value = StatePartsConfig::default();
         value
             .part_dirs
             .insert(234567890, "/dev99/node/data/cells-part".into());
@@ -333,7 +333,7 @@ mod tests {
         let test = serde_json::to_string(&value).unwrap();
         println!("test: {:?}", test);
 
-        let parsed: StatePartitionsConfig = serde_json::from_str(&test).unwrap();
+        let parsed: StatePartsConfig = serde_json::from_str(&test).unwrap();
         println!("parsed: {:?}", parsed);
 
         assert_eq!(parsed, value);

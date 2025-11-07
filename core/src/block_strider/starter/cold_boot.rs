@@ -771,7 +771,7 @@ impl StarterInner {
         block_id: &BlockId,
         is_zerostate: bool,
     ) -> Result<(BlockHandle, ShardStateStuff)> {
-        enum StoreZeroStateFrom {
+        enum StorePersistentStateFrom {
             File(FileBuilder),
             State(ShardStateStuff),
         }
@@ -796,20 +796,25 @@ impl StarterInner {
         };
 
         let mc_seqno = mc_block_id.seqno;
-        let try_save_persistent = |block_handle: &BlockHandle, from: StoreZeroStateFrom| {
+        let try_save_persistent = |block_handle: &BlockHandle, from: StorePersistentStateFrom| {
             let block_handle = block_handle.clone();
             async move {
                 match from {
                     // Fast reuse the downloaded file if possible
-                    StoreZeroStateFrom::File(mut state_file) => {
+                    StorePersistentStateFrom::File(mut state_file) => {
                         // Reuse downloaded (and validated) file as is.
                         let state_file = state_file.read(true).open()?;
                         persistent_states
-                            .store_shard_state_file(mc_seqno, &block_handle, state_file)
+                            .store_shard_state_file(
+                                mc_seqno,
+                                &block_handle,
+                                state_file,
+                                None, // TODO: should pass actual parts info
+                            )
                             .await
                     }
                     // Possibly slow full state traversal
-                    StoreZeroStateFrom::State(state) => {
+                    StorePersistentStateFrom::State(state) => {
                         // Store zerostate as is
                         persistent_states
                             .store_shard_state(
@@ -835,9 +840,9 @@ impl StarterInner {
 
             if !handle.has_persistent_shard_state() {
                 let from = if state_file.exists() {
-                    StoreZeroStateFrom::File(state_file)
+                    StorePersistentStateFrom::File(state_file)
                 } else {
-                    StoreZeroStateFrom::State(state.clone())
+                    StorePersistentStateFrom::State(state.clone())
                 };
                 try_save_persistent(handle, from)
                     .await
@@ -894,7 +899,7 @@ impl StarterInner {
                 block_handles.set_is_zerostate(&block_handle);
             }
 
-            let from = StoreZeroStateFrom::File(state_file);
+            let from = StorePersistentStateFrom::File(state_file);
             try_save_persistent(&block_handle, from)
                 .await
                 .context("failed to store persistent shard state")?;
