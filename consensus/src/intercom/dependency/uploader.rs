@@ -24,29 +24,33 @@ impl Uploader {
         round_ctx: &RoundCtx,
     ) -> DownloadResponse<Bytes> {
         let (status_opt, result) = if point_id.round > head.current().round() {
+            // we surely return points that we used as an (in)direct  dependency,
+            // so we have the opportunity not to search for points that we're unlikely to have
             (None, DownloadResponse::TryLater)
         } else {
             let task_opt = LIMIT.try_spawn_blocking(round_ctx.task(), {
                 let store = store.clone();
                 let last_back_bottom = head.last_back_bottom();
                 move || {
+                    // we'll return any point that is signed by its author (we don't store others)
+                    // despite its well-formedness or validation result (receiver decides on its own)
                     let status_opt = store.get_status(point_id.round, &point_id.digest);
                     let result = match &status_opt {
-                        Some(PointStatusStored::Validated(usable))
-                            if usable.is_valid | usable.is_certified =>
-                        {
+                        Some(
+                            PointStatusStored::Validated(_)
+                            | PointStatusStored::IllFormed(_)
+                            | PointStatusStored::Exists,
+                        ) => {
                             match store.get_point_raw(point_id.round, &point_id.digest) {
-                                None => DownloadResponse::DefinedNone,
                                 Some(slice) => DownloadResponse::Defined(slice),
+                                // though point and its status are saved in one batch,
+                                // the deletion may occur between status and point reads
+                                None => DownloadResponse::DefinedNone,
                             }
                         }
-                        Some(PointStatusStored::IllFormed(ill)) if ill.is_certified => {
-                            DownloadResponse::TryLater
-                        }
-                        Some(PointStatusStored::NotFound(not_found)) if not_found.is_certified => {
-                            DownloadResponse::TryLater
-                        }
-                        Some(PointStatusStored::Exists) | None => {
+                        // won't change even after history gets fixed, except for DB transplantation
+                        Some(PointStatusStored::NotFound(_)) => DownloadResponse::DefinedNone,
+                        None => {
                             if last_back_bottom <= point_id.round {
                                 // may be downloading, unknown or resolving - dag may be incomplete
                                 DownloadResponse::TryLater
@@ -55,11 +59,6 @@ impl Uploader {
                                 DownloadResponse::DefinedNone
                             }
                         }
-                        Some(
-                            PointStatusStored::IllFormed(_)
-                            | PointStatusStored::NotFound(_)
-                            | PointStatusStored::Validated(_),
-                        ) => DownloadResponse::DefinedNone,
                     };
                     (status_opt, result)
                 }

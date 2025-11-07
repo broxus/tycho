@@ -272,7 +272,7 @@ impl DagPointFuture {
                 .run(&point_id, dependers_rx, broadcast_rx, download_ctx)
                 .await?;
             match downloaded {
-                Some(DownloadResult::Verified(point)) => {
+                DownloadResult::Verified(point) => {
                     let info = point.info().clone();
 
                     let store_fn = {
@@ -309,7 +309,7 @@ impl DagPointFuture {
                     let nested = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn);
                     nested.await.await
                 }
-                Some(DownloadResult::IllFormed(point, reason)) => {
+                DownloadResult::IllFormed(point, reason) => {
                     let mut status = PointStatusIllFormed::default();
                     state.acquire(&point_id, &mut status);
                     let dag_point =
@@ -326,7 +326,7 @@ impl DagPointFuture {
                     let nested = LIMIT.spawn_blocking(into_round_ctx.task(), store_fn);
                     nested.await.await
                 }
-                None => {
+                DownloadResult::NotFound => {
                     let mut status = PointStatusNotFound {
                         is_first_resolved: false,
                         is_certified: false,
