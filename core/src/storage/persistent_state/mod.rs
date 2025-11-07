@@ -1,31 +1,41 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{Seek, Write};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwapAny;
-use dashmap::DashMap;
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use parking_lot::Mutex;
 use tokio::sync::{Notify, Semaphore};
 use tokio::time::Instant;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::RefMcStateHandle;
-use tycho_storage::fs::{Dir, MappedFile};
+use tycho_storage::fs::Dir;
+use tycho_types::cell::{Cell, CellDescriptor, CellFamily, HashBytes};
+use tycho_types::merkle::make_pruned_branch;
 use tycho_types::models::{BlockId, PrevBlockRef};
-use tycho_util::FastHashSet;
+use tycho_util::FastHashMap;
 use tycho_util::sync::CancellationFlag;
 
+use self::descriptor_cache::{CacheKey, DescriptorCache};
+use self::parts::{
+    OptionalPersistentStoragePartsMapExt, PersistentStateStoragePartLocalImpl,
+    PersistentStoragePartsMap, PersistentStoragePartsMapExt,
+};
 pub use self::queue_state::reader::{QueueDiffReader, QueueStateReader};
 pub use self::queue_state::writer::QueueStateWriter;
 pub use self::shard_state::reader::{BriefBocHeader, ShardStateReader};
 pub use self::shard_state::writer::ShardStateWriter;
+use super::shard_state::{CellShardRouter, ShardStatePartInfo};
 use super::{
     BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, KeyBlocksDirection, ShardStateStorage,
 };
+use crate::storage::persistent_state::parts::StoreStatePartContext;
+use crate::storage::shard_state::ShardPrefix;
 
 mod queue_state {
     pub mod reader;
@@ -35,6 +45,9 @@ mod shard_state {
     pub mod reader;
     pub mod writer;
 }
+
+mod descriptor_cache;
+mod parts;
 
 #[cfg(test)]
 mod tests;
@@ -48,16 +61,24 @@ pub enum PersistentStateKind {
 }
 
 impl PersistentStateKind {
-    fn make_file_name(&self, block_id: &BlockId) -> PathBuf {
+    fn make_file_name(
+        &self,
+        block_id: &BlockId,
+        part_shard_prefix: Option<&ShardPrefix>,
+    ) -> PathBuf {
         match self {
-            Self::Shard => ShardStateWriter::file_name(block_id),
+            Self::Shard => ShardStateWriter::file_name(block_id, part_shard_prefix),
             Self::Queue => QueueStateWriter::file_name(block_id),
         }
     }
 
-    fn make_temp_file_name(&self, block_id: &BlockId) -> PathBuf {
+    fn make_temp_file_name(
+        &self,
+        block_id: &BlockId,
+        part_shard_prefix: Option<&ShardPrefix>,
+    ) -> PathBuf {
         match self {
-            Self::Shard => ShardStateWriter::temp_file_name(block_id),
+            Self::Shard => ShardStateWriter::temp_file_name(block_id, part_shard_prefix),
             Self::Queue => QueueStateWriter::temp_file_name(block_id),
         }
     }
@@ -69,12 +90,6 @@ impl PersistentStateKind {
             _ => None,
         }
     }
-}
-
-#[derive(Debug, Eq, Hash, PartialEq)]
-struct CacheKey {
-    block_id: BlockId,
-    kind: PersistentStateKind,
 }
 
 #[derive(Clone)]
@@ -94,21 +109,43 @@ impl PersistentStateStorage {
 
         let storage_dir = files_dir.create_subdir(BASE_DIR)?;
 
+        // init persistent storage parts if required
+        let storage_parts = Self::init_storage_parts(files_dir, &shard_state_storage)?;
+
         Ok(Self {
             inner: Arc::new(Inner {
                 cells_db,
-                storage_dir,
                 block_handles: block_handle_storage,
                 blocks: block_storage,
                 shard_states: shard_state_storage,
-                descriptor_cache: Default::default(),
-                mc_seqno_to_block_ids: Default::default(),
+                descriptor_cache: DescriptorCache::new(storage_dir),
                 chunks_semaphore: Arc::new(Semaphore::new(MAX_PARALLEL_CHUNK_READS)),
                 handles_queue: Default::default(),
                 oldest_ps_changed: Default::default(),
                 oldest_ps_handle: Default::default(),
+                storage_parts,
             }),
         })
+    }
+
+    /// Initialize persistent storage parts from shard state storage parts
+    fn init_storage_parts(
+        files_dir: &Dir,
+        shard_state_storage: &ShardStateStorage,
+    ) -> Result<Option<Arc<PersistentStoragePartsMap>>> {
+        let Some(state_storage_parts) = shard_state_storage.storage_parts() else {
+            return Ok(None);
+        };
+
+        let mut res = PersistentStoragePartsMap::default();
+
+        for (shard_prefix, state_storage_part) in state_storage_parts.iter() {
+            let storage_part =
+                PersistentStateStoragePartLocalImpl::new(files_dir, state_storage_part.clone())?;
+            res.insert(*shard_prefix, Arc::new(storage_part));
+        }
+
+        Ok(Some(Arc::new(res)))
     }
 
     pub fn load_oldest_known_handle(&self) -> Option<BlockHandle> {
@@ -184,11 +221,20 @@ impl PersistentStateStorage {
                         .and_then(|ext| ext.to_str())
                         .unwrap_or_default();
 
-                    let Some(cache_type) = PersistentStateKind::from_extension(extension) else {
+                    let Some(kind) = PersistentStateKind::from_extension(extension) else {
                         break 'file;
                     };
 
-                    this.cache_state(mc_seqno, &block_id, cache_type)?;
+                    // TODO: should handle parts from files. State may already gone from shard_states
+                    let parts_info = if kind == PersistentStateKind::Shard {
+                        this.shard_states
+                            .load_state_entry(&block_id)?
+                            .map(|entry| entry.parts_info.unwrap_or_default())
+                    } else {
+                        None
+                    };
+                    this.descriptor_cache
+                        .cache_state(mc_seqno, &block_id, kind, None, parts_info)?;
                     continue 'outer;
                 }
                 tracing::warn!(path = %path.display(), "unexpected file");
@@ -202,7 +248,7 @@ impl PersistentStateStorage {
             let _span = span.enter();
 
             // For each entry in the storage directory
-            'outer: for entry in this.storage_dir.entries()?.flatten() {
+            'outer: for entry in this.descriptor_cache.storage_dir().entries()?.flatten() {
                 let path = entry.path();
                 // Skip files
                 if path.is_file() {
@@ -237,11 +283,11 @@ impl PersistentStateStorage {
         NonZeroU32::new(STATE_CHUNK_SIZE as _).unwrap()
     }
 
+    // TODO: should check parts as well
     pub fn state_exists(&self, block_id: &BlockId, kind: PersistentStateKind) -> bool {
-        self.inner.descriptor_cache.contains_key(&CacheKey {
-            block_id: *block_id,
-            kind,
-        })
+        self.inner
+            .descriptor_cache
+            .contains_key(&CacheKey::from((block_id, kind)))
     }
 
     pub fn get_state_info(
@@ -251,20 +297,24 @@ impl PersistentStateStorage {
     ) -> Option<PersistentStateInfo> {
         self.inner
             .descriptor_cache
-            .get(&CacheKey {
-                block_id: *block_id,
-                kind,
-            })
+            .get(&CacheKey::from((block_id, kind)))
             .and_then(|cached| {
-                let size = NonZeroU64::new(cached.file.length() as u64)?;
+                let mut total_size = cached.file.length();
+                if let Some(parts_info) = &cached.parts_info {
+                    for part_info in parts_info {
+                        // total_size = total_size.saturating_add(part_info.file_size);
+                    }
+                }
+                let size = NonZeroU64::new(total_size as u64)?;
                 Some(PersistentStateInfo {
+                    // TODO: return parts info
                     size,
                     chunk_size: self.state_chunk_size(),
                 })
             })
     }
 
-    pub async fn read_state_part(
+    pub async fn read_state_chunk(
         &self,
         block_id: &BlockId,
         offset: u64,
@@ -282,11 +332,8 @@ impl PersistentStateStorage {
             semaphore.acquire_owned().await.ok()?
         };
 
-        let key = CacheKey {
-            block_id: *block_id,
-            kind: state_kind,
-        };
-        let cached = self.inner.descriptor_cache.get(&key)?.clone();
+        let key = CacheKey::from((block_id, state_kind));
+        let cached = self.inner.descriptor_cache.get(&key)?;
         if offset > cached.file.length() {
             return None;
         }
@@ -312,10 +359,13 @@ impl PersistentStateStorage {
         handle: &BlockHandle,
         tracker_handle: RefMcStateHandle,
     ) -> Result<()> {
-        if self
+        // check if can reuse state
+        let reused = self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Shard)
-            .await?
-        {
+            .await?;
+
+        // return if state was fully reused
+        if reused.reused() {
             return Ok(());
         }
 
@@ -324,43 +374,149 @@ impl PersistentStateStorage {
             cancelled.cancel();
         }
 
-        let handle = handle.clone();
+        let block_id = *handle.id();
+
+        let entry = self
+            .inner
+            .shard_states
+            .load_state_entry(&block_id)?
+            .context("shard state entry not found")?;
+        let root_hash = entry.root_hash;
+
+        // build map of pruned parts branches to write in main file
+        let pruned_parts = self.build_pruned_parts(entry.parts_info.as_deref())?;
+
+        // run persistent store tasks for parts if were not reused
+        let mut part_store_tasks = FuturesUnordered::new();
+        if let Some(parts_info) = &entry.parts_info
+            && !parts_info.is_empty()
+            && !reused.reused_shard_parts()?
+        {
+            let storage_parts = self.inner.storage_parts.try_as_ref_ext()?;
+            for part_info in parts_info {
+                let storage_part = storage_parts.try_get_ext(&part_info.prefix)?.clone();
+                part_store_tasks.push(tokio::spawn(storage_part.store_shard_state_part(
+                    StoreStatePartContext {
+                        mc_seqno,
+                        block_id,
+                        root_hash: part_info.hash,
+                        tracker_handle: tracker_handle.clone(),
+                        cancelled: Some(cancelled.clone()),
+                    },
+                )));
+            }
+        }
+
+        // store main persistent state file
         let this = self.inner.clone();
         let cancelled = cancelled.clone();
-        let span = tracing::Span::current();
+        let handle_for_main = handle.clone();
+        let parts_info = entry.parts_info.clone();
 
+        let span = tracing::Span::current();
         tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
             let guard = scopeguard::guard((), |_| {
-                tracing::warn!("cancelled");
+                tracing::warn!("main cancelled");
             });
 
             // NOTE: Ensure that the tracker handle will outlive the state writer.
             let _tracker_handle = tracker_handle;
 
-            let root_hash = this.shard_states.load_state_root_hash(handle.id())?;
-
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
+            let writer =
+                ShardStateWriter::new(this.cells_db.clone(), &states_dir, &block_id, pruned_parts);
 
-            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
-            match cell_writer.write(&root_hash, Some(&cancelled)) {
+            let stored = match writer.write(&root_hash, Some(&cancelled)) {
                 Ok(()) => {
-                    this.block_handles.set_has_persistent_shard_state(&handle);
+                    this.block_handles
+                        .set_has_persistent_shard_state_main(&handle_for_main);
                     tracing::info!("persistent shard state saved");
+                    true
                 }
                 Err(e) => {
                     // NOTE: We are ignoring an error here. It might be intentional
                     tracing::error!("failed to write persistent shard state: {e:?}");
+                    false
                 }
+            };
+
+            if stored {
+                this.descriptor_cache
+                    .cache_shard_state(mc_seqno, &block_id, None, parts_info)?;
             }
 
-            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
-
             scopeguard::ScopeGuard::into_inner(guard);
-            Ok(())
+            Ok::<_, anyhow::Error>(stored)
         })
-        .await?
+        .await??;
+
+        // wait for all store tasks in parts
+        let mut all_parts_stored = true;
+        while let Some(store_res) = part_store_tasks.next().await {
+            match store_res {
+                Ok(Ok(Some(_res))) => {
+                    // do nothing
+                }
+                Ok(Ok(None)) => {
+                    all_parts_stored = false;
+                    tracing::error!("persistent part was not stored");
+                }
+                Ok(Err(store_error)) => {
+                    all_parts_stored = false;
+                    tracing::error!(?store_error, "error in store persistent part task");
+                }
+                Err(join_error) => {
+                    all_parts_stored = false;
+                    tracing::error!(?join_error, "error executing store persistent part task");
+                }
+            }
+        }
+
+        // update block handle flags that persistent state parts stored
+        if all_parts_stored {
+            self.inner
+                .block_handles
+                .set_has_persistent_shard_state_parts(handle);
+        }
+
+        Ok(())
+    }
+
+    /// Loads part branch root cells and makes pruned cells
+    fn build_pruned_parts(
+        &self,
+        parts_info: Option<&[ShardStatePartInfo]>,
+    ) -> Result<Option<Arc<ShardStatePartsPrunedData>>> {
+        let parts_info = match parts_info {
+            Some(info) if !info.is_empty() => info,
+            _ => return Ok(None),
+        };
+
+        let mut pruned_parts = ShardStatePartsPrunedData::default();
+
+        for part_info in parts_info {
+            let cell = self
+                .inner
+                .shard_states
+                .cell_storage()
+                .load_cell_ext(
+                    &part_info.hash,
+                    0,
+                    Some(CellShardRouter::Shard {
+                        shard_prefix: part_info.prefix,
+                    }),
+                )
+                .context("failed to load part root cell")?;
+            let cell = Cell::from(cell as Arc<_>);
+            let pruned = make_pruned_branch(cell.as_ref(), 0, Cell::empty_context())
+                .context("failed to build pruned branch for part")?;
+
+            pruned_parts.insert(&pruned);
+        }
+
+        Ok(Some(Arc::new(pruned_parts)))
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
@@ -369,11 +525,12 @@ impl PersistentStateStorage {
         mc_seqno: u32,
         handle: &BlockHandle,
         file: File,
+        parts_info: Option<Vec<ShardStatePartInfo>>,
     ) -> Result<()> {
-        if self
+        let reused = self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Shard)
-            .await?
-        {
+            .await?;
+        if reused.reused_shard_main()? {
             return Ok(());
         }
 
@@ -396,10 +553,13 @@ impl PersistentStateStorage {
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
-            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
+            let cell_writer =
+                ShardStateWriter::new(this.cells_db.clone(), &states_dir, handle.id(), None);
             cell_writer.write_file(file, Some(&cancelled))?;
-            this.block_handles.set_has_persistent_shard_state(&handle);
-            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
+            this.block_handles
+                .set_has_persistent_shard_state_main(&handle);
+            this.descriptor_cache
+                .cache_shard_state(mc_seqno, handle.id(), None, parts_info)?;
 
             scopeguard::ScopeGuard::into_inner(guard);
             Ok(())
@@ -417,6 +577,7 @@ impl PersistentStateStorage {
         if self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Queue)
             .await?
+            .reused()
         {
             return Ok(());
         }
@@ -497,7 +658,8 @@ impl PersistentStateStorage {
                 }
             }
 
-            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Queue)?;
+            this.descriptor_cache
+                .cache_queue_state(mc_seqno, handle.id())?;
 
             scopeguard::ScopeGuard::into_inner(guard);
             Ok(())
@@ -515,6 +677,7 @@ impl PersistentStateStorage {
         if self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Queue)
             .await?
+            .reused()
         {
             return Ok(());
         }
@@ -540,7 +703,8 @@ impl PersistentStateStorage {
 
             QueueStateWriter::write_file(&states_dir, handle.id(), file, Some(&cancelled))?;
             this.block_handles.set_has_persistent_queue_state(&handle);
-            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Queue)?;
+            this.descriptor_cache
+                .cache_queue_state(mc_seqno, handle.id())?;
 
             scopeguard::ScopeGuard::into_inner(guard);
             Ok(())
@@ -613,21 +777,8 @@ impl PersistentStateStorage {
             }
 
             // Remove cached states
-            let mut index = this.mc_seqno_to_block_ids.lock();
-            index.retain(|&mc_seqno, block_ids| {
-                if mc_seqno >= top_handle.id().seqno || mc_seqno == 0 {
-                    return true;
-                }
-
-                for block_id in block_ids.drain() {
-                    // TODO: Clear flag in block handle
-                    this.clear_cache(&block_id);
-                }
-                false
-            });
-
-            // Remove files
-            this.clear_outdated_state_entries(top_handle.id())
+            this.descriptor_cache
+                .remove_outdated_cached_states(top_handle.id())
         })
         .await?
     }
@@ -637,209 +788,112 @@ impl PersistentStateStorage {
         mc_seqno: u32,
         handle: &BlockHandle,
         kind: PersistentStateKind,
-    ) -> Result<bool> {
+    ) -> Result<ReuseStateResult> {
         // Check if there is anything to reuse (return false if nothing)
         match kind {
-            PersistentStateKind::Shard if !handle.has_persistent_shard_state() => return Ok(false),
-            PersistentStateKind::Queue if !handle.has_persistent_queue_state() => return Ok(false),
+            // should try reuse main even if parts not saved
+            PersistentStateKind::Shard if !handle.has_persistent_shard_state_main() => {
+                return Ok(ReuseStateResult::Shard {
+                    main: false,
+                    parts: false,
+                });
+            }
+            PersistentStateKind::Queue if !handle.has_persistent_queue_state() => {
+                return Ok(ReuseStateResult::Queue(false));
+            }
             _ => {}
         }
 
-        let block_id = *handle.id();
-
-        let Some(cached) = self
+        let cached = self
             .inner
             .descriptor_cache
-            .get(&CacheKey { block_id, kind })
-            .map(|r| r.clone())
-        else {
-            // Nothing to reuse
-            return Ok(false);
-        };
+            .try_reuse_persistent_state(mc_seqno, *handle.id(), kind, None)
+            .await?;
 
-        if cached.mc_seqno >= mc_seqno {
-            // We already have the recent enough state
-            return Ok(true);
+        // return result for queue
+        if kind == PersistentStateKind::Queue {
+            return Ok(ReuseStateResult::Queue(cached.is_some()));
         }
 
-        let this = self.inner.clone();
+        // return result for shard
+        let Some(cached) = cached else {
+            // cannot check parts when main was not reused
+            return Ok(ReuseStateResult::Shard {
+                main: false,
+                parts: false,
+            });
+        };
 
-        let span = tracing::Span::current();
-        tokio::task::spawn_blocking(move || {
-            let _span = span.enter();
+        // check parts if required
+        let mut all_parts_reused = true;
+        if let Some(parts_info) = &cached.parts_info
+            && !parts_info.is_empty()
+        {
+            let storage_parts = self.inner.storage_parts.try_as_ref_ext()?;
 
-            let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
+            for part_info in parts_info {
+                let storage_part = storage_parts.try_get_ext(&part_info.prefix)?;
+                let part_reused = storage_part
+                    .try_reuse_persistent_state(mc_seqno, *handle.id())
+                    .await?;
+                if !part_reused {
+                    // all parts should be reused
+                    all_parts_reused = false;
+                    break;
+                }
+            }
+        }
 
-            let temp_file = states_dir.file(kind.make_temp_file_name(&block_id));
-            std::fs::write(temp_file.path(), cached.file.as_slice())?;
-            temp_file.rename(kind.make_file_name(&block_id))?;
-
-            drop(cached);
-
-            this.cache_state(mc_seqno, &block_id, kind)?;
-            Ok(true)
+        Ok(ReuseStateResult::Shard {
+            main: true,
+            parts: all_parts_reused,
         })
-        .await?
+    }
+}
+
+enum ReuseStateResult {
+    Shard { main: bool, parts: bool },
+    Queue(bool),
+}
+
+impl ReuseStateResult {
+    fn reused(&self) -> bool {
+        match self {
+            Self::Shard { main, parts } => *main && *parts,
+            Self::Queue(reused) => *reused,
+        }
+    }
+    fn reused_shard_main(&self) -> Result<bool> {
+        match self {
+            Self::Shard { main, .. } => Ok(*main),
+            Self::Queue(_) => anyhow::bail!("not a shard state"),
+        }
+    }
+    fn reused_shard_parts(&self) -> Result<bool> {
+        match self {
+            Self::Shard { parts, .. } => Ok(*parts),
+            Self::Queue(_) => anyhow::bail!("not a shard state"),
+        }
     }
 }
 
 struct Inner {
     cells_db: CellsDb,
-    storage_dir: Dir,
     block_handles: Arc<BlockHandleStorage>,
     blocks: Arc<BlockStorage>,
     shard_states: Arc<ShardStateStorage>,
-    descriptor_cache: DashMap<CacheKey, Arc<CachedState>>,
-    mc_seqno_to_block_ids: Mutex<BTreeMap<u32, FastHashSet<BlockId>>>,
+    descriptor_cache: DescriptorCache,
     chunks_semaphore: Arc<Semaphore>,
     handles_queue: Mutex<HandlesQueue>,
     oldest_ps_changed: Notify,
     oldest_ps_handle: ArcSwapAny<Option<BlockHandle>>,
+    storage_parts: Option<Arc<PersistentStoragePartsMap>>,
 }
 
 impl Inner {
     fn prepare_persistent_states_dir(&self, mc_seqno: u32) -> Result<Dir> {
-        let states_dir = self.mc_states_dir(mc_seqno);
-        if !states_dir.path().is_dir() {
-            tracing::info!(mc_seqno, "creating persistent state directory");
-            states_dir.create_if_not_exists()?;
-        }
-        Ok(states_dir)
-    }
-
-    fn mc_states_dir(&self, mc_seqno: u32) -> Dir {
-        Dir::new_readonly(self.storage_dir.path().join(mc_seqno.to_string()))
-    }
-
-    fn clear_outdated_state_entries(&self, recent_block_id: &BlockId) -> Result<()> {
-        let mut directories_to_remove: Vec<PathBuf> = Vec::new();
-        let mut files_to_remove: Vec<PathBuf> = Vec::new();
-
-        for entry in self.storage_dir.entries()?.flatten() {
-            let path = entry.path();
-
-            if path.is_file() {
-                files_to_remove.push(path);
-                continue;
-            }
-
-            let Ok(name) = entry.file_name().into_string() else {
-                directories_to_remove.push(path);
-                continue;
-            };
-
-            let is_recent = matches!(
-                name.parse::<u32>(),
-                Ok(seqno) if seqno >= recent_block_id.seqno || seqno == 0
-            );
-            if !is_recent {
-                directories_to_remove.push(path);
-            }
-        }
-
-        for dir in directories_to_remove {
-            tracing::info!(dir = %dir.display(), "removing an old persistent state directory");
-            if let Err(e) = std::fs::remove_dir_all(&dir) {
-                tracing::error!(dir = %dir.display(), "failed to remove an old persistent state: {e:?}");
-            }
-        }
-
-        for file in files_to_remove {
-            tracing::info!(file = %file.display(), "removing file");
-            if let Err(e) = std::fs::remove_file(&file) {
-                tracing::error!(file = %file.display(), "failed to remove file: {e:?}");
-            }
-        }
-
-        Ok(())
-    }
-
-    fn cache_state(
-        &self,
-        mc_seqno: u32,
-        block_id: &BlockId,
-        kind: PersistentStateKind,
-    ) -> Result<()> {
-        use std::collections::btree_map;
-
-        use dashmap::mapref::entry::Entry;
-
-        let key = CacheKey {
-            block_id: *block_id,
-            kind,
-        };
-
-        let load_mapped = || {
-            let mut file = self
-                .mc_states_dir(mc_seqno)
-                .file(kind.make_file_name(block_id))
-                .read(true)
-                .open()?;
-
-            // We create a copy of the original file here to make sure
-            // that the underlying mapped file will not be changed outside
-            // of the node. Otherwise it will randomly fail with exit code 7/BUS.
-            let mut temp_file = tempfile::tempfile_in(self.storage_dir.path())
-                .context("failed to create a temp file")?;
-
-            // Underlying implementation will call something like `copy_file_range`,
-            // and we hope that it will be just COW pages.
-            // TODO: Find a way to cancel this operation.
-            std::io::copy(&mut file, &mut temp_file).context("failed to copy a temp file")?;
-            temp_file.flush()?;
-            temp_file.seek(std::io::SeekFrom::Start(0))?;
-
-            MappedFile::from_existing_file(temp_file).context("failed to map a temp file")
-        };
-
-        let file =
-            load_mapped().with_context(|| format!("failed to cache {kind:?} for {block_id}"))?;
-
-        let new_state = Arc::new(CachedState { mc_seqno, file });
-
-        let prev_mc_seqno = match self.descriptor_cache.entry(key) {
-            Entry::Vacant(entry) => {
-                entry.insert(new_state);
-                None
-            }
-            Entry::Occupied(mut entry) => {
-                let prev_mc_seqno = entry.get().mc_seqno;
-                if mc_seqno <= prev_mc_seqno {
-                    // Cache only the most recent block (if changed)
-                    return Ok(());
-                }
-
-                entry.insert(new_state);
-                Some(prev_mc_seqno)
-            }
-        };
-
-        let mut index = self.mc_seqno_to_block_ids.lock();
-
-        // Remove previous entry if exists
-        if let Some(prev_mc_seqno) = prev_mc_seqno
-            && let btree_map::Entry::Occupied(mut entry) = index.entry(prev_mc_seqno)
-        {
-            entry.get_mut().remove(block_id);
-            if entry.get().is_empty() {
-                entry.remove();
-            }
-        }
-
-        index.entry(mc_seqno).or_default().insert(*block_id);
-
-        Ok(())
-    }
-
-    fn clear_cache(&self, block_id: &BlockId) {
-        self.descriptor_cache.remove(&CacheKey {
-            block_id: *block_id,
-            kind: PersistentStateKind::Shard,
-        });
-        self.descriptor_cache.remove(&CacheKey {
-            block_id: *block_id,
-            kind: PersistentStateKind::Queue,
-        });
+        self.descriptor_cache
+            .prepare_persistent_states_dir(mc_seqno)
     }
 }
 
@@ -847,11 +901,6 @@ impl Inner {
 pub struct PersistentStateInfo {
     pub size: NonZeroU64,
     pub chunk_size: NonZeroU32,
-}
-
-struct CachedState {
-    mc_seqno: u32,
-    file: MappedFile,
 }
 
 #[derive(Default)]
@@ -891,3 +940,40 @@ impl HandlesQueue {
 }
 
 const STATE_CHUNK_SIZE: u64 = 1024 * 1024; // 1 MB
+
+#[derive(Default)]
+pub struct ShardStatePartsPrunedData {
+    inner: FastHashMap<HashBytes, PrunedCellData>,
+}
+
+impl ShardStatePartsPrunedData {
+    pub fn insert(&mut self, pruned_cell: &Cell) {
+        self.inner.insert(*pruned_cell.repr_hash(), PrunedCellData {
+            descriptor: pruned_cell.descriptor(),
+            data: pruned_cell.data().to_vec(),
+        });
+    }
+
+    pub fn get(&self, hash: &HashBytes) -> Option<&PrunedCellData> {
+        self.inner.get(hash)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+pub struct PrunedCellData {
+    descriptor: CellDescriptor,
+    data: Vec<u8>,
+}
+
+impl PrunedCellData {
+    pub fn descriptor(&self) -> CellDescriptor {
+        self.descriptor
+    }
+
+    pub fn data(&self) -> &[u8] {
+        self.data.as_slice()
+    }
+}

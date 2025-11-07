@@ -262,7 +262,7 @@ impl CoreDbExt for CellsPartDb {
 }
 
 /// The abstraction over `CellsDb` and `CellsShardDb`
-pub(super) trait CellsDbOps: Send + Sync {
+pub trait CellsDbOps: Send + Sync {
     fn shard_states(&self) -> &Table<tables::ShardStates>;
     fn cells(&self) -> &Table<tables::Cells>;
     fn temp_cells(&self) -> &Table<tables::TempCells>;
@@ -270,7 +270,7 @@ pub(super) trait CellsDbOps: Send + Sync {
 }
 
 #[derive(Clone)]
-pub(super) enum CellStorageDb {
+pub enum CellStorageDb {
     Main(CellsDb),
     Part(CellsPartDb),
 }

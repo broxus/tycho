@@ -7,6 +7,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use bytes::Buf;
 use bytesize::ByteSize;
+pub(super) use cell_storage::CellShardRouter;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tokio::sync::OwnedMutexGuard;
@@ -22,6 +23,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
+pub(super) use self::cell_storage::ShardPrefix;
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
 use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CellsPartDb};
@@ -42,6 +44,7 @@ pub struct SplitAccountEntry {
 pub trait ShardStateStoragePart: Send + Sync {
     fn shard_prefix(&self) -> ShardPrefix;
     fn cell_storage(&self) -> &Arc<CellStorage>;
+    fn cells_db(&self) -> &CellsPartDb;
     fn store_accounts_subtree(
         self: Arc<Self>,
         block_id: &BlockId,
@@ -77,6 +80,10 @@ impl ShardStateStoragePart for ShardStateStoragePartImpl {
 
     fn cell_storage(&self) -> &Arc<CellStorage> {
         &self.cell_storage
+    }
+
+    fn cells_db(&self) -> &CellsPartDb {
+        &self.cells_db
     }
 
     fn blocking_store_accounts_subtree(
@@ -316,6 +323,14 @@ impl ShardStateStorage {
         self.part_split_depth > 0
     }
 
+    pub fn cell_storage(&self) -> &Arc<CellStorage> {
+        &self.cell_storage
+    }
+
+    pub fn storage_parts(&self) -> Option<&Arc<StoragePartsMap>> {
+        self.storage_parts.as_ref()
+    }
+
     pub fn metrics(&self) -> ShardStateStorageMetrics {
         ShardStateStorageMetrics {
             max_new_mc_cell_count: self.max_new_mc_cell_count.swap(0, Ordering::AcqRel),
@@ -422,6 +437,7 @@ impl ShardStateStorage {
 
                 for v in split_at.values() {
                     if let Some(shard) = &v.shard
+                    // TODO: return error if storage part is not configured
                         && let Some(storage_part) = storage_parts.get(&shard.prefix())
                     {
                         let storage_part = storage_part.clone();
