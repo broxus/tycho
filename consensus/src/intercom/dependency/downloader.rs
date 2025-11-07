@@ -29,7 +29,7 @@ use crate::intercom::dependency::limiter::Limiter;
 use crate::intercom::dependency::peer_limiter::PeerLimiter;
 use crate::intercom::peer_schedule::PeerState;
 use crate::intercom::{Dispatcher, PeerSchedule};
-use crate::models::{PeerCount, Point, PointId, PointIntegrityError};
+use crate::models::{PeerCount, Point, PointId, PointIntegrityError, StructureIssue};
 
 #[derive(Clone)]
 pub struct Downloader {
@@ -350,6 +350,7 @@ impl<T: DownloadType> DownloadTask<T> {
         // remove peer status: will not repeat request to the peer in this download task
         enum LastResponse {
             Point(Point),
+            IllFormed(Point, StructureIssue),
             BadPoint(PointIntegrityError),
             DefinedNone,
             TlError(tl_proto::TlError),
@@ -366,7 +367,8 @@ impl<T: DownloadType> DownloadTask<T> {
                         };
                     }
                     future::Either::Right((parsed, _)) => match parsed {
-                        Ok(Ok(point)) => LastResponse::Point(point),
+                        Ok(Ok(Ok(point))) => LastResponse::Point(point),
+                        Ok(Ok(Err((point, issue)))) => LastResponse::IllFormed(point, issue),
                         Ok(Err(bad_point)) => LastResponse::BadPoint(bad_point),
                         Err(tl_error) => LastResponse::TlError(tl_error),
                     },
@@ -441,14 +443,24 @@ impl<T: DownloadType> DownloadTask<T> {
                 );
                 None
             }
+            LastResponse::IllFormed(point, issue) => {
+                tracing::error!(
+                    error = display(&issue),
+                    point = debug(&point),
+                    "downloaded ill-formed"
+                );
+                let reason = IllFormedReason::Structure(issue);
+                Some(DownloadResult::IllFormed(point, reason))
+            }
             LastResponse::Point(point) if point.info().id() != self.point_id => {
                 self.not_found.insert(out.peer_id);
                 DownloadCtx::meter_unreliable();
+                let wrong_id = point.info().id();
                 tracing::error!(
                     peer_id = display(out.peer_id.alt()),
-                    author = display(point.info().author().alt()),
-                    round = point.info().round().0,
-                    digest = display(point.info().digest().alt()),
+                    author = display(wrong_id.author.alt()),
+                    round = wrong_id.round.0,
+                    digest = display(wrong_id.digest.alt()),
                     "returned wrong point",
                 );
                 None

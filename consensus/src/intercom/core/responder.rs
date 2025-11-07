@@ -162,7 +162,8 @@ impl ResponderInner {
         let query = match medium_query {
             QueryRequestMedium::Broadcast(bytes) => {
                 match rayon_run_fifo(|| Point::parse(bytes.into())).await {
-                    Ok(Ok(point)) => QueryRequest::Broadcast(point),
+                    Ok(Ok(Ok(point))) => QueryRequest::Broadcast(point, None),
+                    Ok(Ok(Err((point, issue)))) => QueryRequest::Broadcast(point, Some(issue)),
                     Ok(Err(bad_point)) => {
                         tracing::error!(
                             tag = ?raw_query_tag,
@@ -188,10 +189,11 @@ impl ResponderInner {
         };
 
         Some(match query {
-            QueryRequest::Broadcast(point) => {
+            QueryRequest::Broadcast(point, maybe_issue) => {
                 let reached_threshold = state.broadcast_filter.add_check_threshold(
                     peer_id,
                     &point,
+                    maybe_issue,
                     &state.store,
                     &state.peer_schedule,
                     &state.downloader,

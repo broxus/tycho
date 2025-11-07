@@ -52,7 +52,8 @@ impl Engine {
 
         Point::parse(genesis.serialized().to_vec())
             .expect("parse genesis: point tl serde is broken")
-            .expect("parse genesis: integrity check is broken");
+            .expect("parse genesis: integrity check is broken")
+            .expect("parse genesis: structure check is broken");
         Verifier::verify(genesis.info(), &net.peer_schedule, conf)
             .expect("failed to verify genesis");
 

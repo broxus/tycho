@@ -4,7 +4,7 @@ use tycho_util::FastHashMap;
 
 use crate::models::point::proto_utils::{digests_map, signatures_map};
 use crate::models::point::{Digest, Round, UnixTime};
-use crate::models::{PeerCount, Signature};
+use crate::models::{AnchorStageRole, PeerCount, PointMap, Signature, StructureIssue};
 
 #[derive(Clone, Copy, Debug, PartialEq, TlRead, TlWrite)]
 #[tl(boxed, id = "consensus.pointId", scheme = "proto.tl")]
@@ -71,12 +71,6 @@ pub enum Through {
     Includes(PeerId),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum AnchorStageRole {
-    Trigger,
-    Proof,
-}
-
 impl PointData {
     pub(super) const MAX_BYTE_SIZE: usize = {
         // 4 bytes of PointData tag
@@ -98,31 +92,44 @@ impl PointData {
 
     /// counterpart of [`crate::dag::Verifier::verify`] that must be called earlier,
     /// does not require config and allows to use [`crate::models::Point`] methods
-    pub(super) fn has_well_formed_maps(&self, author: PeerId, round: Round) -> bool {
+    pub(super) fn check_maps(&self, author: PeerId, round: Round) -> Result<(), StructureIssue> {
         // proof for previous point consists of digest and 2F++ evidences
         // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
-        self.evidence.is_empty() != self.includes.contains_key(&author)
+        ((self.evidence.is_empty() == self.includes.contains_key(&author))
+            .then_some(PointMap::Includes))
         // evidence must contain only signatures of others
-        && !self.evidence.contains_key(&author)
+        .or((self.evidence.contains_key(&author)).then_some(PointMap::Evidence))
         // also cannot witness own point
-        && !self.witness.contains_key(&author)
-        && self.is_link_well_formed(AnchorStageRole::Trigger, round)
-        && self.is_link_well_formed(AnchorStageRole::Proof, round)
+        .or((self.witness.contains_key(&author)).then_some(PointMap::Witness))
+        .map(StructureIssue::AuthorInMap)
+        .map_or(Ok(()), Err)?;
+        for role in [AnchorStageRole::Proof, AnchorStageRole::Trigger] {
+            self.link_error(role, round)
+                .map(|map| StructureIssue::Link(role, map))
+                .map_or(Ok(()), Err)?;
+        }
+        Ok(())
     }
 
-    fn is_link_well_formed(&self, link_field: AnchorStageRole, round: Round) -> bool {
+    fn link_error(&self, link_field: AnchorStageRole, round: Round) -> Option<PointMap> {
         match self.anchor_link(link_field) {
-            Link::ToSelf => true,
-            Link::Direct(Through::Includes(peer)) => self.includes.contains_key(peer),
-            Link::Direct(Through::Witness(peer)) => self.witness.contains_key(peer),
+            Link::ToSelf => None,
+            Link::Direct(Through::Includes(peer)) => {
+                (!self.includes.contains_key(peer)).then_some(PointMap::Includes)
+            }
+            Link::Direct(Through::Witness(peer)) => {
+                (!self.witness.contains_key(peer)).then_some(PointMap::Witness)
+            }
             Link::Indirect {
                 path: Through::Includes(peer),
                 to,
-            } => self.includes.contains_key(peer) && to.round.next() < round,
+            } => (!self.includes.contains_key(peer) || to.round.next() >= round)
+                .then_some(PointMap::Includes),
             Link::Indirect {
                 path: Through::Witness(peer),
                 to,
-            } => self.witness.contains_key(peer) && to.round.next().next() < round,
+            } => (!self.witness.contains_key(peer) || to.round.next().next() >= round)
+                .then_some(PointMap::Witness),
         }
     }
 

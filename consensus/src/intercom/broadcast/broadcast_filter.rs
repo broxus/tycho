@@ -12,7 +12,7 @@ use crate::dyn_event;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::engine::{ConsensusConfigExt, NodeConfig};
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, PointId, Round};
+use crate::models::{Digest, PeerCount, Point, PointId, Round, StructureIssue};
 use crate::storage::MempoolStore;
 
 #[derive(Default)]
@@ -130,6 +130,7 @@ impl BroadcastFilter {
         &self,
         sender: &PeerId,
         point: &Point,
+        maybe_issue: Option<StructureIssue>,
         store: &MempoolStore,
         peer_schedule: &PeerSchedule,
         downloader: &Downloader,
@@ -139,12 +140,19 @@ impl BroadcastFilter {
         let _task_time = HistogramGuard::begin("tycho_mempool_bf_add_time");
         let id = point.info().id();
 
+        // have to cache every point when the node lags behind consensus;
+        let prune_after = head.next().round() + NodeConfig::get().cache_future_broadcasts_rounds;
+
         let checked = if sender != id.author {
             Err(CheckError::SenderNotAuthor(*sender))
+        } else if let Some(issue) = maybe_issue {
+            let reason = IllFormedReason::Structure(issue);
+            Ok(if id.round > prune_after {
+                ByAuthorItem::IllFormedPruned(id.digest, reason)
+            } else {
+                ByAuthorItem::IllFormed(point.clone(), reason)
+            })
         } else {
-            // have to cache every point when the node lags behind consensus;
-            let prune_after =
-                head.next().round() + NodeConfig::get().cache_future_broadcasts_rounds;
             match Verifier::verify(point.info(), peer_schedule, round_ctx.conf()) {
                 Ok(()) => Ok(if id.round > prune_after {
                     ByAuthorItem::OkPruned(id.digest)
