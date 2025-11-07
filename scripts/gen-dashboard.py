@@ -2748,6 +2748,16 @@ def mempool_engine() -> RowPanel:
             "Engine: alt resolved point errors (total at moment)",
             legend_format="{{instance}} - {{kind}}",
         ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_failed_query_responder",
+                label_selectors=['kind=~"$kind"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
+            ),
+            "Responder: query execution failed or aborted (total at moment)",
+            legend_format="{{instance}} - {{kind}}",
+        ),
     ]
     return create_row("Mempool engine", metrics)
 

@@ -4,7 +4,7 @@ use tycho_network::Request;
 
 use crate::models::{Point, PointId, Round, StructureIssue};
 
-#[derive(Copy, Clone, Debug, TlRead, TlWrite)]
+#[derive(Copy, Clone, Debug, PartialEq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum QueryRequestTag {
     #[tl(id = "intercom.queryTag.broadcast")]
