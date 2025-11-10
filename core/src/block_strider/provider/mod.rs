@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -223,8 +223,32 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
 pub struct CycleBlockProvider<T1, T2> {
     left: T1,
     right: T2,
-    is_right: AtomicBool,
-    switch_at: AtomicU32,
+    state: Mutex<CycleBlockProviderState>,
+}
+
+struct CycleBlockProviderState {
+    // Current used provider.
+    current: CycleBlockProviderPart,
+    // Next planned switch.
+    switch_at: u32,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum CycleBlockProviderPart {
+    Left,
+    Right,
+}
+
+impl std::ops::Not for CycleBlockProviderPart {
+    type Output = Self;
+
+    #[inline]
+    fn not(self) -> Self::Output {
+        match self {
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+        }
+    }
 }
 
 impl<T1, T2> CycleBlockProvider<T1, T2> {
@@ -232,8 +256,10 @@ impl<T1, T2> CycleBlockProvider<T1, T2> {
         Self {
             left,
             right,
-            is_right: AtomicBool::new(false),
-            switch_at: AtomicU32::new(u32::MAX),
+            state: Mutex::new(CycleBlockProviderState {
+                current: CycleBlockProviderPart::Left,
+                switch_at: u32::MAX,
+            }),
         }
     }
 
@@ -247,14 +273,32 @@ impl<T1, T2> CycleBlockProvider<T1, T2> {
     /// This ensures that:
     /// - Shard blocks are fetched from the same provider as their master block
     /// - Parallel processing of master blocks use the correct provider during the switching transition
-    fn choose_provider(&self, mc_seqno: u32) -> bool {
-        let is_right = self.is_right.load(Ordering::Acquire);
-        let switch_at = self.switch_at.load(Ordering::Acquire);
-
-        if switch_at != u32::MAX && switch_at <= mc_seqno {
-            !is_right
+    fn choose_provider(&self, mc_seqno: u32) -> CycleBlockProviderPart {
+        let state = self.state.lock().unwrap();
+        if state.switch_at != u32::MAX && state.switch_at <= mc_seqno {
+            // Switch in advance but without changing the state.
+            !state.current
         } else {
-            is_right
+            state.current
+        }
+    }
+
+    fn toggle_switch_at(&self, mc_seqno: u32) -> CycleBlockProviderPart {
+        let mut state = self.state.lock().unwrap();
+        if state.switch_at == u32::MAX {
+            state.switch_at = mc_seqno;
+            !state.current
+        } else {
+            state.switch_at = u32::MAX;
+            state.current
+        }
+    }
+
+    fn try_apply_switch(&self, mc_seqno: u32) {
+        let mut state = self.state.lock().unwrap();
+        if state.switch_at != u32::MAX && state.switch_at <= mc_seqno {
+            state.current = !state.current;
+            state.switch_at = u32::MAX;
         }
     }
 }
@@ -266,52 +310,42 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for CycleBlockProvider<
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async move {
-            let is_right = self.choose_provider(prev_block_id.seqno);
-
-            let res = if !is_right {
-                self.left.get_next_block(prev_block_id).await
-            } else {
-                self.right.get_next_block(prev_block_id).await
+            // Try using the current provider.
+            let mut res = match self.choose_provider(prev_block_id.seqno) {
+                CycleBlockProviderPart::Left => self.left.get_next_block(prev_block_id).await,
+                CycleBlockProviderPart::Right => self.right.get_next_block(prev_block_id).await,
             };
-
             if res.is_some() {
                 return res;
             }
 
-            // Schedule switch but dont switch immediately
-            self.switch_at
-                .store(prev_block_id.seqno.saturating_add(1), Ordering::Release);
+            loop {
+                // Fallback to the next provider.
+                res = match self.toggle_switch_at(prev_block_id.seqno.saturating_add(1)) {
+                    CycleBlockProviderPart::Left => self.left.get_next_block(prev_block_id).await,
+                    CycleBlockProviderPart::Right => self.right.get_next_block(prev_block_id).await,
+                };
+                if res.is_some() {
+                    return res;
+                }
 
-            let is_right = !is_right;
-
-            if !is_right {
-                self.left.get_next_block(prev_block_id).await
-            } else {
-                self.right.get_next_block(prev_block_id).await
+                // Allow executor to do some work if all these methods are blocking.
+                // FIXME: Add some sleep here in case of complete blocking?
+                tokio::task::yield_now().await;
             }
         })
     }
 
     fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
-        let is_right = self.choose_provider(block_id_relation.mc_block_id.seqno);
-
-        if is_right {
-            Box::pin(self.right.get_block(block_id_relation))
-        } else {
-            Box::pin(self.left.get_block(block_id_relation))
+        match self.choose_provider(block_id_relation.mc_block_id.seqno) {
+            CycleBlockProviderPart::Left => Box::pin(self.left.get_block(block_id_relation)),
+            CycleBlockProviderPart::Right => Box::pin(self.right.get_block(block_id_relation)),
         }
     }
 
     fn cleanup_until(&self, mc_seqno: u32) -> Self::CleanupFut<'_> {
         Box::pin(async move {
-            let switch_at = self.switch_at.load(Ordering::Acquire);
-            if switch_at <= mc_seqno {
-                let is_right = !self.is_right.load(Ordering::Acquire);
-
-                // Commit the switch: update is_right and clear the schedule
-                self.is_right.store(is_right, Ordering::Release);
-                self.switch_at.store(u32::MAX, Ordering::Release);
-            }
+            self.try_apply_switch(mc_seqno);
 
             let cleanup_left = self.left.cleanup_until(mc_seqno);
             let cleanup_right = self.right.cleanup_until(mc_seqno);
@@ -728,7 +762,10 @@ mod test {
         let right = right_provider.clone().retry(right_config);
         let cycle_provider = left.cycle(right);
 
-        assert!(!cycle_provider.is_right.load(Ordering::Acquire));
+        assert_eq!(
+            cycle_provider.state.lock().unwrap().current,
+            CycleBlockProviderPart::Left
+        );
 
         cycle_provider
             .get_next_block(&get_default_block_id())
@@ -757,7 +794,10 @@ mod test {
             .await
             .unwrap();
 
-        assert!(cycle_provider.is_right.load(Ordering::Acquire));
+        assert_eq!(
+            cycle_provider.state.lock().unwrap().current,
+            CycleBlockProviderPart::Right
+        );
 
         // Cycle switch
         left_provider.has_block.store(true, Ordering::Release);
@@ -780,14 +820,20 @@ mod test {
             .await
             .unwrap();
 
-        assert!(!cycle_provider.is_right.load(Ordering::Acquire));
+        assert_eq!(
+            cycle_provider.state.lock().unwrap().current,
+            CycleBlockProviderPart::Left
+        );
 
         cycle_provider
             .get_block(&get_default_block_id().relative_to_self())
             .await
             .unwrap()
             .unwrap();
-        assert!(!cycle_provider.is_right.load(Ordering::Acquire));
+        assert_eq!(
+            cycle_provider.state.lock().unwrap().current,
+            CycleBlockProviderPart::Left
+        );
 
         left_provider.has_block.store(false, Ordering::Release);
         right_provider.has_block.store(true, Ordering::Release);
