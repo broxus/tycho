@@ -10,7 +10,7 @@ use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::{
     RelaxedAugDict, merge_relaxed_aug_dicts, split_aug_dict, split_aug_dict_raw,
 };
-use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx, SerializedQueueDiff};
+use tycho_block_util::queue::{QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::ConsensusConfigExt;
 use tycho_types::boc;
@@ -34,7 +34,6 @@ use crate::collator::types::{
 };
 use crate::internal_queue::types::diff::DiffZone;
 use crate::internal_queue::types::message::EnqueuedMessage;
-use crate::internal_queue::types::stats::DiffStatistics;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
@@ -70,8 +69,6 @@ impl Phase<FinalizeState> {
         messages_reader: MessagesReader<'a, EnqueuedMessage>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     ) -> Result<FinalizeMessagesReaderResult, CollatorError> {
-        let labels = [("workchain", self.state.shard_id.workchain().to_string())];
-
         // get top other updated shard blocks ids
         let top_other_updated_shard_blocks_ids =
             if self.state.collation_data.block_id_short.is_masterchain() {
@@ -137,17 +134,11 @@ impl Phase<FinalizeState> {
             );
         }
 
-        // get queue diff and check for pending internals
-        let histogram_create_queue_diff = HistogramGuard::begin_with_labels(
-            "tycho_do_collate_create_queue_diff_time_high",
-            &labels,
-        );
-
         let FinalizedMessagesReader {
             has_unprocessed_messages,
             queue_diff_with_msgs,
-            // reader_state,
-            // processed_upto,
+            current_msgs_exec_params,
+            new_statistics,
         } = messages_reader.finalize(
             self.extra.executor.min_next_lt(),
             &other_updated_top_shard_diffs_info,
@@ -160,16 +151,12 @@ impl Phase<FinalizeState> {
             queue_diff_messages_count as u64,
         );
 
-        Ok(
-            FinalizeMessagesReaderResult {
-                queue_diff_with_msgs,
-                // queue_diff,
-                has_unprocessed_messages,
-                // reader_state,
-                // processed_upto,
-            },
-            // update_queue_task,
-        )
+        Ok(FinalizeMessagesReaderResult {
+            queue_diff_with_msgs,
+            current_msgs_exec_params,
+            has_unprocessed_messages,
+            new_statistics,
+        })
     }
 
     pub fn finalize_block(
