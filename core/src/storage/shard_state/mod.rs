@@ -83,6 +83,10 @@ impl ShardStateStorage {
         &self.min_ref_mc_state
     }
 
+    pub fn cell_storage(&self) -> &Arc<CellStorage> {
+        &self.cell_storage
+    }
+
     pub async fn store_state(
         &self,
         handle: &BlockHandle,
