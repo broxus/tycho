@@ -23,7 +23,7 @@ use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
-use tycho_util::sync::rayon_run;
+use tycho_util::sync::rayon_run_fifo;
 use tycho_util::time::now_millis;
 use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
 
@@ -709,7 +709,7 @@ impl CollatorStdImpl {
 
                             while let Some(task) = unfinished_tasks.pop() {
                                 let prev_block_id = *prev_state.block_id();
-                                prev_state = rayon_run({
+                                prev_state = rayon_run_fifo({
                                     let block_id = task.block_id;
                                     let merkle_update = task.state_update.clone();
                                     move || {

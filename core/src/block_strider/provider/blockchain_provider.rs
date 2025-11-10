@@ -13,7 +13,7 @@ use tycho_block_util::block::{BlockIdRelation, BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_types::models::*;
 use tycho_util::serde_helpers;
-use tycho_util::sync::rayon_run;
+use tycho_util::sync::rayon_run_fifo;
 
 use crate::block_strider::BlockProvider;
 use crate::block_strider::provider::{
@@ -239,13 +239,13 @@ impl BlockchainBlockProvider {
         block_full: BlockDataFull,
         neighbour: Neighbour,
     ) -> OptionalBlockStuff {
-        let block_stuff_fut = pin!(rayon_run({
+        let block_stuff_fut = pin!(rayon_run_fifo({
             let block_id = block_full.block_id;
             let block_data = block_full.block_data.clone();
             move || BlockStuff::deserialize_checked(&block_id, &block_data)
         }));
 
-        let other_data_fut = pin!(rayon_run({
+        let other_data_fut = pin!(rayon_run_fifo({
             let block_id = block_full.block_id;
             let proof_data = block_full.proof_data.clone();
             let queue_diff_data = block_full.queue_diff_data.clone();

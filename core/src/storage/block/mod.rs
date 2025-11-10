@@ -13,7 +13,7 @@ use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_types::models::*;
 use tycho_util::FastHasherState;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::{CancellationFlag, rayon_run};
+use tycho_util::sync::{CancellationFlag, rayon_run_fifo};
 
 pub use self::package_entry::{PackageEntryKey, PartialBlockId};
 use super::util::SlotSubscriptions;
@@ -202,7 +202,7 @@ impl BlockStorage {
             BlockStuff::deserialize(handle.id(), data.as_ref())
         } else {
             let handle = handle.clone();
-            rayon_run(move || BlockStuff::deserialize(handle.id(), data.as_ref())).await
+            rayon_run_fifo(move || BlockStuff::deserialize(handle.id(), data.as_ref())).await
         }
     }
 
@@ -369,7 +369,7 @@ impl BlockStorage {
             QueueDiffStuff::deserialize(handle.id(), &data)
         } else {
             let handle = handle.clone();
-            rayon_run(move || QueueDiffStuff::deserialize(handle.id(), data.as_ref())).await
+            rayon_run_fifo(move || QueueDiffStuff::deserialize(handle.id(), data.as_ref())).await
         }
     }
 

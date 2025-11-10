@@ -3,7 +3,7 @@ use futures_util::future::{BoxFuture, FutureExt};
 use tycho_block_util::block::BlockStuff;
 use tycho_types::models::*;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run;
+use tycho_util::sync::rayon_run_fifo;
 
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
@@ -42,7 +42,7 @@ impl StateSubscriber for MetricsSubscriber {
 fn handle_block_fut(block: BlockStuff) -> BoxFuture<'static, Result<()>> {
     let histogram = HistogramGuard::begin("tycho_core_metrics_subscriber_handle_block_time");
 
-    rayon_run(move || {
+    rayon_run_fifo(move || {
         // NOTE: Move histogram into the closure to ensure it's dropped
         // after the block is handled. We started recording it earlier
         // to also include the time spent on `rayon_run` overhead.

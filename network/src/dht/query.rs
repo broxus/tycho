@@ -9,7 +9,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
 use tokio::sync::Semaphore;
 use tycho_util::futures::{JoinTask, Shared, WeakSharedHandle};
-use tycho_util::sync::{rayon_run, yield_on_complex};
+use tycho_util::sync::{rayon_run_fifo, yield_on_complex};
 use tycho_util::time::now_sec;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
@@ -480,7 +480,7 @@ where
 
     // NOTE: Ensure that we don't block the thread for too long
     if nodes.len() > SPAWN_THRESHOLD {
-        let nodes = rayon_run(move || {
+        let nodes = rayon_run_fifo(move || {
             nodes.retain(|node| node.verify(now));
             nodes
         })

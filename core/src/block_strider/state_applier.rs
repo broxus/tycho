@@ -7,7 +7,7 @@ use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_types::cell::{Cell, HashBytes};
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run;
+use tycho_util::sync::rayon_run_fifo;
 
 use crate::block_strider::{
     BlockSaver, BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
@@ -182,7 +182,7 @@ where
 
         let apply_in_mem = HistogramGuard::begin("tycho_core_apply_block_in_mem_time_high");
 
-        let new_state = rayon_run(move || update.par_apply(&prev_root, &split_at))
+        let new_state = rayon_run_fifo(move || update.par_apply(&prev_root, &split_at))
             .await
             .context("Failed to apply state update")?;
 

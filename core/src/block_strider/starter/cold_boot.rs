@@ -15,7 +15,7 @@ use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
 use tycho_util::futures::JoinTask;
-use tycho_util::sync::rayon_run;
+use tycho_util::sync::rayon_run_fifo;
 use tycho_util::time::now_sec;
 
 use super::{ColdBootType, StarterInner, ZerostateProvider};
@@ -570,13 +570,13 @@ impl StarterInner {
                 continue 'outer;
             };
 
-            let block_stuff_fut = pin!(rayon_run({
+            let block_stuff_fut = pin!(rayon_run_fifo({
                 let block_id = *block_id;
                 let block_data = full.block_data.clone();
                 move || BlockStuff::deserialize_checked(&block_id, &block_data)
             }));
 
-            let other_data_fut = pin!(rayon_run({
+            let other_data_fut = pin!(rayon_run_fifo({
                 let block_id = *block_id;
                 let proof_data = full.proof_data.clone();
                 let queue_diff_data = full.queue_diff_data.clone();

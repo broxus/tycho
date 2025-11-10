@@ -100,7 +100,7 @@ impl Archive {
         let this = self.clone();
         let id = *id;
 
-        let (block, proof, queue_diff) = tycho_util::sync::rayon_run(move || {
+        let (block, proof, queue_diff) = tycho_util::sync::rayon_run_fifo(move || {
             let mut block_res = None;
             let mut proof_res = None;
             let mut diff_res = None;
