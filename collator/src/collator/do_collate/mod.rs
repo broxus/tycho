@@ -7,7 +7,7 @@ use humantime::format_duration;
 use phase::{ActualState, Phase};
 use prepare::PrepareState;
 use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
-use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx, SerializedQueueDiff};
+use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
 use tycho_block_util::state::RefMcStateHandle;
 use tycho_core::storage::{NewBlockMeta, StoreStateHint};
 use tycho_types::models::*;
@@ -38,8 +38,7 @@ use crate::internal_queue::types::stats::DiffStatistics;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{
-    ProcessedUptoInfoStuff, build_all_shards_processed_to_by_partitions,
-    find_min_processed_to_by_shards,
+    build_all_shards_processed_to_by_partitions, find_min_processed_to_by_shards,
 };
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
@@ -254,8 +253,8 @@ impl CollatorStdImpl {
             } => {}
         }
         let CollationOutput {
-            mut reader_state,
-            anchors_cache: mut restored_anchors_cache,
+            reader_state,
+            anchors_cache: restored_anchors_cache,
             result: do_collate_res,
         } = do_collate_res.unwrap();
 
@@ -452,9 +451,11 @@ impl CollatorStdImpl {
         let FinalizeMessagesReaderResult {
             queue_diff_with_msgs,
             has_unprocessed_messages,
-            // reader_state,
-            // processed_upto,
+            current_msgs_exec_params,
+            new_statistics,
         } = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
+
+        reader_state.internals.cumulative_statistics = new_statistics;
 
         let (min_message, max_message) = {
             let messages = &queue_diff_with_msgs.messages;
@@ -485,7 +486,9 @@ impl CollatorStdImpl {
             *serialized_diff.hash(),
         )?;
 
-        let processed_upto = reader_state.get_updated_processed_upto();
+        let mut processed_upto = reader_state.get_updated_processed_upto();
+        processed_upto.msgs_exec_params = Some(current_msgs_exec_params);
+
         let internal_processed_upto_by_partitions =
             processed_upto.get_internals_processed_to_by_partitions();
 
@@ -1400,25 +1403,22 @@ fn serialize_diff(
     prev_hash: &HashBytes,
     processed_to: ProcessedTo,
 ) -> SerializedQueueDiff {
-    let queue_diff =
-        QueueDiffStuff::builder(block_id_short.shard, block_id_short.seqno, &prev_hash)
-            .with_processed_to(processed_to)
-            .with_messages(
-                &min_message,
-                &max_message,
-                queue_diff_with_msgs.messages.keys().map(|k| &k.hash),
-            )
-            .with_router(
-                queue_diff_with_msgs
-                    .partition_router
-                    .to_router_partitions_src(),
-                queue_diff_with_msgs
-                    .partition_router
-                    .to_router_partitions_dst(),
-            )
-            .serialize();
-
-    queue_diff
+    QueueDiffStuff::builder(block_id_short.shard, block_id_short.seqno, prev_hash)
+        .with_processed_to(processed_to)
+        .with_messages(
+            min_message,
+            max_message,
+            queue_diff_with_msgs.messages.keys().map(|k| &k.hash),
+        )
+        .with_router(
+            queue_diff_with_msgs
+                .partition_router
+                .to_router_partitions_src(),
+            queue_diff_with_msgs
+                .partition_router
+                .to_router_partitions_dst(),
+        )
+        .serialize()
 }
 
 fn create_apply_diff_task(
@@ -1431,12 +1431,7 @@ fn create_apply_diff_task(
 ) -> Result<impl FnOnce() -> Result<Duration>> {
     // create update queue task but do not run it
     let update_queue_task = {
-        let labels = [
-            ("workchain", block_id_short.shard.workchain().to_string()),
-            // ("par_id", par_id.to_string()),
-        ];
-        // let block_id_short = self.state.collation_data.block_id_short;
-        // let labels = labels.clone();
+        let labels = [("workchain", block_id_short.shard.workchain().to_string())];
         let span = tracing::Span::current();
         move || {
             let _span = span.enter();

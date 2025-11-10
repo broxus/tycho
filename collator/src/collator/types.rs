@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use parking_lot::lock_api::RwLockReadGuard;
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock};
 use tl_proto::TlWrite;
-use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, SerializedQueueDiff};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::{AccountMeta, PublicLibraryChange, TransactionMeta};
@@ -1390,6 +1390,8 @@ pub struct FinalizeMessagesReaderResult {
     // pub reader_state: ReaderState,
     // pub processed_upto: ProcessedUptoInfoStuff,
     pub queue_diff_with_msgs: QueueDiffWithMessages<EnqueuedMessage>,
+    pub current_msgs_exec_params: MsgsExecutionParams,
+    pub new_statistics: Option<CumulativeStatistics>,
 }
 
 pub struct FinalizeCollationResult {
