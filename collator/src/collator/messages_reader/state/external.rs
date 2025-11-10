@@ -31,16 +31,6 @@ pub struct ExternalsReaderState {
 }
 
 impl ExternalsReaderState {
-    pub fn get_state_by_partition_mut<T: Into<QueuePartitionIdx>>(
-        &mut self,
-        par_id: T,
-    ) -> anyhow::Result<&mut ExternalsPartitionReaderState> {
-        let par_id = par_id.into();
-        self.by_partitions
-            .get_mut(&par_id)
-            .with_context(|| format!("externals reader state not exists for partition {par_id}"))
-    }
-
     pub fn get_state_by_partition<T: Into<QueuePartitionIdx>>(
         &self,
         par_id: T,
@@ -49,15 +39,6 @@ impl ExternalsReaderState {
         self.by_partitions
             .get(&par_id)
             .with_context(|| format!("externals reader state not exists for partition {par_id}"))
-    }
-
-    pub fn get_range_state_by_seqno(
-        &mut self,
-        seqno: BlockSeqno,
-    ) -> anyhow::Result<&ExternalsRangeReaderState> {
-        self.ranges
-            .get(&seqno)
-            .with_context(|| format!("externals range reader state not exists for seqno {seqno}"))
     }
 }
 
@@ -77,7 +58,7 @@ pub struct ExternalsRangeReaderState {
     pub range: ExternalsReaderRange,
     /// Partition related externals range reader state
     pub by_partitions: BTreeMap<QueuePartitionIdx, ExternalsPartitionRangeReaderState>,
-    pub fully_read_calculated: bool,
+    pub fully_read: bool,
 }
 
 impl ExternalsRangeReaderState {

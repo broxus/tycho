@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use parking_lot::lock_api::RwLockReadGuard;
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock};
 use tl_proto::TlWrite;
-use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, SerializedQueueDiff};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::{AccountMeta, PublicLibraryChange, TransactionMeta};
@@ -1114,32 +1114,6 @@ pub struct ExecutedTransaction {
 pub struct SkippedTransaction {
     pub gas_used: u64,
 }
-// #[derive(Debug, Clone)]
-// pub struct ParsedMessage {
-//     pub info: MsgInfo,
-//     pub dst_in_current_shard: bool,
-//     pub cell: Cell,
-//     pub special_origin: Option<SpecialOrigin>,
-//     pub block_seqno: Option<BlockSeqno>,
-//     pub from_same_shard: Option<bool>,
-//     pub ext_msg_chain_time: Option<u64>,
-// }
-//
-// impl ParsedMessage {
-//     pub fn kind(&self) -> ParsedMessageKind {
-//         match (&self.info, self.special_origin) {
-//             (_, Some(SpecialOrigin::Recover)) => ParsedMessageKind::Recover,
-//             (_, Some(SpecialOrigin::Mint)) => ParsedMessageKind::Mint,
-//             (MsgInfo::ExtIn(_), _) => ParsedMessageKind::ExtIn,
-//             (MsgInfo::Int(_), _) => ParsedMessageKind::Int,
-//             (MsgInfo::ExtOut(_), _) => ParsedMessageKind::ExtOut,
-//         }
-//     }
-//
-//     pub fn is_external(&self) -> bool {
-//         matches!(self.info, MsgInfo::ExtIn(_) | MsgInfo::ExtOut(_))
-//     }
-// }
 
 #[derive(Debug)]
 pub struct ParsedMessageInner {
@@ -1222,7 +1196,6 @@ impl ParsedMessage {
         matches!(self.info(), MsgInfo::ExtIn(_) | MsgInfo::ExtOut(_))
     }
 
-    /// Если нужно отдать весь Arc наружу
     pub fn arc(&self) -> Arc<ParsedMessageInner> {
         Arc::clone(&self.0)
     }
@@ -1385,11 +1358,10 @@ impl AnchorsCache {
 }
 
 pub struct FinalizeMessagesReaderResult {
-    // pub queue_diff: SerializedQueueDiff,
     pub has_unprocessed_messages: bool,
-    // pub reader_state: ReaderState,
-    // pub processed_upto: ProcessedUptoInfoStuff,
     pub queue_diff_with_msgs: QueueDiffWithMessages<EnqueuedMessage>,
+    pub current_msgs_exec_params: MsgsExecutionParams,
+    pub new_statistics: Option<CumulativeStatistics>,
 }
 
 pub struct FinalizeCollationResult {
@@ -1422,7 +1394,6 @@ pub struct FinalizeBlockResult {
 pub struct CollationResult {
     pub final_result: FinalResult,
     pub finalized: FinalizeBlockResult,
-    // pub reader_state: ReaderState,
     pub execute_result: ExecuteResult,
 }
 

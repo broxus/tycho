@@ -906,8 +906,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 mc_state_gen_lt: mc_gen_lt,
                 prev_state_gen_lt: self.last_block_gen_lt,
                 mc_top_shards_end_lts: mc_top_shards_end_lts.clone(),
-                reader_state,
-                anchors_cache,
+                reader_state: &mut reader_state,
+                anchors_cache: &mut anchors_cache,
                 is_first_block_after_prev_master,
                 cumulative_stats_calc_params: cumulative_stats_calc_params.clone(),
                 part_stat_ranges,
@@ -916,8 +916,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
         )?;
 
         // create secondary reader
-        let secondary_reader_state = ReaderState::new(&processed_upto);
-        let secondary_anchors_cache =
+        let mut secondary_reader_state = ReaderState::new(&processed_upto);
+        let mut secondary_anchors_cache =
             msgs_factory.init_anchors_cache(&self.shard_id, &processed_upto);
         let mut secondary_messages_reader = self.create_secondary_reader(
             MessagesReaderContext {
@@ -931,8 +931,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 mc_state_gen_lt: mc_gen_lt,
                 prev_state_gen_lt: self.last_block_gen_lt,
                 mc_top_shards_end_lts,
-                reader_state: secondary_reader_state,
-                anchors_cache: secondary_anchors_cache,
+                reader_state: &mut secondary_reader_state,
+                anchors_cache: &mut secondary_anchors_cache,
                 cumulative_stats_calc_params,
                 is_first_block_after_prev_master: true,
                 part_stat_ranges: None,
@@ -954,7 +954,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         tracing::debug!(
             int_curr_processed_offset = ?DebugIter(primary_messages_reader
                 .internals_partition_readers.iter()
-                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
+                .map(|(par_id, par)| (par_id, par.state().curr_processed_offset))),
             ext_curr_processed_offset = ?DebugIter(primary_messages_reader
                 .externals_reader.reader_state()
                 .by_partitions.iter()
@@ -968,7 +968,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         tracing::debug!(
             int_curr_processed_offset = ?DebugIter(secondary_messages_reader
                 .internals_partition_readers.iter()
-                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
+                .map(|(par_id, par)| (par_id, par.state().curr_processed_offset))),
             ext_curr_processed_offset = ?DebugIter(secondary_messages_reader
                 .externals_reader.reader_state()
                 .by_partitions.iter()
@@ -982,7 +982,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
         // prepare to execute
         let start_lt = std::cmp::max(self.last_block_gen_lt, mc_gen_lt) + 1000;
-        self.curr_lt = start_lt;
+        let mut curr_lt = start_lt;
 
         // read and execute until messages finished or limits reached
         let mut total_exec_count = 0;
@@ -991,12 +991,12 @@ impl<V: InternalMessageValue> TestCollator<V> {
             groups_count += 1;
 
             // read message group in primary
-            let msg_group_opt = Self::collect_primary(&mut primary_messages_reader, self.curr_lt)?;
+            let msg_group_opt = Self::collect_primary(&mut primary_messages_reader, curr_lt)?;
 
             if groups_count == 1 {
                 // read message group in secondary after refill
                 let secondary_msg_group_opt =
-                    Self::collect_secondary(&mut secondary_messages_reader, self.curr_lt)?;
+                    Self::collect_secondary(&mut secondary_messages_reader, curr_lt)?;
 
                 // compare messages groups
                 self.assert_message_group_opt_eq(
@@ -1012,8 +1012,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
                     exec_count,
                     created_messages,
                     max_lt,
-                } = msgs_factory.execute_group(msg_group, self.curr_lt)?;
-                self.curr_lt = max_lt;
+                } = msgs_factory.execute_group(msg_group, curr_lt)?;
+                curr_lt = max_lt;
                 total_exec_count += exec_count;
 
                 let created_messages_count = created_messages.len();
@@ -1073,10 +1073,15 @@ impl<V: InternalMessageValue> TestCollator<V> {
         let FinalizedMessagesReader {
             has_unprocessed_messages,
             queue_diff_with_msgs,
-            // reader_state,
-            // anchors_cache,
-            ..
-        } = primary_messages_reader.finalize(self.curr_lt, &other_shards_top_block_diffs)?;
+            current_msgs_exec_params,
+            new_statistics,
+        } = primary_messages_reader.finalize(curr_lt, &other_shards_top_block_diffs)?;
+
+        // use new statistics
+        reader_state.internals.cumulative_statistics = new_statistics;
+
+        let mut processed_upto = reader_state.get_updated_processed_upto();
+        processed_upto.msgs_exec_params = Some(current_msgs_exec_params);
 
         // create diff and compute hash
         let (min_message, max_message) = {
@@ -1137,6 +1142,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         )?;
 
         // update shard block gen lt
+        self.curr_lt = curr_lt;
         self.last_block_gen_lt = self.curr_lt;
         self.last_queue_diff_hash = queue_diff_hash;
 
@@ -1156,11 +1162,11 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[allow(clippy::unused_self)]
     #[tracing::instrument(skip_all)]
-    fn create_primary_reader(
+    fn create_primary_reader<'a>(
         &self,
-        cx: MessagesReaderContext,
+        cx: MessagesReaderContext<'a>,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-    ) -> Result<MessagesReader<V>> {
+    ) -> Result<MessagesReader<'a, V>> {
         tracing::trace!(
             for_shard_id = %cx.for_shard_id,
             block_seqno = cx.block_seqno,
@@ -1174,11 +1180,11 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[allow(clippy::unused_self)]
     #[tracing::instrument(skip_all)]
-    fn create_secondary_reader(
+    fn create_secondary_reader<'a>(
         &self,
-        cx: MessagesReaderContext,
+        cx: MessagesReaderContext<'a>,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-    ) -> Result<MessagesReader<V>> {
+    ) -> Result<MessagesReader<'a, V>> {
         tracing::trace!(
             for_shard_id = %cx.for_shard_id,
             block_seqno = cx.block_seqno,
@@ -1191,7 +1197,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
     }
 
     #[tracing::instrument(skip_all)]
-    fn refill_secondary(secondary_messages_reader: &mut MessagesReader<V>) -> Result<()> {
+    fn refill_secondary(secondary_messages_reader: &mut MessagesReader<'_, V>) -> Result<()> {
         if secondary_messages_reader.check_need_refill() {
             secondary_messages_reader.refill_buffers_upto_offsets(|| false)?;
         }
@@ -1200,7 +1206,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[tracing::instrument(skip_all)]
     fn collect_primary(
-        messages_reader: &mut MessagesReader<V>,
+        messages_reader: &mut MessagesReader<'_, V>,
         curr_lt: Lt,
     ) -> Result<Option<MessageGroup>> {
         Self::collect_message_group(messages_reader, curr_lt)
@@ -1208,14 +1214,14 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[tracing::instrument(skip_all)]
     fn collect_secondary(
-        messages_reader: &mut MessagesReader<V>,
+        messages_reader: &mut MessagesReader<'_, V>,
         curr_lt: Lt,
     ) -> Result<Option<MessageGroup>> {
         Self::collect_message_group(messages_reader, curr_lt)
     }
 
     fn collect_message_group(
-        messages_reader: &mut MessagesReader<V>,
+        messages_reader: &mut MessagesReader<'_, V>,
         curr_lt: Lt,
     ) -> Result<Option<MessageGroup>> {
         let msg_group_opt =

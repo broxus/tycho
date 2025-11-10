@@ -30,7 +30,7 @@ use crate::types::{ProcessedTo, SaturatingAddAssign};
 // NEW MESSAGES
 //=========
 
-pub(super) struct NewMessagesState<V: InternalMessageValue> {
+pub struct NewMessagesState<V: InternalMessageValue> {
     current_shard: ShardIdent,
     messages: BTreeMap<QueueKey, Arc<V>>,
     partition_router: PartitionRouter,
@@ -176,8 +176,6 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
                 initialized: true,
             };
 
-            // drop flag when we add new messages range reader
-
             tracing::debug!(target: tracing_targets::COLLATOR,
                 partition_id = %reader.partition_id,
                 for_shard_id = %reader.for_shard_id,
@@ -187,8 +185,8 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
                 "created new messages reader",
             );
 
-            self.insert_range_reader(seqno, reader)?;
-            self.insert_range_state(seqno, state)?;
+            self.insert_range_state(seqno, state);
+            self.insert_range_reader(seqno, reader);
 
             self.all_ranges_fully_read = false;
         } else {
@@ -197,14 +195,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
         }
 
         Ok(seqno)
-        // and return the mutable ref
-        // self.get_last_range_reader_mut()
     }
 
-    pub(super) fn update_new_messages_reader_to_boundary(
-        &mut self,
-        current_next_lt: u64,
-    ) -> Result<()> {
+    pub fn update_new_messages_reader_to_boundary(&mut self, current_next_lt: u64) -> Result<()> {
         let for_shard_id = self.for_shard_id;
         let Ok(&InternalsRangeReader { seqno, kind, .. }) = self.get_last_range_reader() else {
             return Ok(());
@@ -372,7 +365,7 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
 }
 
 #[derive(Default)]
-pub(super) struct ReadNewMessagesResult {
+pub struct ReadNewMessagesResult {
     pub taken_messages: Vec<QueueKey>,
     pub has_pending_new_messages: bool,
     pub metrics: MessagesReaderMetrics,

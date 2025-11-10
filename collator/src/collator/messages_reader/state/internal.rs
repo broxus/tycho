@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use scc::HashMap;
 use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_types::models::{IntAddr, ShardIdent};
 
