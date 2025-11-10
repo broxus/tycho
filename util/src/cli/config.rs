@@ -21,7 +21,7 @@ impl ThreadPoolConfig {
         rayon::ThreadPoolBuilder::new()
             .stack_size(8 * 1024 * 1024)
             .thread_name(|_| "rayon_worker".to_string())
-            .num_threads(self.rayon_threads.get())
+            .num_threads(8)
             .build_global()
     }
 

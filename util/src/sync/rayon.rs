@@ -1,3 +1,4 @@
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
@@ -41,7 +42,7 @@ macro_rules! rayon_run_impl {
 }
 
 rayon_run_impl!(rayon_run, spawn, "tycho_rayon_lifo");
-rayon_run_impl!(rayon_run_fifo, spawn_fifo, "tycho_rayon_fifo");
+// rayon_run_impl!(rayon_run_fifo, spawn_fifo, "tycho_rayon_fifo");
 
 struct Guard {
     span: Span,
@@ -63,4 +64,43 @@ impl Drop for Guard {
             );
         }
     }
+}
+
+static POOL: LazyLock<futures_executor::ThreadPool> = LazyLock::new(|| {
+    futures_executor::ThreadPoolBuilder::new()
+        .pool_size(8)
+        .stack_size(8 * 1024 * 1024)
+        .create()
+        .expect("global executor pool")
+});
+
+pub async fn rayon_run_fifo<T: 'static + Send>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    let guard = Guard {
+        span: Span::current(),
+        finished: false,
+    };
+
+    let (send, recv) = tokio::sync::oneshot::channel();
+    let wait_time_histogram = HistogramGuard::begin("tycho_rayon_fifo_queue_time");
+
+    POOL.spawn_ok(async {
+        drop(wait_time_histogram);
+
+        let _task_time = HistogramGuard::begin("tycho_rayon_fifo_task_time");
+
+        COUNTER.fetch_add(1, Ordering::Relaxed);
+        let res = f();
+        let in_flight = COUNTER.fetch_sub(1, Ordering::Relaxed);
+
+        metrics::histogram!("tycho_rayon_fifo_threads").record(in_flight as f64);
+
+        _ = send.send((Instant::now(), res));
+    });
+
+    let (send_time, res) = recv.await.unwrap();
+    guard.disarm();
+    metrics::histogram!("tycho_rayon_fifo_send_time").record(send_time.elapsed());
+    res
 }
