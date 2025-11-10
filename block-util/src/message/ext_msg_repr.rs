@@ -5,12 +5,15 @@ use tycho_types::error::Error;
 use tycho_types::models::{ExtInMsgInfo, IntAddr, MsgType, StateInit};
 use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
+use tycho_util::mem::Reclaimer;
 
 pub async fn validate_external_message(body: &bytes::Bytes) -> Result<(), InvalidExtMsg> {
     if body.len() > ExtMsgRepr::BOUNDARY_BOC_SIZE {
         let body = body.clone();
-        // NOTE: Drop `Cell` inside rayon to not block the executor thread.
-        tycho_util::sync::rayon_run_fifo(move || ExtMsgRepr::validate(&body).map(|_| ())).await
+        let cell: Cell =
+            tycho_util::sync::rayon_run_fifo(move || ExtMsgRepr::validate(&body)).await?;
+        Reclaimer::instance().drop(cell);
+        Ok(())
     } else {
         ExtMsgRepr::validate(body).map(|_| ())
     }

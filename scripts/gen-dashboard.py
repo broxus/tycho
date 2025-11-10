@@ -3051,6 +3051,12 @@ def rayon_stats() -> RowPanel:
         create_heatmap_panel(
             "tycho_rayon_fifo_queue_time", "FIFO Queue Time", yaxis(UNITS.SECONDS)
         ),
+        create_heatmap_panel(
+            "tycho_rayon_lifo_receive_time", "LIFO Receive result from pool Time", yaxis(UNITS.SECONDS)
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_fifo_receive_time", "FIFO Receive result from pool Time", yaxis(UNITS.SECONDS)
+        ),
     ]
     return create_row("Rayon Stats", metrics)
 
