@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 
 use tracing::Span;
 
@@ -28,11 +29,12 @@ macro_rules! rayon_run_impl {
 
                 metrics::histogram!(concat!($prefix, "_threads")).record(in_flight as f64);
 
-                _ = send.send(res);
+                _ = send.send((Instant::now(), res));
             });
 
-            let res = recv.await.unwrap();
+            let (send_time, res) = recv.await.unwrap();
             guard.disarm();
+            metrics::histogram!(concat!($prefix, "_send_time")).record(send_time.elapsed());
             res
         }
     };
