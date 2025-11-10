@@ -13,8 +13,6 @@ use tycho_types::models::{
 };
 use tycho_util::serde_helpers;
 
-#[cfg(feature = "s3-sync")]
-pub use self::s3_sync::S3FileKind;
 use crate::block_strider::PsCompletionContext;
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;

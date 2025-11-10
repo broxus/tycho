@@ -85,9 +85,13 @@ impl StarterInner {
                 let s3_starter = S3Starter::new(&self.config.s3_config, &self.storage)?;
 
                 // Choose the suitable key block with persistent state
-                let _key_block = s3_starter.choose_key_block().await?;
+                let key_block = s3_starter.choose_key_block().await?;
 
-                todo!("download start blocks and states")
+                s3_starter
+                    .download_start_blocks_and_states(&key_block)
+                    .await?;
+
+                key_block
             }
         };
 
@@ -792,10 +796,6 @@ impl StarterInner {
                 .await?;
 
             remove_state_file.await;
-
-            self.completion_state_handler
-                .on_state_persisted(&cx)
-                .await?;
 
             tracing::info!("using the downloaded shard state");
             return Ok((block_handle, state));

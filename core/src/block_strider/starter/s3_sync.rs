@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -6,10 +5,13 @@ use anyhow::{Result, anyhow};
 use futures_util::StreamExt;
 use object_store::DynObjectStore;
 use object_store::path::Path;
+use tycho_block_util::block::BlockStuff;
 use tycho_types::models::BlockId;
 
 use crate::block_strider::starter::{S3Config, S3ProviderConfig};
-use crate::storage::CoreStorage;
+use crate::storage::{BlockHandle, CoreStorage, PersistentStateKind};
+
+pub const S3_CHUNK_SIZE: usize = 10 * 1024 * 1024;
 
 pub struct S3Starter {
     seqno: Option<u32>,
@@ -58,20 +60,27 @@ impl S3Starter {
 
     pub async fn choose_key_block(&self) -> Result<BlockId> {
         let target_seqno = self.seqno.unwrap_or(u32::MAX);
-        let prefix_path = S3FileKind::ShardState.prefix(true);
+        let prefix_path = Path::from("states");
 
         let mut closest: Option<BlockId> = None;
 
-        let mut list = self
-            .s3_client
-            .list(Some(&Path::from(prefix_path.to_string_lossy().as_ref())));
+        let mut list = self.s3_client.list(Some(&prefix_path));
         while let Some(item) = list.next().await {
             let item = item?;
+
+            let Some(extension) = item.location.extension() else {
+                continue;
+            };
+
+            if PersistentStateKind::from_extension(extension) != Some(PersistentStateKind::Shard) {
+                continue;
+            }
 
             let filename = item
                 .location
                 .filename()
-                .ok_or_else(|| anyhow!("no filename in path"))?;
+                .and_then(|f| f.rsplit_once('.').map(|(name, _)| name))
+                .ok_or_else(|| anyhow!("invalid filename format for persistent state"))?;
 
             let block_id = BlockId::from_str(filename)?;
 
@@ -86,53 +95,37 @@ impl S3Starter {
 
         closest.ok_or_else(|| anyhow!("key block not found"))
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum S3FileKind {
-    BlockData,
-    BlockProof,
-    QueueDiff,
-    ShardState,
-    QueueState,
-}
+    pub async fn download_start_blocks_and_states(&self, mc_block_id: &BlockId) -> Result<()> {
+        // Download and save masterchain block and state
+        let (_, init_mc_block) = self
+            .download_block_with_states(mc_block_id, mc_block_id)
+            .await?;
 
-impl S3FileKind {
-    const BLOCK_DATA_DIR: &'static str = "data";
-    const BLOCK_PROOF_DIR: &'static str = "proof";
-    const QUEUE_DIFF_DIR: &'static str = "diff";
+        tracing::info!(
+            block_id = %init_mc_block.id(),
+            "downloaded init mc block state"
+        );
 
-    const SHARD_STATE_DIR: &'static str = "boc";
-    const QUEUE_STATE_DIR: &'static str = "queue";
+        // Download and save blocks and states from other shards
+        for (_, block_id) in init_mc_block.shard_blocks()? {
+            let (handle, _) = self
+                .download_block_with_states(mc_block_id, &block_id)
+                .await?;
 
-    pub fn make_path(&self, block_id: &BlockId) -> PathBuf {
-        self.prefix(block_id.is_masterchain())
-            .join(block_id.to_string())
-    }
-
-    pub fn prefix(&self, is_masterchain: bool) -> PathBuf {
-        let base = match self {
-            Self::ShardState | Self::QueueState => "states",
-            Self::BlockData | Self::BlockProof | Self::QueueDiff => "blocks",
-        };
-
-        let chain = Self::chain(is_masterchain);
-        let type_dir = self.subdir();
-
-        PathBuf::from(base).join(chain).join(type_dir)
-    }
-
-    fn subdir(&self) -> &'static str {
-        match self {
-            Self::BlockData => Self::BLOCK_DATA_DIR,
-            Self::BlockProof => Self::BLOCK_PROOF_DIR,
-            Self::QueueDiff => Self::QUEUE_DIFF_DIR,
-            Self::ShardState => Self::SHARD_STATE_DIR,
-            Self::QueueState => Self::QUEUE_STATE_DIR,
+            self.storage
+                .block_handle_storage()
+                .set_block_committed(&handle);
         }
+
+        Ok(())
     }
 
-    fn chain(is_masterchain: bool) -> &'static str {
-        if is_masterchain { "master" } else { "shards" }
+    async fn download_block_with_states(
+        &self,
+        _mc_block_id: &BlockId,
+        _block_id: &BlockId,
+    ) -> Result<(BlockHandle, BlockStuff)> {
+        todo!()
     }
 }
