@@ -26,14 +26,16 @@ impl BlockStuff {
     pub const BOOT_OFFSET: Duration = Duration::from_secs(12 * 3600);
 
     pub fn compute_is_persistent(block_utime: u32, prev_utime: u32) -> bool {
-        let hack_enabled = cfg!(tycho_unstable)
-            && std::env::var("HACK_EACH_KEY_BLOCK_IS_PERSISTENT").unwrap_or_default() == "1";
+        // let hack_enabled = cfg!(tycho_unstable)
+        //     && std::env::var("HACK_EACH_KEY_BLOCK_IS_PERSISTENT").unwrap_or_default() == "1";
+        //
+        // if hack_enabled {
+        //     true
+        // } else {
+        //     block_utime >> 17 != prev_utime >> 17
+        // }
 
-        if hack_enabled {
-            true
-        } else {
-            block_utime >> 17 != prev_utime >> 17
-        }
+        true
     }
 
     pub fn can_use_for_boot(block_utime: u32, now_utime: u32) -> bool {
