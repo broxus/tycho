@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use error::CollatorError;
 use futures_util::future::Future;
-use messages_reader::{FinalizedMessagesReader, MessagesReader, MessagesReaderContext};
+use messages_reader::{MessagesReader, MessagesReaderContext};
 use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -1588,14 +1588,10 @@ impl CollatorStdImpl {
         }
 
         // return reader state to working state
-        let FinalizedMessagesReader {
-            ..
-            // mut reader_state, ..
-        } = messages_reader.finalize(
+        let _ = messages_reader.finalize(
             0, // can pass 0 because new messages reader was not initialized in this case
             &Default::default(),
         )?;
-        // std::mem::swap(&mut working_state.reader_state, &mut reader_state);
 
         working_state.has_unprocessed_messages = Some(has_pending_internals);
 
