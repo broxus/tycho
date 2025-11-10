@@ -1,5 +1,4 @@
 use tycho_block_util::queue::QueueKey;
-use tycho_core::storage::PersistentStateKind::Queue;
 
 use crate::collator::messages_reader::state::external::{
     ExternalsPartitionReaderState, ExternalsRangeReaderState, ExternalsReaderRange,
@@ -41,7 +40,7 @@ impl ReaderState {
                     .or_insert(ExternalsRangeReaderState {
                         range: ExternalsReaderRange::from_range_info(range_info, processed_to),
                         by_partitions: [(*par_id, range_info.into())].into(),
-                        fully_read_calculated: false,
+                        fully_read: false,
                     });
             }
         }

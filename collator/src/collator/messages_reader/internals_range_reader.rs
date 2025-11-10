@@ -85,7 +85,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
     pub fn collect_messages(
         &mut self,
         msg_group: &mut MessageGroup,
-        prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<V>>,
+        prev_par_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<'_, V>>,
         prev_readers_states: &Vec<&InternalsRangeReaderState>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
         already_skipped_accounts: &mut FastHashSet<HashBytes>,
@@ -180,8 +180,8 @@ pub struct CollectMessagesFromRangeReaderResult {
 }
 
 pub fn partitions_have_intersecting_accounts<V: InternalMessageValue>(
-    current: &InternalsPartitionReader<V>,
-    next: &InternalsPartitionReader<V>,
+    current: &InternalsPartitionReader<'_, V>,
+    next: &InternalsPartitionReader<'_, V>,
 ) -> anyhow::Result<Option<IntAddr>> {
     ensure!(current.for_shard_id == next.for_shard_id);
     ensure!(current.partition_id.is_zero());
@@ -198,7 +198,7 @@ pub fn partitions_have_intersecting_accounts<V: InternalMessageValue>(
 
     // Check buffers in range readers
     for range_reader_seqno in next.range_readers.keys() {
-        let state = next.state().ranges.get(&range_reader_seqno).unwrap();
+        let state = next.state().ranges.get(range_reader_seqno).unwrap();
 
         for (account_address, _) in state.buffer.iter() {
             let addr = IntAddr::Std(StdAddr::new(workchain, *account_address));
