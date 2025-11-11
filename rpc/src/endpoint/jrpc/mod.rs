@@ -220,7 +220,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<RfcBehaviour, Method
                 return ok_to_response(req.id, BlockDataResponse { data: None });
             };
 
-            tycho_util::sync::rayon_run(move || {
+            tycho_util::sync::fifo_run(move || {
                 let data = encode_base64(data);
                 ok_to_response(req.id, BlockDataResponse { data: Some(data) })
             })

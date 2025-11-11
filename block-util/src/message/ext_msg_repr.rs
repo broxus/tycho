@@ -10,8 +10,7 @@ use tycho_util::mem::Reclaimer;
 pub async fn validate_external_message(body: &bytes::Bytes) -> Result<(), InvalidExtMsg> {
     if body.len() > ExtMsgRepr::BOUNDARY_BOC_SIZE {
         let body = body.clone();
-        let cell: Cell =
-            tycho_util::sync::rayon_run_fifo(move || ExtMsgRepr::validate(&body)).await?;
+        let cell: Cell = tycho_util::sync::fifo_run(move || ExtMsgRepr::validate(&body)).await?;
         Reclaimer::instance().drop(cell);
         Ok(())
     } else {
@@ -22,7 +21,7 @@ pub async fn validate_external_message(body: &bytes::Bytes) -> Result<(), Invali
 pub async fn parse_external_message(body: &bytes::Bytes) -> Result<Cell, InvalidExtMsg> {
     if body.len() > ExtMsgRepr::BOUNDARY_BOC_SIZE {
         let body = body.clone();
-        tycho_util::sync::rayon_run_fifo(move || ExtMsgRepr::validate(&body)).await
+        tycho_util::sync::fifo_run(move || ExtMsgRepr::validate(&body)).await
     } else {
         ExtMsgRepr::validate(body)
     }

@@ -187,7 +187,7 @@ impl CollatorStdImpl {
         });
         let collation_is_cancelled = state.collation_is_cancelled.clone();
 
-        let do_collate_fut = tycho_util::sync::rayon_run_fifo({
+        let do_collate_fut = tycho_util::sync::fifo_run({
             let collation_session = self.collation_session.clone();
             let config = self.config.clone();
             let mq_adapter = self.mq_adapter.clone();

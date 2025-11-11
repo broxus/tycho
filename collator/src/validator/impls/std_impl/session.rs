@@ -358,7 +358,7 @@ impl ValidatorSession {
         let mut total_weight = self.inner.own_weight;
 
         let span = tracing::Span::current();
-        tycho_util::sync::rayon_run(move || {
+        tycho_util::sync::fifo_run(move || {
             let _span = span.enter();
 
             // Prepare our own signature

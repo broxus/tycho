@@ -4,7 +4,7 @@ use arc_swap::ArcSwapOption;
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, future};
 use tycho_network::{Response, Service, ServiceRequest};
-use tycho_util::sync::rayon_run_fifo;
+use tycho_util::sync::fifo_run;
 
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
@@ -163,7 +163,7 @@ impl ResponderInner {
 
         let query = match medium_query {
             QueryRequestMedium::Broadcast(bytes) => {
-                match rayon_run_fifo(|| Point::parse(bytes.into())).await {
+                match fifo_run(|| Point::parse(bytes.into())).await {
                     Ok(Ok(Ok(point))) if point.info().author() == peer_id => {
                         QueryRequest::Broadcast(point, None)
                     }

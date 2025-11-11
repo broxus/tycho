@@ -375,7 +375,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
                 }));
             };
 
-            tycho_util::sync::rayon_run(move || {
+            tycho_util::sync::fifo_run(move || {
                 ok_to_response(response::Result::GetBlockData(response::BlockData {
                     data: Some(Bytes::from_owner(data)),
                 }))

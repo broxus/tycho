@@ -17,12 +17,18 @@ impl ThreadPoolConfig {
     // don't assign unique names to threads, for example using indexes:
     // that way they'll be merged into a pretty-looking single one in flame graphs
 
-    pub fn init_global_rayon_pool(&self) -> Result<(), rayon::ThreadPoolBuildError> {
+    pub fn init_global_thread_pools(&self) -> anyhow::Result<()> {
+        let num_threads = self.rayon_threads.get().div_ceil(2);
+
         rayon::ThreadPoolBuilder::new()
             .stack_size(8 * 1024 * 1024)
             .thread_name(|_| "rayon_worker".to_string())
-            .num_threads(self.rayon_threads.get())
-            .build_global()
+            .num_threads(num_threads)
+            .build_global()?;
+
+        tycho_util::sync::install_global_fifo_pool(num_threads.try_into().unwrap())?;
+
+        Ok(())
     }
 
     pub fn build_tokio_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {

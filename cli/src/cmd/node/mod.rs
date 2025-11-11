@@ -85,7 +85,7 @@ impl CmdRun {
             .context("failed to load node config")?
             .with_relative_paths(&args.home);
 
-        node_config.threads.init_global_rayon_pool()?;
+        node_config.threads.init_global_thread_pools()?;
         node_config.threads.init_reclaimer()?;
 
         node_config

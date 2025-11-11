@@ -110,7 +110,7 @@ impl CmdRun {
         let node_config =
             NodeConfig::from_file(&self.config).context("failed to load node config")?;
 
-        node_config.threads.init_global_rayon_pool()?;
+        node_config.threads.init_global_thread_pools()?;
 
         node_config
             .threads

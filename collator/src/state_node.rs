@@ -18,7 +18,7 @@ use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run;
+use tycho_util::sync::fifo_run;
 use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::tracing_targets;
@@ -434,7 +434,7 @@ impl StateNodeAdapterStdImpl {
     }
 
     async fn save_block_proof(&self, block: &Arc<BlockStuffForSync>) -> Result<()> {
-        let (block_info, archive_data) = rayon_run({
+        let (block_info, archive_data) = fifo_run({
             let block = block.clone();
             move || {
                 let PreparedProof { proof, block_info } = prepare_block_proof(

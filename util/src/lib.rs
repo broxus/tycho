@@ -49,12 +49,12 @@ pub mod num {
 pub mod sync {
     pub use self::once_take::*;
     pub use self::priority_semaphore::{AcquireError, PrioritySemaphore, TryAcquireError};
-    pub use self::rayon::{rayon_run, rayon_run_fifo};
+    pub use self::run_fifo::{fifo_run, install_global_fifo_pool};
     pub use self::task::{CancellationFlag, DebounceCancellationFlag, yield_on_complex};
 
     mod once_take;
     mod priority_semaphore;
-    mod rayon;
+    mod run_fifo;
     mod task;
 }
 
