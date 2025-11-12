@@ -4,7 +4,6 @@ use arc_swap::ArcSwapOption;
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, future};
 use tycho_network::{Response, Service, ServiceRequest};
-use tycho_util::sync::rayon_run_fifo;
 
 use crate::dag::DagHead;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
@@ -162,44 +161,42 @@ impl ResponderInner {
         };
 
         let query = match medium_query {
-            QueryRequestMedium::Broadcast(bytes) => {
-                match rayon_run_fifo(|| Point::parse(bytes.into())).await {
-                    Ok(Ok(Ok(point))) if point.info().author() == peer_id => {
-                        QueryRequest::Broadcast(point, None)
-                    }
-                    Ok(Ok(Ok(wrong_point))) => {
-                        let wrong_id = wrong_point.info().id();
-                        tracing::error!(
-                            ?tag,
-                            peer_id = display(peer_id.alt()),
-                            author = display(wrong_id.author.alt()),
-                            round = wrong_id.round.0,
-                            digest = display(wrong_id.digest.alt()),
-                            "broadcasted other's point",
-                        );
-                        return None;
-                    }
-                    Ok(Ok(Err((point, issue)))) => QueryRequest::Broadcast(point, Some(issue)),
-                    Ok(Err(integrity_err)) => {
-                        tracing::error!(
-                            ?tag,
-                            peer_id = display(peer_id.alt()),
-                            error = %integrity_err,
-                            "bad point",
-                        );
-                        return None;
-                    }
-                    Err(tl_error) => {
-                        tracing::warn!(
-                            ?tag,
-                            peer_id = display(peer_id.alt()),
-                            error = %tl_error,
-                            "bad request",
-                        );
-                        return None;
-                    }
+            QueryRequestMedium::Broadcast(bytes) => match Point::parse(bytes.into()).await {
+                Ok(Ok(Ok(point))) if point.info().author() == peer_id => {
+                    QueryRequest::Broadcast(point, None)
                 }
-            }
+                Ok(Ok(Ok(wrong_point))) => {
+                    let wrong_id = wrong_point.info().id();
+                    tracing::error!(
+                        ?tag,
+                        peer_id = display(peer_id.alt()),
+                        author = display(wrong_id.author.alt()),
+                        round = wrong_id.round.0,
+                        digest = display(wrong_id.digest.alt()),
+                        "broadcasted other's point",
+                    );
+                    return None;
+                }
+                Ok(Ok(Err((point, issue)))) => QueryRequest::Broadcast(point, Some(issue)),
+                Ok(Err(integrity_err)) => {
+                    tracing::error!(
+                        ?tag,
+                        peer_id = display(peer_id.alt()),
+                        error = %integrity_err,
+                        "bad point",
+                    );
+                    return None;
+                }
+                Err(tl_error) => {
+                    tracing::warn!(
+                        ?tag,
+                        peer_id = display(peer_id.alt()),
+                        error = %tl_error,
+                        "bad request",
+                    );
+                    return None;
+                }
+            },
             QueryRequestMedium::Signature(round) => QueryRequest::Signature(round),
             QueryRequestMedium::Download(point_id) => QueryRequest::Download(point_id),
         };

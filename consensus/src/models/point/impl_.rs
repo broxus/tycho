@@ -152,20 +152,26 @@ impl Point {
         })
     }
 
-    pub fn parse(serialized: Vec<u8>) -> ParseResult {
+    /// made async because a run in a thread pool induces latency on queueing etc
+    pub async fn parse(serialized: Vec<u8>) -> ParseResult {
         let raw = PointRawRead::<'_>::read_from(&mut &serialized[..])?;
 
+        // ~ 35-45us
         if !(raw.signature).verifies(raw.author()?, raw.digest) {
             return Ok(Err(PointIntegrityError::BadSig));
         };
 
+        // ~ 130-160us for 768kb payload
         if *raw.digest != Digest::new(raw.body.as_ref()) {
             return Ok(Err(PointIntegrityError::BadHash));
         };
 
+        tokio::task::yield_now().await;
+
+        // ~ 95-140us for 768kb payload
         let point = Self::from_bytes(serialized)?;
 
-        Ok(Ok(match point.info().check_structure() {
+        Ok(Ok(match point.info().check_structure().await {
             Ok(()) => Ok(point),
             Err(issue) => Err((point, issue)),
         }))
@@ -292,12 +298,13 @@ mod tests {
     use super::*;
     use crate::test_utils::default_test_config;
 
-    #[test]
-    pub fn check_serialize() -> Result<()> {
+    #[tokio::test]
+    pub async fn check_serialize() -> Result<()> {
         let conf = default_test_config().conf;
         let point = point(&new_key_pair(), &payload(&conf), &conf);
 
         let point_2 = Point::parse(point.serialized().to_vec())
+            .await
             .context("parse point bytes")??
             .map_err(|(_, err)| err)?;
         ensure!(point == point_2, "point serde roundtrip");

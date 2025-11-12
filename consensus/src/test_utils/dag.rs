@@ -128,6 +128,7 @@ pub async fn populate_points<const PEER_COUNT: usize>(
 
     for point in points.values() {
         Point::parse(point.serialized().to_vec())
+            .await
             .expect("point tl serde is broken")
             .expect("point integrity check is broken")
             .expect("structure check is broken");

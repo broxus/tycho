@@ -135,14 +135,21 @@ impl PointInfo {
         (self.0.data).includes.get(&self.0.author)
     }
 
-    pub(super) fn check_structure(&self) -> Result<(), StructureIssue> {
+    pub(super) async fn check_structure(&self) -> Result<(), StructureIssue> {
         (self.0.data).check_maps(self.0.author, self.0.round)?;
-        self.prev_digest()
-            .is_none_or(|prev_proof| {
-                (self.evidence().iter()).all(|(peer, sig)| sig.verifies(peer, prev_proof))
-            })
-            .then_some(())
-            .ok_or(StructureIssue::EvidenceSig)
+        let Some(prev_digest) = self.prev_digest() else {
+            return Ok(());
+        };
+        for (i, (peer_id, sig)) in self.evidence().iter().enumerate() {
+            if i.is_multiple_of(5) {
+                tokio::task::yield_now().await;
+            }
+            // ~ 35-45us
+            if !sig.verifies(peer_id, prev_digest) {
+                return Err(StructureIssue::EvidenceSig);
+            }
+        }
+        Ok(())
     }
 
     pub fn id(&self) -> PointId {

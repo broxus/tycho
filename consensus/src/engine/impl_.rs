@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 use std::time::Duration;
 
+use anyhow::Context;
 use futures_util::future::BoxFuture;
 use futures_util::never::Never;
 use futures_util::stream::FuturesUnordered;
@@ -21,6 +22,7 @@ use crate::engine::lifecycle::{EngineBinding, EngineError, EngineNetwork, FixHis
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolMergedConfig};
+use crate::intercom::PeerSchedule;
 use crate::models::{
     DagPoint, MempoolOutput, Point, PointRestore, PointRestoreSelect, PointStatusStoredRef, Round,
 };
@@ -48,14 +50,6 @@ impl Engine {
         fix_history: FixHistoryFlag,
     ) -> Engine {
         let conf = &merged_conf.conf;
-        let genesis = merged_conf.genesis();
-
-        Point::parse(genesis.serialized().to_vec())
-            .expect("parse genesis: point tl serde is broken")
-            .expect("parse genesis: integrity check is broken")
-            .expect("parse genesis: structure check is broken");
-        Verifier::verify(genesis.info(), &net.peer_schedule, conf)
-            .expect("failed to verify genesis");
 
         let consensus_round = RoundWatch::default();
         consensus_round.set_max(conf.genesis_round);
@@ -89,15 +83,38 @@ impl Engine {
         );
         let committer_run = CommitterTask::new(committer, conf);
 
-        let init_task = engine_ctx.task().spawn_blocking({
+        let init_task = {
             let store = store.clone();
+            let verify_genesis = Self::verify_genesis(
+                merged_conf.genesis(),
+                net.peer_schedule.clone(),
+                round_ctx.clone(),
+            );
             let overlay_id = merged_conf.overlay_id;
-            move || {
-                store.init_storage(&overlay_id);
-                store.insert_point(&genesis, PointStatusStoredRef::Exists);
-                fix_history // just pass further
-            }
-        });
+            let ctx = round_ctx.clone();
+            round_ctx.task().spawn(async move {
+                match verify_genesis.await {
+                    Err(error) => {
+                        tracing::error!(
+                            parent: ctx.span(),
+                            ?error,
+                            "cancel engine on init"
+                        );
+                        Err(Cancelled())
+                    }
+                    Ok(genesis) => {
+                        let init = ctx.task().spawn_blocking({
+                            move || {
+                                store.init_storage(&overlay_id);
+                                store.insert_point(&genesis, PointStatusStoredRef::Exists);
+                                fix_history // just pass further
+                            }
+                        });
+                        init.await
+                    }
+                }
+            })
+        };
 
         let round_task = RoundTaskReady::new(&store, bind, &consensus_round, net, conf);
 
@@ -116,6 +133,21 @@ impl Engine {
             init_task: Some(init_task),
             ctx: engine_ctx,
         }
+    }
+
+    async fn verify_genesis(
+        genesis: Point,
+        peer_schedule: PeerSchedule,
+        ctx: RoundCtx,
+    ) -> anyhow::Result<Point> {
+        Point::parse(genesis.serialized().to_vec())
+            .await
+            .context("parse genesis: point tl serde is broken")?
+            .context("parse genesis: integrity check is broken")?
+            .map_err(|(_, e)| e)
+            .context("parse genesis: structure check is broken")?;
+        Verifier::verify(genesis.info(), &peer_schedule, ctx.conf()).context("verify genesis")?;
+        Ok(genesis)
     }
 
     // restore last two rounds into dag, return the last own point among them to repeat broadcast

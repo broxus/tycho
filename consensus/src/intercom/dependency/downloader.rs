@@ -16,7 +16,6 @@ use tracing::Instrument;
 use tycho_network::PeerId;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run_fifo;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
@@ -358,7 +357,7 @@ impl<T: DownloadType> DownloadTask<T> {
 
         let last_response = match out.result {
             Ok(DownloadResponse::Defined(bytes)) => {
-                let parse = std::pin::pin!(rayon_run_fifo(|| Point::parse(bytes.into())));
+                let parse = std::pin::pin!(Point::parse(bytes.into()));
                 match future::select(broadcast_result, parse).await {
                     future::Either::Left((bcast_result, _)) => {
                         return match bcast_result {
