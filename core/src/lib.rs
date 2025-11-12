@@ -5,3 +5,6 @@ pub mod node;
 pub mod overlay_client;
 pub mod proto;
 pub mod storage;
+
+#[cfg(feature = "s3")]
+pub mod s3;

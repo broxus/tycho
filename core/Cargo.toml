@@ -85,7 +85,7 @@ default = ["cells-metrics"]
 test = []
 cli = ["dep:clap", "clap/derive"]
 cells-metrics = []
-s3-sync = ["dep:object_store"]
+s3 = ["dep:object_store"]
 
 [lints]
 workspace = true

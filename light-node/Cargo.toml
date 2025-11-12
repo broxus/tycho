@@ -39,6 +39,7 @@ name = "light-node"
 path = "examples/node.rs"
 
 [features]
+s3 = ["tycho-core/s3"]
 test = ["tycho-core/test"]
 
 [lints]

@@ -16,12 +16,14 @@ use tycho_util::serde_helpers;
 use crate::block_strider::PsCompletionContext;
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
+#[cfg(feature = "s3")]
+use crate::s3::S3Client;
 use crate::storage::{CoreStorage, QueueStateReader};
 
 mod cold_boot;
 
-#[cfg(feature = "s3-sync")]
-mod s3_sync;
+#[cfg(feature = "s3")]
+mod s3_cold_boot;
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,48 +34,11 @@ pub struct StarterConfig {
     #[serde(with = "serde_helpers::humantime")]
     pub custom_boot_offset: Option<Duration>,
 
-    /// TODO
+    /// Choose the closest persistent state seqno to start from.
     ///
     /// Default: None
-    #[cfg(feature = "s3-sync")]
     #[serde(default)]
-    pub s3_config: S3Config,
-}
-
-#[cfg(feature = "s3-sync")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct S3Config {
-    pub seqno: Option<u32>,
-    pub bucket_name: String,
-    pub s3_provider: S3ProviderConfig,
-}
-
-#[cfg(feature = "s3-sync")]
-impl Default for S3Config {
-    fn default() -> Self {
-        Self {
-            seqno: None,
-            bucket_name: "archives".to_string(),
-            s3_provider: S3ProviderConfig::Gcs {
-                credentials_path: "credentials.json".to_owned(),
-            },
-        }
-    }
-}
-
-#[cfg(feature = "s3-sync")]
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum S3ProviderConfig {
-    #[serde(rename = "aws")]
-    Aws {
-        endpoint: String,
-        access_key_id: String,
-        secret_access_key: String,
-        allow_http: bool,
-    },
-
-    #[serde(rename = "gcs")]
-    Gcs { credentials_path: String },
+    pub start_from: Option<u32>,
 }
 
 pub struct StarterBuilder<
@@ -97,6 +62,8 @@ impl StarterBuilder {
     pub fn build(self) -> Starter {
         let (storage, blockchain_rpc_client, zerostate, config) = self.mandatory_fields;
         let BuilderFields {
+            #[cfg(feature = "s3")]
+            s3_client,
             queue_state_handler,
             completion_state_subscriber,
         } = self.optional_fields;
@@ -111,6 +78,9 @@ impl StarterBuilder {
                     .unwrap_or_else(|| Box::new(ValidateQueueState)),
                 completion_state_handler: completion_state_subscriber
                     .unwrap_or_else(|| Box::new(PsCompletionNoop)),
+
+                #[cfg(feature = "s3")]
+                s3_client,
             }),
         }
     }
@@ -164,6 +134,12 @@ impl<T1, T2, T3> StarterBuilder<(T1, T2, T3, ())> {
 }
 
 impl<T> StarterBuilder<T> {
+    #[cfg(feature = "s3")]
+    pub fn with_s3(mut self, s3_client: S3Client) -> Self {
+        self.optional_fields.s3_client = Some(s3_client);
+        self
+    }
+
     pub fn with_queue_state_handler<H: QueueStateHandler>(mut self, handler: H) -> Self {
         self.optional_fields.queue_state_handler = Some(castaway::match_type!(handler, {
             Box<dyn QueueStateHandler> as handler => handler,
@@ -183,6 +159,8 @@ impl<T> StarterBuilder<T> {
 
 #[derive(Default)]
 struct BuilderFields {
+    #[cfg(feature = "s3")]
+    s3_client: Option<S3Client>,
     queue_state_handler: Option<Box<dyn QueueStateHandler>>,
     completion_state_subscriber: Option<Box<dyn PsCompletionHandler>>,
 }
@@ -228,12 +206,14 @@ impl Starter {
 pub enum ColdBootType {
     Genesis,
     LatestPersistent,
-    #[cfg(feature = "s3-sync")]
+    #[cfg(feature = "s3")]
     PersistentFromS3,
 }
 
 struct StarterInner {
     storage: CoreStorage,
+    #[cfg(feature = "s3")]
+    s3_client: Option<S3Client>,
     blockchain_rpc_client: BlockchainRpcClient,
     zerostate: ZerostateId,
     config: StarterConfig,
