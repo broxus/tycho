@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,9 +11,11 @@ use parking_lot::RwLock;
 use rand::Rng;
 use scopeguard::defer;
 use tycho_network::PeerId;
-use tycho_types::models::*;
+use tycho_storage::StorageContext;
+use tycho_types::models::{ConsensusConfig, GenesisInfo, *};
 use tycho_types::prelude::*;
 
+use crate::mempool::impls::dump_anchors::DumpAnchors;
 use crate::mempool::{
     DebugStateUpdateContext, ExternalMessage, GetAnchorResult, MempoolAdapter, MempoolAnchor,
     MempoolAnchorId, MempoolEventListener, StateUpdateContext,
@@ -84,15 +86,19 @@ impl MempoolAdapterStubImpl {
         now: Option<u64>,
         top_processed_to_anchor_mc: u32,
         top_processed_to_anchor_shards: u32,
-        anchors_path: PathBuf,
+        storage_context: StorageContext,
+        start_round: u32,
+        genesis_millis: u64,
     ) -> Result<Arc<Self>> {
         Self::with_generator(listener.clone(), Some(top_processed_to_anchor_shards), {
             move |a| {
                 tokio::spawn(Self::anchors_generator(
                     a,
-                    anchors_path,
                     now,
                     top_processed_to_anchor_mc,
+                    storage_context,
+                    start_round,
+                    genesis_millis,
                 ));
                 Ok(())
             }
@@ -140,58 +146,74 @@ impl MempoolAdapterStubImpl {
     }
 
     #[tracing::instrument(skip_all)]
-    #[allow(clippy::todo)]
     async fn anchors_generator(
         self: Arc<Self>,
-        anchors_path: PathBuf,
         now: Option<u64>,
         top_processed_to_anchor_mc: u32,
+        storage_context: StorageContext,
+        start_round: u32,
+        genesis_millis: u64,
     ) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "started");
         defer! {
             tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
         }
 
-        let mut file_queue: VecDeque<(MempoolAnchorId, u64, PathBuf)> = VecDeque::new();
-        if anchors_path.exists()
-            && let Ok(entries) = std::fs::read_dir(&anchors_path)
+        let dump_anchors =
+            DumpAnchors::new(&storage_context).expect("Failed to create DumpAnchors");
+
+        let mempool_node_config = tycho_consensus::prelude::MempoolNodeConfig {
+            clean_db_period_rounds: std::num::NonZeroU16::new(10).unwrap(),
+            ..Default::default()
+        };
+        let consensus_config = tycho_consensus::test_utils::default_test_config()
+            .conf
+            .consensus;
+        let genesis_info = tycho_types::models::GenesisInfo {
+            start_round,
+            genesis_millis,
+        };
+
+        let dumped_anchors = dump_anchors
+            .load(
+                top_processed_to_anchor_mc,
+                &mempool_node_config,
+                &consensus_config,
+                genesis_info,
+            )
+            .expect("Failed to load dumped anchors")
+            .into_iter()
+            .map(Arc::new);
+
+        tracing::info!("dumped anchors: {:#?}", dumped_anchors);
+
+        // Preload dumped anchors into cache
         {
-            for entry in entries.filter_map(Result::ok) {
-                let path = entry.path();
-                if let Some((anchor_id, chain_time)) = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| s.strip_prefix("anchor_"))
-                    .and_then(|f| {
-                        let mut split = f.split('_');
-                        split.next().and_then(|anchor_id| {
-                            split.next().map(|chain_time| (anchor_id, chain_time))
-                        })
-                    })
-                {
-                    let anchor_id = anchor_id
-                        .parse::<MempoolAnchorId>()
-                        .expect("Filename should be parseable as u32");
-                    let chain_time: u64 = chain_time
-                        .parse()
-                        .expect("Filename should be parseable as u64");
-                    file_queue.push_back((anchor_id, chain_time, path));
-                }
+            let mut cache = self.anchors_cache.write();
+            for anchor in dumped_anchors {
+                tracing::debug!(
+                    target: tracing_targets::MEMPOOL_ADAPTER,
+                    anchor_id = anchor.id,
+                    chain_time = anchor.chain_time,
+                    externals = anchor.externals.len(),
+                    "anchor added to cache",
+                );
+
+                cache.insert(anchor.id, anchor);
             }
-            file_queue.make_contiguous().sort_by_key(|(aid, _, _)| *aid);
         }
 
-        // fill with empty anchors all from top_processed_to_anchor to top_processed_to_anchor_mc
+        // Fill with empty anchors for missing ranges from top_processed_to_anchor to top_processed_to_anchor_mc
         if top_processed_to_anchor_mc > self.top_processed_to_anchor.unwrap_or_default() {
             let mut prev_anchor_id = self.top_processed_to_anchor.unwrap_or_default();
             let start_anchor_id = prev_anchor_id;
             for anchor_id in start_anchor_id..=top_processed_to_anchor_mc {
-                let chain_time = now.unwrap_or_default();
-                let anchor = make_empty_anchor(anchor_id, prev_anchor_id, chain_time + 1336);
-
+                if !self.anchors_cache.read().contains_key(&anchor_id) {
+                    let chain_time = now.unwrap_or_default();
+                    let anchor = make_empty_anchor(anchor_id, prev_anchor_id, chain_time + 1336);
+                    self.anchors_cache.write().insert(anchor_id, anchor.clone());
+                }
                 prev_anchor_id = anchor_id;
-
-                self.anchors_cache.write().insert(anchor_id, anchor.clone());
             }
         }
 
@@ -204,22 +226,19 @@ impl MempoolAdapterStubImpl {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
-            let anchor =
-                if let Some((file_anchor_id, _chain_time, _file_path)) = file_queue.pop_front() {
-                    if file_anchor_id == anchor_id {
-                        todo!("make anchor from file")
-                    } else {
-                        continue;
-                    }
+            let anchor = {
+                let read = self.anchors_cache.read();
+                if read.get(&anchor_id).is_some() {
+                    continue;
                 } else {
-                    let read = self.anchors_cache.read();
                     let chain_time = read
                         .get(&prev_anchor_id)
                         .map(|prev_anchor| prev_anchor.chain_time)
                         .or(now)
                         .unwrap_or_default();
                     make_empty_anchor(anchor_id, prev_anchor_id, chain_time + 1336)
-                };
+                }
+            };
 
             prev_anchor_id = anchor_id;
 
@@ -230,7 +249,7 @@ impl MempoolAdapterStubImpl {
                 anchor_id = anchor.id,
                 chain_time = anchor.chain_time,
                 externals = anchor.externals.len(),
-                "anchor added to cache from file",
+                "anchor added to cache",
             );
 
             self.listener.on_new_anchor(anchor).await.unwrap();
