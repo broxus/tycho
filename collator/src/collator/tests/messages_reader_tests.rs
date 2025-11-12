@@ -18,15 +18,17 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use super::{
     CumulativeStatsCalcParams, FinalizedMessagesReader, GetNextMessageGroupMode, MessagesReader,
-    MessagesReaderContext, ReaderState,
+    MessagesReaderContext,
 };
 use crate::collator::MsgsExecutionParamsStuff;
 use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::messages_reader::log_remaining_msgs_stats;
+use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::types::{AnchorsCache, CumulativeStatistics, ParsedMessage};
-use crate::internal_queue::types::{
-    Bound, DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, QueueShardBoundedRange,
-};
+use crate::internal_queue::types::diff::DiffZone;
+use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValue};
+use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
+use crate::internal_queue::types::stats::DiffStatistics;
 use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
@@ -828,8 +830,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
         F: Fn(IntMsgInfo, Cell) -> V,
     {
         let TestWorkingState {
-            anchors_cache,
-            reader_state,
+            mut anchors_cache,
+            mut reader_state,
             ..
         } = self.primary_working_state.take().unwrap();
 
@@ -904,8 +906,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 mc_state_gen_lt: mc_gen_lt,
                 prev_state_gen_lt: self.last_block_gen_lt,
                 mc_top_shards_end_lts: mc_top_shards_end_lts.clone(),
-                reader_state,
-                anchors_cache,
+                reader_state: &mut reader_state,
+                anchors_cache: &mut anchors_cache,
                 is_first_block_after_prev_master,
                 cumulative_stats_calc_params: cumulative_stats_calc_params.clone(),
                 part_stat_ranges,
@@ -914,8 +916,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
         )?;
 
         // create secondary reader
-        let secondary_reader_state = ReaderState::new(&processed_upto);
-        let secondary_anchors_cache =
+        let mut secondary_reader_state = ReaderState::new(&processed_upto);
+        let mut secondary_anchors_cache =
             msgs_factory.init_anchors_cache(&self.shard_id, &processed_upto);
         let mut secondary_messages_reader = self.create_secondary_reader(
             MessagesReaderContext {
@@ -929,8 +931,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 mc_state_gen_lt: mc_gen_lt,
                 prev_state_gen_lt: self.last_block_gen_lt,
                 mc_top_shards_end_lts,
-                reader_state: secondary_reader_state,
-                anchors_cache: secondary_anchors_cache,
+                reader_state: &mut secondary_reader_state,
+                anchors_cache: &mut secondary_anchors_cache,
                 cumulative_stats_calc_params,
                 is_first_block_after_prev_master: true,
                 part_stat_ranges: None,
@@ -952,7 +954,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         tracing::debug!(
             int_curr_processed_offset = ?DebugIter(primary_messages_reader
                 .internals_partition_readers.iter()
-                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
+                .map(|(par_id, par)| (par_id, par.state().curr_processed_offset))),
             ext_curr_processed_offset = ?DebugIter(primary_messages_reader
                 .externals_reader.reader_state()
                 .by_partitions.iter()
@@ -966,7 +968,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         tracing::debug!(
             int_curr_processed_offset = ?DebugIter(secondary_messages_reader
                 .internals_partition_readers.iter()
-                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
+                .map(|(par_id, par)| (par_id, par.state().curr_processed_offset))),
             ext_curr_processed_offset = ?DebugIter(secondary_messages_reader
                 .externals_reader.reader_state()
                 .by_partitions.iter()
@@ -980,7 +982,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
         // prepare to execute
         let start_lt = std::cmp::max(self.last_block_gen_lt, mc_gen_lt) + 1000;
-        self.curr_lt = start_lt;
+        let mut curr_lt = start_lt;
 
         // read and execute until messages finished or limits reached
         let mut total_exec_count = 0;
@@ -989,12 +991,12 @@ impl<V: InternalMessageValue> TestCollator<V> {
             groups_count += 1;
 
             // read message group in primary
-            let msg_group_opt = Self::collect_primary(&mut primary_messages_reader, self.curr_lt)?;
+            let msg_group_opt = Self::collect_primary(&mut primary_messages_reader, curr_lt)?;
 
             if groups_count == 1 {
                 // read message group in secondary after refill
                 let secondary_msg_group_opt =
-                    Self::collect_secondary(&mut secondary_messages_reader, self.curr_lt)?;
+                    Self::collect_secondary(&mut secondary_messages_reader, curr_lt)?;
 
                 // compare messages groups
                 self.assert_message_group_opt_eq(
@@ -1010,8 +1012,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
                     exec_count,
                     created_messages,
                     max_lt,
-                } = msgs_factory.execute_group(msg_group, self.curr_lt)?;
-                self.curr_lt = max_lt;
+                } = msgs_factory.execute_group(msg_group, curr_lt)?;
+                curr_lt = max_lt;
                 total_exec_count += exec_count;
 
                 let created_messages_count = created_messages.len();
@@ -1071,10 +1073,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
         let FinalizedMessagesReader {
             has_unprocessed_messages,
             queue_diff_with_msgs,
-            reader_state,
-            anchors_cache,
             ..
-        } = primary_messages_reader.finalize(self.curr_lt, &other_shards_top_block_diffs)?;
+        } = primary_messages_reader.finalize(curr_lt, &other_shards_top_block_diffs)?;
 
         // create diff and compute hash
         let (min_message, max_message) = {
@@ -1135,6 +1135,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         )?;
 
         // update shard block gen lt
+        self.curr_lt = curr_lt;
         self.last_block_gen_lt = self.curr_lt;
         self.last_queue_diff_hash = queue_diff_hash;
 
@@ -1154,11 +1155,11 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[allow(clippy::unused_self)]
     #[tracing::instrument(skip_all)]
-    fn create_primary_reader(
+    fn create_primary_reader<'a>(
         &self,
-        cx: MessagesReaderContext,
+        cx: MessagesReaderContext<'a>,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-    ) -> Result<MessagesReader<V>> {
+    ) -> Result<MessagesReader<'a, V>> {
         tracing::trace!(
             for_shard_id = %cx.for_shard_id,
             block_seqno = cx.block_seqno,
@@ -1172,11 +1173,11 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[allow(clippy::unused_self)]
     #[tracing::instrument(skip_all)]
-    fn create_secondary_reader(
+    fn create_secondary_reader<'a>(
         &self,
-        cx: MessagesReaderContext,
+        cx: MessagesReaderContext<'a>,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-    ) -> Result<MessagesReader<V>> {
+    ) -> Result<MessagesReader<'a, V>> {
         tracing::trace!(
             for_shard_id = %cx.for_shard_id,
             block_seqno = cx.block_seqno,
@@ -1189,7 +1190,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
     }
 
     #[tracing::instrument(skip_all)]
-    fn refill_secondary(secondary_messages_reader: &mut MessagesReader<V>) -> Result<()> {
+    fn refill_secondary(secondary_messages_reader: &mut MessagesReader<'_, V>) -> Result<()> {
         if secondary_messages_reader.check_need_refill() {
             secondary_messages_reader.refill_buffers_upto_offsets(|| false)?;
         }
@@ -1198,7 +1199,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[tracing::instrument(skip_all)]
     fn collect_primary(
-        messages_reader: &mut MessagesReader<V>,
+        messages_reader: &mut MessagesReader<'_, V>,
         curr_lt: Lt,
     ) -> Result<Option<MessageGroup>> {
         Self::collect_message_group(messages_reader, curr_lt)
@@ -1206,14 +1207,14 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[tracing::instrument(skip_all)]
     fn collect_secondary(
-        messages_reader: &mut MessagesReader<V>,
+        messages_reader: &mut MessagesReader<'_, V>,
         curr_lt: Lt,
     ) -> Result<Option<MessageGroup>> {
         Self::collect_message_group(messages_reader, curr_lt)
     }
 
     fn collect_message_group(
-        messages_reader: &mut MessagesReader<V>,
+        messages_reader: &mut MessagesReader<'_, V>,
         curr_lt: Lt,
     ) -> Result<Option<MessageGroup>> {
         let msg_group_opt =
@@ -1289,32 +1290,44 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 );
 
                 assert_eq!(
-                    exp_msg.info, act_msg.info,
+                    exp_msg.info(),
+                    act_msg.info(),
                     "mismatch in 'info' field of message {} for account {} (block_seqno={})",
-                    i, account_id, self.block_seqno,
+                    i,
+                    account_id,
+                    self.block_seqno,
                 );
                 assert_eq!(
-                    exp_msg.dst_in_current_shard, act_msg.dst_in_current_shard,
+                    exp_msg.dst_in_current_shard(),
+                    act_msg.dst_in_current_shard(),
                     "mismatch in 'dst_in_current_shard' field of message {} for account {} (block_seqno={})",
-                    i, account_id, self.block_seqno,
+                    i,
+                    account_id,
+                    self.block_seqno,
                 );
                 assert_eq!(
-                    exp_msg.cell.repr_hash(),
-                    act_msg.cell.repr_hash(),
+                    exp_msg.cell().repr_hash(),
+                    act_msg.cell().repr_hash(),
                     "mismatch in 'cell' field of message {} for account {} (block_seqno={})",
                     i,
                     account_id,
                     self.block_seqno,
                 );
                 assert_eq!(
-                    exp_msg.special_origin, act_msg.special_origin,
+                    exp_msg.special_origin(),
+                    act_msg.special_origin(),
                     "mismatch in 'special_origin' field of message {} for account {} (block_seqno={})",
-                    i, account_id, self.block_seqno,
+                    i,
+                    account_id,
+                    self.block_seqno,
                 );
                 assert_eq!(
-                    exp_msg.from_same_shard, act_msg.from_same_shard,
+                    exp_msg.is_from_same_shard(),
+                    act_msg.is_from_same_shard(),
                     "mismatch in 'from_same_shard' field of message {} for account {} (block_seqno={})",
-                    i, account_id, self.block_seqno,
+                    i,
+                    account_id,
+                    self.block_seqno,
                 );
             }
         }
@@ -2149,21 +2162,21 @@ where
     F: Fn(IntMsgInfo, Cell) -> V,
 {
     fn get_test_msg_info(&self, msg: &ParsedMessage) -> TestMessageInfo {
-        match msg.info {
+        match msg.info() {
             MsgInfo::ExtIn(_) => {
-                let msg_state = self.ext_msgs_journal.get(msg.cell.repr_hash()).unwrap();
+                let msg_state = self.ext_msgs_journal.get(msg.cell().repr_hash()).unwrap();
                 TestMessageInfo::Ext(msg_state.info.clone())
             }
             MsgInfo::Int(IntMsgInfo { created_lt, .. }) => {
                 let key = QueueKey {
-                    lt: created_lt,
-                    hash: *msg.cell.repr_hash(),
+                    lt: *created_lt,
+                    hash: *msg.cell().repr_hash(),
                 };
                 let msg_state = self.int_msgs_journal.get(&key).unwrap();
                 TestMessageInfo::Int(msg_state.info.clone())
             }
             MsgInfo::ExtOut(_) => {
-                unreachable!("ext out message in ordinary messages set: {:?}", msg.info)
+                unreachable!("ext out message in ordinary messages set: {:?}", msg.info())
             }
         }
     }

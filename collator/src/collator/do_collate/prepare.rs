@@ -10,28 +10,29 @@ use crate::collator::CollationCancelReason;
 use crate::collator::do_collate::phase::ActualState;
 use crate::collator::error::CollatorError;
 use crate::collator::execution_manager::MessagesExecutor;
+use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::messages_reader::{
-    CumulativeStatsCalcParams, MessagesReader, MessagesReaderContext, ReaderState,
+    CumulativeStatsCalcParams, MessagesReader, MessagesReaderContext,
 };
 use crate::collator::types::{AnchorsCache, MsgsExecutionParamsStuff};
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::build_all_shards_processed_to_by_partitions;
 
-pub struct PrepareState {
+pub struct PrepareState<'a> {
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-    reader_state: ReaderState,
-    anchors_cache: AnchorsCache,
+    reader_state: &'a mut ReaderState,
+    anchors_cache: &'a mut AnchorsCache,
 }
 
-impl PhaseState for PrepareState {}
+impl<'a> PhaseState for PrepareState<'a> {}
 
-impl Phase<PrepareState> {
+impl<'a> Phase<PrepareState<'a>> {
     pub fn new(
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-        reader_state: ReaderState,
-        anchors_cache: AnchorsCache,
+        reader_state: &'a mut ReaderState,
+        anchors_cache: &'a mut AnchorsCache,
         state: Box<ActualState>,
     ) -> Self {
         Self {
@@ -44,7 +45,7 @@ impl Phase<PrepareState> {
         }
     }
 
-    pub fn run(self) -> Result<Phase<ExecuteState>, CollatorError> {
+    pub fn run(self) -> Result<Phase<ExecuteState<'a>>, CollatorError> {
         // log initial processed upto
         tracing::debug!(target: tracing_targets::COLLATOR,
             "initial processed_upto = {:?}",
@@ -179,7 +180,7 @@ impl Phase<PrepareState> {
             }
         }
 
-        Ok(Phase::<ExecuteState> {
+        Ok(Phase::<ExecuteState<'a>> {
             extra: ExecuteState {
                 messages_reader,
                 executor: ExecutorWrapper::new(executor, self.state.shard_id),

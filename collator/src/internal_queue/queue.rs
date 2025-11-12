@@ -11,15 +11,16 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet, serde_helpers};
 
 use super::gc::GcEndKey;
-use super::types::SeparatedStatisticsByPartitions;
 use crate::internal_queue::gc::GcManager;
 use crate::internal_queue::state::state_iterator::StateIterator;
 use crate::internal_queue::state::storage::{
     QueueState, QueueStateFactory, QueueStateImplFactory, QueueStateStdImpl,
 };
-use crate::internal_queue::types::{
-    AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, QueueDiffWithMessages,
-    QueueShardRange,
+use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
+use crate::internal_queue::types::message::InternalMessageValue;
+use crate::internal_queue::types::ranges::QueueShardRange;
+use crate::internal_queue::types::stats::{
+    AccountStatistics, DiffStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::storage::models::DiffInfo;
 use crate::{internal_queue, tracing_targets};

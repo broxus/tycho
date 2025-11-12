@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use parking_lot::lock_api::RwLockReadGuard;
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock};
 use tl_proto::TlWrite;
-use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, SerializedQueueDiff};
+use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::{AccountMeta, PublicLibraryChange, TransactionMeta};
@@ -30,12 +30,16 @@ use tycho_types::num::Tokens;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
-use super::messages_reader::{MessagesReaderMetrics, ReaderState};
+use super::messages_reader::MessagesReaderMetrics;
 use crate::collator::do_collate::work_units::{DoCollateWu, ExecuteWu, FinalizeWu};
-use crate::collator::messages_reader::{ExternalKey, MetricsTimer};
-use crate::internal_queue::types::{
-    AccountStatistics, Bound, DiffStatistics, InternalMessageValue, QueueShardBoundedRange,
-    QueueStatistics, SeparatedStatisticsByPartitions,
+use crate::collator::messages_reader::MetricsTimer;
+use crate::collator::messages_reader::state::ReaderState;
+use crate::collator::messages_reader::state::external::ExternalKey;
+use crate::internal_queue::types::diff::QueueDiffWithMessages;
+use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValue};
+use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
+use crate::internal_queue::types::stats::{
+    AccountStatistics, DiffStatistics, QueueStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -1110,8 +1114,35 @@ pub struct ExecutedTransaction {
 pub struct SkippedTransaction {
     pub gas_used: u64,
 }
+// #[derive(Debug, Clone)]
+// pub struct ParsedMessage {
+//     pub info: MsgInfo,
+//     pub dst_in_current_shard: bool,
+//     pub cell: Cell,
+//     pub special_origin: Option<SpecialOrigin>,
+//     pub block_seqno: Option<BlockSeqno>,
+//     pub from_same_shard: Option<bool>,
+//     pub ext_msg_chain_time: Option<u64>,
+// }
+//
+// impl ParsedMessage {
+//     pub fn kind(&self) -> ParsedMessageKind {
+//         match (&self.info, self.special_origin) {
+//             (_, Some(SpecialOrigin::Recover)) => ParsedMessageKind::Recover,
+//             (_, Some(SpecialOrigin::Mint)) => ParsedMessageKind::Mint,
+//             (MsgInfo::ExtIn(_), _) => ParsedMessageKind::ExtIn,
+//             (MsgInfo::Int(_), _) => ParsedMessageKind::Int,
+//             (MsgInfo::ExtOut(_), _) => ParsedMessageKind::ExtOut,
+//         }
+//     }
+//
+//     pub fn is_external(&self) -> bool {
+//         matches!(self.info, MsgInfo::ExtIn(_) | MsgInfo::ExtOut(_))
+//     }
+// }
 
-pub struct ParsedMessage {
+#[derive(Debug)]
+pub struct ParsedMessageInner {
     pub info: MsgInfo,
     pub dst_in_current_shard: bool,
     pub cell: Cell,
@@ -1121,9 +1152,64 @@ pub struct ParsedMessage {
     pub ext_msg_chain_time: Option<u64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ParsedMessage(Arc<ParsedMessageInner>);
+
 impl ParsedMessage {
+    pub fn new(
+        info: MsgInfo,
+        dst_in_current_shard: bool,
+        cell: Cell,
+        special_origin: Option<SpecialOrigin>,
+        block_seqno: Option<BlockSeqno>,
+        from_same_shard: Option<bool>,
+        ext_msg_chain_time: Option<u64>,
+    ) -> Self {
+        Self(Arc::new(ParsedMessageInner {
+            info,
+            dst_in_current_shard,
+            cell,
+            special_origin,
+            block_seqno,
+            from_same_shard,
+            ext_msg_chain_time,
+        }))
+    }
+
+    pub fn block_seqno(&self) -> Option<BlockSeqno> {
+        self.0.block_seqno
+    }
+    pub fn is_from_same_shard(&self) -> Option<bool> {
+        self.0.from_same_shard
+    }
+    pub fn info(&self) -> &MsgInfo {
+        &self.0.info
+    }
+    pub fn cell(&self) -> &Cell {
+        &self.0.cell
+    }
+    pub fn ext_msg_chain_time(&self) -> Option<u64> {
+        self.0.ext_msg_chain_time
+    }
+    pub fn dst_in_current_shard(&self) -> bool {
+        self.0.dst_in_current_shard
+    }
+    pub fn special_origin(&self) -> Option<SpecialOrigin> {
+        self.0.special_origin
+    }
+
+    pub fn try_into_parts(self) -> Result<(MsgInfo, Cell)> {
+        match Arc::try_unwrap(self.0) {
+            Ok(inner) => Ok((inner.info, inner.cell)),
+            Err(arc) => Err(anyhow!(
+                "cannot unwrap ParsedMessage, ref count = {}",
+                Arc::strong_count(&arc)
+            )),
+        }
+    }
+
     pub fn kind(&self) -> ParsedMessageKind {
-        match (&self.info, self.special_origin) {
+        match (self.info(), self.special_origin()) {
             (_, Some(SpecialOrigin::Recover)) => ParsedMessageKind::Recover,
             (_, Some(SpecialOrigin::Mint)) => ParsedMessageKind::Mint,
             (MsgInfo::ExtIn(_), _) => ParsedMessageKind::ExtIn,
@@ -1133,7 +1219,12 @@ impl ParsedMessage {
     }
 
     pub fn is_external(&self) -> bool {
-        matches!(self.info, MsgInfo::ExtIn(_) | MsgInfo::ExtOut(_))
+        matches!(self.info(), MsgInfo::ExtIn(_) | MsgInfo::ExtOut(_))
+    }
+
+    /// Если нужно отдать весь Arc наружу
+    pub fn arc(&self) -> Arc<ParsedMessageInner> {
+        Arc::clone(&self.0)
     }
 }
 
@@ -1294,11 +1385,13 @@ impl AnchorsCache {
 }
 
 pub struct FinalizeMessagesReaderResult {
-    pub queue_diff: SerializedQueueDiff,
+    // pub queue_diff: SerializedQueueDiff,
     pub has_unprocessed_messages: bool,
-    pub reader_state: ReaderState,
-    pub processed_upto: ProcessedUptoInfoStuff,
-    pub anchors_cache: AnchorsCache,
+    // pub reader_state: ReaderState,
+    // pub processed_upto: ProcessedUptoInfoStuff,
+    pub queue_diff_with_msgs: QueueDiffWithMessages<EnqueuedMessage>,
+    pub current_msgs_exec_params: MsgsExecutionParams,
+    pub new_statistics: Option<CumulativeStatistics>,
 }
 
 pub struct FinalizeCollationResult {
@@ -1331,8 +1424,7 @@ pub struct FinalizeBlockResult {
 pub struct CollationResult {
     pub final_result: FinalResult,
     pub finalized: FinalizeBlockResult,
-    pub reader_state: ReaderState,
-    pub anchors_cache: AnchorsCache,
+    // pub reader_state: ReaderState,
     pub execute_result: ExecuteResult,
 }
 
@@ -1387,7 +1479,7 @@ impl MsgsExecutionParamsExtension for MsgsExecutionParams {
 
 type DiffMaxMessage = QueueKey;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QueueStatisticsWithRemaning {
     /// Statistics shows all messages count
     pub initial_stats: QueueStatistics,
@@ -1396,6 +1488,7 @@ pub struct QueueStatisticsWithRemaning {
     pub remaning_stats: ConcurrentQueueStatistics,
 }
 
+#[derive(Clone)]
 pub struct CumulativeStatistics {
     /// Cumulative statistics created for this shard. When reader reads messages, it decrements `remaining messages`
     /// Another shard stats can be decremented only by calling `update_processed_to_by_partitions`
