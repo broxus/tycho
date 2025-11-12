@@ -1,9 +1,10 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 use tycho_util::config::PartialConfig;
-use tycho_util::serde_helpers;
+use tycho_util::{FastHashMap, serde_helpers};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
 #[serde(deny_unknown_fields, default)]
@@ -28,6 +29,11 @@ pub struct CoreStorageConfig {
     ///
     /// States GC is disabled if this field is `None`.
     pub states_gc: Option<StatesGcConfig>,
+
+    /// State partitions config.
+    ///
+    /// State partitioning is disabled if this field is `None`.
+    pub state_parts: Option<StatePartitionsConfig>,
 
     /// Blocks GC config.
     ///
@@ -61,6 +67,7 @@ impl Default for CoreStorageConfig {
             drop_interval: 3,
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
+            state_parts: None,
             blocks_gc: Some(BlocksGcConfig::default()),
             blocks_cache: BlocksCacheConfig::default(),
             blob_db: BlobDbConfig::default(),
@@ -189,5 +196,130 @@ impl Default for BlobDbConfig {
         Self {
             pre_create_cas_tree: true,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct StatePartitionsConfig {
+    /// State partitions split depth
+    ///
+    /// Default: 0 -> 2^0 = 1 partition, no split.
+    pub split_depth: u8,
+
+    /// Map of state partitions directories.
+    ///
+    /// Default: empty, relative paths will be generated.
+    #[serde(with = "serde_shard_part_dirs_map")]
+    pub part_dirs: FastHashMap<u64, PathBuf>,
+}
+
+mod serde_shard_part_dirs_map {
+    use std::path::PathBuf;
+
+    use serde::de::Deserializer;
+    use serde::ser::{SerializeMap, Serializer};
+    use tycho_block_util::block::DisplayShardPrefix;
+    use tycho_util::FastHashMap;
+
+    use super::*;
+
+    pub fn serialize<S>(value: &FastHashMap<u64, PathBuf>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[repr(transparent)]
+        struct WrappedKey<'a>(&'a u64);
+        impl Serialize for WrappedKey<'_> {
+            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(&DisplayShardPrefix(self.0).to_string())
+            }
+        }
+
+        let mut ser = serializer.serialize_map(Some(value.len()))?;
+        for (prefix, path) in value {
+            ser.serialize_entry(&WrappedKey(prefix), &path)?;
+        }
+        ser.end()
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<FastHashMap<u64, PathBuf>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(PartialEq, Eq, Hash)]
+        #[repr(transparent)]
+        struct WrappedKey(u64);
+        impl<'de> Deserialize<'de> for WrappedKey {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let tmp = String::deserialize(deserializer)?;
+                if tmp.len() != 16 || !tmp.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "invalid shard prefix key format '{tmp}', expected 16 hex digits (e.g. a000000000000000)"
+                    )));
+                }
+                let prefix = u64::from_str_radix(&tmp, 16).map_err(serde::de::Error::custom)?;
+                Ok(Self(prefix))
+            }
+        }
+
+        <FastHashMap<WrappedKey, PathBuf>>::deserialize(deserializer)
+            .map(|map| map.into_iter().map(|(k, v)| (k.0, v)).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+
+    #[test]
+    pub fn test_state_partitions_config() {
+        let test: &str = r#"{
+            "split_depth": 2,
+            "part_dirs": {
+                "2000000000000000": "/dev1/node/data/cells-part-1",
+                "6000000000000000": "/dev2/node/data/cells-part-2",
+                "a000000000000000": "/dev3/node/data/cells-part-3",
+                "e000000000000000": "/dev4/node/data/cells-part-4"
+            }
+        }"#;
+
+        let mut value = StatePartitionsConfig::default();
+        value
+            .part_dirs
+            .insert(234567890, "/dev1/node/data/cells-part".into());
+        println!("test: {:?}", test);
+
+        let parsed: StatePartitionsConfig = serde_json::from_str(test).unwrap();
+        println!("parsed: {:?}", parsed);
+
+        assert_eq!(parsed.split_depth, 2);
+        let path1 = parsed.part_dirs.get(&2305843009213693952).unwrap();
+        let expected = PathBuf::from_str("/dev1/node/data/cells-part-1").unwrap();
+        assert_eq!(path1, &expected);
+
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        println!("test serialized: {:?}", serialized);
+
+        let mut value = StatePartitionsConfig::default();
+        value
+            .part_dirs
+            .insert(234567890, "/dev99/node/data/cells-part".into());
+
+        let test = serde_json::to_string(&value).unwrap();
+        println!("test: {:?}", test);
+
+        let parsed: StatePartitionsConfig = serde_json::from_str(&test).unwrap();
+        println!("parsed: {:?}", parsed);
+
+        assert_eq!(parsed, value);
     }
 }

@@ -105,7 +105,19 @@ impl BlockHandle {
     }
 
     pub fn has_state(&self) -> bool {
-        self.inner.meta.flags().contains(BlockFlags::HAS_STATE)
+        let main_state_and_parts = BlockFlags::HAS_STATE_MAIN.union(BlockFlags::HAS_STATE_PARTS);
+        self.inner.meta.flags().contains(main_state_and_parts)
+    }
+
+    pub fn has_state_main(&self) -> bool {
+        self.inner.meta.flags().contains(BlockFlags::HAS_STATE_MAIN)
+    }
+
+    pub fn has_state_parts(&self) -> bool {
+        self.inner
+            .meta
+            .flags()
+            .contains(BlockFlags::HAS_STATE_PARTS)
     }
 
     pub fn has_persistent_shard_state(&self) -> bool {
