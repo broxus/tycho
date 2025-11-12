@@ -11,9 +11,11 @@ use parking_lot::RwLock;
 use rand::Rng;
 use scopeguard::defer;
 use tycho_network::PeerId;
-use tycho_types::models::*;
+use tycho_storage::StorageContext;
+use tycho_types::models::{ConsensusConfig, GenesisInfo, *};
 use tycho_types::prelude::*;
 
+use crate::mempool::impls::dump_anchors::DumpAnchors;
 use crate::mempool::{
     DebugStateUpdateContext, ExternalMessage, GetAnchorResult, MempoolAdapter, MempoolAnchor,
     MempoolAnchorId, MempoolEventListener, StateUpdateContext,
@@ -25,6 +27,7 @@ pub struct MempoolAdapterStubImpl {
     listener: Arc<dyn MempoolEventListener>,
     anchors_cache: Arc<RwLock<BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
     sleep_between_anchors: AtomicBool,
+    top_processed_to_anchor: Option<u32>,
 }
 
 impl MempoolAdapterStubImpl {
@@ -32,7 +35,7 @@ impl MempoolAdapterStubImpl {
         listener: Arc<dyn MempoolEventListener>,
         now: Option<u64>,
     ) -> Arc<Self> {
-        Self::with_generator(listener, |a| {
+        Self::with_generator(listener, None, |a| {
             tokio::spawn(Self::stub_externals_generator(a, now));
             Ok(())
         })
@@ -43,7 +46,7 @@ impl MempoolAdapterStubImpl {
         listener: Arc<dyn MempoolEventListener>,
         dir_path: impl AsRef<Path>,
     ) -> Result<Arc<Self>> {
-        Self::with_generator(listener, move |a| {
+        Self::with_generator(listener, None, move |a| {
             let mut paths = std::fs::read_dir(dir_path)?
                 .map(|res| res.map(|e| e.path()))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -54,7 +57,11 @@ impl MempoolAdapterStubImpl {
         })
     }
 
-    fn with_generator<F>(listener: Arc<dyn MempoolEventListener>, start: F) -> Result<Arc<Self>>
+    fn with_generator<F>(
+        listener: Arc<dyn MempoolEventListener>,
+        top_processed_to_anchor: Option<u32>,
+        start: F,
+    ) -> Result<Arc<Self>>
     where
         F: FnOnce(Arc<Self>) -> Result<()>,
     {
@@ -64,6 +71,7 @@ impl MempoolAdapterStubImpl {
             listener,
             anchors_cache: Arc::new(RwLock::new(BTreeMap::new())),
             sleep_between_anchors: AtomicBool::new(true),
+            top_processed_to_anchor,
         };
 
         let adapter = Arc::new(adapter);
@@ -73,6 +81,30 @@ impl MempoolAdapterStubImpl {
         Ok(adapter)
     }
 
+    pub fn with_anchors_from_dump(
+        listener: Arc<dyn MempoolEventListener>,
+        now: Option<u64>,
+        top_processed_to_anchor_mc: u32,
+        top_processed_to_anchor_shards: u32,
+        storage_context: StorageContext,
+        start_round: u32,
+        genesis_millis: u64,
+    ) -> Result<Arc<Self>> {
+        Self::with_generator(listener.clone(), Some(top_processed_to_anchor_shards), {
+            move |a| {
+                tokio::spawn(Self::anchors_generator(
+                    a,
+                    now,
+                    top_processed_to_anchor_mc,
+                    storage_context,
+                    start_round,
+                    genesis_millis,
+                ));
+                Ok(())
+            }
+        })
+    }
+
     #[tracing::instrument(skip_all)]
     async fn stub_externals_generator(self: Arc<Self>, now: Option<u64>) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "started");
@@ -80,15 +112,17 @@ impl MempoolAdapterStubImpl {
             tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
         }
 
-        let mut prev_anchor_id = 0;
-        for anchor_id in 1.. {
+        let mut prev_anchor_id = self.top_processed_to_anchor.unwrap_or_default();
+        let start_anchor_id = prev_anchor_id + 1;
+        for anchor_id in start_anchor_id.. {
             if self.sleep_between_anchors.load(Ordering::Acquire) {
                 tokio::time::sleep(make_round_interval() * 4).await;
             } else {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
-            let mut anchor = make_stub_anchor(anchor_id, prev_anchor_id);
+            let mut anchor =
+                make_stub_anchor(anchor_id, prev_anchor_id, self.top_processed_to_anchor);
             prev_anchor_id = anchor_id;
 
             if let Some(now) = now {
@@ -96,6 +130,117 @@ impl MempoolAdapterStubImpl {
             }
 
             let anchor = Arc::new(anchor);
+
+            self.anchors_cache.write().insert(anchor_id, anchor.clone());
+
+            tracing::debug!(
+                target: tracing_targets::MEMPOOL_ADAPTER,
+                anchor_id = anchor.id,
+                chain_time = anchor.chain_time,
+                externals = anchor.externals.len(),
+                "anchor added to cache",
+            );
+
+            self.listener.on_new_anchor(anchor).await.unwrap();
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn anchors_generator(
+        self: Arc<Self>,
+        now: Option<u64>,
+        top_processed_to_anchor_mc: u32,
+        storage_context: StorageContext,
+        start_round: u32,
+        genesis_millis: u64,
+    ) {
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "started");
+        defer! {
+            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
+        }
+
+        let dump_anchors =
+            DumpAnchors::new(&storage_context).expect("Failed to create DumpAnchors");
+
+        let mempool_node_config = tycho_consensus::prelude::MempoolNodeConfig {
+            clean_db_period_rounds: std::num::NonZeroU16::new(10).unwrap(),
+            ..Default::default()
+        };
+        let consensus_config = tycho_consensus::test_utils::default_test_config()
+            .conf
+            .consensus;
+        let genesis_info = tycho_types::models::GenesisInfo {
+            start_round,
+            genesis_millis,
+        };
+
+        let dumped_anchors = dump_anchors
+            .load(
+                top_processed_to_anchor_mc,
+                &mempool_node_config,
+                &consensus_config,
+                genesis_info,
+            )
+            .expect("Failed to load dumped anchors")
+            .into_iter()
+            .map(Arc::new);
+
+        tracing::info!("dumped anchors: {:#?}", dumped_anchors);
+
+        // Preload dumped anchors into cache
+        {
+            let mut cache = self.anchors_cache.write();
+            for anchor in dumped_anchors {
+                tracing::debug!(
+                    target: tracing_targets::MEMPOOL_ADAPTER,
+                    anchor_id = anchor.id,
+                    chain_time = anchor.chain_time,
+                    externals = anchor.externals.len(),
+                    "anchor added to cache",
+                );
+
+                cache.insert(anchor.id, anchor);
+            }
+        }
+
+        // Fill with empty anchors for missing ranges from top_processed_to_anchor to top_processed_to_anchor_mc
+        if top_processed_to_anchor_mc > self.top_processed_to_anchor.unwrap_or_default() {
+            let mut prev_anchor_id = self.top_processed_to_anchor.unwrap_or_default();
+            let start_anchor_id = prev_anchor_id;
+            for anchor_id in start_anchor_id..=top_processed_to_anchor_mc {
+                if !self.anchors_cache.read().contains_key(&anchor_id) {
+                    let chain_time = now.unwrap_or_default();
+                    let anchor = make_empty_anchor(anchor_id, prev_anchor_id, chain_time + 1336);
+                    self.anchors_cache.write().insert(anchor_id, anchor.clone());
+                }
+                prev_anchor_id = anchor_id;
+            }
+        }
+
+        let mut prev_anchor_id = self.top_processed_to_anchor.unwrap_or_default();
+        let start_anchor_id = prev_anchor_id;
+        for anchor_id in start_anchor_id.. {
+            if self.sleep_between_anchors.load(Ordering::Acquire) {
+                tokio::time::sleep(make_round_interval() * 4).await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            let anchor = {
+                let read = self.anchors_cache.read();
+                if read.get(&anchor_id).is_some() {
+                    continue;
+                } else {
+                    let chain_time = read
+                        .get(&prev_anchor_id)
+                        .map(|prev_anchor| prev_anchor.chain_time)
+                        .or(now)
+                        .unwrap_or_default();
+                    make_empty_anchor(anchor_id, prev_anchor_id, chain_time + 1336)
+                }
+            };
+
+            prev_anchor_id = anchor_id;
 
             self.anchors_cache.write().insert(anchor_id, anchor.clone());
 
@@ -186,12 +331,10 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         let mut last_attempt_at = None;
         loop {
             let Some(anchor) = self.anchors_cache.read().get(&anchor_id).cloned() else {
-                let last_anchor_id = self
-                    .anchors_cache
-                    .read()
-                    .last_key_value()
-                    .map(|(_, last_anchor)| last_anchor.id)
-                    .unwrap_or_default();
+                let last_anchor_id = self.anchors_cache.read().last_key_value().map_or(
+                    self.top_processed_to_anchor.unwrap_or_default(),
+                    |(_, last_anchor)| last_anchor.id,
+                );
                 if last_anchor_id > anchor_id {
                     return Ok(GetAnchorResult::NotExist);
                 } else {
@@ -275,12 +418,10 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                 .map(|(_, v)| v.clone());
 
             let Some(anchor) = res else {
-                let last_anchor_id = self
-                    .anchors_cache
-                    .read()
-                    .last_key_value()
-                    .map(|(_, last_anchor)| last_anchor.id)
-                    .unwrap_or_default();
+                let last_anchor_id = self.anchors_cache.read().last_key_value().map_or(
+                    self.top_processed_to_anchor.unwrap_or_default(),
+                    |(_, last_anchor)| last_anchor.id,
+                );
                 let delta = prev_anchor_id.saturating_sub(last_anchor_id);
                 if delta >= 20 {
                     tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
@@ -378,8 +519,12 @@ pub(crate) fn make_empty_anchor(
     })
 }
 
-pub(crate) fn make_stub_anchor(id: MempoolAnchorId, prev_id: MempoolAnchorId) -> MempoolAnchor {
-    let chain_time = id as u64 * 1736 % 1000000000;
+pub(crate) fn make_stub_anchor(
+    id: MempoolAnchorId,
+    prev_id: MempoolAnchorId,
+    anchor_id_offset: Option<u32>,
+) -> MempoolAnchor {
+    let chain_time = (id - anchor_id_offset.unwrap_or_default()) as u64 * 1736 % 1000000000;
 
     let externals_count = (chain_time % 10) as u32;
 
