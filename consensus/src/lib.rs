@@ -23,6 +23,6 @@ pub mod prelude {
         AnchorData, AnchorStageRole, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError,
         PointInfo,
     };
-    pub use crate::moderator::{Moderator, ModeratorConfig};
+    pub use crate::moderator::{Moderator, ModeratorConfig, RecordKey};
     pub use crate::storage::{MempoolAdapterStore, MempoolDb};
 }

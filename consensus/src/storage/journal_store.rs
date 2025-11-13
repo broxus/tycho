@@ -6,7 +6,7 @@ use tl_proto::{TlRead, TlWrite};
 use weedb::rocksdb::{Direction, IteratorMode, WriteBatch};
 
 use crate::models::{PointKey, Round, UnixTime};
-use crate::moderator::{RecordBatch, RecordKey, RecordValueShort};
+use crate::moderator::{RecordBatch, RecordFull, RecordKey, RecordValue, RecordValueShort};
 use crate::storage::MempoolDb;
 use crate::storage::time_to_round::TimeToRound;
 
@@ -34,6 +34,32 @@ impl JournalStore {
             .filter_map_ok(|(k, v)| filter_parse(&k, &v).transpose())
             .flatten()
             .try_collect()
+    }
+
+    pub fn load_records(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>> {
+        let mode = if asc {
+            IteratorMode::Start
+        } else {
+            IteratorMode::End
+        };
+        (self.0.db.journal)
+            .iterator(mode)
+            .skip(count as usize * page as usize)
+            .take(count as usize)
+            .map_ok(|(k, v)| {
+                let key = RecordKey::read_from(&mut &k[..])?;
+                let value = RecordValue::read_from(&mut &v[..])?;
+                Ok(RecordFull { key, value })
+            })
+            .flatten()
+            .try_collect()
+    }
+
+    pub fn delete(&self, millis: std::ops::Range<UnixTime>) -> Result<()> {
+        self.0.wait_for_compact()?;
+        self.0.clean_events(millis)?;
+        self.0.wait_for_compact()?;
+        Ok(())
     }
 
     pub fn store_records(&self, batch: RecordBatch<'_>, conf_point_max_bytes: usize) -> Result<()> {

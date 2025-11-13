@@ -16,4 +16,8 @@ enum UpdaterQueueItem {
         peer_id: tycho_network::PeerId,
         q_ban: CurrentBan,
     },
+    ManualUnban {
+        peer_id: tycho_network::PeerId,
+        callback: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+    },
 }
