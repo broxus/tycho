@@ -1,18 +1,21 @@
+use std::ops::Range;
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
-use tycho_network::Network;
+use futures_util::future::BoxFuture;
+use tokio::sync::{mpsc, oneshot};
+use tycho_network::{Network, PeerId};
 use tycho_util::futures::JoinTask;
 
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
+use crate::models::UnixTime;
 use crate::moderator::ban::core::BanCore;
 use crate::moderator::journal::batch::batch;
 use crate::moderator::journal::item::{JournalItem, JournalItemFull};
 use crate::moderator::journal::record_key::RecordKeyFactory;
-use crate::moderator::{JournalEvent, JournalTtl, ModeratorConfig};
+use crate::moderator::{BanConfigDuration, JournalEvent, JournalTtl, ModeratorConfig, RecordFull};
 use crate::storage::{JournalStore, MempoolDb};
 
 /// Must outlive [`crate::engine::lifecycle::EngineSession`] just like opened DB
@@ -56,6 +59,7 @@ impl Moderator {
 
         let inner = Arc::new(ModeratorInner {
             init: Once::new(),
+            local_id: *network.peer_id(),
             ban_core,
             journal_store: journal_store.clone(),
             mempool_conf_tx,
@@ -101,6 +105,22 @@ impl Moderator {
     pub(crate) fn apply_mempool_config(&self, conf: &MempoolConfig) {
         self.0.apply_mempool_config(conf);
     }
+
+    pub fn manual_ban(&self, peer_id: &PeerId, duration: Duration) -> Result<serde_json::Value> {
+        (self.0).manual_ban(peer_id, duration.try_into()?)
+    }
+
+    pub fn manual_unban(&self, peer_id: &PeerId) -> BoxFuture<'static, Result<()>> {
+        self.0.manual_unban(peer_id)
+    }
+
+    pub fn list_events(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>> {
+        self.0.list_events(count, page, asc)
+    }
+
+    pub fn delete_events(&self, millis: Range<u64>) -> Result<()> {
+        self.0.delete_events(millis)
+    }
 }
 
 trait ModeratorTrait: Send + Sync {
@@ -109,6 +129,14 @@ trait ModeratorTrait: Send + Sync {
     fn set_peer_schedule(&self, peer_schedule: &PeerSchedule);
     fn report(&self, event: JournalEvent);
     fn apply_mempool_config(&self, conf: &MempoolConfig);
+    fn manual_ban(
+        &self,
+        peer_id: &PeerId,
+        duration: BanConfigDuration,
+    ) -> Result<serde_json::Value>;
+    fn manual_unban(&self, peer_id: &PeerId) -> BoxFuture<'static, Result<()>>;
+    fn list_events(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>>;
+    fn delete_events(&self, millis: Range<u64>) -> Result<()>;
 }
 
 #[cfg(any(test, feature = "test"))]
@@ -125,11 +153,24 @@ impl ModeratorTrait for ModeratorStub {
     fn set_peer_schedule(&self, _: &PeerSchedule) {}
     fn report(&self, _: JournalEvent) {}
     fn apply_mempool_config(&self, _: &MempoolConfig) {}
+    fn manual_ban(&self, _: &PeerId, _: BanConfigDuration) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn manual_unban(&self, _: &PeerId) -> BoxFuture<'static, Result<()>> {
+        Box::pin(futures_util::future::ready(Ok(())))
+    }
+    fn list_events(&self, _: u16, _: u32, _: bool) -> Result<Vec<RecordFull>> {
+        Ok(Vec::new())
+    }
+    fn delete_events(&self, _: Range<u64>) -> Result<()> {
+        Ok(())
+    }
 }
 
 struct ModeratorInner {
     /// because gets created and init once at a node start and may outlive engine session
     init: Once,
+    local_id: PeerId,
     ban_core: BanCore,
     journal_store: JournalStore,
     mempool_conf_tx: mpsc::UnboundedSender<MempoolConfig>,
@@ -158,9 +199,59 @@ impl ModeratorTrait for ModeratorInner {
     fn apply_mempool_config(&self, conf: &MempoolConfig) {
         self.mempool_conf_tx.send(conf.clone()).ok();
     }
+
+    fn manual_ban(
+        &self,
+        peer_id: &PeerId,
+        duration: BanConfigDuration,
+    ) -> Result<serde_json::Value> {
+        anyhow::ensure!(self.local_id != peer_id, "cannot ban yourself");
+        self.check_init()?;
+        let until = UnixTime::now() + duration.to_time();
+        self.ban_core.manual_ban(peer_id, until)?;
+        Ok(serde_json::json!({"banned_until_utc_millis": until.millis()}))
+    }
+
+    fn manual_unban(&self, peer_id: &PeerId) -> BoxFuture<'static, Result<()>> {
+        // leave a way to unban yourself just in case of DB transplantation
+        match self.check_init() {
+            Ok(()) => {
+                let (tx, rx) = oneshot::channel();
+                let result = self.ban_core.manual_unban(peer_id, tx);
+                Box::pin(async move {
+                    result?;
+                    rx.await.context("failed in unban task")?
+                })
+            }
+            Err(e) => Box::pin(futures_util::future::ready(Err(e))),
+        }
+    }
+
+    fn list_events(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>> {
+        // no need to check init
+        self.journal_store.load_records(count, page, asc)
+    }
+
+    fn delete_events(&self, millis: Range<u64>) -> Result<()> {
+        if millis.is_empty() {
+            anyhow::bail!("time range is empty");
+        }
+        self.check_init()?;
+        let range = UnixTime::from_millis(millis.start)..UnixTime::from_millis(millis.end);
+        self.journal_store.delete(range)?;
+        Ok(())
+    }
 }
 
 impl ModeratorInner {
+    fn check_init(&self) -> Result<()> {
+        if self.init.is_completed() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("moderator is not init yet"))
+        }
+    }
+
     async fn delayed_db_write(
         journal_store: JournalStore,
         mut delayed_db_writes_rx: mpsc::UnboundedReceiver<Vec<JournalItemFull>>,
