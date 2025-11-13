@@ -135,7 +135,11 @@ if __name__ == "__main__":
         "util/src/sync/rayon.rs",
     ]
     metrics = find_metrics(root_directory, blacklisted_dirs)
-    dashboard_data = open(f"{root_directory}/scripts/gen-dashboard.py", "r").read()
+    proc = subprocess.Popen(f"{root_directory}/scripts/gen-dashboard.py", text=True, stdout=subprocess.PIPE)
+    dashboard_data = proc.communicate(timeout=30)[0]
+    if proc.returncode != 0:
+        print("failed to build dashboard")
+        exit(2)
     exit_code = 0
     for metric in sorted(metrics):
         if metric not in dashboard_data:
