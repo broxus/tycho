@@ -3,13 +3,13 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
-use tycho_control::ControlClient;
+use tycho_control::{ControlClient, mempool};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockId, StdAddr};
 use tycho_util::cli::logger::init_logger_simple;
@@ -43,6 +43,8 @@ pub enum CmdControl {
     Overlay(CmdOverlay),
     #[clap(subcommand)]
     Dht(CmdDht),
+    #[clap(subcommand)]
+    Mempool(CmdMempool),
 }
 
 impl CmdControl {
@@ -67,6 +69,7 @@ impl CmdControl {
             Self::MemProfiler(cmd) => cmd.run(args),
             Self::Overlay(cmd) => cmd.run(args),
             Self::Dht(cmd) => cmd.run(args),
+            Self::Mempool(cmd) => cmd.run(args),
         }
     }
 }
@@ -939,6 +942,181 @@ impl CmdDhtFindNode {
                 .dht_find_node(&self.key, self.k, self.peer_id.as_ref())
                 .await?;
             print_json(res)
+        })
+    }
+}
+
+/// Mempool journal and ban tools
+#[derive(Subcommand)]
+#[clap(subcommand_required = true, arg_required_else_help = true)]
+pub enum CmdMempool {
+    Ban(CmdMempoolBan),
+    Unban(CmdMempoolUnban),
+    ListEvents(CmdMempoolListEvents),
+    DeleteEvents(CmdMempoolDeleteEvents),
+}
+
+impl CmdMempool {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        match self {
+            Self::Ban(cmd) => cmd.run(args),
+            Self::Unban(cmd) => cmd.run(args),
+            Self::ListEvents(cmd) => cmd.run(args),
+            Self::DeleteEvents(cmd) => cmd.run(args),
+        }
+    }
+}
+
+/// Ban peer manually
+#[derive(Parser)]
+pub struct CmdMempoolBan {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// which peer to ban
+    #[clap(short, long)]
+    peer_id: HashBytes,
+
+    /// Ban duration, must be more than 1 minute and less than 4 years
+    #[clap(short, long, value_parser = humantime::parse_duration)]
+    duration: Duration,
+}
+
+impl CmdMempoolBan {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            let pretty = std::io::stdin().is_terminal();
+            let output = client
+                .mempool_ban(&self.peer_id, self.duration, pretty)
+                .await?;
+            println!("{output}");
+            Ok(())
+        })
+    }
+}
+
+/// Unban peer manually
+#[derive(Parser)]
+pub struct CmdMempoolUnban {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// which peer to unban
+    #[clap(short, long)]
+    peer_id: HashBytes,
+}
+
+impl CmdMempoolUnban {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            client.mempool_unban(&self.peer_id).await?;
+            print_json(Empty {})
+        })
+    }
+}
+
+/// List mempool journal events
+#[derive(Parser)]
+pub struct CmdMempoolListEvents {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// amount of items per page
+    #[clap(short, long, default_value_t = 10)]
+    count: u16,
+
+    /// page to display, starts with 0
+    #[clap(short, long, default_value_t = 0)]
+    page: u32,
+
+    /// apply historical order, starting with oldest (by default order is reversed)
+    #[clap(short, long, action)]
+    asc: bool,
+
+    /// display point DB keys linked to the event (by default only their count is shown)
+    #[clap(long, action)]
+    point_keys: bool,
+
+    /// print as a table
+    #[clap(short, long, action)]
+    table: bool,
+}
+
+impl CmdMempoolListEvents {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        struct TableRow(mempool::MempoolEventDisplay);
+
+        impl tabled::Tabled for TableRow {
+            const LENGTH: usize = 8;
+
+            fn fields(&self) -> Vec<Cow<'_, str>> {
+                let humantime_created = humantime::format_rfc3339_seconds(
+                    UNIX_EPOCH + Duration::from_millis(self.0.created),
+                );
+                let point_keys =
+                    (self.0.point_keys.as_ref()).map_or(String::new(), |v| format!("{v:?}"));
+                vec![
+                    Cow::from(self.0.created.to_string()),
+                    Cow::from(humantime_created.to_string()),
+                    Cow::from(self.0.seq_no.to_string()),
+                    Cow::from(self.0.peer_id.to_string()),
+                    Cow::from(self.0.points.to_string()),
+                    Cow::from(&self.0.kind),
+                    Cow::from(&self.0.message),
+                    Cow::from(point_keys),
+                ]
+            }
+
+            fn headers() -> Vec<Cow<'static, str>> {
+                vec![
+                    Cow::from("created"),
+                    Cow::from("created"),
+                    Cow::from("seq_no"),
+                    Cow::from("peer_id"),
+                    Cow::from("points"),
+                    Cow::from("kind"),
+                    Cow::from("message"),
+                    Cow::from("point keys"),
+                ]
+            }
+        }
+
+        self.args.rt(args, move |client| async move {
+            let res = client
+                .mempool_list_events(self.count, self.page, self.asc, self.point_keys)
+                .await?;
+            if self.table {
+                let mut table = tabled::Table::new(res.into_iter().map(TableRow));
+                table.with(tabled::settings::Style::psql());
+                println!("{table}");
+                Ok(())
+            } else {
+                print_json(res)
+            }
+        })
+    }
+}
+
+/// Delete events DB entries and trigger compaction on a given range of event creation timestamps
+#[derive(Parser)]
+pub struct CmdMempoolDeleteEvents {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// range start (inclusive) in utc millis
+    #[clap(short, long)]
+    since: u64,
+
+    /// range end (exclusive) in utc millis
+    #[clap(short, long)]
+    until: u64,
+}
+
+impl CmdMempoolDeleteEvents {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            client.mempool_delete_events(self.since, self.until).await?;
+            print_json(Empty {})
         })
     }
 }
