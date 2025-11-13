@@ -162,6 +162,24 @@ impl BanCache {
     }
 
     /// does not affect accumulated penalties in events cache
+    /// * returns `Ok(is_first)` if stored a new value that ends later than previous
+    ///   * `true` in case a ban is new and should be applied at network level
+    ///   * `false` in case a ban at network level already exists
+    /// * returns `Err` in case a longer ban exists and this call is a no-op
+    pub fn manual_ban(&mut self, peer_id: &PeerId, q_ban: CurrentBan) -> Result<bool, ()> {
+        let result = self.current_bans.upsert(peer_id, q_ban);
+        if result.is_ok() {
+            self.updates_tx
+                .send(UpdaterQueueItem::AutoUnban {
+                    peer_id: *peer_id,
+                    q_ban,
+                })
+                .ok();
+        }
+        result
+    }
+
+    /// does not affect accumulated penalties in events cache
     /// * returns `Err` in case a longer ban was set concurrently
     pub fn auto_unban(&mut self, peer_id: &PeerId, expected_until: UnixTime) -> Result<(), ()> {
         let ord = self
@@ -178,6 +196,12 @@ impl BanCache {
             Some(cmp::Ordering::Greater) => Err(()), // newer auto (un)ban waits in channel
             None => panic!("bans cannot be removed without reset of delay queue"),
         }
+    }
+
+    /// does not affect accumulated penalties in events cache
+    /// * returns `Err` in case peer was not banned
+    pub fn manual_unban(&mut self, peer_id: &PeerId) -> Result<(), ()> {
+        self.current_bans.remove(peer_id)
     }
 }
 
