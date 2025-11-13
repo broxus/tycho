@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -74,14 +75,30 @@ impl S3Client {
         self.inner.client.list(prefix)
     }
 
-    pub fn find_archive(&self, mc_seqno: u32, prev_key_block_seqno: u32) -> u64 {
-        // TODO: check last_mc_block >= mc_seqno
+    pub async fn find_archive(
+        &self,
+        mc_seqno: u32,
+        last_mc_seqno: u32,
+        prev_key_block_seqno: u32,
+    ) -> Result<PendingArchiveResponse, Error> {
+        if mc_seqno > last_mc_seqno {
+            return Ok(PendingArchiveResponse::TooNew);
+        }
 
         let blocks_after_key = mc_seqno - prev_key_block_seqno;
         let archive_number = (blocks_after_key - 1) / 100;
         let archive_id = (prev_key_block_seqno + 1) + (archive_number * 100);
 
-        archive_id as u64
+        let meta = self
+            .inner
+            .client
+            .head(&Path::from(archive_id.to_string()))
+            .await?;
+
+        Ok(PendingArchiveResponse::Found(PendingArchive {
+            id: archive_id as u64,
+            size: NonZeroU64::new(meta.size as _).unwrap(),
+        }))
     }
 
     #[tracing::instrument(skip_all, fields(
@@ -208,11 +225,18 @@ impl S3Client {
     ))]
     pub async fn get_block_full(
         &self,
-        mc_block_id: &BlockId,
         block_id: &BlockId,
-        prev_key_block: &BlockId,
+        mc_seqno: u32,
+        last_mc_seqno: u32,
+        prev_key_block_seqno: u32,
     ) -> anyhow::Result<Option<BlockDataFull>, Error> {
-        let archive_id = self.find_archive(mc_block_id.seqno, prev_key_block.seqno);
+        let archive_id = match self
+            .find_archive(mc_seqno, last_mc_seqno, prev_key_block_seqno)
+            .await?
+        {
+            PendingArchiveResponse::Found(id) => id.id,
+            PendingArchiveResponse::TooNew => return Ok(None),
+        };
 
         // TODO: write to file for huge archives
         let output = BytesMut::new().writer();
@@ -261,6 +285,17 @@ impl S3Client {
 
         Ok(block_full)
     }
+}
+
+pub enum PendingArchiveResponse {
+    Found(PendingArchive),
+    TooNew,
+}
+
+#[derive(Clone)]
+pub struct PendingArchive {
+    pub id: u64,
+    pub size: NonZeroU64,
 }
 
 pub struct BlockDataFull {

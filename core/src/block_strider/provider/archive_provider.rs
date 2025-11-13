@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, btree_map};
 use std::io::Seek;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use bytesize::ByteSize;
 use futures_util::future::BoxFuture;
@@ -16,9 +18,12 @@ use tycho_storage::fs::MappedFile;
 use tycho_types::models::BlockId;
 
 use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
-use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive, PendingArchiveResponse};
+use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::overlay_client::{Neighbour, PunishReason};
+#[cfg(feature = "s3")]
+use crate::s3::S3Client;
 use crate::storage::CoreStorage;
+use crate::{blockchain_rpc, s3};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -36,16 +41,15 @@ impl Default for ArchiveBlockProviderConfig {
 
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct ArchiveBlockProvider {
-    inner: Arc<Inner>,
+pub struct ArchiveBlockProvider<C = BlockchainRpcClient> {
+    inner: Arc<Inner<C>>,
 }
 
-impl ArchiveBlockProvider {
-    pub fn new(
-        client: BlockchainRpcClient,
-        storage: CoreStorage,
-        config: ArchiveBlockProviderConfig,
-    ) -> Self {
+impl<C> ArchiveBlockProvider<C>
+where
+    C: ArchiveClient + 'static,
+{
+    pub fn new(client: C, storage: CoreStorage, config: ArchiveBlockProviderConfig) -> Self {
         let proof_checker = ProofChecker::new(storage.clone());
 
         Self {
@@ -76,8 +80,10 @@ impl ArchiveBlockProvider {
                 tracing::error!(
                     "received archive does not contain mc block with seqno {next_mc_seqno}"
                 );
-                info.from.punish(PunishReason::Malicious);
                 this.remove_archive_if_same(archive_key, &info);
+                if let Some(from) = &info.from {
+                    from.punish(PunishReason::Malicious);
+                }
                 continue;
             };
 
@@ -89,7 +95,9 @@ impl ArchiveBlockProvider {
                 Err(e) => {
                     tracing::error!(archive_key, %block_id, "invalid archive entry: {e:?}");
                     this.remove_archive_if_same(archive_key, &info);
-                    info.from.punish(PunishReason::Malicious);
+                    if let Some(from) = &info.from {
+                        from.punish(PunishReason::Malicious);
+                    }
                 }
             }
         }
@@ -118,7 +126,9 @@ impl ArchiveBlockProvider {
                 Err(e) => {
                     tracing::error!(archive_key, %block_id, %mc_block_id, "invalid archive entry: {e:?}");
                     this.remove_archive_if_same(archive_key, &info);
-                    info.from.punish(PunishReason::Malicious);
+                    if let Some(from) = &info.from {
+                        from.punish(PunishReason::Malicious);
+                    }
                 }
             }
         }
@@ -150,10 +160,10 @@ impl ArchiveBlockProvider {
     }
 }
 
-struct Inner {
+struct Inner<C> {
     storage: CoreStorage,
 
-    client: BlockchainRpcClient,
+    client: C,
     proof_checker: ProofChecker,
 
     known_archives: parking_lot::Mutex<ArchivesMap>,
@@ -161,7 +171,10 @@ struct Inner {
     config: ArchiveBlockProviderConfig,
 }
 
-impl Inner {
+impl<C> Inner<C>
+where
+    C: ArchiveClient + 'static,
+{
     async fn get_archive(&self, mc_seqno: u32) -> Option<(u32, ArchiveInfo)> {
         loop {
             let mut pending = 'pending: {
@@ -249,7 +262,7 @@ impl Inner {
         }
     }
 
-    fn make_downloader(&self) -> ArchiveDownloader {
+    fn make_downloader(&self) -> ArchiveDownloader<C> {
         ArchiveDownloader {
             client: self.client.clone(),
             storage: self.storage.clone(),
@@ -304,17 +317,20 @@ enum ArchiveSlot {
 
 #[derive(Clone)]
 struct ArchiveInfo {
-    from: Neighbour,
+    from: Option<Neighbour>, // None for S3
     archive: Arc<Archive>,
 }
 
-struct ArchiveDownloader {
-    client: BlockchainRpcClient,
+struct ArchiveDownloader<C> {
+    client: C,
     storage: CoreStorage,
     memory_threshold: ByteSize,
 }
 
-impl ArchiveDownloader {
+impl<C> ArchiveDownloader<C>
+where
+    C: ArchiveClient + Clone + 'static,
+{
     fn spawn(self, mc_seqno: u32) -> ArchiveTask {
         // TODO: Use a proper backoff here?
         const INTERVAL: Duration = Duration::from_secs(1);
@@ -359,54 +375,51 @@ impl ArchiveDownloader {
         }
     }
 
-    async fn try_download(&self, seqno: u32) -> Result<Option<ArchiveInfo>> {
-        let response = self.client.find_archive(seqno).await?;
-        let pending = match response {
-            PendingArchiveResponse::Found(pending) => pending,
-            PendingArchiveResponse::TooNew => return Ok(None),
+    async fn try_download(&self, mc_seqno: u32) -> Result<Option<ArchiveInfo>> {
+        let req = self.client.create_request(mc_seqno, &self.storage)?;
+        let res = match self
+            .client
+            .download_archive(req, ArchiveDownloadContext {
+                storage: &self.storage,
+                memory_threshold: self.memory_threshold,
+            })
+            .await?
+        {
+            Some(res) => res,
+            None => return Ok(None),
         };
-
-        let neighbour = pending.neighbour.clone();
-
-        let writer = self.get_archive_writer(&pending)?;
-        let writer = self.client.download_archive(pending, writer).await?;
 
         let span = tracing::Span::current();
         tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
-            let bytes = writer.try_freeze()?;
+            let bytes = res.writer.try_freeze()?;
 
             let archive = match Archive::new(bytes) {
                 Ok(array) => array,
                 Err(e) => {
-                    neighbour.punish(PunishReason::Malicious);
+                    if let Some(neighbour) = res.neighbour {
+                        neighbour.punish(PunishReason::Malicious);
+                    }
                     return Err(e);
                 }
             };
 
             if let Err(e) = archive.check_mc_blocks_range() {
                 // TODO: Punish a bit less for missing mc blocks?
-                neighbour.punish(PunishReason::Malicious);
+                if let Some(neighbour) = res.neighbour {
+                    neighbour.punish(PunishReason::Malicious);
+                }
                 return Err(e);
             }
 
             Ok(ArchiveInfo {
                 archive: Arc::new(archive),
-                from: neighbour,
+                from: res.neighbour,
             })
         })
         .await?
         .map(Some)
-    }
-
-    fn get_archive_writer(&self, pending: &PendingArchive) -> Result<ArchiveWriter> {
-        Ok(if pending.size.get() > self.memory_threshold.as_u64() {
-            let file = self.storage.context().temp_files().unnamed_file().open()?;
-            ArchiveWriter::File(std::io::BufWriter::new(file))
-        } else {
-            ArchiveWriter::Bytes(BytesMut::new().writer())
-        })
     }
 }
 
@@ -443,7 +456,10 @@ enum ArchiveTaskState {
     Cancelled,
 }
 
-impl BlockProvider for ArchiveBlockProvider {
+impl<C> BlockProvider for ArchiveBlockProvider<C>
+where
+    C: ArchiveClient + 'static,
+{
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type CleanupFut<'a> = futures_util::future::Ready<Result<()>>;
@@ -462,7 +478,7 @@ impl BlockProvider for ArchiveBlockProvider {
     }
 }
 
-enum ArchiveWriter {
+pub enum ArchiveWriter {
     File(std::io::BufWriter<std::fs::File>),
     Bytes(bytes::buf::Writer<BytesMut>),
 }
@@ -509,5 +525,147 @@ impl std::io::Write for ArchiveWriter {
             Self::File(writer) => writer.write_fmt(fmt),
             Self::Bytes(writer) => writer.write_fmt(fmt),
         }
+    }
+}
+
+pub struct ArchiveRequest {
+    mc_seqno: u32,
+    last_mc_seqno: Option<u32>,
+    prev_key_block_seqno: Option<u32>,
+}
+
+impl ArchiveRequest {
+    pub fn new(mc_seqno: u32) -> Self {
+        Self {
+            mc_seqno,
+            last_mc_seqno: None,
+            prev_key_block_seqno: None,
+        }
+    }
+
+    pub fn with_last_mc_seqno(mut self, seqno: u32) -> Self {
+        self.last_mc_seqno = Some(seqno);
+        self
+    }
+
+    pub fn with_prev_key_block_seqno(mut self, seqno: u32) -> Self {
+        self.prev_key_block_seqno = Some(seqno);
+        self
+    }
+}
+
+pub struct ArchiveResponse {
+    writer: ArchiveWriter,
+    neighbour: Option<Neighbour>,
+}
+
+pub struct ArchiveDownloadContext<'a> {
+    pub storage: &'a CoreStorage,
+    pub memory_threshold: ByteSize,
+}
+
+impl<'a> ArchiveDownloadContext<'a> {
+    fn get_archive_writer(&self, size: NonZeroU64) -> Result<ArchiveWriter> {
+        Ok(if size.get() > self.memory_threshold.as_u64() {
+            let file = self.storage.context().temp_files().unnamed_file().open()?;
+            ArchiveWriter::File(std::io::BufWriter::new(file))
+        } else {
+            ArchiveWriter::Bytes(BytesMut::new().writer())
+        })
+    }
+}
+
+#[async_trait]
+pub trait ArchiveClient: Send + Sync + Clone {
+    async fn download_archive(
+        &self,
+        req: ArchiveRequest,
+        ctx: ArchiveDownloadContext<'_>,
+    ) -> Result<Option<ArchiveResponse>>;
+
+    fn create_request(&self, mc_seqno: u32, storage: &CoreStorage) -> Result<ArchiveRequest>;
+}
+
+#[async_trait]
+impl ArchiveClient for BlockchainRpcClient {
+    async fn download_archive(
+        &self,
+        req: ArchiveRequest,
+        ctx: ArchiveDownloadContext<'_>,
+    ) -> Result<Option<ArchiveResponse>> {
+        let response = self.find_archive(req.mc_seqno).await?;
+
+        let pending = match response {
+            blockchain_rpc::PendingArchiveResponse::Found(pending) => pending,
+            blockchain_rpc::PendingArchiveResponse::TooNew => return Ok(None),
+        };
+
+        let neighbour = pending.neighbour.clone();
+
+        let output = ctx.get_archive_writer(pending.size)?;
+        let writer = self.download_archive(pending, output).await?;
+
+        Ok(Some(ArchiveResponse {
+            writer,
+            neighbour: Some(neighbour),
+        }))
+    }
+
+    fn create_request(&self, mc_seqno: u32, _storage: &CoreStorage) -> Result<ArchiveRequest> {
+        Ok(ArchiveRequest::new(mc_seqno))
+    }
+}
+
+#[cfg(feature = "s3")]
+#[async_trait]
+impl ArchiveClient for S3Client {
+    async fn download_archive(
+        &self,
+        req: ArchiveRequest,
+        ctx: ArchiveDownloadContext<'_>,
+    ) -> Result<Option<ArchiveResponse>> {
+        let (last_mc_seqno, prev_key_block_seqno) =
+            match (req.last_mc_seqno, req.prev_key_block_seqno) {
+                (Some(last_mc_seqno), Some(prev_key_block_seqno)) => {
+                    (last_mc_seqno, prev_key_block_seqno)
+                }
+                _ => anyhow::bail!("invalid archive request"),
+            };
+
+        let response = self
+            .find_archive(req.mc_seqno, last_mc_seqno, prev_key_block_seqno)
+            .await?;
+
+        let pending = match response {
+            s3::PendingArchiveResponse::Found(pending) => pending,
+            s3::PendingArchiveResponse::TooNew => return Ok(None),
+        };
+
+        let output = ctx.get_archive_writer(pending.size)?;
+        let writer = self.download_archive(pending.id, output).await?;
+
+        Ok(Some(ArchiveResponse {
+            writer,
+            neighbour: None,
+        }))
+    }
+
+    fn create_request(&self, mc_seqno: u32, storage: &CoreStorage) -> Result<ArchiveRequest> {
+        let last_mc_seqno = storage
+            .node_state()
+            .load_last_mc_block_id()
+            .context("no blocks applied yet")?
+            .seqno;
+
+        let prev_key_block_seqno = storage
+            .block_handle_storage()
+            .find_prev_key_block(mc_seqno)
+            .context("previous key block not found")?
+            .id()
+            .seqno;
+
+        Ok(ArchiveRequest::new(mc_seqno)
+            .with_last_mc_seqno(last_mc_seqno)
+            .with_prev_key_block_seqno(prev_key_block_seqno))
     }
 }

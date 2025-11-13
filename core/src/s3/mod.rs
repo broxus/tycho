@@ -1,3 +1,3 @@
-pub use self::client::{S3Client, S3ClientConfig};
+pub use self::client::{PendingArchiveResponse, S3Client, S3ClientConfig};
 
 mod client;
