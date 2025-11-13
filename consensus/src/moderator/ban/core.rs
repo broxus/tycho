@@ -1,8 +1,9 @@
 use std::collections::hash_map;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use futures_util::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::time::{DelayQueue, delay_queue};
 use tycho_network::{Network, PeerId};
 use tycho_util::FastHashMap;
@@ -19,6 +20,7 @@ use crate::moderator::{BanConfig, JournalEvent, RecordKey, RecordValueShort};
 pub struct BanCore {
     cache: EventsCache,
     ban_queue: mpsc::UnboundedSender<QueuedBanItem>,
+    manual_unban_queue: mpsc::UnboundedSender<ManualUnbanItem>,
     _updater: JoinTask<()>, // outlives mempool session(s) as a moderator part
 }
 
@@ -28,16 +30,19 @@ impl BanCore {
         delayed_db_writes_tx: &mpsc::UnboundedSender<Vec<JournalItemFull>>,
     ) -> Self {
         let (ban_tx, ban_rx) = mpsc::unbounded_channel();
+        let (unban_tx, unban_rx) = mpsc::unbounded_channel();
         let cache = EventsCache::default();
         let cache_back = cache.back();
         Self {
             cache,
             ban_queue: ban_tx,
+            manual_unban_queue: unban_tx,
             _updater: JoinTask::new(updater(
                 network.clone(),
                 cache_back,
                 delayed_db_writes_tx.clone(),
                 ban_rx,
+                unban_rx,
             )),
         }
     }
@@ -109,6 +114,27 @@ impl BanCore {
         };
         self.ban_queue.send(new_ban_item).ok(); // consumer is closed only at shutdown
     }
+
+    pub fn manual_unban(
+        &self,
+        peer_id: &PeerId,
+        force: bool,
+    ) -> oneshot::Receiver<anyhow::Result<()>> {
+        let (tx, rx) = oneshot::channel();
+        let unban = ManualUnbanItem {
+            peer_id: *peer_id,
+            force,
+            result: tx,
+        };
+        self.manual_unban_queue.send(unban).ok();
+        rx
+    }
+}
+
+struct ManualUnbanItem {
+    peer_id: PeerId,
+    force: bool,
+    result: oneshot::Sender<anyhow::Result<()>>,
 }
 
 async fn updater(
@@ -116,6 +142,7 @@ async fn updater(
     cache_back: EventsCacheBack,
     delayed_db_writes_tx: mpsc::UnboundedSender<Vec<JournalItemFull>>,
     mut ban_queue: mpsc::UnboundedReceiver<QueuedBanItem>,
+    mut manual_unban_tx: mpsc::UnboundedReceiver<ManualUnbanItem>,
 ) {
     let mut last_bans = FastHashMap::<PeerId, (delay_queue::Key, UnixTime)>::default();
     let mut unban_queue = DelayQueue::<UnbanItem>::new();
@@ -125,7 +152,7 @@ async fn updater(
                 // Note: restored ban doesn't contain tag so new unban item won't always inherit it
                 let tag = match ban.to_store {
                     Some(ItemOrigin::Parent { tag, .. }) => tag ,
-                    None => None,
+                    None | Some(ItemOrigin::Manual { .. }) => None,
                 };
                 let queued = UnbanItem {
                     peer_id: ban.peer_id,
@@ -170,6 +197,41 @@ async fn updater(
                     item: JournalItem::Unbanned(unban),
                 };
                 delayed_db_writes_tx.send(vec![item_full]).ok();
+            },
+            Some(manual_unban) = manual_unban_tx.recv() => {
+                let until = match last_bans.remove(&manual_unban.peer_id) {
+                    Some((key, until)) => {
+                        unban_queue.remove(&key); // panics if the key is not present
+                        until
+                    }
+                    None if manual_unban.force => UnixTime::from_millis(u64::MAX),
+                    None => {
+                        manual_unban.result.send(Err(anyhow!("peer is not banned"))).ok();
+                        continue;
+                    }
+                };
+                // force remove always succeeds
+                if cache_back.remove_last_ban(&manual_unban.peer_id, until).is_err() {
+                    let msg = "a newer ban is enqueued, will not toggle peer state";
+                    manual_unban.result.send(Err(anyhow!(msg))).ok();
+                    continue;
+                }
+                network.known_peers().remove(&manual_unban.peer_id);
+                meter_banned(&manual_unban.peer_id, false);
+
+                let item_full = JournalItemFull {
+                    key: RecordKey::new(),
+                    item: JournalItem::Unbanned(UnbanItem {
+                        peer_id: manual_unban.peer_id,
+                        origin: ItemOrigin::Manual {
+                            forced: manual_unban.force
+                        },
+                    }),
+                };
+                let result = delayed_db_writes_tx
+                    .send(vec![item_full])
+                    .map_err(|_e| anyhow!("ban server db writer is shut down"));
+                manual_unban.result.send(result).ok();
             },
             else => break,
         }

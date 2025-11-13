@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::num::NonZeroU64;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -35,6 +36,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::collator::Collator;
 use crate::error::{ServerError, ServerResult};
+use crate::mempool::{self, MempoolService};
 use crate::profiler::{MemoryProfiler, StubMemoryProfiler};
 use crate::proto::{self, ArchiveInfo, ControlServer as _};
 
@@ -162,6 +164,7 @@ pub struct ControlServerBuilder<
     collator: Option<Arc<dyn Collator>>,
     dht_client: Option<DhtClient>,
     overlay_service: Option<OverlayService>,
+    mempool_service: Option<Arc<dyn MempoolService>>,
 }
 
 impl ControlServerBuilder {
@@ -222,6 +225,7 @@ impl ControlServerBuilder {
                 overlay_service: self.overlay_service,
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
+                mempool_service: self.mempool_service,
             }),
         })
     }
@@ -237,6 +241,7 @@ impl<T2, T3, T4> ControlServerBuilder<((), T2, T3, T4)> {
             collator: self.collator,
             dht_client: self.dht_client,
             overlay_service: self.overlay_service,
+            mempool_service: self.mempool_service,
         }
     }
 }
@@ -254,6 +259,7 @@ impl<T1, T3, T4> ControlServerBuilder<(T1, (), T3, T4)> {
             collator: self.collator,
             dht_client: self.dht_client,
             overlay_service: self.overlay_service,
+            mempool_service: self.mempool_service,
         }
     }
 }
@@ -271,6 +277,7 @@ impl<T1, T2, T4> ControlServerBuilder<(T1, T2, (), T4)> {
             collator: self.collator,
             dht_client: self.dht_client,
             overlay_service: self.overlay_service,
+            mempool_service: self.mempool_service,
         }
     }
 }
@@ -288,6 +295,7 @@ impl<T1, T2, T3> ControlServerBuilder<(T1, T2, T3, ())> {
             collator: self.collator,
             dht_client: self.dht_client,
             overlay_service: self.overlay_service,
+            mempool_service: self.mempool_service,
         }
     }
 }
@@ -317,6 +325,11 @@ impl<T> ControlServerBuilder<T> {
         self.overlay_service = Some(service);
         self
     }
+
+    pub fn with_mempool_service(mut self, service: Arc<dyn MempoolService>) -> Self {
+        self.mempool_service = Some(service);
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -334,6 +347,7 @@ impl ControlServer {
             collator: None,
             dht_client: None,
             overlay_service: None,
+            mempool_service: None,
         }
     }
 }
@@ -888,6 +902,53 @@ impl proto::ControlServer for ControlServer {
             signature: Box::new(signature),
         })
     }
+
+    async fn mempool_ban(
+        self,
+        _: tarpc::context::Context,
+        req: mempool::BanRequest,
+    ) -> ServerResult<String> {
+        let mempool = (self.inner.mempool_service.as_ref()).ok_or_else(|| {
+            ServerError::new("control server was created without mempool service")
+        })?;
+        mempool.manual_ban(req).map_err(Into::into)
+    }
+
+    async fn mempool_unban(
+        self,
+        _: tarpc::context::Context,
+        peer_id: HashBytes,
+        force: bool,
+    ) -> ServerResult<()> {
+        let mempool = (self.inner.mempool_service.as_ref()).ok_or_else(|| {
+            ServerError::new("control server was created without mempool service")
+        })?;
+        mempool.manual_unban(peer_id, force).await?;
+        Ok(())
+    }
+
+    async fn mempool_list_events(
+        self,
+        _: tarpc::context::Context,
+        req: mempool::ListEventsRequest,
+    ) -> ServerResult<Vec<mempool::MempoolEventDisplay>> {
+        let mempool = (self.inner.mempool_service.as_ref()).ok_or_else(|| {
+            ServerError::new("control server was created without mempool service")
+        })?;
+        Ok(mempool.list_events(req).await?)
+    }
+
+    async fn mempool_delete_events(
+        self,
+        _: tarpc::context::Context,
+        millis: Range<u64>,
+    ) -> ServerResult<()> {
+        let mempool = (self.inner.mempool_service.as_ref()).ok_or_else(|| {
+            ServerError::new("control server was created without mempool service")
+        })?;
+        mempool.delete_events(millis).await?;
+        Ok(())
+    }
 }
 
 impl StateSubscriber for ControlServer {
@@ -912,6 +973,7 @@ struct Inner {
     overlay_service: Option<OverlayService>,
     mc_accounts: RwLock<Option<CachedAccounts>>,
     sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,
+    mempool_service: Option<Arc<dyn MempoolService>>,
 }
 
 impl Inner {

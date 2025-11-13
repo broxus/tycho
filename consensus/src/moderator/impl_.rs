@@ -1,8 +1,11 @@
+use std::ops::Range;
 use std::sync::{Arc, Once};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use futures_util::future::BoxFuture;
 use tokio::sync::mpsc;
-use tycho_network::Network;
+use tycho_network::{Network, PeerId};
 use tycho_util::futures::JoinTask;
 
 use crate::effects::{Ctx, RoundCtx};
@@ -10,8 +13,8 @@ use crate::engine::MempoolConfig;
 use crate::models::UnixTime;
 use crate::moderator::ban::core::BanCore;
 use crate::moderator::journal::batch::batch;
-use crate::moderator::journal::item::{JournalItem, JournalItemFull};
-use crate::moderator::{JournalEvent, ModeratorConfig, RecordKey};
+use crate::moderator::journal::item::{BanItem, ItemOrigin, JournalItem, JournalItemFull};
+use crate::moderator::{BanConfigDuration, JournalEvent, ModeratorConfig, RecordFull, RecordKey};
 use crate::storage::{JournalStore, MempoolDb};
 
 /// Must outlive [`crate::engine::lifecycle::EngineSession`] just like opened DB
@@ -52,6 +55,7 @@ impl Moderator {
 
         let inner = Arc::new(ModeratorInner {
             init: Once::new(),
+            network: network.clone(),
             delayed_db_writes_tx,
             ban_core,
             journal_store: journal_store.clone(),
@@ -104,6 +108,22 @@ impl Moderator {
     pub(crate) fn apply_mempool_config(&self, conf: &MempoolConfig) {
         self.0.apply_mempool_config(conf);
     }
+
+    pub fn manual_ban(&self, peer_id: &PeerId, duration: Duration) -> Result<serde_json::Value> {
+        (self.0).manual_ban(peer_id, duration.try_into()?)
+    }
+
+    pub fn manual_unban(&self, peer_id: &PeerId, force: bool) -> BoxFuture<'static, Result<()>> {
+        self.0.manual_unban(peer_id, force)
+    }
+
+    pub fn list_events(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>> {
+        self.0.list_events(count, page, asc)
+    }
+
+    pub fn delete_events(&self, millis: Range<u64>) -> Result<()> {
+        self.0.delete_events(millis)
+    }
 }
 
 trait ModeratorTrait: Send + Sync {
@@ -112,6 +132,14 @@ trait ModeratorTrait: Send + Sync {
     fn report_blocking(&self, batch: Vec<JournalEvent>, round_ctx: &RoundCtx);
     fn send_report(&self, data: JournalEvent);
     fn apply_mempool_config(&self, conf: &MempoolConfig);
+    fn manual_ban(
+        &self,
+        peer_id: &PeerId,
+        duration: BanConfigDuration,
+    ) -> Result<serde_json::Value>;
+    fn manual_unban(&self, peer_id: &PeerId, force: bool) -> BoxFuture<'static, Result<()>>;
+    fn list_events(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>>;
+    fn delete_events(&self, millis: Range<u64>) -> Result<()>;
 }
 
 #[cfg(any(test, feature = "test"))]
@@ -128,11 +156,24 @@ impl ModeratorTrait for ModeratorStub {
     fn report_blocking(&self, _: Vec<JournalEvent>, _: &RoundCtx) {}
     fn send_report(&self, _: JournalEvent) {}
     fn apply_mempool_config(&self, _: &MempoolConfig) {}
+    fn manual_ban(&self, _: &PeerId, _: BanConfigDuration) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn manual_unban(&self, _: &PeerId, _: bool) -> BoxFuture<'static, Result<()>> {
+        Box::pin(futures_util::future::ready(Ok(())))
+    }
+    fn list_events(&self, _: u16, _: u32, _: bool) -> Result<Vec<RecordFull>> {
+        Ok(Vec::new())
+    }
+    fn delete_events(&self, _: Range<u64>) -> Result<()> {
+        Ok(())
+    }
 }
 
 struct ModeratorInner {
     /// because gets created and init once at a node start and may outlive engine session
     init: Once,
+    network: Network,
     delayed_db_writes_tx: mpsc::UnboundedSender<Vec<JournalItemFull>>,
     ban_core: BanCore,
     journal_store: JournalStore,
@@ -169,9 +210,61 @@ impl ModeratorTrait for ModeratorInner {
     fn apply_mempool_config(&self, conf: &MempoolConfig) {
         self.mempool_conf_tx.send(conf.clone()).ok();
     }
+
+    fn manual_ban(
+        &self,
+        peer_id: &PeerId,
+        duration: BanConfigDuration,
+    ) -> Result<serde_json::Value> {
+        anyhow::ensure!(self.network.peer_id() != peer_id, "cannot ban yourself");
+        self.check_init()?;
+        let key = RecordKey::new();
+        let until = UnixTime::now() + duration.to_time();
+        let item = JournalItem::Banned(BanItem {
+            peer_id: *peer_id,
+            until,
+            origin: ItemOrigin::Manual { forced: false }, // force is unapplicable
+        });
+        self.ban_core.send_ban(key, &item);
+        self.delayed_db_writes_tx
+            .send(vec![JournalItemFull { key, item }])
+            .ok();
+        Ok(serde_json::json!({"banned_until_utc_millis": until.millis()}))
+    }
+
+    fn manual_unban(&self, peer_id: &PeerId, force: bool) -> BoxFuture<'static, Result<()>> {
+        // leave a way to unban yourself just in case of DB transplantation
+        match self.check_init() {
+            Ok(()) => {
+                let rx = self.ban_core.manual_unban(peer_id, force);
+                Box::pin(async move { rx.await.map_err(anyhow::Error::from)? })
+            }
+            Err(e) => Box::pin(futures_util::future::ready(Err(e))),
+        }
+    }
+
+    fn list_events(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>> {
+        // no need to check init
+        self.journal_store.load_records(count, page, asc)
+    }
+
+    fn delete_events(&self, millis: Range<u64>) -> Result<()> {
+        self.check_init()?;
+        let range = UnixTime::from_millis(millis.start)..UnixTime::from_millis(millis.end);
+        self.journal_store.delete(range)?;
+        Ok(())
+    }
 }
 
 impl ModeratorInner {
+    fn check_init(&self) -> Result<()> {
+        if self.init.is_completed() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("moderator is not init yet"))
+        }
+    }
+
     fn events_to_items_and_maybe_ban(&self, events: Vec<JournalEvent>) -> Vec<JournalItemFull> {
         let mut items = Vec::with_capacity(events.len());
         let mut new_bans = Vec::new();

@@ -36,6 +36,10 @@ impl RecordKey {
             seq_no: RECORD_SEQ_NO.fetch_add(1, atomic::Ordering::Relaxed),
         }
     }
+
+    pub fn seq_no(&self) -> u32 {
+        self.seq_no
+    }
 }
 
 /// Manual encoding because we need big-endian key in rocksdb for ranged deletes

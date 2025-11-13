@@ -115,6 +115,9 @@ pub struct UnbanItem {
 
 #[derive(Debug, Clone, Copy)]
 pub enum ItemOrigin {
+    Manual {
+        forced: bool,
+    },
     /// Record that triggered the ban or a ban that was unbanned
     Parent {
         key: RecordKey,
@@ -125,6 +128,8 @@ pub enum ItemOrigin {
 impl Display for ItemOrigin {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Manual { forced: false } => f.write_str("manual"),
+            Self::Manual { forced: true } => f.write_str("manual forced"),
             Self::Parent { key, tag } => match tag {
                 None => write!(f, "auto without tag by {key}"),
                 Some(tag) => write!(f, "auto by {tag:?} {key}"),
