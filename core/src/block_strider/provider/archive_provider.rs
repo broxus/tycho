@@ -41,15 +41,16 @@ impl Default for ArchiveBlockProviderConfig {
 
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct ArchiveBlockProvider<C = BlockchainRpcClient> {
-    inner: Arc<Inner<C>>,
+pub struct ArchiveBlockProvider {
+    inner: Arc<Inner>,
 }
 
-impl<C> ArchiveBlockProvider<C>
-where
-    C: ArchiveClient + 'static,
-{
-    pub fn new(client: C, storage: CoreStorage, config: ArchiveBlockProviderConfig) -> Self {
+impl ArchiveBlockProvider {
+    pub fn new(
+        client: Arc<dyn ArchiveClient>,
+        storage: CoreStorage,
+        config: ArchiveBlockProviderConfig,
+    ) -> Self {
         let proof_checker = ProofChecker::new(storage.clone());
 
         Self {
@@ -160,10 +161,10 @@ where
     }
 }
 
-struct Inner<C> {
+struct Inner {
     storage: CoreStorage,
 
-    client: C,
+    client: Arc<dyn ArchiveClient>,
     proof_checker: ProofChecker,
 
     known_archives: parking_lot::Mutex<ArchivesMap>,
@@ -171,10 +172,7 @@ struct Inner<C> {
     config: ArchiveBlockProviderConfig,
 }
 
-impl<C> Inner<C>
-where
-    C: ArchiveClient + 'static,
-{
+impl Inner {
     async fn get_archive(&self, mc_seqno: u32) -> Option<(u32, ArchiveInfo)> {
         loop {
             let mut pending = 'pending: {
@@ -262,7 +260,7 @@ where
         }
     }
 
-    fn make_downloader(&self) -> ArchiveDownloader<C> {
+    fn make_downloader(&self) -> ArchiveDownloader {
         ArchiveDownloader {
             client: self.client.clone(),
             storage: self.storage.clone(),
@@ -321,16 +319,13 @@ struct ArchiveInfo {
     archive: Arc<Archive>,
 }
 
-struct ArchiveDownloader<C> {
-    client: C,
+struct ArchiveDownloader {
+    client: Arc<dyn ArchiveClient>,
     storage: CoreStorage,
     memory_threshold: ByteSize,
 }
 
-impl<C> ArchiveDownloader<C>
-where
-    C: ArchiveClient + Clone + 'static,
-{
+impl ArchiveDownloader {
     fn spawn(self, mc_seqno: u32) -> ArchiveTask {
         // TODO: Use a proper backoff here?
         const INTERVAL: Duration = Duration::from_secs(1);
@@ -377,16 +372,14 @@ where
 
     async fn try_download(&self, mc_seqno: u32) -> Result<Option<ArchiveInfo>> {
         let req = self.client.create_request(mc_seqno, &self.storage)?;
-        let res = match self
-            .client
-            .download_archive(req, ArchiveDownloadContext {
-                storage: &self.storage,
-                memory_threshold: self.memory_threshold,
-            })
-            .await?
-        {
-            Some(res) => res,
-            None => return Ok(None),
+
+        let ctx = ArchiveDownloadContext {
+            storage: &self.storage,
+            memory_threshold: self.memory_threshold,
+        };
+
+        let Some(res) = self.client.download_archive(req, ctx).await? else {
+            return Ok(None);
         };
 
         let span = tracing::Span::current();
@@ -456,10 +449,7 @@ enum ArchiveTaskState {
     Cancelled,
 }
 
-impl<C> BlockProvider for ArchiveBlockProvider<C>
-where
-    C: ArchiveClient + 'static,
-{
+impl BlockProvider for ArchiveBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type CleanupFut<'a> = futures_util::future::Ready<Result<()>>;
@@ -576,7 +566,7 @@ impl<'a> ArchiveDownloadContext<'a> {
 }
 
 #[async_trait]
-pub trait ArchiveClient: Send + Sync + Clone {
+pub trait ArchiveClient: Send + Sync {
     async fn download_archive(
         &self,
         req: ArchiveRequest,

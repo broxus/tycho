@@ -157,7 +157,7 @@ impl NodeBase {
 
     pub fn build_archive_block_provider(&self) -> ArchiveBlockProvider {
         ArchiveBlockProvider::new(
-            self.blockchain_rpc_client.clone(),
+            Arc::new(self.blockchain_rpc_client.clone()),
             self.core_storage.clone(),
             self.base_config.archive_block_provider.clone(),
         )

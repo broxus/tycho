@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Context;
 use clap::Parser;
 use tycho_core::block_strider::{
@@ -37,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
     let mut node = args.node.create(config.clone()).await?;
 
     let archive_block_provider = ArchiveBlockProvider::new(
-        node.blockchain_rpc_client().clone(),
+        Arc::new(node.blockchain_rpc_client().clone()),
         node.storage().clone(),
         config.archive_block_provider.clone(),
     );
