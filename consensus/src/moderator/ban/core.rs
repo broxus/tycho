@@ -2,8 +2,9 @@ use std::collections::hash_map;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use anyhow::{Context, anyhow};
 use futures_util::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::time::{DelayQueue, delay_queue};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
@@ -63,6 +64,39 @@ impl BanCore {
     pub fn send_report(&self, event: JournalEvent) {
         self.0.updates_tx.send(UpdaterQueueItem::Event(event)).ok();
     }
+
+    pub fn manual_ban(&self, peer_id: &PeerId, until: UnixTime) -> anyhow::Result<()> {
+        let mut state = self.0.state.lock().unwrap();
+        let key = state.kf.new_key();
+        state
+            .manual_ban(peer_id, CurrentBan { until, key })
+            .map_err(|()| anyhow!("already banned for a longer period"))?;
+
+        let item = JournalItem::Banned(BanItem {
+            until,
+            peer_id: *peer_id,
+            origin: BanOrigin::Manual,
+        });
+        self.0
+            .delayed_db_writes_tx
+            .send(vec![JournalItemFull { key, item }])
+            .context("send to db writer at the end")?;
+        Ok(())
+    }
+
+    pub fn manual_unban(
+        &self,
+        peer_id: &PeerId,
+        tx: oneshot::Sender<anyhow::Result<()>>,
+    ) -> anyhow::Result<()> {
+        self.0
+            .updates_tx
+            .send(UpdaterQueueItem::ManualUnban {
+                peer_id: *peer_id,
+                callback: tx,
+            })
+            .context("unban task stopped")
+    }
 }
 
 async fn run_updater(
@@ -96,6 +130,20 @@ async fn run_updater(
                         hash_map::Entry::Vacant(vacant) => {
                             let dq_key = auto_unbans.insert(peer_id, unban_wait);
                             vacant.insert((dq_key, q_ban));
+                        }
+                    };
+                }
+                UpdaterQueueItem::ManualUnban{peer_id, callback} => {
+                    match last_bans.remove(&peer_id) {
+                        Some((dq_key, _q_ban)) => {
+                            auto_unbans.remove(&dq_key); // panics if the key is not present
+                            let Some(inner) = weak.upgrade() else {
+                                break;
+                            };
+                            inner.on_manual_unban(&peer_id, callback);
+                        }
+                        None => {
+                            callback.send(Err(anyhow!("peer is not banned"))).ok();
                         }
                     };
                 }
@@ -151,6 +199,29 @@ impl BanCoreInner {
         if !items.is_empty() {
             self.delayed_db_writes_tx.send(items).ok();
         }
+    }
+
+    fn on_manual_unban(&self, peer_id: &PeerId, callback: oneshot::Sender<anyhow::Result<()>>) {
+        let mut state = self.state.lock().unwrap();
+
+        if state.manual_unban(peer_id).is_err() {
+            callback.send(Err(anyhow!("no ban to remove"))).ok();
+            return;
+        }
+
+        let item_full = JournalItemFull {
+            key: state.kf.new_key(),
+            item: JournalItem::Unbanned(UnbanItem {
+                peer_id: *peer_id,
+                origin: UnbanOrigin::Manual,
+            }),
+        };
+
+        let result = self
+            .delayed_db_writes_tx
+            .send(vec![item_full])
+            .map_err(|_e| anyhow!("ban server db writer is shut down"));
+        callback.send(result).ok();
     }
 
     fn on_auto_unban(&self, peer_id: &PeerId, q_ban: CurrentBan) {

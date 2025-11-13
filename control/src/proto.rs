@@ -10,6 +10,7 @@ use tycho_types::prelude::*;
 use tycho_util::{FastHashSet, serde_helpers};
 
 use crate::error::ServerResult;
+use crate::mempool;
 
 #[tarpc::service]
 pub trait ControlServer {
@@ -83,6 +84,16 @@ pub trait ControlServer {
     async fn sign_elections_payload(
         req: ElectionsPayloadRequest,
     ) -> ServerResult<ElectionsPayloadResponse>;
+
+    async fn mempool_ban(req: mempool::BanRequest) -> ServerResult<String>;
+
+    async fn mempool_unban(peer_id: HashBytes) -> ServerResult<()>;
+
+    async fn mempool_list_events(
+        req: mempool::ListEventsRequest,
+    ) -> ServerResult<Vec<mempool::MempoolEventDisplay>>;
+
+    async fn mempool_delete_events(millis: std::ops::Range<u64>) -> ServerResult<()>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

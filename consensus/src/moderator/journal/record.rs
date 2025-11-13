@@ -3,6 +3,12 @@ use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
 use crate::models::{PointKey, UnixTime};
+use crate::moderator::RecordKey;
+
+pub struct RecordFull {
+    pub key: RecordKey,
+    pub value: RecordValue,
+}
 
 #[derive(TlRead, TlWrite)]
 #[tl(boxed, id = "journal.recordValue", scheme = "proto.tl")]

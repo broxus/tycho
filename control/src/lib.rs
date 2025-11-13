@@ -20,6 +20,8 @@ mod client;
 mod collator;
 mod error;
 #[cfg(feature = "server")]
+pub mod mempool;
+#[cfg(feature = "server")]
 mod profiler;
 #[cfg(feature = "server")]
 mod server;
