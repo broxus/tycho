@@ -11,10 +11,12 @@ use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
 
 pub use self::control::CmdControl;
+pub use self::mempool_control::MempoolServer;
 use crate::BaseArgs;
 use crate::node::{Node, NodeConfig};
 
 mod control;
+mod mempool_control;
 
 /// Manage the node.
 #[derive(Parser)]

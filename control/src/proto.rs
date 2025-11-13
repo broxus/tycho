@@ -10,6 +10,7 @@ use tycho_types::prelude::*;
 use tycho_util::{FastHashSet, serde_helpers};
 
 use crate::error::ServerResult;
+use crate::mempool;
 
 #[tarpc::service]
 pub trait ControlServer {
@@ -83,6 +84,25 @@ pub trait ControlServer {
     async fn sign_elections_payload(
         req: ElectionsPayloadRequest,
     ) -> ServerResult<ElectionsPayloadResponse>;
+
+    /// Queues a manual ban and waits for persisted completion while the client stays connected.
+    /// After the node accepts the request, it cannot be cancelled (by timeout, disconnect, etc.).
+    async fn mempool_ban(req: mempool::BanRequest) -> ServerResult<String>;
+
+    /// Queues a manual unban and waits for persisted completion while the client stays connected.
+    /// Live visibility can lag because the peer must resolve again after unban.
+    /// After the node accepts the request, it cannot be cancelled (by timeout, disconnect, etc.).
+    async fn mempool_unban(peer_id: HashBytes) -> ServerResult<()>;
+
+    /// Lists persisted moderator journal records of all types.
+    /// Point key with `stored=true` can be used to retrieve full point with a separate call.
+    async fn mempool_list_events(
+        req: mempool::ListEventsRequest,
+    ) -> ServerResult<Vec<mempool::MempoolEventDisplay>>;
+
+    /// Deletes persisted moderator journal data only; does not mutate in-mem moderator state.
+    /// After the node accepts the request, it cannot be cancelled (by timeout, disconnect, etc.).
+    async fn mempool_delete_events(millis: std::ops::Range<u64>) -> ServerResult<()>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
