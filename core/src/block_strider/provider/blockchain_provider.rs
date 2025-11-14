@@ -163,6 +163,9 @@ impl BlockchainBlockProvider {
             // Schedule next cleanup
             self.cleanup_fallback_at
                 .store(prev_block_id.seqno.saturating_add(1), Ordering::Release);
+
+            // Wait for timeout before next request
+            tokio::time::sleep(self.config.get_next_block_timeout).await;
         }
     }
 
@@ -224,6 +227,9 @@ impl BlockchainBlockProvider {
 
             // Reset fallback
             self.use_fallback.store(false, Ordering::Relaxed);
+
+            // Wait for timeout before next request
+            tokio::time::sleep(self.config.get_next_block_timeout).await;
 
             // NOTE: Don't schedule next cleanup for fallback, get_next is enough for that.
         }
