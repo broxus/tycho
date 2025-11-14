@@ -1,23 +1,75 @@
 use std::io::Write;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use bytesize::ByteSize;
-use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
 use object_store::path::Path;
 use object_store::{DynObjectStore, Error, ObjectMeta, ObjectStore};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 use tycho_block_util::archive::{Archive, ArchiveVerifier};
 use tycho_types::models::BlockId;
-use tycho_util::compression::ZstdDecompressStream;
-use tycho_util::futures::JoinTask;
 
 use crate::storage::PersistentStateKind;
+use crate::util::downloader::{DownloaderError, DownloaderResponseHandle, download_and_decompress};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3ClientConfig {
+    /// Endpoint region.
+    pub region: String,
+
+    /// Endpoint to be used. For instance, `"https://s3.my-provider.net"` or just
+    /// `"s3.my-provider.net"` (default scheme is https).
+    pub endpoint: String,
+
+    /// The bucket name.
+    ///
+    /// Default: "bucket".
+    pub bucket: String,
+
+    /// Archive prefix before its id (Default: empty)
+    #[serde(default)]
+    pub archive_key_prefix: String,
+
+    /// AWS API access credentials
+    #[serde(default)]
+    pub credentials: Option<S3Credentials>,
+
+    /// Maximum downloaded chunk size.
+    ///
+    /// Default: 10 MB.
+    #[serde(default = "default_chunk_size")]
+    pub chunk_size: ByteSize,
+
+    /// Number of retries to download archives/blocks/states.
+    ///
+    /// Default: 10.
+    #[serde(default = "default_download_retries")]
+    pub download_retries: usize,
+}
+
+fn default_chunk_size() -> ByteSize {
+    ByteSize::mib(10)
+}
+
+fn default_download_retries() -> usize {
+    10
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct S3Credentials {
+    /// Access key id
+    pub access_key: String,
+    /// Secret access key
+    pub secret_key: String,
+    /// Session token
+    #[serde(default)]
+    pub token: Option<String>,
+}
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -27,43 +79,39 @@ pub struct S3Client {
 
 impl S3Client {
     pub fn new(config: &S3ClientConfig) -> anyhow::Result<Self> {
-        let client: Arc<DynObjectStore> = match &config.provider {
-            S3ProviderConfig::Aws {
-                endpoint,
-                access_key_id,
-                secret_access_key,
-                allow_http,
-            } => Arc::new(
-                object_store::aws::AmazonS3Builder::new()
-                    .with_bucket_name(&config.bucket_name)
-                    .with_endpoint(endpoint)
-                    .with_access_key_id(access_key_id)
-                    .with_secret_access_key(secret_access_key)
-                    .with_client_options(
-                        object_store::ClientOptions::new().with_allow_http(*allow_http),
-                    )
-                    .build()?,
-            ),
-            S3ProviderConfig::Gcs { credentials_path } => Arc::new(
-                object_store::gcp::GoogleCloudStorageBuilder::new()
-                    .with_client_options(
-                        object_store::ClientOptions::new()
-                            .with_connect_timeout_disabled()
-                            .with_timeout_disabled(),
-                    )
-                    .with_bucket_name(&config.bucket_name)
-                    .with_application_credentials(credentials_path)
-                    .build()?,
-            ),
+        let chunk_size = config.chunk_size.as_u64();
+        anyhow::ensure!(chunk_size >= 1024, "chunk size must be at least 1 KiB");
+        anyhow::ensure!(
+            chunk_size <= u32::MAX as u64,
+            "chunk size must be at most 4 GiB"
+        );
+
+        let client: Arc<DynObjectStore> = {
+            let mut b = object_store::aws::AmazonS3Builder::new()
+                .with_region(&config.region)
+                .with_endpoint(&config.endpoint)
+                .with_bucket_name(&config.bucket)
+                .with_client_options(object_store::ClientOptions::new().with_allow_http(true));
+
+            if let Some(credentials) = &config.credentials {
+                b = b
+                    .with_access_key_id(&credentials.access_key)
+                    .with_secret_access_key(&credentials.secret_key);
+
+                if let Some(token) = &credentials.token {
+                    b = b.with_token(token);
+                }
+            }
+
+            b.build().map(Arc::new)?
         };
 
         Ok(Self {
             inner: Arc::new(Inner {
-                settings: Settings {
-                    chunk_size: config.chunk_size,
-                    download_retries: config.download_retries,
-                },
                 client,
+                archive_key_prefix: config.archive_key_prefix.clone(),
+                chunk_size: NonZeroU32::new(chunk_size as u32).unwrap(),
+                download_retries: config.download_retries,
             }),
         })
     }
@@ -92,11 +140,11 @@ impl S3Client {
         let meta = self
             .inner
             .client
-            .head(&Path::from(archive_id.to_string()))
+            .head(&self.inner.make_archive_key(archive_id))
             .await?;
 
         Ok(PendingArchiveResponse::Found(PendingArchive {
-            id: archive_id as u64,
+            id: archive_id,
             size: NonZeroU64::new(meta.size as _).unwrap(),
         }))
     }
@@ -122,17 +170,20 @@ impl S3Client {
         let location = PathBuf::from("states").join(kind.make_file_name(block_id));
         let path = Path::from(location.display().to_string());
 
-        let chunk_size = self.inner.settings.chunk_size.as_u64();
-        let max_retries = self.inner.settings.download_retries;
+        let chunk_size = self.inner.chunk_size;
+        let max_retries = self.inner.download_retries;
 
         let client = &self.inner.client.clone();
 
         let meta = client.head(&path).await?;
-        let target_size = meta.size;
+        let Some(target_size) = NonZeroU64::new(meta.size) else {
+            return Err(empty_file_error(path));
+        };
 
-        download_compressed(
+        download_and_decompress(
             target_size,
             chunk_size,
+            PARALLEL_REQUESTS,
             output,
             |offset| {
                 tracing::debug!("downloading persistent state chunk");
@@ -156,10 +207,11 @@ impl S3Client {
             },
         )
         .await
+        .map_err(map_downloader_error)
     }
 
     #[tracing::instrument(skip_all, fields(archive_id))]
-    pub async fn download_archive<W>(&self, archive_id: u64, output: W) -> anyhow::Result<W, Error>
+    pub async fn download_archive<W>(&self, archive_id: u32, output: W) -> anyhow::Result<W, Error>
     where
         W: Write + Send + 'static,
     {
@@ -170,19 +222,21 @@ impl S3Client {
             tracing::debug!("finished");
         }
 
-        let chunk_size = self.inner.settings.chunk_size.as_u64();
-        let max_retries = self.inner.settings.download_retries;
+        let chunk_size = self.inner.chunk_size;
+        let max_retries = self.inner.download_retries;
 
         let client = &self.inner.client.clone();
 
-        let path = Path::from(archive_id.to_string());
+        let path = self.inner.make_archive_key(archive_id);
         let meta = client.head(&path).await?;
+        let Some(target_size) = NonZeroU64::new(meta.size) else {
+            return Err(empty_file_error(path));
+        };
 
-        let target_size = meta.size;
-
-        download_compressed(
+        download_and_decompress(
             target_size,
             chunk_size,
+            PARALLEL_REQUESTS,
             (output, ArchiveVerifier::default()),
             |offset| {
                 let started_at = Instant::now();
@@ -218,6 +272,7 @@ impl S3Client {
             },
         )
         .await
+        .map_err(map_downloader_error)
     }
 
     #[tracing::instrument(skip_all, fields(
@@ -294,7 +349,7 @@ pub enum PendingArchiveResponse {
 
 #[derive(Clone)]
 pub struct PendingArchive {
-    pub id: u64,
+    pub id: u32,
     pub size: NonZeroU64,
 }
 
@@ -305,161 +360,37 @@ pub struct BlockDataFull {
     pub queue_diff_data: Bytes,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-#[non_exhaustive]
-pub struct S3ClientConfig {
-    /// TODO
-    ///
-    /// Default: "bucket".
-    pub bucket_name: String,
-
-    /// TODO
-    ///
-    /// Default: GCS.
-    pub provider: S3ProviderConfig,
-
-    /// TODO
-    ///
-    /// Default: 10 MB.
-    pub chunk_size: ByteSize,
-
-    /// Number of retries to download archives/blocks/states
-    ///
-    /// Default: 10.
-    pub download_retries: usize,
-}
-
-impl Default for S3ClientConfig {
-    fn default() -> Self {
-        Self {
-            bucket_name: "bucket".to_string(),
-            provider: S3ProviderConfig::Gcs {
-                credentials_path: "credentials.json".to_owned(),
-            },
-            chunk_size: ByteSize::mb(10),
-            download_retries: 10,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum S3ProviderConfig {
-    #[serde(rename = "aws")]
-    Aws {
-        endpoint: String,
-        access_key_id: String,
-        secret_access_key: String,
-        allow_http: bool,
-    },
-
-    #[serde(rename = "gcs")]
-    Gcs { credentials_path: String },
-}
-
 struct Inner {
-    settings: Settings,
     client: Arc<DynObjectStore>,
+    archive_key_prefix: String,
+    chunk_size: NonZeroU32,
+    download_retries: usize,
 }
 
-async fn download_compressed<S, T, DF, DFut, PF, FF>(
-    target_size: u64,
-    chunk_size: u64,
-    mut state: S,
-    mut download_fn: DF,
-    mut process_fn: PF,
-    finalize_fn: FF,
-) -> Result<T, Error>
-where
-    S: Send + 'static,
-    T: Send + 'static,
-    DF: FnMut(u64) -> DFut,
-    DFut: Future<Output = DownloadedChunkResult> + Send + 'static,
-    PF: FnMut(&mut S, &[u8]) -> anyhow::Result<()> + Send + 'static,
-    FF: FnOnce(S) -> anyhow::Result<T> + Send + 'static,
-{
-    const PARALLEL_REQUESTS: usize = 10;
-
-    let (chunks_tx, mut chunks_rx) = mpsc::channel::<Bytes>(PARALLEL_REQUESTS);
-
-    let span = tracing::Span::current();
-    let processing_task = tokio::task::spawn_blocking(move || {
-        let _span = span.enter();
-
-        let mut zstd_decoder = ZstdDecompressStream::new(chunk_size as usize)?;
-
-        // Reuse buffer for decompressed data
-        let mut decompressed_chunk = Vec::new();
-
-        // Receive and process chunks
-        let mut downloaded = 0;
-        while let Some(chunk) = chunks_rx.blocking_recv() {
-            anyhow::ensure!(chunk.len() <= chunk_size as usize, "received invalid chunk");
-
-            downloaded += chunk.len() as u64;
-            tracing::debug!(
-                downloaded = %bytesize::ByteSize::b(downloaded),
-                "got chunk"
-            );
-
-            anyhow::ensure!(downloaded <= target_size, "received too many chunks");
-
-            decompressed_chunk.clear();
-            zstd_decoder.write(chunk.as_ref(), &mut decompressed_chunk)?;
-
-            process_fn(&mut state, &decompressed_chunk)?;
-        }
-
-        anyhow::ensure!(
-            target_size == downloaded,
-            "size mismatch (target size: {target_size}; downloaded: {downloaded})",
-        );
-
-        finalize_fn(state)
-    });
-
-    let stream = futures_util::stream::iter((0..target_size).step_by(chunk_size as usize))
-        .map(|offset| JoinTask::new(download_fn(offset)))
-        .buffered(PARALLEL_REQUESTS);
-
-    let mut stream = std::pin::pin!(stream);
-    while let Some(chunk) = stream.next().await.transpose()? {
-        if chunks_tx.send(chunk).await.is_err() {
-            break;
-        }
+impl Inner {
+    fn make_archive_key(&self, archive_id: u32) -> Path {
+        Path::from(format!("{}{archive_id}", self.archive_key_prefix))
     }
-
-    drop(chunks_tx);
-
-    let output = processing_task
-        .await
-        .map_err(|e| Error::JoinError { source: e })?
-        .map_err(|e| Error::Generic {
-            store: "processing_task",
-            source: e.into(),
-        })?;
-
-    Ok(output)
 }
 
 async fn download_with_retries(
     path: Path,
     offset: u64,
-    length: u64,
+    length: NonZeroU32,
     client: Arc<DynObjectStore>,
     max_retries: usize,
     name: &'static str,
-) -> DownloadedChunkResult {
+) -> object_store::Result<(DownloaderHandle, Bytes)> {
     let mut retries = 0;
     loop {
         let range = std::ops::Range {
             start: offset,
-            end: offset + length,
+            end: offset + length.get() as u64,
         };
 
         match client.get_range(&path, range).await {
             Ok(bytes) => {
-                return Ok(bytes);
+                return Ok((DownloaderHandle, bytes));
             }
             Err(e) => {
                 tracing::error!("failed to download {name}: {e:?}");
@@ -474,9 +405,29 @@ async fn download_with_retries(
     }
 }
 
-struct Settings {
-    pub chunk_size: ByteSize,
-    pub download_retries: usize,
+fn map_downloader_error(error: DownloaderError<Error>) -> Error {
+    match error {
+        DownloaderError::DownloadFailed(e) => e,
+        e => Error::Generic {
+            store: "downloader",
+            source: e.into(),
+        },
+    }
 }
 
-type DownloadedChunkResult = anyhow::Result<Bytes, Error>;
+fn empty_file_error(path: impl Into<String>) -> Error {
+    Error::Precondition {
+        path: path.into(),
+        source: Box::new(std::io::Error::other("empty file")),
+    }
+}
+
+struct DownloaderHandle;
+
+impl DownloaderResponseHandle for DownloaderHandle {
+    fn accept(self) {}
+    fn reject(self) {}
+}
+
+// TODO: Move into config
+const PARALLEL_REQUESTS: NonZeroUsize = NonZeroUsize::new(10).unwrap();

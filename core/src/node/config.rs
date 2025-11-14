@@ -61,7 +61,7 @@ pub struct NodeBaseConfig {
     pub blockchain_block_provider: BlockchainBlockProviderConfig,
 
     #[cfg(feature = "s3")]
-    pub s3_client: S3ClientConfig,
+    pub s3_client: Option<S3ClientConfig>,
 }
 
 impl Default for NodeBaseConfig {
@@ -84,7 +84,7 @@ impl Default for NodeBaseConfig {
             archive_block_provider: ArchiveBlockProviderConfig::default(),
 
             #[cfg(feature = "s3")]
-            s3_client: S3ClientConfig::default(),
+            s3_client: None,
         }
     }
 }

@@ -1,6 +1,5 @@
-use std::future::Future;
 use std::io::Write;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,6 +24,7 @@ use crate::overlay_client::{
 use crate::proto::blockchain::*;
 use crate::proto::overlay::BroadcastPrefix;
 use crate::storage::PersistentStateKind;
+use crate::util::downloader::{DownloaderError, DownloaderResponseHandle, download_and_decompress};
 
 /// A listener for self-broadcasted messages.
 ///
@@ -447,9 +447,10 @@ impl BlockchainRpcClient {
         let block_id = state.block_id;
         let max_retries = self.inner.config.download_retries;
 
-        download_compressed(
+        download_and_decompress(
             state.size,
             state.chunk_size,
+            PARALLEL_REQUESTS,
             output,
             |offset| {
                 tracing::debug!("downloading persistent state chunk");
@@ -480,6 +481,7 @@ impl BlockchainRpcClient {
             },
         )
         .await
+        .map_err(map_downloader_error)
     }
 
     pub async fn find_archive(&self, mc_seqno: u32) -> Result<PendingArchiveResponse, Error> {
@@ -575,9 +577,10 @@ impl BlockchainRpcClient {
 
         let retries = self.inner.config.download_retries;
 
-        download_compressed(
+        download_and_decompress(
             archive.size,
             archive.chunk_size,
+            PARALLEL_REQUESTS,
             (output, ArchiveVerifier::default()),
             |offset| {
                 let archive_id = archive.id;
@@ -616,6 +619,7 @@ impl BlockchainRpcClient {
             },
         )
         .await
+        .map_err(map_downloader_error)
     }
 }
 
@@ -812,100 +816,13 @@ async fn download_block_inner(
     })
 }
 
-async fn download_compressed<S, T, DF, DFut, PF, FF>(
-    target_size: NonZeroU64,
-    chunk_size: NonZeroU32,
-    mut state: S,
-    mut download_fn: DF,
-    mut process_fn: PF,
-    finalize_fn: FF,
-) -> Result<T, Error>
-where
-    S: Send + 'static,
-    T: Send + 'static,
-    DF: FnMut(u64) -> DFut,
-    DFut: Future<Output = DownloadedChunkResult> + Send + 'static,
-    PF: FnMut(&mut S, &[u8]) -> Result<()> + Send + 'static,
-    FF: FnOnce(S) -> Result<T> + Send + 'static,
-{
-    const PARALLEL_REQUESTS: usize = 10;
-
-    let target_size = target_size.get();
-    let chunk_size = chunk_size.get() as usize;
-
-    let (chunks_tx, mut chunks_rx) =
-        mpsc::channel::<(QueryResponseHandle, Bytes)>(PARALLEL_REQUESTS);
-
-    let span = tracing::Span::current();
-    let processing_task = tokio::task::spawn_blocking(move || {
-        let _span = span.enter();
-
-        let mut zstd_decoder = ZstdDecompressStream::new(chunk_size)?;
-
-        // Reuse buffer for decompressed data
-        let mut decompressed_chunk = Vec::new();
-
-        // Receive and process chunks
-        let mut downloaded = 0;
-        while let Some((h, chunk)) = chunks_rx.blocking_recv() {
-            let guard = scopeguard::guard(h, |handle| {
-                handle.reject();
-            });
-
-            anyhow::ensure!(chunk.len() <= chunk_size, "received invalid chunk");
-
-            downloaded += chunk.len() as u64;
-            tracing::debug!(
-                downloaded = %bytesize::ByteSize::b(downloaded),
-                "got chunk"
-            );
-
-            anyhow::ensure!(downloaded <= target_size, "received too many chunks");
-
-            decompressed_chunk.clear();
-            zstd_decoder.write(chunk.as_ref(), &mut decompressed_chunk)?;
-
-            process_fn(&mut state, &decompressed_chunk)?;
-
-            ScopeGuard::into_inner(guard).accept(); // defuse the guard
-        }
-
-        anyhow::ensure!(
-            target_size == downloaded,
-            "size mismatch (target size: {target_size}; downloaded: {downloaded})",
-        );
-
-        finalize_fn(state)
-    });
-
-    let stream = futures_util::stream::iter((0..target_size).step_by(chunk_size))
-        .map(|offset| JoinTask::new(download_fn(offset)))
-        .buffered(PARALLEL_REQUESTS);
-
-    let mut stream = std::pin::pin!(stream);
-    while let Some(chunk) = stream.next().await.transpose()? {
-        if chunks_tx.send(chunk).await.is_err() {
-            break;
-        }
-    }
-
-    drop(chunks_tx);
-
-    let output = processing_task
-        .await
-        .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to join blocking task: {e}")))?
-        .map_err(Error::Internal)?;
-
-    Ok(output)
-}
-
 async fn download_with_retries(
     req: Request,
     overlay_client: PublicOverlayClient,
     neighbour: Neighbour,
     max_retries: usize,
     name: &'static str,
-) -> DownloadedChunkResult {
+) -> Result<(QueryResponseHandle, Bytes), Error> {
     let mut retries = 0;
     loop {
         match overlay_client
@@ -929,7 +846,25 @@ async fn download_with_retries(
     }
 }
 
-type DownloadedChunkResult = Result<(QueryResponseHandle, Bytes), Error>;
+impl DownloaderResponseHandle for QueryResponseHandle {
+    fn accept(self) {
+        QueryResponseHandle::accept(self);
+    }
+
+    fn reject(self) {
+        QueryResponseHandle::reject(self);
+    }
+}
+
+fn map_downloader_error(e: DownloaderError<Error>) -> Error {
+    match e {
+        DownloaderError::DownloadFailed(e) => e,
+        e => Error::Internal(e.into()),
+    }
+}
+
+// TODO: Move info config?
+const PARALLEL_REQUESTS: NonZeroUsize = NonZeroUsize::new(10).unwrap();
 
 #[cfg(test)]
 mod tests {
@@ -938,6 +873,10 @@ mod tests {
     use tycho_util::compression::zstd_compress;
 
     use super::*;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("stub")]
+    struct StubError;
 
     #[tokio::test]
     async fn download_compressed_works() -> Result<()> {
@@ -954,9 +893,10 @@ mod tests {
 
         const CHUNK_SIZE: usize = 128;
 
-        let received = download_compressed(
+        let received = download_and_decompress(
             NonZeroU64::new(compressed_data.len() as _).unwrap(),
             NonZeroU32::new(CHUNK_SIZE as _).unwrap(),
+            PARALLEL_REQUESTS,
             Vec::new(),
             |offset| {
                 assert_eq!(offset % CHUNK_SIZE as u64, 0);
@@ -965,7 +905,7 @@ mod tests {
                 let to = std::cmp::min(from + CHUNK_SIZE, compressed_data.len());
                 let chunk = compressed_data.slice(from..to);
                 let handle = QueryResponseHandle::with_roundtrip_ms(neighbour.clone(), 100);
-                futures_util::future::ready(Ok((handle, chunk)))
+                futures_util::future::ready(Ok::<_, StubError>((handle, chunk)))
             },
             |result, chunk| {
                 result.extend_from_slice(chunk);

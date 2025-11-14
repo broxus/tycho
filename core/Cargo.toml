@@ -48,7 +48,7 @@ parking_lot = { workspace = true }
 parking_lot_core = { workspace = true }
 pin-project-lite = { workspace = true }
 quick_cache = { workspace = true }
-object_store = { workspace = true, features = ["aws", "gcp"], optional = true }
+object_store = { workspace = true, optional = true }
 rand = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
@@ -85,7 +85,7 @@ default = ["cells-metrics"]
 test = []
 cli = ["dep:clap", "clap/derive"]
 cells-metrics = []
-s3 = ["dep:object_store"]
+s3 = ["dep:object_store", "object_store/aws"]
 
 [lints]
 workspace = true
