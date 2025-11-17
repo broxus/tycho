@@ -373,16 +373,21 @@ impl PublicOverlay {
     pub(crate) fn remove_invalid_entries(&self, now: u32) {
         let this = self.inner.as_ref();
 
-        let mut should_notify = false;
+        let mut removed = 0;
         let mut entries = this.entries.write();
         entries.retain(|item| {
             let retain = !item.entry.is_expired(now, this.entry_ttl_sec)
                 && !this.banned_peer_ids.contains(&item.entry.peer_id);
-            should_notify |= !retain;
+
+            if !retain {
+                removed += 1;
+            }
+
             retain
         });
 
-        if should_notify {
+        if removed > 0 {
+            this.entry_count.fetch_sub(removed, Ordering::Release);
             self.inner.entries_removed.notify_waiters();
         }
     }
