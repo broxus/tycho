@@ -7,6 +7,12 @@ use {anyhow::Result, futures_util::future::BoxFuture, std::ops::Range};
 
 #[cfg(feature = "server")]
 pub trait MempoolService: Send + Sync + 'static {
+    /// Dumps the current in-memory moderator ban state.
+    fn dump_bans(&self) -> Result<Vec<DumpBansItem>>;
+
+    /// Dumps the in-memory moderator event/toleration cache, not persisted journal rows.
+    fn dump_events(&self, req: DumpEventsRequest) -> Result<String>;
+
     /// Queues a manual ban and waits for persisted completion while the client stays connected.
     /// After the node accepts the request, it cannot be cancelled (by timeout, disconnect, etc.).
     fn manual_ban(&self, req: BanRequest) -> BoxFuture<'static, Result<String>>;
@@ -31,6 +37,20 @@ pub trait MempoolService: Send + Sync + 'static {
     /// Deletes persisted moderator journal data only; does not mutate in-mem moderator state.
     /// After the node accepts the request, it cannot be cancelled (by timeout, disconnect, etc.).
     fn delete_events(&self, millis: Range<u64>) -> BoxFuture<'static, Result<()>>;
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DumpBansItem {
+    pub peer_id: HashBytes,
+    pub until_millis: u64,
+    pub created_millis: u64,
+    pub record_seq_no: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DumpEventsRequest {
+    pub peer_id: Option<HashBytes>,
+    pub pretty: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
