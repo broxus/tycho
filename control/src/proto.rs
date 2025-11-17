@@ -109,6 +109,9 @@ pub trait ControlServer {
     /// Deletes persisted moderator journal data only; does not mutate in-mem moderator state.
     /// After the node accepts the request, it cannot be cancelled (by timeout, disconnect, etc.).
     async fn mempool_delete_events(millis: std::ops::Range<u64>) -> ServerResult<()>;
+
+    /// Loads a point linked from a stored moderator journal record (if its key has `stored` flag)
+    async fn mempool_get_event_point(key: mempool::PointKey) -> ServerResult<Bytes>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
