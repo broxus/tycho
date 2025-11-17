@@ -1,3 +1,4 @@
+use serde::Serialize;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
@@ -6,7 +7,7 @@ use crate::models::point::proto_utils::{digests_map, signatures_map};
 use crate::models::point::{Digest, Round, UnixTime, proto_utils};
 use crate::models::{AnchorStageRole, PeerCount, PointKey, PointMap, Signature, StructureIssue};
 
-#[derive(Clone, Copy, Debug, PartialEq, TlRead, TlWrite)]
+#[derive(Clone, Copy, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, id = "consensus.pointId", scheme = "proto.tl")]
 pub struct PointId {
     pub author: PeerId,
@@ -23,7 +24,7 @@ impl PointId {
     }
 }
 
-#[derive(Clone, Debug, TlWrite, TlRead)]
+#[derive(Clone, Debug, TlRead, TlWrite, Serialize)]
 #[cfg_attr(test, derive(PartialEq))]
 #[tl(boxed, id = "consensus.pointData", scheme = "proto.tl")]
 pub struct PointData {
@@ -52,7 +53,7 @@ pub struct PointData {
     pub anchor_time: UnixTime,
 }
 
-#[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
+#[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum Link {
     #[tl(id = "point.link.to_self")]
@@ -67,7 +68,7 @@ impl Link {
     pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + 4 + PeerId::MAX_TL_BYTES;
 }
 
-#[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
+#[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum Through {
     #[tl(id = "link.through.witness")]

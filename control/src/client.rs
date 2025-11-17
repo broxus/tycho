@@ -377,6 +377,17 @@ impl ControlClient {
             .await?
             .map_err(Into::into)
     }
+
+    pub async fn mempool_get_event_point(
+        &self,
+        round: u32,
+        digest: HashBytes,
+    ) -> ClientResult<Bytes> {
+        self.inner
+            .mempool_get_event_point(current_context(), mempool::PointKey(round, digest))
+            .await?
+            .map_err(Into::into)
+    }
 }
 
 // sets a 10-minute deadline on the context instead of default 10 seconds

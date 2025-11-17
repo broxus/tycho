@@ -98,6 +98,8 @@ pub trait ControlServer {
     ) -> ServerResult<Vec<mempool::MempoolEventDisplay>>;
 
     async fn mempool_delete_events(millis: std::ops::Range<u64>) -> ServerResult<()>;
+
+    async fn mempool_get_event_point(key: mempool::PointKey) -> ServerResult<Bytes>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

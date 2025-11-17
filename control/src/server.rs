@@ -943,6 +943,17 @@ impl proto::ControlServer for ControlServer {
         mempool.delete_events(millis).await?;
         Ok(())
     }
+
+    async fn mempool_get_event_point(
+        self,
+        _: tarpc::context::Context,
+        req: mempool::PointKey,
+    ) -> ServerResult<Bytes> {
+        let mempool = (self.inner.mempool_service.as_ref()).ok_or_else(|| {
+            ServerError::new("control server was created without mempool service")
+        })?;
+        Ok(mempool.get_event_point(req).await?)
+    }
 }
 
 impl StateSubscriber for ControlServer {
