@@ -301,16 +301,17 @@ impl Node {
             })
         };
 
-        // TODO: Uncomment when archive block provider can initiate downloads for shard blocks.
-        // blockchain_block_provider =
-        //     blockchain_block_provider.with_fallback(archive_block_provider.clone());
-
         let archive_block_provider = base.build_archive_block_provider();
-        let blockchain_block_provider = base.build_blockchain_block_provider();
+        let mut blockchain_block_provider = base.build_blockchain_block_provider();
         let storage_block_provider = base.build_storage_block_provider();
         let collator_block_provider = CollatorBlockProvider {
             adapter: collation_manager.state_node_adapter().clone(),
         };
+
+        // NOTE: Do not try to implement fallback with a `cycle` combinator.
+        // We cannot properly organize queries for shard blocks before the switch.
+        blockchain_block_provider =
+            blockchain_block_provider.with_fallback(archive_block_provider.clone());
 
         let block_strider = base.build_strider(
             collator

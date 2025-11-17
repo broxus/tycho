@@ -68,7 +68,7 @@ impl ArchiveBlockProvider {
 
         loop {
             let Some((archive_key, info)) = this.get_archive(next_mc_seqno).await else {
-                tracing::info!(mc_seqno = next_mc_seqno, "archive block provider finished");
+                tracing::warn!(prev_block_id = ?block_id, "archive not found");
                 break None;
             };
 
