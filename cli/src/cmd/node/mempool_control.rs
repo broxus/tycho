@@ -24,6 +24,27 @@ impl MempoolServer {
 }
 
 impl MempoolService for MempoolServer {
+    fn dump_bans(&self) -> Result<Vec<DumpBansItem>> {
+        let bans = self.moderator.dump_bans()?;
+        let mapped = bans.into_iter().map(|(peer_id, q_ban)| DumpBansItem {
+            peer_id: peer_id.0.into(),
+            until_millis: q_ban.until.millis(),
+            created_millis: q_ban.key.created.millis(),
+            record_seq_no: q_ban.key.seq_no(),
+        });
+        Ok(mapped.collect())
+    }
+
+    fn dump_events(&self, req: DumpEventsRequest) -> Result<String> {
+        let peer_id = req.peer_id.as_ref().map(|v| PeerId::wrap(v.as_array()));
+        let json = self.moderator.dump_events(peer_id)?;
+        Ok(if req.pretty {
+            serde_json::to_string_pretty(&json)?
+        } else {
+            serde_json::to_string(&json)?
+        })
+    }
+
     fn manual_ban(&self, req: BanRequest) -> Result<String> {
         let json = self
             .moderator

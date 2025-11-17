@@ -6,11 +6,13 @@ use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot};
 use tycho_network::{Network, PeerId};
+use tycho_util::FastHashMap;
 use tycho_util::futures::JoinTask;
 
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
 use crate::models::UnixTime;
+use crate::moderator::ban::CurrentBan;
 use crate::moderator::ban::core::BanCore;
 use crate::moderator::journal::batch::batch;
 use crate::moderator::journal::item::{JournalItem, JournalItemFull};
@@ -106,6 +108,14 @@ impl Moderator {
         self.0.apply_mempool_config(conf);
     }
 
+    pub fn dump_bans(&self) -> Result<FastHashMap<PeerId, CurrentBan>> {
+        self.0.dump_bans()
+    }
+
+    pub fn dump_events(&self, peer_id: Option<&PeerId>) -> Result<serde_json::Value> {
+        self.0.dump_events(peer_id)
+    }
+
     pub fn manual_ban(&self, peer_id: &PeerId, duration: Duration) -> Result<serde_json::Value> {
         (self.0).manual_ban(peer_id, duration.try_into()?)
     }
@@ -129,6 +139,8 @@ trait ModeratorTrait: Send + Sync {
     fn set_peer_schedule(&self, peer_schedule: &PeerSchedule);
     fn report(&self, event: JournalEvent);
     fn apply_mempool_config(&self, conf: &MempoolConfig);
+    fn dump_bans(&self) -> Result<FastHashMap<PeerId, CurrentBan>>;
+    fn dump_events(&self, peer_id: Option<&PeerId>) -> Result<serde_json::Value>;
     fn manual_ban(
         &self,
         peer_id: &PeerId,
@@ -153,6 +165,12 @@ impl ModeratorTrait for ModeratorStub {
     fn set_peer_schedule(&self, _: &PeerSchedule) {}
     fn report(&self, _: JournalEvent) {}
     fn apply_mempool_config(&self, _: &MempoolConfig) {}
+    fn dump_bans(&self) -> Result<FastHashMap<PeerId, CurrentBan>> {
+        Ok(FastHashMap::default())
+    }
+    fn dump_events(&self, _: Option<&PeerId>) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
     fn manual_ban(&self, _: &PeerId, _: BanConfigDuration) -> Result<serde_json::Value> {
         Ok(serde_json::json!({}))
     }
@@ -198,6 +216,16 @@ impl ModeratorTrait for ModeratorInner {
 
     fn apply_mempool_config(&self, conf: &MempoolConfig) {
         self.mempool_conf_tx.send(conf.clone()).ok();
+    }
+
+    fn dump_bans(&self) -> Result<FastHashMap<PeerId, CurrentBan>> {
+        self.check_init()?;
+        Ok(self.ban_core.dump_bans())
+    }
+
+    fn dump_events(&self, peer_id: Option<&PeerId>) -> Result<serde_json::Value> {
+        self.check_init()?;
+        Ok(self.ban_core.dump_events(peer_id))
     }
 
     fn manual_ban(

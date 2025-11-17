@@ -950,6 +950,8 @@ impl CmdDhtFindNode {
 #[derive(Subcommand)]
 #[clap(subcommand_required = true, arg_required_else_help = true)]
 pub enum CmdMempool {
+    DumpBans(CmdMempoolDumpBans),
+    DumpEvents(CmdMempoolDumpEvents),
     Ban(CmdMempoolBan),
     Unban(CmdMempoolUnban),
     ListEvents(CmdMempoolListEvents),
@@ -959,11 +961,102 @@ pub enum CmdMempool {
 impl CmdMempool {
     fn run(self, args: BaseArgs) -> Result<()> {
         match self {
+            Self::DumpBans(cmd) => cmd.run(args),
+            Self::DumpEvents(cmd) => cmd.run(args),
             Self::Ban(cmd) => cmd.run(args),
             Self::Unban(cmd) => cmd.run(args),
             Self::ListEvents(cmd) => cmd.run(args),
             Self::DeleteEvents(cmd) => cmd.run(args),
         }
+    }
+}
+
+/// List all banned peers
+#[derive(Parser)]
+pub struct CmdMempoolDumpBans {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// print as a table
+    #[clap(short, long, action)]
+    table: bool,
+}
+
+impl CmdMempoolDumpBans {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        struct TableRow(mempool::DumpBansItem);
+
+        impl tabled::Tabled for TableRow {
+            const LENGTH: usize = 6;
+
+            fn fields(&self) -> Vec<Cow<'_, str>> {
+                let humantime_until = humantime::format_rfc3339_seconds(
+                    UNIX_EPOCH + Duration::from_millis(self.0.until_millis),
+                );
+                let humantime_duration = humantime::format_duration(Duration::from_millis(
+                    self.0.until_millis.saturating_sub(self.0.created_millis),
+                ));
+                let humantime_created = humantime::format_rfc3339_seconds(
+                    UNIX_EPOCH + Duration::from_millis(self.0.created_millis),
+                );
+                vec![
+                    Cow::from(self.0.peer_id.to_string()),
+                    Cow::from(humantime_until.to_string()),
+                    Cow::from(humantime_duration.to_string()),
+                    Cow::from(humantime_created.to_string()),
+                    Cow::from(self.0.created_millis.to_string()),
+                    Cow::from(self.0.record_seq_no.to_string()),
+                ]
+            }
+
+            fn headers() -> Vec<Cow<'static, str>> {
+                vec![
+                    Cow::from("peer_id"),
+                    Cow::from("until"),
+                    Cow::from("duration"),
+                    Cow::from("created"),
+                    Cow::from("created"),
+                    Cow::from("seq_no"),
+                ]
+            }
+        }
+
+        self.args.rt(args, move |client| async move {
+            let mut res = client.mempool_dump_bans().await?;
+            res.sort_unstable_by_key(|item| item.until_millis);
+            if self.table {
+                let mut table = tabled::Table::new(res.into_iter().map(TableRow));
+                table.with(tabled::settings::Style::psql());
+                println!("{table}");
+                Ok(())
+            } else {
+                print_json(res)
+            }
+        })
+    }
+}
+
+/// Dump mempool ban cache
+#[derive(Parser)]
+pub struct CmdMempoolDumpEvents {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// single peer to filter
+    #[clap(short, long)]
+    peer_id: Option<HashBytes>,
+}
+
+impl CmdMempoolDumpEvents {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            let pretty = std::io::stdin().is_terminal();
+            let output = client
+                .mempool_dump_events(self.peer_id.as_ref(), pretty)
+                .await?;
+            println!("{output}");
+            Ok(())
+        })
     }
 }
 

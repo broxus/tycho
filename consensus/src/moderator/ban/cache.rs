@@ -211,8 +211,11 @@ impl BanCacheExposed<'_> {
         self.0.current_bans.inner().keys().copied().collect()
     }
 
-    #[cfg(test)]
-    fn dump_events(&self, peer_id: Option<&PeerId>) -> serde_json::Value {
+    pub fn dump_bans(&self) -> FastHashMap<PeerId, CurrentBan> {
+        self.0.current_bans.inner().clone()
+    }
+
+    pub fn dump_events(&self, peer_id: Option<&PeerId>) -> serde_json::Value {
         let events = &self.0.events;
         match peer_id {
             None => {

@@ -309,6 +309,27 @@ impl ControlClient {
             .map(|res| res.nodes)
     }
 
+    pub async fn mempool_dump_bans(&self) -> ClientResult<Vec<mempool::DumpBansItem>> {
+        self.inner
+            .mempool_dump_bans(current_context())
+            .await?
+            .map_err(Into::into)
+    }
+
+    pub async fn mempool_dump_events(
+        &self,
+        peer_id: Option<&HashBytes>,
+        pretty: bool,
+    ) -> ClientResult<String> {
+        self.inner
+            .mempool_dump_events(current_context(), mempool::DumpEventsRequest {
+                peer_id: peer_id.copied(),
+                pretty,
+            })
+            .await?
+            .map_err(Into::into)
+    }
+
     pub async fn mempool_ban(
         &self,
         peer_id: &HashBytes,

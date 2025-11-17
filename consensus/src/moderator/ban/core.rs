@@ -55,6 +55,16 @@ impl BanCore {
         state.set_peer_schedule(peer_schedule);
     }
 
+    pub fn dump_bans(&self) -> FastHashMap<PeerId, CurrentBan> {
+        let state = self.0.state.lock().unwrap();
+        state.cache().dump_bans()
+    }
+
+    pub fn dump_events(&self, peer_id: Option<&PeerId>) -> serde_json::Value {
+        let state = self.0.state.lock().unwrap();
+        state.cache().dump_events(peer_id)
+    }
+
     pub fn restore(&self, now: UnixTime, shorts: &[(RecordKey, RecordValueShort)]) {
         let mut state = self.0.state.lock().unwrap();
         let new_items = state.restore(now, shorts, &self.0.config.bans);

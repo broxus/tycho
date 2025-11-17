@@ -877,6 +877,27 @@ impl proto::ControlServer for ControlServer {
         })
     }
 
+    async fn mempool_dump_bans(
+        self,
+        _: tarpc::context::Context,
+    ) -> ServerResult<Vec<mempool::DumpBansItem>> {
+        let mempool = (self.inner.mempool_service.as_ref()).ok_or_else(|| {
+            ServerError::new("control server was created without mempool service")
+        })?;
+        mempool.dump_bans().map_err(Into::into)
+    }
+
+    async fn mempool_dump_events(
+        self,
+        _: tarpc::context::Context,
+        req: mempool::DumpEventsRequest,
+    ) -> ServerResult<String> {
+        let mempool = (self.inner.mempool_service.as_ref()).ok_or_else(|| {
+            ServerError::new("control server was created without mempool service")
+        })?;
+        mempool.dump_events(req).map_err(Into::into)
+    }
+
     async fn mempool_ban(
         self,
         _: tarpc::context::Context,
