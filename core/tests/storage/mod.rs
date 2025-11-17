@@ -15,8 +15,10 @@ pub(crate) async fn init_storage() -> Result<(CoreStorage, TempDir)> {
     let blocks = storage.block_storage();
 
     // Init zerostate
-    let zerostate_data = utils::read_file("zerostate.boc")?;
-    let zerostate = utils::parse_zerostate(&zerostate_data)?;
+    let zerostate_file = "zerostate.boc";
+    let zerostate_data = utils::read_file(zerostate_file)?;
+    let zerostate = utils::parse_zerostate(&zerostate_data)
+        .with_context(|| format!("Failed to parse zerostate {}", zerostate_file))?;
 
     let (handle, _) =
         storage
@@ -33,8 +35,12 @@ pub(crate) async fn init_storage() -> Result<(CoreStorage, TempDir)> {
         .await?;
 
     // Init blocks
-    let archive_data = utils::read_file("archive_1.bin")?;
-    let block_provider = utils::parse_archive(&archive_data).map(Arc::new)?;
+    let archive_file = "archive_1.bin";
+    let archive_data = utils::read_file(archive_file)?;
+    let block_provider = Arc::new(
+        utils::parse_archive(&archive_data)
+            .with_context(|| format!("Failed to parse archive {}", archive_file))?,
+    );
 
     for block_id in block_provider.mc_block_ids.values() {
         let (block, proof, diff) = block_provider.get_entry_by_id(block_id).await?;

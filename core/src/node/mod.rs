@@ -48,6 +48,7 @@ impl NodeBase {
         base_config: &'a NodeBaseConfig,
         global_config: &'a GlobalConfig,
     ) -> NodeBaseBuilder<'a, ()> {
+        crate::record_version_metric();
         NodeBaseBuilder::new(base_config, global_config)
     }
 

@@ -31,12 +31,15 @@ pub(crate) fn parse_zerostate(data: &Vec<u8>) -> Result<ShardStateStuff> {
 }
 
 pub(crate) fn parse_archive(data: &[u8]) -> Result<Archive> {
-    let mut decoder = ZstdDecompressStream::new(1024 * 1024)?;
+    let mut decoder =
+        ZstdDecompressStream::new(1024 * 1024).context("Failed to construct zstd decoder")?;
 
     let mut decompressed = Vec::new();
-    decoder.write(data, &mut decompressed)?;
+    decoder
+        .write(data, &mut decompressed)
+        .context("Failed to decompress archive data")?;
 
-    Archive::new(decompressed)
+    Archive::new(decompressed).context("Failed to parse archive contents")
 }
 
 pub(crate) fn read_file(filename: &str) -> Result<Vec<u8>> {
@@ -45,6 +48,7 @@ pub(crate) fn read_file(filename: &str) -> Result<Vec<u8>> {
         .join(DATA_PATH)
         .join(filename);
 
-    let data = std::fs::read(file_path)?;
+    let data = std::fs::read(&file_path)
+        .with_context(|| format!("Failed to read {}", file_path.display()))?;
     Ok(data)
 }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
@@ -241,8 +241,12 @@ async fn overlay_server_blocks() -> Result<()> {
         ))
         .build();
 
-    let archive_data = utils::read_file("archive_1.bin")?;
-    let archive = utils::parse_archive(&archive_data).map(Arc::new)?;
+    let archive_file = "archive_1.bin";
+    let archive_data = utils::read_file(archive_file)?;
+    let archive = Arc::new(
+        utils::parse_archive(&archive_data)
+            .with_context(|| format!("Failed to parse archive {}", archive_file))?,
+    );
 
     for block_id in archive.blocks.keys() {
         if block_id.shard.is_masterchain() {

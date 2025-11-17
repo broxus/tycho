@@ -3707,6 +3707,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tycho-build-info"
+version = "0.3.3"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "tycho-cli"
 version = "0.3.3"
 dependencies = [
@@ -3741,6 +3748,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tycho-block-util",
+ "tycho-build-info",
  "tycho-collator",
  "tycho-consensus",
  "tycho-control",
@@ -3905,6 +3913,7 @@ dependencies = [
  "tracing",
  "triomphe",
  "tycho-block-util",
+ "tycho-build-info",
  "tycho-crypto",
  "tycho-network",
  "tycho-storage",

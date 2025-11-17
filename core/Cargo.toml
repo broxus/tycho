@@ -85,5 +85,8 @@ test = []
 cli = ["dep:clap", "clap/derive"]
 cells-metrics = []
 
+[build-dependencies]
+tycho-build-info = { workspace = true }
+
 [lints]
 workspace = true

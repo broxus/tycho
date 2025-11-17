@@ -117,6 +117,7 @@ impl<C> Node<C> {
     where
         C: Clone,
     {
+        tycho_core::record_version_metric();
         // Setup network
         let keypair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
         let local_id = keypair.public_key.into();

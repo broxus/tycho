@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use anyhow::Context;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tycho_block_util::block::{BlockIdExt, BlockStuff};
@@ -23,8 +24,10 @@ async fn storage_block_strider() -> anyhow::Result<()> {
 
     let storage_provider = StorageBlockProvider::new(storage);
 
-    let archive_data = utils::read_file("archive_1.bin")?;
-    let archive = utils::parse_archive(&archive_data)?;
+    let archive_file = "archive_1.bin";
+    let archive_data = utils::read_file(archive_file)?;
+    let archive = utils::parse_archive(&archive_data)
+        .with_context(|| format!("Failed to parse archive {}", archive_file))?;
     for (block_id, data) in archive.blocks {
         if block_id.shard.is_masterchain() {
             let block = storage_provider
@@ -134,8 +137,10 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
         },
     );
 
-    let archive_data = utils::read_file("archive_1.bin")?;
-    let archive = utils::parse_archive(&archive_data)?;
+    let archive_file = "archive_1.bin";
+    let archive_data = utils::read_file(archive_file)?;
+    let archive = utils::parse_archive(&archive_data)
+        .with_context(|| format!("Failed to parse archive {}", archive_file))?;
     for block_id in archive.mc_block_ids.values() {
         let block = provider.get_block(&block_id.relative_to_self()).await;
         assert!(block.is_some());
