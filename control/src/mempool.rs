@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use tycho_types::cell::HashBytes;
 
 pub trait MempoolService: Send + Sync + 'static {
+    fn list_banned(&self) -> Vec<HashBytes>;
+
     fn ban_cache_dump(&self, req: BanCacheDumpRequest) -> Result<String>;
 
     fn manual_ban(&self, req: BanRequest) -> Result<String>;

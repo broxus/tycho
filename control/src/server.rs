@@ -903,6 +903,14 @@ impl proto::ControlServer for ControlServer {
         })
     }
 
+    async fn mempool_list_banned(self, _: tarpc::context::Context) -> ServerResult<Vec<HashBytes>> {
+        // NOTE requires only network, so mempool service is not strictly required
+        let mempool = (self.inner.mempool_service.as_ref()).ok_or_else(|| {
+            ServerError::new("control server was created without mempool service")
+        })?;
+        Ok(mempool.list_banned())
+    }
+
     async fn mempool_ban_cache_dump(
         self,
         _: tarpc::context::Context,

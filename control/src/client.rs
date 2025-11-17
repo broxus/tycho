@@ -309,6 +309,13 @@ impl ControlClient {
             .map(|res| res.nodes)
     }
 
+    pub async fn mempool_list_banned(&self) -> ClientResult<Vec<HashBytes>> {
+        self.inner
+            .mempool_list_banned(current_context())
+            .await?
+            .map_err(Into::into)
+    }
+
     pub async fn mempool_ban_cache_dump(
         &self,
         peer_id: Option<&HashBytes>,

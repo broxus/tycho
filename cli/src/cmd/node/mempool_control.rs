@@ -24,6 +24,14 @@ impl MempoolServer {
 }
 
 impl MempoolService for MempoolServer {
+    fn list_banned(&self) -> Vec<HashBytes> {
+        self.moderator
+            .list_banned()
+            .into_iter()
+            .map(|v| HashBytes::from(v.0))
+            .collect()
+    }
+
     fn ban_cache_dump(&self, req: BanCacheDumpRequest) -> Result<String> {
         let peer_id = req.peer_id.as_ref().map(|v| PeerId::wrap(v.as_array()));
         let json = self.moderator.ban_cache_dump(peer_id)?;

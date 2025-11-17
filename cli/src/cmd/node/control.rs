@@ -950,6 +950,7 @@ impl CmdDhtFindNode {
 #[derive(Subcommand)]
 #[clap(subcommand_required = true, arg_required_else_help = true)]
 pub enum CmdMempool {
+    ListBanned(CmdMempoolListBanned),
     BanCache(CmdMempoolBanCache),
     Ban(CmdMempoolBan),
     Unban(CmdMempoolUnban),
@@ -960,12 +961,28 @@ pub enum CmdMempool {
 impl CmdMempool {
     fn run(self, args: BaseArgs) -> Result<()> {
         match self {
+            Self::ListBanned(cmd) => cmd.run(args),
             Self::BanCache(cmd) => cmd.run(args),
             Self::Ban(cmd) => cmd.run(args),
             Self::Unban(cmd) => cmd.run(args),
             Self::ListEvents(cmd) => cmd.run(args),
             Self::DeleteEvents(cmd) => cmd.run(args),
         }
+    }
+}
+
+/// List all banned peers
+#[derive(Parser)]
+pub struct CmdMempoolListBanned {
+    #[clap(flatten)]
+    args: ControlArgs,
+}
+
+impl CmdMempoolListBanned {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            print_json(client.mempool_list_banned().await?)
+        })
     }
 }
 

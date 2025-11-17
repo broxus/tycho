@@ -1160,15 +1160,17 @@ impl KnownPeers {
         self.0.contains_key(peer_id)
     }
 
+    pub fn list_banned(&self) -> Vec<PeerId> {
+        self.0
+            .iter()
+            .filter_map(|item| item.is_banned().then(|| *item.key()))
+            .collect()
+    }
+
     pub fn is_banned(&self, peer_id: &PeerId) -> bool {
         self.0
             .get(peer_id)
-            .and_then(|item| {
-                Some(match item.value() {
-                    KnownPeerState::Stored(item) => item.upgrade()?.is_banned(),
-                    KnownPeerState::Banned => true,
-                })
-            })
+            .map(|item| item.is_banned())
             .unwrap_or_default()
     }
 
@@ -1320,6 +1322,13 @@ impl KnownPeerState {
             Self::Stored(weak) => weak.upgrade()?.compute_affinity(),
             Self::Banned => PeerAffinity::Never,
         })
+    }
+
+    fn is_banned(&self) -> bool {
+        match self {
+            KnownPeerState::Stored(item) => item.upgrade().is_none_or(|stored| stored.is_banned()),
+            KnownPeerState::Banned => true,
+        }
     }
 }
 

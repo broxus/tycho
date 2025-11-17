@@ -109,6 +109,10 @@ impl Moderator {
         self.0.apply_mempool_config(conf);
     }
 
+    pub fn list_banned(&self) -> Vec<PeerId> {
+        self.0.list_banned()
+    }
+
     pub fn ban_cache_dump(&self, peer_id: Option<&PeerId>) -> Result<serde_json::Value> {
         self.0.ban_cache_dump(peer_id)
     }
@@ -136,6 +140,7 @@ trait ModeratorTrait: Send + Sync {
     fn report_blocking(&self, batch: Vec<JournalEvent>, round_ctx: &RoundCtx);
     fn send_report(&self, data: JournalEvent);
     fn apply_mempool_config(&self, conf: &MempoolConfig);
+    fn list_banned(&self) -> Vec<PeerId>;
     fn ban_cache_dump(&self, peer_id: Option<&PeerId>) -> Result<serde_json::Value>;
     fn manual_ban(
         &self,
@@ -161,6 +166,9 @@ impl ModeratorTrait for ModeratorStub {
     fn report_blocking(&self, _: Vec<JournalEvent>, _: &RoundCtx) {}
     fn send_report(&self, _: JournalEvent) {}
     fn apply_mempool_config(&self, _: &MempoolConfig) {}
+    fn list_banned(&self) -> Vec<PeerId> {
+        Vec::new()
+    }
     fn ban_cache_dump(&self, _: Option<&PeerId>) -> Result<serde_json::Value> {
         Ok(serde_json::json!({}))
     }
@@ -217,6 +225,11 @@ impl ModeratorTrait for ModeratorInner {
 
     fn apply_mempool_config(&self, conf: &MempoolConfig) {
         self.mempool_conf_tx.send(conf.clone()).ok();
+    }
+
+    fn list_banned(&self) -> Vec<PeerId> {
+        // no need to check init
+        self.network.known_peers().list_banned()
     }
 
     fn ban_cache_dump(&self, peer_id: Option<&PeerId>) -> Result<serde_json::Value> {
