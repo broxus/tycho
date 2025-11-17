@@ -28,6 +28,8 @@ pub trait MempoolService: Send + Sync + 'static {
     // TODO async fn get_event_point(key: PointKey) -> boc / parsed
 
     fn delete_events(&self, millis: Range<u64>) -> BoxFuture<'static, Result<()>>;
+
+    fn get_event_point(&self, point_key: PointKey) -> BoxFuture<'static, Result<Vec<u8>>>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]

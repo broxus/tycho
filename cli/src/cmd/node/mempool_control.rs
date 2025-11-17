@@ -103,4 +103,15 @@ impl MempoolService for MempoolServer {
             .await?
         })
     }
+
+    fn get_event_point(&self, point_key: PointKey) -> BoxFuture<'static, Result<Vec<u8>>> {
+        let moderator = self.moderator.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let PointKey(round, peer_bytes) = point_key;
+                moderator.get_event_point(round, peer_bytes.as_array())
+            })
+            .await?
+        })
+    }
 }
