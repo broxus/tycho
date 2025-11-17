@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use itertools::Itertools;
 use tl_proto::{TlRead, TlWrite};
 use weedb::rocksdb::{Direction, IteratorMode, WriteBatch};
@@ -53,6 +54,14 @@ impl JournalStore {
             })
             .flatten()
             .try_collect()
+    }
+
+    pub fn get_point(&self, key: &PointKey) -> Result<Option<Bytes>> {
+        let mut key_buf = [0; _];
+        key.fill(&mut key_buf);
+
+        let slice = self.0.db.journal_points.get_owned(&key_buf[..])?;
+        Ok(slice.map(Bytes::from_owner))
     }
 
     pub fn delete(&self, millis: std::ops::Range<UnixTime>) -> Result<()> {

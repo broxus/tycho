@@ -2,6 +2,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use tokio::sync::Semaphore;
 use tycho_consensus::prelude::Moderator;
@@ -102,6 +103,17 @@ impl MempoolService for MempoolServer {
                 moderator.delete_events(millis)?;
                 drop(permit);
                 Ok(())
+            })
+            .await?
+        })
+    }
+
+    fn get_event_point(&self, point_key: PointKey) -> BoxFuture<'static, Result<Bytes>> {
+        let moderator = self.moderator.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let PointKey(round, peer_bytes) = point_key;
+                moderator.get_event_point(round, peer_bytes.as_array())
             })
             .await?
         })
