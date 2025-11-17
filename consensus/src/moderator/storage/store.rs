@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use ahash::HashSetExt;
 use anyhow::{Context, Result};
+use bytes::{Buf, Bytes};
 use itertools::Itertools;
 use tl_proto::{RawBytes, TlRead, TlWrite};
 use tycho_util::FastHashSet;
@@ -90,6 +91,22 @@ impl JournalStore {
             })
             .flatten()
             .try_collect()
+    }
+
+    pub fn get_point(&self, key: &PointKey) -> Result<Option<Bytes>> {
+        let mut key_buf = [0; _];
+        key.fill(&mut key_buf);
+
+        let Some(slice) = self.0.this.db.journal_points.get_owned(&key_buf[..])? else {
+            return Ok(None);
+        };
+        let data_offset = match JournalPoint::read_from(&mut &slice[..])?.data {
+            JournalPointData::Sub => return Ok(None),
+            JournalPointData::Data(point) => slice.len() - point.into_inner().len(),
+        };
+        let mut point_bytes = Bytes::from_owner(slice);
+        point_bytes.advance(data_offset);
+        Ok(Some(point_bytes))
     }
 
     pub fn delete(&self, millis: std::ops::Range<UnixTime>) -> Result<()> {

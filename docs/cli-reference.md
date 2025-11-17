@@ -43,6 +43,7 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho node mempool unban`↴](#tycho-node-mempool-unban)
 * [`tycho node mempool list-events`↴](#tycho-node-mempool-list-events)
 * [`tycho node mempool delete-events`↴](#tycho-node-mempool-delete-events)
+* [`tycho node mempool get-event-point`↴](#tycho-node-mempool-get-event-point)
 * [`tycho tool`↴](#tycho-tool)
 * [`tycho tool gen-dht`↴](#tycho-tool-gen-dht)
 * [`tycho tool gen-key`↴](#tycho-tool-gen-key)
@@ -616,6 +617,7 @@ Mempool journal and ban tools
 * `unban` — Unban peer manually. After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it. Re-check ban state before retrying after interruption or timeout
 * `list-events` — List persisted mempool moderator journal records of all types
 * `delete-events` — Delete persisted mempool journal entries and trigger compaction. Current live moderator state is left as-is; persisted edits affect bans after restart. After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it. Re-check persisted journal state before retrying after interruption or timeout
+* `get-event-point` — Get point linked with a persisted moderator journal record. Use `list-events --point-keys` first; only point keys marked `stored=true` are available
 
 
 
@@ -704,6 +706,21 @@ Delete persisted mempool journal entries and trigger compaction. Current live mo
 * `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
 * `-s`, `--since <SINCE>` — range start (inclusive) in UTC millis of event creation timestamp
 * `-u`, `--until <UNTIL>` — range end (exclusive) in UTC millis of event creation timestamp
+
+
+
+## `tycho node mempool get-event-point`
+
+Get point linked with a persisted moderator journal record. Use `list-events --point-keys` first; only point keys marked `stored=true` are available
+
+**Usage:** `tycho node mempool get-event-point [OPTIONS] --round <ROUND> --digest <DIGEST>`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-r`, `--round <ROUND>` — point round
+* `-d`, `--digest <DIGEST>` — point digest
+* `-b`, `--base64` — Print raw bytes as base64 instead of parsing (bypass old incompatible format parsing)
 
 
 

@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tycho_types::cell::HashBytes;
 #[cfg(feature = "server")]
-use {anyhow::Result, futures_util::future::BoxFuture, std::ops::Range};
+use {anyhow::Result, bytes::Bytes, futures_util::future::BoxFuture, std::ops::Range};
 
 #[cfg(feature = "server")]
 pub trait MempoolService: Send + Sync + 'static {
@@ -37,6 +37,9 @@ pub trait MempoolService: Send + Sync + 'static {
     /// Deletes persisted moderator journal data only; does not mutate in-mem moderator state.
     /// After the node accepts the request, it cannot be cancelled (by timeout, disconnect, etc.).
     fn delete_events(&self, millis: Range<u64>) -> BoxFuture<'static, Result<()>>;
+
+    /// Loads a point linked from a stored moderator journal record (if its key has `stored` flag)
+    fn get_event_point(&self, point_key: PointKey) -> BoxFuture<'static, Result<Bytes>>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
