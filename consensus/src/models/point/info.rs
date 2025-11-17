@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
+use serde::Serialize;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
@@ -15,7 +16,17 @@ use crate::models::{
 #[tl(boxed, id = "consensus.pointInfo", scheme = "proto.tl")]
 pub struct PointInfo(Arc<PointInfoInner>);
 
-#[derive(TlWrite, TlRead)]
+// The only such case doesn't deserve `rc` feature on `serde` crate to be enabled
+impl Serialize for &PointInfo {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+#[derive(TlRead, TlWrite, Serialize)]
 #[cfg_attr(test, derive(PartialEq))]
 struct PointInfoInner {
     digest: Digest,

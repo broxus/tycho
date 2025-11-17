@@ -3,6 +3,7 @@ use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use tokio::sync::{mpsc, oneshot};
 use tycho_network::{Network, PeerId};
@@ -11,7 +12,7 @@ use tycho_util::futures::JoinTask;
 
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
-use crate::models::UnixTime;
+use crate::models::{Digest, PointKey, Round, UnixTime};
 use crate::moderator::ban::CurrentBan;
 use crate::moderator::ban::core::BanCore;
 use crate::moderator::journal::batch::batch;
@@ -131,6 +132,15 @@ impl Moderator {
     pub fn delete_events(&self, millis: Range<u64>) -> Result<()> {
         self.0.delete_events(millis)
     }
+
+    pub fn get_event_point(
+        &self,
+        round: u32,
+        digest: &[u8; Digest::MAX_TL_BYTES],
+    ) -> Result<Bytes> {
+        let key = PointKey::new(Round(round), *Digest::wrap(digest));
+        self.0.get_event_point(&key)
+    }
 }
 
 trait ModeratorTrait: Send + Sync {
@@ -149,6 +159,7 @@ trait ModeratorTrait: Send + Sync {
     fn manual_unban(&self, peer_id: &PeerId) -> BoxFuture<'static, Result<()>>;
     fn list_events(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>>;
     fn delete_events(&self, millis: Range<u64>) -> Result<()>;
+    fn get_event_point(&self, key: &PointKey) -> Result<Bytes>;
 }
 
 #[cfg(any(test, feature = "test"))]
@@ -182,6 +193,9 @@ impl ModeratorTrait for ModeratorStub {
     }
     fn delete_events(&self, _: Range<u64>) -> Result<()> {
         Ok(())
+    }
+    fn get_event_point(&self, _: &PointKey) -> Result<Bytes> {
+        anyhow::bail!("no points in stub")
     }
 }
 
@@ -268,6 +282,12 @@ impl ModeratorTrait for ModeratorInner {
         let range = UnixTime::from_millis(millis.start)..UnixTime::from_millis(millis.end);
         self.journal_store.delete(range)?;
         Ok(())
+    }
+
+    fn get_event_point(&self, key: &PointKey) -> Result<Bytes> {
+        self.journal_store
+            .get_point(key)?
+            .ok_or_else(|| anyhow::anyhow!("point not found"))
     }
 }
 
