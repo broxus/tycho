@@ -4,7 +4,7 @@ use tycho_network::PeerId;
 
 use crate::intercom::{PeerSchedule, WeakPeerSchedule};
 use crate::models::UnixTime;
-use crate::moderator::ban::cache::BanCache;
+use crate::moderator::ban::cache::{BanCache, BanCacheExposed};
 use crate::moderator::ban::{CurrentBan, UpdaterQueueItem};
 use crate::moderator::journal::item::JournalItemFull;
 use crate::moderator::journal::record_key::RecordKeyFactory;
@@ -23,6 +23,10 @@ impl BanCoreState {
             cache: BanCache::new(updates_tx),
             peer_schedule: None,
         }
+    }
+
+    pub fn cache(&self) -> BanCacheExposed<'_> {
+        self.cache.exposed()
     }
 
     /// returns newly created bans by current config, if no longer bans were stored

@@ -37,6 +37,8 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho node dht`↴](#tycho-node-dht)
 * [`tycho node dht find-node`↴](#tycho-node-dht-find-node)
 * [`tycho node mempool`↴](#tycho-node-mempool)
+* [`tycho node mempool dump-bans`↴](#tycho-node-mempool-dump-bans)
+* [`tycho node mempool dump-events`↴](#tycho-node-mempool-dump-events)
 * [`tycho node mempool ban`↴](#tycho-node-mempool-ban)
 * [`tycho node mempool unban`↴](#tycho-node-mempool-unban)
 * [`tycho node mempool list-events`↴](#tycho-node-mempool-list-events)
@@ -608,10 +610,38 @@ Mempool journal and ban tools
 
 ###### **Subcommands:**
 
+* `dump-bans` — List all banned peers
+* `dump-events` — Dump in-memory mempool moderator event counters. This is ban cache event/toleration state, not persisted journal history
 * `ban` — Ban peer manually. After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it. Re-check ban state before retrying after interruption or timeout
 * `unban` — Unban peer manually. After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it. Re-check ban state before retrying after interruption or timeout
 * `list-events` — List persisted mempool moderator journal records of all types
 * `delete-events` — Delete persisted mempool journal entries and trigger compaction. Current live moderator state is left as-is; persisted edits affect bans after restart. After the node accepts the request, Ctrl-C, disconnect, or client timeout does not cancel it. Re-check persisted journal state before retrying after interruption or timeout
+
+
+
+## `tycho node mempool dump-bans`
+
+List all banned peers
+
+**Usage:** `tycho node mempool dump-bans [OPTIONS]`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-t`, `--table` — print as a table
+
+
+
+## `tycho node mempool dump-events`
+
+Dump in-memory mempool moderator event counters. This is ban cache event/toleration state, not persisted journal history
+
+**Usage:** `tycho node mempool dump-events [OPTIONS]`
+
+###### **Options:**
+
+* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-p`, `--peer-id <PEER_ID>` — single peer to filter
 
 
 
