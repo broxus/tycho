@@ -20,7 +20,7 @@ pub mod prelude {
     pub use crate::intercom::InitPeers;
     pub use crate::models::{
         AnchorData, AnchorStageRole, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError,
-        PointInfo,
+        Point, PointInfo,
     };
     pub use crate::moderator::{Moderator, ModeratorConfig, RecordKey};
     pub use crate::storage::{MempoolAdapterStore, MempoolDb};
