@@ -85,6 +85,12 @@ pub trait ControlServer {
         req: ElectionsPayloadRequest,
     ) -> ServerResult<ElectionsPayloadResponse>;
 
+    /// Dumps the current in-memory moderator ban state.
+    async fn mempool_dump_bans() -> ServerResult<Vec<mempool::DumpBansItem>>;
+
+    /// Dumps the in-memory moderator event/toleration cache, not persisted journal rows.
+    async fn mempool_dump_events(req: mempool::DumpEventsRequest) -> ServerResult<String>;
+
     /// Queues a manual ban and waits for persisted completion while the client stays connected.
     /// After the node accepts the request, it cannot be cancelled (by timeout, disconnect, etc.).
     async fn mempool_ban(req: mempool::BanRequest) -> ServerResult<String>;
