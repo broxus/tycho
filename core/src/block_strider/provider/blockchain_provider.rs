@@ -54,6 +54,12 @@ pub struct BlockchainBlockProviderConfig {
     /// Default: 60 seconds.
     #[serde(with = "serde_helpers::humantime")]
     pub get_block_timeout: Duration,
+
+    /// How long to wait after the fallback.
+    ///
+    /// Default: 1 second.
+    #[serde(with = "serde_helpers::humantime")]
+    pub fallback_interval: Duration,
 }
 
 impl Default for BlockchainBlockProviderConfig {
@@ -63,6 +69,7 @@ impl Default for BlockchainBlockProviderConfig {
             get_block_polling_interval: Duration::from_secs(1),
             get_next_block_timeout: Duration::from_secs(120),
             get_block_timeout: Duration::from_secs(60),
+            fallback_interval: Duration::from_secs(1),
         }
     }
 }
@@ -155,6 +162,9 @@ impl BlockchainBlockProvider {
                 if let res @ Some(_) = fallback.get_next_block(prev_block_id).await {
                     return res;
                 }
+
+                // Wait for some time before the next request
+                tokio::time::sleep(self.config.fallback_interval).await;
             }
 
             // Reset fallback
@@ -220,6 +230,9 @@ impl BlockchainBlockProvider {
                 if let res @ Some(_) = fallback.get_block(block_id_relation).await {
                     return res;
                 }
+
+                // Wait for some time before the next request
+                tokio::time::sleep(self.config.fallback_interval).await;
             }
 
             // Reset fallback
