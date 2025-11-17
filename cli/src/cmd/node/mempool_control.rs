@@ -24,6 +24,16 @@ impl MempoolServer {
 }
 
 impl MempoolService for MempoolServer {
+    fn ban_cache_dump(&self, req: BanCacheDumpRequest) -> Result<String> {
+        let peer_id = req.peer_id.as_ref().map(|v| PeerId::wrap(v.as_array()));
+        let json = self.moderator.ban_cache_dump(peer_id)?;
+        Ok(if req.pretty {
+            serde_json::to_string_pretty(&json)?
+        } else {
+            serde_json::to_string(&json)?
+        })
+    }
+
     fn manual_ban(&self, req: BanRequest) -> Result<String> {
         let json = self
             .moderator

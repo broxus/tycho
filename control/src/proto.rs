@@ -85,6 +85,8 @@ pub trait ControlServer {
         req: ElectionsPayloadRequest,
     ) -> ServerResult<ElectionsPayloadResponse>;
 
+    async fn mempool_ban_cache_dump(req: mempool::BanCacheDumpRequest) -> ServerResult<String>;
+
     async fn mempool_ban(req: mempool::BanRequest) -> ServerResult<String>;
 
     async fn mempool_unban(peer_id: HashBytes, force: bool) -> ServerResult<()>;

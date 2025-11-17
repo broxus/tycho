@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use tycho_types::cell::HashBytes;
 
 pub trait MempoolService: Send + Sync + 'static {
+    fn ban_cache_dump(&self, req: BanCacheDumpRequest) -> Result<String>;
+
     fn manual_ban(&self, req: BanRequest) -> Result<String>;
 
     /// has a delayed effect (peer must resolve), unlike `ban` that is immediately noticeable,
@@ -24,6 +26,12 @@ pub trait MempoolService: Send + Sync + 'static {
     // TODO async fn get_event_point(key: PointKey) -> boc / parsed
 
     fn delete_events(&self, millis: Range<u64>) -> BoxFuture<'static, Result<()>>;
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BanCacheDumpRequest {
+    pub peer_id: Option<HashBytes>,
+    pub pretty: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

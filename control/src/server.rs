@@ -903,6 +903,17 @@ impl proto::ControlServer for ControlServer {
         })
     }
 
+    async fn mempool_ban_cache_dump(
+        self,
+        _: tarpc::context::Context,
+        req: mempool::BanCacheDumpRequest,
+    ) -> ServerResult<String> {
+        let mempool = (self.inner.mempool_service.as_ref()).ok_or_else(|| {
+            ServerError::new("control server was created without mempool service")
+        })?;
+        mempool.ban_cache_dump(req).map_err(Into::into)
+    }
+
     async fn mempool_ban(
         self,
         _: tarpc::context::Context,

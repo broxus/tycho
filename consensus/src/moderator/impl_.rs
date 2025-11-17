@@ -109,6 +109,10 @@ impl Moderator {
         self.0.apply_mempool_config(conf);
     }
 
+    pub fn ban_cache_dump(&self, peer_id: Option<&PeerId>) -> Result<serde_json::Value> {
+        self.0.ban_cache_dump(peer_id)
+    }
+
     pub fn manual_ban(&self, peer_id: &PeerId, duration: Duration) -> Result<serde_json::Value> {
         (self.0).manual_ban(peer_id, duration.try_into()?)
     }
@@ -132,6 +136,7 @@ trait ModeratorTrait: Send + Sync {
     fn report_blocking(&self, batch: Vec<JournalEvent>, round_ctx: &RoundCtx);
     fn send_report(&self, data: JournalEvent);
     fn apply_mempool_config(&self, conf: &MempoolConfig);
+    fn ban_cache_dump(&self, peer_id: Option<&PeerId>) -> Result<serde_json::Value>;
     fn manual_ban(
         &self,
         peer_id: &PeerId,
@@ -156,6 +161,9 @@ impl ModeratorTrait for ModeratorStub {
     fn report_blocking(&self, _: Vec<JournalEvent>, _: &RoundCtx) {}
     fn send_report(&self, _: JournalEvent) {}
     fn apply_mempool_config(&self, _: &MempoolConfig) {}
+    fn ban_cache_dump(&self, _: Option<&PeerId>) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
     fn manual_ban(&self, _: &PeerId, _: BanConfigDuration) -> Result<serde_json::Value> {
         Ok(serde_json::json!({}))
     }
@@ -209,6 +217,11 @@ impl ModeratorTrait for ModeratorInner {
 
     fn apply_mempool_config(&self, conf: &MempoolConfig) {
         self.mempool_conf_tx.send(conf.clone()).ok();
+    }
+
+    fn ban_cache_dump(&self, peer_id: Option<&PeerId>) -> Result<serde_json::Value> {
+        self.check_init()?;
+        Ok(self.ban_core.cache_dump(peer_id))
     }
 
     fn manual_ban(

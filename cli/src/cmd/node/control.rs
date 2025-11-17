@@ -950,6 +950,7 @@ impl CmdDhtFindNode {
 #[derive(Subcommand)]
 #[clap(subcommand_required = true, arg_required_else_help = true)]
 pub enum CmdMempool {
+    BanCache(CmdMempoolBanCache),
     Ban(CmdMempoolBan),
     Unban(CmdMempoolUnban),
     ListEvents(CmdMempoolListEvents),
@@ -959,11 +960,36 @@ pub enum CmdMempool {
 impl CmdMempool {
     fn run(self, args: BaseArgs) -> Result<()> {
         match self {
+            Self::BanCache(cmd) => cmd.run(args),
             Self::Ban(cmd) => cmd.run(args),
             Self::Unban(cmd) => cmd.run(args),
             Self::ListEvents(cmd) => cmd.run(args),
             Self::DeleteEvents(cmd) => cmd.run(args),
         }
+    }
+}
+
+/// Dump mempool ban cache
+#[derive(Parser)]
+pub struct CmdMempoolBanCache {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// single peer to filter
+    #[clap(short, long)]
+    peer_id: Option<HashBytes>,
+}
+
+impl CmdMempoolBanCache {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            let pretty = std::io::stdin().is_terminal();
+            let output = client
+                .mempool_ban_cache_dump(self.peer_id.as_ref(), pretty)
+                .await?;
+            println!("{output}");
+            Ok(())
+        })
     }
 }
 

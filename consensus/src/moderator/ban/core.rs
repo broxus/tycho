@@ -47,6 +47,10 @@ impl BanCore {
         }
     }
 
+    pub fn cache_dump(&self, peer_id: Option<&PeerId>) -> serde_json::Value {
+        self.cache.dump(peer_id)
+    }
+
     /// Internal [`ByPeer`] counts which ban is topmost.
     /// May return new ban items that should be stored.
     pub fn restore(

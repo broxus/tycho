@@ -309,6 +309,20 @@ impl ControlClient {
             .map(|res| res.nodes)
     }
 
+    pub async fn mempool_ban_cache_dump(
+        &self,
+        peer_id: Option<&HashBytes>,
+        pretty: bool,
+    ) -> ClientResult<String> {
+        self.inner
+            .mempool_ban_cache_dump(current_context(), mempool::BanCacheDumpRequest {
+                peer_id: peer_id.copied(),
+                pretty,
+            })
+            .await?
+            .map_err(Into::into)
+    }
+
     pub async fn mempool_ban(
         &self,
         peer_id: &HashBytes,

@@ -14,7 +14,6 @@ use crate::moderator::{BanConfig, EventTag, RecordKey, RecordKind, RecordValueSh
 pub struct EventsCache(Arc<FastDashMap<PeerId, PeerEvents>>);
 
 impl EventsCache {
-    #[cfg(test)]
     pub fn dump(&self, peer_id: Option<&PeerId>) -> serde_json::Value {
         match peer_id {
             None => {
