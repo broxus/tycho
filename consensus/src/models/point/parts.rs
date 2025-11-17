@@ -5,6 +5,7 @@ use serde::Serialize;
 use tl_proto::{TlRead, TlWrite};
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
+use tycho_util::serde_helpers;
 
 #[derive(Clone, Copy, TlWrite, TlRead, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -28,6 +29,15 @@ impl Debug for Digest {
     }
 }
 
+impl serde::Serialize for Digest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serde_helpers::Base64BytesWithLimit::<32>::serialize(&self.0, serializer)
+    }
+}
+
 impl Digest {
     pub const MAX_TL_BYTES: usize = 32;
 
@@ -47,9 +57,9 @@ impl Digest {
     }
 }
 
-#[derive(Clone, TlWrite, TlRead, PartialEq)]
+#[derive(Clone, PartialEq, TlRead, TlWrite, Serialize)]
 #[repr(transparent)]
-pub struct Signature([u8; 64]);
+pub struct Signature(#[serde(with = "serde_helpers::signature")] [u8; 64]);
 
 impl Display for Signature {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -110,6 +120,8 @@ macro_rules! impl_tl_read_bare_ref {
 impl_tl_read_bare_ref! { Digest, Signature }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, TlRead, TlWrite)]
+// new block for rust-fmt
+#[derive(Serialize)]
 pub struct Round(pub u32);
 
 impl Round {

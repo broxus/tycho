@@ -5,7 +5,7 @@ use itertools::Itertools;
 use tl_proto::{TlRead, TlWrite};
 use weedb::rocksdb::{Direction, IteratorMode, MergeOperands, WriteBatch};
 
-use crate::models::{Round, UnixTime};
+use crate::models::{Digest, Round, UnixTime};
 use crate::moderator::{RecordBatch, RecordFull, RecordKey, RecordValue, RecordValueShort};
 use crate::storage::{MempoolDb, POINT_KEY_LEN, fill_point_key};
 
@@ -52,6 +52,13 @@ impl JournalStore {
             })
             .flatten()
             .try_collect()
+    }
+
+    pub fn get_point(&self, round: Round, digest: &Digest) -> Result<Option<Vec<u8>>> {
+        let mut key = [0; _];
+        fill_point_key(round.0, digest.inner(), &mut key);
+        let journal_points_cf = self.0.db.journal_points.cf();
+        Ok(self.0.db.rocksdb().get_cf(&journal_points_cf, key)?)
     }
 
     pub fn delete(&self, millis: std::ops::Range<UnixTime>) -> Result<()> {

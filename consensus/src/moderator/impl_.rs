@@ -11,7 +11,7 @@ use tycho_util::futures::JoinTask;
 
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
-use crate::models::UnixTime;
+use crate::models::{Digest, Round, UnixTime};
 use crate::moderator::ban::CurrentBan;
 use crate::moderator::ban::core::BanCore;
 use crate::moderator::journal::batch::batch;
@@ -131,6 +131,14 @@ impl Moderator {
     pub fn delete_events(&self, millis: Range<u64>) -> Result<()> {
         self.0.delete_events(millis)
     }
+
+    pub fn get_event_point(
+        &self,
+        round: u32,
+        digest: &[u8; Digest::MAX_TL_BYTES],
+    ) -> Result<Vec<u8>> {
+        self.0.get_event_point(Round(round), Digest::wrap(digest))
+    }
 }
 
 trait ModeratorTrait: Send + Sync {
@@ -149,6 +157,7 @@ trait ModeratorTrait: Send + Sync {
     fn manual_unban(&self, peer_id: &PeerId) -> BoxFuture<'static, Result<()>>;
     fn list_events(&self, count: u16, page: u32, asc: bool) -> Result<Vec<RecordFull>>;
     fn delete_events(&self, millis: Range<u64>) -> Result<()>;
+    fn get_event_point(&self, round: Round, digest: &Digest) -> Result<Vec<u8>>;
 }
 
 #[cfg(any(test, feature = "test"))]
@@ -182,6 +191,9 @@ impl ModeratorTrait for ModeratorStub {
     }
     fn delete_events(&self, _: Range<u64>) -> Result<()> {
         Ok(())
+    }
+    fn get_event_point(&self, _: Round, _: &Digest) -> Result<Vec<u8>> {
+        anyhow::bail!("no points in stub")
     }
 }
 
@@ -265,6 +277,12 @@ impl ModeratorTrait for ModeratorInner {
         let range = UnixTime::from_millis(millis.start)..UnixTime::from_millis(millis.end);
         self.journal_store.delete(range)?;
         Ok(())
+    }
+
+    fn get_event_point(&self, round: Round, digest: &Digest) -> Result<Vec<u8>> {
+        self.journal_store
+            .get_point(round, digest)?
+            .ok_or_else(|| anyhow::anyhow!("point not found"))
     }
 }
 
