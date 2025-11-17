@@ -20,10 +20,11 @@ members = [
     "network",
     "rpc",
     "simulator",
-    "storage-traits",
     "storage",
-    "util-proc",
+    "storage-traits",
+    "tycho-build-info",
     "util",
+    "util-proc",
     "wu-tuner",
 ]
 
@@ -141,6 +142,7 @@ zstd-sys = "2.0"
 
 # local deps
 tycho-block-util = { path = "./block-util", version = "0.3.3" }
+tycho-build-info = { path = "./tycho-build-info", version = "0.3.3" }
 tycho-collator = { path = "./collator", version = "0.3.3" }
 tycho-consensus = { path = "./consensus", version = "0.3.3" }
 tycho-control = { path = "./control", version = "0.3.3" }

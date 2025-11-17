@@ -55,7 +55,23 @@ echo "Integration test directory: ${test_dir}"
 mkdir -p "${test_dir}"
 
 function download() {
-    curl --request GET -L --url $1 --output $2
+    local url="$1"
+    local output="$2"
+    local http_status
+
+    http_status=$(curl --silent --show-error -L \
+        --write-out "%{http_code}" \
+        --output "${output}" \
+        "${url}") || {
+        echo "ERROR: Failed to download ${url}" >&2
+        exit 1
+    }
+
+    if [ "${http_status}" != "200" ]; then
+        echo "ERROR: ${url} returned HTTP status ${http_status}" >&2
+        rm -f "${output}"
+        exit 1
+    fi
 }
 
 function ensure_exists() {
@@ -65,7 +81,7 @@ function ensure_exists() {
     local checksum_path="${test_dir}/$2.sha256"
 
     echo "[$1]: Downloading checksum file..."
-    curl --request GET -sL --url "${checksum_url}" --output "${checksum_path}"
+    download "${checksum_url}" "${checksum_path}"
     # Rename file in checksum to match the custom name
     sed -i -e "s/$1/$2/g" "${checksum_path}"
 
@@ -74,17 +90,17 @@ function ensure_exists() {
         # Verify it against the checksum
         echo "[$1]: Verifying $1 against checksum..."
 
-        cd "${test_dir}"
+        cd "${test_dir}" > /dev/null
         if sha256sum -c "$checksum_path"; then
             echo "[$1]: Checksum matches. No need to download..."
         else
             echo "[$1]: Checksum does not match. Downloading..."
-            download ${file_url} ${file_path}
+            download "${file_url}" "${file_path}"
         fi
-        cd -
+        cd - > /dev/null
     else
         echo "[$1]: File does not exist. Downloading it..."
-        download ${file_url} ${file_path}
+        download "${file_url}" "${file_path}"
     fi
 
     echo "[$1]: Done."

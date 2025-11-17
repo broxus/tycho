@@ -31,6 +31,7 @@ from grafanalib.core import (
     Tooltip,
     GRAPH_TOOLTIP_MODE_SHARED_CROSSHAIR,
     Target,
+    Table,
 )
 
 
@@ -404,6 +405,33 @@ def blockchain_stats() -> RowPanel:
     layout.row(first_row)
     layout.row(second_row)
     return layout.row_panel
+
+
+def table_panel(title: str, targets: list[Target]) -> Panel:
+    for t in targets:
+        t.format = "table"
+    return Table(
+        title=title,
+        dataSource=DATASOURCE,
+        targets=targets,
+    )
+
+
+def node_info() -> RowPanel:
+    metrics = [
+        table_panel(
+            title="Node Versions",
+            targets=[
+                Target(
+                    expr='sum by (instance, crate, version, commit) (tycho_version{instance=~"$instance"})',
+                    instant=True,
+                    datasource=DATASOURCE,
+                )
+            ],
+        )
+    ]
+
+    return create_row("node info", metrics)
 
 
 def core_bc() -> RowPanel:
@@ -2009,6 +2037,7 @@ def collator_wu_metrics() -> RowPanel:
     ]
     return create_row("collator: Work units calculation", metrics)
 
+
 def collator_wu_params() -> RowPanel:
     metrics = [
         create_gauge_panel(
@@ -2239,6 +2268,7 @@ def collator_wu_params() -> RowPanel:
         ),
     ]
     return create_row("collator: Work units params", metrics)
+
 
 def collator_core_operations_metrics() -> RowPanel:
     metrics = [
@@ -3263,6 +3293,7 @@ dashboard = Dashboard(
     templating=templates(),
     refresh="30s",
     panels=[
+        node_info(),
         blockchain_stats(),
         core_bc(),
         core_block_strider(),

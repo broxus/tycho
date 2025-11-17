@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytesize::ByteSize;
 use futures_util::future;
 use futures_util::future::BoxFuture;
@@ -248,8 +248,10 @@ async fn archives() -> Result<()> {
     // Init storage
     let config = StorageConfig::new_potato(tmp_dir.path());
 
-    let zerostate_data = utils::read_file("zerostate.boc")?;
-    let zerostate = utils::parse_zerostate(&zerostate_data)?;
+    let zerostate_file = "zerostate.boc";
+    let zerostate_data = utils::read_file(zerostate_file)?;
+    let zerostate = utils::parse_zerostate(&zerostate_data)
+        .with_context(|| format!("Failed to parse zerostate {}", zerostate_file))?;
     let zerostate_id = *zerostate.block_id();
     let storage = prepare_storage(config.clone(), zerostate.clone()).await?;
 
@@ -259,16 +261,28 @@ async fn archives() -> Result<()> {
     let state_applier = ShardStateApplier::new(storage.clone(), state_subscriber);
 
     // Archive provider
-    let first_archive_data = utils::read_file("archive_1.bin")?;
-    let first_archive = utils::parse_archive(&first_archive_data).map(Arc::new)?;
+    let first_archive_file = "archive_1.bin";
+    let first_archive_data = utils::read_file(first_archive_file)?;
+    let first_archive = Arc::new(
+        utils::parse_archive(&first_archive_data)
+            .with_context(|| format!("Failed to parse archive {}", first_archive_file))?,
+    );
 
     // Next archive provider
-    let next_archive_data = utils::read_file("archive_2.bin")?;
-    let next_archive = utils::parse_archive(&next_archive_data).map(Arc::new)?;
+    let next_archive_file = "archive_2.bin";
+    let next_archive_data = utils::read_file(next_archive_file)?;
+    let next_archive = Arc::new(
+        utils::parse_archive(&next_archive_data)
+            .with_context(|| format!("Failed to parse archive {}", next_archive_file))?,
+    );
 
     // Last archive provider
-    let last_archive_data = utils::read_file("archive_3.bin")?;
-    let last_archive = utils::parse_archive(&last_archive_data).map(Arc::new)?;
+    let last_archive_file = "archive_3.bin";
+    let last_archive_data = utils::read_file(last_archive_file)?;
+    let last_archive = Arc::new(
+        utils::parse_archive(&last_archive_data)
+            .with_context(|| format!("Failed to parse archive {}", last_archive_file))?,
+    );
 
     let mut first_provider_archives = ArchivesSet::new();
     first_provider_archives.insert(1, first_archive.clone());
@@ -633,7 +647,8 @@ fn repack_heavy_archives() -> Result<()> {
 
     for path in ["archive_1.bin", "archive_2.bin", "archive_3.bin"] {
         let path = integration_test_path.join(path);
-        let data = std::fs::read(&path)?;
+        let data =
+            std::fs::read(&path).with_context(|| format!("Failed to read {}", path.display()))?;
 
         // Decompress
         let decompressed = zstd_decompress_simple(&data)?;
@@ -653,7 +668,8 @@ fn repack_heavy_archives() -> Result<()> {
         drop(decompressed);
 
         // Write compressed data
-        std::fs::write(path, compressed)?;
+        std::fs::write(&path, compressed)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
     }
     Ok(())
 }
@@ -668,7 +684,8 @@ async fn heavy_archives() -> Result<()> {
     let integration_test_path = project_root.join("integration_tests");
     let current_test_path = integration_test_path.join("heavy_archives");
     std::fs::remove_dir_all(&current_test_path).ok();
-    std::fs::create_dir_all(&current_test_path)?;
+    std::fs::create_dir_all(&current_test_path)
+        .with_context(|| format!("Failed to create {}", current_test_path.display()))?;
 
     // Init storage
     let config = StorageConfig {
@@ -678,8 +695,10 @@ async fn heavy_archives() -> Result<()> {
     };
 
     let zerostate_path = integration_test_path.join("zerostate.boc");
-    let zerostate_data = std::fs::read(zerostate_path)?;
-    let zerostate = utils::parse_zerostate(&zerostate_data)?;
+    let zerostate_data = std::fs::read(&zerostate_path)
+        .with_context(|| format!("Failed to read {}", zerostate_path.display()))?;
+    let zerostate = utils::parse_zerostate(&zerostate_data)
+        .with_context(|| format!("Failed to parse zerostate {}", zerostate_path.display()))?;
     let zerostate_id = *zerostate.block_id();
     let storage = prepare_storage(config, zerostate).await?;
 
@@ -691,18 +710,30 @@ async fn heavy_archives() -> Result<()> {
 
     // Archive provider
     let archive_path = integration_test_path.join("archive_1.bin");
-    let first_archive_data = std::fs::read(archive_path)?;
-    let first_archive = utils::parse_archive(&first_archive_data).map(Arc::new)?;
+    let first_archive_data = std::fs::read(&archive_path)
+        .with_context(|| format!("Failed to read {}", archive_path.display()))?;
+    let first_archive = Arc::new(
+        utils::parse_archive(&first_archive_data)
+            .with_context(|| format!("Failed to parse archive {}", archive_path.display()))?,
+    );
 
     // Next archive provider
     let next_archive_path = integration_test_path.join("archive_2.bin");
-    let next_archive_data = std::fs::read(next_archive_path)?;
-    let next_archive = utils::parse_archive(&next_archive_data).map(Arc::new)?;
+    let next_archive_data = std::fs::read(&next_archive_path)
+        .with_context(|| format!("Failed to read {}", next_archive_path.display()))?;
+    let next_archive = Arc::new(
+        utils::parse_archive(&next_archive_data)
+            .with_context(|| format!("Failed to parse archive {}", next_archive_path.display()))?,
+    );
 
     // Last archive provider
     let last_archive_path = integration_test_path.join("archive_3.bin");
-    let last_archive_data = std::fs::read(last_archive_path)?;
-    let last_archive = utils::parse_archive(&last_archive_data).map(Arc::new)?;
+    let last_archive_data = std::fs::read(&last_archive_path)
+        .with_context(|| format!("Failed to read {}", last_archive_path.display()))?;
+    let last_archive = Arc::new(
+        utils::parse_archive(&last_archive_data)
+            .with_context(|| format!("Failed to parse archive {}", last_archive_path.display()))?,
+    );
 
     let mut first_provider_archives = ArchivesSet::new();
     first_provider_archives.insert(1, first_archive.clone());
@@ -776,8 +807,10 @@ async fn heavy_archives() -> Result<()> {
 
     // Get archive
     let archive_path = integration_test_path.join("archive_1.bin");
-    let archive_data = std::fs::read(archive_path)?;
-    let archive = utils::parse_archive(&archive_data)?;
+    let archive_data = std::fs::read(&archive_path)
+        .with_context(|| format!("Failed to read {}", archive_path.display()))?;
+    let archive = utils::parse_archive(&archive_data)
+        .with_context(|| format!("Failed to parse archive {}", archive_path.display()))?;
 
     // Request blocks from network and check with archive blocks
     let mut sorted: Vec<_> = archive.blocks.into_iter().collect();
@@ -842,8 +875,10 @@ async fn heavy_archives() -> Result<()> {
 
     // Get archive
     let archive_path = integration_test_path.join("archive_1.bin");
-    let archive_data = std::fs::read(archive_path)?;
-    let archive = utils::parse_archive(&archive_data)?;
+    let archive_data = std::fs::read(&archive_path)
+        .with_context(|| format!("Failed to read {}", archive_path.display()))?;
+    let archive = utils::parse_archive(&archive_data)
+        .with_context(|| format!("Failed to parse archive {}", archive_path.display()))?;
 
     // Archive provider
     {

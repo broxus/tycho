@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 use anyhow::{Context, Result};
 use tycho_crypto::ed25519;
@@ -48,6 +48,7 @@ impl NodeBase {
         base_config: &'a NodeBaseConfig,
         global_config: &'a GlobalConfig,
     ) -> NodeBaseBuilder<'a, ()> {
+        record_version_metric();
         NodeBaseBuilder::new(base_config, global_config)
     }
 
@@ -547,4 +548,19 @@ impl ConfiguredStorage {
             core_storage,
         })
     }
+}
+
+fn record_version_metric() {
+    static VERSION_METRIC: Once = Once::new();
+
+    VERSION_METRIC.call_once(|| {
+        let commit = option_env!("TYCHO_BUILD").unwrap_or("unknown");
+        metrics::gauge!(
+            "tycho_version",
+            "crate" => "tycho-core",
+            "version" => env!("CARGO_PKG_VERSION"),
+            "commit" => commit,
+        )
+        .set(1.0);
+    });
 }

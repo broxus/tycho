@@ -71,6 +71,7 @@ tycho-collator = { workspace = true, features = ["test"] }
 [build-dependencies]
 anyhow = { workspace = true }
 rustc_version = { workspace = true }
+tycho-build-info = { workspace = true }
 
 [features]
 default = ["jemalloc"]
