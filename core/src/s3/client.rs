@@ -1,19 +1,16 @@
 use std::io::Write;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use bytesize::ByteSize;
 use futures_util::stream::BoxStream;
 use object_store::path::Path;
 use object_store::{DynObjectStore, Error, ObjectMeta, ObjectStore};
 use serde::{Deserialize, Serialize};
-use tycho_block_util::archive::{Archive, ArchiveVerifier};
-use tycho_types::models::BlockId;
+use tycho_block_util::archive::ArchiveVerifier;
 
-use crate::storage::PersistentStateKind;
 use crate::util::downloader::{DownloaderError, DownloaderResponseHandle, download_and_decompress};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,94 +120,28 @@ impl S3Client {
         self.inner.client.list(prefix)
     }
 
-    pub async fn find_archive(
+    pub async fn get_archive_info(
         &self,
-        mc_seqno: u32,
-        last_mc_seqno: u32,
-        prev_key_block_seqno: u32,
-    ) -> Result<PendingArchiveResponse, Error> {
-        if mc_seqno > last_mc_seqno {
-            return Ok(PendingArchiveResponse::TooNew);
-        }
-
-        let blocks_after_key = mc_seqno - prev_key_block_seqno;
-        let archive_number = (blocks_after_key - 1) / 100;
-        let archive_id = (prev_key_block_seqno + 1) + (archive_number * 100);
-
-        let meta = self
+        archive_id: u32,
+    ) -> Result<Option<BriefArchiveInfo>, Error> {
+        let meta = match self
             .inner
             .client
             .head(&self.inner.make_archive_key(archive_id))
-            .await?;
+            .await
+        {
+            Ok(meta) if meta.size > 0 => meta,
+            Ok(_) | Err(object_store::Error::NotFound { .. }) => return Ok(None),
+            Err(e) => return Err(e),
+        };
 
-        Ok(PendingArchiveResponse::Found(PendingArchive {
+        Ok(Some(BriefArchiveInfo {
             id: archive_id,
-            size: NonZeroU64::new(meta.size as _).unwrap(),
+            size: NonZeroU64::new(meta.size).unwrap(),
         }))
     }
 
-    #[tracing::instrument(skip_all, fields(
-        block_id = %block_id.as_short_id(),
-        kind = ?kind,
-    ))]
-    pub async fn download_persistent_state<W>(
-        &self,
-        block_id: &BlockId,
-        kind: PersistentStateKind,
-        output: W,
-    ) -> anyhow::Result<W, Error>
-    where
-        W: Write + Send + 'static,
-    {
-        tracing::debug!("started");
-        scopeguard::defer! {
-            tracing::debug!("finished");
-        }
-
-        let location = PathBuf::from("states").join(kind.make_file_name(block_id));
-        let path = Path::from(location.display().to_string());
-
-        let chunk_size = self.inner.chunk_size;
-        let max_retries = self.inner.download_retries;
-
-        let client = &self.inner.client.clone();
-
-        let meta = client.head(&path).await?;
-        let Some(target_size) = NonZeroU64::new(meta.size) else {
-            return Err(empty_file_error(path));
-        };
-
-        download_and_decompress(
-            target_size,
-            chunk_size,
-            PARALLEL_REQUESTS,
-            output,
-            |offset| {
-                tracing::debug!("downloading persistent state chunk");
-
-                download_with_retries(
-                    path.clone(),
-                    offset,
-                    chunk_size,
-                    client.clone(),
-                    max_retries,
-                    "persistent state chunk",
-                )
-            },
-            |output, chunk| {
-                output.write_all(chunk)?;
-                Ok(())
-            },
-            |mut output| {
-                output.flush()?;
-                Ok(output)
-            },
-        )
-        .await
-        .map_err(map_downloader_error)
-    }
-
-    #[tracing::instrument(skip_all, fields(archive_id))]
+    #[tracing::instrument(skip_all, fields(archive_id = archive_id))]
     pub async fn download_archive<W>(&self, archive_id: u32, output: W) -> anyhow::Result<W, Error>
     where
         W: Write + Send + 'static,
@@ -274,90 +205,12 @@ impl S3Client {
         .await
         .map_err(map_downloader_error)
     }
-
-    #[tracing::instrument(skip_all, fields(
-        block_id = %block_id.as_short_id(),
-    ))]
-    pub async fn get_block_full(
-        &self,
-        block_id: &BlockId,
-        mc_seqno: u32,
-        last_mc_seqno: u32,
-        prev_key_block_seqno: u32,
-    ) -> anyhow::Result<Option<BlockDataFull>, Error> {
-        let archive_id = match self
-            .find_archive(mc_seqno, last_mc_seqno, prev_key_block_seqno)
-            .await?
-        {
-            PendingArchiveResponse::Found(id) => id.id,
-            PendingArchiveResponse::TooNew => return Ok(None),
-        };
-
-        // TODO: write to file for huge archives
-        let output = BytesMut::new().writer();
-        let writer = self.download_archive(archive_id, output).await?;
-
-        let span = tracing::Span::current();
-
-        let mut archive = tokio::task::spawn_blocking(move || -> anyhow::Result<Archive> {
-            let _span = span.enter();
-
-            let bytes = writer.into_inner().freeze();
-
-            let archive = Archive::new(bytes)?;
-            archive.check_mc_blocks_range()?;
-
-            Ok(archive)
-        })
-        .await
-        .map_err(|e| Error::JoinError { source: e })?
-        .map_err(|e| Error::Generic {
-            store: "processing_archive",
-            source: e.into(),
-        })?;
-
-        let missing_field_error = |field: &str| -> Error {
-            Error::Generic {
-                store: "unpacking_archive",
-                source: anyhow::anyhow!("{} not found in archive", field).into(),
-            }
-        };
-
-        let block_full = archive
-            .blocks
-            .remove(block_id)
-            .map(|x| -> Result<BlockDataFull, Error> {
-                Ok(BlockDataFull {
-                    block_id: *block_id,
-                    block_data: x.block.ok_or_else(|| missing_field_error("block data"))?,
-                    proof_data: x.proof.ok_or_else(|| missing_field_error("proof data"))?,
-                    queue_diff_data: x
-                        .queue_diff
-                        .ok_or_else(|| missing_field_error("queue_diff data"))?,
-                })
-            })
-            .transpose()?;
-
-        Ok(block_full)
-    }
-}
-
-pub enum PendingArchiveResponse {
-    Found(PendingArchive),
-    TooNew,
 }
 
 #[derive(Clone)]
-pub struct PendingArchive {
+pub struct BriefArchiveInfo {
     pub id: u32,
     pub size: NonZeroU64,
-}
-
-pub struct BlockDataFull {
-    pub block_id: BlockId,
-    pub block_data: Bytes,
-    pub proof_data: Bytes,
-    pub queue_diff_data: Bytes,
 }
 
 struct Inner {

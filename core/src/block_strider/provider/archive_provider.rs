@@ -18,12 +18,12 @@ use tycho_storage::fs::MappedFile;
 use tycho_types::models::BlockId;
 
 use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
+use crate::blockchain_rpc;
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::overlay_client::{Neighbour, PunishReason};
 #[cfg(feature = "s3")]
 use crate::s3::S3Client;
 use crate::storage::CoreStorage;
-use crate::{blockchain_rpc, s3};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -371,14 +371,11 @@ impl ArchiveDownloader {
     }
 
     async fn try_download(&self, mc_seqno: u32) -> Result<Option<ArchiveInfo>> {
-        let req = self.client.create_request(mc_seqno, &self.storage)?;
-
         let ctx = ArchiveDownloadContext {
             storage: &self.storage,
             memory_threshold: self.memory_threshold,
         };
-
-        let Some(res) = self.client.download_archive(req, ctx).await? else {
+        let Some(res) = self.client.download_archive(mc_seqno, ctx).await? else {
             return Ok(None);
         };
 
@@ -518,32 +515,6 @@ impl std::io::Write for ArchiveWriter {
     }
 }
 
-pub struct ArchiveRequest {
-    mc_seqno: u32,
-    last_mc_seqno: Option<u32>,
-    prev_key_block_seqno: Option<u32>,
-}
-
-impl ArchiveRequest {
-    pub fn new(mc_seqno: u32) -> Self {
-        Self {
-            mc_seqno,
-            last_mc_seqno: None,
-            prev_key_block_seqno: None,
-        }
-    }
-
-    pub fn with_last_mc_seqno(mut self, seqno: u32) -> Self {
-        self.last_mc_seqno = Some(seqno);
-        self
-    }
-
-    pub fn with_prev_key_block_seqno(mut self, seqno: u32) -> Self {
-        self.prev_key_block_seqno = Some(seqno);
-        self
-    }
-}
-
 pub struct ArchiveResponse {
     writer: ArchiveWriter,
     neighbour: Option<Neighbour>,
@@ -563,29 +534,60 @@ impl<'a> ArchiveDownloadContext<'a> {
             ArchiveWriter::Bytes(BytesMut::new().writer())
         })
     }
+
+    fn compute_archive_id(&self, mc_seqno: u32) -> Result<Option<u32>> {
+        const BLOCKS_PER_ARCHIVE: u32 = Archive::MAX_MC_BLOCKS_PER_ARCHIVE;
+
+        let storage = self.storage;
+
+        // Next block should not be too far in the future.
+        let last_mc_seqno = storage
+            .node_state()
+            .load_last_mc_block_id()
+            .context("no blocks applied yet")?
+            .seqno;
+        if mc_seqno > last_mc_seqno.saturating_add(BLOCKS_PER_ARCHIVE) {
+            return Ok(None);
+        }
+
+        // Archive id must be aligned to the latest key block id.
+        let prev_key_block_seqno = storage
+            .block_handle_storage()
+            .find_prev_key_block(mc_seqno)
+            .context("previous key block not found")?
+            .id()
+            .seqno;
+
+        let mut archive_id = mc_seqno;
+        if prev_key_block_seqno < mc_seqno {
+            // Example:
+            // prev_key_block_seqno = 150
+            // mc_seqno = 290
+            // archive_id = 290 - (290 - 150) % 100 = 250
+            archive_id -= (mc_seqno - prev_key_block_seqno) % BLOCKS_PER_ARCHIVE;
+        }
+
+        Ok(Some(archive_id))
+    }
 }
 
 #[async_trait]
 pub trait ArchiveClient: Send + Sync {
     async fn download_archive(
         &self,
-        req: ArchiveRequest,
+        mc_seqno: u32,
         ctx: ArchiveDownloadContext<'_>,
     ) -> Result<Option<ArchiveResponse>>;
-
-    fn create_request(&self, mc_seqno: u32, storage: &CoreStorage) -> Result<ArchiveRequest>;
 }
 
 #[async_trait]
 impl ArchiveClient for BlockchainRpcClient {
     async fn download_archive(
         &self,
-        req: ArchiveRequest,
+        mc_seqno: u32,
         ctx: ArchiveDownloadContext<'_>,
     ) -> Result<Option<ArchiveResponse>> {
-        let response = self.find_archive(req.mc_seqno).await?;
-
-        let pending = match response {
+        let pending = match self.find_archive(mc_seqno).await? {
             blockchain_rpc::PendingArchiveResponse::Found(pending) => pending,
             blockchain_rpc::PendingArchiveResponse::TooNew => return Ok(None),
         };
@@ -600,10 +602,6 @@ impl ArchiveClient for BlockchainRpcClient {
             neighbour: Some(neighbour),
         }))
     }
-
-    fn create_request(&self, mc_seqno: u32, _storage: &CoreStorage) -> Result<ArchiveRequest> {
-        Ok(ArchiveRequest::new(mc_seqno))
-    }
 }
 
 #[cfg(feature = "s3")]
@@ -611,51 +609,22 @@ impl ArchiveClient for BlockchainRpcClient {
 impl ArchiveClient for S3Client {
     async fn download_archive(
         &self,
-        req: ArchiveRequest,
+        mc_seqno: u32,
         ctx: ArchiveDownloadContext<'_>,
     ) -> Result<Option<ArchiveResponse>> {
-        let (last_mc_seqno, prev_key_block_seqno) =
-            match (req.last_mc_seqno, req.prev_key_block_seqno) {
-                (Some(last_mc_seqno), Some(prev_key_block_seqno)) => {
-                    (last_mc_seqno, prev_key_block_seqno)
-                }
-                _ => anyhow::bail!("invalid archive request"),
-            };
-
-        let response = self
-            .find_archive(req.mc_seqno, last_mc_seqno, prev_key_block_seqno)
-            .await?;
-
-        let pending = match response {
-            s3::PendingArchiveResponse::Found(pending) => pending,
-            s3::PendingArchiveResponse::TooNew => return Ok(None),
+        let Some(archive_id) = ctx.compute_archive_id(mc_seqno)? else {
+            return Ok(None);
+        };
+        let Some(info) = self.get_archive_info(archive_id).await? else {
+            return Ok(None);
         };
 
-        let output = ctx.get_archive_writer(pending.size)?;
-        let writer = self.download_archive(pending.id, output).await?;
+        let output = ctx.get_archive_writer(info.size)?;
+        let writer = self.download_archive(archive_id, output).await?;
 
         Ok(Some(ArchiveResponse {
             writer,
             neighbour: None,
         }))
-    }
-
-    fn create_request(&self, mc_seqno: u32, storage: &CoreStorage) -> Result<ArchiveRequest> {
-        let last_mc_seqno = storage
-            .node_state()
-            .load_last_mc_block_id()
-            .context("no blocks applied yet")?
-            .seqno;
-
-        let prev_key_block_seqno = storage
-            .block_handle_storage()
-            .find_prev_key_block(mc_seqno)
-            .context("previous key block not found")?
-            .id()
-            .seqno;
-
-        Ok(ArchiveRequest::new(mc_seqno)
-            .with_last_mc_seqno(last_mc_seqno)
-            .with_prev_key_block_seqno(prev_key_block_seqno))
     }
 }
