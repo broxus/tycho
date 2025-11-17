@@ -956,6 +956,7 @@ pub enum CmdMempool {
     Unban(CmdMempoolUnban),
     ListEvents(CmdMempoolListEvents),
     DeleteEvents(CmdMempoolDeleteEvents),
+    GetEventPoint(CmdMempoolGetEventPoint),
 }
 
 impl CmdMempool {
@@ -967,6 +968,7 @@ impl CmdMempool {
             Self::Unban(cmd) => cmd.run(args),
             Self::ListEvents(cmd) => cmd.run(args),
             Self::DeleteEvents(cmd) => cmd.run(args),
+            Self::GetEventPoint(cmd) => cmd.run(args),
         }
     }
 }
@@ -1219,6 +1221,44 @@ impl CmdMempoolDeleteEvents {
         self.args.rt(args, move |client| async move {
             client.mempool_delete_events(self.since, self.until).await?;
             print_json(Empty {})
+        })
+    }
+}
+
+/// Get point linked with a persisted moderator journal record.
+/// Use `list-events --point-keys` first; only point keys marked `stored=true` are available.
+#[derive(Parser)]
+pub struct CmdMempoolGetEventPoint {
+    #[clap(flatten)]
+    args: ControlArgs,
+
+    /// point round
+    #[clap(short, long)]
+    round: u32,
+
+    /// point digest
+    #[clap(short, long)]
+    digest: HashBytes,
+
+    /// Print raw bytes as base64 instead of parsing (bypass old incompatible format parsing)
+    #[clap(short, long, action)]
+    base64: bool,
+}
+
+impl CmdMempoolGetEventPoint {
+    fn run(self, args: BaseArgs) -> Result<()> {
+        self.args.rt(args, move |client| async move {
+            let bytes = client
+                .mempool_get_event_point(self.round, self.digest)
+                .await?;
+            if self.base64 {
+                let string = base64::engine::general_purpose::STANDARD.encode(bytes);
+                println!("{string}");
+                Ok(())
+            } else {
+                let point = tycho_consensus::prelude::Point::from_bytes(bytes.into())?;
+                print_json(point.info())
+            }
         })
     }
 }

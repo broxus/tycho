@@ -1,12 +1,13 @@
 use std::fmt::{Debug, Formatter};
 
+use serde::Serialize;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Digest, PointId, PointMap, Round};
 
-#[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
+#[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum AnchorLink {
     #[tl(id = "consensus.anchorLink.to_self")]
@@ -21,7 +22,7 @@ impl AnchorLink {
     pub const MAX_TL_BYTES: usize = 4 + IndirectLink::MAX_TL_BYTES;
 }
 
-#[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
+#[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum ChainedAnchorProof {
     #[tl(id = "consensus.chainedAnchorProof.inapplicable")]
@@ -34,7 +35,7 @@ impl ChainedAnchorProof {
     pub const MAX_TL_BYTES: usize = 4 + IndirectLink::MAX_TL_BYTES;
 }
 
-#[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
+#[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, id = "consensus.link.indirect", scheme = "proto.tl")]
 pub struct IndirectLink {
     pub to: PointId,
@@ -45,7 +46,7 @@ impl IndirectLink {
     pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + Through::MAX_TL_BYTES;
 }
 
-#[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
+#[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum Through {
     #[tl(id = "consensus.link.through.includes")]
