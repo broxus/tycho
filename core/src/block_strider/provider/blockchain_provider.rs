@@ -118,11 +118,18 @@ impl BlockchainBlockProvider {
                 self.config.get_next_block_timeout,
                 self.fallback.is_some(),
                 || {
+                    let start = std::time::Instant::now();
+
                     tracing::debug!(%prev_block_id, "get_next_block_full requested");
-                    self.client
-                        .get_next_block_full(prev_block_id, DataRequirement::Optional)
+                    async move {
+                        let res = self
+                            .client
+                            .get_next_block_full(prev_block_id, DataRequirement::Optional)
+                            .await;
+                        (start, res)
+                    }
                 },
-                |res| async move {
+                |(start, res)| async move {
                     match res {
                         Ok(res) => match res.data {
                             Some(data) if !is_next_for(&data.block_id, prev_block_id) => {
@@ -134,6 +141,25 @@ impl BlockchainBlockProvider {
                                 let parsed = self
                                     .process_received_block(&mc_block_id, data, res.neighbour)
                                     .await;
+
+                                if let Some(Ok(block)) = &parsed {
+                                    let block_info = block.data.block().info.load().unwrap();
+
+                                    let block_utime = block_info.gen_utime as u64 * 1000
+                                        + block_info.gen_utime_ms as u64;
+
+                                    let now = tycho_util::time::now_millis();
+                                    let diff = (now as i64) - (block_utime as i64);
+
+                                    let labels = [("workchain", "-1")];
+
+                                    metrics::gauge!("tycho_client_block_time_diff", &labels)
+                                        .set(diff as f64);
+
+                                    metrics::gauge!("tycho_client_request_time", &labels)
+                                        .set(start.elapsed().as_millis() as f64);
+                                }
+
                                 if parsed.is_some() {
                                     return parsed;
                                 }
