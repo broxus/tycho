@@ -712,13 +712,9 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                             }
                         }
                         None => {
-                            // reader_state.fully_read = true;
-
                             // set current position to the end of the range
                             for (_, shard_reader_state) in reader_state.shards.iter_mut() {
                                 shard_reader_state.set_fully_read();
-                                // shard_reader_state.current_position =
-                                //     QueueKey::max_for_lt(shard_reader_state.to);
                             }
 
                             break 'read_range;
@@ -873,13 +869,9 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                     return Ok(true);
                 }
                 None => {
-                    // reader_state.fully_read = true;
-
                     // set current position to the end of the range
                     for (_, shard_reader_state) in reader_state.shards.iter_mut() {
                         shard_reader_state.set_fully_read();
-                        // shard_reader_state.current_position =
-                        //     QueueKey::max_for_lt(shard_reader_state.to);
                     }
                 }
             }
@@ -980,8 +972,6 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
             let range_reader_processed_offset = current_range_state.processed_offset;
 
             prev_readers_states_seqnos.push(*seqno);
-            // prev_readers_states.insert(*seqno, reader_state);
-            // range_readers.insert(seqno, range_reader);
 
             // collect messages from the next range
             // only when current range processed offset is reached
@@ -989,8 +979,6 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                 break;
             }
         }
-        // self.set_range_readers(range_readers);
-
         Ok(res)
     }
 
