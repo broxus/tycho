@@ -235,7 +235,7 @@ mod serde_shard_part_dirs_map {
 
     use serde::de::Deserializer;
     use serde::ser::{SerializeMap, Serializer};
-    use tycho_block_util::block::DisplayShardPrefix;
+    use tycho_block_util::block::{DisplayShardPrefix, ShardPrefix};
     use tycho_util::FastHashMap;
 
     use super::*;
@@ -245,7 +245,7 @@ mod serde_shard_part_dirs_map {
         S: Serializer,
     {
         #[repr(transparent)]
-        struct WrappedKey<'a>(&'a u64);
+        struct WrappedKey<'a>(&'a ShardPrefix);
         impl Serialize for WrappedKey<'_> {
             fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
             where
@@ -280,7 +280,8 @@ mod serde_shard_part_dirs_map {
                         "invalid shard prefix key format '{tmp}', expected 16 hex digits (e.g. a000000000000000)"
                     )));
                 }
-                let prefix = u64::from_str_radix(&tmp, 16).map_err(serde::de::Error::custom)?;
+                let prefix =
+                    ShardPrefix::from_str_radix(&tmp, 16).map_err(serde::de::Error::custom)?;
                 Ok(Self(prefix))
             }
         }
