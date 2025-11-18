@@ -317,7 +317,7 @@ async fn overlay_server_persistent_state() -> Result<()> {
         )?;
 
         persistent_states
-            .store_shard_state_file(0, &zerostate_handle, zerostate_file, None)
+            .store_shard_state_file(0, &zerostate_handle, zerostate_file, Vec::new())
             .await?;
     }
 
@@ -348,9 +348,11 @@ async fn overlay_server_persistent_state() -> Result<()> {
         .find_persistent_state(&zerostate_id, PersistentStateKind::Shard)
         .await?;
 
+    // TODO: update test to check persistent state parts download
     let temp_file = client
         .download_persistent_state(
             pending_state,
+            None,
             storage.context().temp_files().unnamed_file().open()?,
         )
         .await?;

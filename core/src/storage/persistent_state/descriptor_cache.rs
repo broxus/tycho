@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
+use tycho_block_util::block::ShardPrefix;
 use tycho_storage::fs::Dir;
 use tycho_types::models::BlockId;
 use tycho_util::fs::MappedFile;
 use tycho_util::{FastDashMap, FastHashSet};
 
 use super::PersistentStateKind;
-use crate::storage::shard_state::{ShardPrefix, ShardStatePartInfo};
+use crate::storage::shard_state::ShardStatePartInfo;
 
 #[derive(Debug, Eq, Hash, PartialEq)]
 pub struct CacheKey {
