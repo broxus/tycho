@@ -107,18 +107,6 @@ impl CollatorStdImpl {
             ..
         } = *working_state;
 
-        let snapshot_start = std::time::Instant::now();
-
-        let snapshot_elapsed = snapshot_start.elapsed();
-
-        metrics::histogram!("tycho_collator_reader_state_snapshot_time", &labels)
-            .record(snapshot_elapsed.as_millis() as f64);
-
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            snapshot_time_ms = snapshot_elapsed.as_millis(),
-            "Measured reader_state cloning performance for analysis"
-        );
-
         let mc_block_id = mc_data.block_id;
         let prev_shard_data = prev_shard_data.unwrap();
         let usage_tree = usage_tree.unwrap();
@@ -136,7 +124,7 @@ impl CollatorStdImpl {
         // We should remove all previously imported anchors above next chain time.
         // We have cases when some shard can force master block collation (e.g. no pending messages after sc block)
         // but it is not clear how many anchors were already imported by master. So we take next chain time
-        // from shard and should use anchors only up to choosen next chain time.
+        // from shard and should use anchors only up to chosen next chain time.
         let Some(AnchorInfo {
             ct: last_imported_chain_time,
             author,
