@@ -2,7 +2,10 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
-use tycho_block_util::tl::{block_id as tl_block_id, block_id_vec as tl_block_id_vec};
+use tycho_block_util::tl::{
+    block_id as tl_block_id, block_id_vec as tl_block_id_vec, hash_bytes as tl_hash_bytes,
+};
+use tycho_types::cell::HashBytes;
 
 /// Data for computing a public overlay id.
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
@@ -69,6 +72,31 @@ pub enum PersistentStateInfo {
     },
     #[tl(id = "blockchain.persistentStateInfo.notFound")]
     NotFound,
+    #[tl(id = "blockchain.persistentStateInfo.foundWithParts")]
+    FoundWithParts {
+        size: NonZeroU64,
+        chunk_size: NonZeroU32,
+        parts: Vec<PersistentStatePartInfo>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
+#[tl(boxed, id = "blockchain.persistentStatePartInfo", scheme = "proto.tl")]
+pub struct PersistentStatePartInfo {
+    #[tl(with = "tl_hash_bytes")]
+    pub hash: HashBytes,
+    pub prefix: u64,
+    pub size: NonZeroU64,
+}
+
+impl From<crate::storage::PersistentStatePartInfo> for PersistentStatePartInfo {
+    fn from(value: crate::storage::PersistentStatePartInfo) -> Self {
+        Self {
+            hash: value.hash,
+            prefix: value.prefix,
+            size: value.size,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
@@ -189,6 +217,19 @@ pub mod rpc {
         #[tl(with = "tl_block_id")]
         pub block_id: tycho_types::models::BlockId,
         pub offset: u64,
+    }
+
+    #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(
+        boxed,
+        id = "blockchain.getPersistentShardStatePartChunk",
+        scheme = "proto.tl"
+    )]
+    pub struct GetPersistentShardStatePartChunk {
+        #[tl(with = "tl_block_id")]
+        pub block_id: tycho_types::models::BlockId,
+        pub offset: u64,
+        pub part_shard_prefix: u64,
     }
 
     #[derive(Debug, Clone, TlRead, TlWrite)]

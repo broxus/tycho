@@ -15,7 +15,7 @@ use bytesize::ByteSize;
 use dashmap::Map;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
-use tycho_block_util::block::DisplayShardPrefix;
+use tycho_block_util::block::{DisplayShardPrefix, ShardPrefix};
 use tycho_storage::kv::refcount;
 use tycho_types::cell::*;
 use tycho_util::metrics::{HistogramGuard, spawn_metrics_loop};
@@ -1256,7 +1256,6 @@ pub enum CellStorageError {
     Internal(#[from] rocksdb::Error),
 }
 
-pub type ShardPrefix = u64;
 pub type ShardStatePartsMap = FastHashMap<HashBytes, ShardPrefix>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

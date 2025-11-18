@@ -87,7 +87,7 @@ async fn persistent_shard_state() -> Result<()> {
 
     let read_verify_state = || async {
         let persistent_state_data = persistent_states
-            .read_state_chunk(zerostate.block_id(), 0, PersistentStateKind::Shard)
+            .read_state_chunk(zerostate.block_id(), 0, PersistentStateKind::Shard, None)
             .await
             .unwrap();
 

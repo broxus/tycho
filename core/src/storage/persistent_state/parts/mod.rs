@@ -1,16 +1,16 @@
+use std::fs::File;
+use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 pub use impls::*;
-use tycho_block_util::block::DisplayShardPrefix;
+use tycho_block_util::block::{DisplayShardPrefix, ShardPrefix};
 use tycho_block_util::state::RefMcStateHandle;
 use tycho_types::cell::HashBytes;
 use tycho_types::models::BlockId;
 use tycho_util::FastHashMap;
 use tycho_util::sync::CancellationFlag;
-
-use crate::storage::shard_state::ShardPrefix;
 
 mod impls {
     pub use local_impl::PersistentStateStoragePartLocalImpl;
@@ -19,6 +19,7 @@ mod impls {
 }
 
 pub trait PersistentStateStoragePart: Send + Sync {
+    // TODO: remove unused
     fn try_reuse_persistent_state(
         &self,
         mc_seqno: u32,
@@ -29,6 +30,21 @@ pub trait PersistentStateStoragePart: Send + Sync {
         &self,
         cx: StoreStatePartContext,
     ) -> Pin<Box<dyn Future<Output = Result<Option<StoreStatePartResult>>> + Send>>;
+
+    fn store_shard_state_part_file(
+        &self,
+        cx: StoreStatePartFileContext,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<StoreStatePartResult>>> + Send>>;
+
+    fn state_part_size(&self, block_id: &BlockId) -> Result<Option<NonZeroU64>>;
+
+    #[allow(clippy::type_complexity)]
+    fn read_state_part_chunk(
+        &self,
+        block_id: &BlockId,
+        offset: u64,
+        chunk_size: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send>>;
 }
 
 pub struct StoreStatePartContext {
@@ -39,9 +55,16 @@ pub struct StoreStatePartContext {
     pub cancelled: Option<CancellationFlag>,
 }
 
+pub struct StoreStatePartFileContext {
+    pub mc_seqno: u32,
+    pub block_id: BlockId,
+    pub file: File,
+    pub cancelled: Option<CancellationFlag>,
+}
+
 pub struct StoreStatePartResult {
-    prefix: ShardPrefix,
-    file_size: usize,
+    pub prefix: ShardPrefix,
+    pub file_size: usize,
 }
 
 pub type PersistentStoragePartsMap = FastHashMap<ShardPrefix, Arc<dyn PersistentStateStoragePart>>;

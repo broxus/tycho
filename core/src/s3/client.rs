@@ -339,7 +339,8 @@ impl Inner {
         Path::from(format!(
             "{}{}",
             self.state_key_prefix,
-            kind.make_file_name(block_id).display()
+            // TODO: should handle parts
+            kind.make_file_name(block_id, None).display()
         ))
     }
 }

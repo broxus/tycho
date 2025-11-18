@@ -12,7 +12,7 @@ use futures_util::stream::FuturesUnordered;
 use parking_lot::Mutex;
 use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::time::Instant;
-use tycho_block_util::block::BlockStuff;
+use tycho_block_util::block::{BlockStuff, DisplayShardPrefix, ShardPrefix};
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::RefMcStateHandle;
 use tycho_storage::fs::Dir;
@@ -38,8 +38,7 @@ use super::{
     ShardStateStorage,
 };
 use crate::storage::persistent_state::descriptor_cache::ReusePersistentStateResult;
-use crate::storage::persistent_state::parts::StoreStatePartContext;
-use crate::storage::shard_state::ShardPrefix;
+use crate::storage::persistent_state::parts::{StoreStatePartContext, StoreStatePartFileContext};
 
 mod queue_state {
     pub mod reader;
@@ -338,17 +337,50 @@ impl PersistentStateStorage {
             .descriptor_cache
             .get(&CacheKey::from((block_id, kind)))
             .and_then(|cached| {
-                let mut total_size = cached.file.length();
+                let size = NonZeroU64::new(cached.file.length() as u64)?;
+                let chunk_size = self.state_chunk_size();
+                if kind == PersistentStateKind::Queue {
+                    return Some(PersistentStateInfo {
+                        size,
+                        chunk_size,
+                        parts: Vec::new(),
+                    });
+                }
+
+                let mut parts = Vec::new();
                 if let Some(parts_info) = &cached.parts_info {
-                    for part_info in parts_info {
-                        // total_size = total_size.saturating_add(part_info.file_size);
+                    let storage_parts = self.inner.storage_parts.as_ref()?;
+                    for part in parts_info {
+                        let storage_part = storage_parts.get(&part.prefix)?;
+                        let size = match storage_part.state_part_size(block_id) {
+                            Ok(Some(size)) => size,
+                            Ok(None) => {
+                                tracing::warn!(
+                                    prefix = %DisplayShardPrefix(&part.prefix),
+                                    "persistent shard state part not found",
+                                );
+                                return None;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    prefix = %DisplayShardPrefix(&part.prefix),
+                                    "failed to load persistent shard state part size: {e:?}",
+                                );
+                                return None;
+                            }
+                        };
+                        parts.push(PersistentStatePartInfo {
+                            hash: part.hash,
+                            prefix: part.prefix,
+                            size,
+                        });
                     }
                 }
-                let size = NonZeroU64::new(total_size as u64)?;
+
                 Some(PersistentStateInfo {
-                    // TODO: return parts info
                     size,
-                    chunk_size: self.state_chunk_size(),
+                    chunk_size,
+                    parts,
                 })
             })
     }
@@ -358,6 +390,7 @@ impl PersistentStateStorage {
         block_id: &BlockId,
         offset: u64,
         state_kind: PersistentStateKind,
+        part_shard_prefix: Option<ShardPrefix>,
     ) -> Option<Vec<u8>> {
         // NOTE: Should be noop on x64
         let offset = usize::try_from(offset).ok()?;
@@ -366,29 +399,51 @@ impl PersistentStateStorage {
             return None;
         }
 
-        let permit = {
-            let semaphore = self.inner.chunks_semaphore.clone();
-            semaphore.acquire_owned().await.ok()?
-        };
-
         let key = CacheKey::from((block_id, state_kind));
-        let cached = self.inner.descriptor_cache.get(&key)?;
-        if offset > cached.file.length() {
-            return None;
+        match (state_kind, part_shard_prefix) {
+            (PersistentStateKind::Shard, Some(prefix)) => {
+                let storage_parts = self.inner.storage_parts.as_ref()?;
+                let storage_part = storage_parts.get(&prefix)?;
+                match storage_part
+                    .read_state_part_chunk(block_id, offset as u64, chunk_size)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        tracing::warn!(
+                            prefix = %DisplayShardPrefix(&prefix),
+                            "failed to read persistent shard state part chunk: {e:?}",
+                        );
+                        None
+                    }
+                }
+            }
+            (PersistentStateKind::Shard, None) | (PersistentStateKind::Queue, _) => {
+                let permit = {
+                    let semaphore = self.inner.chunks_semaphore.clone();
+                    semaphore.acquire_owned().await.ok()?
+                };
+
+                let cached = self.inner.descriptor_cache.get(&key)?;
+                if offset > cached.file.length() {
+                    return None;
+                }
+
+                // NOTE: Cached file is a mapped file, therefore it can take a while to read from it.
+                // NOTE: `spawn_blocking` is called here because it is mostly IO-bound operation.
+                // TODO: Add semaphore to limit the number of concurrent operations.
+                tokio::task::spawn_blocking(move || {
+                    // Ensure that permit is dropped only after cached state is used.
+                    let _permit = permit;
+
+                    let end =
+                        std::cmp::min(offset.saturating_add(chunk_size), cached.file.length());
+                    cached.file.as_slice()[offset..end].to_vec()
+                })
+                .await
+                .ok()
+            }
         }
-
-        // NOTE: Cached file is a mapped file, therefore it can take a while to read from it.
-        // NOTE: `spawn_blocking` is called here because it is mostly IO-bound operation.
-        // TODO: Add semaphore to limit the number of concurrent operations.
-        tokio::task::spawn_blocking(move || {
-            // Ensure that permit is dropped only after cached state is used.
-            let _permit = permit;
-
-            let end = std::cmp::min(offset.saturating_add(chunk_size), cached.file.length());
-            cached.file.as_slice()[offset..end].to_vec()
-        })
-        .await
-        .ok()
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
@@ -446,6 +501,7 @@ impl PersistentStateStorage {
             }
         }
 
+        // TODO: skip store main file if reused
         // store main persistent state file
         let this = self.inner.clone();
         let cancelled = cancelled.clone();
@@ -575,12 +631,13 @@ impl PersistentStateStorage {
         mc_seqno: u32,
         handle: &BlockHandle,
         file: File,
-        parts_info: Option<Vec<ShardStatePartInfo>>,
+        part_files: Vec<(ShardStatePartInfo, File)>,
     ) -> Result<()> {
         let reused = self
             .try_reuse_persistent_state(mc_seqno, handle, PersistentStateKind::Shard)
             .await?;
-        if reused.reused_shard_main()? {
+
+        if reused.reused() {
             return Ok(());
         }
 
@@ -589,11 +646,37 @@ impl PersistentStateStorage {
             cancelled.cancel();
         }
 
-        let handle = handle.clone();
+        let block_id = *handle.id();
+
+        let in_parts_info: Vec<_> = part_files.iter().map(|(info, _)| info).cloned().collect();
+        let in_parts_info = (!in_parts_info.is_empty()).then_some(in_parts_info);
+
+        // run persistent store tasks for parts if were not reused
+        let mut part_store_tasks = FuturesUnordered::new();
+        let should_store_parts = !part_files.is_empty() && !reused.reused_shard_parts()?;
+        if should_store_parts {
+            let storage_parts = self.inner.storage_parts.try_as_ref_ext()?;
+            for (info, part_file) in part_files {
+                // TODO: actually we can store part file without specified part storage
+                let storage_part = storage_parts.try_get_ext(&info.prefix)?.clone();
+                part_store_tasks.push(tokio::spawn(storage_part.store_shard_state_part_file(
+                    StoreStatePartFileContext {
+                        mc_seqno,
+                        block_id,
+                        file: part_file,
+                        cancelled: Some(cancelled.clone()),
+                    },
+                )));
+            }
+        }
+
+        // TODO: skip store main file if reused
+        // store main persistent state file
+        let handle_for_main = handle.clone();
         let this = self.inner.clone();
         let cancelled = cancelled.clone();
-        let span = tracing::Span::current();
 
+        let span = tracing::Span::current();
         let state = tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
@@ -606,21 +689,57 @@ impl PersistentStateStorage {
                 .prepare_persistent_states_dir(mc_seqno)?;
 
             let cell_writer =
-                ShardStateWriter::new(this.cells_db.clone(), &states_dir, handle.id(), None);
+                ShardStateWriter::new(this.cells_db.clone(), &states_dir, &block_id, None);
             cell_writer.write_file(file, Some(&cancelled))?;
             this.block_handles
-                .set_has_persistent_shard_state_main(&handle);
-            let state =
-                this.descriptor_cache
-                    .cache_shard_state(mc_seqno, handle.id(), None, parts_info)?;
+                .set_has_persistent_shard_state_main(&handle_for_main);
+            let state = this.descriptor_cache.cache_shard_state(
+                mc_seqno,
+                &block_id,
+                None,
+                in_parts_info,
+            )?;
 
             scopeguard::ScopeGuard::into_inner(guard);
             Ok::<_, anyhow::Error>(state)
         })
         .await??;
 
+        // wait for all store tasks in parts
+        let mut all_parts_stored = true;
+        while let Some(store_res) = part_store_tasks.next().await {
+            match store_res {
+                Ok(Ok(Some(_res))) => {
+                    // do nothing
+                }
+                Ok(Ok(None)) => {
+                    all_parts_stored = false;
+                    tracing::error!("persistent shard part file was not stored");
+                }
+                Ok(Err(store_error)) => {
+                    all_parts_stored = false;
+                    tracing::error!(?store_error, "error storing persistent shard part file");
+                }
+                Err(join_error) => {
+                    all_parts_stored = false;
+                    tracing::error!(
+                        ?join_error,
+                        "error executing persistent shard part file task"
+                    );
+                }
+            }
+        }
+
+        // update block handle flags that persistent state parts stored
+        if all_parts_stored {
+            self.inner
+                .block_handles
+                .set_has_persistent_shard_state_parts(handle);
+        }
+
         // TODO: should handle parts as well
         self.notify_with_persistent_state(&state).await;
+
         Ok(())
     }
 
@@ -979,10 +1098,18 @@ struct Inner {
     storage_parts: Option<Arc<PersistentStoragePartsMap>>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PersistentStateInfo {
     pub size: NonZeroU64,
     pub chunk_size: NonZeroU32,
+    pub parts: Vec<PersistentStatePartInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistentStatePartInfo {
+    pub hash: HashBytes,
+    pub prefix: ShardPrefix,
+    pub size: NonZeroU64,
 }
 
 pub struct PersistentStateReceiver {
