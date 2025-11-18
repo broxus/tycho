@@ -71,7 +71,7 @@ pub struct NodeConfig<T> {
     pub starter: StarterConfig,
 
     #[cfg(feature = "s3")]
-    pub s3_client: S3ClientConfig,
+    pub s3_client: Option<S3ClientConfig>,
 
     #[serde(flatten)]
     pub user_config: T,
@@ -105,7 +105,7 @@ where
             starter: Default::default(),
 
             #[cfg(feature = "s3")]
-            s3_client: S3ClientConfig::default(),
+            s3_client: None,
 
             user_config: Default::default(),
         }

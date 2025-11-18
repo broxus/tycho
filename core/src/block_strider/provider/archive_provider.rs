@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, btree_map};
 use std::io::Seek;
 use std::num::NonZeroU64;
+use std::pin::pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -47,7 +49,7 @@ pub struct ArchiveBlockProvider {
 
 impl ArchiveBlockProvider {
     pub fn new(
-        client: Arc<dyn ArchiveClient>,
+        client: impl IntoArchiveClient,
         storage: CoreStorage,
         config: ArchiveBlockProviderConfig,
     ) -> Self {
@@ -55,7 +57,7 @@ impl ArchiveBlockProvider {
 
         Self {
             inner: Arc::new(Inner {
-                client,
+                client: client.into_archive_client(),
                 proof_checker,
 
                 known_archives: parking_lot::Mutex::new(Default::default()),
@@ -375,9 +377,10 @@ impl ArchiveDownloader {
             storage: &self.storage,
             memory_threshold: self.memory_threshold,
         };
-        let Some(res) = self.client.download_archive(mc_seqno, ctx).await? else {
+        let Some(found) = self.client.find_archive(mc_seqno, ctx).await? else {
             return Ok(None);
         };
+        let res = (found.download)().await?;
 
         let span = tracing::Span::current();
         tokio::task::spawn_blocking(move || {
@@ -520,13 +523,14 @@ pub struct ArchiveResponse {
     neighbour: Option<Neighbour>,
 }
 
+#[derive(Clone, Copy)]
 pub struct ArchiveDownloadContext<'a> {
     pub storage: &'a CoreStorage,
     pub memory_threshold: ByteSize,
 }
 
 impl<'a> ArchiveDownloadContext<'a> {
-    fn get_archive_writer(&self, size: NonZeroU64) -> Result<ArchiveWriter> {
+    pub fn get_archive_writer(&self, size: NonZeroU64) -> Result<ArchiveWriter> {
         Ok(if size.get() > self.memory_threshold.as_u64() {
             let file = self.storage.context().temp_files().unnamed_file().open()?;
             ArchiveWriter::File(std::io::BufWriter::new(file))
@@ -535,7 +539,7 @@ impl<'a> ArchiveDownloadContext<'a> {
         })
     }
 
-    fn compute_archive_id(&self, mc_seqno: u32) -> Result<Option<u32>> {
+    pub fn compute_archive_id(&self, mc_seqno: u32) -> Result<Option<u32>> {
         const BLOCKS_PER_ARCHIVE: u32 = Archive::MAX_MC_BLOCKS_PER_ARCHIVE;
 
         let storage = self.storage;
@@ -571,60 +575,240 @@ impl<'a> ArchiveDownloadContext<'a> {
     }
 }
 
+pub trait IntoArchiveClient {
+    fn into_archive_client(self) -> Arc<dyn ArchiveClient>;
+}
+
+impl<T: ArchiveClient> IntoArchiveClient for (T,) {
+    #[inline]
+    fn into_archive_client(self) -> Arc<dyn ArchiveClient> {
+        Arc::new(self.0)
+    }
+}
+
+impl<T1: ArchiveClient, T2: ArchiveClient> IntoArchiveClient for (T1, Option<T2>) {
+    fn into_archive_client(self) -> Arc<dyn ArchiveClient> {
+        let (primary, secondary) = self;
+        match secondary {
+            None => Arc::new(primary),
+            Some(secondary) => Arc::new(HybridArchiveClient::new(primary, secondary)),
+        }
+    }
+}
+
+pub struct FoundArchive<'a> {
+    pub archive_id: u64,
+    pub download: Box<dyn FnOnce() -> BoxFuture<'a, Result<ArchiveResponse>> + Send + 'a>,
+}
+
 #[async_trait]
-pub trait ArchiveClient: Send + Sync {
-    async fn download_archive(
-        &self,
+pub trait ArchiveClient: Send + Sync + 'static {
+    async fn find_archive<'a>(
+        &'a self,
         mc_seqno: u32,
-        ctx: ArchiveDownloadContext<'_>,
-    ) -> Result<Option<ArchiveResponse>>;
+        ctx: ArchiveDownloadContext<'a>,
+    ) -> Result<Option<FoundArchive<'a>>>;
 }
 
 #[async_trait]
 impl ArchiveClient for BlockchainRpcClient {
-    async fn download_archive(
-        &self,
+    async fn find_archive<'a>(
+        &'a self,
         mc_seqno: u32,
-        ctx: ArchiveDownloadContext<'_>,
-    ) -> Result<Option<ArchiveResponse>> {
-        let pending = match self.find_archive(mc_seqno).await? {
-            blockchain_rpc::PendingArchiveResponse::Found(pending) => pending,
-            blockchain_rpc::PendingArchiveResponse::TooNew => return Ok(None),
-        };
+        ctx: ArchiveDownloadContext<'a>,
+    ) -> Result<Option<FoundArchive<'a>>> {
+        Ok(match self.find_archive(mc_seqno).await {
+            Ok(blockchain_rpc::PendingArchiveResponse::Found(found)) => Some(FoundArchive {
+                archive_id: found.id,
+                download: Box::new(move || {
+                    Box::pin(async move {
+                        let neighbour = found.neighbour.clone();
 
-        let neighbour = pending.neighbour.clone();
+                        let output = ctx.get_archive_writer(found.size)?;
+                        let writer = self.download_archive(found, output).await?;
 
-        let output = ctx.get_archive_writer(pending.size)?;
-        let writer = self.download_archive(pending, output).await?;
+                        Ok(ArchiveResponse {
+                            writer,
+                            neighbour: Some(neighbour),
+                        })
+                    })
+                }),
+            }),
+            Ok(blockchain_rpc::PendingArchiveResponse::TooNew)
+            | Err(crate::overlay_client::Error::NotFound) => None,
+            Err(e) => return Err(e.into()),
+        })
+    }
+}
 
-        Ok(Some(ArchiveResponse {
-            writer,
-            neighbour: Some(neighbour),
-        }))
+impl IntoArchiveClient for BlockchainRpcClient {
+    #[inline]
+    fn into_archive_client(self) -> Arc<dyn ArchiveClient> {
+        Arc::new(self)
     }
 }
 
 #[cfg(feature = "s3")]
 #[async_trait]
 impl ArchiveClient for S3Client {
-    async fn download_archive(
-        &self,
+    async fn find_archive<'a>(
+        &'a self,
         mc_seqno: u32,
-        ctx: ArchiveDownloadContext<'_>,
-    ) -> Result<Option<ArchiveResponse>> {
+        ctx: ArchiveDownloadContext<'a>,
+    ) -> Result<Option<FoundArchive<'a>>> {
         let Some(archive_id) = ctx.compute_archive_id(mc_seqno)? else {
             return Ok(None);
         };
         let Some(info) = self.get_archive_info(archive_id).await? else {
             return Ok(None);
         };
+        Ok(Some(FoundArchive {
+            archive_id: info.archive_id as u64,
+            download: Box::new(move || {
+                Box::pin(async move {
+                    let output = ctx.get_archive_writer(info.size)?;
+                    let writer = self.download_archive(info.archive_id, output).await?;
 
-        let output = ctx.get_archive_writer(info.size)?;
-        let writer = self.download_archive(archive_id, output).await?;
-
-        Ok(Some(ArchiveResponse {
-            writer,
-            neighbour: None,
+                    Ok(ArchiveResponse {
+                        writer,
+                        neighbour: None,
+                    })
+                })
+            }),
         }))
+    }
+}
+
+#[cfg(feature = "s3")]
+impl IntoArchiveClient for S3Client {
+    #[inline]
+    fn into_archive_client(self) -> Arc<dyn ArchiveClient> {
+        Arc::new(self)
+    }
+}
+
+pub struct HybridArchiveClient<T1, T2> {
+    primary: T1,
+    secondary: T2,
+    prefer: HybridArchiveClientState,
+}
+
+impl<T1, T2> HybridArchiveClient<T1, T2> {
+    pub fn new(primary: T1, secondary: T2) -> Self {
+        Self {
+            primary,
+            secondary,
+            prefer: Default::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl<T1, T2> ArchiveClient for HybridArchiveClient<T1, T2>
+where
+    T1: ArchiveClient,
+    T2: ArchiveClient,
+{
+    async fn find_archive<'a>(
+        &'a self,
+        mc_seqno: u32,
+        ctx: ArchiveDownloadContext<'a>,
+    ) -> Result<Option<FoundArchive<'a>>> {
+        // FIXME: There should be a better way of writing this.
+
+        if let Some(prefer) = self.prefer.get() {
+            tracing::debug!(mc_seqno, ?prefer);
+            match prefer {
+                HybridArchiveClientPart::Primary => {
+                    let res = self.primary.find_archive(mc_seqno, ctx).await;
+                    if matches!(&res, Ok(Some(_))) {
+                        return res;
+                    }
+                }
+                HybridArchiveClientPart::Secondary => {
+                    let res = self.secondary.find_archive(mc_seqno, ctx).await;
+                    if matches!(&res, Ok(Some(_))) {
+                        return res;
+                    }
+                }
+            }
+        }
+
+        self.prefer.set(None);
+
+        let primary = pin!(self.primary.find_archive(mc_seqno, ctx));
+        let secondary = pin!(self.secondary.find_archive(mc_seqno, ctx));
+        match futures_util::future::select(primary, secondary).await {
+            futures_util::future::Either::Left((found, other)) => {
+                match found {
+                    Ok(Some(found)) => {
+                        self.prefer.set(Some(HybridArchiveClientPart::Primary));
+                        return Ok(Some(found));
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("primary archive client error: {e:?}"),
+                }
+                other.await.inspect(|res| {
+                    if res.is_some() {
+                        self.prefer.set(Some(HybridArchiveClientPart::Secondary));
+                    }
+                })
+            }
+            futures_util::future::Either::Right((found, other)) => {
+                match found {
+                    Ok(Some(found)) => {
+                        self.prefer.set(Some(HybridArchiveClientPart::Secondary));
+                        return Ok(Some(found));
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("secondary archive client error: {e:?}"),
+                }
+                other.await.inspect(|res| {
+                    if res.is_some() {
+                        self.prefer.set(Some(HybridArchiveClientPart::Primary));
+                    }
+                })
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct HybridArchiveClientState(AtomicU8);
+
+impl HybridArchiveClientState {
+    fn get(&self) -> Option<HybridArchiveClientPart> {
+        match self.0.load(Ordering::Acquire) {
+            1 => Some(HybridArchiveClientPart::Primary),
+            2 => Some(HybridArchiveClientPart::Secondary),
+            _ => None,
+        }
+    }
+
+    fn set(&self, value: Option<HybridArchiveClientPart>) {
+        let value = match value {
+            None => 0,
+            Some(HybridArchiveClientPart::Primary) => 1,
+            Some(HybridArchiveClientPart::Secondary) => 2,
+        };
+        self.0.store(value, Ordering::Release);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HybridArchiveClientPart {
+    Primary,
+    Secondary,
+}
+
+impl std::ops::Not for HybridArchiveClientPart {
+    type Output = Self;
+
+    #[inline]
+    fn not(self) -> Self::Output {
+        match self {
+            Self::Primary => Self::Secondary,
+            Self::Secondary => Self::Primary,
+        }
     }
 }

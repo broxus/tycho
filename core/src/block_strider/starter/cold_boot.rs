@@ -78,14 +78,6 @@ impl StarterInner {
 
                 *last_key_block.id()
             }
-            #[cfg(feature = "s3")]
-            ColdBootType::PersistentFromS3 => {
-                let Some(_s3_client) = &self.s3_client else {
-                    anyhow::bail!("S3 client not initialized");
-                };
-
-                todo!()
-            }
         };
 
         self.storage

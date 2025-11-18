@@ -16,8 +16,6 @@ use tycho_util::serde_helpers;
 use crate::block_strider::PsCompletionContext;
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
-#[cfg(feature = "s3")]
-use crate::s3::S3Client;
 use crate::storage::{CoreStorage, QueueStateReader};
 
 mod cold_boot;
@@ -59,8 +57,6 @@ impl StarterBuilder {
     pub fn build(self) -> Starter {
         let (storage, blockchain_rpc_client, zerostate, config) = self.mandatory_fields;
         let BuilderFields {
-            #[cfg(feature = "s3")]
-            s3_client,
             queue_state_handler,
             completion_state_subscriber,
         } = self.optional_fields;
@@ -75,9 +71,6 @@ impl StarterBuilder {
                     .unwrap_or_else(|| Box::new(ValidateQueueState)),
                 completion_state_handler: completion_state_subscriber
                     .unwrap_or_else(|| Box::new(PsCompletionNoop)),
-
-                #[cfg(feature = "s3")]
-                s3_client,
             }),
         }
     }
@@ -131,12 +124,6 @@ impl<T1, T2, T3> StarterBuilder<(T1, T2, T3, ())> {
 }
 
 impl<T> StarterBuilder<T> {
-    #[cfg(feature = "s3")]
-    pub fn with_s3(mut self, s3_client: S3Client) -> Self {
-        self.optional_fields.s3_client = Some(s3_client);
-        self
-    }
-
     pub fn with_queue_state_handler<H: QueueStateHandler>(mut self, handler: H) -> Self {
         self.optional_fields.queue_state_handler = Some(castaway::match_type!(handler, {
             Box<dyn QueueStateHandler> as handler => handler,
@@ -156,8 +143,6 @@ impl<T> StarterBuilder<T> {
 
 #[derive(Default)]
 struct BuilderFields {
-    #[cfg(feature = "s3")]
-    s3_client: Option<S3Client>,
     queue_state_handler: Option<Box<dyn QueueStateHandler>>,
     completion_state_subscriber: Option<Box<dyn PsCompletionHandler>>,
 }
@@ -203,8 +188,6 @@ impl Starter {
 pub enum ColdBootType {
     Genesis,
     LatestPersistent,
-    #[cfg(feature = "s3")]
-    PersistentFromS3,
 }
 
 struct StarterInner {
@@ -214,8 +197,6 @@ struct StarterInner {
     config: StarterConfig,
     queue_state_handler: Box<dyn QueueStateHandler>,
     completion_state_handler: Box<dyn PsCompletionHandler>,
-    #[cfg(feature = "s3")]
-    s3_client: Option<S3Client>,
 }
 
 pub trait ZerostateProvider {

@@ -79,7 +79,7 @@ impl S3Client {
         let chunk_size = config.chunk_size.as_u64();
         anyhow::ensure!(chunk_size >= 1024, "chunk size must be at least 1 KiB");
         anyhow::ensure!(
-            chunk_size <= u32::MAX as u64,
+            u32::try_from(chunk_size).is_ok(),
             "chunk size must be at most 4 GiB"
         );
 
@@ -136,7 +136,7 @@ impl S3Client {
         };
 
         Ok(Some(BriefArchiveInfo {
-            id: archive_id,
+            archive_id,
             size: NonZeroU64::new(meta.size).unwrap(),
         }))
     }
@@ -209,7 +209,7 @@ impl S3Client {
 
 #[derive(Clone)]
 pub struct BriefArchiveInfo {
-    pub id: u32,
+    pub archive_id: u32,
     pub size: NonZeroU64,
 }
 

@@ -105,11 +105,6 @@ impl NodeBase {
                     .with_zerostate_id(self.global_config.zerostate)
                     .with_config(self.base_config.starter.clone());
 
-                #[cfg(feature = "s3")]
-                if let Some(s3_client) = &self.s3_client {
-                    starter = starter.with_s3(s3_client.clone());
-                }
-
                 if let Some(handler) = queue_state_handler {
                     starter = starter.with_queue_state_handler(handler);
                 }
@@ -157,7 +152,11 @@ impl NodeBase {
 
     pub fn build_archive_block_provider(&self) -> ArchiveBlockProvider {
         ArchiveBlockProvider::new(
-            Arc::new(self.blockchain_rpc_client.clone()),
+            (
+                self.blockchain_rpc_client.clone(),
+                #[cfg(feature = "s3")]
+                self.s3_client.clone(),
+            ),
             self.core_storage.clone(),
             self.base_config.archive_block_provider.clone(),
         )

@@ -97,15 +97,8 @@ impl Node {
             }
         };
 
-        #[cfg(not(feature = "s3"))]
         let base = base
             .init_blockchain_rpc(rpc_mempool_adapter.clone(), rpc_mempool_adapter.clone())?
-            .build()?;
-
-        #[cfg(feature = "s3")]
-        let base = base
-            .init_blockchain_rpc(rpc_mempool_adapter.clone(), rpc_mempool_adapter.clone())?
-            .init_s3()?
             .build()?;
 
         // Setup queue storage

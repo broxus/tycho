@@ -847,11 +847,8 @@ async fn heavy_archives() -> Result<()> {
 
     // Archive provider
     {
-        let archive_block_provider = ArchiveBlockProvider::new(
-            Arc::new(client),
-            storage,
-            ArchiveBlockProviderConfig::default(),
-        );
+        let archive_block_provider =
+            ArchiveBlockProvider::new(client, storage, ArchiveBlockProviderConfig::default());
 
         // getBlock
         for (_, mc_block_id) in archive.mc_block_ids.iter() {

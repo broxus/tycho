@@ -109,7 +109,7 @@ pub struct Node<C> {
     config: NodeConfig<C>,
 
     #[cfg(feature = "s3")]
-    s3_client: S3Client,
+    _s3_client: Option<S3Client>,
 }
 
 impl<C> Node<C> {
@@ -215,9 +215,6 @@ impl<C> Node<C> {
             "initialized blockchain rpc"
         );
 
-        #[cfg(feature = "s3")]
-        let s3_client = S3Client::new(&node_config.s3_client)?;
-
         Ok(Self {
             zerostate,
             network,
@@ -232,7 +229,12 @@ impl<C> Node<C> {
             run_handle: None,
 
             #[cfg(feature = "s3")]
-            s3_client,
+            _s3_client: node_config
+                .s3_client
+                .as_ref()
+                .map(S3Client::new)
+                .transpose()
+                .context("failed to create S3 client")?,
         })
     }
 
@@ -282,11 +284,6 @@ impl<C> Node<C> {
                     .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
                     .with_zerostate_id(self.zerostate)
                     .with_config(self.starter_config.clone());
-
-                #[cfg(feature = "s3")]
-                {
-                    starter = starter.with_s3(self.s3_client.clone());
-                }
 
                 if let Some(handler) = completion_state_handler {
                     starter = starter.with_completion_state_handler(handler);
