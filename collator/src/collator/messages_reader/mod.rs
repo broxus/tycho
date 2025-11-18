@@ -763,21 +763,20 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
     where
         F: FnMut() -> bool,
     {
-        // tracing::debug!(target: tracing_targets::COLLATOR,
-        //     internals_processed_offsets = ?DebugIter(self.internals_partition_readers
-        //         .iter()
-        //         .map(|(par_id, par_r)| {
-        //             (
-        //                 par_id,
-        //                 par_r.get_last_range_reader()
-        //                     .map(|(_, r)| r.reader_state.processed_offset)
-        //                     .unwrap_or_default(),
-        //             )
-        //         })),
-        //     externals_processed_offset = ?self.externals_reader.get_last_range_reader_offsets_by_partitions(),
-        //     "start: refill messages buffer and skip groups upto",
-        // );
-        //
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            internals_processed_offsets = ?DebugIter(self.internals_partition_readers
+                .iter()
+                .map(|(par_id, par_r)| {
+                    (
+                        par_id,
+                        par_r.get_last_range_state()
+                            .map(|(_, r)| r.processed_offset)
+                            .unwrap_or_default(),
+                    )
+                })),
+            externals_processed_offset = ?self.externals_reader.get_last_range_reader_offsets_by_partitions(),
+            "start: refill messages buffer and skip groups upto",
+        );
         loop {
             // stop refill when collation cancelled
             if is_cancelled() {

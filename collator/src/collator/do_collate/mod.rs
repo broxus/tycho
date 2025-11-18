@@ -262,12 +262,10 @@ impl CollatorStdImpl {
 
         let CollationResult {
             finalized,
-            // reader_state,
             execute_result,
             final_result,
         } = match do_collate_res {
             Err(CollatorError::Cancelled(reason)) => {
-                // anchors_cache automatically rollbacks via &mut reference (no changes applied)
                 // cancel collation
                 self.listener
                     .on_cancelled(mc_block_id, next_block_id_short, reason)

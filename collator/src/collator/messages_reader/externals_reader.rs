@@ -237,6 +237,17 @@ impl<'a> ExternalsReader<'a> {
         self.anchors_cache.has_pending_externals()
     }
 
+    pub fn get_last_range_reader_offsets_by_partitions(&self) -> Vec<(QueuePartitionIdx, u32)> {
+        self.get_last_range_state()
+            .map(|(_, r)| {
+                r.by_partitions
+                    .iter()
+                    .map(|(par_id, par)| (*par_id, par.processed_offset))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn retain_only_last_range_state(&mut self) -> Result<()> {
         let last_seqno = *self.state.ranges.last_key_value().context(
             "externals reader should have at least one range state when retain_only_last_range_state() called",
@@ -421,13 +432,6 @@ impl<'a> ExternalsReader<'a> {
         'main_loop: loop {
             let mut all_ranges_fully_read = true;
             while let Some(seqno) = ranges_seqno.pop_front() {
-                // let range_reader = self.range_readers.get_mut(&seqno).unwrap_or_else(||
-                //     panic!(
-                //         "externals range reader should exist (for_shard_id: {}, seqno: {}, block_seqno: {})",
-                //         self.for_shard_id, seqno, self.block_seqno,
-                //     )
-                // );
-
                 let reader_state = self.state.ranges.get_mut(&seqno).unwrap_or_else(||
                     panic!(
                         "externals range reader state should exists (for_shard_id: {}, seqno: {}, block_seqno: {})",
