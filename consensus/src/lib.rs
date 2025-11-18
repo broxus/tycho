@@ -18,7 +18,10 @@ pub mod prelude {
         MempoolNodeConfig,
     };
     pub use crate::intercom::InitPeers;
-    pub use crate::models::{AnchorData, AnchorStageRole, MempoolOutput, PointInfo};
+    pub use crate::models::{
+        AnchorData, AnchorStageRole, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError,
+        PointInfo,
+    };
     pub use crate::moderator::{Moderator, ModeratorConfig};
     pub use crate::storage::{MempoolAdapterStore, MempoolDb};
 }

@@ -142,12 +142,17 @@ impl Inner {
 
             if let Some(committed) = committed {
                 round_ctx.log_committed(&committed);
+                let anchor_rounds =
+                    (committed.iter().map(|a| a.anchor.round())).collect::<Vec<_>>();
                 for data in committed {
-                    let anchor_round = data.anchor.round();
                     round_ctx.commit_metrics(&data.anchor);
                     anchors_tx
                         .send(MempoolOutput::NextAnchor(data))
                         .map_err(|_closed| Cancelled())?;
+                }
+                // stats should be reported for each round separately - to be grouped by consumer
+                for anchor_round in anchor_rounds {
+                    let _stats = committer.remove_committed(anchor_round, round_ctx.conf())?;
                     anchors_tx
                         .send(MempoolOutput::CommitFinished(anchor_round))
                         .map_err(|_closed| Cancelled())?;
