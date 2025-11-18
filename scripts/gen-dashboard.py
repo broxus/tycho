@@ -2882,6 +2882,46 @@ def mempool_engine() -> RowPanel:
     return create_row("Mempool engine", metrics)
 
 
+def mempool_stats() -> RowPanel:
+    label_selectors = ['peer_id=~"$peer_id"']
+    by_labels = ["instance", "peer_id"]
+    legend_format = "{{peer_id}} <- {{instance}}"
+
+    def counter_with_defaults(metric_field, title):
+        return create_counter_panel(
+            expr_sum_increase(
+                f"tycho_mempool_stats_{metric_field}",
+                label_selectors=label_selectors,
+                range_selector="$__interval",
+                by_labels=by_labels,
+            ),
+            title,
+            labels_selectors=label_selectors,
+            legend_format=legend_format,
+            by_labels=by_labels,
+        )
+
+    metrics = [
+        create_gauge_panel(
+            "tycho_mempool_stats_last_round",
+            "Last observed point round",
+            labels=label_selectors,
+            legend_format=legend_format,
+        ),
+        # tycho_mempool_stats_filled_rounds trust me it's here (suppress check-metrics warn)
+        counter_with_defaults("filled_rounds", "Rounds filled in stats"),
+        counter_with_defaults("was_leader", "Leader role accomplished"),
+        counter_with_defaults("was_not_leader", "Leader role skipped"),
+        counter_with_defaults("skipped_rounds", "Skipped rounds"),
+        counter_with_defaults("valid_points", "Valid points"),
+        counter_with_defaults("equivocated", "Equivocated points"),
+        counter_with_defaults("invalid_points", "Invalid points"),
+        counter_with_defaults("ill_formed_points", "Ill-formed points"),
+        counter_with_defaults("references_skipped", "References skipped"),
+    ]
+    return create_row("Mempool stats", metrics)
+
+
 def mempool_misc() -> RowPanel:
     metrics = [
         create_counter_panel(
@@ -2907,6 +2947,16 @@ def mempool_misc() -> RowPanel:
         create_heatmap_panel(
             "tycho_mempool_point_parse_verify_time",
             "Responder and Downloader: point parse time (incl check sig and verify)",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_stats_merge_errors",
+                label_selectors=['kind=~"$kind"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
+            ),
+            "Stats: merge errors",
+            legend_format="{{instance}} - {{kind}}",
         ),
         create_heatmap_panel(
             "tycho_mempool_engine_parse_point_time",
@@ -3456,6 +3506,7 @@ dashboard = Dashboard(
         mempool_payload_rates(),
         mempool_engine_rates(),
         mempool_engine(),
+        mempool_stats(),
         mempool_misc(),
         mempool_broadcasts(),
         mempool_downloads(),

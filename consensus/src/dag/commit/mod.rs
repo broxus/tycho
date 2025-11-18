@@ -1,5 +1,6 @@
 mod anchor_chain;
 mod back;
+mod inspector;
 
 use std::ops::RangeInclusive;
 use std::sync::atomic::Ordering;
@@ -9,9 +10,10 @@ use tycho_util::metrics::HistogramGuard;
 use crate::dag::DagRound;
 use crate::dag::commit::anchor_chain::{AnchorChain, EnqueuedAnchor};
 use crate::dag::commit::back::DagBack;
-use crate::effects::{AltFmt, AltFormat};
+use crate::dag::commit::inspector::RoundInspector;
+use crate::effects::{AltFmt, AltFormat, TaskResult};
 use crate::engine::MempoolConfig;
-use crate::models::{AnchorData, AnchorStageRole, Round};
+use crate::models::{AnchorData, AnchorStageRole, MempoolStatsOutput, Round};
 
 #[derive(thiserror::Error, Debug)]
 #[error("Committer encountered local history conflict at round {}", .0.0)]
@@ -30,6 +32,7 @@ pub struct Committer {
     // some anchors won't contain full history after a gap (filled with sync),
     // so this determines least round at which fully reproducible anchor may be produced
     full_history_bottom: Round,
+    inspector: RoundInspector,
 }
 
 impl Default for Committer {
@@ -38,6 +41,7 @@ impl Default for Committer {
             dag: Default::default(),
             anchor_chain: Default::default(),
             full_history_bottom: Round::BOTTOM,
+            inspector: Default::default(),
         }
     }
 }
@@ -85,6 +89,23 @@ impl Committer {
         } else {
             Err(self.full_history_bottom)
         }
+    }
+
+    pub fn remove_committed(
+        &mut self,
+        last_anchor: Round,
+        conf: &MempoolConfig,
+    ) -> TaskResult<MempoolStatsOutput> {
+        // in case previous anchor was triggered directly - rounds are already dropped
+        for r_0 in (self.dag).drain_upto(last_anchor - conf.consensus.commit_history_rounds.get()) {
+            if r_0.round() > conf.genesis_round {
+                self.inspector.inspect(&r_0)?;
+            }
+        }
+        Ok(MempoolStatsOutput {
+            anchor_round: last_anchor,
+            data: self.inspector.take_stats(),
+        })
     }
 
     pub fn commit(&mut self, conf: &MempoolConfig) -> CommitterResult<Vec<AnchorData>> {
@@ -195,8 +216,6 @@ impl Committer {
         next: EnqueuedAnchor,
         conf: &MempoolConfig,
     ) -> Result<AnchorData, SyncError> {
-        // in case previous anchor was triggered directly - rounds are already dropped
-        (self.dag).drop_upto(next.anchor.round() - conf.consensus.commit_history_rounds.get());
         let uncommitted =
             match (self.dag).gather_uncommitted(self.full_history_bottom, &next.anchor, conf) {
                 Ok(uncommitted) => uncommitted,
@@ -485,6 +504,11 @@ mod test {
         } else {
             println!("committed");
         };
+        if let Some(last) = committed.last() {
+            committer
+                .remove_committed(last.anchor.round(), conf)
+                .expect("no task can be cancelled");
+        }
         committed
     }
 }
