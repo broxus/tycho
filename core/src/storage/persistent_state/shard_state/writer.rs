@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use smallvec::SmallVec;
-use tycho_block_util::block::DisplayShardPrefix;
+use tycho_block_util::block::{DisplayShardPrefix, ShardPrefix};
 use tycho_storage::fs::Dir;
 use tycho_storage::kv::refcount;
 use tycho_types::cell::{CellDescriptor, HashBytes};
@@ -19,7 +19,6 @@ use tycho_util::sync::CancellationFlag;
 
 use crate::storage::db::{CellStorageDb, CellsDbOps};
 use crate::storage::persistent_state::ShardStatePartsPrunedData;
-use crate::storage::shard_state::ShardPrefix;
 use crate::storage::{CellsDb, CellsPartDb};
 
 pub struct ShardStateWriter<'a> {

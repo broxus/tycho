@@ -24,7 +24,6 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
-pub(super) use self::cell_storage::ShardPrefix;
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
 use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CellsPartDb};
