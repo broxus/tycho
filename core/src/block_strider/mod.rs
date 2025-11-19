@@ -16,9 +16,11 @@ use tycho_util::metrics::HistogramGuard;
 pub use self::archive_handler::ArchiveHandler;
 pub use self::block_saver::BlockSaver;
 pub use self::provider::{
-    ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
-    BlockchainBlockProvider, BlockchainBlockProviderConfig, ChainBlockProvider, CheckProof,
-    EmptyBlockProvider, OptionalBlockStuff, ProofChecker, RetryConfig, StorageBlockProvider,
+    ArchiveBlockProvider, ArchiveBlockProviderConfig, ArchiveClient, ArchiveDownloadContext,
+    ArchiveResponse, ArchiveWriter, BlockProvider, BlockProviderExt, BlockchainBlockProvider,
+    BlockchainBlockProviderConfig, BoxBlockProvider, ChainBlockProvider, CheckProof,
+    CycleBlockProvider, EmptyBlockProvider, FoundArchive, HybridArchiveClient, IntoArchiveClient,
+    OptionalBlockStuff, ProofChecker, RetryBlockProvider, RetryConfig, StorageBlockProvider,
 };
 pub use self::starter::{
     ColdBootType, FileZerostateProvider, QueueStateHandler, Starter, StarterBuilder, StarterConfig,
@@ -35,8 +37,7 @@ pub use self::subscriber::{
     ArchiveSubscriber, ArchiveSubscriberContext, ArchiveSubscriberExt, BlockSubscriber,
     BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, DelayedTasks,
     DelayedTasksJoinHandle, DelayedTasksSpawner, GcSubscriber, ManualGcTrigger, MetricsSubscriber,
-    NoopSubscriber, PsCompletionSubscriber, PsSubscriber, StateSubscriber, StateSubscriberContext,
-    StateSubscriberExt,
+    NoopSubscriber, PsSubscriber, StateSubscriber, StateSubscriberContext, StateSubscriberExt,
 };
 use crate::storage::CoreStorage;
 

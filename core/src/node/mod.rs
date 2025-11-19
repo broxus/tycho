@@ -22,6 +22,8 @@ use crate::blockchain_rpc::{
 };
 use crate::global_config::{GlobalConfig, ZerostateId};
 use crate::overlay_client::{PublicOverlayClient, ValidatorsResolver};
+#[cfg(feature = "s3")]
+use crate::s3::S3Client;
 use crate::storage::{CoreStorage, CoreStorageConfig};
 
 mod config;
@@ -41,6 +43,9 @@ pub struct NodeBase {
     pub core_storage: CoreStorage,
 
     pub blockchain_rpc_client: BlockchainRpcClient,
+
+    #[cfg(feature = "s3")]
+    pub s3_client: Option<S3Client>,
 }
 
 impl NodeBase {
@@ -148,7 +153,11 @@ impl NodeBase {
 
     pub fn build_archive_block_provider(&self) -> ArchiveBlockProvider {
         ArchiveBlockProvider::new(
-            self.blockchain_rpc_client.clone(),
+            (
+                self.blockchain_rpc_client.clone(),
+                #[cfg(feature = "s3")]
+                self.s3_client.clone(),
+            ),
             self.core_storage.clone(),
             self.base_config.archive_block_provider.clone(),
         )
@@ -271,7 +280,7 @@ impl<'a> NodeBaseBuilder<'a, init::Step1> {
     }
 }
 
-impl NodeBaseBuilder<'_, init::Final> {
+impl<'a> NodeBaseBuilder<'a, init::Final> {
     pub fn build(self) -> Result<NodeBase> {
         let net = self.step.prev_step.prev_step.net;
         let store = self.step.prev_step.store;
@@ -288,6 +297,14 @@ impl NodeBaseBuilder<'_, init::Final> {
             storage_context: store.context,
             core_storage: store.core_storage,
             blockchain_rpc_client,
+            #[cfg(feature = "s3")]
+            s3_client: self
+                .base_config
+                .s3_client
+                .as_ref()
+                .map(S3Client::new)
+                .transpose()
+                .context("failed to create S3 client")?,
         })
     }
 }

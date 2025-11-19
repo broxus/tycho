@@ -6,6 +6,13 @@ pub mod overlay_client;
 pub mod proto;
 pub mod storage;
 
+#[cfg(feature = "s3")]
+pub mod s3;
+
+mod util {
+    pub(crate) mod downloader;
+}
+
 pub fn record_version_metric() {
     use std::sync::Once;
 

@@ -79,6 +79,7 @@ jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 deadlock-detection = ["parking_lot/deadlock_detection"]
 debug = ["tycho-consensus/test", "tycho-consensus/mock-feedback"]
 lto = ["weedb/lto"]
+s3 = ["tycho-core/s3"]
 
 [lints]
 workspace = true

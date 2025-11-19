@@ -14,6 +14,8 @@ use tycho_core::blockchain_rpc::{
 };
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::overlay_client::PublicOverlayClient;
+#[cfg(feature = "s3")]
+use tycho_core::s3::S3Client;
 use tycho_core::storage::CoreStorage;
 use tycho_crypto::ed25519;
 use tycho_network::{
@@ -105,6 +107,9 @@ pub struct Node<C> {
     run_handle: Option<tokio::task::JoinHandle<()>>,
 
     config: NodeConfig<C>,
+
+    #[cfg(feature = "s3")]
+    s3_client: Option<S3Client>,
 }
 
 impl<C> Node<C> {
@@ -223,6 +228,14 @@ impl<C> Node<C> {
             rpc_config: node_config.rpc,
             starter_config: node_config.starter,
             run_handle: None,
+
+            #[cfg(feature = "s3")]
+            s3_client: node_config
+                .s3_client
+                .as_ref()
+                .map(S3Client::new)
+                .transpose()
+                .context("failed to create S3 client")?,
         })
     }
 
@@ -394,6 +407,11 @@ impl<C> Node<C> {
 
     pub fn config(&self) -> &NodeConfig<C> {
         &self.config
+    }
+
+    #[cfg(feature = "s3")]
+    pub fn s3_client(&self) -> Option<&S3Client> {
+        self.s3_client.as_ref()
     }
 
     pub fn stop(&mut self) {

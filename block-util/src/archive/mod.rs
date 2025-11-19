@@ -30,6 +30,8 @@ pub struct Archive {
 }
 
 impl Archive {
+    pub const MAX_MC_BLOCKS_PER_ARCHIVE: u32 = 100;
+
     pub fn new<T>(data: T) -> Result<Self>
     where
         Bytes: From<T>,

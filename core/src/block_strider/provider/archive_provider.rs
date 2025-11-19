@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, btree_map};
 use std::io::Seek;
+use std::num::NonZeroU64;
+use std::pin::pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use bytesize::ByteSize;
 use futures_util::future::BoxFuture;
@@ -16,8 +20,11 @@ use tycho_storage::fs::MappedFile;
 use tycho_types::models::BlockId;
 
 use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
-use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive, PendingArchiveResponse};
+use crate::blockchain_rpc;
+use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::overlay_client::{Neighbour, PunishReason};
+#[cfg(feature = "s3")]
+use crate::s3::S3Client;
 use crate::storage::CoreStorage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +49,7 @@ pub struct ArchiveBlockProvider {
 
 impl ArchiveBlockProvider {
     pub fn new(
-        client: BlockchainRpcClient,
+        client: impl IntoArchiveClient,
         storage: CoreStorage,
         config: ArchiveBlockProviderConfig,
     ) -> Self {
@@ -50,7 +57,7 @@ impl ArchiveBlockProvider {
 
         Self {
             inner: Arc::new(Inner {
-                client,
+                client: client.into_archive_client(),
                 proof_checker,
 
                 known_archives: parking_lot::Mutex::new(Default::default()),
@@ -76,8 +83,10 @@ impl ArchiveBlockProvider {
                 tracing::error!(
                     "received archive does not contain mc block with seqno {next_mc_seqno}"
                 );
-                info.from.punish(PunishReason::Malicious);
                 this.remove_archive_if_same(archive_key, &info);
+                if let Some(from) = &info.from {
+                    from.punish(PunishReason::Malicious);
+                }
                 continue;
             };
 
@@ -89,7 +98,9 @@ impl ArchiveBlockProvider {
                 Err(e) => {
                     tracing::error!(archive_key, %block_id, "invalid archive entry: {e:?}");
                     this.remove_archive_if_same(archive_key, &info);
-                    info.from.punish(PunishReason::Malicious);
+                    if let Some(from) = &info.from {
+                        from.punish(PunishReason::Malicious);
+                    }
                 }
             }
         }
@@ -118,7 +129,9 @@ impl ArchiveBlockProvider {
                 Err(e) => {
                     tracing::error!(archive_key, %block_id, %mc_block_id, "invalid archive entry: {e:?}");
                     this.remove_archive_if_same(archive_key, &info);
-                    info.from.punish(PunishReason::Malicious);
+                    if let Some(from) = &info.from {
+                        from.punish(PunishReason::Malicious);
+                    }
                 }
             }
         }
@@ -153,7 +166,7 @@ impl ArchiveBlockProvider {
 struct Inner {
     storage: CoreStorage,
 
-    client: BlockchainRpcClient,
+    client: Arc<dyn ArchiveClient>,
     proof_checker: ProofChecker,
 
     known_archives: parking_lot::Mutex<ArchivesMap>,
@@ -258,9 +271,6 @@ impl Inner {
     }
 
     fn clear_outdated_archives(&self, bound: u32) {
-        // TODO: Move into archive stuff
-        const MAX_MC_PER_ARCHIVE: u32 = 100;
-
         let mut entries_remaining = 0usize;
         let mut entries_removed = 0usize;
 
@@ -273,7 +283,10 @@ impl Inner {
                     Some((last_mc_seqno, _)) => retain = *last_mc_seqno >= bound,
                 },
                 ArchiveSlot::Pending(task) => {
-                    retain = task.archive_key.saturating_add(MAX_MC_PER_ARCHIVE) >= bound;
+                    retain = task
+                        .archive_key
+                        .saturating_add(Archive::MAX_MC_BLOCKS_PER_ARCHIVE)
+                        >= bound;
                     if !retain {
                         task.abort_handle.abort();
                     }
@@ -304,12 +317,12 @@ enum ArchiveSlot {
 
 #[derive(Clone)]
 struct ArchiveInfo {
-    from: Neighbour,
+    from: Option<Neighbour>, // None for S3
     archive: Arc<Archive>,
 }
 
 struct ArchiveDownloader {
-    client: BlockchainRpcClient,
+    client: Arc<dyn ArchiveClient>,
     storage: CoreStorage,
     memory_threshold: ByteSize,
 }
@@ -359,54 +372,47 @@ impl ArchiveDownloader {
         }
     }
 
-    async fn try_download(&self, seqno: u32) -> Result<Option<ArchiveInfo>> {
-        let response = self.client.find_archive(seqno).await?;
-        let pending = match response {
-            PendingArchiveResponse::Found(pending) => pending,
-            PendingArchiveResponse::TooNew => return Ok(None),
+    async fn try_download(&self, mc_seqno: u32) -> Result<Option<ArchiveInfo>> {
+        let ctx = ArchiveDownloadContext {
+            storage: &self.storage,
+            memory_threshold: self.memory_threshold,
         };
-
-        let neighbour = pending.neighbour.clone();
-
-        let writer = self.get_archive_writer(&pending)?;
-        let writer = self.client.download_archive(pending, writer).await?;
+        let Some(found) = self.client.find_archive(mc_seqno, ctx).await? else {
+            return Ok(None);
+        };
+        let res = (found.download)().await?;
 
         let span = tracing::Span::current();
         tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
-            let bytes = writer.try_freeze()?;
+            let bytes = res.writer.try_freeze()?;
 
             let archive = match Archive::new(bytes) {
                 Ok(array) => array,
                 Err(e) => {
-                    neighbour.punish(PunishReason::Malicious);
+                    if let Some(neighbour) = res.neighbour {
+                        neighbour.punish(PunishReason::Malicious);
+                    }
                     return Err(e);
                 }
             };
 
             if let Err(e) = archive.check_mc_blocks_range() {
                 // TODO: Punish a bit less for missing mc blocks?
-                neighbour.punish(PunishReason::Malicious);
+                if let Some(neighbour) = res.neighbour {
+                    neighbour.punish(PunishReason::Malicious);
+                }
                 return Err(e);
             }
 
             Ok(ArchiveInfo {
                 archive: Arc::new(archive),
-                from: neighbour,
+                from: res.neighbour,
             })
         })
         .await?
         .map(Some)
-    }
-
-    fn get_archive_writer(&self, pending: &PendingArchive) -> Result<ArchiveWriter> {
-        Ok(if pending.size.get() > self.memory_threshold.as_u64() {
-            let file = self.storage.context().temp_files().unnamed_file().open()?;
-            ArchiveWriter::File(std::io::BufWriter::new(file))
-        } else {
-            ArchiveWriter::Bytes(BytesMut::new().writer())
-        })
     }
 }
 
@@ -462,7 +468,7 @@ impl BlockProvider for ArchiveBlockProvider {
     }
 }
 
-enum ArchiveWriter {
+pub enum ArchiveWriter {
     File(std::io::BufWriter<std::fs::File>),
     Bytes(bytes::buf::Writer<BytesMut>),
 }
@@ -508,6 +514,304 @@ impl std::io::Write for ArchiveWriter {
         match self {
             Self::File(writer) => writer.write_fmt(fmt),
             Self::Bytes(writer) => writer.write_fmt(fmt),
+        }
+    }
+}
+
+pub struct ArchiveResponse {
+    writer: ArchiveWriter,
+    neighbour: Option<Neighbour>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ArchiveDownloadContext<'a> {
+    pub storage: &'a CoreStorage,
+    pub memory_threshold: ByteSize,
+}
+
+impl<'a> ArchiveDownloadContext<'a> {
+    pub fn get_archive_writer(&self, size: NonZeroU64) -> Result<ArchiveWriter> {
+        Ok(if size.get() > self.memory_threshold.as_u64() {
+            let file = self.storage.context().temp_files().unnamed_file().open()?;
+            ArchiveWriter::File(std::io::BufWriter::new(file))
+        } else {
+            ArchiveWriter::Bytes(BytesMut::new().writer())
+        })
+    }
+
+    pub fn compute_archive_id(&self, mc_seqno: u32) -> Result<Option<u32>> {
+        const BLOCKS_PER_ARCHIVE: u32 = Archive::MAX_MC_BLOCKS_PER_ARCHIVE;
+
+        let storage = self.storage;
+
+        // Next block should not be too far in the future.
+        let last_mc_seqno = storage
+            .node_state()
+            .load_last_mc_block_id()
+            .context("no blocks applied yet")?
+            .seqno;
+        if mc_seqno > last_mc_seqno.saturating_add(BLOCKS_PER_ARCHIVE) {
+            return Ok(None);
+        }
+
+        // Archive id must be aligned to the latest key block id.
+        let prev_key_block_seqno = storage
+            .block_handle_storage()
+            .find_prev_key_block(mc_seqno)
+            .map(|handle| handle.id().seqno)
+            .unwrap_or_default();
+
+        // Key block causes the archive to be split earlier,
+        // after that archive sizes start all over again.
+        // Example:
+        // 001 101 201 301 401 <keyblock at 450> 451 551 651 751 ...
+        let archive_id_base = prev_key_block_seqno + 1;
+
+        let mut archive_id = mc_seqno;
+        if archive_id_base < mc_seqno {
+            // Example:
+            // archive_id_base = 151
+            // mc_seqno = 290
+            // archive_id = 290 - (290 - 151) % 100 = 251
+            archive_id -= (mc_seqno - archive_id_base) % BLOCKS_PER_ARCHIVE;
+        }
+
+        Ok(Some(archive_id))
+    }
+}
+
+pub trait IntoArchiveClient {
+    fn into_archive_client(self) -> Arc<dyn ArchiveClient>;
+}
+
+impl<T: ArchiveClient> IntoArchiveClient for (T,) {
+    #[inline]
+    fn into_archive_client(self) -> Arc<dyn ArchiveClient> {
+        Arc::new(self.0)
+    }
+}
+
+impl<T1: ArchiveClient, T2: ArchiveClient> IntoArchiveClient for (T1, Option<T2>) {
+    fn into_archive_client(self) -> Arc<dyn ArchiveClient> {
+        let (primary, secondary) = self;
+        match secondary {
+            None => Arc::new(primary),
+            Some(secondary) => Arc::new(HybridArchiveClient::new(primary, secondary)),
+        }
+    }
+}
+
+pub struct FoundArchive<'a> {
+    pub archive_id: u64,
+    pub download: Box<dyn FnOnce() -> BoxFuture<'a, Result<ArchiveResponse>> + Send + 'a>,
+}
+
+#[async_trait]
+pub trait ArchiveClient: Send + Sync + 'static {
+    async fn find_archive<'a>(
+        &'a self,
+        mc_seqno: u32,
+        ctx: ArchiveDownloadContext<'a>,
+    ) -> Result<Option<FoundArchive<'a>>>;
+}
+
+#[async_trait]
+impl ArchiveClient for BlockchainRpcClient {
+    async fn find_archive<'a>(
+        &'a self,
+        mc_seqno: u32,
+        ctx: ArchiveDownloadContext<'a>,
+    ) -> Result<Option<FoundArchive<'a>>> {
+        Ok(match self.find_archive(mc_seqno).await? {
+            blockchain_rpc::PendingArchiveResponse::Found(found) => Some(FoundArchive {
+                archive_id: found.id,
+                download: Box::new(move || {
+                    Box::pin(async move {
+                        let neighbour = found.neighbour.clone();
+
+                        let output = ctx.get_archive_writer(found.size)?;
+                        let writer = self.download_archive(found, output).await?;
+
+                        Ok(ArchiveResponse {
+                            writer,
+                            neighbour: Some(neighbour),
+                        })
+                    })
+                }),
+            }),
+            blockchain_rpc::PendingArchiveResponse::TooNew => None,
+        })
+    }
+}
+
+impl IntoArchiveClient for BlockchainRpcClient {
+    #[inline]
+    fn into_archive_client(self) -> Arc<dyn ArchiveClient> {
+        Arc::new(self)
+    }
+}
+
+#[cfg(feature = "s3")]
+#[async_trait]
+impl ArchiveClient for S3Client {
+    async fn find_archive<'a>(
+        &'a self,
+        mc_seqno: u32,
+        ctx: ArchiveDownloadContext<'a>,
+    ) -> Result<Option<FoundArchive<'a>>> {
+        let Some(archive_id) = ctx.compute_archive_id(mc_seqno)? else {
+            return Ok(None);
+        };
+        let Some(info) = self.get_archive_info(archive_id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(FoundArchive {
+            archive_id: info.archive_id as u64,
+            download: Box::new(move || {
+                Box::pin(async move {
+                    let output = ctx.get_archive_writer(info.size)?;
+                    let writer = self.download_archive(info.archive_id, output).await?;
+
+                    Ok(ArchiveResponse {
+                        writer,
+                        neighbour: None,
+                    })
+                })
+            }),
+        }))
+    }
+}
+
+#[cfg(feature = "s3")]
+impl IntoArchiveClient for S3Client {
+    #[inline]
+    fn into_archive_client(self) -> Arc<dyn ArchiveClient> {
+        Arc::new(self)
+    }
+}
+
+pub struct HybridArchiveClient<T1, T2> {
+    primary: T1,
+    secondary: T2,
+    prefer: HybridArchiveClientState,
+}
+
+impl<T1, T2> HybridArchiveClient<T1, T2> {
+    pub fn new(primary: T1, secondary: T2) -> Self {
+        Self {
+            primary,
+            secondary,
+            prefer: Default::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl<T1, T2> ArchiveClient for HybridArchiveClient<T1, T2>
+where
+    T1: ArchiveClient,
+    T2: ArchiveClient,
+{
+    async fn find_archive<'a>(
+        &'a self,
+        mc_seqno: u32,
+        ctx: ArchiveDownloadContext<'a>,
+    ) -> Result<Option<FoundArchive<'a>>> {
+        // FIXME: There should be a better way of writing this.
+
+        if let Some(prefer) = self.prefer.get() {
+            tracing::debug!(mc_seqno, ?prefer);
+            match prefer {
+                HybridArchiveClientPart::Primary => {
+                    let res = self.primary.find_archive(mc_seqno, ctx).await;
+                    if matches!(&res, Ok(Some(_))) {
+                        return res;
+                    }
+                }
+                HybridArchiveClientPart::Secondary => {
+                    let res = self.secondary.find_archive(mc_seqno, ctx).await;
+                    if matches!(&res, Ok(Some(_))) {
+                        return res;
+                    }
+                }
+            }
+        }
+
+        self.prefer.set(None);
+
+        let primary = pin!(self.primary.find_archive(mc_seqno, ctx));
+        let secondary = pin!(self.secondary.find_archive(mc_seqno, ctx));
+        match futures_util::future::select(primary, secondary).await {
+            futures_util::future::Either::Left((found, other)) => {
+                match found {
+                    Ok(Some(found)) => {
+                        self.prefer.set(Some(HybridArchiveClientPart::Primary));
+                        return Ok(Some(found));
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("primary archive client error: {e:?}"),
+                }
+                other.await.inspect(|res| {
+                    if res.is_some() {
+                        self.prefer.set(Some(HybridArchiveClientPart::Secondary));
+                    }
+                })
+            }
+            futures_util::future::Either::Right((found, other)) => {
+                match found {
+                    Ok(Some(found)) => {
+                        self.prefer.set(Some(HybridArchiveClientPart::Secondary));
+                        return Ok(Some(found));
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("secondary archive client error: {e:?}"),
+                }
+                other.await.inspect(|res| {
+                    if res.is_some() {
+                        self.prefer.set(Some(HybridArchiveClientPart::Primary));
+                    }
+                })
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct HybridArchiveClientState(AtomicU8);
+
+impl HybridArchiveClientState {
+    fn get(&self) -> Option<HybridArchiveClientPart> {
+        match self.0.load(Ordering::Acquire) {
+            1 => Some(HybridArchiveClientPart::Primary),
+            2 => Some(HybridArchiveClientPart::Secondary),
+            _ => None,
+        }
+    }
+
+    fn set(&self, value: Option<HybridArchiveClientPart>) {
+        let value = match value {
+            None => 0,
+            Some(HybridArchiveClientPart::Primary) => 1,
+            Some(HybridArchiveClientPart::Secondary) => 2,
+        };
+        self.0.store(value, Ordering::Release);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HybridArchiveClientPart {
+    Primary,
+    Secondary,
+}
+
+impl std::ops::Not for HybridArchiveClientPart {
+    type Output = Self;
+
+    #[inline]
+    fn not(self) -> Self::Output {
+        match self {
+            Self::Primary => Self::Secondary,
+            Self::Secondary => Self::Primary,
         }
     }
 }
