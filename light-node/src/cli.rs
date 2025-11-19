@@ -5,9 +5,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Args;
 use tycho_core::block_strider::{
-    BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt, BoxPsCompletionSubscriber,
-    ColdBootType, FileZerostateProvider, GcSubscriber, MetricsSubscriber,
-    PersistentBlockStriderState, Starter, StarterConfig,
+    BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt, ColdBootType,
+    FileZerostateProvider, GcSubscriber, MetricsSubscriber, PersistentBlockStriderState, Starter,
+    StarterConfig,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener,
@@ -109,7 +109,7 @@ pub struct Node<C> {
     config: NodeConfig<C>,
 
     #[cfg(feature = "s3")]
-    _s3_client: Option<S3Client>,
+    s3_client: Option<S3Client>,
 }
 
 impl<C> Node<C> {
@@ -229,7 +229,7 @@ impl<C> Node<C> {
             run_handle: None,
 
             #[cfg(feature = "s3")]
-            _s3_client: node_config
+            s3_client: node_config
                 .s3_client
                 .as_ref()
                 .map(S3Client::new)
@@ -242,12 +242,11 @@ impl<C> Node<C> {
         &self,
         boot_type: ColdBootType,
         import_zerostate: Option<Vec<PathBuf>>,
-        ps_completion_subscriber: Option<BoxPsCompletionSubscriber>,
     ) -> Result<BlockId> {
         self.wait_for_neighbours().await;
 
         let init_block_id = self
-            .boot(boot_type, import_zerostate, ps_completion_subscriber)
+            .boot(boot_type, import_zerostate)
             .await
             .context("failed to init node")?;
 
@@ -272,24 +271,17 @@ impl<C> Node<C> {
         &self,
         boot_type: ColdBootType,
         zerostates: Option<Vec<PathBuf>>,
-        ps_completion_subscriber: Option<BoxPsCompletionSubscriber>,
     ) -> Result<BlockId> {
         let node_state = self.storage.node_state();
 
         let last_mc_block_id = match node_state.load_last_mc_block_id() {
             Some(block_id) => block_id,
             None => {
-                let mut starter = Starter::builder()
+                Starter::builder()
                     .with_storage(self.storage.clone())
                     .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
                     .with_zerostate_id(self.zerostate)
-                    .with_config(self.starter_config.clone());
-
-                if let Some(handler) = ps_completion_subscriber {
-                    starter = starter.with_completion_subscriber(handler);
-                }
-
-                starter
+                    .with_config(self.starter_config.clone())
                     .build()
                     .cold_boot(boot_type, zerostates.map(FileZerostateProvider))
                     .await?
@@ -414,6 +406,11 @@ impl<C> Node<C> {
 
     pub fn config(&self) -> &NodeConfig<C> {
         &self.config
+    }
+
+    #[cfg(feature = "s3")]
+    pub fn s3_client(&self) -> Option<&S3Client> {
+        self.s3_client.as_ref()
     }
 
     pub fn stop(&mut self) {

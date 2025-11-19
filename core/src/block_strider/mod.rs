@@ -35,11 +35,9 @@ pub use self::state_applier::ShardStateApplier;
 pub use self::subscriber::test::PrintSubscriber;
 pub use self::subscriber::{
     ArchiveSubscriber, ArchiveSubscriberContext, ArchiveSubscriberExt, BlockSubscriber,
-    BlockSubscriberContext, BlockSubscriberExt, BoxPsCompletionSubscriber, ChainSubscriber,
-    DelayedTasks, DelayedTasksJoinHandle, DelayedTasksSpawner, GcSubscriber, ManualGcTrigger,
-    MetricsSubscriber, NoopSubscriber, PsCompletionContext, PsCompletionSubscriber,
-    PsCompletionSubscriberExt, PsSubscriber, PsSubscriberBuilder, StateSubscriber,
-    StateSubscriberContext, StateSubscriberExt,
+    BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, DelayedTasks,
+    DelayedTasksJoinHandle, DelayedTasksSpawner, GcSubscriber, ManualGcTrigger, MetricsSubscriber,
+    NoopSubscriber, PsSubscriber, StateSubscriber, StateSubscriberContext, StateSubscriberExt,
 };
 use crate::storage::CoreStorage;
 

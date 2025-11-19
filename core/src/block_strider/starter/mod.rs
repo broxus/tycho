@@ -13,8 +13,6 @@ use tycho_types::models::{
 };
 use tycho_util::serde_helpers;
 
-use super::PsCompletionSubscriber;
-use crate::block_strider::BoxPsCompletionSubscriber;
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
 use crate::storage::{CoreStorage, QueueStateReader};
@@ -29,12 +27,6 @@ pub struct StarterConfig {
     /// Default: None
     #[serde(with = "serde_helpers::humantime")]
     pub custom_boot_offset: Option<Duration>,
-
-    /// Choose the closest persistent state seqno to start from.
-    ///
-    /// Default: None
-    #[serde(default)]
-    pub start_from: Option<u32>,
 }
 
 pub struct StarterBuilder<
@@ -59,7 +51,6 @@ impl StarterBuilder {
         let (storage, blockchain_rpc_client, zerostate, config) = self.mandatory_fields;
         let BuilderFields {
             queue_state_handler,
-            completion_state_subscriber,
         } = self.optional_fields;
 
         Starter {
@@ -70,7 +61,6 @@ impl StarterBuilder {
                 config,
                 queue_state_handler: queue_state_handler
                     .unwrap_or_else(|| Box::new(ValidateQueueState)),
-                ps_compestion_subscriber: completion_state_subscriber,
             }),
         }
     }
@@ -131,21 +121,11 @@ impl<T> StarterBuilder<T> {
         }));
         self
     }
-
-    pub fn with_completion_subscriber<S: PsCompletionSubscriber>(mut self, subscriber: S) -> Self {
-        self.optional_fields.completion_state_subscriber =
-            Some(castaway::match_type!(subscriber, {
-                BoxPsCompletionSubscriber as handler => handler,
-                handler => BoxPsCompletionSubscriber::new(handler),
-            }));
-        self
-    }
 }
 
 #[derive(Default)]
 struct BuilderFields {
     queue_state_handler: Option<Box<dyn QueueStateHandler>>,
-    completion_state_subscriber: Option<BoxPsCompletionSubscriber>,
 }
 
 /// Bootstrapping utils.
@@ -197,7 +177,6 @@ struct StarterInner {
     zerostate: ZerostateId,
     config: StarterConfig,
     queue_state_handler: Box<dyn QueueStateHandler>,
-    ps_compestion_subscriber: Option<BoxPsCompletionSubscriber>,
 }
 
 pub trait ZerostateProvider {

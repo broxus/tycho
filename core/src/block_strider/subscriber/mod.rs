@@ -13,8 +13,8 @@ pub use self::futures::{
 };
 pub use self::gc_subscriber::{GcSubscriber, ManualGcTrigger};
 pub use self::metrics_subscriber::MetricsSubscriber;
-pub use self::ps_subscriber::{BoxPsCompletionSubscriber, PsSubscriber, PsSubscriberBuilder};
-use crate::storage::{CoreStorage, PersistentStateKind};
+pub use self::ps_subscriber::PsSubscriber;
+use crate::storage::CoreStorage;
 
 mod futures;
 mod gc_subscriber;
@@ -260,66 +260,6 @@ impl<B: ArchiveSubscriber> ArchiveSubscriberExt for B {
     }
 }
 
-// === trait PsCompletionSubscriber ===
-
-pub struct PsCompletionContext {
-    pub block_id: BlockId,
-    pub kind: PersistentStateKind,
-}
-
-pub trait PsCompletionSubscriber: Send + Sync + 'static {
-    type OnStatePersistedFut<'a>: Future<Output = Result<()>> + Send + 'a;
-
-    fn on_state_persisted<'a>(
-        &'a self,
-        cx: &'a PsCompletionContext,
-    ) -> Self::OnStatePersistedFut<'a>;
-}
-
-impl<T: PsCompletionSubscriber> PsCompletionSubscriber for Option<T> {
-    type OnStatePersistedFut<'a> = OptionHandleFut<T::OnStatePersistedFut<'a>>;
-
-    fn on_state_persisted<'a>(
-        &'a self,
-        cx: &'a PsCompletionContext,
-    ) -> Self::OnStatePersistedFut<'a> {
-        OptionHandleFut::<_>::from(self.as_ref().map(|s| s.on_state_persisted(cx)))
-    }
-}
-
-impl<T: PsCompletionSubscriber> PsCompletionSubscriber for Box<T> {
-    type OnStatePersistedFut<'a> = T::OnStatePersistedFut<'a>;
-
-    fn on_state_persisted<'a>(
-        &'a self,
-        cx: &'a PsCompletionContext,
-    ) -> Self::OnStatePersistedFut<'a> {
-        <T as PsCompletionSubscriber>::on_state_persisted(self, cx)
-    }
-}
-
-impl<T: PsCompletionSubscriber> PsCompletionSubscriber for Arc<T> {
-    type OnStatePersistedFut<'a> = T::OnStatePersistedFut<'a>;
-
-    fn on_state_persisted<'a>(
-        &'a self,
-        cx: &'a PsCompletionContext,
-    ) -> Self::OnStatePersistedFut<'a> {
-        <T as PsCompletionSubscriber>::on_state_persisted(self, cx)
-    }
-}
-
-pub trait PsCompletionSubscriberExt: Sized {
-    fn boxed(self) -> BoxPsCompletionSubscriber;
-}
-
-impl<S: PsCompletionSubscriber> PsCompletionSubscriberExt for S {
-    #[inline]
-    fn boxed(self) -> BoxPsCompletionSubscriber {
-        BoxPsCompletionSubscriber::new(self)
-    }
-}
-
 // === NoopSubscriber ===
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -350,17 +290,6 @@ impl StateSubscriber for NoopSubscriber {
     type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn handle_state(&self, _cx: &StateSubscriberContext) -> Self::HandleStateFut<'_> {
-        futures_util::future::ready(Ok(()))
-    }
-}
-
-impl PsCompletionSubscriber for NoopSubscriber {
-    type OnStatePersistedFut<'a> = futures_util::future::Ready<Result<()>>;
-
-    fn on_state_persisted<'a>(
-        &'a self,
-        _cx: &'a PsCompletionContext,
-    ) -> Self::OnStatePersistedFut<'a> {
         futures_util::future::ready(Ok(()))
     }
 }

@@ -1,61 +1,14 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::Result;
-use futures_util::future::{BoxFuture, FutureExt};
+use futures_util::future::BoxFuture;
 use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::RefMcStateHandle;
 
-use crate::block_strider::{
-    NoopSubscriber, PsCompletionContext, PsCompletionSubscriber, StateSubscriber,
-    StateSubscriberContext,
-};
-use crate::storage::{BlockHandle, CoreStorage, PersistentStateKind};
-
-/// A builder for [`PsSubscriber`].
-pub struct PsSubscriberBuilder {
-    storage: CoreStorage,
-    completion_subscriber: Option<BoxPsCompletionSubscriber>,
-}
-
-impl PsSubscriberBuilder {
-    pub fn new(storage: CoreStorage) -> Self {
-        Self {
-            storage,
-            completion_subscriber: None,
-        }
-    }
-
-    pub fn build(self) -> PsSubscriber {
-        let last_key_block_utime = Self::find_last_key_block_utime(&self.storage);
-        PsSubscriber {
-            inner: Arc::new(Inner {
-                last_key_block_utime: AtomicU32::new(last_key_block_utime),
-                storage: self.storage,
-                completion_subscriber: self
-                    .completion_subscriber
-                    .unwrap_or_else(|| BoxPsCompletionSubscriber::new(NoopSubscriber)),
-                prev_state_task: Default::default(),
-            }),
-        }
-    }
-
-    pub fn with_completion_subscriber<S: PsCompletionSubscriber>(
-        mut self,
-        completion_subscriber: S,
-    ) -> Self {
-        self.completion_subscriber = Some(BoxPsCompletionSubscriber::new(completion_subscriber));
-        self
-    }
-
-    fn find_last_key_block_utime(storage: &CoreStorage) -> u32 {
-        storage
-            .block_handle_storage()
-            .find_last_key_block()
-            .map_or(0, |handle| handle.gen_utime())
-    }
-}
+use crate::block_strider::{StateSubscriber, StateSubscriberContext};
+use crate::storage::{BlockHandle, CoreStorage};
 
 /// Persistent state subscriber.
 #[derive(Clone)]
@@ -64,8 +17,22 @@ pub struct PsSubscriber {
 }
 
 impl PsSubscriber {
-    pub fn builder(storage: CoreStorage) -> PsSubscriberBuilder {
-        PsSubscriberBuilder::new(storage)
+    pub fn new(storage: CoreStorage) -> Self {
+        let last_key_block_utime = Self::find_last_key_block_utime(&storage);
+        Self {
+            inner: Arc::new(Inner {
+                last_key_block_utime: AtomicU32::new(last_key_block_utime),
+                storage,
+                prev_state_task: Default::default(),
+            }),
+        }
+    }
+
+    fn find_last_key_block_utime(storage: &CoreStorage) -> u32 {
+        storage
+            .block_handle_storage()
+            .find_last_key_block()
+            .map_or(0, |handle| handle.gen_utime())
     }
 }
 
@@ -80,7 +47,6 @@ impl StateSubscriber for PsSubscriber {
 struct Inner {
     last_key_block_utime: AtomicU32,
     storage: CoreStorage,
-    completion_subscriber: BoxPsCompletionSubscriber,
     prev_state_task: tokio::sync::Mutex<Option<StorePersistentStateTask>>,
 }
 
@@ -181,12 +147,6 @@ impl Inner {
             persistent_states
                 .store_shard_state(mc_seqno, &block_handle, mc_state_handle.clone())
                 .await?;
-
-            let cx = PsCompletionContext {
-                block_id,
-                kind: PersistentStateKind::Shard,
-            };
-            self.completion_subscriber.on_state_persisted(&cx).await?;
         }
 
         // NOTE: We intentionally store the masterchain state last to ensure that
@@ -195,12 +155,6 @@ impl Inner {
         persistent_states
             .store_shard_state(mc_seqno, &mc_block_handle, mc_state_handle)
             .await?;
-
-        let cx = PsCompletionContext {
-            block_id: *mc_block_handle.id(),
-            kind: PersistentStateKind::Shard,
-        };
-        self.completion_subscriber.on_state_persisted(&cx).await?;
 
         Ok(())
     }
@@ -246,23 +200,11 @@ impl Inner {
             persistent_states
                 .store_queue_state(mc_seqno, &block_handle, block)
                 .await?;
-
-            let cx = PsCompletionContext {
-                block_id: *block_handle.id(),
-                kind: PersistentStateKind::Queue,
-            };
-            self.completion_subscriber.on_state_persisted(&cx).await?;
         }
 
         persistent_states
             .store_queue_state(mc_seqno, &mc_block_handle, mc_block)
             .await?;
-
-        let cx = PsCompletionContext {
-            block_id: *mc_block_handle.id(),
-            kind: PersistentStateKind::Queue,
-        };
-        self.completion_subscriber.on_state_persisted(&cx).await?;
 
         Ok(())
     }
@@ -308,140 +250,5 @@ impl StorePersistentStateTask {
         }
 
         false
-    }
-}
-
-pub struct BoxPsCompletionSubscriber {
-    data: AtomicPtr<()>,
-    vtable: &'static Vtable,
-}
-
-impl BoxPsCompletionSubscriber {
-    pub fn new<S: PsCompletionSubscriber>(provider: S) -> Self {
-        let ptr = Box::into_raw(Box::new(provider));
-
-        Self {
-            data: AtomicPtr::new(ptr.cast()),
-            vtable: const { Vtable::new::<S>() },
-        }
-    }
-}
-
-impl PsCompletionSubscriber for BoxPsCompletionSubscriber {
-    type OnStatePersistedFut<'a> = OnStatePersistedFut<'a>;
-
-    fn on_state_persisted<'a>(
-        &'a self,
-        cx: &'a PsCompletionContext,
-    ) -> Self::OnStatePersistedFut<'a> {
-        unsafe { (self.vtable.on_state_persisted)(&self.data, cx) }
-    }
-}
-
-impl Drop for BoxPsCompletionSubscriber {
-    fn drop(&mut self) {
-        unsafe { (self.vtable.drop)(&mut self.data) }
-    }
-}
-
-// Vtable must enforce this behavior
-unsafe impl Send for BoxPsCompletionSubscriber {}
-unsafe impl Sync for BoxPsCompletionSubscriber {}
-
-struct Vtable {
-    on_state_persisted: OnStatePersistedFn,
-    drop: DropFn,
-}
-
-impl Vtable {
-    const fn new<S: PsCompletionSubscriber>() -> &'static Self {
-        &Self {
-            on_state_persisted: |ptr, cx| {
-                let subscriber = unsafe { &*ptr.load(Ordering::Relaxed).cast::<S>() };
-                subscriber.on_state_persisted(cx).boxed()
-            },
-            drop: |ptr| {
-                drop(unsafe { Box::<S>::from_raw(ptr.get_mut().cast::<S>()) });
-            },
-        }
-    }
-}
-
-type OnStatePersistedFn =
-    for<'a> unsafe fn(&AtomicPtr<()>, &'a PsCompletionContext) -> OnStatePersistedFut<'a>;
-type DropFn = unsafe fn(&mut AtomicPtr<()>);
-
-type OnStatePersistedFut<'a> = BoxFuture<'a, Result<()>>;
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
-
-    use anyhow::Result;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn boxed_subscriber_works() -> Result<()> {
-        struct SubscriberState {
-            persisted_called: AtomicUsize,
-            dropped: AtomicUsize,
-        }
-
-        struct TestSubscriber {
-            state: Arc<SubscriberState>,
-        }
-
-        impl Drop for TestSubscriber {
-            fn drop(&mut self) {
-                self.state.dropped.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        impl PsCompletionSubscriber for TestSubscriber {
-            type OnStatePersistedFut<'a> = futures_util::future::Ready<Result<()>>;
-
-            fn on_state_persisted<'a>(
-                &'a self,
-                _cx: &'a PsCompletionContext,
-            ) -> Self::OnStatePersistedFut<'a> {
-                self.state.persisted_called.fetch_add(1, Ordering::Relaxed);
-                futures_util::future::ready(Ok(()))
-            }
-        }
-
-        let state = Arc::new(SubscriberState {
-            persisted_called: AtomicUsize::new(0),
-            dropped: AtomicUsize::new(0),
-        });
-        let boxed = BoxPsCompletionSubscriber::new(TestSubscriber {
-            state: state.clone(),
-        });
-
-        assert_eq!(state.persisted_called.load(Ordering::Acquire), 0);
-        assert_eq!(state.dropped.load(Ordering::Acquire), 0);
-
-        let cx = PsCompletionContext {
-            block_id: Default::default(),
-            kind: PersistentStateKind::Shard,
-        };
-        assert!(boxed.on_state_persisted(&cx).await.is_ok());
-        assert_eq!(state.persisted_called.load(Ordering::Acquire), 1);
-        assert_eq!(state.dropped.load(Ordering::Acquire), 0);
-
-        assert!(boxed.on_state_persisted(&cx).await.is_ok());
-        assert_eq!(state.persisted_called.load(Ordering::Acquire), 2);
-        assert_eq!(state.dropped.load(Ordering::Acquire), 0);
-
-        assert_eq!(Arc::strong_count(&state), 2);
-        drop(boxed);
-
-        assert_eq!(state.persisted_called.load(Ordering::Acquire), 2);
-        assert_eq!(state.dropped.load(Ordering::Acquire), 1);
-
-        assert_eq!(Arc::strong_count(&state), 1);
-
-        Ok(())
     }
 }

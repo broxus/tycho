@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
     .with_fallback(archive_block_provider.clone());
 
     let init_block_id = node
-        .init(ColdBootType::LatestPersistent, import_zerostate, None)
+        .init(ColdBootType::LatestPersistent, import_zerostate)
         .await?;
     node.update_validator_set(&init_block_id).await?;
 

@@ -23,8 +23,6 @@ pub struct S3ClientConfig {
     pub endpoint: String,
 
     /// The bucket name.
-    ///
-    /// Default: "bucket".
     pub bucket: String,
 
     /// Archive prefix before its id (Default: empty)
