@@ -610,7 +610,7 @@ impl ProofChecker {
             }
         }
 
-        meta.save_utime = tycho_util::time::now_millis() as u32;
+        meta.save_utime = tycho_util::time::now_millis();
 
         if store_on_success {
             // Store proof

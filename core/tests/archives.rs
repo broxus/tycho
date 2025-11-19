@@ -182,7 +182,7 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
                 is_key_block: zerostate.block_id().is_masterchain(),
                 gen_utime: zerostate.state().gen_utime,
                 ref_by_mc_seqno: 0,
-                save_utime: tycho_util::time::now_millis() as u32,
+                save_utime: tycho_util::time::now_millis(),
             });
 
     let shard_states = storage.shard_state_storage();
@@ -228,7 +228,7 @@ async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> R
                     is_key_block: state.block_id().is_masterchain(),
                     gen_utime,
                     ref_by_mc_seqno: 0,
-                    save_utime: tycho_util::time::now_millis() as u32,
+                    save_utime: tycho_util::time::now_millis(),
                 });
 
         storage

@@ -403,13 +403,13 @@ fn block_handle_merge(
     current_value: Option<&[u8]>,
     operands: &MergeOperands,
 ) -> Option<Vec<u8>> {
-    let mut value = [0u8; 16];
+    let mut value = [0u8; 20];
     if let Some(current_value) = current_value {
         value.copy_from_slice(current_value);
     }
 
     for operand in operands {
-        assert_eq!(operand.len(), 16);
+        assert_eq!(operand.len(), 20);
         for (a, b) in std::iter::zip(&mut value, operand) {
             *a |= *b;
         }

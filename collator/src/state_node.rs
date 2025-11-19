@@ -472,7 +472,7 @@ impl StateNodeAdapterStdImpl {
                     is_key_block: block_info.key_block,
                     gen_utime: block_info.gen_utime,
                     ref_by_mc_seqno: block.ref_by_mc_seqno,
-                    save_utime: tycho_util::time::now_millis() as u32,
+                    save_utime: tycho_util::time::now_millis(),
                 }),
             )
             .await?;

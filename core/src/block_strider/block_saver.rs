@@ -96,7 +96,7 @@ impl BlockSaver {
                 is_key_block: info.key_block,
                 gen_utime: info.gen_utime,
                 ref_by_mc_seqno: mc_block_id.seqno,
-                save_utime: tycho_util::time::now_millis() as u32,
+                save_utime: tycho_util::time::now_millis(),
             })
             .await?;
 

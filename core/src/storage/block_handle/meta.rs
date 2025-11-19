@@ -8,7 +8,7 @@ pub struct NewBlockMeta {
     pub is_key_block: bool,
     pub gen_utime: u32,
     pub ref_by_mc_seqno: u32,
-    pub save_utime: u32,
+    pub save_utime: u64,
 }
 
 impl NewBlockMeta {
@@ -17,7 +17,7 @@ impl NewBlockMeta {
             is_key_block,
             gen_utime,
             ref_by_mc_seqno: 0,
-            save_utime: tycho_util::time::now_millis() as u32,
+            save_utime: tycho_util::time::now_millis(),
         }
     }
 }
@@ -26,7 +26,7 @@ impl NewBlockMeta {
 pub struct BlockMeta {
     flags: AtomicU64,
     gen_utime: u32,
-    save_utime: u32,
+    save_utime: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -34,7 +34,7 @@ pub struct LoadedBlockMeta {
     pub flags: BlockFlags,
     pub mc_ref_seqno: u32,
     pub gen_utime: u32,
-    pub save_utime: u32,
+    pub save_utime: u64,
 }
 
 impl BlockMeta {
@@ -78,7 +78,7 @@ impl BlockMeta {
         self.gen_utime
     }
 
-    pub fn save_utime(&self) -> u32 {
+    pub fn save_utime(&self) -> u64 {
         self.save_utime
     }
 
@@ -96,8 +96,8 @@ impl BlockMeta {
 impl StoredValue for BlockMeta {
     /// 8 bytes flags
     /// 4 bytes `gen_utime`
-    /// 4 bytes `save_utime`
-    const SIZE_HINT: usize = 8 + 4 + 4;
+    /// 8 bytes `save_utime`
+    const SIZE_HINT: usize = 8 + 4 + 8;
 
     type OnStackSlice = [u8; Self::SIZE_HINT];
 
@@ -115,7 +115,7 @@ impl StoredValue for BlockMeta {
         assert_eq!(reader.len(), Self::SIZE_HINT, "invalid block meta");
         let flags = reader.get_u64_le();
         let gen_utime = reader.get_u32_le();
-        let save_utime = reader.get_u32_le();
+        let save_utime = reader.get_u64_le();
 
         Self {
             flags: AtomicU64::new(flags),
@@ -165,7 +165,7 @@ mod tests {
             is_key_block: true,
             gen_utime: 123456789,
             ref_by_mc_seqno: 4311231,
-            save_utime: tycho_util::time::now_millis() as u32,
+            save_utime: tycho_util::time::now_millis(),
         });
         assert_eq!(meta.flags(), BlockFlags::IS_KEY_BLOCK);
         assert_eq!(meta.ref_by_mc_seqno(), 4311231);

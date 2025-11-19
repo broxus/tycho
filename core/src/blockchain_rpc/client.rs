@@ -649,11 +649,11 @@ pub struct PendingPersistentState {
 }
 
 pub struct BlockDataFull {
-    pub save_utime: u32,
     pub block_id: BlockId,
     pub block_data: Bytes,
     pub proof_data: Bytes,
     pub queue_diff_data: Bytes,
+    pub save_utime: u64,
 }
 
 pub struct BlockDataFullWithNeighbour {
