@@ -5,9 +5,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Args;
 use tycho_core::block_strider::{
-    BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt, ColdBootType,
-    FileZerostateProvider, GcSubscriber, MetricsSubscriber, PersistentBlockStriderState,
-    PsCompletionHandler, Starter, StarterConfig,
+    BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt, BoxPsCompletionSubscriber,
+    ColdBootType, FileZerostateProvider, GcSubscriber, MetricsSubscriber,
+    PersistentBlockStriderState, Starter, StarterConfig,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener,
@@ -242,12 +242,12 @@ impl<C> Node<C> {
         &self,
         boot_type: ColdBootType,
         import_zerostate: Option<Vec<PathBuf>>,
-        completion_state_handler: Option<Box<dyn PsCompletionHandler>>,
+        ps_completion_subscriber: Option<BoxPsCompletionSubscriber>,
     ) -> Result<BlockId> {
         self.wait_for_neighbours().await;
 
         let init_block_id = self
-            .boot(boot_type, import_zerostate, completion_state_handler)
+            .boot(boot_type, import_zerostate, ps_completion_subscriber)
             .await
             .context("failed to init node")?;
 
@@ -272,7 +272,7 @@ impl<C> Node<C> {
         &self,
         boot_type: ColdBootType,
         zerostates: Option<Vec<PathBuf>>,
-        completion_state_handler: Option<Box<dyn PsCompletionHandler>>,
+        ps_completion_subscriber: Option<BoxPsCompletionSubscriber>,
     ) -> Result<BlockId> {
         let node_state = self.storage.node_state();
 
@@ -285,8 +285,8 @@ impl<C> Node<C> {
                     .with_zerostate_id(self.zerostate)
                     .with_config(self.starter_config.clone());
 
-                if let Some(handler) = completion_state_handler {
-                    starter = starter.with_completion_state_handler(handler);
+                if let Some(handler) = ps_completion_subscriber {
+                    starter = starter.with_completion_subscriber(handler);
                 }
 
                 starter

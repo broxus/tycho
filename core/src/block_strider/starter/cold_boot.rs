@@ -18,7 +18,7 @@ use tycho_util::futures::JoinTask;
 use tycho_util::sync::rayon_run;
 use tycho_util::time::now_sec;
 
-use super::{ColdBootType, PsCompletionHandler, StarterInner, ZerostateProvider};
+use super::{ColdBootType, PsCompletionSubscriber, StarterInner, ZerostateProvider};
 use crate::block_strider::{CheckProof, ProofChecker, PsCompletionContext};
 use crate::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::PunishReason;
@@ -462,11 +462,10 @@ impl StarterInner {
                 .await?;
 
             let cx = PsCompletionContext {
-                block_id: handle.id(),
-                storage: &self.storage,
+                block_id: *handle.id(),
                 kind: PersistentStateKind::Shard,
             };
-            self.completion_state_handler
+            self.ps_compestion_subscriber
                 .on_state_persisted(&cx)
                 .await?;
         }
@@ -715,11 +714,10 @@ impl StarterInner {
                 try_save_persistent(handle, from).await?;
 
                 let cx = PsCompletionContext {
-                    block_id: handle.id(),
+                    block_id: *handle.id(),
                     kind: PersistentStateKind::Shard,
-                    storage: &self.storage,
                 };
-                self.completion_state_handler
+                self.ps_compestion_subscriber
                     .on_state_persisted(&cx)
                     .await?;
             }
@@ -772,11 +770,10 @@ impl StarterInner {
             try_save_persistent(&block_handle, from).await?;
 
             let cx = PsCompletionContext {
-                block_id: block_handle.id(),
+                block_id: *block_handle.id(),
                 kind: PersistentStateKind::Shard,
-                storage: &self.storage,
             };
-            self.completion_state_handler
+            self.ps_compestion_subscriber
                 .on_state_persisted(&cx)
                 .await?;
 
@@ -846,11 +843,10 @@ impl StarterInner {
                 .with_context(|| "failed to store persistent queue state")?;
 
             let cx = PsCompletionContext {
-                block_id: block_handle.id(),
+                block_id: *block_handle.id(),
                 kind: PersistentStateKind::Queue,
-                storage: &self.storage,
             };
-            self.completion_state_handler
+            self.ps_compestion_subscriber
                 .on_state_persisted(&cx)
                 .await?;
 

@@ -13,7 +13,8 @@ use tycho_types::models::{
 };
 use tycho_util::serde_helpers;
 
-use crate::block_strider::PsCompletionContext;
+use super::PsCompletionSubscriber;
+use crate::block_strider::BoxPsCompletionSubscriber;
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
 use crate::storage::{CoreStorage, QueueStateReader};
@@ -69,8 +70,7 @@ impl StarterBuilder {
                 config,
                 queue_state_handler: queue_state_handler
                     .unwrap_or_else(|| Box::new(ValidateQueueState)),
-                completion_state_handler: completion_state_subscriber
-                    .unwrap_or_else(|| Box::new(PsCompletionNoop)),
+                ps_compestion_subscriber: completion_state_subscriber,
             }),
         }
     }
@@ -132,11 +132,12 @@ impl<T> StarterBuilder<T> {
         self
     }
 
-    pub fn with_completion_state_handler<H: PsCompletionHandler>(mut self, handler: H) -> Self {
-        self.optional_fields.completion_state_subscriber = Some(castaway::match_type!(handler, {
-            Box<dyn PsCompletionHandler> as handler => handler,
-            handler => Box::new(handler),
-        }));
+    pub fn with_completion_subscriber<S: PsCompletionSubscriber>(mut self, subscriber: S) -> Self {
+        self.optional_fields.completion_state_subscriber =
+            Some(castaway::match_type!(subscriber, {
+                BoxPsCompletionSubscriber as handler => handler,
+                handler => BoxPsCompletionSubscriber::new(handler),
+            }));
         self
     }
 }
@@ -144,7 +145,7 @@ impl<T> StarterBuilder<T> {
 #[derive(Default)]
 struct BuilderFields {
     queue_state_handler: Option<Box<dyn QueueStateHandler>>,
-    completion_state_subscriber: Option<Box<dyn PsCompletionHandler>>,
+    completion_state_subscriber: Option<BoxPsCompletionSubscriber>,
 }
 
 /// Bootstrapping utils.
@@ -196,7 +197,7 @@ struct StarterInner {
     zerostate: ZerostateId,
     config: StarterConfig,
     queue_state_handler: Box<dyn QueueStateHandler>,
-    completion_state_handler: Box<dyn PsCompletionHandler>,
+    ps_compestion_subscriber: Option<BoxPsCompletionSubscriber>,
 }
 
 pub trait ZerostateProvider {
@@ -328,34 +329,5 @@ impl QueueStateHandler for ValidateQueueState {
             reader.finish()
         })
         .await?
-    }
-}
-
-#[async_trait::async_trait]
-pub trait PsCompletionHandler: Send + Sync + 'static {
-    async fn on_state_persisted(&self, cx: &PsCompletionContext<'_>) -> Result<()>;
-}
-
-#[async_trait::async_trait]
-impl<T: PsCompletionHandler + ?Sized> PsCompletionHandler for Arc<T> {
-    async fn on_state_persisted(&self, cx: &PsCompletionContext<'_>) -> Result<()> {
-        T::on_state_persisted(self, cx).await
-    }
-}
-
-#[async_trait::async_trait]
-impl<T: PsCompletionHandler + ?Sized> PsCompletionHandler for Box<T> {
-    async fn on_state_persisted(&self, cx: &PsCompletionContext<'_>) -> Result<()> {
-        T::on_state_persisted(self, cx).await
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct PsCompletionNoop;
-
-#[async_trait::async_trait]
-impl PsCompletionHandler for PsCompletionNoop {
-    async fn on_state_persisted(&self, _cx: &PsCompletionContext<'_>) -> Result<()> {
-        Ok(())
     }
 }
