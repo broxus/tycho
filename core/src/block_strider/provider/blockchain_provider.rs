@@ -144,18 +144,24 @@ impl BlockchainBlockProvider {
                                     .await;
 
                                 if let Some(Ok(block)) = &parsed {
-                                    let block_info = block.data.block().info.load().unwrap();
-
-                                    let block_utime = block_info.gen_utime as u64 * 1000
-                                        + block_info.gen_utime_ms as u64;
+                                    // let block_info = block.data.block().info.load().unwrap();
+                                    //
+                                    // let block_utime = block_info.gen_utime as u64 * 1000
+                                    //     + block_info.gen_utime_ms as u64;
 
                                     let now = tycho_util::time::now_millis();
                                     let diff = (now as i64) - (save_utime as i64);
 
                                     let labels = [("workchain", "-1")];
 
-                                    metrics::gauge!("tycho_client_block_time_diff", &labels)
+                                    metrics::gauge!("tycho_client_block_diff_time", &labels)
                                         .set(diff as f64);
+
+                                    metrics::gauge!("tycho_client_block_now_time", &labels)
+                                        .set(now as f64);
+
+                                    metrics::gauge!("tycho_client_block_save_time", &labels)
+                                        .set(save_utime as f64);
 
                                     metrics::gauge!("tycho_client_request_time", &labels)
                                         .set(start.elapsed().as_millis() as f64);
