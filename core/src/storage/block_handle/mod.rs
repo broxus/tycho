@@ -392,6 +392,7 @@ mod tests {
             is_key_block: false,
             gen_utime: 123,
             ref_by_mc_seqno: 456,
+            save_utime: tycho_util::time::now_millis() as u32,
         };
 
         {

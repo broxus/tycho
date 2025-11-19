@@ -535,10 +535,11 @@ impl ProofChecker {
         anyhow::ensure!(is_masterchain ^ proof.is_link(), "unexpected proof type");
 
         let (virt_block, virt_block_info) = proof.pre_check_block_proof()?;
-        let meta = NewBlockMeta {
+        let mut meta = NewBlockMeta {
             is_key_block: virt_block_info.key_block,
             gen_utime: virt_block_info.gen_utime,
             ref_by_mc_seqno: mc_block_id.seqno,
+            save_utime: 0,
         };
 
         let block_storage = self.storage.block_storage();
@@ -608,6 +609,8 @@ impl ProofChecker {
                 )?;
             }
         }
+
+        meta.save_utime = tycho_util::time::now_millis() as u32;
 
         if store_on_success {
             // Store proof

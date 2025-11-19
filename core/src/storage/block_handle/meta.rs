@@ -8,6 +8,7 @@ pub struct NewBlockMeta {
     pub is_key_block: bool,
     pub gen_utime: u32,
     pub ref_by_mc_seqno: u32,
+    pub save_utime: u32,
 }
 
 impl NewBlockMeta {
@@ -16,6 +17,7 @@ impl NewBlockMeta {
             is_key_block,
             gen_utime,
             ref_by_mc_seqno: 0,
+            save_utime: tycho_util::time::now_millis() as u32,
         }
     }
 }
@@ -24,6 +26,7 @@ impl NewBlockMeta {
 pub struct BlockMeta {
     flags: AtomicU64,
     gen_utime: u32,
+    save_utime: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -31,6 +34,7 @@ pub struct LoadedBlockMeta {
     pub flags: BlockFlags,
     pub mc_ref_seqno: u32,
     pub gen_utime: u32,
+    pub save_utime: u32,
 }
 
 impl BlockMeta {
@@ -47,6 +51,7 @@ impl BlockMeta {
                 } | data.ref_by_mc_seqno as u64,
             ),
             gen_utime: data.gen_utime,
+            save_utime: data.save_utime,
         }
     }
 
@@ -56,6 +61,7 @@ impl BlockMeta {
             flags: BlockFlags::from_bits_retain((flags >> BLOCK_FLAGS_OFFSET) as u32),
             mc_ref_seqno: flags as u32,
             gen_utime: self.gen_utime,
+            save_utime: self.save_utime,
         }
     }
 
@@ -72,6 +78,10 @@ impl BlockMeta {
         self.gen_utime
     }
 
+    pub fn save_utime(&self) -> u32 {
+        self.save_utime
+    }
+
     pub fn add_flags(&self, flags: BlockFlags) -> bool {
         let flags = (flags.bits() as u64) << BLOCK_FLAGS_OFFSET;
         self.flags.fetch_or(flags, Ordering::Release) & flags != flags
@@ -86,7 +96,8 @@ impl BlockMeta {
 impl StoredValue for BlockMeta {
     /// 8 bytes flags
     /// 4 bytes `gen_utime`
-    const SIZE_HINT: usize = 8 + 4;
+    /// 4 bytes `save_utime`
+    const SIZE_HINT: usize = 8 + 4 + 4;
 
     type OnStackSlice = [u8; Self::SIZE_HINT];
 
@@ -94,6 +105,7 @@ impl StoredValue for BlockMeta {
         let flags = self.flags.load(Ordering::Acquire);
         buffer.write_raw_slice(&flags.to_le_bytes());
         buffer.write_raw_slice(&self.gen_utime.to_le_bytes());
+        buffer.write_raw_slice(&self.save_utime.to_le_bytes());
     }
 
     fn deserialize(reader: &mut &[u8]) -> Self
@@ -103,10 +115,12 @@ impl StoredValue for BlockMeta {
         assert_eq!(reader.len(), Self::SIZE_HINT, "invalid block meta");
         let flags = reader.get_u64_le();
         let gen_utime = reader.get_u32_le();
+        let save_utime = reader.get_u32_le();
 
         Self {
             flags: AtomicU64::new(flags),
             gen_utime,
+            save_utime,
         }
     }
 }
@@ -151,6 +165,7 @@ mod tests {
             is_key_block: true,
             gen_utime: 123456789,
             ref_by_mc_seqno: 4311231,
+            save_utime: tycho_util::time::now_millis() as u32,
         });
         assert_eq!(meta.flags(), BlockFlags::IS_KEY_BLOCK);
         assert_eq!(meta.ref_by_mc_seqno(), 4311231);

@@ -947,6 +947,7 @@ impl CollatorStdImpl {
                 is_key_block,
                 gen_utime: finalized.collation_data.gen_utime,
                 ref_by_mc_seqno: finalized.block_candidate.ref_by_mc_seqno,
+                save_utime: tycho_util::time::now_millis() as u32,
             };
             let adapter = self.state_node_adapter.clone();
             let new_state_root = finalized.new_state_root.clone();

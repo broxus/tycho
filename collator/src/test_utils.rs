@@ -64,6 +64,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(CoreStorage, tempfile::Te
         is_key_block: mc_state_extra.after_key_block,
         gen_utime: master_state_stuff.state().gen_utime,
         ref_by_mc_seqno: master_block_id.seqno,
+        save_utime: tycho_util::time::now_millis() as u32,
     };
     let (handle, _) = storage
         .block_handle_storage()
@@ -143,6 +144,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(CoreStorage, tempfile::Te
                     is_key_block: false,
                     gen_utime: shard_state_stuff.state().gen_utime,
                     ref_by_mc_seqno: master_block_id.seqno,
+                    save_utime: tycho_util::time::now_millis() as u32,
                 });
 
         shard_states

@@ -25,6 +25,7 @@ pub(crate) async fn init_storage() -> Result<(CoreStorage, TempDir)> {
                 is_key_block: zerostate.block_id().is_masterchain(),
                 gen_utime: zerostate.state().gen_utime,
                 ref_by_mc_seqno: 0,
+                save_utime: tycho_util::time::now_millis() as u32,
             });
 
     storage
@@ -44,6 +45,7 @@ pub(crate) async fn init_storage() -> Result<(CoreStorage, TempDir)> {
             is_key_block: info.key_block,
             gen_utime: info.gen_utime,
             ref_by_mc_seqno: block_id.seqno,
+            save_utime: tycho_util::time::now_millis() as u32,
         };
 
         let block_result = blocks

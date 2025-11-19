@@ -67,6 +67,7 @@ blockchain.blockFull.found
     block:blockchain.blockData
     proof:bytes
     queue_diff:bytes
+    save_utime:int
     = blockchain.BlockFull;
 
 /**

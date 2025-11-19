@@ -642,6 +642,7 @@ impl<B> Inner<B> {
             block,
             proof: Bytes::from_owner(proof?),
             queue_diff: Bytes::from_owner(queue_diff?),
+            save_utime: handle.meta().save_utime(),
         })
     }
 

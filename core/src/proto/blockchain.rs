@@ -36,6 +36,7 @@ pub enum BlockFull {
         block: BlockData,
         proof: Bytes,
         queue_diff: Bytes,
+        save_utime: u32,
     },
     #[tl(id = "blockchain.blockFull.notFound")]
     NotFound,

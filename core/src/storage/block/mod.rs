@@ -601,6 +601,7 @@ mod tests {
                 is_key_block: shard.is_masterchain() && seqno == 0,
                 gen_utime: 0,
                 ref_by_mc_seqno: seqno,
+                save_utime: tycho_util::time::now_millis() as u32,
             };
 
             let store_block_data = || {
@@ -707,6 +708,7 @@ mod tests {
                     is_key_block: shard.is_masterchain() && seqno == 0,
                     gen_utime: 0,
                     ref_by_mc_seqno: seqno,
+                    save_utime: tycho_util::time::now_millis() as u32,
                 });
                 let lock = handle.block_data_lock().write().await;
 

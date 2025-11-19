@@ -975,6 +975,7 @@ mod test {
             is_key_block: false,
             gen_utime: 1000000,
             ref_by_mc_seqno: block_id.seqno,
+            save_utime: tycho_util::time::now_millis() as u32,
         });
         handle.meta().add_flags(flags);
         handle

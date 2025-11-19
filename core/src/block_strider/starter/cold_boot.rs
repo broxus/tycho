@@ -441,6 +441,7 @@ impl StarterInner {
                     is_key_block: state.block_id().is_masterchain(),
                     gen_utime,
                     ref_by_mc_seqno: 0,
+                    save_utime: tycho_util::time::now_millis() as u32,
                 });
 
             let stored = state_storage
@@ -747,6 +748,7 @@ impl StarterInner {
                         is_key_block: block_id.is_masterchain(),
                         gen_utime: state.as_ref().gen_utime,
                         ref_by_mc_seqno: mc_block_id.seqno,
+                        save_utime: tycho_util::time::now_millis() as u32,
                     });
                     handle
                 }
@@ -967,6 +969,7 @@ impl InitBlock {
             is_key_block: virt_block_info.key_block,
             gen_utime: virt_block_info.gen_utime,
             ref_by_mc_seqno: next_proof.proof().proof_for.seqno,
+            save_utime: tycho_util::time::now_millis() as u32,
         };
 
         match self {

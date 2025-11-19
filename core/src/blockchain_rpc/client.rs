@@ -649,6 +649,7 @@ pub struct PendingPersistentState {
 }
 
 pub struct BlockDataFull {
+    pub save_utime: u32,
     pub block_id: BlockId,
     pub block_data: Bytes,
     pub proof_data: Bytes,
@@ -694,6 +695,7 @@ async fn download_block_inner(
         block: block_data,
         proof: proof_data,
         queue_diff: queue_diff_data,
+        save_utime,
     } = block_full
     else {
         match requirement {
@@ -803,6 +805,7 @@ async fn download_block_inner(
 
     Ok(BlockDataFullWithNeighbour {
         data: Some(BlockDataFull {
+            save_utime,
             block_id,
             block_data,
             proof_data,

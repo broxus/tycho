@@ -138,6 +138,7 @@ impl BlockchainBlockProvider {
                             }
                             Some(data) => {
                                 let mc_block_id = data.block_id;
+                                let save_utime = data.save_utime;
                                 let parsed = self
                                     .process_received_block(&mc_block_id, data, res.neighbour)
                                     .await;
@@ -149,7 +150,7 @@ impl BlockchainBlockProvider {
                                         + block_info.gen_utime_ms as u64;
 
                                     let now = tycho_util::time::now_millis();
-                                    let diff = (now as i64) - (block_utime as i64);
+                                    let diff = (now as i64) - (save_utime as i64);
 
                                     let labels = [("workchain", "-1")];
 
