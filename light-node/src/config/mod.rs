@@ -10,6 +10,8 @@ use tycho_core::block_strider::{
 use tycho_core::blockchain_rpc::{BlockchainRpcClientConfig, BlockchainRpcServiceConfig};
 pub use tycho_core::node::NodeKeys;
 use tycho_core::overlay_client::PublicOverlayClientConfig;
+#[cfg(feature = "s3")]
+use tycho_core::s3::S3ClientConfig;
 use tycho_core::storage::CoreStorageConfig;
 use tycho_network::{DhtConfig, NetworkConfig, OverlayConfig, PeerResolverConfig};
 use tycho_rpc::RpcConfig;
@@ -68,6 +70,9 @@ pub struct NodeConfig<T> {
 
     pub starter: StarterConfig,
 
+    #[cfg(feature = "s3")]
+    pub s3_client: Option<S3ClientConfig>,
+
     #[serde(flatten)]
     pub user_config: T,
 }
@@ -98,6 +103,10 @@ where
             profiling: Default::default(),
             logger_config: Default::default(),
             starter: Default::default(),
+
+            #[cfg(feature = "s3")]
+            s3_client: None,
+
             user_config: Default::default(),
         }
     }

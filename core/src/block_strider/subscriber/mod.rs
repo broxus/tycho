@@ -13,7 +13,7 @@ pub use self::futures::{
 };
 pub use self::gc_subscriber::{GcSubscriber, ManualGcTrigger};
 pub use self::metrics_subscriber::MetricsSubscriber;
-pub use self::ps_subscriber::{PsCompletionSubscriber, PsSubscriber};
+pub use self::ps_subscriber::PsSubscriber;
 use crate::storage::CoreStorage;
 
 mod futures;

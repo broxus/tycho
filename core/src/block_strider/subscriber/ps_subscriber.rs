@@ -23,22 +23,6 @@ impl PsSubscriber {
             inner: Arc::new(Inner {
                 last_key_block_utime: AtomicU32::new(last_key_block_utime),
                 storage,
-                completion_subscriber: Default::default(),
-                prev_state_task: Default::default(),
-            }),
-        }
-    }
-
-    pub fn with_completion_subscriber<S>(storage: CoreStorage, completion_subscriber: S) -> Self
-    where
-        S: PsCompletionSubscriber,
-    {
-        let last_key_block_utime = Self::find_last_key_block_utime(&storage);
-        Self {
-            inner: Arc::new(Inner {
-                last_key_block_utime: AtomicU32::new(last_key_block_utime),
-                storage,
-                completion_subscriber: Some(Arc::new(completion_subscriber)),
                 prev_state_task: Default::default(),
             }),
         }
@@ -63,7 +47,6 @@ impl StateSubscriber for PsSubscriber {
 struct Inner {
     last_key_block_utime: AtomicU32,
     storage: CoreStorage,
-    completion_subscriber: Option<Arc<dyn PsCompletionSubscriber>>,
     prev_state_task: tokio::sync::Mutex<Option<StorePersistentStateTask>>,
 }
 
@@ -116,8 +99,6 @@ impl Inner {
     ) -> Result<()> {
         let block_handles = self.storage.block_handle_storage();
 
-        let mc_seqno = mc_block.id().seqno;
-
         let Some(mc_block_handle) = block_handles.load_handle(mc_block.id()) else {
             anyhow::bail!("masterchain block handle not found: {}", mc_block.id());
         };
@@ -138,10 +119,6 @@ impl Inner {
             .persistent_state_storage()
             .rotate_persistent_states(&mc_block_handle)
             .await?;
-
-        if let Some(completion_subscriber) = &self.completion_subscriber {
-            completion_subscriber.on_state_persisted(mc_seqno);
-        }
 
         metrics::counter!("tycho_core_ps_subscriber_saved_persistent_states_count").increment(1);
 
@@ -177,7 +154,9 @@ impl Inner {
         //       other nodes with the incomplete set of persistent states.
         persistent_states
             .store_shard_state(mc_seqno, &mc_block_handle, mc_state_handle)
-            .await
+            .await?;
+
+        Ok(())
     }
 
     async fn save_persistent_queue_states(
@@ -225,7 +204,9 @@ impl Inner {
 
         persistent_states
             .store_queue_state(mc_seqno, &mc_block_handle, mc_block)
-            .await
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -270,8 +251,4 @@ impl StorePersistentStateTask {
 
         false
     }
-}
-
-pub trait PsCompletionSubscriber: Send + Sync + 'static {
-    fn on_state_persisted(&self, mc_seqno: u32);
 }

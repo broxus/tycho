@@ -25,7 +25,7 @@ pub(super) struct CommitArchiveTask {
 }
 
 impl CommitArchiveTask {
-    #[tracing::instrument(skip_all, name = "commit_archive", fields(archive_id = %archive_id))]
+    #[tracing::instrument(skip_all, name = "commit_archive", fields(archive_id = archive_id))]
     pub(super) fn new(
         db: CoreDb,
         block_handle_storage: Arc<BlockHandleStorage>,
@@ -154,7 +154,7 @@ impl CommitArchiveTask {
                     archive_id,
                     blocks = unique_ids.len(),
                     elapsed = %humantime::format_duration(histogram.finish()),
-                    "Archive committed"
+                    "archive committed"
                 );
 
                 Ok(())

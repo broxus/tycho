@@ -51,7 +51,7 @@ use bytes::Bytes;
 use cassadilia::Cas;
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
-use tycho_block_util::archive::ArchiveEntryType;
+use tycho_block_util::archive::{Archive, ArchiveEntryType};
 use tycho_storage::kv::StoredValue;
 use tycho_types::boc::{Boc, BocRepr};
 use tycho_types::cell::HashBytes;
@@ -66,8 +66,6 @@ pub use self::util::remove_blocks;
 use super::package_entry::{PackageEntryKey, PartialBlockId};
 use crate::storage::block_handle::BlockDataGuard;
 use crate::storage::{BlockFlags, BlockHandle, BlockHandleStorage, BlockMeta, CoreDb, tables};
-
-const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 
 // Default archive chunk size (no longer used for actual chunking, kept for protocol compatibility)
 pub(super) const DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024; // 1 MB
@@ -600,7 +598,7 @@ impl BlobStorage {
             // NOTE: handles case when mc_seqno is far in the future.
             // However if there is a key block between `id` and `mc_seqno`,
             // this will return an archive without that specified block.
-            Some(id) if mc_seqno < id + ARCHIVE_PACKAGE_SIZE => ArchiveId::Found(*id),
+            Some(id) if mc_seqno < id + Archive::MAX_MC_BLOCKS_PER_ARCHIVE => ArchiveId::Found(*id),
             _ => ArchiveId::NotFound,
         }
     }
@@ -832,7 +830,9 @@ impl BlobStorage {
         };
 
         let is_first_archive = prev_id.is_none();
-        if is_first_archive || mc_seqno.saturating_sub(archive_id.id) >= ARCHIVE_PACKAGE_SIZE {
+        if is_first_archive
+            || mc_seqno.saturating_sub(archive_id.id) >= Archive::MAX_MC_BLOCKS_PER_ARCHIVE
+        {
             let is_new = archive_ids.items.insert(mc_seqno);
             archive_id = PreparedArchiveId {
                 id: mc_seqno,
@@ -843,7 +843,7 @@ impl BlobStorage {
         }
 
         // NOTE: subtraction is intentional to panic if archive_id > mc_seqno
-        debug_assert!(mc_seqno - archive_id.id <= ARCHIVE_PACKAGE_SIZE);
+        debug_assert!(mc_seqno - archive_id.id <= Archive::MAX_MC_BLOCKS_PER_ARCHIVE);
 
         archive_id
     }

@@ -703,9 +703,9 @@ impl StarterInner {
                 } else {
                     StoreZeroStateFrom::State(state.clone())
                 };
-                if let Err(e) = try_save_persistent(handle, from).await {
-                    tracing::error!(%block_id, "failed to store persistent shard state: {e:?}");
-                }
+                try_save_persistent(handle, from)
+                    .await
+                    .context("failed to store persistent shard state")?;
             }
 
             remove_state_file.await;
@@ -820,7 +820,7 @@ impl StarterInner {
 
             try_save_persistent(block_handle, state_file)
                 .await
-                .with_context(|| "failed to store persistent queue state")?;
+                .context("failed to store persistent queue state")?;
 
             remove_state_file.await;
 

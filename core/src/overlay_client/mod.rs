@@ -158,13 +158,13 @@ pub enum Error {
     NoNeighbours,
     #[error("no neighbour has the requested data")]
     NotFound,
-    #[error("network error: {0}")]
+    #[error("network error")]
     NetworkError(#[source] anyhow::Error),
-    #[error("invalid response: {0}")]
+    #[error("invalid response")]
     InvalidResponse(#[source] tl_proto::TlError),
     #[error("request failed with code: {0}")]
     RequestFailed(u32),
-    #[error("internal error: {0}")]
+    #[error("internal error")]
     Internal(#[source] anyhow::Error),
     #[error("timeout")]
     Timeout,

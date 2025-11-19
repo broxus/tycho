@@ -3,21 +3,22 @@ use std::fs::File;
 use std::io::{Seek, Write};
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 use anyhow::{Context, Result};
-use arc_swap::ArcSwapAny;
+use arc_swap::{ArcSwap, ArcSwapAny};
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::time::Instant;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::RefMcStateHandle;
 use tycho_storage::fs::{Dir, MappedFile};
 use tycho_types::models::{BlockId, PrevBlockRef};
-use tycho_util::FastHashSet;
 use tycho_util::sync::CancellationFlag;
+use tycho_util::{FastHashMap, FastHashSet};
 
 pub use self::queue_state::reader::{QueueDiffReader, QueueStateReader};
 pub use self::queue_state::writer::QueueStateWriter;
@@ -48,21 +49,21 @@ pub enum PersistentStateKind {
 }
 
 impl PersistentStateKind {
-    fn make_file_name(&self, block_id: &BlockId) -> PathBuf {
+    pub fn make_file_name(&self, block_id: &BlockId) -> PathBuf {
         match self {
             Self::Shard => ShardStateWriter::file_name(block_id),
             Self::Queue => QueueStateWriter::file_name(block_id),
         }
     }
 
-    fn make_temp_file_name(&self, block_id: &BlockId) -> PathBuf {
+    pub fn make_temp_file_name(&self, block_id: &BlockId) -> PathBuf {
         match self {
             Self::Shard => ShardStateWriter::temp_file_name(block_id),
             Self::Queue => QueueStateWriter::temp_file_name(block_id),
         }
     }
 
-    fn from_extension(extension: &str) -> Option<Self> {
+    pub fn from_extension(extension: &str) -> Option<Self> {
         match extension {
             ShardStateWriter::FILE_EXTENSION => Some(Self::Shard),
             QueueStateWriter::FILE_EXTENSION => Some(Self::Queue),
@@ -107,6 +108,8 @@ impl PersistentStateStorage {
                 handles_queue: Default::default(),
                 oldest_ps_changed: Default::default(),
                 oldest_ps_handle: Default::default(),
+                subscriptions: Default::default(),
+                subscriptions_mutex: Default::default(),
             }),
         })
     }
@@ -237,6 +240,47 @@ impl PersistentStateStorage {
         NonZeroU32::new(STATE_CHUNK_SIZE as _).unwrap()
     }
 
+    pub fn subscribe(&self) -> (Vec<PersistentState>, PersistentStateReceiver) {
+        let id = RECEIVER_ID.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel(1);
+
+        // TODO: Hold `_guard` for the whole method body? So that we can know
+        // that no states will be send to subscriptions while we are collecting
+        // the current cache snapshot.
+        {
+            let _guard = self.inner.subscriptions_mutex.lock();
+            let mut subscriptions = self.inner.subscriptions.load_full();
+            {
+                let subscriptions = Arc::make_mut(&mut subscriptions);
+                let prev = subscriptions.insert(id, sender);
+                assert!(
+                    prev.is_none(),
+                    "persistent state subscription must be unique"
+                );
+            }
+            self.inner.subscriptions.store(subscriptions);
+        }
+
+        let receiver = PersistentStateReceiver {
+            id,
+            inner: Arc::downgrade(&self.inner),
+            receiver,
+        };
+
+        let initial_states = self
+            .inner
+            .descriptor_cache
+            .iter()
+            .map(|item| PersistentState {
+                block_id: item.key().block_id,
+                kind: item.key().kind,
+                cached: item.value().clone(),
+            })
+            .collect();
+
+        (initial_states, receiver)
+    }
+
     pub fn state_exists(&self, block_id: &BlockId, kind: PersistentStateKind) -> bool {
         self.inner.descriptor_cache.contains_key(&CacheKey {
             block_id: *block_id,
@@ -329,7 +373,7 @@ impl PersistentStateStorage {
         let cancelled = cancelled.clone();
         let span = tracing::Span::current();
 
-        tokio::task::spawn_blocking(move || {
+        let state = tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
             let guard = scopeguard::guard((), |_| {
@@ -355,12 +399,15 @@ impl PersistentStateStorage {
                 }
             }
 
-            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
+            let state = this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
 
             scopeguard::ScopeGuard::into_inner(guard);
-            Ok(())
+            Ok::<_, anyhow::Error>(state)
         })
-        .await?
+        .await??;
+
+        self.notify_with_persistent_state(&state).await;
+        Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
@@ -387,7 +434,7 @@ impl PersistentStateStorage {
         let cancelled = cancelled.clone();
         let span = tracing::Span::current();
 
-        tokio::task::spawn_blocking(move || {
+        let state = tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
             let guard = scopeguard::guard((), |_| {
@@ -399,12 +446,15 @@ impl PersistentStateStorage {
             let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
             cell_writer.write_file(file, Some(&cancelled))?;
             this.block_handles.set_has_persistent_shard_state(&handle);
-            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
+            let state = this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;
 
             scopeguard::ScopeGuard::into_inner(guard);
-            Ok(())
+            Ok::<_, anyhow::Error>(state)
         })
-        .await?
+        .await??;
+
+        self.notify_with_persistent_state(&state).await;
+        Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno = mc_seqno, block_id = %block.id()))]
@@ -477,7 +527,7 @@ impl PersistentStateStorage {
         let cancelled = cancelled.clone();
         let span = tracing::Span::current();
 
-        tokio::task::spawn_blocking(move || {
+        let state = tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
             let guard = scopeguard::guard((), |_| {
@@ -497,12 +547,15 @@ impl PersistentStateStorage {
                 }
             }
 
-            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Queue)?;
+            let state = this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Queue)?;
 
             scopeguard::ScopeGuard::into_inner(guard);
-            Ok(())
+            Ok::<_, anyhow::Error>(state)
         })
-        .await?
+        .await??;
+
+        self.notify_with_persistent_state(&state).await;
+        Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
@@ -529,7 +582,7 @@ impl PersistentStateStorage {
         let cancelled = cancelled.clone();
         let span = tracing::Span::current();
 
-        tokio::task::spawn_blocking(move || {
+        let state = tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
             let guard = scopeguard::guard((), |_| {
@@ -540,12 +593,15 @@ impl PersistentStateStorage {
 
             QueueStateWriter::write_file(&states_dir, handle.id(), file, Some(&cancelled))?;
             this.block_handles.set_has_persistent_queue_state(&handle);
-            this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Queue)?;
+            let state = this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Queue)?;
 
             scopeguard::ScopeGuard::into_inner(guard);
-            Ok(())
+            Ok::<_, anyhow::Error>(state)
         })
-        .await?
+        .await??;
+
+        self.notify_with_persistent_state(&state).await;
+        Ok(())
     }
 
     pub async fn rotate_persistent_states(&self, top_handle: &BlockHandle) -> Result<()> {
@@ -665,7 +721,7 @@ impl PersistentStateStorage {
         let this = self.inner.clone();
 
         let span = tracing::Span::current();
-        tokio::task::spawn_blocking(move || {
+        let state = tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
@@ -676,10 +732,19 @@ impl PersistentStateStorage {
 
             drop(cached);
 
-            this.cache_state(mc_seqno, &block_id, kind)?;
-            Ok(true)
+            this.cache_state(mc_seqno, &block_id, kind)
         })
-        .await?
+        .await??;
+
+        self.notify_with_persistent_state(&state).await;
+        Ok(true)
+    }
+
+    async fn notify_with_persistent_state(&self, state: &PersistentState) {
+        let subscriptions = self.inner.subscriptions.load_full();
+        for sender in subscriptions.values() {
+            sender.send(state.clone()).await.ok();
+        }
     }
 }
 
@@ -695,6 +760,8 @@ struct Inner {
     handles_queue: Mutex<HandlesQueue>,
     oldest_ps_changed: Notify,
     oldest_ps_handle: ArcSwapAny<Option<BlockHandle>>,
+    subscriptions: ArcSwap<FastHashMap<usize, mpsc::Sender<PersistentState>>>,
+    subscriptions_mutex: Mutex<()>,
 }
 
 impl Inner {
@@ -759,7 +826,7 @@ impl Inner {
         mc_seqno: u32,
         block_id: &BlockId,
         kind: PersistentStateKind,
-    ) -> Result<()> {
+    ) -> Result<PersistentState> {
         use std::collections::btree_map;
 
         use dashmap::mapref::entry::Entry;
@@ -799,17 +866,21 @@ impl Inner {
 
         let prev_mc_seqno = match self.descriptor_cache.entry(key) {
             Entry::Vacant(entry) => {
-                entry.insert(new_state);
+                entry.insert(new_state.clone());
                 None
             }
             Entry::Occupied(mut entry) => {
                 let prev_mc_seqno = entry.get().mc_seqno;
                 if mc_seqno <= prev_mc_seqno {
                     // Cache only the most recent block (if changed)
-                    return Ok(());
+                    return Ok(PersistentState {
+                        block_id: *block_id,
+                        kind,
+                        cached: entry.get().clone(),
+                    });
                 }
 
-                entry.insert(new_state);
+                entry.insert(new_state.clone());
                 Some(prev_mc_seqno)
             }
         };
@@ -828,7 +899,11 @@ impl Inner {
 
         index.entry(mc_seqno).or_default().insert(*block_id);
 
-        Ok(())
+        Ok(PersistentState {
+            block_id: *block_id,
+            kind,
+            cached: new_state,
+        })
     }
 
     fn clear_cache(&self, block_id: &BlockId) {
@@ -848,6 +923,69 @@ pub struct PersistentStateInfo {
     pub size: NonZeroU64,
     pub chunk_size: NonZeroU32,
 }
+
+#[derive(Clone)]
+pub struct PersistentState {
+    block_id: BlockId,
+    kind: PersistentStateKind,
+    cached: Arc<CachedState>,
+}
+
+impl PersistentState {
+    pub fn block_id(&self) -> &BlockId {
+        &self.block_id
+    }
+
+    pub fn kind(&self) -> PersistentStateKind {
+        self.kind
+    }
+
+    pub fn file(&self) -> &MappedFile {
+        &self.cached.file
+    }
+
+    pub fn mc_seqno(&self) -> u32 {
+        self.cached.mc_seqno
+    }
+}
+
+pub struct PersistentStateReceiver {
+    id: usize,
+    inner: Weak<Inner>,
+    receiver: mpsc::Receiver<PersistentState>,
+}
+
+impl std::ops::Deref for PersistentStateReceiver {
+    type Target = mpsc::Receiver<PersistentState>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.receiver
+    }
+}
+
+impl std::ops::DerefMut for PersistentStateReceiver {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.receiver
+    }
+}
+
+impl Drop for PersistentStateReceiver {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            let _guard = inner.subscriptions_mutex.lock();
+            let mut subscriptions = inner.subscriptions.load_full();
+            {
+                let subscriptions = Arc::make_mut(&mut subscriptions);
+                subscriptions.remove(&self.id);
+            }
+            inner.subscriptions.store(subscriptions);
+        }
+    }
+}
+
+static RECEIVER_ID: AtomicUsize = AtomicUsize::new(0);
 
 struct CachedState {
     mc_seqno: u32,
