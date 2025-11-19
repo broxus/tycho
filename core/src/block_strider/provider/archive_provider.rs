@@ -558,9 +558,8 @@ impl<'a> ArchiveDownloadContext<'a> {
         let prev_key_block_seqno = storage
             .block_handle_storage()
             .find_prev_key_block(mc_seqno)
-            .context("previous key block not found")?
-            .id()
-            .seqno;
+            .map(|handle| handle.id().seqno)
+            .unwrap_or_default();
 
         let mut archive_id = mc_seqno;
         if prev_key_block_seqno < mc_seqno {
@@ -570,6 +569,7 @@ impl<'a> ArchiveDownloadContext<'a> {
             // archive_id = 290 - (290 - 150) % 100 = 250
             archive_id -= (mc_seqno - prev_key_block_seqno) % BLOCKS_PER_ARCHIVE;
         }
+        archive_id += 1;
 
         Ok(Some(archive_id))
     }
@@ -617,8 +617,8 @@ impl ArchiveClient for BlockchainRpcClient {
         mc_seqno: u32,
         ctx: ArchiveDownloadContext<'a>,
     ) -> Result<Option<FoundArchive<'a>>> {
-        Ok(match self.find_archive(mc_seqno).await {
-            Ok(blockchain_rpc::PendingArchiveResponse::Found(found)) => Some(FoundArchive {
+        Ok(match self.find_archive(mc_seqno).await? {
+            blockchain_rpc::PendingArchiveResponse::Found(found) => Some(FoundArchive {
                 archive_id: found.id,
                 download: Box::new(move || {
                     Box::pin(async move {
@@ -634,9 +634,7 @@ impl ArchiveClient for BlockchainRpcClient {
                     })
                 }),
             }),
-            Ok(blockchain_rpc::PendingArchiveResponse::TooNew)
-            | Err(crate::overlay_client::Error::NotFound) => None,
-            Err(e) => return Err(e.into()),
+            blockchain_rpc::PendingArchiveResponse::TooNew => None,
         })
     }
 }

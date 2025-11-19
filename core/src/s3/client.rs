@@ -122,12 +122,8 @@ impl S3Client {
         &self,
         archive_id: u32,
     ) -> Result<Option<BriefArchiveInfo>, Error> {
-        let meta = match self
-            .inner
-            .client
-            .head(&self.inner.make_archive_key(archive_id))
-            .await
-        {
+        let path = self.inner.make_archive_key(archive_id);
+        let meta = match self.inner.client.head(&path).await {
             Ok(meta) if meta.size > 0 => meta,
             Ok(_) | Err(object_store::Error::NotFound { .. }) => return Ok(None),
             Err(e) => return Err(e),
