@@ -675,12 +675,15 @@ Generate an account state
 
 Generate a simple wallet state
 
-**Usage:** `tycho tool gen-account wallet --pubkey <PUBKEY> --balance <BALANCE>`
+**Usage:** `tycho tool gen-account wallet [OPTIONS] --pubkey <PUBKEY> --balance <BALANCE>`
 
 ###### **Options:**
 
 * `-p`, `--pubkey <PUBKEY>` — Account public key
-* `-b`, `--balance <BALANCE>` — Initial balance of the wallet
+* `-b`, `--balance <BALANCE>` — Initial balance of the account
+* `-e`, `--extra-balance <EXTRA_BALANCE>` — Initial extra currencies balance of the account.
+
+   Specified as a comma-separated list of `currency_id:amount`
 
 
 
@@ -693,7 +696,10 @@ Generate a multisig wallet state
 ###### **Options:**
 
 * `-p`, `--pubkey <PUBKEY>` — account public key
-* `-b`, `--balance <BALANCE>` — initial balance of the wallet
+* `-b`, `--balance <BALANCE>` — Initial balance of the account
+* `-e`, `--extra-balance <EXTRA_BALANCE>` — Initial extra currencies balance of the account.
+
+   Specified as a comma-separated list of `currency_id:amount`
 * `-c`, `--custodians <CUSTODIANS>` — list of custodian public keys
 * `-r`, `--req-confirms <REQ_CONFIRMS>` — Number of required confirmations
 * `-l`, `--lifetime <LIFETIME>` — Custom lifetime of the wallet
@@ -705,12 +711,15 @@ Generate a multisig wallet state
 
 Generate a giver state
 
-**Usage:** `tycho tool gen-account giver --pubkey <PUBKEY> --balance <BALANCE>`
+**Usage:** `tycho tool gen-account giver [OPTIONS] --pubkey <PUBKEY> --balance <BALANCE>`
 
 ###### **Options:**
 
 * `-p`, `--pubkey <PUBKEY>` — account public key
-* `-b`, `--balance <BALANCE>` — initial balance of the giver
+* `-b`, `--balance <BALANCE>` — Initial balance of the account
+* `-e`, `--extra-balance <EXTRA_BALANCE>` — Initial extra currencies balance of the account.
+
+   Specified as a comma-separated list of `currency_id:amount`
 
 
 

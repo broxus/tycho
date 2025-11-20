@@ -1,7 +1,13 @@
+use std::collections::BTreeMap;
+use std::str::FromStr;
+
 use anyhow::{Context, Result};
 use tycho_crypto::ed25519;
-use tycho_types::models::{Account, AccountState, OptionalAccount, StateInit, StdAddr};
-use tycho_types::num::Tokens;
+use tycho_types::models::{
+    Account, AccountState, CurrencyCollection, ExtraCurrencyCollection, OptionalAccount, StateInit,
+    StdAddr,
+};
+use tycho_types::num::VarUint248;
 use tycho_types::prelude::*;
 
 use crate::util::{FpTokens, compute_storage_used, parse_public_key, print_json};
@@ -43,9 +49,8 @@ struct WalletCmd {
     #[clap(short, long, required = true)]
     pubkey: String,
 
-    /// Initial balance of the wallet.
-    #[clap(short, long, required = true)]
-    balance: FpTokens,
+    #[clap(flatten)]
+    balance: BalanceArgs,
 }
 
 impl WalletCmd {
@@ -55,7 +60,7 @@ impl WalletCmd {
 
         let (account, state) = WalletBuilder {
             pubkey,
-            balance: self.balance.into(),
+            balance: self.balance.build_currency_collection()?,
         }
         .build()?;
 
@@ -70,9 +75,8 @@ struct MultisigCmd {
     #[clap(short, long, required = true)]
     pubkey: String,
 
-    /// initial balance of the wallet
-    #[clap(short, long, required = true)]
-    balance: FpTokens,
+    #[clap(flatten)]
+    balance: BalanceArgs,
 
     /// list of custodian public keys
     #[clap(short, long)]
@@ -109,7 +113,7 @@ impl MultisigCmd {
             updatable: self.updatable,
             required_confirms: self.req_confirms,
             lifetime: self.lifetime,
-            balance: self.balance.into(),
+            balance: self.balance.build_currency_collection()?,
         }
         .build()?;
 
@@ -124,9 +128,8 @@ struct GiverCmd {
     #[clap(short, long, required = true)]
     pubkey: String,
 
-    /// initial balance of the giver
-    #[clap(short, long, required = true)]
-    balance: FpTokens,
+    #[clap(flatten)]
+    balance: BalanceArgs,
 }
 
 impl GiverCmd {
@@ -136,7 +139,7 @@ impl GiverCmd {
 
         let (account, state) = GiverBuilder {
             pubkey,
-            balance: self.balance.into(),
+            balance: self.balance.build_currency_collection()?,
         }
         .build()?;
 
@@ -154,7 +157,7 @@ fn write_state(account: &HashBytes, state: &Account) -> Result<()> {
 
 struct WalletBuilder {
     pubkey: ed25519::PublicKey,
-    balance: Tokens,
+    balance: CurrencyCollection,
 }
 
 impl WalletBuilder {
@@ -177,7 +180,7 @@ impl WalletBuilder {
             address: StdAddr::new(-1, address).into(),
             storage_stat: Default::default(),
             last_trans_lt: 0,
-            balance: self.balance.into(),
+            balance: self.balance,
             state: AccountState::Active(state_init),
         };
 
@@ -193,7 +196,7 @@ struct MultisigBuilder {
     updatable: bool,
     required_confirms: Option<u8>,
     lifetime: Option<u32>,
-    balance: Tokens,
+    balance: CurrencyCollection,
 }
 
 impl MultisigBuilder {
@@ -329,7 +332,7 @@ impl MultisigBuilder {
             address: StdAddr::new(-1, address).into(),
             storage_stat: Default::default(),
             last_trans_lt: 0,
-            balance: self.balance.into(),
+            balance: self.balance,
             state: AccountState::Active(state_init),
         };
 
@@ -341,7 +344,7 @@ impl MultisigBuilder {
 
 struct GiverBuilder {
     pubkey: ed25519::PublicKey,
-    balance: Tokens,
+    balance: CurrencyCollection,
 }
 
 impl GiverBuilder {
@@ -379,9 +382,62 @@ impl GiverBuilder {
             _ => unreachable!("saved state is for the active account"),
         };
 
-        account.balance.tokens = self.balance;
+        account.balance = self.balance;
         account.storage_stat.used = compute_storage_used(&account)?;
 
         Ok((address, account))
+    }
+}
+
+#[derive(clap::Args)]
+struct BalanceArgs {
+    /// Initial balance of the account.
+    #[clap(short, long, required = true)]
+    balance: FpTokens,
+
+    /// Initial extra currencies balance of the account.
+    ///
+    /// Specified as a comma-separated list of `currency_id:amount`
+    #[clap(short, long, value_delimiter = ',', num_args = 1..)]
+    extra_balance: Vec<ExtraBalance>,
+}
+
+impl BalanceArgs {
+    fn build_currency_collection(&self) -> Result<CurrencyCollection> {
+        let mut other = BTreeMap::new();
+        for item in &self.extra_balance {
+            if other.insert(item.currency_id, item.balance).is_some() {
+                anyhow::bail!(
+                    "duplicate extra balance for currency id {}",
+                    item.currency_id
+                );
+            }
+        }
+
+        Ok(CurrencyCollection {
+            tokens: self.balance.into(),
+            other: ExtraCurrencyCollection::try_from_iter(other)
+                .context("failed to create `ExtraCurrencyCollection`")?,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExtraBalance {
+    currency_id: u32,
+    balance: VarUint248,
+}
+
+impl FromStr for ExtraBalance {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let Some((key, value)) = s.split_once(':') else {
+            anyhow::bail!("extra balance expected as a string like `currency_id:amount`");
+        };
+        Ok(Self {
+            currency_id: u32::from_str(key).context("invalid currency id")?,
+            balance: VarUint248::from_str(value).context("invalid extra balance")?,
+        })
     }
 }
