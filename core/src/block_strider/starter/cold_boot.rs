@@ -752,6 +752,9 @@ impl StarterInner {
                 }
             };
 
+            // set flag that state stored
+            block_handles.set_has_shard_state(&block_handle);
+
             let from = StoreZeroStateFrom::File(state_file);
             try_save_persistent(&block_handle, from)
                 .await
