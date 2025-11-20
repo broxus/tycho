@@ -13,7 +13,7 @@ use tycho_types::models::{
 use crate::collator::execution_manager::{MessagesExecutor, TransactionResult};
 use crate::collator::types::{
     BlockCollationData, ExecutedTransaction, ParsedMessage, PreparedInMsg, PreparedOutMsg,
-    SpecialOrigin,
+    ShardAccountStuff, SpecialOrigin,
 };
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::tracing_targets;
@@ -114,6 +114,8 @@ impl ExecutorWrapper {
         special_origin: SpecialOrigin,
         collation_data: &mut BlockCollationData,
     ) -> Result<Vec<Arc<EnqueuedMessage>>> {
+        const MASTERCHAIN: i8 = ShardIdent::MASTERCHAIN.workchain() as i8;
+
         tracing::trace!(
             target: tracing_targets::COLLATOR,
             account_addr = %account_id,
@@ -122,17 +124,19 @@ impl ExecutorWrapper {
             "create_special_transaction",
         );
 
-        let Some(account_stuff) = self.executor.take_account_stuff_if(account_id, |_| true)? else {
-            return Ok(vec![]);
+        let account_stuff = match self.executor.take_account_stuff_if(account_id, |_| true)? {
+            Some(existing) => existing,
+            // Create a new empty account to receive the message.
+            None => Box::new(ShardAccountStuff::new_empty(MASTERCHAIN, account_id)),
         };
 
         let in_message = {
             let info = MsgInfo::Int(IntMsgInfo {
                 ihr_disabled: false,
-                bounce: true,
+                bounce: false,
                 bounced: false,
-                src: IntAddr::from((-1, HashBytes::ZERO)),
-                dst: IntAddr::from((-1, *account_id)),
+                src: IntAddr::from((MASTERCHAIN, HashBytes::ZERO)),
+                dst: IntAddr::from((MASTERCHAIN, *account_id)),
                 value: amount,
                 ihr_fee: Default::default(),
                 fwd_fee: Default::default(),
