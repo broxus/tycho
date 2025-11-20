@@ -181,6 +181,7 @@ async fn updater(
                 if is_new {
                     meter_banned(&ban.peer_id, true);
                     network.known_peers().ban(&ban.peer_id);
+                    network.disconnect(&ban.peer_id);
                 }
             },
             Some(expired) = unban_queue.next() => {
