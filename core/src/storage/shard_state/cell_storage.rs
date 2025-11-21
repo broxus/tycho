@@ -106,7 +106,14 @@ impl CellStorage {
         &self.cells_db
     }
 
-    pub fn apply_temp_cell(&self, root: &HashBytes) -> Result<()> {
+    /// Moves cells tree from temp cells db to the main.
+    ///
+    /// * `split_at_parts` - parts subtrees roots that will be stored in separate storages.
+    pub fn apply_temp_cell(
+        &self,
+        root: &HashBytes,
+        split_at_parts: &Option<FastHashSet<HashBytes>>,
+    ) -> Result<()> {
         const MAX_NEW_CELLS_BATCH_SIZE: usize = 10000;
 
         struct TempCell {
@@ -297,6 +304,11 @@ impl CellStorage {
             };
 
             for ref child in iter {
+                // skip parts subtrees roots because they will be stored in separate storages
+                if split_at_parts.as_ref().is_some_and(|at| at.contains(child)) {
+                    continue;
+                }
+
                 if let InsertedCell::New(iter) = ctx.insert_cell(child)? {
                     stack.push(iter);
                     continue 'outer;

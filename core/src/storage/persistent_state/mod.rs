@@ -431,7 +431,6 @@ impl PersistentStateStorage {
 
                 // NOTE: Cached file is a mapped file, therefore it can take a while to read from it.
                 // NOTE: `spawn_blocking` is called here because it is mostly IO-bound operation.
-                // TODO: Add semaphore to limit the number of concurrent operations.
                 tokio::task::spawn_blocking(move || {
                     // Ensure that permit is dropped only after cached state is used.
                     let _permit = permit;
@@ -1188,14 +1187,14 @@ impl HandlesQueue {
 
 const STATE_CHUNK_SIZE: u64 = 1024 * 1024; // 1 MB
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ShardStatePartsPrunedData {
     inner: FastHashMap<HashBytes, PrunedCellData>,
 }
 
 impl ShardStatePartsPrunedData {
     pub fn insert(&mut self, pruned_cell: &Cell) {
-        self.inner.insert(*pruned_cell.repr_hash(), PrunedCellData {
+        self.inner.insert(*pruned_cell.hash(0), PrunedCellData {
             descriptor: pruned_cell.descriptor(),
             data: pruned_cell.data().to_vec(),
         });
@@ -1210,6 +1209,7 @@ impl ShardStatePartsPrunedData {
     }
 }
 
+#[derive(Debug)]
 pub struct PrunedCellData {
     descriptor: CellDescriptor,
     data: Vec<u8>,
