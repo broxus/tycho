@@ -20,11 +20,13 @@ members = [
     "network",
     "rpc",
     "simulator",
-    "storage",
+    "slasher-traits",
+    "slasher",
     "storage-traits",
+    "storage",
     "tycho-build-info",
-    "util",
     "util-proc",
+    "util",
     "wu-tuner",
 ]
 
@@ -77,10 +79,7 @@ proc-macro2 = "1.0"
 prost = "0.14.1"
 prost-build = "0.14.1"
 quick_cache = "0.6.0"
-quinn = { version = "0.11.9", default-features = false, features = [
-    "runtime-tokio",
-    "rustls",
-] }
+quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls"] }
 quote = "1.0"
 object_store = "0.12"
 rand = "0.9"
@@ -122,9 +121,7 @@ tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"] }
 tl-proto = "0.5.1"
 tokio = { version = "1", default-features = false }
 tokio-stream = "0.1.15"
-tokio-util = { version = "0.7.10", default-features = false, features = [
-    "codec",
-] }
+tokio-util = { version = "0.7.10", default-features = false, features = ["codec"] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
@@ -150,6 +147,8 @@ tycho-control = { path = "./control", version = "0.3.3" }
 tycho-core = { path = "./core", version = "0.3.3" }
 tycho-network = { path = "./network", version = "0.3.3" }
 tycho-rpc = { path = "./rpc", version = "0.3.3" }
+tycho-slasher = { path = "./slasher", version = "0.3.2" }
+tycho-slasher-traits = { path = "./slasher-traits", version = "0.3.2" }
 tycho-storage = { path = "./storage", version = "0.3.3" }
 tycho-storage-traits = { path = "./storage-traits", version = "0.3.3" }
 tycho-util = { path = "./util", version = "0.3.3" }
