@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use bytes::Buf;
 use bytesize::ByteSize;
 pub(super) use cell_storage::CellShardRouter;
@@ -25,7 +25,7 @@ use weedb::rocksdb;
 
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
-use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CellsPartDb};
+use super::{BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CellsPartDb};
 use crate::storage::db::{CellStorageDb, CellsDbOps};
 
 mod cell_storage;
@@ -33,6 +33,33 @@ mod entries_buffer;
 mod store_state_raw;
 
 pub type StoragePartsMap = FastHashMap<ShardPrefix, Arc<dyn ShardStateStoragePart>>;
+
+pub trait OptionalStoragePartsMapExt {
+    fn try_as_ref_ext(&self) -> Result<&Arc<StoragePartsMap>>;
+}
+impl OptionalStoragePartsMapExt for Option<Arc<StoragePartsMap>> {
+    fn try_as_ref_ext(&self) -> Result<&Arc<StoragePartsMap>> {
+        let storage_parts = self
+            .as_ref()
+            .context("shard state parts storage not configured")?;
+        Ok(storage_parts)
+    }
+}
+
+pub trait StoragePartsMapExt {
+    fn try_get_ext(&self, prefix: &ShardPrefix) -> Result<&Arc<dyn ShardStateStoragePart>>;
+}
+impl StoragePartsMapExt for StoragePartsMap {
+    fn try_get_ext(&self, prefix: &ShardPrefix) -> Result<&Arc<dyn ShardStateStoragePart>> {
+        let Some(storage_part) = self.get(prefix) else {
+            anyhow::bail!(
+                "shard state part storage not configured for shard {}",
+                &DisplayShardPrefix(prefix),
+            );
+        };
+        Ok(storage_part)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SplitAccountEntry {
@@ -44,6 +71,7 @@ pub trait ShardStateStoragePart: Send + Sync {
     fn shard_prefix(&self) -> ShardPrefix;
     fn cell_storage(&self) -> &Arc<CellStorage>;
     fn cells_db(&self) -> &CellsPartDb;
+    fn gc_lock(&self) -> &Arc<tokio::sync::Mutex<()>>;
     fn store_accounts_subtree(
         self: Arc<Self>,
         block_id: &BlockId,
@@ -51,6 +79,11 @@ pub trait ShardStateStoragePart: Send + Sync {
         estimated_cell_count: usize,
         split_depth: u8,
     ) -> Pin<Box<dyn Future<Output = Result<usize>> + Send>>;
+    fn store_accounts_subtree_from_file(
+        self: Arc<Self>,
+        block_id: BlockId,
+        boc: File,
+    ) -> Pin<Box<dyn Future<Output = Result<HashBytes>> + Send>>;
     fn blocking_store_accounts_subtree(
         self: Arc<Self>,
         block_id: &BlockId,
@@ -70,6 +103,7 @@ pub struct ShardStateStoragePartImpl {
     cells_db: CellsPartDb,
     cell_storage: Arc<CellStorage>,
     gc_lock: Arc<tokio::sync::Mutex<()>>,
+    temp_file_storage: TempFileStorage,
 }
 
 impl ShardStateStoragePart for ShardStateStoragePartImpl {
@@ -83,6 +117,10 @@ impl ShardStateStoragePart for ShardStateStoragePartImpl {
 
     fn cells_db(&self) -> &CellsPartDb {
         &self.cells_db
+    }
+
+    fn gc_lock(&self) -> &Arc<tokio::sync::Mutex<()>> {
+        &self.gc_lock
     }
 
     fn blocking_store_accounts_subtree(
@@ -112,6 +150,15 @@ impl ShardStateStoragePart for ShardStateStoragePartImpl {
         Box::pin(fut)
     }
 
+    fn store_accounts_subtree_from_file(
+        self: Arc<Self>,
+        block_id: BlockId,
+        boc: File,
+    ) -> Pin<Box<dyn Future<Output = Result<HashBytes>> + Send>> {
+        let fut = self.store_accounts_subtree_from_file_impl(block_id, boc);
+        Box::pin(fut)
+    }
+
     fn remove_outdated_states_in_part(
         self: Arc<Self>,
         top_blocks: TopBlocks,
@@ -128,6 +175,7 @@ impl ShardStateStoragePartImpl {
         cells_db: CellsPartDb,
         cache_size_bytes: ByteSize,
         drop_interval: u32,
+        temp_file_storage: TempFileStorage,
     ) -> Self {
         let cell_storage = CellStorage::new_for_shard(
             cells_db.clone(),
@@ -140,6 +188,7 @@ impl ShardStateStoragePartImpl {
             cells_db,
             cell_storage,
             gc_lock: Default::default(),
+            temp_file_storage,
         }
     }
 
@@ -210,6 +259,34 @@ impl ShardStateStoragePartImpl {
         Reclaimer::instance().drop(cell);
 
         Ok(new_cell_count)
+    }
+
+    async fn store_accounts_subtree_from_file_impl(
+        self: Arc<Self>,
+        block_id: BlockId,
+        boc: File,
+    ) -> Result<HashBytes> {
+        let ctx = StoreStateContext {
+            cells_db: CellStorageDb::Part(self.cells_db.clone()),
+            cell_storage: self.cell_storage.clone(),
+            temp_file_storage: self.temp_file_storage.clone(),
+        };
+
+        let gc_lock = {
+            let _hist = HistogramGuard::begin("tycho_storage_cell_gc_lock_store_time_high");
+            self.gc_lock.clone().lock_owned().await
+        };
+
+        let shard_prefix = self.shard_prefix;
+        let root_hash = tokio::task::spawn_blocking(move || {
+            // NOTE: Ensure that GC lock is captured by the spawned thread.
+            let _gc_lock = gc_lock;
+
+            ctx.store(&block_id, boc, None, shard_prefix)
+        })
+        .await??;
+
+        Ok(root_hash)
     }
 
     async fn remove_outdated_states_impl(
@@ -461,15 +538,6 @@ impl ShardStateStorage {
             let block_handle_storage = self.block_handle_storage.clone();
             let handle = handle.clone();
 
-            let update_block_handle = move || {
-                // update block handle flags that main state stored
-                let updated = handle.meta().add_flags(BlockFlags::HAS_STATE_MAIN);
-                if updated {
-                    block_handle_storage.store_handle(&handle, false);
-                }
-                updated
-            };
-
             // check if state already stored
             let mut already_stored = false;
             if let Some(value) = self.cells_db.shard_states().get(block_id.to_vec())? {
@@ -481,7 +549,7 @@ impl ShardStateStorage {
 
             if already_stored {
                 // update block handle flags that main state stored
-                updated = update_block_handle();
+                updated = block_handle_storage.set_has_shard_state_main(&handle);
 
                 // NOTE: Ensure that GC lock is dropped only after storing the state.
                 drop(gc_lock.take());
@@ -538,7 +606,7 @@ impl ShardStateStorage {
                     hist.finish();
 
                     // update block handle flags that main state stored
-                    let updated = update_block_handle();
+                    let updated = block_handle_storage.set_has_shard_state_main(&handle);
 
                     // NOTE: Ensure that GC lock is dropped only after storing the state.
                     drop(gc_lock);
@@ -569,24 +637,19 @@ impl ShardStateStorage {
 
         // update block handle flags that state parts stored
         if !parts_store_failed {
-            let updated_state_parts = handle.meta().add_flags(BlockFlags::HAS_STATE_PARTS);
-            if updated_state_parts {
-                updated = true;
+            // TODO: maybe this gc lock is excessive?
 
-                // TODO: maybe this gc lock is excessive?
-
-                // acquire new lock if it was dropped before
-                if gc_lock.is_none() {
-                    let lock = {
-                        let _hist =
-                            HistogramGuard::begin("tycho_storage_cell_gc_lock_store_time_high");
-                        self.gc_lock.clone().lock_owned().await
-                    };
-                    gc_lock = Some(lock);
-                }
-                self.block_handle_storage.store_handle(handle, false);
-                drop(gc_lock);
+            // acquire new lock if it was dropped before
+            if gc_lock.is_none() {
+                let lock = {
+                    let _hist = HistogramGuard::begin("tycho_storage_cell_gc_lock_store_time_high");
+                    self.gc_lock.clone().lock_owned().await
+                };
+                gc_lock = Some(lock);
             }
+            let updated_state_parts = self.block_handle_storage.set_has_shard_state_parts(handle);
+            updated = updated || updated_state_parts;
+            drop(gc_lock);
         }
 
         metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
@@ -602,24 +665,73 @@ impl ShardStateStorage {
         Ok(updated)
     }
 
-    // Stores shard state and returns the hash of its root cell.
-    pub async fn store_state_file(&self, block_id: &BlockId, boc: File) -> Result<HashBytes> {
+    // Stores shard state from file and returns the hash of its root cell.
+    pub async fn store_state_from_file(
+        &self,
+        block_id: &BlockId,
+        boc: File,
+        part_files: Vec<(ShardStatePartInfo, File)>,
+    ) -> Result<HashBytes> {
+        let block_id = *block_id;
+
+        // run store tasks in parts
+        let mut part_store_tasks = FuturesUnordered::new();
+        let parts_info = if !block_id.is_masterchain() && !part_files.is_empty() {
+            let storage_parts = self.storage_parts.try_as_ref_ext()?;
+            ensure!(
+                storage_parts.len() == part_files.len(),
+                "shard state parts count mismatch",
+            );
+
+            let mut parts_info = Vec::new();
+
+            let mut remaining_prefixes: FastHashSet<_> = storage_parts.keys().cloned().collect();
+            for (info, file) in part_files {
+                ensure!(
+                    remaining_prefixes.remove(&info.prefix),
+                    "unexpected persistent shard state part {}",
+                    DisplayShardPrefix(&info.prefix),
+                );
+
+                let storage_part = storage_parts.try_get_ext(&info.prefix)?.clone();
+                part_store_tasks.push(tokio::spawn(
+                    storage_part.store_accounts_subtree_from_file(block_id, file),
+                ));
+
+                parts_info.push(info);
+            }
+
+            Some(parts_info)
+        } else {
+            None
+        };
+
+        // store main state in a separate task
         let ctx = StoreStateContext {
             cells_db: self.cells_db.clone(),
             cell_storage: self.cell_storage.clone(),
             temp_file_storage: self.temp_file_storage.clone(),
         };
 
-        let block_id = *block_id;
+        let gc_lock = {
+            let _hist = HistogramGuard::begin("tycho_storage_cell_gc_lock_store_time_high");
+            self.gc_lock.clone().lock_owned().await
+        };
 
-        let gc_lock = self.gc_lock.clone().lock_owned().await;
-        tokio::task::spawn_blocking(move || {
+        let root_hash = tokio::task::spawn_blocking(move || {
             // NOTE: Ensure that GC lock is captured by the spawned thread.
             let _gc_lock = gc_lock;
 
-            ctx.store(&block_id, boc)
+            ctx.store(&block_id, boc, parts_info, ShardIdent::PREFIX_FULL)
         })
-        .await?
+        .await??;
+
+        // wait for all store tasks in parts
+        while let Some(store_res) = part_store_tasks.next().await {
+            store_res??;
+        }
+
+        Ok(root_hash)
     }
 
     // NOTE: DO NOT try to make a separate `load_state_root` method

@@ -28,7 +28,7 @@ use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
 use crate::storage::{
-    BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
+    BlockFlags, BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
     PersistentStateKind, ShardStatePartInfo,
 };
 
@@ -72,6 +72,11 @@ impl StarterInner {
 
                 // Choose the latest key block with persistent state
                 let last_key_block = self.choose_key_block()?;
+
+                tracing::info!(
+                    last_key_block = %last_key_block.id(),
+                    "found latest key block with persistent state",
+                );
 
                 if last_key_block.id().seqno != 0 {
                     // If the last suitable key block is not zerostate, we must download all blocks
@@ -173,6 +178,11 @@ impl StarterInner {
                             Ok(res) => {
                                 let (handle, data) = res.split();
                                 handle.accept();
+
+                                tracing::debug!(
+                                    ids = ?data,
+                                    "downloaded key blocks ids",
+                                );
 
                                 if ids_tx.send((block_id, data.block_ids)).is_err() {
                                     tracing::debug!(%block_id, "stop downloading next key blocks");
@@ -748,6 +758,7 @@ impl StarterInner {
         for attempt in 0..MAX_PERSISTENT_STATE_RETRIES {
             // find persistent state
             if cached_found_state.is_none() {
+                tracing::info!(%block_id, "trying to find persistent state...");
                 match self
                     .starter_client
                     .find_persistent_state(block_id, PersistentStateKind::Shard)
@@ -760,6 +771,7 @@ impl StarterInner {
                     }
                 }
             }
+            tracing::info!(%block_id, "found persistent state");
             let found_state = cached_found_state.as_ref().unwrap();
 
             // download main file
@@ -813,12 +825,19 @@ impl StarterInner {
                 ));
             }
 
+            let mut part_files_for_storage = Vec::with_capacity(part_files.len());
+            for (info, builder) in &part_files {
+                let mut builder_for_read = builder.clone();
+                let file = builder_for_read.read(true).open()?;
+                part_files_for_storage.push((info.clone(), file));
+            }
+
             // NOTE: `store_state_file` error is mostly unrecoverable since the operation
             //       context is too large to be atomic.
+            // NOTE: store shard state from downloaded main file and part files
             // TODO: Make this operation recoverable to allow an infinite number of attempts.
-            // TODO: should store state from multiply files (main and parts)
             shard_states
-                .store_state_file(block_id, main_file)
+                .store_state_from_file(block_id, main_file, part_files_for_storage)
                 .await
                 .context("failed to store shard state file")?;
 
@@ -840,7 +859,10 @@ impl StarterInner {
             };
 
             // set flag that state stored
-            block_handles.set_has_shard_state(&block_handle);
+            block_handles.set_flags(
+                &block_handle,
+                BlockFlags::HAS_STATE_MAIN.union(BlockFlags::HAS_STATE_PARTS),
+            );
 
             let parts_paths: Vec<_> = part_files
                 .iter()

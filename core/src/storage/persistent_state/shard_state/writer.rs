@@ -143,13 +143,21 @@ impl<'a> ShardStateWriter<'a> {
             .map_err(Into::into)
     }
 
+    #[tracing::instrument(skip_all,
+        fields(
+            %root_hash,
+            part_shard_prefix = ?self.part_shard_prefix.as_ref().map(DisplayShardPrefix)
+        ),
+    )]
     pub fn write(&self, root_hash: &HashBytes, cancelled: Option<&CancellationFlag>) -> Result<()> {
         let temp_file_name = Self::temp_file_name(self.block_id, self.part_shard_prefix.as_ref());
         scopeguard::defer! {
             self.states_dir.remove_file(&temp_file_name).ok();
         }
 
-        // Load cells from db in reverse order into the temp file
+        // Load cells from db in reverse order into the temp file:
+        //   the last leaf will be at the beginning with index 0,
+        //   and the root will be at the end with the maximum index
         tracing::info!("started loading cells");
         let mut intermediate = self
             .write_rev(&root_hash.0, cancelled)
@@ -212,6 +220,13 @@ impl<'a> ShardStateWriter<'a> {
         // Cells             | current len: 22 + offset_size * (1 + cell_sizes.len())
         let mut cell_buffer = [0; 2 + 128 + 4 * REF_SIZE];
 
+        // write cells from the intermediate reverse file
+        // reverse children indexes
+        // e.g. when intermediate contains
+        // E[0; ] C[1; ref 0] D[2; ] B[3; ref 2] A[4; ref 1,3]
+        // will write cells in the reverse order like this
+        // A[0; ref 3, 1] B[1; ref 2] D[2; ] C[3; ref 4] E[4; ]
+
         let mut cancelled = cancelled.map(|c| c.debounce(1000));
         for &cell_size in intermediate.cell_sizes.iter().rev() {
             if let Some(cancelled) = &mut cancelled
@@ -266,6 +281,7 @@ impl<'a> ShardStateWriter<'a> {
             .map_err(Into::into)
     }
 
+    #[tracing::instrument(skip_all)]
     fn write_rev(
         &self,
         root_hash: &[u8; 32],
@@ -299,6 +315,18 @@ impl<'a> ShardStateWriter<'a> {
         let mut total_size = 0u64;
         let mut iteration = 0u32;
         let mut remap_index = 0u32;
+
+        // we put cells in the stack and traverse down one branch until the leaf is reached,
+        // then write this leaf cell, go back to the parent cell, and visit the sibling branch,
+        // so when both child branches are stored, we continue moving backward
+
+        // the leaf will have index 0 and the root will have the maximum index
+        // parent cells refer to children by indexes
+        // e.g. for the original branch
+        // A -> B -> D
+        //   -> C -> E
+        // the intermediate file will contain
+        // E[0; ] C[1; ref 0] D[2; ] B[3; ref 2] A[4; ref 1,3]
 
         stack.push((iteration, StackItem::New(*root_hash)));
         indices.insert(*root_hash, (iteration, false));
