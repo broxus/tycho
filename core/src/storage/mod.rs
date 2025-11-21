@@ -238,6 +238,7 @@ async fn try_init_state_parts(
                 cells_part_db,
                 config.cells_cache_size,
                 config.drop_interval,
+                ctx.temp_files().clone(),
             )),
         );
     }

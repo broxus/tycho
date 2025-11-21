@@ -3,20 +3,21 @@ use std::io::{BufWriter, Read, Seek, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use tycho_block_util::block::{DisplayShardPrefix, ShardPrefix};
 use tycho_storage::fs::TempFileStorage;
 use tycho_storage::kv::StoredValue;
 use tycho_types::cell::*;
 use tycho_types::models::BlockId;
 use tycho_types::util::ArrayVec;
-use tycho_util::FastHashMap;
 use tycho_util::fs::MappedFile;
 use tycho_util::io::ByteOrderRead;
 use tycho_util::progress_bar::*;
+use tycho_util::{FastHashMap, FastHashSet};
 use weedb::{BoundedCfHandle, rocksdb};
 
-use super::ShardStateEntry;
 use super::cell_storage::*;
 use super::entries_buffer::*;
+use super::{ShardStateEntry, ShardStatePartInfo};
 use crate::storage::db::{CellStorageDb, CellsDbOps};
 use crate::storage::{BriefBocHeader, ShardStateReader};
 
@@ -30,12 +31,19 @@ pub struct StoreStateContext {
 
 impl StoreStateContext {
     // Stores shard state and returns the hash of its root cell.
-    pub fn store<R>(&self, block_id: &BlockId, reader: R) -> Result<HashBytes>
+    #[tracing::instrument(skip_all, fields(block_id = %block_id.as_short_id(), shard_prefix = %DisplayShardPrefix(&_shard_prefix)))]
+    pub fn store<R>(
+        &self,
+        block_id: &BlockId,
+        reader: R,
+        parts_info: Option<Vec<ShardStatePartInfo>>,
+        _shard_prefix: ShardPrefix,
+    ) -> Result<HashBytes>
     where
         R: std::io::Read,
     {
         let preprocessed = self.preprocess(reader)?;
-        self.finalize(block_id, preprocessed)
+        self.finalize(block_id, preprocessed, parts_info)
     }
 
     fn preprocess<R>(&self, reader: R) -> Result<PreprocessedState>
@@ -97,7 +105,12 @@ impl StoreStateContext {
         }
     }
 
-    fn finalize(&self, block_id: &BlockId, preprocessed: PreprocessedState) -> Result<HashBytes> {
+    fn finalize(
+        &self,
+        block_id: &BlockId,
+        preprocessed: PreprocessedState,
+        parts_info: Option<Vec<ShardStatePartInfo>>,
+    ) -> Result<HashBytes> {
         // 2^7 bits + 1 bytes
         const MAX_DATA_SIZE: usize = 128;
         const CELLS_PER_BATCH: u64 = 1_000_000;
@@ -119,7 +132,13 @@ impl StoreStateContext {
         let raw = self.cells_db.rocksdb().as_ref();
         let write_options = self.cells_db.temp_cells().write_config();
 
-        let mut ctx = FinalizationContext::new(self.cells_db.temp_cells().cf());
+        let parts_hashes = parts_info.as_ref().map(|parts| {
+            parts
+                .iter()
+                .map(|part| part.hash)
+                .collect::<FastHashSet<_>>()
+        });
+        let mut ctx = FinalizationContext::new(self.cells_db.temp_cells().cf(), &parts_hashes);
         ctx.clear_temp_cells(&self.cells_db)?;
 
         // Allocate on heap to prevent big future size
@@ -211,13 +230,13 @@ impl StoreStateContext {
         ctx.final_check(root_hash)?;
 
         self.cell_storage
-            .apply_temp_cell(HashBytes::wrap(root_hash))?;
+            .apply_temp_cell(HashBytes::wrap(root_hash), &parts_hashes)?;
         ctx.clear_temp_cells(&self.cells_db)?;
 
         let shard_state_key = block_id.to_vec();
         let entry = ShardStateEntry {
             root_hash: HashBytes(*root_hash),
-            parts_info: None,
+            parts_info,
         };
         self.cells_db
             .shard_states()
@@ -238,17 +257,23 @@ struct FinalizationContext<'a> {
     cell_usages: FastHashMap<[u8; 32], i32>,
     entries_buffer: EntriesBuffer,
     output_buffer: Vec<u8>,
+    /// Contains map of original parts roots hashes
+    pruned_parts_hashes: &'a Option<FastHashSet<HashBytes>>,
     temp_cells_cf: BoundedCfHandle<'a>,
     write_batch: rocksdb::WriteBatch,
 }
 
 impl<'a> FinalizationContext<'a> {
-    fn new(temp_cells_cf: BoundedCfHandle<'a>) -> Self {
+    fn new(
+        temp_cells_cf: BoundedCfHandle<'a>,
+        pruned_parts_hashes: &'a Option<FastHashSet<HashBytes>>,
+    ) -> Self {
         Self {
             pruned_branches: Default::default(),
             cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
             entries_buffer: EntriesBuffer::new(),
             output_buffer: Vec::with_capacity(1 << 10),
+            pruned_parts_hashes,
             temp_cells_cf,
             write_batch: rocksdb::WriteBatch::default(),
         }
@@ -273,14 +298,50 @@ impl<'a> FinalizationContext<'a> {
         // Prepare mask and counters
         let mut children_mask = LevelMask::new(0);
 
-        for (_, child) in children.iter() {
+        let mut children_are_pruned_parts = vec![];
+        let mut children_lvl_0_hashes = FastHashMap::default();
+
+        for (index, child) in children.iter() {
             children_mask |= child.level_mask();
+
+            // check if child is a pruned part
+            let mut child_is_pruned_part = false;
+            if child.cell_type().is_pruned_branch() {
+                let child_data = self
+                    .pruned_branches
+                    .get(index)
+                    .ok_or(StoreStateError::InvalidCell)
+                    .context("Pruned branch data not found")?;
+                let child_hash = child
+                    .pruned_branch_hash(0, child_data)
+                    .context("Invalid pruned branch")?;
+                if self
+                    .pruned_parts_hashes
+                    .as_ref()
+                    .is_some_and(|parts| parts.contains(&HashBytes::from_slice(child_hash)))
+                {
+                    child_is_pruned_part = true;
+                }
+                // cache children hashes at level 0
+                children_lvl_0_hashes.insert(*index, *child_hash);
+            }
+            children_are_pruned_parts.push(child_is_pruned_part);
         }
+
+        let all_children_are_pruned_parts = children_are_pruned_parts.iter().all(|v| *v);
 
         let mut is_merkle_cell = false;
         let mut is_pruned_cell = false;
         let level_mask = match cell.descriptor.cell_type() {
-            CellType::Ordinary => children_mask,
+            CellType::Ordinary => {
+                // NOTE: when parts sub trees roots replaced with pruned branches in the main persistent state file
+                //      we do not recalculate ancestors levels, so we should take the original level mask
+                if all_children_are_pruned_parts {
+                    cell.descriptor.level_mask()
+                } else {
+                    children_mask
+                }
+            }
             CellType::PrunedBranch => {
                 is_pruned_cell = true;
                 cell.descriptor.level_mask()
@@ -383,6 +444,31 @@ impl<'a> FinalizationContext<'a> {
             self.pruned_branches.insert(cell_index, cell.data.to_vec());
         }
 
+        // get cell hash and check if it is a pruned part
+        let (repr_hash, is_pruned_part) = if is_pruned_cell {
+            let repr_hash = current_entry
+                .as_reader()
+                .pruned_branch_hash(LevelMask::MAX_LEVEL, cell.data)
+                .context("Invalid pruned branch")?;
+            let lvl_0_hash = current_entry
+                .as_reader()
+                .pruned_branch_hash(0, cell.data)
+                .context("Invalid pruned branch")?;
+            let is_pruned_part = self
+                .pruned_parts_hashes
+                .as_ref()
+                .is_some_and(|parts| parts.contains(&HashBytes::from_slice(lvl_0_hash)));
+            (*repr_hash, is_pruned_part)
+        } else {
+            let repr_hash = current_entry.as_reader().hash(LevelMask::MAX_LEVEL);
+            (*repr_hash, false)
+        };
+
+        // do not store pruned part
+        if is_pruned_part {
+            return Ok(());
+        }
+
         // Write cell data
         let output_buffer = &mut self.output_buffer;
         output_buffer.clear();
@@ -402,35 +488,37 @@ impl<'a> FinalizationContext<'a> {
         // Write cell references
         for (index, child) in children.iter() {
             let child_hash = if child.cell_type().is_pruned_branch() {
-                let child_data = self
-                    .pruned_branches
-                    .get(index)
-                    .ok_or(StoreStateError::InvalidCell)
-                    .context("Pruned branch data not found")?;
-                child
-                    .pruned_branch_hash(LevelMask::MAX_LEVEL, child_data)
-                    .context("Invalid pruned branch")?
+                if all_children_are_pruned_parts {
+                    // when children are pruned parts we should store refs to original hashes at level 0
+                    children_lvl_0_hashes
+                        .get(index)
+                        .expect("child lvl 0 hash must exist when all children are pruned parts")
+                } else {
+                    let child_data = self
+                        .pruned_branches
+                        .get(index)
+                        .ok_or(StoreStateError::InvalidCell)
+                        .context("Pruned branch data not found")?;
+                    child
+                        .pruned_branch_hash(LevelMask::MAX_LEVEL, child_data)
+                        .context("Invalid pruned branch")?
+                }
             } else {
                 child.hash(LevelMask::MAX_LEVEL)
             };
 
-            *self.cell_usages.entry(*child_hash).or_default() += 1;
+            // update cell usages only when child is not a pruned part
+            // because we won't store pruned part
+            if !all_children_are_pruned_parts {
+                *self.cell_usages.entry(*child_hash).or_default() += 1;
+            }
             output_buffer.extend_from_slice(child_hash);
         }
 
         // Save serialized data
-        let repr_hash = if is_pruned_cell {
-            current_entry
-                .as_reader()
-                .pruned_branch_hash(LevelMask::MAX_LEVEL, cell.data)
-                .context("Invalid pruned branch")?
-        } else {
-            current_entry.as_reader().hash(LevelMask::MAX_LEVEL)
-        };
-
         self.write_batch
             .put_cf(&self.temp_cells_cf, repr_hash, output_buffer.as_slice());
-        self.cell_usages.insert(*repr_hash, -1);
+        self.cell_usages.insert(repr_hash, -1);
 
         // Done
         Ok(())
@@ -442,7 +530,7 @@ impl<'a> FinalizationContext<'a> {
 
     fn final_check(&self, root_hash: &[u8; 32]) -> Result<()> {
         tracing::info!(root_hash = %HashBytes::wrap(root_hash), "Final check");
-        tracing::info!(len=?self.cell_usages.len(), "Cell usages");
+        tracing::info!(len = self.cell_usages.len(), "Cell usages",);
 
         anyhow::ensure!(
             self.cell_usages.len() == 1 && self.cell_usages.contains_key(root_hash),
@@ -602,7 +690,7 @@ mod test {
             #[allow(clippy::disallowed_methods)]
             let file = File::open(file.path())?;
 
-            store_ctx.store(&block_id, file)?;
+            store_ctx.store(&block_id, file, None, ShardIdent::PREFIX_FULL)?;
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");
