@@ -9,10 +9,11 @@ use tycho_collator::internal_queue::queue::{
 };
 use tycho_collator::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use tycho_collator::internal_queue::state::storage::{QueueStateImplFactory, QueueStateStdImpl};
-use tycho_collator::internal_queue::types::{
-    DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, PartitionRouter,
-    QueueDiffWithMessages, QueueShardRange,
-};
+use tycho_collator::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
+use tycho_collator::internal_queue::types::message::{EnqueuedMessage, InternalMessageValue};
+use tycho_collator::internal_queue::types::ranges::QueueShardRange;
+use tycho_collator::internal_queue::types::router::PartitionRouter;
+use tycho_collator::internal_queue::types::stats::DiffStatistics;
 use tycho_collator::storage::InternalQueueStorage;
 use tycho_collator::storage::snapshot::{AccountStatistics, InternalQueueSnapshot};
 use tycho_storage::StorageContext;
