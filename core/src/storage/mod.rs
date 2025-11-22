@@ -1,6 +1,9 @@
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
+use tycho_block_util::block::{DisplayShardPrefix, split_shard_ident};
 use tycho_storage::StorageContext;
 use tycho_storage::kv::ApplyMigrations;
 
@@ -17,14 +20,15 @@ pub use self::config::{
     ArchivesGcConfig, BlocksCacheConfig, BlocksGcConfig, BlocksGcType, CoreStorageConfig,
     StatesGcConfig,
 };
-pub use self::db::{CellsDb, CoreDb, CoreDbExt, CoreTables};
+pub use self::db::{CellsDb, CellsPartDb, CoreDb, CoreDbExt, CoreTables};
 pub use self::node_state::{NodeStateStorage, NodeSyncState};
 pub use self::persistent_state::{
     BriefBocHeader, PersistentStateInfo, PersistentStateKind, PersistentStateStorage,
     QueueDiffReader, QueueStateReader, QueueStateWriter, ShardStateReader, ShardStateWriter,
 };
 pub use self::shard_state::{
-    ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics, StoreStateHint,
+    ShardStateStorage, ShardStateStorageContext, ShardStateStorageError, ShardStateStorageMetrics,
+    ShardStateStoragePart, ShardStateStoragePartImpl, StoragePartsMap, StoreStateHint,
 };
 
 pub mod tables;
@@ -80,14 +84,20 @@ impl CoreStorage {
         )
         .await?;
         let block_storage = Arc::new(block_storage);
-        let shard_state_storage = ShardStateStorage::new(
-            cells_db.clone(),
-            block_handle_storage.clone(),
-            block_storage.clone(),
-            ctx.temp_files().clone(),
-            config.cells_cache_size,
-            config.drop_interval,
-        )?;
+
+        // try init state partitions if configured
+        let (part_split_depth, storage_parts) = try_init_state_partitions(&ctx, &config).await?;
+
+        let shard_state_storage = ShardStateStorage::new(ShardStateStorageContext {
+            cells_db: cells_db.clone(),
+            block_handle_storage: block_handle_storage.clone(),
+            block_storage: block_storage.clone(),
+            temp_file_storage: ctx.temp_files().clone(),
+            cache_size_bytes: config.cells_cache_size,
+            drop_interval: config.drop_interval,
+            part_split_depth,
+            storage_parts,
+        })?;
         let persistent_state_storage = PersistentStateStorage::new(
             cells_db.clone(),
             ctx.files_dir(),
@@ -173,4 +183,43 @@ struct Inner {
     shard_state_storage: Arc<ShardStateStorage>,
     node_state_storage: NodeStateStorage,
     persistent_state_storage: PersistentStateStorage,
+}
+
+async fn try_init_state_partitions(
+    ctx: &StorageContext,
+    config: &CoreStorageConfig,
+) -> Result<(u8, Arc<StoragePartsMap>)> {
+    let Some(state_parts_config) = &config.state_parts else {
+        return Ok(Default::default());
+    };
+
+    let mut storage_parts = StoragePartsMap::default();
+
+    // NOTE: workchain_id does not matter because we use only shard prefixes
+    let shards = split_shard_ident(0, state_parts_config.split_depth);
+    for shard in shards {
+        let shard_prefix = shard.prefix();
+        let path = match state_parts_config.part_dirs.get(&shard_prefix) {
+            Some(p) => p.clone(),
+            None => PathBuf::from_str(&format!(
+                "cells-parts/cells-part-{}",
+                DisplayShardPrefix(&shard_prefix)
+            ))?,
+        };
+        let cells_part_db: CellsPartDb =
+            ctx.open_preconfigured_partition(path, Some(shard_prefix))?;
+        cells_part_db.normalize_version()?;
+        cells_part_db.apply_migrations().await?;
+        storage_parts.insert(
+            shard_prefix,
+            Arc::new(ShardStateStoragePartImpl::new(
+                shard_prefix,
+                cells_part_db,
+                config.cells_cache_size,
+                config.drop_interval,
+            )),
+        );
+    }
+
+    Ok((state_parts_config.split_depth, Arc::new(storage_parts)))
 }
