@@ -794,6 +794,38 @@ impl BlobStorage {
         &self.blocks
     }
 
+    /// Estimates the archive ID for a given masterchain block.
+    ///
+    /// Note: For blocks that are too far in the future (new > last + `BLOCKS_PER_ARCHIVE`),
+    /// the archive ID may be calculated incorrectly if a new key block appears in between.
+    pub fn estimate_archive_id(&self, mc_seqno: u32) -> u32 {
+        const BLOCKS_PER_ARCHIVE: u32 = Archive::MAX_MC_BLOCKS_PER_ARCHIVE;
+
+        // Archive id must be aligned to the latest key block id.
+        let prev_key_block_seqno = self
+            .block_handle_storage
+            .find_prev_key_block(mc_seqno)
+            .map(|handle| handle.id().seqno)
+            .unwrap_or_default();
+
+        // Key block causes the archive to be split earlier,
+        // after that archive sizes start all over again.
+        // Example:
+        // 001 101 201 301 401 <keyblock at 450> 451 551 651 751 ...
+        let archive_id_base = prev_key_block_seqno + 1;
+
+        let mut archive_id = mc_seqno;
+        if archive_id_base < mc_seqno {
+            // Example:
+            // archive_id_base = 151
+            // mc_seqno = 290
+            // archive_id = 290 - (290 - 151) % 100 = 251
+            archive_id -= (mc_seqno - archive_id_base) % BLOCKS_PER_ARCHIVE;
+        }
+
+        archive_id
+    }
+
     fn prepare_archive_id(&self, mc_seqno: u32, force_split_archive: bool) -> PreparedArchiveId {
         let mut archive_ids = self.archive_ids.write();
 

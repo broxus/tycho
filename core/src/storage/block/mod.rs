@@ -434,6 +434,10 @@ impl BlockStorage {
         self.blob_storage.remove_outdated_archives(until_id).await
     }
 
+    pub fn estimate_archive_id(&self, mc_seqno: u32) -> u32 {
+        self.blob_storage.estimate_archive_id(mc_seqno)
+    }
+
     // === GC stuff ===
 
     #[tracing::instrument(skip(self, max_blocks_per_batch))]

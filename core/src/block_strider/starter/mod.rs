@@ -13,11 +13,15 @@ use tycho_types::models::{
 use tycho_util::fs::MappedFile;
 use tycho_util::serde_helpers;
 
+use self::starter_client::StarterClient;
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
+#[cfg(feature = "s3")]
+use crate::s3::S3Client;
 use crate::storage::{CoreStorage, QueueStateReader};
 
 mod cold_boot;
+mod starter_client;
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +31,12 @@ pub struct StarterConfig {
     /// Default: None
     #[serde(with = "serde_helpers::humantime")]
     pub custom_boot_offset: Option<Duration>,
+
+    /// Choose nearest persistent state to start from.
+    ///
+    /// Default: None
+    #[serde(default)]
+    pub start_from: Option<u32>,
 }
 
 pub struct StarterBuilder<
@@ -51,11 +61,29 @@ impl StarterBuilder {
         let (storage, blockchain_rpc_client, zerostate, config) = self.mandatory_fields;
         let BuilderFields {
             queue_state_handler,
+            #[cfg(feature = "s3")]
+            s3_client,
         } = self.optional_fields;
+
+        #[allow(unused_labels)]
+        let starter_client: Arc<dyn StarterClient> = 'client: {
+            #[cfg(feature = "s3")]
+            if let Some(s3_client) = s3_client {
+                use self::starter_client::{HybridStarterClient, S3StarterClient};
+
+                break 'client Arc::new(HybridStarterClient::new(
+                    blockchain_rpc_client.clone(),
+                    S3StarterClient::new(s3_client, storage.clone()),
+                ));
+            }
+
+            Arc::new(blockchain_rpc_client.clone())
+        };
 
         Starter {
             inner: Arc::new(StarterInner {
                 storage,
+                starter_client,
                 blockchain_rpc_client,
                 zerostate,
                 config,
@@ -67,7 +95,6 @@ impl StarterBuilder {
 }
 
 impl<T2, T3, T4> StarterBuilder<((), T2, T3, T4)> {
-    // TODO: Use `CoreStorage`.
     pub fn with_storage(self, storage: CoreStorage) -> StarterBuilder<(CoreStorage, T2, T3, T4)> {
         let ((), client, id, config) = self.mandatory_fields;
         StarterBuilder {
@@ -121,11 +148,20 @@ impl<T> StarterBuilder<T> {
         }));
         self
     }
+
+    #[cfg(feature = "s3")]
+    pub fn with_s3_client(mut self, client: S3Client) -> Self {
+        self.optional_fields.s3_client = Some(client);
+        self
+    }
 }
 
 #[derive(Default)]
 struct BuilderFields {
     queue_state_handler: Option<Box<dyn QueueStateHandler>>,
+
+    #[cfg(feature = "s3")]
+    s3_client: Option<S3Client>,
 }
 
 /// Bootstrapping utils.
@@ -173,6 +209,8 @@ pub enum ColdBootType {
 
 struct StarterInner {
     storage: CoreStorage,
+    starter_client: Arc<dyn StarterClient>,
+    // TODO: Access blockchain only though the starter client.
     blockchain_rpc_client: BlockchainRpcClient,
     zerostate: ZerostateId,
     config: StarterConfig,

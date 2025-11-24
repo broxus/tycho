@@ -20,7 +20,7 @@ use tycho_util::time::now_sec;
 
 use super::{ColdBootType, StarterInner, ZerostateProvider};
 use crate::block_strider::{CheckProof, ProofChecker};
-use crate::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
+use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
 use crate::storage::{
@@ -197,6 +197,11 @@ impl StarterInner {
             Some(t) => now_utime.saturating_sub(gen_utime) as u64 >= t.as_secs(),
         };
 
+        let satisfies_seqno = |seqno: u32| match self.config.start_from {
+            None => true,
+            Some(start_from) => start_from > seqno,
+        };
+
         let mut retry_counter = 0usize;
         while let Some((requested_key_block, ids)) = ids_rx.recv().await {
             let stream = futures_util::stream::iter(ids)
@@ -221,7 +226,10 @@ impl StarterInner {
             for (index, proof) in proofs.into_iter().enumerate() {
                 // Verify block proof
                 match prev_key_block.check_next_proof(&proof.data) {
-                    Ok(meta) if satisfies_offset(meta.gen_utime, now_utime) => {
+                    Ok(meta)
+                        if satisfies_offset(meta.gen_utime, now_utime)
+                            && satisfies_seqno(meta.ref_by_mc_seqno) =>
+                    {
                         // Save block proof
                         let handle = self
                             .storage
@@ -528,7 +536,7 @@ impl StarterInner {
         mc_block_id: &BlockId,
         block_id: &BlockId,
     ) -> Result<(BlockHandle, BlockStuff)> {
-        let rpc = &self.blockchain_rpc_client;
+        let client = &self.starter_client;
         let blocks = self.storage.block_storage();
         let block_handles = self.storage.block_handle_storage();
 
@@ -547,21 +555,16 @@ impl StarterInner {
 
         // TODO: add retry count to interrupt infinite loop
         'outer: loop {
-            let (full, neighbour) = 'res: {
-                match rpc
-                    .get_block_full(block_id, DataRequirement::Expected)
-                    .await
-                {
-                    Ok(res) => match res.data {
-                        Some(data) if &data.block_id == block_id => {
-                            break 'res (data, res.neighbour);
+            let (full, punish) = 'res: {
+                match client.get_block_full(mc_block_id.seqno, block_id).await {
+                    Ok(res) => {
+                        if &res.data.block_id == block_id {
+                            break 'res (res.data, res.punish);
                         }
-                        Some(_) => {
-                            res.neighbour.punish(PunishReason::Malicious);
-                            tracing::warn!("received block id mismatch");
-                        }
-                        None => tracing::warn!("block not found"),
-                    },
+
+                        (res.punish)(PunishReason::Malicious);
+                        tracing::warn!("received block id mismatch");
+                    }
                     Err(e) => tracing::warn!("failed to download block: {e:?}"),
                 }
 
@@ -613,13 +616,13 @@ impl StarterInner {
                             return Ok((res.handle, block));
                         }
                         Err(e) => {
-                            neighbour.punish(PunishReason::Malicious);
+                            (punish)(PunishReason::Malicious);
                             tracing::error!("got invalid block proof: {e:?}");
                         }
                     }
                 }
                 (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-                    neighbour.punish(PunishReason::Malicious);
+                    (punish)(PunishReason::Malicious);
                     tracing::error!("failed to deserialize shard block or block proof: {e:?}");
                 }
             }
@@ -846,17 +849,17 @@ impl StarterInner {
             std::fs::remove_file(temp_file_path).ok();
         };
 
-        let rpc = &self.blockchain_rpc_client;
+        let client = &self.starter_client;
         loop {
             if state_file.exists() {
                 // Use the downloaded state file if it exists
                 return state_file.clone().read(true).open();
             }
 
-            let pending_state = rpc.find_persistent_state(block_id, kind).await?;
+            let pending_state = client.find_persistent_state(block_id, kind).await?;
 
             let output = temp_file.write(true).create(true).truncate(true).open()?;
-            rpc.download_persistent_state(pending_state, output).await?;
+            _ = (pending_state.download)(output).await?;
 
             tokio::fs::rename(temp_file.path(), state_file.path()).await?;
 
