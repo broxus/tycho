@@ -17,7 +17,7 @@ pub use self::archive_handler::ArchiveHandler;
 pub use self::block_saver::BlockSaver;
 pub use self::provider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, ArchiveClient, ArchiveDownloadContext,
-    ArchiveResponse, ArchiveWriter, BlockProvider, BlockProviderExt, BlockchainBlockProvider,
+    ArchiveResponse, BlockProvider, BlockProviderExt, BlockchainBlockProvider,
     BlockchainBlockProviderConfig, BoxBlockProvider, ChainBlockProvider, CheckProof,
     CycleBlockProvider, EmptyBlockProvider, FoundArchive, HybridArchiveClient, IntoArchiveClient,
     OptionalBlockStuff, ProofChecker, RetryBlockProvider, RetryConfig, StorageBlockProvider,

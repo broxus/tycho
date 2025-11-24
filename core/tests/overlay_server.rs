@@ -14,9 +14,9 @@ use tycho_core::proto::blockchain::{KeyBlockIds, PersistentStateInfo};
 use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta, PersistentStateKind};
 use tycho_network::{DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay};
 use tycho_storage::StorageContext;
-use tycho_storage::fs::MappedFile;
 use tycho_types::boc::{Boc, BocRepr};
 use tycho_types::models::{BlockId, ExtInMsgInfo, OwnedMessage, ShardIdent};
+use tycho_util::fs::MappedFile;
 
 use crate::network::TestNode;
 

@@ -15,8 +15,9 @@ use tokio::time::Instant;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::RefMcStateHandle;
-use tycho_storage::fs::{Dir, MappedFile};
+use tycho_storage::fs::Dir;
 use tycho_types::models::{BlockId, PrevBlockRef};
+use tycho_util::fs::MappedFile;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::{FastHashMap, FastHashSet};
 

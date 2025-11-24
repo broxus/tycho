@@ -6,11 +6,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_storage::fs::MappedFile;
 use tycho_types::boc::Boc;
 use tycho_types::models::{
     BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardStateUnsplit,
 };
+use tycho_util::fs::MappedFile;
 use tycho_util::serde_helpers;
 
 use crate::blockchain_rpc::BlockchainRpcClient;

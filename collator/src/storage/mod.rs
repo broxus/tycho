@@ -4,10 +4,10 @@ use anyhow::Result;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPartitions};
 use tycho_core::storage::QueueStateReader;
 use tycho_storage::StorageContext;
-use tycho_storage::fs::MappedFile;
 use tycho_storage::kv::StoredValue;
 use tycho_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_util::FastHashMap;
+use tycho_util::fs::MappedFile;
 
 use self::db::InternalQueueDB;
 use self::models::{

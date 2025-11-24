@@ -1,14 +1,13 @@
 use std::collections::{BTreeMap, btree_map};
-use std::io::Seek;
 use std::num::NonZeroU64;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 use bytesize::ByteSize;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -16,8 +15,8 @@ use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tycho_block_util::archive::Archive;
 use tycho_block_util::block::{BlockIdRelation, BlockStuffAug};
-use tycho_storage::fs::MappedFile;
 use tycho_types::models::BlockId;
+use tycho_util::fs::TargetWriter;
 
 use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc;
@@ -468,58 +467,8 @@ impl BlockProvider for ArchiveBlockProvider {
     }
 }
 
-pub enum ArchiveWriter {
-    File(std::io::BufWriter<std::fs::File>),
-    Bytes(bytes::buf::Writer<BytesMut>),
-}
-
-impl ArchiveWriter {
-    fn try_freeze(self) -> Result<Bytes, std::io::Error> {
-        match self {
-            Self::File(file) => match file.into_inner() {
-                Ok(mut file) => {
-                    file.seek(std::io::SeekFrom::Start(0))?;
-                    MappedFile::from_existing_file(file).map(Bytes::from_owner)
-                }
-                Err(e) => Err(e.into_error()),
-            },
-            Self::Bytes(data) => Ok(data.into_inner().freeze()),
-        }
-    }
-}
-
-impl std::io::Write for ArchiveWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            Self::File(writer) => writer.write(buf),
-            Self::Bytes(writer) => writer.write(buf),
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            Self::File(writer) => writer.flush(),
-            Self::Bytes(writer) => writer.flush(),
-        }
-    }
-
-    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        match self {
-            Self::File(writer) => writer.write_all(buf),
-            Self::Bytes(writer) => writer.write_all(buf),
-        }
-    }
-
-    fn write_fmt(&mut self, fmt: std::fmt::Arguments<'_>) -> std::io::Result<()> {
-        match self {
-            Self::File(writer) => writer.write_fmt(fmt),
-            Self::Bytes(writer) => writer.write_fmt(fmt),
-        }
-    }
-}
-
 pub struct ArchiveResponse {
-    writer: ArchiveWriter,
+    writer: TargetWriter,
     neighbour: Option<Neighbour>,
 }
 
@@ -530,12 +479,12 @@ pub struct ArchiveDownloadContext<'a> {
 }
 
 impl<'a> ArchiveDownloadContext<'a> {
-    pub fn get_archive_writer(&self, size: NonZeroU64) -> Result<ArchiveWriter> {
+    pub fn get_archive_writer(&self, size: NonZeroU64) -> Result<TargetWriter> {
         Ok(if size.get() > self.memory_threshold.as_u64() {
             let file = self.storage.context().temp_files().unnamed_file().open()?;
-            ArchiveWriter::File(std::io::BufWriter::new(file))
+            TargetWriter::File(std::io::BufWriter::new(file))
         } else {
-            ArchiveWriter::Bytes(BytesMut::new().writer())
+            TargetWriter::Bytes(BytesMut::new().writer())
         })
     }
 
