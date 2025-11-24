@@ -110,6 +110,11 @@ impl NodeBase {
                     starter = starter.with_queue_state_handler(handler);
                 }
 
+                #[cfg(feature = "s3")]
+                if let Some(s3_client) = self.s3_client.as_ref() {
+                    starter = starter.with_s3_client(s3_client.clone());
+                }
+
                 starter
                     .build()
                     .cold_boot(boot_type, zerostates.map(FileZerostateProvider))
