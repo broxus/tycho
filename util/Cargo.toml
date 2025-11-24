@@ -55,6 +55,7 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 
 [features]
 test = ["dep:tracing-subscriber"]
+fs = ["dep:libc"]
 cli = [
     "dep:getip",
     "dep:libc",

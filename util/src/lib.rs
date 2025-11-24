@@ -15,6 +15,15 @@ pub mod time;
 
 pub mod tl;
 
+#[cfg(feature = "fs")]
+pub mod fs {
+    pub use self::mapped_file::{MappedFile, MappedFileMut};
+    pub use self::target_writer::TargetWriter;
+
+    mod mapped_file;
+    mod target_writer;
+}
+
 pub mod futures {
     pub use self::await_blocking::AwaitBlocking;
     pub use self::box_future_or_noop::BoxFutureOrNoop;

@@ -20,7 +20,7 @@ use tycho_util::serde_helpers;
 
 pub use self::archive_provider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, ArchiveClient, ArchiveDownloadContext,
-    ArchiveResponse, ArchiveWriter, FoundArchive, HybridArchiveClient, IntoArchiveClient,
+    ArchiveResponse, FoundArchive, HybridArchiveClient, IntoArchiveClient,
 };
 pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
 pub use self::box_provider::BoxBlockProvider;

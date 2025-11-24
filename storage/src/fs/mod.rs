@@ -10,10 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-
-pub use self::mapped_file::{MappedFile, MappedFileMut};
-
-mod mapped_file;
+use tycho_util::fs::MappedFileMut;
 
 const BASE_DIR: &str = "temp";
 

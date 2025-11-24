@@ -3,12 +3,13 @@ use std::io::{BufWriter, Read, Seek, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tycho_storage::fs::{MappedFile, TempFileStorage};
+use tycho_storage::fs::TempFileStorage;
 use tycho_storage::kv::StoredValue;
 use tycho_types::cell::*;
 use tycho_types::models::BlockId;
 use tycho_types::util::ArrayVec;
 use tycho_util::FastHashMap;
+use tycho_util::fs::MappedFile;
 use tycho_util::io::ByteOrderRead;
 use tycho_util::progress_bar::*;
 use weedb::{BoundedCfHandle, rocksdb};

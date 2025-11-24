@@ -68,7 +68,7 @@ weedb = { workspace = true }
 tycho-block-util = { workspace = true }
 tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
-tycho-util = { workspace = true }
+tycho-util = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
