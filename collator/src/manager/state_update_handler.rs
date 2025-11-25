@@ -5,7 +5,7 @@ use ahash::HashMapExt;
 use anyhow::{Context, Result, anyhow};
 use tokio::sync::Notify;
 use tycho_block_util::block::{ValidatorSubsetInfo, calc_next_block_id_short};
-use tycho_types::models::{BlockId, GlobalCapabilities, ShardIdent, ValidatorDescription};
+use tycho_types::models::{BlockId, GlobalCapabilities, IndexedValidatorDescription, ShardIdent};
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{DashMapEntry, FastHashMap, FastHashSet};
@@ -195,13 +195,15 @@ where
         let mut subset_cache = FastHashMap::new();
         let mut get_validator_subset = |shard_id| match subset_cache.entry(shard_id) {
             hash_map::Entry::Occupied(entry) => {
-                let (subset, hash_short): &(Arc<FastHashMap<[u8; 32], ValidatorDescription>>, u32) =
-                    entry.get();
+                let (subset, hash_short): &(
+                    Arc<FastHashMap<[u8; 32], IndexedValidatorDescription>>,
+                    u32,
+                ) = entry.get();
                 Result::<_>::Ok((subset.clone(), *hash_short))
             }
             hash_map::Entry::Vacant(entry) => {
                 let (subset, hash_short) = full_validators_set
-                    .compute_mc_subset(current_session_seqno, collation_config.shuffle_mc_validators)
+                    .compute_mc_subset_indexed(current_session_seqno, collation_config.shuffle_mc_validators)
                     .ok_or_else(|| anyhow!(
                         "Error calculating subset of validators for session (shard_id = {}, seqno = {})",
                         ShardIdent::MASTERCHAIN,
@@ -210,7 +212,7 @@ where
 
                 let subset: FastHashMap<_, _> = subset
                     .into_iter()
-                    .map(|vldr| (vldr.public_key.into(), vldr))
+                    .map(|vldr| (vldr.desc.public_key.into(), vldr))
                     .collect();
                 let subset = Arc::new(subset);
 
