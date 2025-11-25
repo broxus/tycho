@@ -284,7 +284,7 @@ impl BlockProofStuff {
 
         let weight = match signatures
             .signatures
-            .check_signatures(&subset.validators, &checked_data)
+            .check_signatures(subset.validators.iter().map(AsRef::as_ref), &checked_data)
         {
             Ok(weight) => weight,
             Err(e) => anyhow::bail!("proof contains invalid signatures: {e:?}"),
@@ -520,7 +520,7 @@ fn pre_check_key_block_proof(virt_block: &Block) -> Result<()> {
 
 #[derive(Clone, Debug)]
 pub struct ValidatorSubsetInfo {
-    pub validators: Vec<ValidatorDescription>,
+    pub validators: Vec<IndexedValidatorDescription>,
     pub short_hash: u32,
 }
 
@@ -531,7 +531,7 @@ impl ValidatorSubsetInfo {
         shuffle_validators: bool,
     ) -> Result<Self> {
         let Some((validators, short_hash)) =
-            validator_set.compute_mc_subset(cc_seqno, shuffle_validators)
+            validator_set.compute_mc_subset_indexed(cc_seqno, shuffle_validators)
         else {
             anyhow::bail!("failed to compute a validator subset");
         };
