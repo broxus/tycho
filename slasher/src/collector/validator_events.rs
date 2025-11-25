@@ -1,63 +1,53 @@
+use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
-use anyhow::Result;
-use arc_swap::ArcSwap;
+use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tracing::instrument;
 use tycho_slasher_traits::{ReceivedSignature, ValidationSessionId, ValidatorEventsListener};
-use tycho_types::dict;
-use tycho_types::models::{BlockId, ValidatorDescription};
+use tycho_types::models::{BlockId, IndexedValidatorDescription};
 use tycho_types::prelude::*;
-use tycho_util::{DashMapEntry, FastDashMap, FastHashMap};
+use tycho_util::{DashMapEntry, FastDashMap};
 
-use crate::util::AtomicBitSet;
-
-// Gauges
-const METRIC_SLASHER_PENDING_BLOCKS: &str = "tycho_slasher_pending_blocks";
-const METRIC_SLASHER_COMPLETE_BLOCKS: &str = "tycho_slasher_complete_blocks";
-const METRIC_SLASHER_LATEST_COMPLETE_BLOCK: &str = "tycho_slasher_latest_complete_block";
-const METRIC_SLASHER_BLOCKS_TAKEN_UNTIL: &str = "tycho_slasher_blocks_taken_until";
+use crate::bc::BlocksBatch;
 
 #[derive(Default)]
 pub struct ValidatorEventsCollector {
-    default_batch_size: AtomicUsize,
+    default_batch_size: AtomicU32,
     sessions: FastDashMap<ValidationSessionId, SessionState>,
 }
 
 struct SessionState {
-    batch_size: usize,
-    validator_count: usize,
-    current_batch: ArcSwap<BlocksBatch>,
-    latest_seqno: AtomicU32,
-    complete_batches: Option<mpsc::Sender<Cell>>,
-}
-
-struct BlocksBatch {
-    start_seqno: u32,
-    committed_blocks: AtomicBitSet,
-    signatures_history: Box<[AtomicBitSet]>,
+    batch_size: NonZeroU32,
+    /// Maps each subset item with its original vset index.
+    validator_indices: Box<[u16]>,
+    current_batch: BlocksBatch,
+    first_seqno: u32,
+    next_expected_seqno: u32,
+    complete_batches: Option<mpsc::UnboundedSender<Cell>>,
 }
 
 // === Collector impl ===
 
 impl ValidatorEventsCollector {
-    pub fn new(default_batch_size: usize) -> Self {
+    pub fn new(default_batch_size: NonZeroU32) -> Self {
         Self {
-            default_batch_size: AtomicUsize::new(default_batch_size),
+            default_batch_size: AtomicU32::new(default_batch_size.get()),
             sessions: Default::default(),
         }
     }
 
-    pub fn set_default_batch_size(&self, batch_size: usize) {
-        self.default_batch_size.store(batch_size, Ordering::Release);
+    pub fn set_default_batch_size(&self, batch_size: NonZeroU32) {
+        self.default_batch_size
+            .store(batch_size.get(), Ordering::Release);
     }
 
     pub fn init_session(
         &self,
         session_id: ValidationSessionId,
-        batch_size: usize,
-        complete_batches: mpsc::Sender<Cell>,
+        batch_size: NonZeroU32,
+        complete_batches: mpsc::UnboundedSender<Cell>,
     ) -> bool {
         let Some(mut session) = self.sessions.get_mut(&session_id) else {
             return false;
@@ -67,11 +57,11 @@ impl ValidatorEventsCollector {
         // TODO: Split or grow the previous batch to not discard events.
         if session.batch_size != batch_size {
             session.batch_size = batch_size;
-            session.current_batch.store(Arc::new(BlocksBatch::new(
-                session.latest_seqno.load(Ordering::Acquire),
+            session.current_batch = BlocksBatch::new(
+                session.align_seqno(session.next_expected_seqno),
                 batch_size,
-                session.validator_count,
-            )));
+                &session.validator_indices,
+            );
         }
 
         session.complete_batches = Some(complete_batches);
@@ -90,28 +80,27 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
         &self,
         session_id: ValidationSessionId,
         first_mc_seqno: u32,
-        validators: &[ValidatorDescription],
+        validators: &[IndexedValidatorDescription],
     ) {
         tracing::debug!(first_mc_seqno, "on_session_open");
 
-        let validator_count = validators.len();
-        let mut peer_id_to_index =
-            FastHashMap::with_capacity_and_hasher(validator_count, Default::default());
-        let mut peer_ids = Vec::with_capacity(validator_count);
-        for validator in validators {
-            if peer_id_to_index
-                .insert(validator.public_key, peer_ids.len())
-                .is_none()
-            {
-                peer_ids.push(validator.public_key);
-            }
-        }
+        let validator_indices = validators
+            .iter()
+            .map(|item| item.validator_idx)
+            .collect::<Box<[_]>>();
 
-        if let DashMapEntry::Vacant(v) = self.pending.entry(session_id) {
-            v.insert(PendingBlocks {
-                peer_ids: Arc::from(peer_ids),
-                peer_id_to_index,
-                pending_blocks: Default::default(),
+        let batch_size = NonZeroU32::new(self.default_batch_size.load(Ordering::Acquire)).unwrap();
+        let current_batch = BlocksBatch::new(first_mc_seqno, batch_size, &validator_indices);
+
+        if let DashMapEntry::Vacant(v) = self.sessions.entry(session_id) {
+            v.insert(SessionState {
+                batch_size,
+                validator_indices,
+                current_batch,
+                first_seqno: first_mc_seqno,
+                next_expected_seqno: first_mc_seqno,
+                // Will be initialized later via `init_session`.
+                complete_batches: None,
             });
         } else {
             tracing::warn!("duplicate session");
@@ -121,9 +110,10 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
     #[instrument(skip_all, fields(session_id = ?session_id))]
     fn on_session_finished(&self, session_id: ValidationSessionId) {
         tracing::debug!("on_session_drop");
-        if let Some((_, entry)) = self.pending.remove(&session_id) {
-            let removed_count = entry.pending_blocks.len();
-            metrics::gauge!(METRIC_SLASHER_PENDING_BLOCKS).decrement(removed_count as f64);
+        if let Some((_, session)) = self.sessions.remove(&session_id)
+            && let Err(e) = session.commit_batch(&session.current_batch)
+        {
+            tracing::warn!("failed to commit blocks batch on finish: {e:?}");
         }
     }
 
@@ -139,44 +129,12 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
             return;
         }
 
-        scopeguard::defer! {
-            self.update_latest_complete_block_seqno(block_id.seqno);
-        }
-
         tracing::debug!(%block_id, "on_validation_complete");
-        let Some(session) = self.pending.get(&session_id) else {
-            tracing::warn!("session not found, ignoring validation_complete event");
+        let Some(mut session) = self.sessions.get_mut(&session_id) else {
+            tracing::warn!("session not found, ignoring on_block_validated event");
             return;
         };
-
-        let Some((_, block)) = session.pending_blocks.remove(block_id) else {
-            tracing::warn!("no signatures found for a complete session");
-            return;
-        };
-
-        let peer_ids = session.peer_ids.clone();
-        drop(session);
-
-        metrics::gauge!(METRIC_SLASHER_PENDING_BLOCKS).decrement(1);
-
-        let block = CompleteBlock {
-            seqno: block_id.seqno,
-            root_hash: block_id.root_hash,
-            file_hash: block_id.file_hash,
-            session_id,
-            peer_ids,
-            peer_signatures: AtomicSignatureState::freeze_boxed_slice(block.peer_signatures),
-        };
-
-        let mut complete = self.complete.lock();
-
-        // FIXME: Is this really needed? Can we even start validating block from the future first?
-        if block_id.seqno <= *self.latest_complete_block.borrow() {
-            tracing::info!("skipping an old validation result");
-            return;
-        }
-
-        complete.insert(block.seqno, block);
+        session.handle_block(block_id.seqno, Some(signatures.as_ref()));
     }
 
     #[instrument(skip_all, fields(session_id = ?session_id))]
@@ -186,98 +144,93 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
             return;
         }
 
-        scopeguard::defer! {
-            self.update_latest_complete_block_seqno(block_id.seqno);
-        }
-
-        tracing::debug!(%block_id, "on_validation_skipped");
-        let Some(session) = self.pending.get(&session_id) else {
-            tracing::warn!("session not found, skipping validation_skipped event");
+        tracing::debug!(%block_id, "on_block_skipped");
+        let Some(mut session) = self.sessions.get_mut(&session_id) else {
+            tracing::warn!("session not found, ignoring on_block_skipped event");
             return;
         };
-
-        let was_pending = session.pending_blocks.remove(block_id).is_some();
-        drop(session);
-
-        if was_pending {
-            metrics::gauge!(METRIC_SLASHER_PENDING_BLOCKS).decrement(1);
-        }
+        session.handle_block(block_id.seqno, None);
     }
 }
 
-// === Blocks batch impl ===
+// === Session state impl ===
 
-impl BlocksBatch {
-    fn new(start_seqno: u32, len: usize, validator_count: usize) -> Self {
-        Self {
-            start_seqno,
-            committed_blocks: AtomicBitSet::with_capacity(len),
-            signatures_history: (0..validator_count)
-                .into_iter()
-                .map(|_| AtomicBitSet::with_capacity(len * 2))
-                .collect::<Box<[_]>>(),
+impl SessionState {
+    fn handle_block(&mut self, seqno: u32, signatures: Option<&[ReceivedSignature]>) -> bool {
+        let to_commit = match self.try_advance_current_batch(seqno) {
+            AdvanceBlockStatus::TooOld => return false,
+            AdvanceBlockStatus::Unchanged => None,
+            AdvanceBlockStatus::Replaced(batch) => Some(batch),
+        };
+
+        let event_type = match signatures {
+            Some(signatures) => {
+                self.current_batch
+                    .commit_signatures(seqno, signatures)
+                    .expect("ranges must be consistent");
+                "validated"
+            }
+            None => "skipped",
+        };
+
+        if let Some(batch) = to_commit
+            && let Err(e) = self.commit_batch(&batch)
+        {
+            tracing::error!(event_type, "failed to commit blocks batch: {e:?}");
         }
+        true
     }
 
-    pub fn start_seqno(&self) -> u32 {
-        self.start_seqno
-    }
-
-    pub fn seqno_after(&self) -> u32 {
-        self.start_seqno
-            .saturating_add(self.committed_blocks.len() as u32)
-    }
-
-    pub fn contains_seqno(&self, seqno: u32) -> bool {
-        (self.start_seqno..self.seqno_after()).contains(&seqno)
-    }
-
-    fn commit_signatures(
-        &mut self,
-        mut seqno: u32,
-        signatures: &[ReceivedSignature],
-    ) -> Result<()> {
-        anyhow::ensure!(
-            self.contains_seqno(seqno),
-            "seqno is out of range: got {seqno}, expected {}..{}",
-            self.start_seqno,
-            self.seqno_after(),
-        );
-        anyhow::ensure!(
-            signatures.len() == self.signatures_history.len(),
-            "signature count mismatch: got {}, expected {}",
-            signatures.len(),
-            self.signatures_history.len(),
-        );
-        seqno -= self.start_seqno;
-
-        self.committed_blocks.set(seqno as usize, true);
-        for (history, received) in std::iter::zip(&mut self.signatures_history, signatures) {
-            let idx = (seqno as usize) * 2;
-            history.set(idx, received.has_invalid_signature());
-            history.set(idx + 1, received.has_valid_signature());
+    fn try_advance_current_batch(&mut self, seqno: u32) -> AdvanceBlockStatus {
+        if seqno < self.next_expected_seqno {
+            return AdvanceBlockStatus::TooOld;
+        } else if self.current_batch.contains_seqno(seqno) {
+            return AdvanceBlockStatus::Unchanged;
         }
 
+        let start_seqno = self.align_seqno(seqno);
+        let prev_batch = std::mem::replace(
+            &mut self.current_batch,
+            BlocksBatch::new(start_seqno, self.batch_size, &self.validator_indices),
+        );
+        self.next_expected_seqno = seqno + 1;
+
+        AdvanceBlockStatus::Replaced(prev_batch)
+    }
+
+    fn commit_batch(&self, batch: &BlocksBatch) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        let cell = batch
+            .build_cell()
+            .context("failed to pack batch into a cell")?;
+
+        let Some(tx) = &self.complete_batches else {
+            anyhow::bail!("not initialized");
+        };
+
+        if tx.send(cell).is_err() {
+            anyhow::bail!("channel closed");
+        }
         Ok(())
     }
 
-    fn build_cell(&self) -> Result<Cell, tycho_types::error::Error> {
-        let cx = Cell::empty_context();
-        let mut b = CellBuilder::new();
-        b.store_u32(self.start_seqno)?;
-        self.committed_blocks.store_into(&mut b, cx)?;
+    fn align_seqno(&self, seqno: u32) -> u32 {
+        assert!(seqno >= self.first_seqno);
 
-        let Some(dict_root) = dict::build_dict_from_sorted_iter(
-            self.signatures_history
-                .iter()
-                .enumerate()
-                .map(|(idx, bitset)| (idx as u16, bitset)),
-            cx,
-        )?
-        else {
-            return Err(tycho_types::error::Error::InvalidData);
-        };
-        b.store_reference(dict_root)?;
-        b.build_ext(cx)
+        // Example:
+        // batch_size = 100
+        // first_seqno = 101
+        // seqno = 250
+        // result = 250 - (250 - 101) % 100 = 201
+        seqno - (seqno - self.first_seqno) % self.batch_size.get()
     }
+}
+
+enum AdvanceBlockStatus {
+    TooOld,
+    Unchanged,
+    Replaced(BlocksBatch),
 }

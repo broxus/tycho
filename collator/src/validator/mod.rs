@@ -4,7 +4,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tycho_crypto::ed25519::PublicKey;
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
-use tycho_types::models::{BlockId, BlockIdShort, ShardIdent, ValidatorDescription};
+use tycho_types::models::{
+    BlockId, BlockIdShort, IndexedValidatorDescription, ShardIdent, ValidatorDescription,
+};
 use tycho_util::FastHashMap;
 
 pub use self::impls::*;
@@ -70,7 +72,7 @@ pub struct AddSession<'a> {
     pub shard_ident: ShardIdent,
     pub start_block_seqno: u32,
     pub session_id: ValidationSessionId,
-    pub validators: &'a [ValidatorDescription],
+    pub validators: &'a [IndexedValidatorDescription],
 }
 
 #[derive(Debug, Clone)]
@@ -96,7 +98,7 @@ pub struct BriefValidatorDescr {
 }
 
 impl BriefValidatorDescr {
-    pub fn from_descr(validator_idx: u16, descr: &ValidatorDescription) -> Result<Self> {
+    pub fn from_descr(descr: &IndexedValidatorDescription) -> Result<Self> {
         let Some(public_key) = PublicKey::from_bytes(descr.public_key.0) else {
             anyhow::bail!("invalid validator public key");
         };
@@ -105,7 +107,7 @@ impl BriefValidatorDescr {
             peer_id: PeerId(descr.public_key.0),
             public_key,
             weight: descr.weight,
-            validator_idx,
+            validator_idx: descr.validator_idx,
         })
     }
 }
