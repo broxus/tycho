@@ -2,7 +2,7 @@ use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use tycho_types::models::{BlockId, ValidatorDescription};
+use tycho_types::models::{BlockId, IndexedValidatorDescription};
 
 // TODO: Decide how to be with this collator-defined type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -53,7 +53,7 @@ impl ValidatorEvents {
         &self,
         session_id: ValidationSessionId,
         first_mc_seqno: u32,
-        validators: &[ValidatorDescription],
+        validators: &[IndexedValidatorDescription],
     ) -> ValidatorSessionScope {
         self.listener
             .on_session_started(session_id, first_mc_seqno, validators);
@@ -205,7 +205,7 @@ pub trait ValidatorEventsListener: Send + Sync + 'static {
         &self,
         session_id: ValidationSessionId,
         first_mc_seqno: u32,
-        validators: &[ValidatorDescription],
+        validators: &[IndexedValidatorDescription],
     );
 
     /// Called when the session is complete.
@@ -231,7 +231,7 @@ impl ValidatorEventsListener for NoopValidatorEventsRecorder {
         &self,
         _session_id: ValidationSessionId,
         _first_mc_seqno: u32,
-        _validators: &[ValidatorDescription],
+        _validators: &[IndexedValidatorDescription],
     ) {
     }
 
@@ -258,7 +258,7 @@ macro_rules! impl_recorder_for_tuples {
                 &self,
                 session_id: ValidationSessionId,
                 first_mc_seqno: u32,
-                validators: &[ValidatorDescription],
+                validators: &[IndexedValidatorDescription],
             ) {
                 $(self.$n.on_session_started(session_id, first_mc_seqno, validators);)+
             }

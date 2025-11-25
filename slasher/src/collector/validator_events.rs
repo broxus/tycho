@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tracing::instrument;
 use tycho_slasher_traits::{ReceivedSignature, ValidationSessionId, ValidatorEventsListener};
 use tycho_types::dict;
-use tycho_types::models::{BlockId, ValidatorDescription};
+use tycho_types::models::{BlockId, IndexedValidatorDescription};
 use tycho_types::prelude::*;
 use tycho_util::{DashMapEntry, FastDashMap, FastHashMap};
 
@@ -90,7 +90,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
         &self,
         session_id: ValidationSessionId,
         first_mc_seqno: u32,
-        validators: &[ValidatorDescription],
+        validators: &[IndexedValidatorDescription],
     ) {
         tracing::debug!(first_mc_seqno, "on_session_open");
 
