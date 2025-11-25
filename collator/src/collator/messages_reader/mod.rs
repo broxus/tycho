@@ -23,7 +23,9 @@ use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::collator::messages_reader::internals_range_reader::{
     InternalsRangeReader, InternalsRangeReaderKind,
 };
-use crate::collator::messages_reader::state::internal::DebugInternalsRangeReaderState;
+use crate::collator::messages_reader::state::internal::{
+    DebugInternalsRangeReaderState, InternalsReaderState,
+};
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::InternalMessageValue;
 use crate::internal_queue::types::ranges::QueueShardBoundedRange;
@@ -48,7 +50,6 @@ pub(super) struct FinalizedMessagesReader<V: InternalMessageValue> {
     pub has_unprocessed_messages: bool,
     pub queue_diff_with_msgs: QueueDiffWithMessages<V>,
     pub current_msgs_exec_params: MsgsExecutionParams,
-    pub new_statistics: Option<CumulativeStatistics>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +75,7 @@ pub(super) struct MessagesReader<'a, V: InternalMessageValue> {
     externals_reader: ExternalsReader<'a>,
     internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsPartitionReader<'a, V>>,
     /// Cumulative queue stats
-    internal_queue_statistics: Option<CumulativeStatistics>,
+    internal_queue_statistics: Option<&'a mut CumulativeStatistics>,
     readers_stages: BTreeMap<QueuePartitionIdx, MessagesReaderStage>,
 }
 
@@ -119,19 +120,24 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
 
         let mut new_messages = NewMessagesState::new(cx.for_shard_id);
 
-        let mut cumulative_statistics = None;
         let mut cumulative_stats_just_loaded = false;
 
-        if let Some(params) = cx.cumulative_stats_calc_params {
-            // TODO remove take
-            let previous_cumulative_statistics =
-                cx.reader_state.internals.cumulative_statistics.take();
+        let ReaderState {
+            externals: externals_reader_state,
+            internals: internals_reader_state,
+        } = cx.reader_state;
 
-            // get cumulative internals stats
-            let inner_cumulative_statistics = if cx.is_first_block_after_prev_master {
+        let InternalsReaderState {
+            partitions: partition_reader_states,
+            cumulative_statistics,
+        } = internals_reader_state;
+
+        if let Some(params) = cx.cumulative_stats_calc_params {
+            if cx.is_first_block_after_prev_master {
                 // if cumulative statistics are already present, then we should
-                // enrich it using a diff from the previous master block and diffs
-                // from another shard between the previous master block and previous master block - 1
+                //  enrich it using a diff from the previous master block and diffs
+                //  from another shard between the previous master block and previous master block - 1
+
                 let partitions = params
                     .all_shards_processed_to_by_partitions
                     .values()
@@ -139,52 +145,49 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                     .copied()
                     .collect();
 
-                match (previous_cumulative_statistics, cx.part_stat_ranges) {
-                    (Some(mut previous_cumulative_statistics), Some(part_stat_ranges)) => {
-                        // update all_shards_processed_to_by_partitions and truncate processed data
-                        previous_cumulative_statistics.update_processed_to_by_partitions(
+                match (cumulative_statistics.as_mut(), cx.part_stat_ranges) {
+                    // update all_shards_processed_to_by_partitions and truncate processed data
+                    (Some(prev), Some(part_stat_ranges)) => {
+                        prev.update_processed_to_by_partitions(
                             params.all_shards_processed_to_by_partitions.clone(),
                         );
 
                         // partial load statistics and enrich current value
-                        previous_cumulative_statistics.load_partial(
-                            mq_adapter.clone(),
-                            &partitions,
-                            part_stat_ranges,
-                        )?;
-
-                        previous_cumulative_statistics
+                        prev.load_partial(mq_adapter.clone(), &partitions, part_stat_ranges)?;
                     }
                     _ => {
                         cumulative_stats_just_loaded = true;
-                        let mut inner_cumulative_statistics = CumulativeStatistics::new(
+
+                        let mut stat = CumulativeStatistics::new(
                             cx.for_shard_id,
-                            params.all_shards_processed_to_by_partitions,
+                            params.all_shards_processed_to_by_partitions.clone(),
                         );
-                        inner_cumulative_statistics.load(
+                        stat.load(
                             mq_adapter.clone(),
                             &partitions,
                             cx.prev_state_gen_lt,
                             cx.mc_state_gen_lt,
                             &cx.mc_top_shards_end_lts.iter().copied().collect(),
                         )?;
-                        inner_cumulative_statistics
+
+                        *cumulative_statistics = Some(stat);
                     }
                 }
             } else {
-                previous_cumulative_statistics.expect("cumulative statistics should exist")
-            };
+                assert!(
+                    cumulative_statistics.is_some(),
+                    "cumulative statistics should exist"
+                );
+            }
 
-            if let Some(partition_stats) =
-                inner_cumulative_statistics.result().get(&LP_PARTITION_ID)
+            if let Some(stat) = cumulative_statistics
+                && let Some(partition_stats) = stat.result().get(&LP_PARTITION_ID)
             {
                 new_messages.init_partition_router(
                     LP_PARTITION_ID,
                     partition_stats.initial_stats.statistics(),
                 );
             }
-
-            cumulative_statistics = Some(inner_cumulative_statistics);
         }
 
         let msgs_exec_params = cx.msgs_exec_params.clone();
@@ -197,7 +200,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             msgs_exec_params.clone(),
             externals,
             cx.anchors_cache,
-            &mut cx.reader_state.externals,
+            externals_reader_state,
         );
 
         let mut res = Self {
@@ -208,14 +211,11 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             externals_reader,
             internals_partition_readers: Default::default(),
             readers_stages: Default::default(),
-            internal_queue_statistics: cumulative_statistics,
+            internal_queue_statistics: cumulative_statistics.as_mut(),
         };
 
         // define the initial reader stage
         let initial_reader_stage = MessagesReaderStage::ExistingAndExternals;
-
-        // create internals readers by partitions
-        let partition_reader_states = &mut cx.reader_state.internals.partitions;
 
         partition_reader_states
             .entry(MAIN_PARTITION_ID)
@@ -225,6 +225,9 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         let main_ptr = partition_reader_states.get_mut(&MAIN_PARTITION_ID).unwrap() as *mut _;
         let lp_ptr = partition_reader_states.get_mut(&LP_PARTITION_ID).unwrap() as *mut _;
 
+        // SAFETY: We take two different elements from BTreeMap (different partition IDs) and pass them
+        // to different handlers (InternalsPartitionReader::new), they don't overlap. The borrow checker
+        // can't verify this statically, hence unsafe.
         let main_state = unsafe { &mut *main_ptr };
         let lp_state = unsafe { &mut *lp_ptr };
 
@@ -363,7 +366,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         let mut min_internals_processed_to = ProcessedTo::default();
 
         for par_reader in self.internals_partition_readers.values() {
-            for (shard_id, key) in &par_reader.state().processed_to {
+            for (shard_id, key) in &par_reader.reader_state().processed_to {
                 min_internals_processed_to
                     .entry(*shard_id)
                     .and_modify(|min_key| *min_key = std::cmp::min(*min_key, *key))
@@ -528,13 +531,10 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
 
         Self::msgs_exec_params_metrics(&current_msgs_exec_params)?;
 
-        let new_statistics = self.internal_queue_statistics;
-
         Ok(FinalizedMessagesReader {
             has_unprocessed_messages,
             current_msgs_exec_params,
             queue_diff_with_msgs,
-            new_statistics,
         })
     }
 
@@ -542,7 +542,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         let mut res: ProcessedToByPartitions = FastHashMap::default();
 
         for (par_id, par_reader) in &self.internals_partition_readers {
-            for (processed_shard, msg_key) in &par_reader.state().processed_to {
+            for (processed_shard, msg_key) in &par_reader.reader_state().processed_to {
                 res.entry(*par_id)
                     .or_default()
                     .insert(*processed_shard, *msg_key);
@@ -774,7 +774,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                             .unwrap_or_default(),
                     )
                 })),
-            externals_processed_offset = ?self.externals_reader.get_last_range_reader_offsets_by_partitions(),
+            externals_processed_offset = ?self.externals_reader.get_last_range_state_offsets_by_partitions(),
             "start: refill messages buffer and skip groups upto",
         );
         loop {
@@ -1033,7 +1033,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         tracing::debug!(target: tracing_targets::COLLATOR,
             int_curr_processed_offset = ?DebugIter(self
                 .internals_partition_readers.iter()
-                .map(|(par_id, par)| (par_id, par.state().curr_processed_offset))),
+                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
             ext_curr_processed_offset = ?DebugIter(self
                 .externals_reader.reader_state()
                 .by_partitions.iter()
@@ -1389,7 +1389,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                 }
                 // we can move "from" boundary to current position
                 // because all messages up to current position processed
-                externals_reader.set_from_to_current_position_in_last_range_reader()?;
+                externals_reader.set_from_to_current_position_in_last_range_state()?;
                 // drop last read to anchor chain time when no pending externals in cache
                 // it used to calc externals time diff, but it does not update when there are no messages,
                 // so time diff will grow endlessly, so we drop the last chain time to drop time diff
@@ -1403,7 +1403,6 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     has_pending_externals = externals_reader.has_pending_externals(),
                     ext_reader_states = ?externals_reader.reader_state().by_partitions,
-                    // last_range_reader_state = ?externals_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugExternalsRangeReaderState(r.reader_state()))),
                     "all read externals collected when collecting from partition_id={}",
                     par_reader.partition_id,
                 );
@@ -1441,9 +1440,9 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             if !all_internals_collected_before {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     partition_id = %par_reader.partition_id,
-                    int_processed_to = ?par_reader.state().processed_to,
-                    int_curr_processed_offset = par_reader.state().curr_processed_offset,
-                    last_range_reader_state = ?par_reader.get_last_range_state().map(|(seqno, state)| (seqno, DebugInternalsRangeReaderState(state))),
+                    int_processed_to = ?par_reader.reader_state().processed_to,
+                    int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
+                    last_range_state = ?par_reader.get_last_range_state().map(|(seqno, state)| (seqno, DebugInternalsRangeReaderState(state))),
                     "all read existing internals collected from partition",
                 );
             }
@@ -1529,8 +1528,8 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             if !all_internals_collected_before {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     partition_id = %par_reader.partition_id,
-                    int_processed_to = ?par_reader.state().processed_to,
-                    int_curr_processed_offset = par_reader.state().curr_processed_offset,
+                    int_processed_to = ?par_reader.reader_state().processed_to,
+                    int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
                     last_range_reader_state = ?par_reader.get_last_range_state().map(|(seqno, state)| (seqno, DebugInternalsRangeReaderState(state))),
                     "all new internals collected from partition",
                 );

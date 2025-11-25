@@ -138,7 +138,6 @@ impl Phase<FinalizeState> {
             has_unprocessed_messages,
             queue_diff_with_msgs,
             current_msgs_exec_params,
-            new_statistics,
         } = messages_reader.finalize(
             self.extra.executor.min_next_lt(),
             &other_updated_top_shard_diffs_info,
@@ -155,7 +154,6 @@ impl Phase<FinalizeState> {
             queue_diff_with_msgs,
             current_msgs_exec_params,
             has_unprocessed_messages,
-            new_statistics,
         })
     }
 

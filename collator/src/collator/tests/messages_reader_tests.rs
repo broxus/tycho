@@ -954,7 +954,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         tracing::debug!(
             int_curr_processed_offset = ?DebugIter(primary_messages_reader
                 .internals_partition_readers.iter()
-                .map(|(par_id, par)| (par_id, par.state().curr_processed_offset))),
+                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
             ext_curr_processed_offset = ?DebugIter(primary_messages_reader
                 .externals_reader.reader_state()
                 .by_partitions.iter()
@@ -968,7 +968,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         tracing::debug!(
             int_curr_processed_offset = ?DebugIter(secondary_messages_reader
                 .internals_partition_readers.iter()
-                .map(|(par_id, par)| (par_id, par.state().curr_processed_offset))),
+                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
             ext_curr_processed_offset = ?DebugIter(secondary_messages_reader
                 .externals_reader.reader_state()
                 .by_partitions.iter()
@@ -1074,11 +1074,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
             has_unprocessed_messages,
             queue_diff_with_msgs,
             current_msgs_exec_params,
-            new_statistics,
         } = primary_messages_reader.finalize(curr_lt, &other_shards_top_block_diffs)?;
-
-        // use new statistics
-        reader_state.internals.cumulative_statistics = new_statistics;
 
         let mut processed_upto = reader_state.get_updated_processed_upto();
         processed_upto.msgs_exec_params = Some(current_msgs_exec_params);

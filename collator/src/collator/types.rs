@@ -21,8 +21,8 @@ use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::{
     AccountBlocks, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
     BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg,
-    InMsgDescr, IntAddr, LibDescr, MsgInfo, MsgsExecutionParams, OptionalAccount, OutMsg,
-    OutMsgDescr, OwnedMessage, PrevBlockRef, ShardAccount, ShardAccounts, ShardDescription,
+    InMsgDescr, IntAddr, IntMsgInfo, LibDescr, MsgInfo, MsgsExecutionParams, OptionalAccount,
+    OutMsg, OutMsgDescr, OwnedMessage, PrevBlockRef, ShardAccount, ShardAccounts, ShardDescription,
     ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit, SpecialFlags,
     StateInit, StdAddr, Transaction, ValueFlow,
 };
@@ -1115,6 +1115,13 @@ pub struct SkippedTransaction {
     pub gas_used: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct OutMessageData {
+    pub int_msg_info: IntMsgInfo,
+    pub cell: Cell,
+    pub dst_in_current_shard: bool,
+}
+
 #[derive(Debug)]
 pub struct ParsedMessageInner {
     pub info: MsgInfo,
@@ -1170,16 +1177,6 @@ impl ParsedMessage {
     }
     pub fn special_origin(&self) -> Option<SpecialOrigin> {
         self.0.special_origin
-    }
-
-    pub fn try_into_parts(self) -> Result<(MsgInfo, Cell)> {
-        match Arc::try_unwrap(self.0) {
-            Ok(inner) => Ok((inner.info, inner.cell)),
-            Err(arc) => Err(anyhow!(
-                "cannot unwrap ParsedMessage, ref count = {}",
-                Arc::strong_count(&arc)
-            )),
-        }
     }
 
     pub fn kind(&self) -> ParsedMessageKind {
@@ -1361,7 +1358,6 @@ pub struct FinalizeMessagesReaderResult {
     pub has_unprocessed_messages: bool,
     pub queue_diff_with_msgs: QueueDiffWithMessages<EnqueuedMessage>,
     pub current_msgs_exec_params: MsgsExecutionParams,
-    pub new_statistics: Option<CumulativeStatistics>,
 }
 
 pub struct FinalizeCollationResult {

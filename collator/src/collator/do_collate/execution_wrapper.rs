@@ -12,8 +12,8 @@ use tycho_types::models::{
 
 use crate::collator::execution_manager::{MessagesExecutor, TransactionResult};
 use crate::collator::types::{
-    BlockCollationData, ExecutedTransaction, ParsedMessage, PreparedInMsg, PreparedOutMsg,
-    ShardAccountStuff, SpecialOrigin,
+    BlockCollationData, ExecutedTransaction, OutMessageData, ParsedMessage, PreparedInMsg,
+    PreparedOutMsg, ShardAccountStuff, SpecialOrigin,
 };
 use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::tracing_targets;
@@ -45,23 +45,21 @@ impl ExecutorWrapper {
         let out_msgs = new_transaction(collation_data, &self.shard_id, executed, in_message)?;
         collation_data.new_msgs_created_count += out_msgs.len() as u64;
 
-        for out_msg in out_msgs {
-            let dst_in_current_shard = out_msg.dst_in_current_shard();
-            let (MsgInfo::Int(int_msg_info), cell) = out_msg.try_into_parts()? else {
-                continue;
-            };
-
-            if dst_in_current_shard {
+        for out_msg_data in out_msgs {
+            if out_msg_data.dst_in_current_shard {
                 let new_message_key = QueueKey {
-                    lt: int_msg_info.created_lt,
-                    hash: *cell.repr_hash(),
+                    lt: out_msg_data.int_msg_info.created_lt,
+                    hash: *out_msg_data.cell.repr_hash(),
                 };
                 self.max_new_message_key_to_current_shard =
                     std::cmp::max(self.max_new_message_key_to_current_shard, new_message_key);
             }
 
             collation_data.inserted_new_msgs_count += 1;
-            new_messages.push(Arc::new(EnqueuedMessage::from((int_msg_info, cell))));
+            new_messages.push(Arc::new(EnqueuedMessage::from((
+                out_msg_data.int_msg_info,
+                out_msg_data.cell,
+            ))));
         }
 
         collation_data.next_lt = self.executor.min_next_lt();
@@ -240,7 +238,7 @@ fn new_transaction(
     shard_id: &ShardIdent,
     executed: ExecutedTransaction,
     in_msg: Option<ParsedMessage>,
-) -> Result<Vec<ParsedMessage>> {
+) -> Result<Vec<OutMessageData>> {
     tracing::trace!(
         target: tracing_targets::COLLATOR,
         message_hash = ?in_msg.as_ref().map(|m| m.cell().repr_hash()),
@@ -281,12 +279,12 @@ fn new_transaction(
             info = ?out_msg_info,
             "adding out message to out_msgs",
         );
-        match &out_msg_info {
-            MsgInfo::Int(IntMsgInfo { fwd_fee, dst, .. }) => {
+        match out_msg_info {
+            MsgInfo::Int(int_msg_info) => {
                 collation_data.int_enqueue_count += 1;
 
-                let dst_prefix = dst.prefix();
-                let dst_workchain = dst.workchain();
+                let dst_prefix = int_msg_info.dst.prefix();
+                let dst_workchain = int_msg_info.dst.workchain();
                 let dst_in_current_shard = shard_id.contains_prefix(dst_workchain, dst_prefix);
 
                 let out_msg = OutMsg::New(OutMsgNew {
@@ -298,7 +296,7 @@ fn new_transaction(
                         } else {
                             IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
                         },
-                        fwd_fee_remaining: *fwd_fee,
+                        fwd_fee_remaining: int_msg_info.fwd_fee,
                         message: out_msg_cell.clone(),
                     })?,
                     transaction: executed.transaction.clone(),
@@ -312,15 +310,11 @@ fn new_transaction(
                         new_tx: Some(executed.transaction.clone()),
                     });
 
-                out_messages.push(ParsedMessage::new(
-                    out_msg_info,
+                out_messages.push(OutMessageData {
+                    int_msg_info,
+                    cell: out_msg_cell.into_inner(),
                     dst_in_current_shard,
-                    out_msg_cell.into_inner(),
-                    None,
-                    Some(collation_data.block_id_short.seqno),
-                    Some(true),
-                    None,
-                ));
+                });
             }
             MsgInfo::ExtOut(_) => {
                 let out_msg = OutMsg::External(OutMsgExternal {
