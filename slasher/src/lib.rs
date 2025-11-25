@@ -1,10 +1,16 @@
 use std::sync::Arc;
 
-use tokio::task::AbortHandle;
+use anyhow::{Context, Result};
+use arc_swap::ArcSwapOption;
+use futures_util::future::BoxFuture;
+use tycho_core::block_strider::{StateSubscriber, StateSubscriberContext};
 use tycho_crypto::ed25519;
 use tycho_slasher_traits::ValidatorEventsListener;
-use tycho_types::prelude::*;
 
+pub use self::bc::{
+    BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, SignatureHistory, SignedMessage,
+    SlasherContract,
+};
 use self::collector::ValidatorEventsCollector;
 
 pub mod collector {
@@ -14,6 +20,7 @@ pub mod collector {
     // TODO: mod mempool_events;
 }
 
+mod bc;
 mod util;
 
 pub struct SlasherParams {
@@ -22,74 +29,80 @@ pub struct SlasherParams {
 }
 
 // NOTE: Stub
+#[derive(Clone)]
+#[repr(transparent)]
 pub struct Slasher {
-    #[allow(unused)]
-    node_keys: Arc<ed25519::KeyPair>,
-    validator_events_collector: Arc<ValidatorEventsCollector>,
-    validator_events_task_handle: AbortHandle,
+    inner: Arc<Inner>,
 }
 
 impl Slasher {
-    pub fn new(node_keys: Arc<ed25519::KeyPair>) -> Self {
+    pub fn new<C: SlasherContract>(node_keys: Arc<ed25519::KeyPair>, contract: C) -> Self {
         let collector = Arc::new(ValidatorEventsCollector::default());
-        let collector_task = tokio::task::spawn(process_validator_events(collector.clone()));
 
         Self {
-            node_keys,
-            validator_events_collector: collector,
-            validator_events_task_handle: collector_task.abort_handle(),
+            inner: Arc::new(Inner {
+                node_keys,
+                validator_events_collector: collector,
+                contract: Box::new(contract),
+                subscription: ArcSwapOption::empty(),
+            }),
         }
     }
 
     pub fn validator_events_listener(&self) -> Arc<dyn ValidatorEventsListener> {
-        self.validator_events_collector.clone()
+        self.inner.validator_events_collector.clone()
+    }
+
+    async fn handle_state_impl(&self, cx: &StateSubscriberContext) -> Result<()> {
+        if !cx.block.id().is_masterchain() {
+            return Ok(());
+        }
+
+        let this = self.inner.as_ref();
+
+        // Check config updates
+        let config_params = cx.state.config_params()?;
+        let Some(slasher_address) = this
+            .contract
+            .find_account_address(&config_params)
+            .context("failed to find contract address")?
+            .filter(|addr| addr.is_masterchain())
+        else {
+            return Ok(());
+        };
+
+        let subscription = match this.subscription.load_full() {
+            Some(s) if s.address() == &slasher_address => s,
+            // TODO: Use `ArcSwap::compare_and_swap`?
+            _ => {
+                let s = Arc::new(ContractSubscription::new(&slasher_address));
+                this.subscription.store(Some(s.clone()));
+                s
+            }
+        };
+
+        let extra = cx.block.load_extra()?.account_blocks.load()?;
+        if let Some((_, account_block)) = extra.get(&slasher_address.address)? {
+            subscription.handle_account_transactions(&account_block)?;
+        }
+
+        Ok(())
     }
 }
 
-impl Drop for Slasher {
-    fn drop(&mut self) {
-        self.validator_events_task_handle.abort();
+impl StateSubscriber for Slasher {
+    type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
+
+    #[inline]
+    fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
+        Box::pin(self.handle_state_impl(cx))
     }
 }
 
-// === Tasks ===
-
-#[tracing::instrument(skip_all)]
-async fn process_validator_events(collector: Arc<ValidatorEventsCollector>) {
-    tracing::info!("started");
-    scopeguard::defer! { tracing::info!("finished"); };
-
-    const BATCH_STEP: u32 = 100;
-
-    let mut latest_block_seqno = collector.subscribe_to_latest_block_seqno();
-
-    // TODO: Use more sensible initial seqno.
-    let mut processed_upto = 0u32;
-    let mut buffer = Vec::with_capacity(BATCH_STEP as _);
-    loop {
-        if *latest_block_seqno.borrow_and_update() <= processed_upto + BATCH_STEP {
-            latest_block_seqno
-                .changed()
-                .await
-                .expect("sender is never dropped while `collector` is alive");
-            continue;
-        }
-
-        buffer.clear();
-        collector.take_batch(processed_upto + BATCH_STEP, &mut buffer);
-        buffer.retain(|item| item.seqno > processed_upto);
-
-        let mut buffer = buffer.as_slice();
-        while let Some(first) = buffer.first() {
-            let session_id = first.session_id;
-            let batch_size = buffer
-                .iter()
-                .take_while(|item| item.session_id == session_id)
-                .count();
-        }
-
-        // TODO: Build a voting matrix from completed blocks
-
-        processed_upto += BATCH_STEP;
-    }
+struct Inner {
+    #[allow(unused)]
+    node_keys: Arc<ed25519::KeyPair>,
+    validator_events_collector: Arc<ValidatorEventsCollector>,
+    contract: Box<dyn SlasherContract>,
+    subscription: ArcSwapOption<ContractSubscription>,
 }
