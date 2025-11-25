@@ -438,10 +438,12 @@ impl CollatorStdImpl {
             queue_diff_with_msgs,
             has_unprocessed_messages,
             current_msgs_exec_params,
-            new_statistics,
         } = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
 
-        reader_state.internals.cumulative_statistics = new_statistics;
+        let histogram_create_queue_diff = HistogramGuard::begin_with_labels(
+            "tycho_do_collate_create_queue_diff_time_high",
+            &labels,
+        );
 
         let (min_message, max_message) = {
             let messages = &queue_diff_with_msgs.messages;
@@ -463,6 +465,8 @@ impl CollatorStdImpl {
             reader_state.internals.get_min_processed_to_by_shards(),
         );
 
+        histogram_create_queue_diff.finish();
+
         let update_queue_task = create_apply_diff_task(
             &mq_adapter,
             queue_diff_with_msgs,
@@ -473,6 +477,19 @@ impl CollatorStdImpl {
         )?;
 
         let mut processed_upto = reader_state.get_updated_processed_upto();
+
+        // report actual ranges count to metrics
+        for (par_id, par) in &processed_upto.partitions {
+            let labels = [
+                ("workchain", shard_id.workchain().to_string()),
+                ("par_id", par_id.to_string()),
+            ];
+            metrics::gauge!("tycho_do_collate_processed_upto_ext_ranges", &labels)
+                .set(par.externals.ranges.len() as f64);
+            metrics::gauge!("tycho_do_collate_processed_upto_int_ranges", &labels)
+                .set(par.internals.ranges.len() as f64);
+        }
+
         processed_upto.msgs_exec_params = Some(current_msgs_exec_params);
 
         let internal_processed_upto_by_partitions =
@@ -547,7 +564,6 @@ impl CollatorStdImpl {
 
         Ok(CollationResult {
             finalized,
-            // reader_state,
             execute_result,
             final_result,
         })

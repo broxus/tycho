@@ -124,7 +124,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
         Ok(reader)
     }
 
-    pub fn state(&self) -> &InternalsPartitionReaderState {
+    pub fn reader_state(&self) -> &InternalsPartitionReaderState {
         self.reader_state
     }
 
@@ -336,16 +336,16 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
     pub fn set_skip_processed_offset_to_current(&mut self) -> Result<()> {
         let curr_processed_offset = self.reader_state.curr_processed_offset;
 
-        let last_range_reader = self.get_last_range_state_mut()?;
-        last_range_reader.processed_offset = curr_processed_offset;
-        last_range_reader.skip_offset = curr_processed_offset;
+        let last_range_state = self.get_last_range_state_mut()?;
+        last_range_state.processed_offset = curr_processed_offset;
+        last_range_state.skip_offset = curr_processed_offset;
 
         Ok(())
     }
 
     pub fn set_processed_to_current_position(&mut self) -> Result<()> {
-        let (_, last_range_reader) = self.get_last_range_state()?;
-        self.reader_state.processed_to = last_range_reader
+        let (_, last_range_state) = self.get_last_range_state()?;
+        self.reader_state.processed_to = last_range_state
             .shards
             .iter()
             .map(|(k, v)| (*k, v.current_position))
