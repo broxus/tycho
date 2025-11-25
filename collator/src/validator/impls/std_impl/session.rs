@@ -65,9 +65,9 @@ impl ValidatorSession {
     ) -> Result<Self> {
         // Prepare a map with other validators
         let mut validators = FastHashMap::default();
-        for (i, descr) in info.validators.iter().enumerate() {
+        for item in info.validators {
             // TODO: Skip invalid entries? But what should we do with the total weight?
-            let validator_info = BriefValidatorDescr::from_descr(i as u16, descr)?;
+            let validator_info = BriefValidatorDescr::from_descr(item)?;
             validators.insert(validator_info.peer_id, validator_info);
         }
 
