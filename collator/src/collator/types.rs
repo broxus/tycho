@@ -1361,7 +1361,6 @@ pub struct FinalizeMessagesReaderResult {
     pub has_unprocessed_messages: bool,
     pub queue_diff_with_msgs: QueueDiffWithMessages<EnqueuedMessage>,
     pub current_msgs_exec_params: MsgsExecutionParams,
-    pub new_statistics: Option<CumulativeStatistics>,
 }
 
 pub struct FinalizeCollationResult {

@@ -133,6 +133,10 @@ impl<'a> Phase<PrepareState<'a>> {
             self.state.collation_config.msgs_exec_params.clone(),
         );
 
+        let mut cumulative_stats_calc_params = CumulativeStatsCalcParams {
+            all_shards_processed_to_by_partitions: all_shards_processed_to_by_partitions.clone(),
+        };
+
         // create messages reader
         let mut messages_reader = MessagesReader::new(
             MessagesReaderContext {
@@ -143,13 +147,11 @@ impl<'a> Phase<PrepareState<'a>> {
                 mc_state_gen_lt: self.state.mc_data.gen_lt,
                 prev_state_gen_lt: self.state.prev_shard_data.gen_lt(),
                 mc_top_shards_end_lts,
-                cumulative_stats_calc_params: Some(CumulativeStatsCalcParams {
-                    all_shards_processed_to_by_partitions: all_shards_processed_to_by_partitions
-                        .clone(),
-                }),
+                // !!! cumulative_stats_calc_params: Some(&mut cumulative_stats_calc_params),
                 reader_state: self.extra.reader_state,
                 anchors_cache: self.extra.anchors_cache,
                 is_first_block_after_prev_master: self.state.is_first_block_after_prev_master,
+                cumulative_stats_calc_params: None,
                 part_stat_ranges: self.state.part_stat_ranges.clone(),
             },
             self.extra.mq_adapter.clone(),

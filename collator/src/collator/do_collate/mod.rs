@@ -438,10 +438,7 @@ impl CollatorStdImpl {
             queue_diff_with_msgs,
             has_unprocessed_messages,
             current_msgs_exec_params,
-            new_statistics,
         } = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
-
-        reader_state.internals.cumulative_statistics = new_statistics;
 
         let (min_message, max_message) = {
             let messages = &queue_diff_with_msgs.messages;
@@ -547,7 +544,6 @@ impl CollatorStdImpl {
 
         Ok(CollationResult {
             finalized,
-            // reader_state,
             execute_result,
             final_result,
         })

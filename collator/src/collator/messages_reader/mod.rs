@@ -23,7 +23,9 @@ use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::collator::messages_reader::internals_range_reader::{
     InternalsRangeReader, InternalsRangeReaderKind,
 };
-use crate::collator::messages_reader::state::internal::DebugInternalsRangeReaderState;
+use crate::collator::messages_reader::state::internal::{
+    DebugInternalsRangeReaderState, InternalsReaderState,
+};
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::InternalMessageValue;
 use crate::internal_queue::types::ranges::QueueShardBoundedRange;
@@ -48,7 +50,6 @@ pub(super) struct FinalizedMessagesReader<V: InternalMessageValue> {
     pub has_unprocessed_messages: bool,
     pub queue_diff_with_msgs: QueueDiffWithMessages<V>,
     pub current_msgs_exec_params: MsgsExecutionParams,
-    pub new_statistics: Option<CumulativeStatistics>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +75,7 @@ pub(super) struct MessagesReader<'a, V: InternalMessageValue> {
     externals_reader: ExternalsReader<'a>,
     internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsPartitionReader<'a, V>>,
     /// Cumulative queue stats
-    internal_queue_statistics: Option<CumulativeStatistics>,
+    internal_queue_statistics: Option<&'a mut CumulativeStatistics>,
     readers_stages: BTreeMap<QueuePartitionIdx, MessagesReaderStage>,
 }
 
@@ -95,7 +96,7 @@ pub(super) struct MessagesReaderContext<'a> {
     pub reader_state: &'a mut ReaderState,
     pub anchors_cache: &'a mut AnchorsCache,
     pub is_first_block_after_prev_master: bool,
-    pub cumulative_stats_calc_params: Option<CumulativeStatsCalcParams>,
+    pub cumulative_stats_calc_params: Option<&'a mut CumulativeStatsCalcParams>,
     pub part_stat_ranges: Option<Vec<QueueShardBoundedRange>>,
 }
 
@@ -117,21 +118,27 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
 
         drop(current_msgs_exec_params);
 
-        let mut new_messages = NewMessagesState::new(cx.for_shard_id);
+        let new_messages = NewMessagesState::new(cx.for_shard_id);
 
-        let mut cumulative_statistics = None;
+        // let mut cumulative_statistics = None;
         let mut cumulative_stats_just_loaded = false;
 
-        if let Some(params) = cx.cumulative_stats_calc_params {
-            // TODO remove take
-            let previous_cumulative_statistics =
-                cx.reader_state.internals.cumulative_statistics.take();
+        let ReaderState {
+            externals: externals_reader_state,
+            internals: internals_reader_state,
+        } = cx.reader_state;
 
-            // get cumulative internals stats
-            let inner_cumulative_statistics = if cx.is_first_block_after_prev_master {
+        let InternalsReaderState {
+            partitions,
+            cumulative_statistics,
+        } = internals_reader_state;
+
+        if let Some(params) = cx.cumulative_stats_calc_params {
+            if cx.is_first_block_after_prev_master {
                 // if cumulative statistics are already present, then we should
-                // enrich it using a diff from the previous master block and diffs
-                // from another shard between the previous master block and previous master block - 1
+                //  enrich it using a diff from the previous master block and diffs
+                //  from another shard between the previous master block and previous master block - 1
+
                 let partitions = params
                     .all_shards_processed_to_by_partitions
                     .values()
@@ -139,53 +146,43 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                     .copied()
                     .collect();
 
-                match (previous_cumulative_statistics, cx.part_stat_ranges) {
-                    (Some(mut previous_cumulative_statistics), Some(part_stat_ranges)) => {
-                        // update all_shards_processed_to_by_partitions and truncate processed data
-                        previous_cumulative_statistics.update_processed_to_by_partitions(
+                match (cumulative_statistics.as_mut(), cx.part_stat_ranges) {
+                    // update all_shards_processed_to_by_partitions and truncate processed data
+                    (Some(prev), Some(part_stat_ranges)) => {
+                        prev.update_processed_to_by_partitions(
                             params.all_shards_processed_to_by_partitions.clone(),
                         );
 
                         // partial load statistics and enrich current value
-                        previous_cumulative_statistics.load_partial(
-                            mq_adapter.clone(),
-                            &partitions,
-                            part_stat_ranges,
-                        )?;
-
-                        previous_cumulative_statistics
+                        prev.load_partial(mq_adapter.clone(), &partitions, part_stat_ranges)?;
                     }
                     _ => {
                         cumulative_stats_just_loaded = true;
-                        let mut inner_cumulative_statistics = CumulativeStatistics::new(
+
+                        let mut stat = CumulativeStatistics::new(
                             cx.for_shard_id,
-                            params.all_shards_processed_to_by_partitions,
+                            params.all_shards_processed_to_by_partitions.clone(),
                         );
-                        inner_cumulative_statistics.load(
+                        stat.load(
                             mq_adapter.clone(),
                             &partitions,
                             cx.prev_state_gen_lt,
                             cx.mc_state_gen_lt,
                             &cx.mc_top_shards_end_lts.iter().copied().collect(),
                         )?;
-                        inner_cumulative_statistics
+
+                        *cumulative_statistics = Some(stat);
                     }
                 }
             } else {
-                previous_cumulative_statistics.expect("cumulative statistics should exist")
-            };
-
-            if let Some(partition_stats) =
-                inner_cumulative_statistics.result().get(&LP_PARTITION_ID)
-            {
-                new_messages.init_partition_router(
-                    LP_PARTITION_ID,
-                    partition_stats.initial_stats.statistics(),
+                assert!(
+                    cumulative_statistics.is_some(),
+                    "cumulative statistics should exist"
                 );
             }
-
-            cumulative_statistics = Some(inner_cumulative_statistics);
         }
+
+        let internal_queue_statistics = cumulative_statistics.as_mut();
 
         let msgs_exec_params = cx.msgs_exec_params.clone();
 
@@ -197,7 +194,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             msgs_exec_params.clone(),
             externals,
             cx.anchors_cache,
-            &mut cx.reader_state.externals,
+            externals_reader_state,
         );
 
         let mut res = Self {
@@ -208,14 +205,14 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             externals_reader,
             internals_partition_readers: Default::default(),
             readers_stages: Default::default(),
-            internal_queue_statistics: cumulative_statistics,
+            internal_queue_statistics,
         };
 
         // define the initial reader stage
         let initial_reader_stage = MessagesReaderStage::ExistingAndExternals;
 
         // create internals readers by partitions
-        let partition_reader_states = &mut cx.reader_state.internals.partitions;
+        let partition_reader_states = partitions;
 
         partition_reader_states
             .entry(MAIN_PARTITION_ID)
@@ -528,13 +525,10 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
 
         Self::msgs_exec_params_metrics(&current_msgs_exec_params)?;
 
-        let new_statistics = self.internal_queue_statistics;
-
         Ok(FinalizedMessagesReader {
             has_unprocessed_messages,
             current_msgs_exec_params,
             queue_diff_with_msgs,
-            new_statistics,
         })
     }
 
