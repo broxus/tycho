@@ -8,12 +8,14 @@ use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_types::models::*;
 
+pub use self::box_subscriber::{BoxBlockSubscriber, BoxStateSubscriber};
 pub use self::futures::{
     DelayedTasks, DelayedTasksJoinHandle, DelayedTasksSpawner, OptionHandleFut, OptionPrepareFut,
 };
 pub use self::metrics_subscriber::MetricsSubscriber;
 use crate::storage::CoreStorage;
 
+mod box_subscriber;
 mod futures;
 mod metrics_subscriber;
 
@@ -118,10 +120,19 @@ impl<T: BlockSubscriber> BlockSubscriber for Arc<T> {
 }
 
 pub trait BlockSubscriberExt: Sized {
+    fn boxed(self) -> BoxBlockSubscriber;
+
     fn chain<T: BlockSubscriber>(self, other: T) -> ChainSubscriber<Self, T>;
 }
 
 impl<B: BlockSubscriber> BlockSubscriberExt for B {
+    fn boxed(self) -> BoxBlockSubscriber {
+        castaway::match_type!(self, {
+            BoxBlockSubscriber as subscriber => subscriber,
+            subscriber => BoxBlockSubscriber::new(subscriber),
+        })
+    }
+
     fn chain<T: BlockSubscriber>(self, other: T) -> ChainSubscriber<Self, T> {
         ChainSubscriber {
             left: self,
@@ -182,10 +193,19 @@ impl<T: StateSubscriber> StateSubscriber for Arc<T> {
 }
 
 pub trait StateSubscriberExt: Sized {
+    fn boxed(self) -> BoxStateSubscriber;
+
     fn chain<T: StateSubscriber>(self, other: T) -> ChainSubscriber<Self, T>;
 }
 
 impl<B: StateSubscriber> StateSubscriberExt for B {
+    fn boxed(self) -> BoxStateSubscriber {
+        castaway::match_type!(self, {
+            BoxStateSubscriber as subscriber => subscriber,
+            subscriber => BoxStateSubscriber::new(subscriber),
+        })
+    }
+
     fn chain<T: StateSubscriber>(self, other: T) -> ChainSubscriber<Self, T> {
         ChainSubscriber {
             left: self,
