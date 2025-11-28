@@ -120,7 +120,7 @@ pub struct BlocksBatch {
 }
 
 impl BlocksBatch {
-    fn new(start_seqno: u32, len: NonZeroU32, map_ids: &[u16]) -> Self {
+    pub fn new(start_seqno: u32, len: NonZeroU32, map_ids: &[u16]) -> Self {
         let len = len.get() as usize;
 
         Self {
