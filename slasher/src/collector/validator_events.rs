@@ -12,6 +12,10 @@ use tycho_util::{DashMapEntry, FastDashMap};
 
 use crate::bc::BlocksBatch;
 
+pub trait BlockBatchesStore {
+    fn known_batch_size(&self) -> AtomicU32;
+}
+
 #[derive(Default)]
 pub struct ValidatorEventsCollector {
     default_batch_size: AtomicU32,
@@ -165,9 +169,7 @@ impl SessionState {
 
         let event_type = match signatures {
             Some(signatures) => {
-                self.current_batch
-                    .commit_signatures(seqno, signatures)
-                    .expect("ranges must be consistent");
+                self.current_batch.commit_signatures(seqno, signatures);
                 "validated"
             }
             None => "skipped",
