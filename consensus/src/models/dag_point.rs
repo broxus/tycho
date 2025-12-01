@@ -60,6 +60,7 @@ impl DagPoint {
             is_first_resolved: status.is_first_resolved,
             cert,
             root_cause,
+            is_restored: status.is_restored,
         })))
     }
 
@@ -239,6 +240,7 @@ struct TransInvalidPointInner {
     is_first_resolved: bool,
     cert: Cert,
     root_cause: InvalidDependency,
+    is_restored: bool,
 }
 impl TransInvalidPoint {
     pub fn info(&self) -> &PointInfo {
@@ -258,6 +260,9 @@ impl TransInvalidPoint {
     }
     pub fn committable(self) -> Committable {
         Committable(CommittableInner::TransInvalid(self))
+    }
+    pub fn is_restored(&self) -> bool {
+        self.0.is_restored
     }
 }
 

@@ -571,6 +571,7 @@ impl DagPointFuture {
             },
             committed: None,
             root_cause: inv_dep.link.clone(),
+            is_restored: false,
         }
     }
 
