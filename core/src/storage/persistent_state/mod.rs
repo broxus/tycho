@@ -390,7 +390,7 @@ impl PersistentStateStorage {
 
             let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
             match cell_writer.write(&root_hash, Some(&cancelled)) {
-                Ok(()) => {
+                Ok(_) => {
                     this.block_handles.set_has_persistent_shard_state(&handle);
                     tracing::info!("persistent shard state saved");
                 }

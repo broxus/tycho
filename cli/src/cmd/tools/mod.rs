@@ -7,6 +7,7 @@ mod gen_account;
 mod gen_dht;
 mod gen_key;
 mod gen_zerostate;
+mod prepare_hardfork;
 
 /// Work with blockchain stuff.
 #[derive(Parser)]
@@ -24,6 +25,7 @@ impl Cmd {
             SubCmd::GenAccount(cmd) => cmd.run(),
             SubCmd::Bc(cmd) => cmd.run(),
             SubCmd::CheckCellsDb(cmd) => cmd.run(),
+            SubCmd::PrepareHardfork(cmd) => cmd.run(),
         }
     }
 }
@@ -36,4 +38,5 @@ enum SubCmd {
     GenAccount(gen_account::Cmd),
     Bc(bc::Cmd),
     CheckCellsDb(check_cells_db::Cmd),
+    PrepareHardfork(prepare_hardfork::Cmd),
 }

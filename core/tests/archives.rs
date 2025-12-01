@@ -406,7 +406,7 @@ async fn test_pagination(storage: CoreStorage) -> Result<Vec<BlockId>> {
                 .await?;
 
             let encoded_data = Boc::encode(block_data.root_cell());
-            let expected_file_hash = Boc::file_hash(&encoded_data);
+            let expected_file_hash = Boc::file_hash_blake(&encoded_data);
 
             assert_eq!(
                 block.file_hash, expected_file_hash,

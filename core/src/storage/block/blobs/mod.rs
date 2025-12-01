@@ -402,7 +402,7 @@ impl BlobStorage {
                         .decompress(&mut decompressed)?;
 
                     // Calculate hash of the decompressed BOC data
-                    let file_hash = Boc::file_hash(&decompressed);
+                    let file_hash = Boc::file_hash_blake(&decompressed);
                     let block_id = key.block_id.make_full(file_hash);
 
                     result.push(block_id);
