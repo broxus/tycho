@@ -1,9 +1,11 @@
 use std::fs::File;
-use std::sync::Arc;
+use std::io::Cursor;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use bytesize::ByteSize;
 use tycho_block_util::block::*;
 use tycho_block_util::dict::split_aug_dict_raw;
@@ -201,8 +203,10 @@ impl ShardStateStorage {
         Ok(updated)
     }
 
-    // Stores shard state and returns the hash of its root cell.
-    pub async fn store_state_file(&self, block_id: &BlockId, boc: File) -> Result<HashBytes> {
+    async fn store_state_inner<R>(&self, block_id: &BlockId, boc: R) -> Result<HashBytes>
+    where
+        R: std::io::Read + Send + 'static,
+    {
         let ctx = StoreStateContext {
             cells_db: self.cells_db.clone(),
             cell_storage: self.cell_storage.clone(),
@@ -219,6 +223,16 @@ impl ShardStateStorage {
             ctx.store(&block_id, boc)
         })
         .await?
+    }
+
+    // Stores shard state and returns the hash of its root cell.
+    pub async fn store_state_file(&self, block_id: &BlockId, boc: File) -> Result<HashBytes> {
+        self.store_state_inner(block_id, boc).await
+    }
+
+    pub async fn store_state_bytes(&self, block_id: &BlockId, boc: Bytes) -> Result<HashBytes> {
+        let cursor = Cursor::new(boc);
+        self.store_state_inner(block_id, cursor).await
     }
 
     // NOTE: DO NOT try to make a separate `load_state_root` method

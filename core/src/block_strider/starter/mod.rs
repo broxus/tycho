@@ -3,13 +3,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_types::boc::Boc;
-use tycho_types::models::{
-    BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardStateUnsplit,
-};
+use tycho_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates};
 use tycho_util::config::PartialConfig;
 use tycho_util::fs::MappedFile;
 use tycho_util::serde_helpers;
@@ -38,6 +35,9 @@ pub struct StarterConfig {
     /// Default: None
     #[important]
     pub start_from: Option<u32>,
+
+    /// Max zerostate byte size in size to download on cold start
+    pub zerostate_max_size: u64,
 }
 
 pub struct StarterBuilder<
@@ -229,17 +229,11 @@ struct StarterInner {
 }
 
 pub trait ZerostateProvider {
-    fn load_zerostates(
-        &self,
-        tracker: &MinRefMcStateTracker,
-    ) -> impl Iterator<Item = Result<ShardStateStuff>>;
+    fn load_zerostates(&self) -> impl Iterator<Item = Result<Bytes>>;
 }
 
 impl ZerostateProvider for () {
-    fn load_zerostates(
-        &self,
-        _: &MinRefMcStateTracker,
-    ) -> impl Iterator<Item = Result<ShardStateStuff>> {
+    fn load_zerostates(&self) -> impl Iterator<Item = Result<Bytes>> {
         std::iter::empty()
     }
 }
@@ -247,35 +241,15 @@ impl ZerostateProvider for () {
 pub struct FileZerostateProvider(pub Vec<PathBuf>);
 
 impl ZerostateProvider for FileZerostateProvider {
-    fn load_zerostates(
-        &self,
-        tracker: &MinRefMcStateTracker,
-    ) -> impl Iterator<Item = Result<ShardStateStuff>> {
-        self.0.iter().map(move |path| load_zerostate(tracker, path))
+    fn load_zerostates(&self) -> impl Iterator<Item = Result<Bytes>> {
+        self.0.iter().map(move |path| load_zerostate(path))
     }
 }
 
-fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<ShardStateStuff> {
-    let data = std::fs::read(path).context("failed to read file")?;
-    let file_hash = Boc::file_hash_blake(&data);
-
-    let root = Boc::decode(data).context("failed to decode BOC")?;
-    let root_hash = *root.repr_hash();
-
-    let state = root
-        .parse::<ShardStateUnsplit>()
-        .context("failed to parse state")?;
-
-    anyhow::ensure!(state.seqno == 0, "not a zerostate");
-
-    let block_id = BlockId {
-        shard: state.shard_ident,
-        seqno: state.seqno,
-        root_hash,
-        file_hash,
-    };
-
-    ShardStateStuff::from_root(&block_id, root, tracker.insert_untracked())
+fn load_zerostate(path: &PathBuf) -> Result<Bytes> {
+    let mf = MappedFile::from_existing_file(File::open(path)?)?;
+    let bytes = Bytes::from_owner(mf);
+    Ok(bytes)
 }
 
 #[async_trait::async_trait]

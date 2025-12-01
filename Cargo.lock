@@ -3991,6 +3991,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "bitflags",
+ "blake3",
  "bumpalo",
  "bumpalo-herd",
  "bytes",
