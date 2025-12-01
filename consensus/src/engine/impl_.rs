@@ -48,6 +48,7 @@ impl Engine {
         fix_history: FixHistoryFlag,
     ) -> Engine {
         let conf = &merged_conf.conf;
+        net.moderator.apply_mempool_config(conf);
         let genesis = merged_conf.genesis();
 
         Point::parse(genesis.serialized().to_vec())
@@ -70,6 +71,7 @@ impl Engine {
             bind.top_known_anchor.receiver(),
             bind.commit_finished.receiver(),
             consensus_round.receiver(),
+            net.moderator.event_journal_ttl(),
         );
 
         // Dag, created at genesis, will at first extend up to its greatest length
@@ -92,9 +94,11 @@ impl Engine {
         let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();
             let overlay_id = merged_conf.overlay_id;
+            let moderator = net.moderator.clone();
             move || {
                 store.init_storage(&overlay_id);
                 store.insert_point(&genesis, PointStatusStoredRef::Exists);
+                moderator.wait_init_blocking();
                 fix_history // just pass further
             }
         });
