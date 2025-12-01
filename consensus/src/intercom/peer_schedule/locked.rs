@@ -16,6 +16,7 @@ pub struct PeerScheduleLocked {
     pub(super) overlay: PrivateOverlay,
     /// update task, aborts on drop
     pub(super) resolve_peers_task: Option<Task<()>>,
+    pub(super) banned: FastHashSet<PeerId>,
     // Connection to self is always "Added"
     // Updates are Resolved or Removed, sent single time
     // Must be kept under Mutex to provide consistent updates on retrieved data
@@ -29,6 +30,7 @@ impl PeerScheduleLocked {
             local_id,
             overlay,
             resolve_peers_task: None,
+            banned: FastHashSet::default(),
             updates: broadcast::Sender::new(PeerCount::MAX.full()),
             data: PeerScheduleStateful::default(),
         }
@@ -46,6 +48,31 @@ impl PeerScheduleLocked {
             _ = self.updates.send((*peer_id, state));
         }
         is_applied
+    }
+
+    pub(super) fn set_banned(&mut self, peers: &[PeerId]) {
+        let mut entries = self.overlay.write_entries();
+        for peer_id in peers {
+            self.banned.insert(*peer_id);
+            entries.remove(peer_id);
+        }
+    }
+
+    pub(super) fn remove_bans(&mut self, peers: &[PeerId], parent: WeakPeerSchedule) {
+        let mut entries = self.overlay.write_entries();
+        let mut need_resolve = false;
+        for peer_id in peers {
+            self.banned.remove(peer_id);
+            if self.data.is_in_any_vset(peer_id) {
+                entries.insert(peer_id);
+                need_resolve |= true;
+            }
+        }
+        if need_resolve {
+            let resolved_waiters =
+                WeakPeerSchedule::resolved_waiters(&self.local_id, &entries.downgrade());
+            self.resolve_peers_task = parent.new_resolve_task(resolved_waiters);
+        }
     }
 
     pub(super) fn forget_oldest(&mut self, parent: WeakPeerSchedule) {
@@ -73,7 +100,9 @@ impl PeerScheduleLocked {
             let mut write_entries = self.overlay.write_entries();
 
             for peer_id in validator_set {
-                write_entries.insert(peer_id);
+                if !self.banned.contains(peer_id) {
+                    write_entries.insert(peer_id);
+                }
             }
 
             let all_resolved = write_entries

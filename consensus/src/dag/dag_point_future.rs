@@ -575,6 +575,7 @@ impl DagPointFuture {
                 to: inv_dep.point_id,
                 path: inv_dep.through.clone(),
             },
+            is_restored: false,
         }
     }
 
