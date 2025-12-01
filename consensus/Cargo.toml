@@ -24,6 +24,7 @@ bumpalo = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
+humantime = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
 metrics = { workspace = true }
@@ -33,6 +34,7 @@ rand_pcg = { workspace = true }
 rayon = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tl-proto = { workspace = true }
 tokio = { workspace = true, default-features = false }
@@ -51,7 +53,6 @@ tycho-util = { workspace = true }
 tycho-storage = { workspace = true }
 
 [dev-dependencies]
-humantime = { workspace = true }
 parking_lot = { workspace = true, features = ["deadlock_detection"] }
 tempfile = { workspace = true }
 tikv-jemallocator = { workspace = true, features = [

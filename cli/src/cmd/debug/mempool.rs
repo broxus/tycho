@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::{
     EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolConfigBuilder,
-    MempoolDb, MempoolMergedConfig,
+    MempoolDb, MempoolMergedConfig, Moderator,
 };
 use tycho_consensus::test_utils::{AnchorConsumer, LastAnchorFile, test_logger};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
@@ -182,6 +182,20 @@ impl Mempool {
         let init_peers =
             InitPeers::new((global_config.bootstrap_peers.iter().map(|info| info.id)).collect());
 
+        let core_storage = {
+            let ctx = StorageContext::new(node_config.storage.clone())
+                .await
+                .context("failed to create storage context")?;
+            let mut core_storage = node_config.core_storage.clone();
+            if std::mem::replace(&mut core_storage.blob_db.pre_create_cas_tree, false) {
+                tracing::warn!("Cas_tree will not be created, blob_db config ignored");
+            }
+            CoreStorage::open(ctx, core_storage)
+                .await
+                .context("failed to create storage")?
+        };
+        let mempool_db = MempoolDb::open(core_storage.context().clone())?;
+
         let net_args = {
             let keys = NodeKeys::try_from(&cmd.key_variant)?;
 
@@ -210,6 +224,13 @@ impl Mempool {
                 peer_count += is_new as usize;
             }
 
+            let moderator = Moderator::new(
+                dht_client.network(),
+                mempool_db.clone(),
+                node_config.mempool.moderator,
+                crate::version_string(),
+            )?;
+
             tracing::info!(
                 %local_id,
                 %local_addr,
@@ -223,24 +244,11 @@ impl Mempool {
                 network: dht_client.network().clone(),
                 peer_resolver,
                 overlay_service,
+                moderator,
             }
         };
 
         // Setup storage
-
-        let core_storage = {
-            let ctx = StorageContext::new(node_config.storage.clone())
-                .await
-                .context("failed to create storage context")?;
-            let mut core_storage = node_config.core_storage.clone();
-            if std::mem::replace(&mut core_storage.blob_db.pre_create_cas_tree, false) {
-                tracing::warn!("Cas_tree will not be created, blob_db config ignored");
-            }
-            CoreStorage::open(ctx, core_storage)
-                .await
-                .context("failed to create storage")?
-        };
-        let mempool_db = MempoolDb::open(core_storage.context().clone())?;
 
         let mut last_anchor_file = LastAnchorFile::reopen_in(&mempool_db.file_storage()?)?;
         let last_anchor_opt = last_anchor_file.read_opt()?;
@@ -263,7 +271,7 @@ impl Mempool {
         )
         .await?;
 
-        let mut config_builder = MempoolConfigBuilder::new(&node_config.mempool);
+        let mut config_builder = MempoolConfigBuilder::new(&node_config.mempool.node);
 
         config_builder.set_genesis(match &global_config.mempool {
             Some(global_config) => global_config.genesis_info,
