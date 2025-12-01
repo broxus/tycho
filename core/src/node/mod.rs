@@ -29,6 +29,29 @@ use crate::storage::{CoreStorage, CoreStorageConfig};
 mod config;
 mod keys;
 
+pub struct NodeBootArgs {
+    /// Default: [`ColdBootType::LatestPersistent`].
+    pub boot_type: ColdBootType,
+    /// Default: None
+    pub zerostates: Option<Vec<PathBuf>>,
+    /// Default: None
+    pub queue_state_handler: Option<Box<dyn QueueStateHandler>>,
+    /// Default: false
+    pub ignore_states: bool,
+}
+
+impl Default for NodeBootArgs {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            boot_type: ColdBootType::LatestPersistent,
+            zerostates: None,
+            queue_state_handler: None,
+            ignore_states: false,
+        }
+    }
+}
+
 pub struct NodeBase {
     pub base_config: NodeBaseConfig,
     pub global_config: GlobalConfig,
@@ -95,6 +118,17 @@ impl NodeBase {
         zerostates: Option<Vec<PathBuf>>,
         queue_state_handler: Option<Box<dyn QueueStateHandler>>,
     ) -> Result<BlockId> {
+        self.boot_ext(NodeBootArgs {
+            boot_type,
+            zerostates,
+            queue_state_handler,
+            ..Default::default()
+        })
+        .await
+    }
+
+    /// Initialize the node and return the init block id.
+    pub async fn boot_ext(&self, args: NodeBootArgs) -> Result<BlockId> {
         let node_state = self.core_storage.node_state();
 
         let last_mc_block_id = match node_state.load_last_mc_block_id() {
@@ -104,9 +138,10 @@ impl NodeBase {
                     .with_storage(self.core_storage.clone())
                     .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
                     .with_zerostate_id(self.global_config.zerostate)
-                    .with_config(self.base_config.starter.clone());
+                    .with_config(self.base_config.starter.clone())
+                    .ignore_states(args.ignore_states);
 
-                if let Some(handler) = queue_state_handler {
+                if let Some(handler) = args.queue_state_handler {
                     starter = starter.with_queue_state_handler(handler);
                 }
 
@@ -117,7 +152,7 @@ impl NodeBase {
 
                 starter
                     .build()
-                    .cold_boot(boot_type, zerostates.map(FileZerostateProvider))
+                    .cold_boot(args.boot_type, args.zerostates.map(FileZerostateProvider))
                     .await?
             }
         };
@@ -204,16 +239,17 @@ impl NodeBase {
 }
 
 pub struct NodeBaseBuilder<'a, Step = ()> {
-    base_config: &'a NodeBaseConfig,
-    global_config: &'a GlobalConfig,
+    common: NodeBaseBuilderCommon<'a>,
     step: Step,
 }
 
 impl<'a> NodeBaseBuilder<'a, ()> {
     pub fn new(base_config: &'a NodeBaseConfig, global_config: &'a GlobalConfig) -> Self {
         Self {
-            base_config,
-            global_config,
+            common: NodeBaseBuilderCommon {
+                base_config,
+                global_config,
+            },
             step: (),
         }
     }
@@ -226,13 +262,12 @@ impl<'a> NodeBaseBuilder<'a, ()> {
         let net = ConfiguredNetwork::new(
             public_addr,
             secret_key,
-            self.base_config,
-            &self.global_config.bootstrap_peers,
+            self.common.base_config,
+            &self.common.global_config.bootstrap_peers,
         )?;
 
         Ok(NodeBaseBuilder {
-            base_config: self.base_config,
-            global_config: self.global_config,
+            common: self.common,
             step: init::Step0 { net },
         })
     }
@@ -241,13 +276,14 @@ impl<'a> NodeBaseBuilder<'a, ()> {
 impl<'a> NodeBaseBuilder<'a, init::Step0> {
     // TODO: Add some options here if needed.
     pub async fn init_storage(self) -> Result<NodeBaseBuilder<'a, init::Step1>> {
-        let store =
-            ConfiguredStorage::new(&self.base_config.storage, &self.base_config.core_storage)
-                .await?;
+        let store = ConfiguredStorage::new(
+            &self.common.base_config.storage,
+            &self.common.base_config.core_storage,
+        )
+        .await?;
 
         Ok(NodeBaseBuilder {
-            base_config: self.base_config,
-            global_config: self.global_config,
+            common: self.common,
             step: init::Step1 {
                 prev_step: self.step,
                 store,
@@ -267,16 +303,15 @@ impl<'a> NodeBaseBuilder<'a, init::Step1> {
         SL: SelfBroadcastListener,
     {
         let (_, blockchain_rpc_client) = self.step.prev_step.net.add_blockchain_rpc(
-            &self.global_config.zerostate,
+            &self.common.global_config.zerostate,
             self.step.store.core_storage.clone(),
             remote_broadcast_listener,
             self_broadcast_listener,
-            self.base_config,
+            self.common.base_config,
         );
 
         Ok(NodeBaseBuilder {
-            base_config: self.base_config,
-            global_config: self.global_config,
+            common: self.common,
             step: init::Step2 {
                 prev_step: self.step,
                 blockchain_rpc_client,
@@ -292,8 +327,8 @@ impl<'a> NodeBaseBuilder<'a, init::Final> {
         let blockchain_rpc_client = self.step.blockchain_rpc_client;
 
         Ok(NodeBase {
-            base_config: self.base_config.clone(),
-            global_config: self.global_config.clone(),
+            base_config: self.common.base_config.clone(),
+            global_config: self.common.global_config.clone(),
             keypair: net.keypair,
             network: net.network,
             dht_client: net.dht_client,
@@ -304,6 +339,7 @@ impl<'a> NodeBaseBuilder<'a, init::Final> {
             blockchain_rpc_client,
             #[cfg(feature = "s3")]
             s3_client: self
+                .common
                 .base_config
                 .s3_client
                 .as_ref()
@@ -316,11 +352,11 @@ impl<'a> NodeBaseBuilder<'a, init::Final> {
 
 impl<'a, Step> NodeBaseBuilder<'a, Step> {
     pub fn base_config(&self) -> &'a NodeBaseConfig {
-        self.base_config
+        self.common.base_config
     }
 
     pub fn global_config(&self) -> &'a GlobalConfig {
-        self.global_config
+        self.common.global_config
     }
 }
 
@@ -360,6 +396,11 @@ impl<Step: AsRef<init::Step2>> NodeBaseBuilder<'_, Step> {
     pub fn blockchain_rpc_client(&self) -> &BlockchainRpcClient {
         &self.step.as_ref().blockchain_rpc_client
     }
+}
+
+struct NodeBaseBuilderCommon<'a> {
+    base_config: &'a NodeBaseConfig,
+    global_config: &'a GlobalConfig,
 }
 
 pub mod init {

@@ -32,7 +32,7 @@ pub struct StarterConfig {
     #[serde(with = "serde_helpers::humantime")]
     pub custom_boot_offset: Option<Duration>,
 
-    /// Choose nearest persistent state to start from.
+    /// Choose the nearest persistent state strictly before this seqno.
     ///
     /// Default: None
     #[serde(default)]
@@ -60,6 +60,7 @@ impl StarterBuilder {
     pub fn build(self) -> Starter {
         let (storage, blockchain_rpc_client, zerostate, config) = self.mandatory_fields;
         let BuilderFields {
+            ignore_states,
             queue_state_handler,
             #[cfg(feature = "s3")]
             s3_client,
@@ -82,6 +83,7 @@ impl StarterBuilder {
 
         Starter {
             inner: Arc::new(StarterInner {
+                ignore_states,
                 storage,
                 starter_client,
                 blockchain_rpc_client,
@@ -141,6 +143,12 @@ impl<T1, T2, T3> StarterBuilder<(T1, T2, T3, ())> {
 }
 
 impl<T> StarterBuilder<T> {
+    /// Whether to skip downloading persistent states.
+    pub fn ignore_states(mut self, ignore_states: bool) -> Self {
+        self.optional_fields.ignore_states = ignore_states;
+        self
+    }
+
     pub fn with_queue_state_handler<H: QueueStateHandler>(mut self, handler: H) -> Self {
         self.optional_fields.queue_state_handler = Some(castaway::match_type!(handler, {
             Box<dyn QueueStateHandler> as handler => handler,
@@ -158,6 +166,7 @@ impl<T> StarterBuilder<T> {
 
 #[derive(Default)]
 struct BuilderFields {
+    ignore_states: bool,
     queue_state_handler: Option<Box<dyn QueueStateHandler>>,
 
     #[cfg(feature = "s3")]
@@ -208,6 +217,7 @@ pub enum ColdBootType {
 }
 
 struct StarterInner {
+    ignore_states: bool,
     storage: CoreStorage,
     starter_client: Arc<dyn StarterClient>,
     // TODO: Access blockchain only though the starter client.

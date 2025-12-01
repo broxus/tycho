@@ -508,7 +508,7 @@ impl StarterInner {
             .set_block_persistent(&handle);
 
         // Download persistent shard state
-        {
+        if !self.ignore_states {
             let state_update = block.as_ref().load_state_update()?;
 
             let (_, shard_state) = self.download_shard_state(mc_block_id, block_id).await?;
@@ -522,7 +522,7 @@ impl StarterInner {
         // Download persistent queue state
         // NOTE: There is no queue state for zerostate, and there might be a situation
         //       where there were no blocks in the shard.
-        if block_id.seqno != 0 {
+        if !self.ignore_states && block_id.seqno != 0 {
             let top_update = &block.as_ref().out_msg_queue_updates;
             self.download_queue_state(&handle, top_update).await?;
         }
