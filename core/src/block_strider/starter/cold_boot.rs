@@ -402,7 +402,7 @@ impl StarterInner {
 
         for entry in masterchain_zerostate.shards()?.iter() {
             let (shard_ident, descr) = entry.context("invalid mc zerostate")?;
-            anyhow::ensure!(descr.seqno == 0, "invalid shard description {shard_ident}");
+            //anyhow::ensure!(descr.seqno == 0, "invalid shard description {shard_ident}");
 
             let block_id = BlockId {
                 shard: shard_ident,
