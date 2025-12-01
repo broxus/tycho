@@ -7,7 +7,7 @@ use tycho_util::FastHashMap;
 
 use crate::models::{
     AnchorLink, AnchorStageRole, ChainedAnchorProof, Digest, EvidenceSigError, IndirectLink,
-    PointData, PointId, PointKey, Round, Signature, StructureIssue, UnixTime,
+    PointData, PointId, PointKey, Round, Signature, StructureIssue, Through, UnixTime,
 };
 
 #[derive(Clone, TlRead, TlWrite)]
@@ -162,10 +162,16 @@ impl PointInfo {
 
     pub fn chained_proof_to_through(&self) -> Option<(PointId, PointId)> {
         self.chained_anchor_proof().map(|link| {
-            let through = (self.0.data.through_id(&link.path, self.round()))
+            let through = self
+                .through_id(&link.path)
                 .expect("Coding error: usage of ill-formed point");
             (link.to, through)
         })
+    }
+
+    /// Well-formed point may return `None` if attribute belongs to another point
+    pub fn through_id(&self, through: &Through) -> Option<PointId> {
+        self.0.data.through_id(through, self.round())
     }
 
     /// the final destination of an anchor link

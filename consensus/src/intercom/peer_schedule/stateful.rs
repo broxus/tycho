@@ -47,6 +47,12 @@ impl PeerScheduleStateful {
         self.epoch_starts[2]
     }
 
+    pub(super) fn is_in_any_vset(&self, peer_id: &PeerId) -> bool {
+        self.validator_set
+            .iter()
+            .any(|vset| vset.contains_key(peer_id))
+    }
+
     /// local peer id is always kept as not resolved
     pub fn peers_state_for(&self, round: Round) -> &Arc<FastHashMap<PeerId, PeerState>> {
         let result = if self.next_epoch_start.is_some_and(|r| round >= r) {
