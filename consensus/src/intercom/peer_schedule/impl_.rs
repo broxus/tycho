@@ -162,6 +162,20 @@ impl PeerSchedule {
         }
     }
 
+    pub fn set_banned(&self, peers: &[PeerId]) {
+        if !peers.is_empty() {
+            let mut guard = self.write();
+            guard.set_banned(peers);
+        }
+    }
+
+    pub fn remove_bans(&self, peers: &[PeerId]) {
+        if !peers.is_empty() {
+            let mut guard = self.write();
+            guard.remove_bans(peers, self.downgrade());
+        }
+    }
+
     pub fn read(&self) -> RwLockReadGuard<'_, RawRwLock, PeerScheduleLocked> {
         self.0.locked.read()
     }
@@ -307,55 +321,65 @@ impl WeakPeerSchedule {
         };
 
         loop {
-            match rx.recv().await {
-                Ok(ref event @ PrivateOverlayEntriesEvent::Removed(peer)) if peer != local_id => {
-                    let Some(strong) = self.upgrade() else {
-                        tracing::warn!("peer schedule dropped, stopping updater");
-                        break Err(Cancelled());
+            let resolve_result = rx.recv().await;
+            self.restart_resolve_on_remove(&local_id, resolve_result)?;
+        }
+    }
+
+    fn restart_resolve_on_remove(
+        &self,
+        local_id: &PeerId,
+        result: Result<PrivateOverlayEntriesEvent, broadcast::error::RecvError>,
+    ) -> TaskResult<()> {
+        match result {
+            Ok(ref event @ PrivateOverlayEntriesEvent::Removed(peer)) if peer != *local_id => {
+                let Some(strong) = self.upgrade() else {
+                    tracing::warn!("peer schedule dropped, stopping updater");
+                    return Err(Cancelled());
+                };
+                let mut guard = strong.write();
+                let restart = guard.set_state(&peer, PeerState::Unknown);
+                if restart {
+                    guard.resolve_peers_task = None;
+                    let resolved_waiters = {
+                        let entries = guard.overlay.read_entries();
+                        Self::resolved_waiters(local_id, &entries)
                     };
-                    let mut guard = strong.write();
-                    let restart = guard.set_state(&peer, PeerState::Unknown);
-                    if restart {
-                        guard.resolve_peers_task = None;
-                        let resolved_waiters = {
-                            let entries = guard.overlay.read_entries();
-                            Self::resolved_waiters(&local_id, &entries)
-                        };
-                        guard.resolve_peers_task = self.clone().new_resolve_task(resolved_waiters);
-                    }
-                    drop(guard);
-                    tracing::info!(
-                        event = display(event.alt()),
-                        peer = display(peer.alt()),
-                        resolve_restarted = restart,
-                        "peer schedule update"
-                    );
+                    guard.resolve_peers_task = self.clone().new_resolve_task(resolved_waiters);
                 }
-                Ok(
-                    ref event @ (PrivateOverlayEntriesEvent::Added(peer_id)
-                    | PrivateOverlayEntriesEvent::Removed(peer_id)),
-                ) => {
-                    tracing::debug!(
-                        event = display(event.alt()),
-                        peer = display(peer_id.alt()),
-                        "peer schedule update ignored"
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    tracing::error!(
-                        "peer info updates channel closed, cannot maintain node connectivity"
-                    );
-                    break Err(Cancelled());
-                }
-                Err(broadcast::error::RecvError::Lagged(amount)) => {
-                    tracing::error!(
-                        amount = amount,
-                        "Lagged peer info updates, node connectivity may suffer. \
-                         Consider increasing channel capacity."
-                    );
-                }
+                drop(guard);
+                tracing::info!(
+                    event = display(event.alt()),
+                    peer = display(peer.alt()),
+                    resolve_restarted = restart,
+                    "peer schedule update"
+                );
+            }
+            Ok(
+                ref event @ (PrivateOverlayEntriesEvent::Added(peer_id)
+                | PrivateOverlayEntriesEvent::Removed(peer_id)),
+            ) => {
+                tracing::debug!(
+                    event = display(event.alt()),
+                    peer = display(peer_id.alt()),
+                    "peer schedule update ignored"
+                );
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                tracing::error!(
+                    "peer info updates channel closed, cannot maintain node connectivity"
+                );
+                return Err(Cancelled());
+            }
+            Err(broadcast::error::RecvError::Lagged(amount)) => {
+                tracing::error!(
+                    amount = amount,
+                    "Lagged peer info updates, node connectivity may suffer. \
+                     Consider increasing channel capacity."
+                );
             }
         }
+        Ok(())
     }
 
     pub(super) fn resolved_waiters(
@@ -398,9 +422,13 @@ impl WeakPeerSchedule {
                     tracing::warn!("peer schedule is dropped, cannot apply resolve update");
                     return Err(Cancelled());
                 };
-                _ = peer_schedule
-                    .write()
-                    .set_state(&known_peer_handle.peer_info().id, PeerState::Resolved);
+                let peer_id = &known_peer_handle.peer_info().id;
+                let mut guard = peer_schedule.write();
+                if guard.banned.contains(peer_id) {
+                    guard.overlay.write_entries().remove(peer_id); // undo
+                } else {
+                    guard.set_state(peer_id, PeerState::Resolved);
+                }
                 gauge.decrement(1);
             }
             Ok(())

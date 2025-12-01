@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::{Add, Sub};
 
+use serde::Serialize;
 use tl_proto::{TlRead, TlWrite};
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
@@ -133,6 +134,8 @@ impl Round {
 }
 
 #[derive(Debug, Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, TlRead, TlWrite)]
+// new block for rust-fmt
+#[derive(Serialize)]
 pub struct UnixTime(u64);
 
 impl UnixTime {

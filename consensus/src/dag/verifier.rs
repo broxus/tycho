@@ -144,7 +144,6 @@ pub enum InvalidRootCause {
 }
 
 impl InvalidRootCause {
-    #[allow(unused)]
     pub fn point_id(&self) -> &PointId {
         match self {
             InvalidRootCause::Invalid(point_id, _)

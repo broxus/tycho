@@ -10,7 +10,8 @@ use futures_util::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tycho_consensus::prelude::{
-    EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolDb,
+    EngineBinding, EngineNetworkArgs, EngineSession, InitPeers, InputBuffer, MempoolDb, Moderator,
+    ModeratorConfig,
 };
 use tycho_consensus::test_utils::*;
 use tycho_crypto::ed25519::{KeyPair, SecretKey};
@@ -159,6 +160,10 @@ fn make_network(
                     .build()
                     .expect("new tokio runtime")
                     .block_on(async move {
+                        let (ctx, _tmp_dir) =
+                            StorageContext::new_temp().await.expect("new storage");
+                        let mempool_db = MempoolDb::open(ctx).expect("open db");
+
                         let net_args = {
                             let (dht_client, peer_resolver, overlay_service) = from_validator(
                                 bind_address,
@@ -174,19 +179,25 @@ fn make_network(
                                     dht_client.add_peer(info).expect("add peer to dht client");
                                 }
                             }
+                            let moderator = Moderator::new(
+                                dht_client.network(),
+                                mempool_db.clone(),
+                                ModeratorConfig::test_default(),
+                                "engine example",
+                            )
+                            .expect("moderator");
+
                             EngineNetworkArgs {
                                 key_pair,
                                 network: dht_client.network().clone(),
                                 peer_resolver: peer_resolver.clone(),
                                 overlay_service: overlay_service.clone(),
+                                moderator,
                             }
                         };
 
-                        let (ctx, _tmp_dir) =
-                            StorageContext::new_temp().await.expect("new storage");
-
                         let bind = EngineBinding {
-                            mempool_db: MempoolDb::open(ctx).unwrap(),
+                            mempool_db,
                             input_buffer: InputBuffer::new_stub(
                                 cli.payload_step,
                                 cli.steps_until_full,

@@ -1,4 +1,5 @@
 pub use core::dispatcher::*;
+pub use core::query::request::QueryRequestTag;
 pub use core::responder::Responder;
 
 pub use broadcast::*;
