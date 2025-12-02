@@ -7,7 +7,7 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, oneshot, watch};
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Interval, MissedTickBehavior};
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -30,11 +30,11 @@ pub enum BroadcasterSignal {
 pub struct Broadcaster {
     ctx: BroadcastCtx,
     /// Receiver may be closed (collector finished), so do not require `Ok` on send
-    bcaster_signal: Option<oneshot::Sender<BroadcasterSignal>>,
-    collector_status: watch::Receiver<CollectorStatus>,
+    continue_interval: Interval,
 
     peer_updates: broadcast::Receiver<(PeerId, PeerState)>,
     removed_peers: FastHashSet<PeerId>,
+    inflight_peers: FastHashSet<PeerId>,
     // every connected peer should receive broadcast, but only signer's signatures are accountable
     signers: Arc<FastHashSet<PeerId>>,
     signers_count: PeerCount,
@@ -64,13 +64,17 @@ struct SigFutureOutput {
     result: Result<SignatureResponse, QueryError>,
 }
 
+struct CollectorWire {
+    /// Receiver may be closed (collector finished), so do not require `Ok` on send
+    bcaster_signal: Option<oneshot::Sender<BroadcasterSignal>>,
+    collector_status: watch::Receiver<CollectorStatus>,
+}
+
 impl Broadcaster {
     pub fn new(
         dispatcher: Dispatcher,
         point: Point,
         peer_schedule: PeerSchedule,
-        bcaster_signal: oneshot::Sender<BroadcasterSignal>,
-        collector_status: watch::Receiver<CollectorStatus>,
         round_ctx: &RoundCtx,
     ) -> Self {
         let (signers, bcast_peers, peer_updates) = {
@@ -86,15 +90,22 @@ impl Broadcaster {
         let signers_count =
             PeerCount::try_from(signers.len()).expect("validator set for current round is unknown");
 
+        // cannot be copied from Collector, so just create a similar one and synchronise
+        let mut continue_interval = tokio::time::interval(Duration::from_millis(
+            round_ctx.conf().consensus.broadcast_retry_millis.get() as _,
+        ));
+        continue_interval.reset(); // no immediate tick
+        continue_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         Self {
             ctx: BroadcastCtx::new(round_ctx, &point),
-            bcaster_signal: Some(bcaster_signal),
-            collector_status,
+            continue_interval,
 
             peer_updates,
             signers,
             signers_count,
             removed_peers: FastHashSet::from_iter([*point.info().author()]), // no loopback
+            inflight_peers: FastHashSet::default(),
             rejections: Default::default(),
             signatures: Default::default(),
 
@@ -111,7 +122,11 @@ impl Broadcaster {
     }
 
     /// returns evidence for broadcast point
-    pub async fn run(&mut self) -> TaskResult<Arc<LastOwnPoint>> {
+    pub async fn run(
+        &mut self,
+        bcaster_signal: oneshot::Sender<BroadcasterSignal>,
+        collector_status: watch::Receiver<CollectorStatus>,
+    ) -> TaskResult<Arc<LastOwnPoint>> {
         // how this was supposed to work:
         // * in short: broadcast to all and gather signatures from those who accepted the point
         // * both broadcast and signature tasks have their own retry loop for every peer
@@ -136,12 +151,16 @@ impl Broadcaster {
         for peer in mem::take(&mut self.bcast_peers) {
             self.broadcast(&peer);
         }
+        let mut wire = CollectorWire {
+            bcaster_signal: Some(bcaster_signal),
+            collector_status,
+        };
         loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 // rare event that may cause immediate completion
-                result = self.collector_status.changed() => {
-                    if self.should_finish(result) {
+                result = wire.collector_status.changed() => {
+                    if self.should_finish(&mut wire, result) {
                         break;
                     }
                 },
@@ -172,12 +191,8 @@ impl Broadcaster {
 
     pub async fn run_continue(mut self, round_ctx: &RoundCtx) -> TaskResult<()> {
         self.ctx = BroadcastCtx::new(round_ctx, &self.point);
-
-        let mut retry_interval = tokio::time::interval(Duration::from_millis(
-            self.ctx.conf().consensus.broadcast_retry_millis.get() as _,
-        ));
-        retry_interval.reset(); // query signatures after time passes, just to resend broadcast
-        retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut attempt: u8 = 1; // we do nothing at attempt==1 that Collector fires immediately
+        // `self.bcast_peers` is not re-populated, so will add work only if none was added earlier
         for peer in mem::take(&mut self.bcast_peers) {
             self.broadcast(&peer);
         }
@@ -186,11 +201,9 @@ impl Broadcaster {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 // rare event essential for up-to-date retries
                 update = self.peer_updates.recv() => self.match_peer_updates(update)?,
-                _ = retry_interval.tick() => {
-                    BroadcastCtx::retry(self.sig_peers.len());
-                    for peer in mem::take(&mut self.sig_peers) {
-                        self.request_signature(false, &peer);
-                    }
+                _ = self.continue_interval.tick() => {
+                    attempt = attempt.wrapping_add(1);
+                    self.match_attempt(attempt);
                 }
                 // either request signature immediately or postpone until retry
                 Some(out) = self.bcast_futures.next() => {
@@ -208,41 +221,29 @@ impl Broadcaster {
         }
     }
 
-    fn should_finish(&mut self, collector_signal: Result<(), watch::error::RecvError>) -> bool {
-        // don't mark as seen, otherwise may skip ERR notification when collector exits
-        let collector_status = *self.collector_status.borrow();
+    fn should_finish(
+        &mut self,
+        wire: &mut CollectorWire,
+        collector_signal: Result<(), watch::error::RecvError>,
+    ) -> bool {
+        let collector_status = *wire.collector_status.borrow_and_update();
 
         let is_ready = if collector_signal.is_ok() {
+            self.continue_interval.reset(); // synchronise tick delays
+
             if self.rejections.len() >= self.signers_count.reliable_minority() {
-                if let Some(sender) = mem::take(&mut self.bcaster_signal) {
+                if let Some(sender) = mem::take(&mut wire.bcaster_signal) {
                     _ = sender.send(BroadcasterSignal::Err);
                 };
                 true
             } else {
                 if collector_status.attempt >= self.ctx.conf().consensus.min_sign_attempts.get()
                     && self.signatures.len() >= self.signers_count.majority_of_others()
-                    && let Some(sender) = mem::take(&mut self.bcaster_signal)
+                    && let Some(sender) = mem::take(&mut wire.bcaster_signal)
                 {
                     _ = sender.send(BroadcasterSignal::Ok);
                 };
-                if collector_status.attempt == 0 {
-                    // network is stuck, give all broadcast filters a push; forget rejections
-                    self.sig_peers.clear();
-                    self.rejections.clear();
-                    self.sig_futures.clear();
-                    self.bcast_futures.clear();
-                    let peers = self.signers.clone();
-                    BroadcastCtx::retry(peers.len());
-                    for peer in &*peers {
-                        self.broadcast(peer);
-                    }
-                } else if collector_status.attempt > 1 {
-                    let peers = mem::take(&mut self.sig_peers);
-                    BroadcastCtx::retry(peers.len());
-                    for peer in &peers {
-                        self.request_signature(false, peer);
-                    }
-                }
+                self.match_attempt(collector_status.attempt);
                 false
             }
         } else {
@@ -265,7 +266,35 @@ impl Broadcaster {
         is_ready
     }
 
+    fn match_attempt(&mut self, attempt: u8) {
+        // `Collector` emits `1` immediately, that's when we start broadcasts, so ignored here;
+        // don't bother to do nothing at 257th attempt
+        if attempt == 0 {
+            // network is stuck, give all broadcast filters a push; forget rejections
+            self.sig_peers.clear();
+            self.rejections.clear();
+            self.sig_futures.clear();
+            self.bcast_futures.clear();
+            self.inflight_peers.clear();
+            let peers = self.signers.clone();
+            BroadcastCtx::retry(peers.len());
+            for peer in &*peers {
+                self.broadcast(peer);
+            }
+        } else if attempt > 1 {
+            let peers = mem::take(&mut self.sig_peers);
+            BroadcastCtx::retry(peers.len());
+            for peer in &peers {
+                self.request_signature(false, peer);
+            }
+        }
+    }
+
     fn match_broadcast_result(&mut self, out: BcastFutureOutput) {
+        assert!(
+            self.inflight_peers.remove(&out.peer_id),
+            "peer broadcast query not in flight"
+        );
         match out.result {
             Err(QueryError::TlError(error)) => {
                 self.rejections.insert(out.peer_id);
@@ -298,6 +327,10 @@ impl Broadcaster {
     }
 
     fn match_signature_result(&mut self, out: SigFutureOutput) {
+        assert!(
+            self.inflight_peers.remove(&out.peer_id),
+            "peer signature query not in flight"
+        );
         match out.result {
             Err(QueryError::TlError(error)) => {
                 self.rejections.insert(out.peer_id);
@@ -369,6 +402,10 @@ impl Broadcaster {
 
     fn broadcast(&mut self, peer_id: &PeerId) {
         if !self.removed_peers.contains(peer_id) {
+            assert!(
+                self.inflight_peers.insert(*peer_id),
+                "cannot broadcast: peer already in flight"
+            );
             self.bcast_futures.push({
                 let bcast_query = self.bcast_query.clone();
                 let peer_id = *peer_id;
@@ -393,6 +430,10 @@ impl Broadcaster {
 
     fn request_signature(&mut self, after_bcast: bool, peer_id: &PeerId) {
         if !self.removed_peers.contains(peer_id) && self.signers.contains(peer_id) {
+            assert!(
+                self.inflight_peers.insert(*peer_id),
+                "cannot request signature: peer already in flight"
+            );
             self.sig_futures.push({
                 let sig_query = self.sig_query.clone();
                 let peer_id = *peer_id;
@@ -435,8 +476,12 @@ impl Broadcaster {
                     PeerState::Resolved => {
                         self.removed_peers.remove(&peer_id);
                         self.rejections.remove(&peer_id);
-                        // let peer determine current consensus round
-                        self.broadcast(&peer_id);
+                        if !self.inflight_peers.contains(&peer_id) {
+                            self.bcast_peers.remove(&peer_id);
+                            self.sig_peers.remove(&peer_id);
+                            // let peer determine current consensus round
+                            self.broadcast(&peer_id);
+                        }
                     }
                     PeerState::Unknown => _ = self.removed_peers.insert(peer_id),
                 }
