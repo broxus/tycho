@@ -50,6 +50,7 @@ pub struct NodeBaseConfig {
     #[partial]
     pub core_storage: CoreStorageConfig,
 
+    #[partial]
     pub starter: StarterConfig,
 
     pub blockchain_rpc_client: BlockchainRpcClientConfig,

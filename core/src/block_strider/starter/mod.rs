@@ -10,6 +10,7 @@ use tycho_types::boc::Boc;
 use tycho_types::models::{
     BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardStateUnsplit,
 };
+use tycho_util::config::PartialConfig;
 use tycho_util::fs::MappedFile;
 use tycho_util::serde_helpers;
 
@@ -23,8 +24,8 @@ use crate::storage::{CoreStorage, QueueStateReader};
 mod cold_boot;
 mod starter_client;
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Default, Debug, Clone, PartialConfig, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct StarterConfig {
     /// Choose persistent state which is at least this old.
     ///
@@ -35,7 +36,7 @@ pub struct StarterConfig {
     /// Choose the nearest persistent state strictly before this seqno.
     ///
     /// Default: None
-    #[serde(default)]
+    #[important]
     pub start_from: Option<u32>,
 }
 
