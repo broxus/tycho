@@ -91,25 +91,16 @@ impl RoundTaskReady {
             "previous broadcast is already set"
         );
 
-        let (bcaster_ready_tx, stub_rx) = oneshot::channel();
-        let (stub_tx, collector_status_rx) = watch::channel(CollectorStatus {
-            attempt: 0,  // default
-            ready: true, // make broadcaster to resume its work not waiting for collector
-        });
         let broadcaster = Broadcaster::new(
             self.state.dispatcher.clone(),
             prev_last_point,
             self.state.peer_schedule.clone(),
-            bcaster_ready_tx,
-            collector_status_rx,
             round_ctx,
         );
         let task_ctx = round_ctx.task();
         let round_ctx = round_ctx.clone();
         self.prev_broadcast = Some(task_ctx.spawn(async move {
             broadcaster.run_continue(&round_ctx).await?;
-            _ = stub_rx;
-            _ = stub_tx;
             Ok(())
         }));
     }
@@ -245,15 +236,11 @@ impl RoundTaskReady {
                         store,
                         &round_ctx,
                     );
-                    let mut broadcaster = Broadcaster::new(
-                        dispatcher,
-                        own_point,
-                        peer_schedule,
-                        bcaster_ready_tx,
-                        collector_status_rx,
-                        &round_ctx,
-                    );
-                    let new_last_own_point = broadcaster.run().await?;
+                    let mut broadcaster =
+                        Broadcaster::new(dispatcher, own_point, peer_schedule, &round_ctx);
+                    let new_last_own_point = broadcaster
+                        .run(bcaster_ready_tx, collector_status_rx)
+                        .await?;
                     drop(prev_bcast); // aborts after current broadcast finishes
                     let task_ctx = round_ctx.task();
                     let round_ctx = round_ctx.clone();
@@ -263,8 +250,8 @@ impl RoundTaskReady {
                     self_check.await?;
                     Ok(Some((new_prev_bcast, new_last_own_point)))
                 } else {
-                    // drop(collector_signal_rx); // goes out of scope
                     bcaster_ready_tx.send(BroadcasterSignal::Ok).ok();
+                    drop(collector_status_rx); // goes out of scope
                     drop(prev_bcast); // aborts immediately: don't keep for more than 1 round
                     Ok(None)
                 }
