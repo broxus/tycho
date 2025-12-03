@@ -1,5 +1,5 @@
 use bytesize::ByteSize;
-use tycho_storage::kv::{DEFAULT_MIN_BLOB_SIZE, TableContext, with_blob_db};
+use tycho_storage::kv::{default_block_based_table_factory, DEFAULT_MIN_BLOB_SIZE, optimize_for_point_lookup, TableContext, with_blob_db};
 use weedb::rocksdb::{BlockBasedOptions, DBCompressionType, Options, ReadOptions};
 use weedb::{ColumnFamily, ColumnFamilyOptions};
 
@@ -53,7 +53,9 @@ impl ColumnFamily for InternalMessageVar {
 
 impl ColumnFamilyOptions<TableContext> for InternalMessageVar {
     fn options(opts: &mut Options, ctx: &mut TableContext) {
-        internal_queue_options(opts, ctx);
+        default_block_based_table_factory(opts, ctx);
+        opts.set_optimize_filters_for_hits(true);
+        optimize_for_point_lookup(opts, ctx);
     }
 }
 
@@ -107,9 +109,12 @@ impl ColumnFamily for InternalMessageCommitPointer {
 
 impl ColumnFamilyOptions<TableContext> for InternalMessageCommitPointer {
     fn options(opts: &mut Options, ctx: &mut TableContext) {
-        internal_queue_options(opts, ctx);
+        default_block_based_table_factory(opts, ctx);
+        opts.set_optimize_filters_for_hits(true);
+        optimize_for_point_lookup(opts, ctx);
     }
 }
+
 
 // === Helpers ===
 
