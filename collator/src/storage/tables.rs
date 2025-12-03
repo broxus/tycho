@@ -119,20 +119,18 @@ fn internal_queue_options(opts: &mut Options, ctx: &mut TableContext) {
     block_factory.set_format_version(6);
 
     opts.set_block_based_table_factory(&block_factory);
-    opts.set_disable_auto_compactions(true);
+    opts.set_disable_auto_compactions(false);
     opts.set_compression_type(DBCompressionType::None);
-
     opts.set_level_compaction_dynamic_level_bytes(true);
 
-    // optimize for bulk inserts and single writer
-    let buffer_size = ByteSize::mib(256);
-    let buffers_to_merge = 2;
-    let buffer_count = 2;
-    opts.set_write_buffer_size(buffer_size.as_u64() as _);
-    opts.set_max_write_buffer_number(buffer_count);
-    opts.set_min_write_buffer_number_to_merge(buffers_to_merge); // allow early flush
+    opts.set_max_total_wal_size(300 * 1024 * 1024);
+
+    let default_buffer = ByteSize::mib(64);
+    let default_count = 3;
+    let default_merge = 1;
+
     ctx.track_buffer_usage(
-        ByteSize(buffer_size.as_u64() * buffers_to_merge as u64),
-        ByteSize(buffer_size.as_u64() * buffer_count as u64),
+        ByteSize(default_buffer.as_u64() * default_merge as u64),
+        ByteSize(default_buffer.as_u64() * default_count as u64),
     );
 }
