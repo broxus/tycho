@@ -8,8 +8,9 @@ use tycho_storage::fs::MappedFile;
 use tycho_storage::kv::StoredValue;
 use tycho_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_util::FastHashMap;
+use weedb::WeeDb;
 
-use self::db::InternalQueueDB;
+use self::db::{InternalQueueDB, InternalQueueTables};
 use self::models::{
     CommitPointerKey, CommitPointerValue, DiffInfo, DiffInfoKey, DiffTailKey,
     ShardsInternalMessagesKey, StatKey,
@@ -37,7 +38,37 @@ pub struct InternalQueueStorage {
 
 impl InternalQueueStorage {
     pub fn open(context: StorageContext) -> Result<Self> {
-        let db = context.open_preconfigured(INT_QUEUE_SUBDIR)?;
+        let db: WeeDb<InternalQueueTables> = context.open_preconfigured(INT_QUEUE_SUBDIR)?;
+
+        {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(120));
+                    use weedb::rocksdb::{FlushOptions, Options};
+                    for name in [
+                        "default",
+                        "int_msg_var",
+                        "int_msg_diffs_tail",
+                        "int_msg_diff_info",
+                        "int_msg_commit_pointer",
+                        "int_msg_statistics",
+                        "shard_int_messages",
+                    ] {
+                        let cf = db.raw().rocksdb().cf_handle(name).unwrap();
+                        db.raw().rocksdb().flush_cf(&cf).unwrap();
+
+                        let after = db
+                            .raw()
+                            .rocksdb()
+                            .property_value("rocksdb.min-log-number-to-keep");
+                        tracing::error!(
+                            "after flushing {name}: min-log-number-to-keep = {after:?}"
+                        );
+                    }
+                }
+            });
+        }
 
         // TODO: Add migrations here if needed. However, it might require making this method `async`.
 
