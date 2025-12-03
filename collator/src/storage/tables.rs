@@ -1,5 +1,8 @@
 use bytesize::ByteSize;
-use tycho_storage::kv::{default_block_based_table_factory, DEFAULT_MIN_BLOB_SIZE, optimize_for_point_lookup, TableContext, with_blob_db};
+use tycho_storage::kv::{
+    DEFAULT_MIN_BLOB_SIZE, TableContext, default_block_based_table_factory,
+    optimize_for_point_lookup, with_blob_db,
+};
 use weedb::rocksdb::{BlockBasedOptions, DBCompressionType, Options, ReadOptions};
 use weedb::{ColumnFamily, ColumnFamilyOptions};
 
@@ -114,7 +117,6 @@ impl ColumnFamilyOptions<TableContext> for InternalMessageCommitPointer {
         optimize_for_point_lookup(opts, ctx);
     }
 }
-
 
 // === Helpers ===
 
