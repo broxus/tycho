@@ -196,7 +196,12 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         let mut tx = self.storage.begin_transaction();
         tx.commit_messages(commit_pointers)?;
         tx.set_last_committed_mc_block_id(mc_block_id)?;
-        tx.write()
+        tx.write()?;
+        let db = self.storage.db();
+        db.rocksdb()
+            .flush_cf(&db.internal_message_commit_pointer.cf())?;
+        db.rocksdb().flush_cf(&db.internal_message_var.cf())?;
+        Ok(())
     }
 
     fn load_diff_statistics(
