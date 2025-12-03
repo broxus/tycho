@@ -20,7 +20,8 @@ use tycho_util::time::now_sec;
 
 use super::{ColdBootType, StarterInner, ZerostateProvider};
 use crate::block_strider::{CheckProof, ProofChecker};
-use crate::blockchain_rpc::BlockchainRpcClient;
+use crate::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
+use crate::global_config::ZerostateId;
 use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
 use crate::storage::{
@@ -43,7 +44,7 @@ impl StarterInner {
         let last_mc_block_id = match boot_type {
             ColdBootType::Genesis => {
                 let node_state = self.storage.node_state();
-                if self.mc_zerostate.seqno.is_none() {
+                if self.zerostate.seqno.is_none() {
                     if let Some(init_mc_block) = node_state.load_init_mc_block_id() {
                         anyhow::ensure!(
                             init_mc_block.seqno == 0,
@@ -104,10 +105,10 @@ impl StarterInner {
         let node_state = self.storage.node_state();
         let block_id = node_state
             .load_init_mc_block_id()
-            .unwrap_or(self.mc_zerostate.as_block_id());
+            .unwrap_or(self.zerostate.as_block_id());
 
         tracing::info!(init_block_id = %block_id, "preparing init block");
-        let prev_key_block = if block_id.seqno == 0 || self.mc_zerostate.seqno.is_some() {
+        let prev_key_block = if block_id.seqno == 0 || self.zerostate.seqno.is_some() {
             tracing::info!(%block_id, "using zero state");
 
             let (handle, state) = match zerostates {
@@ -372,11 +373,6 @@ impl StarterInner {
 
     // === Helper methods ===
 
-    async fn import_zerostate_file(&self, file: File, block_id: &BlockId) -> Result<()> {
-        let shard_state_storage = self.storage.shard_state_storage();
-        shard_state_storage.store_state_file(block_id, file).await?;
-    }
-
     async fn import_zerostates<P>(&self, provider: P) -> Result<(BlockHandle, ShardStateStuff)>
     where
         P: ZerostateProvider,
@@ -386,68 +382,37 @@ impl StarterInner {
         let state_storage = self.storage.shard_state_storage();
         let tracker = state_storage.min_ref_mc_state();
 
-        // Read all zerostates
         let mut zerostates = FastHashMap::default();
 
         // check zerostate size
 
-        let import_directly = provider.check_zerostate_size(self.config.zerostate_max_size)?;
-
-        if !import_directly {
-            let zerostate_id = self.mc_zerostate.as_block_id();
-            provider
-                .shard_states
-                .store_state_file(block_id, file)
-                .await
-                .context("failed to store shard state file")?;
-
-            let state = shard_states
-                .load_state(mc_seqno, block_id)
-                .await
-                .context("failed to reload saved shard state")?;
-
-            let block_handle = match block_handle {
-                Some(handle) => handle,
-                None => {
-                    let (handle, _) = block_handles.create_or_load_handle(block_id, NewBlockMeta {
-                        is_key_block: block_id.is_masterchain(),
-                        gen_utime: state.as_ref().gen_utime,
-                        ref_by_mc_seqno: mc_block_id.seqno,
-                    });
-                    handle
-                }
-            };
-
-            // set flag that state stored
-            block_handles.set_has_shard_state(&block_handle);
-
-            let from =
-                crate::block_strider::starter::cold_boot::StoreZeroStateFrom::File(state_file);
-            try_save_persistent(&block_handle, from)
-                .await
-                .context("failed to store persistent shard state")?;
-
-            remove_state_file.await;
-
-            tracing::info!("using the downloaded shard state");
-            return Ok((block_handle, state));
-        }
-
-        for loaded in provider.load_zerostates(tracker) {
+        for loaded in provider.load_zerostates() {
             let state = loaded?;
-            if let Some(prev) = zerostates.insert(*state.block_id(), state) {
-                anyhow::bail!("duplicate zerostate {}", prev.block_id());
+            let file_hash = Boc::file_hash_blake(&state);
+            if let Some(_) = zerostates.insert(file_hash, state) {
+                anyhow::bail!("duplicate zerostate {}", file_hash);
             }
         }
 
-        // Find the masterchain zerostate
-        let zerostate_id = self.mc_zerostate.as_block_id();
-        let Some(masterchain_zerostate) = zerostates.remove(&zerostate_id) else {
-            anyhow::bail!("missing mc zerostate for {zerostate_id}");
+        let Some(masterchain_zerostate) = zerostates.remove(&self.zerostate.file_hash) else {
+            anyhow::bail!(
+                "missing mc zerostate for file hash {}",
+                self.zerostate.file_hash
+            );
         };
 
+        let zerostate_block_id = self.zerostate.as_block_id();
+        let root_hash = state_storage
+            .store_state_bytes(&zerostate_block_id, masterchain_zerostate)
+            .await?;
+        assert_eq!(root_hash, self.zerostate.root_hash);
+
+        let masterchain_zerostate = state_storage
+            .load_state(zerostate_block_id.seqno, &zerostate_block_id)
+            .await?;
+
         // Prepare the list of zerostates to import
-        let mut to_import = vec![masterchain_zerostate.clone()];
+        // let mut to_import = vec![masterchain_zerostate.clone()];
 
         let global_id = masterchain_zerostate.state().global_id;
         let gen_utime = masterchain_zerostate.state().gen_utime;
@@ -463,10 +428,12 @@ impl StarterInner {
                 file_hash: descr.file_hash,
             };
 
-            let state = match zerostates.remove(&block_id) {
+            match zerostates.remove(&block_id.file_hash) {
                 Some(existing) => {
                     tracing::debug!(block_id = %block_id, "using custom zerostate");
-                    existing
+
+                    let root_hash = state_storage.store_state_bytes(&block_id, existing).await?;
+                    assert_eq!(root_hash, block_id.root_hash);
                 }
                 None => {
                     // try to get zerostate from init file
@@ -478,12 +445,8 @@ impl StarterInner {
                         state.block_id() == &block_id,
                         "custom zerostate must be provided for {shard_ident}",
                     );
-
-                    state
                 }
             };
-
-            to_import.push(state);
         }
 
         anyhow::ensure!(
@@ -492,53 +455,19 @@ impl StarterInner {
             zerostates.len()
         );
 
-        // Import all zerostates
         let handle_storage = self.storage.block_handle_storage();
-        let persistent_states = self.storage.persistent_state_storage();
-
-        for state in to_import {
-            let (handle, status) =
-                handle_storage.create_or_load_handle(state.block_id(), NewBlockMeta {
-                    is_key_block: state.block_id().is_masterchain(),
-                    gen_utime,
-                    ref_by_mc_seqno: zerostate_id.seqno,
-                });
-
-            let stored = state_storage
-                .store_state(&handle, &state, Default::default())
-                .await
-                .with_context(|| {
-                    format!("failed to import zerostate for {}", state.block_id().shard)
-                })?;
-
-            tracing::debug!(
-                block_id = %state.block_id(),
-                handle_status = ?status,
-                stored,
-                "importing zerostate"
-            );
-
-            persistent_states
-                .store_shard_state(
-                    zerostate_id.seqno,
-                    &handle,
-                    state.ref_mc_state_handle().clone(),
-                )
-                .await?;
-        }
-
         tracing::info!("imported zerostates");
 
-        let state = state_storage.load_state(0, &zerostate_id).await?;
+        // let state = state_storage.load_state(0, &zerostate_id).await?;
         let handle = handle_storage
-            .load_handle(&zerostate_id)
+            .load_handle(&zerostate_block_id)
             .expect("shouldn't happen");
 
-        Ok((handle, state))
+        Ok((handle, masterchain_zerostate))
     }
 
     async fn download_zerostates(&self) -> Result<(BlockHandle, ShardStateStuff)> {
-        let zerostate_id = self.mc_zerostate.as_block_id();
+        let zerostate_id = self.zerostate.as_block_id();
         tracing::info!(zerostate_id = %zerostate_id, "download zerostates");
 
         let (handle, state) = self
