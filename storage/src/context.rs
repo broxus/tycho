@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
+use bytesize::ByteSize;
 use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 use tycho_util::FastHashMap;
@@ -223,6 +224,7 @@ impl StorageContext {
         opts.set_log_level(rocksdb::LogLevel::Info);
         opts.set_keep_log_file_num(2);
         opts.set_recycle_log_file_num(2);
+        opts.set_max_log_file_size(ByteSize::gib(1).as_u64() as usize);
 
         // cf
         opts.create_if_missing(true);
