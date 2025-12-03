@@ -20,8 +20,9 @@ pub use self::config::{
 pub use self::db::{CellsDb, CoreDb, CoreDbExt, CoreTables};
 pub use self::node_state::{NodeStateStorage, NodeSyncState};
 pub use self::persistent_state::{
-    BriefBocHeader, PersistentStateInfo, PersistentStateKind, PersistentStateStorage,
-    QueueDiffReader, QueueStateReader, QueueStateWriter, ShardStateReader, ShardStateWriter,
+    BriefBocHeader, PersistentState, PersistentStateInfo, PersistentStateKind,
+    PersistentStateStorage, QueueDiffReader, QueueStateReader, QueueStateWriter, ShardStateReader,
+    ShardStateWriter,
 };
 pub use self::shard_state::{
     ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics, StoreStateHint,
