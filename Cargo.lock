@@ -3299,7 +3299,7 @@ dependencies = [
  "getrandom 0.3.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4047,9 +4047,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-executor"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "148f0edab661a199f2be88448f8a463ca107a7db370e6abf58ac8b2116ec24e0"
+checksum = "648dbb51e41afc89f6879dc7df6ca00cf14e4a5c5f8b0c5061abe2c0fa66bb99"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4214,9 +4214,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-types"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4f5833c3db328b9ec5544de8a2a7ff4a6d8d654d6f58d6ad5bf8b774dccf969"
+checksum = "c2ccb37e250becb5c4b827536644c777c247b41ac6c9ddd30902ff1db29818a7"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4320,9 +4320,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-vm"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "013cf249ea5a32b38050adfc8cbca471da017c0c03292e7462665859638226ac"
+checksum = "114a3cf7fe65097991d2b3597e266a2b00c674a42647d142fa89757f48171c3b"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4342,9 +4342,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-vm-proc"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94d448e5c9526dcfdd2d3f63d9e13de2a207e1aadf906ea4d1e61e45f0aeceb3"
+checksum = "20f8134185f8c4e962dad667871e36ac7ccea9c566e59aa9fa94ac4be6e80b57"
 dependencies = [
  "darling",
  "proc-macro2",
