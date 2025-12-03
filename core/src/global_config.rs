@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
@@ -11,7 +12,8 @@ use crate::proto::blockchain::OverlayIdData;
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct GlobalConfig {
     pub bootstrap_peers: Vec<PeerInfo>,
-    pub zerostate: ZerostateId,
+    pub mc_zerostate: ZerostateId,
+    pub wc_zerostates: HashMap<ShardIdent, ZerostateId>,
     #[serde(default)]
     pub mempool: Option<MempoolGlobalConfig>,
 }
