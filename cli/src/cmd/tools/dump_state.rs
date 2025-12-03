@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use tokio::fs;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::ShardStateStuff;
@@ -53,26 +54,27 @@ impl Cmd {
         let output_dir = Dir::new(&self.output)?;
         output_dir.create_if_not_exists()?;
 
-        let storage = if let Some(config) = self.config {
+        let (storage, root_dir) = if let Some(config) = self.config {
             let node_config =
                 NodeConfig::from_file(config).context("failed to load node config")?;
 
             let store =
                 ConfiguredStorage::new(&node_config.storage, &node_config.core_storage).await?;
-            store.core_storage
+            (store.core_storage, node_config.storage.root_dir.clone())
         } else if let Some(root_dir) = self.db {
             println!("Opening database at: {}", root_dir.display());
             let storage_config = tycho_storage::StorageConfig {
-                root_dir,
+                root_dir: root_dir.clone(),
                 ..Default::default()
             };
             let core_storage_config = CoreStorageConfig::default();
             let context = StorageContext::new(storage_config)
                 .await
                 .context("Failed to create storage context")?;
-            CoreStorage::open(context, core_storage_config)
+            let storage = CoreStorage::open(context, core_storage_config)
                 .await
-                .context("Failed to open core storage")?
+                .context("Failed to open core storage")?;
+            (storage, root_dir)
         } else {
             return Err(anyhow::anyhow!("Either config or db must be specified"));
         };
@@ -150,7 +152,9 @@ impl Cmd {
 
         // Dump mempool state
         println!("Dumping mempool state...");
-        dumper.dump_mempool_state(top_processed_to_anchor).await?;
+        dumper
+            .dump_mempool_state(top_processed_to_anchor, root_dir)
+            .await?;
 
         println!("Dump completed successfully to: {}", self.output.display());
 
@@ -336,8 +340,42 @@ impl Dumper {
         self.storage.block_storage().load_block_data(&handle).await
     }
 
-    async fn dump_mempool_state(&self, _top_processed_to_anchor: MempoolAnchorId) -> Result<()> {
-        // TODO: Implement dumping mempool state
+    async fn dump_mempool_state(
+        &self,
+        _top_processed_to_anchor: MempoolAnchorId,
+        root_dir: PathBuf,
+    ) -> Result<()> {
+        let src_dir = root_dir.join("mempool");
+        if !src_dir.exists() {
+            println!(" - Mempool directory does not exist, skipping");
+            return Ok(());
+        }
+
+        let dst_dir = self.output_dir.path().join("mempool");
+        self.copy_dir(&src_dir, &dst_dir).await?;
+        println!(" - Mempool state saved");
+        Ok(())
+    }
+
+    async fn copy_dir(&self, src: &PathBuf, dst: &PathBuf) -> Result<()> {
+        fs::create_dir_all(dst)
+            .await
+            .context("Failed to create destination directory")?;
+
+        let mut entries = fs::read_dir(src)
+            .await
+            .context("Failed to read source directory")?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .context("Failed to read directory entry")?
+        {
+            let entry_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            fs::copy(&entry_path, &dst_path)
+                .await
+                .context(format!("Failed to copy file {:?}", entry_path))?;
+        }
         Ok(())
     }
 }

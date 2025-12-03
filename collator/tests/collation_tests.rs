@@ -150,6 +150,9 @@ async fn test_collation_process_on_dump() {
         shard: ShardIdent::MASTERCHAIN,
     };
 
+    let mempool_start_round = 0; //TODO: fill with correct start round
+    let mempool_genesis_millis = 0; // TODO: fill with correct genesis millis
+
     let (storage, mq_adapter, _temp_dir, mc_block_id) =
         load_storage_from_dump(dump_path).await.unwrap();
 
@@ -192,6 +195,10 @@ async fn test_collation_process_on_dump() {
     let (engine_stop_tx, mut engine_stop_rx) = tokio::sync::mpsc::channel(1);
     let validator = ValidatorStub {};
 
+    let consensus_config = tycho_consensus::test_utils::default_test_config()
+        .conf
+        .consensus;
+
     let manager = CollationManager::start(
         keypair,
         config,
@@ -205,7 +212,10 @@ async fn test_collation_process_on_dump() {
                 Some(mc_data.gen_chain_time),
                 top_processed_to_anchor_mc,
                 top_processed_to_anchor_shards,
-                dump_path.join("mempool"),
+                storage.context().clone(),
+                mempool_start_round,
+                mempool_genesis_millis,
+                consensus_config.clone(),
             )
             .unwrap()
         },
