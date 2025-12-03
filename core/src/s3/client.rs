@@ -5,9 +5,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use bytesize::ByteSize;
-use futures_util::stream::BoxStream;
 use object_store::path::Path;
-use object_store::{DynObjectStore, Error, ObjectMeta, ObjectStore};
+use object_store::{DynObjectStore, Error, ObjectStore};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::ArchiveVerifier;
 use tycho_types::models::BlockId;
@@ -118,11 +117,20 @@ impl S3Client {
         })
     }
 
-    pub fn list(
-        &self,
-        prefix: Option<&Path>,
-    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        self.inner.client.list(prefix)
+    pub fn client(&self) -> &Arc<DynObjectStore> {
+        &self.inner.client
+    }
+
+    pub fn chunk_size(&self) -> usize {
+        self.inner.chunk_size.get() as usize
+    }
+
+    pub fn make_archive_key(&self, archive_id: u32) -> Path {
+        self.inner.make_archive_key(archive_id)
+    }
+
+    pub fn make_state_key(&self, block_id: &BlockId, kind: PersistentStateKind) -> Path {
+        self.inner.make_state_key(block_id, kind)
     }
 
     pub async fn get_archive_info(
