@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::fs::File;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_types::boc::Boc;
 use tycho_types::models::{
-    BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardStateUnsplit,
+    BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent, ShardStateUnsplit,
 };
 use tycho_util::config::PartialConfig;
 use tycho_util::fs::MappedFile;
@@ -38,6 +40,9 @@ pub struct StarterConfig {
     /// Default: None
     #[important]
     pub start_from: Option<u32>,
+
+    /// Max zerostate byte size in size to download on cold start
+    pub zerostate_max_size: u64,
 }
 
 pub struct StarterBuilder<
@@ -266,7 +271,7 @@ fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<Shar
         .parse::<ShardStateUnsplit>()
         .context("failed to parse state")?;
 
-    anyhow::ensure!(state.seqno == 0, "not a zerostate");
+    // anyhow::ensure!(state.seqno == 0, "not a zerostate");
 
     let block_id = BlockId {
         shard: state.shard_ident,
