@@ -37,9 +37,6 @@ from grafanalib.core import (
 
 # todo: do something with this metrics
 # tycho_core_last_mc_block_applied
-# tycho_core_last_sc_block_applied
-# tycho_core_last_sc_block_seqno
-# tycho_core_last_sc_block_utime
 
 
 def heatmap_color_warm() -> HeatmapColor:

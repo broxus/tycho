@@ -113,7 +113,7 @@ where
             .await?
         };
 
-        Ok(StateApplierPrepared { handle, state })
+        Ok(StateApplierPrepared { state })
     }
 
     async fn handle_block_impl(
@@ -128,22 +128,6 @@ where
             id = %cx.block.id(),
             "handling block",
         );
-
-        // Update metrics
-        let gen_utime = prepared.handle.gen_utime() as f64;
-        let seqno = prepared.handle.id().seqno as f64;
-        let now = tycho_util::time::now_millis() as f64 / 1000.0;
-
-        if cx.block.id().is_masterchain() {
-            metrics::gauge!("tycho_core_last_mc_block_utime").set(gen_utime);
-            metrics::gauge!("tycho_core_last_mc_block_seqno").set(seqno);
-            metrics::gauge!("tycho_core_last_mc_block_applied").set(now);
-        } else {
-            // TODO: only store max
-            metrics::gauge!("tycho_core_last_sc_block_utime").set(gen_utime);
-            metrics::gauge!("tycho_core_last_sc_block_seqno").set(seqno);
-            metrics::gauge!("tycho_core_last_sc_block_applied").set(now);
-        }
 
         // Process state
         let _histogram = HistogramGuard::begin("tycho_core_subscriber_handle_state_time");
@@ -236,7 +220,6 @@ where
 }
 
 pub struct StateApplierPrepared {
-    handle: BlockHandle,
     state: ShardStateStuff,
 }
 
