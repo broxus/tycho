@@ -186,6 +186,10 @@ where
 
         let started_at = Instant::now();
 
+        let info = block.load_info()?;
+        metrics::gauge!("tycho_core_last_mc_block_utime").set(info.gen_utime);
+        metrics::gauge!("tycho_core_last_mc_block_seqno").set(mc_block_id.seqno);
+
         let custom = block.load_custom()?;
         let is_key_block = custom.config.is_some();
 
@@ -251,6 +255,10 @@ where
             is_key_block,
             shard_heights: &shard_heights,
         });
+
+        // Update "applied" only after commit
+        metrics::gauge!("tycho_core_last_mc_block_applied")
+            .set(tycho_util::time::now_millis() as f64 / 1000.0);
 
         Ok(())
     }
