@@ -13,6 +13,7 @@ use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener,
 };
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
+use tycho_core::node::NodeBootArgs;
 use tycho_core::overlay_client::PublicOverlayClient;
 #[cfg(feature = "s3")]
 use tycho_core::s3::S3Client;
@@ -243,11 +244,17 @@ impl<C> Node<C> {
         &self,
         boot_type: ColdBootType,
         import_zerostate: Option<Vec<PathBuf>>,
+        ignore_states: bool,
     ) -> Result<BlockId> {
         self.wait_for_neighbours().await;
 
         let init_block_id = self
-            .boot(boot_type, import_zerostate)
+            .boot(NodeBootArgs {
+                boot_type,
+                ignore_states,
+                zerostates: import_zerostate,
+                ..Default::default()
+            })
             .await
             .context("failed to init node")?;
 
@@ -268,23 +275,28 @@ impl<C> Node<C> {
     }
 
     /// Initialize the node and return the init block id.
-    async fn boot(
-        &self,
-        boot_type: ColdBootType,
-        zerostates: Option<Vec<PathBuf>>,
-    ) -> Result<BlockId> {
+    async fn boot(&self, args: NodeBootArgs) -> Result<BlockId> {
         let node_state = self.storage.node_state();
 
         let last_mc_block_id = match node_state.load_last_mc_block_id() {
             Some(block_id) => block_id,
             None => {
-                Starter::builder()
+                #[cfg_attr(not(feature = "s3"), allow(unused_mut))]
+                let mut starter = Starter::builder()
                     .with_storage(self.storage.clone())
                     .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
                     .with_zerostate_id(self.zerostate)
                     .with_config(self.starter_config.clone())
+                    .ignore_states(args.ignore_states);
+
+                #[cfg(feature = "s3")]
+                if let Some(s3_client) = self.s3_client.as_ref() {
+                    starter = starter.with_s3_client(s3_client.clone());
+                }
+
+                starter
                     .build()
-                    .cold_boot(boot_type, zerostates.map(FileZerostateProvider))
+                    .cold_boot(args.boot_type, args.zerostates.map(FileZerostateProvider))
                     .await?
             }
         };
