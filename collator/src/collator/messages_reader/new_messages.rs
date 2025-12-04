@@ -49,10 +49,6 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
         }
     }
 
-    pub fn partition_router(&self) -> &PartitionRouter {
-        &self.partition_router
-    }
-
     pub fn init_partition_router(
         &mut self,
         partition_id: QueuePartitionIdx,
@@ -63,6 +59,10 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
                 .insert_dst(account_addr, partition_id)
                 .unwrap();
         }
+    }
+
+    pub fn partition_router(&self) -> &PartitionRouter {
+        &self.partition_router
     }
 
     pub fn has_pending_messages_from_partition(&self, partition_id: QueuePartitionIdx) -> bool {

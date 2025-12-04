@@ -120,7 +120,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
                     // check buffers in previous partition
                     for prev_par_range_reader in prev_par_reader.range_readers().values() {
                         let reader_state = prev_par_reader
-                            .state()
+                            .reader_state()
                             .ranges
                             .get(&prev_par_range_reader.seqno)
                             .unwrap();
@@ -198,7 +198,7 @@ pub fn partitions_have_intersecting_accounts<V: InternalMessageValue>(
 
     // Check buffers in range readers
     for range_reader_seqno in next.range_readers.keys() {
-        let state = next.state().ranges.get(range_reader_seqno).unwrap();
+        let state = next.reader_state().ranges.get(range_reader_seqno).unwrap();
 
         for (account_address, _) in state.buffer.iter() {
             let addr = IntAddr::Std(StdAddr::new(workchain, *account_address));

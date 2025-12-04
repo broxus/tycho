@@ -96,7 +96,7 @@ pub(super) struct MessagesReaderContext<'a> {
     pub reader_state: &'a mut ReaderState,
     pub anchors_cache: &'a mut AnchorsCache,
     pub is_first_block_after_prev_master: bool,
-    pub cumulative_stats_calc_params: Option<&'a mut CumulativeStatsCalcParams>,
+    pub cumulative_stats_calc_params: Option<CumulativeStatsCalcParams>,
     pub part_stat_ranges: Option<Vec<QueueShardBoundedRange>>,
 }
 
@@ -118,9 +118,8 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
 
         drop(current_msgs_exec_params);
 
-        let new_messages = NewMessagesState::new(cx.for_shard_id);
+        let mut new_messages = NewMessagesState::new(cx.for_shard_id);
 
-        // let mut cumulative_statistics = None;
         let mut cumulative_stats_just_loaded = false;
 
         let ReaderState {
@@ -129,7 +128,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         } = cx.reader_state;
 
         let InternalsReaderState {
-            partitions,
+            partitions: partition_reader_states,
             cumulative_statistics,
         } = internals_reader_state;
 
@@ -180,9 +179,16 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                     "cumulative statistics should exist"
                 );
             }
-        }
 
-        let internal_queue_statistics = cumulative_statistics.as_mut();
+            if let Some(stat) = cumulative_statistics
+                && let Some(partition_stats) = stat.result().get(&LP_PARTITION_ID)
+            {
+                new_messages.init_partition_router(
+                    LP_PARTITION_ID,
+                    partition_stats.initial_stats.statistics(),
+                );
+            }
+        }
 
         let msgs_exec_params = cx.msgs_exec_params.clone();
 
@@ -205,14 +211,11 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             externals_reader,
             internals_partition_readers: Default::default(),
             readers_stages: Default::default(),
-            internal_queue_statistics,
+            internal_queue_statistics: cumulative_statistics.as_mut(),
         };
 
         // define the initial reader stage
         let initial_reader_stage = MessagesReaderStage::ExistingAndExternals;
-
-        // create internals readers by partitions
-        let partition_reader_states = partitions;
 
         partition_reader_states
             .entry(MAIN_PARTITION_ID)
@@ -222,6 +225,9 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         let main_ptr = partition_reader_states.get_mut(&MAIN_PARTITION_ID).unwrap() as *mut _;
         let lp_ptr = partition_reader_states.get_mut(&LP_PARTITION_ID).unwrap() as *mut _;
 
+        // SAFETY: We take two different elements from BTreeMap (different partition IDs) and pass them
+        // to different handlers (InternalsPartitionReader::new), they don't overlap. The borrow checker
+        // can't verify this statically, hence unsafe.
         let main_state = unsafe { &mut *main_ptr };
         let lp_state = unsafe { &mut *lp_ptr };
 
@@ -360,7 +366,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         let mut min_internals_processed_to = ProcessedTo::default();
 
         for par_reader in self.internals_partition_readers.values() {
-            for (shard_id, key) in &par_reader.state().processed_to {
+            for (shard_id, key) in &par_reader.reader_state().processed_to {
                 min_internals_processed_to
                     .entry(*shard_id)
                     .and_modify(|min_key| *min_key = std::cmp::min(*min_key, *key))
@@ -536,7 +542,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         let mut res: ProcessedToByPartitions = FastHashMap::default();
 
         for (par_id, par_reader) in &self.internals_partition_readers {
-            for (processed_shard, msg_key) in &par_reader.state().processed_to {
+            for (processed_shard, msg_key) in &par_reader.reader_state().processed_to {
                 res.entry(*par_id)
                     .or_default()
                     .insert(*processed_shard, *msg_key);
@@ -768,7 +774,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                             .unwrap_or_default(),
                     )
                 })),
-            externals_processed_offset = ?self.externals_reader.get_last_range_reader_offsets_by_partitions(),
+            externals_processed_offset = ?self.externals_reader.get_last_range_state_offsets_by_partitions(),
             "start: refill messages buffer and skip groups upto",
         );
         loop {
@@ -1027,7 +1033,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         tracing::debug!(target: tracing_targets::COLLATOR,
             int_curr_processed_offset = ?DebugIter(self
                 .internals_partition_readers.iter()
-                .map(|(par_id, par)| (par_id, par.state().curr_processed_offset))),
+                .map(|(par_id, par)| (par_id, par.reader_state().curr_processed_offset))),
             ext_curr_processed_offset = ?DebugIter(self
                 .externals_reader.reader_state()
                 .by_partitions.iter()
@@ -1383,7 +1389,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                 }
                 // we can move "from" boundary to current position
                 // because all messages up to current position processed
-                externals_reader.set_from_to_current_position_in_last_range_reader()?;
+                externals_reader.set_from_to_current_position_in_last_range_state()?;
                 // drop last read to anchor chain time when no pending externals in cache
                 // it used to calc externals time diff, but it does not update when there are no messages,
                 // so time diff will grow endlessly, so we drop the last chain time to drop time diff
@@ -1397,7 +1403,6 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     has_pending_externals = externals_reader.has_pending_externals(),
                     ext_reader_states = ?externals_reader.reader_state().by_partitions,
-                    // last_range_reader_state = ?externals_reader.get_last_range_reader().map(|(seqno, r)| (seqno, DebugExternalsRangeReaderState(r.reader_state()))),
                     "all read externals collected when collecting from partition_id={}",
                     par_reader.partition_id,
                 );
@@ -1435,9 +1440,9 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             if !all_internals_collected_before {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     partition_id = %par_reader.partition_id,
-                    int_processed_to = ?par_reader.state().processed_to,
-                    int_curr_processed_offset = par_reader.state().curr_processed_offset,
-                    last_range_reader_state = ?par_reader.get_last_range_state().map(|(seqno, state)| (seqno, DebugInternalsRangeReaderState(state))),
+                    int_processed_to = ?par_reader.reader_state().processed_to,
+                    int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
+                    last_range_state = ?par_reader.get_last_range_state().map(|(seqno, state)| (seqno, DebugInternalsRangeReaderState(state))),
                     "all read existing internals collected from partition",
                 );
             }
@@ -1523,8 +1528,8 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             if !all_internals_collected_before {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     partition_id = %par_reader.partition_id,
-                    int_processed_to = ?par_reader.state().processed_to,
-                    int_curr_processed_offset = par_reader.state().curr_processed_offset,
+                    int_processed_to = ?par_reader.reader_state().processed_to,
+                    int_curr_processed_offset = par_reader.reader_state().curr_processed_offset,
                     last_range_reader_state = ?par_reader.get_last_range_state().map(|(seqno, state)| (seqno, DebugInternalsRangeReaderState(state))),
                     "all new internals collected from partition",
                 );
