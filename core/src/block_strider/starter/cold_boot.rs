@@ -69,6 +69,8 @@ impl StarterInner {
                 // Choose the latest key block with persistent state
                 let last_key_block = self.choose_key_block()?;
 
+                tracing::info!(block_id = ?last_key_block.id(), "last key block");
+
                 if last_key_block.id().seqno != 0 {
                     // If the last suitable key block is not zerostate, we must download all blocks
                     // with their states from shards for that
@@ -206,6 +208,8 @@ impl StarterInner {
         while let Some((requested_key_block, ids)) = ids_rx.recv().await {
             let stream = futures_util::stream::iter(ids)
                 .map(|block_id| {
+                    tracing::info!(?block_id, "key block ids");
+
                     JoinTask::new(download_block_proof_task(
                         self.storage.clone(),
                         self.blockchain_rpc_client.clone(),
@@ -237,6 +241,8 @@ impl StarterInner {
                             .store_block_proof(&proof, MaybeExistingHandle::New(meta))
                             .await?
                             .handle;
+
+                        tracing::info!(block_id = %handle.id(), "download key blocks");
 
                         let block_utime = handle.gen_utime();
                         let prev_utime = prev_key_block.handle().gen_utime();
@@ -320,6 +326,8 @@ impl StarterInner {
 
         // Iterate all key blocks in reverse order (from the latest to the oldest)
         while let Some(handle) = key_blocks.next().transpose()? {
+            tracing::info!(block_id = %handle.id(), "choose_key_block iterator");
+
             let handle_utime = handle.gen_utime();
             let prev_utime = match key_blocks.peek() {
                 Some(Ok(prev_block)) => prev_block.gen_utime(),

@@ -157,9 +157,9 @@ impl S3Client {
     {
         use futures_util::FutureExt;
 
-        tracing::debug!("started");
+        tracing::info!("started");
         scopeguard::defer! {
-            tracing::debug!("finished");
+            tracing::info!("finished");
         }
 
         let chunk_size = self.inner.chunk_size;
@@ -247,11 +247,13 @@ impl S3Client {
     where
         W: Write + Send + 'static,
     {
+        tracing::info!(?block_id, "download_persistent_state s3");
+
         use futures_util::FutureExt;
 
-        tracing::debug!("started");
+        tracing::info!("started");
         scopeguard::defer! {
-            tracing::debug!("finished");
+            tracing::info!("finished");
         }
 
         let chunk_size = self.inner.chunk_size;

@@ -439,9 +439,11 @@ impl BlockchainRpcClient {
     where
         W: Write + Send + 'static,
     {
-        tracing::debug!("started");
+        tracing::info!(block_id = ?state.block_id, "download_persistent_state s3");
+
+        tracing::info!("started");
         scopeguard::defer! {
-            tracing::debug!("finished");
+            tracing::info!("finished");
         }
 
         let block_id = state.block_id;
