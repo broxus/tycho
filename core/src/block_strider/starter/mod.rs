@@ -72,11 +72,12 @@ impl StarterBuilder {
             #[cfg(feature = "s3")]
             if let Some(s3_client) = s3_client {
                 use self::starter_client::{HybridStarterClient, S3StarterClient};
+                // break 'client Arc::new(HybridStarterClient::new(
+                //     blockchain_rpc_client.clone(),
+                //     S3StarterClient::new(s3_client, storage.clone()),
+                // ));
 
-                break 'client Arc::new(HybridStarterClient::new(
-                    blockchain_rpc_client.clone(),
-                    S3StarterClient::new(s3_client, storage.clone()),
-                ));
+                break 'client Arc::new(S3StarterClient::new(s3_client, storage.clone()));
             }
 
             Arc::new(blockchain_rpc_client.clone())

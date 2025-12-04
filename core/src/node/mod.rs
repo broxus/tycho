@@ -194,7 +194,6 @@ impl NodeBase {
     pub fn build_archive_block_provider(&self) -> ArchiveBlockProvider {
         ArchiveBlockProvider::new(
             (
-                self.blockchain_rpc_client.clone(),
                 #[cfg(feature = "s3")]
                 self.s3_client.clone(),
             ),

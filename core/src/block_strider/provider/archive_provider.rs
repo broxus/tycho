@@ -514,6 +514,16 @@ impl<T1: ArchiveClient, T2: ArchiveClient> IntoArchiveClient for (T1, Option<T2>
     }
 }
 
+impl<T1: ArchiveClient> IntoArchiveClient for (Option<T1>,) {
+    fn into_archive_client(self) -> Arc<dyn ArchiveClient> {
+        let primary = self.0;
+        match primary {
+            None => unreachable!("empty tuple"),
+            Some(primary) => Arc::new(primary),
+        }
+    }
+}
+
 pub struct FoundArchive<'a> {
     pub archive_id: u64,
     pub download: Box<dyn FnOnce() -> BoxFuture<'a, Result<ArchiveResponse>> + Send + 'a>,
