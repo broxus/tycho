@@ -2080,8 +2080,7 @@ dependencies = [
 [[package]]
 name = "object_store"
 version = "0.12.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c1be0c6c22ec0817cdc77d3842f721a17fd30ab6965001415b5402a74e6b740"
+source = "git+https://github.com/apache/arrow-rs-object-store.git?rev=12ef9bc22c56228b25f3b56a78879e9a45a07fc4#12ef9bc22c56228b25f3b56a78879e9a45a07fc4"
 dependencies = [
  "async-trait",
  "base64",
