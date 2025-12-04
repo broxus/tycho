@@ -278,11 +278,18 @@ impl<C> Node<C> {
         let last_mc_block_id = match node_state.load_last_mc_block_id() {
             Some(block_id) => block_id,
             None => {
-                Starter::builder()
+                let mut starter = Starter::builder()
                     .with_storage(self.storage.clone())
                     .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
                     .with_zerostate_id(self.zerostate)
-                    .with_config(self.starter_config.clone())
+                    .with_config(self.starter_config.clone());
+
+                #[cfg(feature = "s3")]
+                if let Some(s3_client) = self.s3_client.as_ref() {
+                    starter = starter.with_s3_client(s3_client.clone());
+                }
+
+                starter
                     .build()
                     .cold_boot(boot_type, zerostates.map(FileZerostateProvider))
                     .await?
