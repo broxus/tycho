@@ -19,6 +19,7 @@ pub struct PeerScheduleStateful {
     // resolved peers from current or next subset
     broadcast_receivers: FastHashSet<PeerId>,
     all_resolved: FastHashSet<PeerId>,
+    pub(super) to_forget: Vec<PeerId>,
 }
 
 impl Default for PeerScheduleStateful {
@@ -31,6 +32,7 @@ impl Default for PeerScheduleStateful {
             empty: Default::default(),
             broadcast_receivers: Default::default(),
             all_resolved: Default::default(),
+            to_forget: Vec::new(),
         }
     }
 }
@@ -145,7 +147,7 @@ impl PeerScheduleStateful {
                     || validator_set.contains_key(peer))
             })
             .map(|(peer_id, _)| *peer_id)
-            .collect();
+            .collect::<Vec<_>>();
         self.validator_set[3] = validator_set;
         self.all_resolved = all_resolved;
         meter_all_resolved(self.all_resolved.len());
@@ -153,6 +155,7 @@ impl PeerScheduleStateful {
             self.broadcast_receivers.remove(peer);
         }
         meter_bcast_receivers(self.broadcast_receivers.len());
+        self.to_forget.extend(to_forget.iter().copied());
         to_forget
     }
 
@@ -223,6 +226,7 @@ impl PeerScheduleStateful {
         meter_all_resolved(self.all_resolved.len());
         meter_bcast_receivers(self.broadcast_receivers.len());
         self.active_subset[0] = Default::default();
+        self.to_forget.extend(to_forget.iter().copied());
         to_forget
     }
 }

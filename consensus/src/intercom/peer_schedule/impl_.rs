@@ -170,6 +170,10 @@ impl PeerSchedule {
         self.0.locked.write()
     }
 
+    pub fn to_forget(&self) -> Vec<PeerId> {
+        std::mem::take(&mut self.write().data.to_forget)
+    }
+
     fn set_next_subset(
         &self,
         locked: &mut PeerScheduleLocked,

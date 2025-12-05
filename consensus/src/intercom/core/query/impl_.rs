@@ -33,10 +33,22 @@ impl BroadcastQuery {
     pub async fn send(&self, peer_id: &PeerId) -> Result<BroadcastResponse, QueryError> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_broadcast_query_dispatcher_time");
 
+        let permit = match self.dispatcher.bcast_rate_limit().broadcast(peer_id) {
+            Ok(permit) => permit,
+            Err(()) => {
+                return Err(QueryError::Network(anyhow::anyhow!(
+                    "query rate limit on sender side"
+                )));
+            }
+        };
+
         let response = match self.dispatcher.query(peer_id, self.request.clone()).await {
             Ok(response) => response,
             Err(e) => return Err(QueryError::Network(e)),
         };
+
+        drop(permit);
+
         QueryResponse::parse_broadcast(&response).map_err(QueryError::TlError)
     }
 }
@@ -55,10 +67,22 @@ impl SignatureQuery {
     pub async fn send(&self, peer_id: &PeerId) -> Result<SignatureResponse, QueryError> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_signature_query_dispatcher_time");
 
+        let permit = match self.dispatcher.bcast_rate_limit().sig_query(peer_id) {
+            Ok(permit) => permit,
+            Err(()) => {
+                return Err(QueryError::Network(anyhow::anyhow!(
+                    "query rate limit on sender side"
+                )));
+            }
+        };
+
         let response = match self.dispatcher.query(peer_id, self.request.clone()).await {
             Ok(response) => response,
             Err(e) => return Err(QueryError::Network(e)),
         };
+
+        drop(permit);
+
         QueryResponse::parse_signature(&response).map_err(QueryError::TlError)
     }
 }

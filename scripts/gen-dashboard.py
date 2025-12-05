@@ -2884,19 +2884,29 @@ def mempool_engine() -> RowPanel:
 
 def mempool_misc() -> RowPanel:
     metrics = [
-        create_heatmap_panel(
-            "tycho_mempool_point_parse_verify_time",
-            "Responder and Downloader: point parse time (incl check sig and verify)",
-        ),
         create_counter_panel(
             expr_sum_increase(
-                "tycho_mempool_failed_query_responder",
+                "tycho_mempool_query_limited_responder",
                 label_selectors=['kind=~"$kind"'],
                 range_selector="$__interval",
                 by_labels=["kind", "instance"],
             ),
-            "Responder: query execution failed or aborted (total at moment)",
+            "Responder: query limits reached (total at moment)",
             legend_format="{{instance}} - {{kind}}",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_query_aborted_responder",
+                label_selectors=['kind=~"$kind"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
+            ),
+            "Responder: query execution aborted (total at moment)",
+            legend_format="{{instance}} - {{kind}}",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_point_parse_verify_time",
+            "Responder and Downloader: point parse time (incl check sig and verify)",
         ),
         create_heatmap_panel(
             "tycho_mempool_engine_parse_point_time",
