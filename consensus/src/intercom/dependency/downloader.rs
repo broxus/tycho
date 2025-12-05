@@ -24,9 +24,8 @@ use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, TaskResult};
 use crate::engine::round_watch::{Consensus, RoundWatcher};
 use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
 use crate::intercom::core::query::response::DownloadResponse;
-use crate::intercom::core::query::{DownloadIdQuery, QueryError};
+use crate::intercom::core::query::{DownloadQuery, QueryError};
 use crate::intercom::dependency::limiter::Limiter;
-use crate::intercom::dependency::peer_limiter::PeerLimiter;
 use crate::intercom::peer_schedule::PeerState;
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{PeerCount, Point, PointId, PointIntegrityError, StructureIssue};
@@ -46,7 +45,6 @@ struct DownloaderInner {
     dispatcher: Dispatcher,
     peer_schedule: PeerSchedule,
     limiter: Limiter,
-    peer_limiter: PeerLimiter,
     consensus_round: RoundWatcher<Consensus>,
 }
 
@@ -100,14 +98,12 @@ impl Downloader {
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
         consensus_round: RoundWatcher<Consensus>,
-        conf: &MempoolConfig,
     ) -> Self {
         Self {
             inner: Arc::new(DownloaderInner {
                 dispatcher: dispatcher.clone(),
                 peer_schedule: peer_schedule.clone(),
                 limiter: Limiter::new(NodeConfig::get().max_download_tasks),
-                peer_limiter: PeerLimiter::new(conf.consensus.download_peer_queries.into()),
                 consensus_round,
             }),
         }
@@ -180,12 +176,11 @@ impl Downloader {
             })
             .collect::<FastHashMap<_, _>>();
 
-        let mut task = DownloadTask {
-            parent: self.clone(),
+        let mut task = DownloadTask::<T> {
+            peer_schedule: self.inner.peer_schedule.clone(),
             _phantom: PhantomData,
             ctx,
-            query: DownloadIdQuery::new(point_id),
-            point_id: *point_id,
+            query: DownloadQuery::new(self.inner.dispatcher.clone(), point_id),
             peer_count,
             // this node is +1 to 2F; count every peer uniquely, as they may be removed and resolved
             not_found: FastHashSet::with_capacity(peer_count.majority_of_others()),
@@ -198,8 +193,6 @@ impl Downloader {
             .run(dependers_rx, broadcast_result)
             .instrument(entered_span.exit())
             .await?;
-
-        DownloadCtx::meter_task::<T>(&task);
 
         if matches!(downloaded, DownloadResult::NotFound) {
             tracing::warn!(
@@ -215,12 +208,11 @@ impl Downloader {
 }
 
 struct DownloadTask<T> {
-    parent: Downloader,
+    peer_schedule: PeerSchedule,
     _phantom: PhantomData<T>,
     ctx: DownloadCtx,
 
-    query: DownloadIdQuery,
-    point_id: PointId,
+    query: DownloadQuery,
 
     peer_count: PeerCount,
     not_found: FastHashSet<PeerId>, // count only responses considered reliable
@@ -333,11 +325,9 @@ impl<T: DownloadType> DownloadTask<T> {
         );
         status.is_in_flight = true;
 
-        let parent = self.parent.clone();
         let query = self.query.clone();
         self.downloading.push(Box::pin(async move {
-            let permit = parent.inner.peer_limiter.get(peer_id).await;
-            let result = query.send_with(&parent.inner.dispatcher, permit).await;
+            let result = query.send(&peer_id).await;
             QueryFutureOutput { peer_id, result }
         }));
     }
@@ -452,7 +442,7 @@ impl<T: DownloadType> DownloadTask<T> {
                 let reason = IllFormedReason::Structure(issue);
                 Some(DownloadResult::IllFormed(point, reason))
             }
-            LastResponse::Point(point) if point.info().id() != self.point_id => {
+            LastResponse::Point(point) if point.info().id() != *self.query.point_id() => {
                 self.not_found.insert(out.peer_id);
                 DownloadCtx::meter_unreliable();
                 let wrong_id = point.info().id();
@@ -466,11 +456,7 @@ impl<T: DownloadType> DownloadTask<T> {
                 None
             }
             LastResponse::Point(point) => {
-                match Verifier::verify(
-                    point.info(),
-                    &self.parent.inner.peer_schedule,
-                    self.ctx.conf(),
-                ) {
+                match Verifier::verify(point.info(), &self.peer_schedule, self.ctx.conf()) {
                     Ok(()) => Some(DownloadResult::Verified(point)), // `Some` breaks outer loop
                     Err(VerifyError::IllFormed(reason)) => {
                         tracing::error!(
@@ -522,11 +508,6 @@ impl DownloadCtx {
 
     fn meter_not_found() {
         metrics::counter!("tycho_mempool_download_not_found_responses").increment(1);
-    }
-
-    fn meter_task<T>(task: &DownloadTask<T>) {
-        metrics::counter!("tycho_mempool_download_aborted_on_exit_count")
-            .increment(task.downloading.len() as _);
     }
 
     fn meter_start(&self, point_id: &PointId) {
