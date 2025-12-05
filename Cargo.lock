@@ -4303,6 +4303,7 @@ dependencies = [
  "tracing-stackdriver",
  "tracing-subscriber",
  "tycho-util-proc",
+ "walkdir",
  "zstd-safe",
  "zstd-sys",
 ]

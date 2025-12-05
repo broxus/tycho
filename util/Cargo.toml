@@ -41,6 +41,7 @@ tracing = { workspace = true }
 tracing-appender = { workspace = true, optional = true }
 tracing-stackdriver = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
+walkdir = { workspace = true }
 zstd-safe = { workspace = true, features = ["std", "zstdmt"] }
 zstd-sys = { workspace = true }
 

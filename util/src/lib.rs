@@ -75,10 +75,12 @@ pub mod test {
 }
 
 pub mod metrics {
+    pub use self::fs_usage::{FsUsageBuilder, FsUsageMonitor, Stats, StatsEntry};
     pub use self::gauge_guard::GaugeGuard;
     pub use self::histogram_guard::{HistogramGuard, HistogramGuardWithLabels};
     pub use self::metrics_loop::spawn_metrics_loop;
 
+    mod fs_usage;
     mod gauge_guard;
     mod histogram_guard;
     mod metrics_loop;
