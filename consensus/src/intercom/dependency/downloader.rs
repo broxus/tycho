@@ -348,8 +348,9 @@ impl<T: DownloadType> DownloadTask<T> {
 
         let last_response = match out.result {
             Ok(DownloadResponse::Defined(bytes)) => {
+                let start = std::time::Instant::now();
                 let parse = std::pin::pin!(rayon_run_fifo(|| Point::parse(bytes.into())));
-                match future::select(broadcast_result, parse).await {
+                let parsed_response = match future::select(broadcast_result, parse).await {
                     future::Either::Left((bcast_result, _)) => {
                         return match bcast_result {
                             Ok(download_result) => Ok(Some(download_result)),
@@ -362,7 +363,10 @@ impl<T: DownloadType> DownloadTask<T> {
                         Ok(Err(bad_point)) => LastResponse::BadPoint(bad_point),
                         Err(tl_error) => LastResponse::TlError(tl_error),
                     },
-                }
+                };
+                metrics::histogram!("tycho_mempool_engine_parse_point_time")
+                    .record(start.elapsed());
+                parsed_response
             }
             Ok(DownloadResponse::DefinedNone) => LastResponse::DefinedNone,
             Err(QueryError::TlError(tl_error)) => LastResponse::TlError(tl_error),

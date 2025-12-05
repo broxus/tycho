@@ -85,10 +85,22 @@ impl DownloadQuery {
     }
 
     pub async fn send(&self, peer_id: &PeerId) -> Result<DownloadResponse<Bytes>, QueryError> {
-        let permit = self.0.dispatcher.download_rate_limit().get(peer_id).await;
+        let permit = {
+            let permit_abort_guard = scopeguard::guard(Instant::now(), |start| {
+                metrics::histogram!("tycho_mempool_download_permit_aborted_time")
+                    .record(start.elapsed());
+            });
+            let start = Instant::now(); // only completed, not aborted
 
+            let permit = self.0.dispatcher.download_rate_limit().get(peer_id).await;
+
+            scopeguard::ScopeGuard::into_inner(permit_abort_guard); // defuse aborted only
+            metrics::histogram!("tycho_mempool_download_permit_acquired_time")
+                .record(start.elapsed());
+            permit
+        };
         let query_abort_guard = scopeguard::guard((), |()| {
-            metrics::counter!("tycho_mempool_download_aborted_on_exit_count").increment(1);
+            metrics::counter!("tycho_mempool_download_aborted_queries_count").increment(1);
         });
         let start = Instant::now(); // only completed, not aborted
 

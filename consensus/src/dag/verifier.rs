@@ -124,8 +124,6 @@ impl Verifier {
         peer_schedule: &PeerSchedule,
         conf: &MempoolConfig,
     ) -> Result<(), VerifyError> {
-        let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_verify_time");
-
         let result = Self::verify_impl(info, peer_schedule, conf).map_or(Ok(()), Err);
 
         ValidateCtx::verified(&result);
