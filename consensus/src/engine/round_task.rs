@@ -266,6 +266,12 @@ impl RoundTaskReady {
             }
         });
 
+        let to_forget = self.state.peer_schedule.to_forget();
+        if !to_forget.is_empty() {
+            self.state.dispatcher.forget_peers(&to_forget);
+            self.state.responder.forget_peers(&to_forget);
+        }
+
         RoundTaskRunning {
             state: self.state,
             last_own_point: self.last_own_point,
