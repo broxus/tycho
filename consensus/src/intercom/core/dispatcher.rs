@@ -6,6 +6,7 @@ use tycho_network::{Network, PeerId, PrivateOverlay, Request, Response};
 use crate::engine::MempoolConfig;
 use crate::intercom::core::bcast_rate_limit::BcastSenderLimits;
 use crate::intercom::core::download_rate_limit::DownloaderLimits;
+use crate::moderator::Moderator;
 
 #[derive(Clone)]
 pub struct Dispatcher(Arc<DispatcherInner>);
@@ -14,16 +15,27 @@ pub struct DispatcherInner {
     overlay: PrivateOverlay,
     bcast_rate_limit: BcastSenderLimits,
     download_rate_limit: DownloaderLimits,
+    moderator: Moderator,
 }
 
 impl Dispatcher {
-    pub fn new(network: &Network, private_overlay: &PrivateOverlay, conf: &MempoolConfig) -> Self {
+    pub fn new(
+        network: &Network,
+        private_overlay: &PrivateOverlay,
+        moderator: &Moderator,
+        conf: &MempoolConfig,
+    ) -> Self {
         Self(Arc::new(DispatcherInner {
             network: network.clone(),
             overlay: private_overlay.clone(),
             bcast_rate_limit: BcastSenderLimits::new(conf),
             download_rate_limit: DownloaderLimits::new(conf),
+            moderator: moderator.clone(),
         }))
+    }
+
+    pub fn moderator(&self) -> &Moderator {
+        &self.0.moderator
     }
 
     pub(super) fn bcast_rate_limit(&self) -> &BcastSenderLimits {
