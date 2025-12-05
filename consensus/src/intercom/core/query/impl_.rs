@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::time::Instant;
+
 use bytes::Bytes;
 use tl_proto::TlError;
 use tycho_network::{PeerId, Request};
@@ -8,7 +11,6 @@ use crate::intercom::core::query::request::QueryRequest;
 use crate::intercom::core::query::response::{
     BroadcastResponse, DownloadResponse, QueryResponse, SignatureResponse,
 };
-use crate::intercom::dependency::PeerDownloadPermit;
 use crate::models::{Point, PointId, Round};
 
 pub enum QueryError {
@@ -62,26 +64,44 @@ impl SignatureQuery {
 }
 
 #[derive(Clone)]
-pub struct DownloadIdQuery(Request);
-impl DownloadIdQuery {
-    pub fn new(id: &PointId) -> Self {
-        Self(QueryRequest::download(id))
+pub struct DownloadQuery(Arc<DownloadQueryInner>);
+struct DownloadQueryInner {
+    dispatcher: Dispatcher,
+    request: Request,
+    point_id: PointId,
+}
+
+impl DownloadQuery {
+    pub fn new(dispatcher: Dispatcher, point_id: &PointId) -> Self {
+        Self(Arc::new(DownloadQueryInner {
+            dispatcher,
+            request: QueryRequest::download(point_id),
+            point_id: *point_id,
+        }))
     }
 
-    pub async fn send_with(
-        self,
-        dispatcher: &Dispatcher,
-        peer_permit: PeerDownloadPermit,
-    ) -> Result<DownloadResponse<Bytes>, QueryError> {
-        let _task_duration = HistogramGuard::begin("tycho_mempool_download_query_dispatcher_time");
+    pub fn point_id(&self) -> &PointId {
+        &self.0.point_id
+    }
 
-        let response = match dispatcher.query(&peer_permit.peer_id, self.0).await {
-            Ok(response) => response,
-            Err(e) => return Err(QueryError::Network(e)),
-        };
+    pub async fn send(&self, peer_id: &PeerId) -> Result<DownloadResponse<Bytes>, QueryError> {
+        let permit = self.0.dispatcher.download_rate_limit().get(peer_id).await;
 
-        drop(peer_permit);
+        let query_abort_guard = scopeguard::guard((), |()| {
+            metrics::counter!("tycho_mempool_download_aborted_on_exit_count").increment(1);
+        });
+        let start = Instant::now(); // only completed, not aborted
 
-        QueryResponse::parse_download(response).map_err(QueryError::TlError)
+        let request = self.0.request.clone();
+        let query_result = self.0.dispatcher.query(peer_id, request).await;
+
+        drop(permit);
+        scopeguard::ScopeGuard::into_inner(query_abort_guard); // defuse aborted only
+        metrics::histogram!("tycho_mempool_download_query_dispatcher_time").record(start.elapsed());
+
+        match query_result {
+            Ok(response) => QueryResponse::parse_download(response).map_err(QueryError::TlError),
+            Err(e) => Err(QueryError::Network(e)),
+        }
     }
 }

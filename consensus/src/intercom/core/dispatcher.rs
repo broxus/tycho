@@ -1,21 +1,36 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use tycho_network::{Network, PeerId, PrivateOverlay, Request, Response};
 
+use crate::engine::MempoolConfig;
+use crate::intercom::core::download_rate_limit::DownloaderRateLimit;
+
 #[derive(Clone)]
-pub struct Dispatcher {
+pub struct Dispatcher(Arc<DispatcherInner>);
+pub struct DispatcherInner {
     network: Network,
     overlay: PrivateOverlay,
+    download_rate_limit: DownloaderRateLimit,
 }
 
 impl Dispatcher {
-    pub fn new(network: &Network, private_overlay: &PrivateOverlay) -> Self {
-        Self {
+    pub fn new(network: &Network, private_overlay: &PrivateOverlay, conf: &MempoolConfig) -> Self {
+        Self(Arc::new(DispatcherInner {
             network: network.clone(),
             overlay: private_overlay.clone(),
-        }
+            download_rate_limit: DownloaderRateLimit::new(conf),
+        }))
     }
+
+    pub(super) fn download_rate_limit(&self) -> &DownloaderRateLimit {
+        &self.0.download_rate_limit
+    }
+
     pub(super) async fn query(&self, peer_id: &PeerId, request: Request) -> Result<Response> {
-        self.overlay.query(&self.network, peer_id, request).await
+        (self.0.overlay)
+            .query(&self.0.network, peer_id, request)
+            .await
     }
 }
 
@@ -33,8 +48,8 @@ impl MockFeedbackMessage {
         }
     }
     pub async fn send(&self, peer_id: &PeerId) -> anyhow::Result<()> {
-        let overlay = &self.dispatcher.overlay;
-        let network = &self.dispatcher.network;
+        let overlay = &self.dispatcher.0.overlay;
+        let network = &self.dispatcher.0.network;
         overlay.send(network, peer_id, self.request.clone()).await
     }
 }

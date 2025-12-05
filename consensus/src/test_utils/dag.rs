@@ -33,13 +33,13 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
     let private_overlay =
         PrivateOverlay::builder(*OverlayId::wrap(&[0; 32])).build(Responder::default());
 
-    let dispatcher = Dispatcher::new(&network, &private_overlay);
-
     let task_tracker = TaskTracker::default();
 
     let merged_conf = crate::test_utils::default_test_config();
     let conf = &merged_conf.conf;
     let genesis = merged_conf.genesis();
+
+    let dispatcher = Dispatcher::new(&network, &private_overlay, conf);
 
     let engine_ctx = EngineCtx::new(conf.genesis_round, conf, &task_tracker);
 
@@ -49,12 +49,8 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
     peer_schedule.init(&merged_conf, &init_peers);
 
     let stub_consensus_round = RoundWatch::<Consensus>::default();
-    let stub_downloader = Downloader::new(
-        &dispatcher,
-        &peer_schedule,
-        stub_consensus_round.receiver(),
-        conf,
-    );
+    let stub_downloader =
+        Downloader::new(&dispatcher, &peer_schedule, stub_consensus_round.receiver());
 
     (peer_schedule, stub_downloader, genesis, engine_ctx)
 }
