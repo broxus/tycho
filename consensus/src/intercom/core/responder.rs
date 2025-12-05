@@ -19,6 +19,7 @@ use crate::intercom::core::query::request::{
 use crate::intercom::core::query::response::QueryResponse;
 use crate::intercom::{BroadcastFilter, Downloader, PeerSchedule, Uploader};
 use crate::models::Point;
+use crate::moderator::{JournalEvent, Moderator};
 use crate::storage::MempoolStore;
 
 #[derive(Clone, Default)]
@@ -35,6 +36,7 @@ struct ResponderState {
     bcast_rate_limit: BcastReceiverLimits,
     upload_rate_limit: UploaderLimits,
     // state and storage components go here
+    moderator: Moderator,
     store: MempoolStore,
     consensus_round: RoundWatch<Consensus>,
     peer_schedule: PeerSchedule,
@@ -47,6 +49,7 @@ impl Responder {
     #[allow(clippy::too_many_arguments)]
     pub fn init(
         &self,
+        moderator: &Moderator,
         store: &MempoolStore,
         consensus_round: &RoundWatch<Consensus>,
         peer_schedule: &PeerSchedule,
@@ -61,6 +64,7 @@ impl Responder {
             broadcast_filter: BroadcastFilter::default(),
             bcast_rate_limit: BcastReceiverLimits::new(round_ctx.conf()),
             upload_rate_limit: UploaderLimits::new(round_ctx.conf()),
+            moderator: moderator.clone(),
             store: store.clone(),
             consensus_round: consensus_round.clone(),
             peer_schedule: peer_schedule.clone(),
@@ -156,6 +160,7 @@ impl ResponderInner {
                     error = %tl_error,
                     "unexpected query",
                 );
+                (state.moderator).report(JournalEvent::UnknownQuery(*peer_id, tl_error));
                 return None;
             }
         };
@@ -187,6 +192,8 @@ impl ResponderInner {
                     peer_id = display(peer_id.alt()),
                     "query limit reached",
                 );
+                let event = JournalEvent::QueryLimitReached(*peer_id, tag);
+                state.moderator.report(event);
                 response.set_hard_limited();
                 return None;
             }
@@ -201,6 +208,8 @@ impl ResponderInner {
                     error = %tl_error,
                     "bad request",
                 );
+                let event = JournalEvent::BadRequest(*peer_id, tag, tl_error);
+                state.moderator.report(event);
                 return None;
             }
         };
@@ -225,6 +234,8 @@ impl ResponderInner {
                             digest = display(wrong_id.digest.alt()),
                             "broadcasted other's point",
                         );
+                        let event = JournalEvent::SenderNotAuthor(*peer_id, wrong_id);
+                        (state.moderator).report(event);
                         return None;
                     }
                     Ok(Ok(Err((point, issue)))) => QueryRequest::Broadcast(point, Some(issue)),
@@ -235,6 +246,8 @@ impl ResponderInner {
                             error = %integrity_err,
                             "bad point",
                         );
+                        let event = JournalEvent::PointIntegrityError(*peer_id, tag, integrity_err);
+                        (state.moderator).report(event);
                         return None;
                     }
                     Err(tl_error) => {
@@ -244,6 +257,8 @@ impl ResponderInner {
                             error = %tl_error,
                             "bad request",
                         );
+                        let event = JournalEvent::BadRequest(*peer_id, tag, tl_error);
+                        state.moderator.report(event);
                         return None;
                     }
                 }

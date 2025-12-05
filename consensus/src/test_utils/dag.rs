@@ -18,6 +18,7 @@ use crate::models::{
     AnchorStageRole, Cert, Digest, Link, PeerCount, Point, PointData, PointId, Round, Signature,
     Through, UnixTime,
 };
+use crate::moderator::Moderator;
 use crate::storage::MempoolStore;
 
 pub fn make_engine_parts<const PEER_COUNT: usize>(
@@ -38,7 +39,7 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
     let conf = &merged_conf.conf;
     let genesis = merged_conf.genesis();
 
-    let dispatcher = Dispatcher::new(&network, &private_overlay, conf);
+    let dispatcher = Dispatcher::new(&network, &private_overlay, &Moderator::new_stub(), conf);
 
     let engine_ctx = EngineCtx::new(conf.genesis_round, conf, &task_tracker);
 
