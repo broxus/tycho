@@ -1,33 +1,33 @@
-use std::num::NonZeroU16;
+use std::num::NonZeroU8;
 use std::sync::Arc;
 
 use tokio::sync::{Semaphore, TryAcquireError};
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
-pub struct PeerLimiter {
+use crate::engine::MempoolConfig;
+
+pub struct DownloaderRateLimit {
     // fair semaphore is enough: second layer of by-round priority like in `Limiter` makes to starve
     data: FastDashMap<PeerId, Arc<Semaphore>>,
-    limit: NonZeroU16,
-}
-pub struct PeerDownloadPermit {
-    pub peer_id: PeerId,
-    /// manual impl of [`tokio::sync::OwnedSemaphorePermit`] to not allocate on fast path
-    semaphore: Arc<Semaphore>,
+    limit: NonZeroU8,
 }
 
-impl PeerLimiter {
-    pub fn new(limit: NonZeroU16) -> Self {
+/// manual impl of [`tokio::sync::OwnedSemaphorePermit`] to not allocate on fast path
+pub struct DownloadPermit(Arc<Semaphore>);
+
+impl DownloaderRateLimit {
+    pub fn new(conf: &MempoolConfig) -> Self {
         Self {
             data: FastDashMap::default(),
-            limit,
+            limit: conf.consensus.download_peer_queries,
         }
     }
 
-    pub async fn get(&self, peer_id: PeerId) -> PeerDownloadPermit {
-        let semaphore = match self.data.get(&peer_id) {
+    pub async fn get(&self, peer_id: &PeerId) -> DownloadPermit {
+        let semaphore = match self.data.get(peer_id) {
             Some(semaphore) => semaphore.clone(),
-            None => (self.data.entry(peer_id))
+            None => (self.data.entry(*peer_id))
                 .or_insert_with(|| Arc::new(Semaphore::new(self.limit.get() as usize)))
                 .clone(),
         };
@@ -38,12 +38,12 @@ impl PeerLimiter {
         };
         let permit = permit_or_closed.expect("never closed");
         permit.forget();
-        PeerDownloadPermit { peer_id, semaphore }
+        DownloadPermit(semaphore)
     }
 }
 
-impl Drop for PeerDownloadPermit {
+impl Drop for DownloadPermit {
     fn drop(&mut self) {
-        self.semaphore.add_permits(1);
+        self.0.add_permits(1);
     }
 }
