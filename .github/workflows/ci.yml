@@ -31,6 +31,7 @@ jobs:
       shell: ${{ steps.filter.outputs.shell }}
       proto: ${{ steps.filter.outputs.proto }}
       contracts: ${{ steps.filter.outputs.contracts }}
+      python: ${{ steps.filter.outputs.python }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -49,6 +50,24 @@ jobs:
               - '**.proto'
             contracts:
               - 'contracts/**'
+            python:
+              - '**.py'
+
+  python-format:
+    name: Python Format
+    needs: changes
+    if: ${{ needs.changes.outputs.python == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
+      - name: Check Python formatting
+        run: just check_format_py
   rustfmt:
     name: Rustfmt
     needs: changes
@@ -212,9 +231,9 @@ jobs:
       - name: Install protobuf
         run: sudo apt update && sudo apt-get -y install protobuf-compiler
       - name: Update RPC proto
-        run: just update_rpc_proto
-      - name: Check for uncommitted changes
-        run: git diff --exit-code
+        run: |
+          just update_rpc_proto
+          git diff --exit-code
 
   check-cli-reference:
     name: Check CLI Reference
@@ -227,6 +246,45 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/init
       - name: Update CLI reference
-        run: just update_cli_reference
-      - name: Check for uncommitted changes
-        run: git diff --exit-code
+        run: |
+          just update_cli_reference
+          git diff --exit-code
+
+  ci-failure-comment:
+    name: CI Failure Comment
+    needs:
+      - python-format
+      - check-protos
+      - check-cli-reference
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Post combined failure comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          messages=()
+          if [ "${{ needs.python-format.result }}" = "failure" ]; then
+            messages+=($'❌ Python formatting check failed in CI.\n\nPlease run `just fmt_py` locally and push the updated files.')
+          fi
+          if [ "${{ needs.check-protos.result }}" = "failure" ]; then
+            messages+=($'❌ RPC proto check failed in CI.\n\nPlease run `just update_rpc_proto`, ensure `protoc` is installed, then commit the generated changes.')
+          fi
+          if [ "${{ needs.check-cli-reference.result }}" = "failure" ]; then
+            messages+=($'❌ CLI reference check failed in CI.\n\nPlease run `just update_cli_reference`, add the updated docs/cli-reference.md, and push the changes.')
+          fi
+
+          if [ ${#messages[@]} -eq 0 ]; then
+            echo "No tracked failures; skipping comment."
+            exit 0
+          fi
+
+          body=$(printf '%s\n\n' "${messages[@]}")
+          gh pr comment "$PR_NUMBER" --body "$body"

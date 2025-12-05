@@ -35,10 +35,6 @@ from grafanalib.core import (
 )
 
 
-# todo: do something with this metrics
-# tycho_core_last_mc_block_applied
-
-
 def heatmap_color_warm() -> HeatmapColor:
     return HeatmapColor()
 
@@ -598,10 +594,12 @@ def core_blockchain_rpc_general() -> RowPanel:
             "Current score per peer",
         ),
         create_counter_panel(
-            "tycho_core_overlay_client_neighbour_total_requests", "Number of total requests per peer"
+            "tycho_core_overlay_client_neighbour_total_requests",
+            "Number of total requests per peer",
         ),
         create_counter_panel(
-            "tycho_core_overlay_client_neighbour_failed_requests", "Number of failed requests per peer"
+            "tycho_core_overlay_client_neighbour_failed_requests",
+            "Number of failed requests per peer",
         ),
     ]
     return create_row("blockchain: RPC - General Stats", metrics)
@@ -651,8 +649,8 @@ def util_reclaimer() -> RowPanel:
         title="Reclaimer queue length",
         targets=[
             target(
-                "sum by (instance) (tycho_delayed_drop_enqueued{instance=~\"$instance\"}) - sum by (instance) (tycho_delayed_drop_dropped{instance=~\"$instance\"})",
-                legend_format="{{instance}}"
+                'sum by (instance) (tycho_delayed_drop_enqueued{instance=~"$instance"}) - sum by (instance) (tycho_delayed_drop_dropped{instance=~"$instance"})',
+                legend_format="{{instance}}",
             )
         ],
         unit=UNITS.NUMBER_FORMAT,
@@ -924,7 +922,7 @@ def storage() -> RowPanel:
         create_gauge_panel(
             "tycho_storage_state_max_epoch",
             "Max known state root cell epoch",
-            unit_format="Seqno"
+            unit_format="Seqno",
         ),
         create_gauge_panel(
             "tycho_storage_raw_cells_cache_size",
@@ -995,8 +993,8 @@ def storage() -> RowPanel:
             title="States GC seqno guard",
             targets=[
                 target(
-                    "tycho_min_ref_mc_seqno{instance=~\"$instance\"} > 0",
-                    legend_format="{{instance}}"
+                    'tycho_min_ref_mc_seqno{instance=~"$instance"} > 0',
+                    legend_format="{{instance}}",
                 )
             ],
             unit="States",
@@ -1005,8 +1003,8 @@ def storage() -> RowPanel:
             title="States GC safe range",
             targets=[
                 target(
-                    "tycho_min_ref_mc_seqno{instance=~\"$instance\"} - tycho_gc_states_seqno{instance=~\"$instance\"}",
-                    legend_format="{{instance}}"
+                    'tycho_min_ref_mc_seqno{instance=~"$instance"} - tycho_gc_states_seqno{instance=~"$instance"}',
+                    legend_format="{{instance}}",
                 )
             ],
             unit="States",
@@ -2093,7 +2091,6 @@ def collator_wu_params() -> RowPanel:
             "tycho_do_collate_wu_param_prepare_add_to_msg_groups_target",
             "prepare.add_to_msg_groups (target)",
         ),
-
         create_gauge_panel(
             "tycho_do_collate_wu_param_execute_prepare_curr",
             "execute.prepare (current)",
@@ -2150,7 +2147,6 @@ def collator_wu_params() -> RowPanel:
             "tycho_do_collate_wu_param_execute_max_threads_target",
             "execute.max_threads (target)",
         ),
-
         create_gauge_panel(
             "tycho_do_collate_wu_param_finalize_build_transactions_curr",
             "finalize.build_transactions (current)",
@@ -2440,7 +2436,8 @@ def collator_state_adapter_metrics() -> RowPanel:
             "Prepare block proof",
         ),
         create_heatmap_panel(
-            "tycho_collator_state_adapter_save_block_proof_time_high", "Save block proof"
+            "tycho_collator_state_adapter_save_block_proof_time_high",
+            "Save block proof",
         ),
         create_heatmap_panel(
             "tycho_collator_state_store_state_root_time_high",
@@ -2449,7 +2446,9 @@ def collator_state_adapter_metrics() -> RowPanel:
         ),
         create_heatmap_panel("tycho_collator_state_load_block_time", "Load block"),
         create_heatmap_panel("tycho_collator_state_load_state_time", "Load state"),
-        create_heatmap_panel("tycho_collator_state_load_state_root_time", "Load state root"),
+        create_heatmap_panel(
+            "tycho_collator_state_load_state_root_time", "Load state root"
+        ),
         create_heatmap_panel(
             "tycho_collator_state_load_queue_diff_time", "Load queue diff"
         ),

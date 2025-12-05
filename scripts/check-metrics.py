@@ -2,6 +2,7 @@
 import os
 import re
 import subprocess
+import sys
 from typing import Set, Dict
 
 # todo: rewrite this script to use the rust-analyzer API or tree-sitter
@@ -122,11 +123,15 @@ def find_constant_in_imports(file_path: str, constant_name: str) -> str:
 
 
 if __name__ == "__main__":
-    root_directory = (
-        subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True)
-        .stdout.decode()
-        .strip()
-    )
+    root_directory = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True
+    ).stdout.strip()
+    if not root_directory:
+        root_directory = subprocess.run(
+            ["jj", "root"], capture_output=True, text=True
+        ).stdout.strip()
+    if not root_directory:
+        root_directory = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     blacklisted_dirs = [
         "network/connection_manager.rs",
         "network/src/overlay/metrics.rs",
@@ -135,9 +140,35 @@ if __name__ == "__main__":
         "util/src/sync/rayon.rs",
     ]
     metrics = find_metrics(root_directory, blacklisted_dirs)
-    dashboard_data = open(f"{root_directory}/scripts/gen-dashboard.py", "r").read()
+    ignore_missing = """
+    tycho_core_last_mc_block_applied
+    """
+    ignore_missing = {
+        metric.strip() for metric in ignore_missing.splitlines() if metric.strip()
+    }
+    try:
+        res = subprocess.run(
+            [sys.executable, f"{root_directory}/scripts/gen-dashboard.py"],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+        dashboard_data = res.stdout
+    except subprocess.TimeoutExpired:
+        print("failed to build dashboard: timeout")
+        exit(2)
+    except subprocess.CalledProcessError as err:
+        print("failed to build dashboard")
+        if err.stdout:
+            print(err.stdout)
+        if err.stderr:
+            print(err.stderr)
+        exit(2)
     exit_code = 0
     for metric in sorted(metrics):
+        if metric in ignore_missing:
+            continue
         if metric not in dashboard_data:
             exit_code = 1
             print(f"Missing metric: {metric}")
