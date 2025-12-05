@@ -6,12 +6,13 @@ use tl_proto::TlError;
 use tycho_network::{PeerId, Request};
 use tycho_util::metrics::HistogramGuard;
 
-use crate::intercom::Dispatcher;
 use crate::intercom::core::query::request::QueryRequest;
 use crate::intercom::core::query::response::{
     BroadcastResponse, DownloadResponse, QueryResponse, SignatureResponse,
 };
-use crate::models::{Point, PointId, Round};
+use crate::intercom::{Dispatcher, QueryRequestTag};
+use crate::models::{Point, PointId, PointIntegrityError, Round};
+use crate::moderator::JournalEvent;
 
 pub enum QueryError {
     Network(anyhow::Error),
@@ -51,6 +52,10 @@ impl BroadcastQuery {
 
         QueryResponse::parse_broadcast(&response).map_err(QueryError::TlError)
     }
+    pub fn report(&self, peer_id: &PeerId, error: TlError) {
+        let event = JournalEvent::BadResponse(*peer_id, QueryRequestTag::Broadcast, error);
+        self.dispatcher.moderator().report(event);
+    }
 }
 
 pub struct SignatureQuery {
@@ -84,6 +89,10 @@ impl SignatureQuery {
         drop(permit);
 
         QueryResponse::parse_signature(&response).map_err(QueryError::TlError)
+    }
+    pub fn report(&self, peer_id: &PeerId, error: TlError) {
+        let event = JournalEvent::BadResponse(*peer_id, QueryRequestTag::Signature, error);
+        self.dispatcher.moderator().report(event);
     }
 }
 
@@ -137,5 +146,24 @@ impl DownloadQuery {
             Ok(response) => QueryResponse::parse_download(response).map_err(QueryError::TlError),
             Err(e) => Err(QueryError::Network(e)),
         }
+    }
+
+    pub fn report_bad_response(&self, peer_id: &PeerId, error: TlError) {
+        let event = JournalEvent::BadResponse(*peer_id, QueryRequestTag::Download, error);
+        self.0.dispatcher.moderator().report(event);
+    }
+
+    pub fn report_bad_point(&self, peer_id: &PeerId, error: PointIntegrityError) {
+        let event = JournalEvent::PointIntegrityError(*peer_id, QueryRequestTag::Download, error);
+        self.0.dispatcher.moderator().report(event);
+    }
+
+    pub fn report_replaced_point(&self, peer_id: &PeerId, received: PointId) {
+        let event = JournalEvent::ReplacedPoint {
+            peer_id: *peer_id,
+            requested: self.0.point_id,
+            received,
+        };
+        self.0.dispatcher.moderator().report(event);
     }
 }

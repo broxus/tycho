@@ -32,6 +32,7 @@ pub struct RoundTaskState {
 impl RoundTaskState {
     pub fn init_responder(&self, head: &DagHead, round_ctx: &RoundCtx) {
         self.responder.init(
+            self.dispatcher.moderator(),
             &self.store,
             &self.consensus_round,
             &self.peer_schedule,
