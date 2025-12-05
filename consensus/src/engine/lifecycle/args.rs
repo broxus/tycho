@@ -62,7 +62,12 @@ impl EngineNetwork {
             "mempool overlay added"
         );
 
-        let dispatcher = Dispatcher::new(&net_args.network, &private_overlay, &merged_conf.conf);
+        let dispatcher = Dispatcher::new(
+            &net_args.network,
+            &private_overlay,
+            &net_args.moderator,
+            &merged_conf.conf,
+        );
         let peer_schedule =
             PeerSchedule::new(net_args.key_pair.clone(), private_overlay, task_tracker);
         peer_schedule.init(merged_conf, init_peers);
