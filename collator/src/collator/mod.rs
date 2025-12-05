@@ -7,9 +7,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use error::CollatorError;
 use futures_util::future::Future;
-use messages_reader::{
-    FinalizedMessagesReader, MessagesReader, MessagesReaderContext, ReaderState,
-};
+use messages_reader::{MessagesReader, MessagesReaderContext};
 use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -28,7 +26,7 @@ use tycho_util::time::now_millis;
 use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
 
 use self::types::{BlockSerializerCache, CollatorStats, PrevData, WorkingState};
-use crate::internal_queue::types::EnqueuedMessage;
+use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::mempool::{GetAnchorResult, MempoolAdapter, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
@@ -62,8 +60,10 @@ pub mod bench_export {
 
 pub use do_collate::{is_first_block_after_prev_master, work_units};
 pub use error::CollationCancelReason;
+use messages_reader::state::ReaderState;
 pub use types::{ForceMasterCollation, ShardDescriptionExt};
 
+mod state;
 #[cfg(test)]
 #[path = "tests/collator_tests.rs"]
 pub(super) mod tests;
@@ -1531,31 +1531,42 @@ impl CollatorStdImpl {
             working_state.collation_config.msgs_exec_params.clone(),
         );
 
+        // create temporary empty anchors cache for checking pending messages
+        let mut temp_anchors_cache = AnchorsCache::default();
+
+        // Extract values before creating MessagesReaderContext to avoid borrow conflicts
+        let for_shard_id = working_state.next_block_id_short.shard;
+        let block_seqno = working_state.next_block_id_short.seqno;
+        let mc_state_gen_lt = working_state.mc_data.gen_lt;
+        let prev_state_gen_lt = working_state.prev_shard_data_ref().gen_lt();
+        let mc_top_shards_end_lts: Vec<_> = working_state
+            .mc_data
+            .shards
+            .iter()
+            .map(|(k, v)| (*k, v.end_lt))
+            .collect();
+        let is_first = is_first_block_after_prev_master(
+            working_state.prev_shard_data_ref().blocks_ids()[0], // TODO: consider split/merge
+            &working_state.mc_data.shards,
+        );
+
         // create reader
         let mut messages_reader = MessagesReader::new(
             MessagesReaderContext {
-                for_shard_id: working_state.next_block_id_short.shard,
-                block_seqno: working_state.next_block_id_short.seqno,
+                for_shard_id,
+                block_seqno,
                 next_chain_time: 0,
                 msgs_exec_params,
-                mc_state_gen_lt: working_state.mc_data.gen_lt,
-                prev_state_gen_lt: working_state.prev_shard_data_ref().gen_lt(),
-                mc_top_shards_end_lts: working_state
-                    .mc_data
-                    .shards
-                    .iter()
-                    .map(|(k, v)| (*k, v.end_lt))
-                    .collect(),
+                mc_state_gen_lt,
+                prev_state_gen_lt,
+                mc_top_shards_end_lts,
                 cumulative_stats_calc_params: None,
-                // extract reader state to use in the reader
-                reader_state: std::mem::take(&mut working_state.reader_state),
+                // pass reader state by reference
+                reader_state: &mut working_state.reader_state,
                 // do not use anchors cache because we need to check
                 // only for pending internals in iterators
-                anchors_cache: Default::default(),
-                is_first_block_after_prev_master: is_first_block_after_prev_master(
-                    working_state.prev_shard_data_ref().blocks_ids()[0], /* TODO: consider split/merge */
-                    &working_state.mc_data.shards,
-                ),
+                anchors_cache: &mut temp_anchors_cache,
+                is_first_block_after_prev_master: is_first,
                 part_stat_ranges: None,
             },
             self.mq_adapter.clone(),
@@ -1577,13 +1588,10 @@ impl CollatorStdImpl {
         }
 
         // return reader state to working state
-        let FinalizedMessagesReader {
-            mut reader_state, ..
-        } = messages_reader.finalize(
+        let _ = messages_reader.finalize(
             0, // can pass 0 because new messages reader was not initialized in this case
             &Default::default(),
         )?;
-        std::mem::swap(&mut working_state.reader_state, &mut reader_state);
 
         working_state.has_unprocessed_messages = Some(has_pending_internals);
 

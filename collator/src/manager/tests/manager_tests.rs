@@ -28,10 +28,10 @@ use crate::collator::{
     CollatorStdImplFactory, ForceMasterCollation, ShardDescriptionExt as _, TestInternalMessage,
     TestMessageFactory,
 };
-use crate::internal_queue::types::{
-    DiffStatistics, DiffZone, EnqueuedMessage, InternalMessageValue, PartitionRouter,
-    QueueDiffWithMessages,
-};
+use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
+use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValue};
+use crate::internal_queue::types::router::PartitionRouter;
+use crate::internal_queue::types::stats::DiffStatistics;
 use crate::manager::blocks_cache::BlocksCache;
 use crate::manager::types::{CollationSyncState, NextCollationStep};
 use crate::manager::{
@@ -3861,7 +3861,7 @@ fn create_queue_diff_with_msgs<V: InternalMessageValue>(
             .map(|msg| (msg.key(), msg.clone()))
             .collect(),
         processed_to,
-        partition_router: PartitionRouter::new(),
+        partition_router: PartitionRouter::default(),
     }
 }
 

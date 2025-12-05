@@ -10,9 +10,12 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::internal_queue::state::state_iterator::{StateIterator, StateIteratorImpl};
-use crate::internal_queue::types::{
-    AccountStatistics, DiffStatistics, DiffZone, InternalMessageValue, PartitionRouter,
-    QueueDiffWithMessages, QueueShardRange, SeparatedStatisticsByPartitions,
+use crate::internal_queue::types::diff::{DiffZone, QueueDiffWithMessages};
+use crate::internal_queue::types::message::InternalMessageValue;
+use crate::internal_queue::types::ranges::QueueShardRange;
+use crate::internal_queue::types::router::PartitionRouter;
+use crate::internal_queue::types::stats::{
+    AccountStatistics, DiffStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::storage::InternalQueueStorage;
 use crate::storage::models::{
