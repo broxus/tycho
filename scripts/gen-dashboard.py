@@ -674,6 +674,76 @@ def util_reclaimer() -> RowPanel:
     return create_row("util: Reclaimer", metrics)
 
 
+def fs_usage() -> RowPanel:
+    metrics = [
+        FullWidth(
+            create_gauge_panel(
+                "tycho_fs_used_bytes",
+                "FS Used Bytes (Total)",
+                UNITS.BYTES_IEC,
+                labels=['path="__total__"'],
+                legend_format="{{instance}}",
+                legend_placement="bottom",
+            )
+        ),
+        create_gauge_panel(
+            "tycho_fs_used_bytes",
+            "FS Used Bytes",
+            UNITS.BYTES_IEC,
+            labels=['path!="__total__"'],
+            legend_format="{{instance}} path:{{path}}",
+            legend_placement="bottom",
+        ),
+        create_gauge_panel(
+            "cas_total_bytes",
+            "CAS Total Bytes",
+            UNITS.BYTES_IEC,
+            legend_format="{{instance}} path:{{path}}",
+            legend_placement="bottom",
+        ),
+        create_gauge_panel(
+            "tycho_fs_used_blocks",
+            "FS Used Blocks (512B units)",
+            labels=['path!="__total__"'],
+            legend_format="{{instance}} path:{{path}}",
+            legend_placement="bottom",
+        ),
+        create_gauge_panel(
+            Expr(
+                metric="tycho_fs_used_blocks",
+                label_selectors=['path!="__total__"'],
+                extra_expr="* 512",
+            ),
+            "FS Allocated Bytes",
+            UNITS.BYTES_IEC,
+            legend_format="{{instance}} path:{{path}}",
+            legend_placement="bottom",
+        ),
+        create_gauge_panel(
+            "cas_index_size",
+            "CAS Index Size",
+            UNITS.BYTES_IEC,
+            legend_format="{{instance}} path:{{path}}",
+            legend_placement="bottom",
+        ),
+        create_gauge_panel(
+            "tycho_fs_used_files",
+            "FS Entries",
+            labels=['path!="__total__"'],
+            legend_format="{{instance}} path:{{path}}",
+            legend_placement="bottom",
+        ),
+        create_gauge_panel(
+            "cas_unique_blobs",
+            "CAS Unique Blobs",
+            legend_format="{{instance}} path:{{path}}",
+            legend_placement="bottom",
+        ),
+    ]
+
+    return create_row("util: FS Usage", metrics)
+
+
 def net_conn_manager() -> RowPanel:
     metrics = [
         create_heatmap_panel(
@@ -3327,6 +3397,7 @@ dashboard = Dashboard(
         net_dht(),
         *quic_network_panels(),
         util_reclaimer(),
+        fs_usage(),
         allocator_stats(),
         rayon_stats(),
         jrpc(),

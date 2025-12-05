@@ -28,6 +28,10 @@ impl TempFileStorage {
         })
     }
 
+    pub fn dir(&self) -> &Dir {
+        &self.storage_dir
+    }
+
     pub async fn remove_outdated_files(&self) -> Result<()> {
         let now = std::time::SystemTime::now();
 

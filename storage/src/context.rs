@@ -9,7 +9,7 @@ use bytesize::ByteSize;
 use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 use tycho_util::FastHashMap;
-use tycho_util::metrics::spawn_metrics_loop;
+use tycho_util::metrics::{FsUsageBuilder, FsUsageMonitor, spawn_metrics_loop};
 use weedb::{WeakWeeDbRaw, rocksdb};
 
 use crate::config::StorageConfig;
@@ -43,6 +43,13 @@ impl StorageContext {
         let temp_files =
             TempFileStorage::new(&files_dir).context("failed to create temp files storage")?;
         temp_files.remove_outdated_files().await?;
+
+        let mut fs_usage = FsUsageBuilder::new()
+            .add_path(files_dir.path())
+            .add_path(temp_files.dir().path())
+            .build();
+
+        fs_usage.spawn_metrics_loop(Duration::from_secs(60))?;
 
         let threads = std::thread::available_parallelism()?.get();
         let fdlimit = match fdlimit::raise_fd_limit() {
@@ -94,6 +101,7 @@ impl StorageContext {
                 root_dir,
                 files_dir,
                 temp_files,
+                fs_usage,
                 threads,
                 fdlimit,
                 rocksdb_table_context: Default::default(),
@@ -141,7 +149,7 @@ impl StorageContext {
         let Some(known) = self.inner.rocksdb_instances.load().get(name).cloned() else {
             return false;
         };
-        known.compation_events.notify_waiters();
+        known.compaction_events.notify_waiters();
         true
     }
 
@@ -194,6 +202,7 @@ impl StorageContext {
         let this = self.inner.as_ref();
 
         let db_dir = this.root_dir.create_subdir(subdir)?;
+        this.fs_usage.add_path(db_dir.path());
         let db =
             weedb::WeeDb::<T>::builder_prepared(db_dir.path(), this.rocksdb_table_context.clone())
                 .with_metrics_enabled(this.config.rocksdb_enable_metrics)
@@ -257,6 +266,7 @@ struct StorageContextInner {
     root_dir: Dir,
     files_dir: Dir,
     temp_files: TempFileStorage,
+    fs_usage: FsUsageMonitor,
     threads: usize,
     fdlimit: u64,
     rocksdb_table_context: TableContext,
@@ -278,27 +288,27 @@ type KnownInstances = FastHashMap<String, Arc<KnownInstance>>;
 
 struct KnownInstance {
     weak: WeakWeeDbRaw,
-    compation_events: Arc<Notify>,
+    compaction_events: Arc<Notify>,
     task_handle: AbortHandle,
 }
 
 impl KnownInstance {
     fn new(name: &str, weak: WeakWeeDbRaw) -> Self {
         let name = name.to_owned();
-        let compation_events = Arc::new(Notify::new());
+        let compaction_events = Arc::new(Notify::new());
         let task_handle = tokio::task::spawn({
             let weak = weak.clone();
-            let compation_events = compation_events.clone();
+            let compaction_events = compaction_events.clone();
             async move {
                 tracing::debug!(name, "compaction trigger listener started");
                 scopeguard::defer! {
                     tracing::debug!(name, "compaction trigger listener stopped");
                 }
 
-                let mut notified = compation_events.notified();
+                let mut notified = compaction_events.notified();
                 loop {
                     notified.await;
-                    notified = compation_events.notified();
+                    notified = compaction_events.notified();
                     let Some(db) = weak.upgrade() else {
                         break;
                     };
@@ -311,7 +321,7 @@ impl KnownInstance {
 
         Self {
             weak,
-            compation_events,
+            compaction_events,
             task_handle,
         }
     }
