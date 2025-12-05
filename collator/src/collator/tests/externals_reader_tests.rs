@@ -27,7 +27,7 @@ pub(crate) fn fill_test_anchors_cache(
         if anchor_id % 4 != 0 {
             continue;
         }
-        let anchor = Arc::new(make_stub_anchor(anchor_id, prev_anchor_id));
+        let anchor = Arc::new(make_stub_anchor(anchor_id, prev_anchor_id, None));
         let mut curr_dst_addrs = anchor
             .iter_externals(0)
             .map(|ext_msg| ext_msg.info.dst.clone())
