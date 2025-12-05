@@ -6,12 +6,13 @@ use tl_proto::TlError;
 use tycho_network::{PeerId, PrefixedRequest};
 use tycho_util::metrics::HistogramGuard;
 
-use crate::intercom::Dispatcher;
 use crate::intercom::core::query::request::QueryRequest;
 use crate::intercom::core::query::response::{
     BroadcastResponse, DownloadResponse, QueryResponse, SignatureResponse,
 };
+use crate::intercom::{Dispatcher, QueryRequestTag};
 use crate::models::{Point, PointId, Round};
+use crate::moderator::JournalEvent;
 
 pub enum QueryError {
     Network(anyhow::Error),
@@ -52,6 +53,10 @@ impl BroadcastQuery {
 
         QueryResponse::parse_broadcast(&response).map_err(QueryError::TlError)
     }
+    pub fn report(&self, peer_id: &PeerId, error: TlError) {
+        let event = JournalEvent::BadResponse(*peer_id, QueryRequestTag::Broadcast, error);
+        self.dispatcher.moderator().report(event);
+    }
 }
 
 pub struct SignatureQuery {
@@ -86,6 +91,10 @@ impl SignatureQuery {
         drop(permit);
 
         QueryResponse::parse_signature(&response).map_err(QueryError::TlError)
+    }
+    pub fn report(&self, peer_id: &PeerId, error: TlError) {
+        let event = JournalEvent::BadResponse(*peer_id, QueryRequestTag::Signature, error);
+        self.dispatcher.moderator().report(event);
     }
 }
 
@@ -140,5 +149,9 @@ impl DownloadQuery {
             Ok(response) => QueryResponse::parse_download(response).map_err(QueryError::TlError),
             Err(e) => Err(QueryError::Network(e)),
         }
+    }
+
+    pub fn report(&self, event: JournalEvent) {
+        self.0.dispatcher.moderator().report(event);
     }
 }
