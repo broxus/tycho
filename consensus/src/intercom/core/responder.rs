@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
 use futures_util::future::BoxFuture;
@@ -163,7 +164,11 @@ impl ResponderInner {
 
         let query = match medium_query {
             QueryRequestMedium::Broadcast(bytes) => {
-                match rayon_run_fifo(|| Point::parse(bytes.into())).await {
+                let start = Instant::now();
+                let parse_result = rayon_run_fifo(|| Point::parse(bytes.into())).await;
+                metrics::histogram!("tycho_mempool_engine_parse_point_time")
+                    .record(start.elapsed());
+                match parse_result {
                     Ok(Ok(Ok(point))) if point.info().author() == peer_id => {
                         QueryRequest::Broadcast(point, None)
                     }

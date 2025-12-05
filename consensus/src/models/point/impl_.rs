@@ -7,6 +7,7 @@ use tl_proto::{TlError, TlRead, TlWrite};
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
 use tycho_types::models::ConsensusConfig;
+use tycho_util::metrics::HistogramGuard;
 
 use crate::engine::MempoolConfig;
 use crate::models::point::proto_utils::{PointBodyWrite, PointRawRead, PointRead, PointWrite};
@@ -153,6 +154,8 @@ impl Point {
     }
 
     pub fn parse(serialized: Vec<u8>) -> ParseResult {
+        let _duration = HistogramGuard::begin("tycho_mempool_point_parse_verify_time");
+
         let raw = PointRawRead::<'_>::read_from(&mut &serialized[..])?;
 
         if !(raw.signature).verifies(raw.author()?, raw.digest) {

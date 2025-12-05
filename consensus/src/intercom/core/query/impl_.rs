@@ -85,18 +85,28 @@ impl DownloadQuery {
     }
 
     pub async fn send(&self, peer_id: &PeerId) -> Result<DownloadResponse<Bytes>, QueryError> {
-        let permit = self.0.dispatcher.download_rate_limit().get(peer_id).await;
+        let permit = {
+            let permit_abort_guard = scopeguard::guard(Instant::now(), |start| {
+                metrics::histogram!("tycho_mempool_download_permit_aborted_time")
+                    .record(start.elapsed());
+            });
 
-        let query_abort_guard = scopeguard::guard((), |()| {
-            metrics::counter!("tycho_mempool_download_aborted_on_exit_count").increment(1);
+            let permit = self.0.dispatcher.download_rate_limit().get(peer_id).await;
+
+            let start = scopeguard::ScopeGuard::into_inner(permit_abort_guard);
+            metrics::histogram!("tycho_mempool_download_permit_acquired_time")
+                .record(start.elapsed());
+            permit
+        };
+        let query_abort_guard = scopeguard::guard(Instant::now(), |_| {
+            metrics::counter!("tycho_mempool_download_aborted_queries_count").increment(1);
         });
-        let start = Instant::now(); // only completed, not aborted
 
         let request = self.0.request.clone();
         let query_result = self.0.dispatcher.query(peer_id, request).await;
 
         drop(permit);
-        scopeguard::ScopeGuard::into_inner(query_abort_guard); // defuse aborted only
+        let start = scopeguard::ScopeGuard::into_inner(query_abort_guard);
         metrics::histogram!("tycho_mempool_download_query_dispatcher_time").record(start.elapsed());
 
         match query_result {

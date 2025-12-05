@@ -2833,14 +2833,6 @@ def mempool_engine() -> RowPanel:
             labels_selectors=['ord="first"'],
             legend_format="{{instance}}",
         ),
-        create_heatmap_panel(
-            "tycho_mempool_verifier_verify_time",
-            "Verifier: verify() point structure and author's sig",
-        ),
-        create_heatmap_panel(
-            "tycho_mempool_verifier_validate_time",
-            "Verifier: validate() point dependencies in DAG and all-1 sigs",
-        ),
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_points_verify_err",
@@ -2881,6 +2873,16 @@ def mempool_engine() -> RowPanel:
             "Engine: alt resolved point errors (total at moment)",
             legend_format="{{instance}} - {{kind}}",
         ),
+    ]
+    return create_row("Mempool engine", metrics)
+
+
+def mempool_misc() -> RowPanel:
+    metrics = [
+        create_heatmap_panel(
+            "tycho_mempool_point_parse_verify_time",
+            "Responder and Downloader: point parse time (incl check sig and verify)",
+        ),
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_failed_query_responder",
@@ -2891,8 +2893,16 @@ def mempool_engine() -> RowPanel:
             "Responder: query execution failed or aborted (total at moment)",
             legend_format="{{instance}} - {{kind}}",
         ),
+        create_heatmap_panel(
+            "tycho_mempool_engine_parse_point_time",
+            "Responder and Downloader: point parse task duration (async result)",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_verifier_validate_time",
+            "Verifier: validate() point dependencies in DAG and all-1 sigs",
+        ),
     ]
-    return create_row("Mempool engine", metrics)
+    return create_row("Mempool misc", metrics)
 
 
 def mempool_broadcasts() -> RowPanel:
@@ -2961,6 +2971,14 @@ def mempool_downloads() -> RowPanel:
             "tycho_mempool_download_query_responder_none_time",
             "Responder: Download send: None",
         ),
+        create_heatmap_panel(
+            "tycho_mempool_download_permit_acquired_time",
+            "Downloader: wait for peer permit acquired",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_download_permit_aborted_time",
+            "Downloader: wait for peer permit aborted",
+        ),
         create_counter_panel(
             expr_sum_increase(
                 "tycho_mempool_download_task_count", range_selector="$__interval"
@@ -2994,7 +3012,7 @@ def mempool_downloads() -> RowPanel:
         ),
         create_counter_panel(
             expr_sum_increase(
-                "tycho_mempool_download_aborted_on_exit_count",
+                "tycho_mempool_download_aborted_queries_count",
                 range_selector="$__interval",
             ),
             "Downloader: queries aborted (on task completion) (total at moment)",
@@ -3423,6 +3441,7 @@ dashboard = Dashboard(
         mempool_payload_rates(),
         mempool_engine_rates(),
         mempool_engine(),
+        mempool_misc(),
         mempool_broadcasts(),
         mempool_downloads(),
         mempool_peers(),
