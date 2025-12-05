@@ -11,7 +11,11 @@ use crate::dag::DagHead;
 use crate::effects::{AltFormat, Ctx, RoundCtx};
 use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::broadcast::Signer;
-use crate::intercom::core::query::request::{QueryRequest, QueryRequestMedium, QueryRequestRaw};
+use crate::intercom::core::bcast_rate_limit::BcastReceiverLimit;
+use crate::intercom::core::download_rate_limit::UploaderRateLimit;
+use crate::intercom::core::query::request::{
+    QueryRequest, QueryRequestMedium, QueryRequestRaw, QueryRequestTag,
+};
 use crate::intercom::core::query::response::QueryResponse;
 use crate::intercom::{BroadcastFilter, Downloader, PeerSchedule, Uploader};
 use crate::models::Point;
@@ -28,6 +32,8 @@ struct ResponderInner {
 
 struct ResponderState {
     broadcast_filter: BroadcastFilter,
+    bcast_rate_limit: BcastReceiverLimit,
+    upload_rate_limit: UploaderRateLimit,
     // state and storage components go here
     store: MempoolStore,
     consensus_round: RoundWatch<Consensus>,
@@ -53,6 +59,8 @@ impl Responder {
     ) {
         let state = ResponderState {
             broadcast_filter: BroadcastFilter::default(),
+            bcast_rate_limit: BcastReceiverLimit::new(round_ctx.conf()),
+            upload_rate_limit: UploaderRateLimit::new(round_ctx.conf()),
             store: store.clone(),
             consensus_round: consensus_round.clone(),
             peer_schedule: peer_schedule.clone(),
@@ -148,6 +156,34 @@ impl ResponderInner {
         response.set_tag(raw_query.tag);
 
         let tag = raw_query.tag;
+
+        let rate_limit = match tag {
+            QueryRequestTag::Broadcast => (state.bcast_rate_limit).broadcast(peer_id),
+            QueryRequestTag::Signature => (state.bcast_rate_limit).sig_query(peer_id),
+            QueryRequestTag::Download => (state.upload_rate_limit).try_acquire(peer_id),
+        };
+
+        let _permit = match rate_limit {
+            Ok(Some(permit)) => permit,
+            Ok(None) => {
+                tracing::warn!(
+                    ?tag,
+                    peer_id = display(peer_id.alt()),
+                    "concurrent queries soft limit reached",
+                );
+                response.set_soft_limited();
+                return None;
+            }
+            Err(()) => {
+                tracing::error!(
+                    ?tag,
+                    peer_id = display(peer_id.alt()),
+                    "query limit reached",
+                );
+                response.set_hard_limited();
+                return None;
+            }
+        };
 
         let medium_query = match raw_query.parse() {
             Ok(medium_query) => medium_query,

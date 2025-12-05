@@ -61,23 +61,44 @@ pub enum DownloadResponse<T> {
 pub struct QueryResponse {
     start: Instant,
     tag: Option<QueryRequestTag>,
-    result: Result<metrics::Histogram, ()>,
+    result: Result<metrics::Histogram, CancelType>,
+}
+
+enum CancelType {
+    Abort,
+    SoftLimit,
+    HardLimit,
 }
 
 impl Drop for QueryResponse {
     fn drop(&mut self) {
+        fn tag_as_str(tag: Option<QueryRequestTag>) -> &'static str {
+            match tag {
+                None => "unknown",
+                Some(QueryRequestTag::Broadcast) => "broadcast",
+                Some(QueryRequestTag::Signature) => "signature",
+                Some(QueryRequestTag::Download) => "download",
+            }
+        }
+        fn cancel_str(cancel: &CancelType) -> &'static str {
+            match cancel {
+                CancelType::Abort => "abort",
+                CancelType::SoftLimit => "soft",
+                CancelType::HardLimit => "hard",
+            }
+        }
         match &self.result {
             Ok(histogram) => {
                 histogram.record(self.start.elapsed());
             }
-            Err(()) => {
-                let kind = match self.tag {
-                    None => "unknown",
-                    Some(QueryRequestTag::Broadcast) => "broadcast",
-                    Some(QueryRequestTag::Signature) => "signature",
-                    Some(QueryRequestTag::Download) => "download",
-                };
-                metrics::counter!("tycho_mempool_failed_query_responder", "kind" => kind)
+            Err(CancelType::Abort) => {
+                let kind = tag_as_str(self.tag);
+                metrics::counter!("tycho_mempool_query_aborted_responder", "kind" => kind)
+                    .increment(1);
+            }
+            Err(limit) => {
+                let kind = format!("{} {}", tag_as_str(self.tag), cancel_str(limit));
+                metrics::counter!("tycho_mempool_query_limited_responder", "kind" => kind)
                     .increment(1);
             }
         }
@@ -89,12 +110,20 @@ impl QueryResponse {
         Self {
             start: Instant::now(),
             tag: None,
-            result: Err(()),
+            result: Err(CancelType::Abort),
         }
     }
 
     pub fn set_tag(&mut self, tag: QueryRequestTag) {
         self.tag = Some(tag);
+    }
+
+    pub fn set_soft_limited(&mut self) {
+        self.result = Err(CancelType::SoftLimit);
+    }
+
+    pub fn set_hard_limited(&mut self) {
+        self.result = Err(CancelType::HardLimit);
     }
 
     pub fn broadcast(mut self) -> Response {
