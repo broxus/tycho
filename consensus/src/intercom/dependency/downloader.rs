@@ -346,6 +346,7 @@ impl DownloadTask {
                     peer = display(out.peer_id.alt()),
                     "bad response",
                 );
+                self.query.report_bad_response(&out.peer_id, tl_error);
                 None
             }
             LastResponse::BadPoint(bad_point) => {
@@ -357,6 +358,7 @@ impl DownloadTask {
                     peer = display(out.peer_id.alt()),
                     "bad point",
                 );
+                self.query.report_bad_point(&out.peer_id, bad_point);
                 None
             }
             LastResponse::IllFormed(point, issue) => {
@@ -379,6 +381,7 @@ impl DownloadTask {
                     digest = display(wrong_id.digest.alt()),
                     "returned wrong point",
                 );
+                self.query.report_replaced_point(&out.peer_id, *wrong_id);
                 None
             }
             LastResponse::Point(point) => {
