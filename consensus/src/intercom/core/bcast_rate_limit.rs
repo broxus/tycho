@@ -1,5 +1,3 @@
-use std::cmp;
-use std::collections::BinaryHeap;
 use std::time::{Duration, Instant};
 
 use tycho_network::PeerId;
@@ -17,61 +15,52 @@ use crate::intercom::core::query::permit::{QueryPermit, QueryPermits};
 /// [`QueryPermit`] is used to soft limit concurrent queries causing network error for cooldown.
 pub struct BcastReceiverLimit {
     map: FastDashMap<PeerId, ReceiverLimits>,
-    config: LimitConfig,
+    bcast_config: LimitConfig,
+    sig_config: LimitConfig,
 }
 
+/// Doubles the rate limit until hard rejection
 struct ReceiverLimits {
-    broadcasts: ReceiverHistory,
-    sig_queries: ReceiverHistory,
+    broadcasts: SoftBucket,
+    sig_queries: SoftBucket,
     permits: QueryPermits,
-}
-
-struct LimitConfig {
-    window: Duration,
-    bcast_limit: usize,
-    sig_limit: usize,
-}
-impl LimitConfig {
-    fn new(conf: &MempoolConfig) -> Self {
-        let min_sign_attempts = conf.consensus.min_sign_attempts;
-        Self {
-            window: Duration::from_millis(
-                min_sign_attempts.get() as u64 * conf.consensus.broadcast_retry_millis.get() as u64,
-            ),
-            // each broadcast cycle pattern is at most `sig?->bcast->sig?`
-            // two consecutive `Broadcaster`s may overlap, so extra x2
-            bcast_limit: min_sign_attempts.get() as usize * 2,
-            sig_limit: min_sign_attempts.get() as usize * 2 * 2,
-        }
-    }
 }
 
 impl BcastReceiverLimit {
     pub fn new(conf: &MempoolConfig) -> Self {
         Self {
             map: FastDashMap::default(),
-            config: LimitConfig::new(conf),
+            bcast_config: LimitConfig::new_bcast(conf),
+            sig_config: LimitConfig::new_sig(conf),
         }
     }
 
     /// `Ok(None)` is a soft rejection that does not require ban
     pub fn broadcast(&self, peer_id: &PeerId) -> Result<Option<QueryPermit>, ()> {
-        self.history_of(peer_id, |entry| &mut entry.broadcasts)
+        let now = Instant::now();
+        let mut entry = (self.map.entry(*peer_id)).or_insert_with(|| self.new_entry(now));
+        if entry.broadcasts.allows(now, &self.bcast_config)? {
+            Ok(entry.permits.try_acquire())
+        } else {
+            Ok(None)
+        }
     }
 
     /// `Ok(None)` is a soft rejection that does not require ban
     pub fn sig_query(&self, peer_id: &PeerId) -> Result<Option<QueryPermit>, ()> {
-        self.history_of(peer_id, |entry| &mut entry.sig_queries)
+        let now = Instant::now();
+        let mut entry = (self.map.entry(*peer_id)).or_insert_with(|| self.new_entry(now));
+        if entry.sig_queries.allows(now, &self.sig_config)? {
+            Ok(entry.permits.try_acquire())
+        } else {
+            Ok(None)
+        }
     }
 
-    fn history_of<F>(&self, peer_id: &PeerId, f: F) -> Result<Option<QueryPermit>, ()>
-    where
-        F: FnOnce(&mut ReceiverLimits) -> &mut ReceiverHistory,
-    {
-        let now = Instant::now();
-        let mut entry = self.map.entry(*peer_id).or_insert_with(|| ReceiverLimits {
-            broadcasts: ReceiverHistory::new(self.config.bcast_limit, self.config.window, now),
-            sig_queries: ReceiverHistory::new(self.config.sig_limit, self.config.window, now),
+    fn new_entry(&self, now: Instant) -> ReceiverLimits {
+        ReceiverLimits {
+            broadcasts: SoftBucket::new(now, &self.bcast_config),
+            sig_queries: SoftBucket::new(now, &self.sig_config),
             // for each round simultaneously can be queried either sig or bcast, 2 rounds at a time;
             // queries may have extra overlaps in case initiator drops its handle and moves forward
             // but the responder keeps processing the zombie request, thus we need a soft limit;
@@ -79,33 +68,107 @@ impl BcastReceiverLimit {
             // cannot track request round reliably because point must be checked for valid signature
             // after rate limit is applied, and the round extracted earlier cannot be trusted
             permits: QueryPermits::new(2.try_into().unwrap()),
-        });
-        if f(&mut entry).allows(self.config.window, now)? {
-            Ok(entry.permits.try_acquire())
-        } else {
-            Ok(None)
         }
     }
 }
 
-/// Doubles the rate limit until hard rejection
-struct ReceiverHistory {
-    history: CallHistory,
-    soft_rejected: usize,
+pub struct BcastSenderLimit {
+    map: FastDashMap<PeerId, SenderLimits>,
+    bcast_config: LimitConfig,
+    sig_config: LimitConfig,
 }
 
-impl ReceiverHistory {
-    fn new(len: usize, window: Duration, now: Instant) -> Self {
+struct SenderLimits {
+    broadcasts: Bucket,
+    sig_queries: Bucket,
+    permits: QueryPermits,
+}
+
+impl BcastSenderLimit {
+    pub fn new(conf: &MempoolConfig) -> Self {
         Self {
-            history: CallHistory::new(len, window, now),
+            map: FastDashMap::default(),
+            bcast_config: LimitConfig::new_bcast(conf),
+            sig_config: LimitConfig::new_sig(conf),
+        }
+    }
+
+    pub fn broadcast(&self, peer_id: &PeerId) -> Result<QueryPermit, ()> {
+        let now = Instant::now();
+        let mut entry = (self.map.entry(*peer_id)).or_insert_with(|| self.new_entry(now));
+        if entry.broadcasts.passes(now, &self.bcast_config) {
+            entry.permits.try_acquire().ok_or(())
+        } else {
+            Err(())
+        }
+    }
+
+    pub fn sig_query(&self, peer_id: &PeerId) -> Result<QueryPermit, ()> {
+        let now = Instant::now();
+        let mut entry = (self.map.entry(*peer_id)).or_insert_with(|| self.new_entry(now));
+        if entry.sig_queries.passes(now, &self.sig_config) {
+            entry.permits.try_acquire().ok_or(())
+        } else {
+            Err(())
+        }
+    }
+
+    fn new_entry(&self, now: Instant) -> SenderLimits {
+        SenderLimits {
+            broadcasts: Bucket::new(now, &self.bcast_config),
+            sig_queries: Bucket::new(now, &self.sig_config),
+            permits: QueryPermits::new(2.try_into().unwrap()), // as for receiver
+        }
+    }
+}
+
+struct LimitConfig {
+    window: Duration,
+    tokens: u16,
+    soft_rejects: u16,
+}
+
+impl LimitConfig {
+    fn new_bcast(conf: &MempoolConfig) -> Self {
+        let min_sign_attempts = conf.consensus.min_sign_attempts.get();
+        // two consecutive `Broadcaster`s may overlap, so x2
+        Self {
+            window: Duration::from_millis(
+                min_sign_attempts as u64 * conf.consensus.broadcast_retry_millis.get() as u64,
+            ),
+            tokens: min_sign_attempts as u16 * 2,
+            soft_rejects: min_sign_attempts as u16 * 2,
+        }
+    }
+    fn new_sig(conf: &MempoolConfig) -> Self {
+        let bcast = Self::new_bcast(conf);
+        // each broadcast cycle pattern is at most `sig?->bcast->sig?`, so bcast x2
+        Self {
+            window: bcast.window,
+            tokens: bcast.tokens * 2,
+            soft_rejects: bcast.soft_rejects * 2,
+        }
+    }
+}
+
+struct SoftBucket {
+    bucket: Bucket,
+    soft_rejected: u16,
+}
+
+impl SoftBucket {
+    fn new(now: Instant, config: &LimitConfig) -> Self {
+        Self {
+            bucket: Bucket::new(now, config),
             soft_rejected: 0,
         }
     }
-    fn allows(&mut self, window: Duration, now: Instant) -> Result<bool, ()> {
-        if self.history.allows(window, now) {
+
+    fn allows(&mut self, now: Instant, config: &LimitConfig) -> Result<bool, ()> {
+        if self.bucket.passes(now, config) {
             self.soft_rejected = 0;
             Ok(true)
-        } else if self.soft_rejected < self.history.limit() {
+        } else if self.soft_rejected < config.soft_rejects {
             self.soft_rejected += 1;
             Ok(false)
         } else {
@@ -114,194 +177,119 @@ impl ReceiverHistory {
     }
 }
 
-pub struct BcastSenderLimit {
-    map: FastDashMap<PeerId, SenderLimits>,
-    config: LimitConfig,
+struct Bucket {
+    next_refill: Instant,
+    left_tokens: u16,
 }
 
-struct SenderLimits {
-    broadcasts: CallHistory,
-    sig_queries: CallHistory,
-    permits: QueryPermits,
-}
-
-impl BcastSenderLimit {
-    pub fn new(conf: &MempoolConfig) -> Self {
+impl Bucket {
+    fn new(now: Instant, config: &LimitConfig) -> Self {
         Self {
-            map: FastDashMap::default(),
-            config: LimitConfig::new(conf),
+            next_refill: now + config.window,
+            left_tokens: config.tokens,
         }
     }
 
-    pub fn broadcast(&self, peer_id: &PeerId) -> Result<QueryPermit, ()> {
-        self.history_of(peer_id, |entry| &mut entry.broadcasts)
-    }
-
-    pub fn sig_query(&self, peer_id: &PeerId) -> Result<QueryPermit, ()> {
-        self.history_of(peer_id, |entry| &mut entry.sig_queries)
-    }
-
-    fn history_of<F>(&self, peer_id: &PeerId, f: F) -> Result<QueryPermit, ()>
-    where
-        F: FnOnce(&mut SenderLimits) -> &mut CallHistory,
-    {
-        let now = Instant::now();
-        let mut entry = self.map.entry(*peer_id).or_insert_with(|| SenderLimits {
-            broadcasts: CallHistory::new(self.config.bcast_limit, self.config.window, now),
-            sig_queries: CallHistory::new(self.config.sig_limit, self.config.window, now),
-            permits: QueryPermits::new(2.try_into().unwrap()), // same as for receiver
-        });
-        if f(&mut entry).allows(self.config.window, now) {
-            entry.permits.try_acquire().ok_or(())
+    fn passes(&mut self, now: Instant, config: &LimitConfig) -> bool {
+        if self.next_refill <= now {
+            self.next_refill = now + config.window;
+            self.left_tokens = config.tokens;
+        }
+        if self.left_tokens > 0 {
+            self.left_tokens -= 1;
+            true
         } else {
-            Err(())
-        }
-    }
-}
-
-struct CallHistory {
-    min_heap: BinaryHeap<cmp::Reverse<Instant>>,
-}
-
-impl CallHistory {
-    fn new(limit: usize, window: Duration, now: Instant) -> Self {
-        let mut min_heap = BinaryHeap::with_capacity(limit); // won't grow
-        for _ in 0..limit {
-            min_heap.push(cmp::Reverse(now - window)); // length doesn't change; let it allow on start
-        }
-        Self { min_heap }
-    }
-
-    fn limit(&self) -> usize {
-        self.min_heap.len()
-    }
-
-    fn allows(&mut self, window: Duration, now: Instant) -> bool {
-        match self.min_heap.peek_mut() {
-            None => true, // length is always a limit; empty is unlimited
-            Some(mut oldest) => {
-                let is_allowed = now.duration_since(oldest.0) >= window;
-                *oldest = cmp::Reverse(now); // will be placed at right order despite the name
-                is_allowed
-            }
+            false
         }
     }
 }
 
 #[cfg(test)]
 mod test {
-    use anyhow::{Result, ensure};
-
     use super::*;
-    use crate::test_utils::default_test_config;
 
-    #[tokio::test]
-    async fn test_heap() -> Result<()> {
-        let start = Instant::now();
-        let window = Duration::from_secs(2);
-        let mut history = CallHistory::new(3, window, start);
-
-        ensure!(history.allows(window, start), "left 2 tries");
-        ensure!(history.allows(window, Instant::now()), "left 1 try");
-        ensure!(history.allows(window, Instant::now()), "left 0 tries");
-
-        ensure!(!history.allows(window, Instant::now()), "shall not pass");
-        ensure!(!history.allows(window, Instant::now()), "shall not pass");
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        ensure!(!history.allows(window, Instant::now()), "shall not pass");
-        ensure!(!history.allows(window, Instant::now()), "shall not pass");
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        ensure!(
-            history.allows(window, Instant::now()),
-            "replenished 3-2=1 tries, 1 used, 0 left"
-        );
-
-        ensure!(!history.allows(window, Instant::now()), "shall not pass");
-
-        Ok(())
+    fn now() -> Instant {
+        Instant::now()
     }
 
     #[tokio::test]
-    async fn test_soft_reject() -> Result<()> {
-        let limit = BcastReceiverLimit::new(&default_test_config().conf);
+    async fn test_bucket() {
+        let config = LimitConfig {
+            window: Duration::from_secs(2),
+            tokens: 5,
+            soft_rejects: 0,
+        };
 
-        let peer_id = PeerId([0; _]);
+        let start = now();
 
-        for _ in 0..limit.config.bcast_limit {
-            assert!(
-                matches!(limit.broadcast(&peer_id), Ok(Some(_))),
-                "all ok at start"
-            );
+        let mut bucket = Bucket::new(start, &config);
+
+        for n in (0..config.tokens).rev() {
+            assert!(bucket.passes(start, &config), "left {n} tokens on start");
+        }
+        assert!(!bucket.passes(start, &config), "shall not pass on start");
+
+        tokio::time::sleep(config.window / 2).await;
+
+        assert!(!bucket.passes(now(), &config), "no refill");
+
+        tokio::time::sleep(config.window / 2).await;
+
+        assert!(bucket.passes(now(), &config), "refilled");
+
+        assert!(bucket.passes(start, &config), "out-of-order");
+
+        for n in (0..config.tokens - 2).rev() {
+            assert!(bucket.passes(now(), &config), "left {n} tokens");
+        }
+        assert!(!bucket.passes(now(), &config), "shall not pass");
+    }
+
+    #[tokio::test]
+    async fn test_soft_bucket() {
+        let config = LimitConfig {
+            window: Duration::from_secs(2),
+            tokens: 5,
+            soft_rejects: 6,
+        };
+
+        let start = now();
+
+        let mut sb = SoftBucket::new(start, &config);
+
+        for n in (0..config.tokens).rev() {
+            assert_eq!(sb.allows(start, &config), Ok(true), "left {n} tokens");
         }
 
-        for _ in 0..limit.config.bcast_limit {
-            assert!(
-                matches!(limit.broadcast(&peer_id), Ok(None)),
-                "all soft after all ok"
-            );
+        for n in (0..config.soft_rejects).rev() {
+            assert_eq!(sb.allows(start, &config), Ok(false), "left {n} soft");
         }
 
-        assert!(
-            matches!(limit.broadcast(&peer_id), Err(())),
-            "hard after all soft"
-        );
-        assert!(matches!(limit.broadcast(&peer_id), Err(())), "hard again");
+        assert_eq!(sb.allows(start, &config), Err(()), "hard after soft");
+        assert_eq!(sb.allows(start, &config), Err(()), "hard again");
 
-        tokio::time::sleep(limit.config.window).await;
+        tokio::time::sleep(config.window / 2).await;
 
-        for _ in 0..limit.config.bcast_limit {
-            assert!(
-                matches!(limit.broadcast(&peer_id), Ok(Some(_))),
-                "full time resets all ok"
-            );
+        assert_eq!(sb.allows(now(), &config), Err(()), "no refill");
+
+        tokio::time::sleep(config.window / 2).await;
+
+        assert_eq!(sb.allows(now(), &config), Ok(true), "refilled");
+
+        assert_eq!(sb.allows(start, &config), Ok(true), "out-of-order token");
+
+        for n in (0..config.tokens - 2).rev() {
+            assert_eq!(sb.allows(now(), &config), Ok(true), "left {n} tokens");
         }
 
-        for _ in 0..limit.config.bcast_limit {
-            assert!(
-                matches!(limit.broadcast(&peer_id), Ok(None)),
-                "full time resets all soft"
-            );
+        assert_eq!(sb.allows(now(), &config), Ok(false), "soft refilled");
+
+        assert_eq!(sb.allows(start, &config), Ok(false), "out-of-order soft");
+
+        for n in (0..config.soft_rejects - 2).rev() {
+            assert_eq!(sb.allows(now(), &config), Ok(false), "left {n} soft");
         }
 
-        assert!(matches!(limit.broadcast(&peer_id), Err(())), "hard");
-        assert!(matches!(limit.broadcast(&peer_id), Err(())), "hard again");
-
-        tokio::time::sleep(limit.config.window / 2).await;
-
-        const N: usize = 3;
-
-        for _ in 0..N {
-            assert!(
-                matches!(limit.broadcast(&peer_id), Err(())),
-                "half time doesn't reset"
-            );
-        }
-
-        tokio::time::sleep(limit.config.window / 2).await;
-
-        for _ in 0..limit.config.bcast_limit - N {
-            assert!(
-                matches!(limit.broadcast(&peer_id), Ok(Some(_))),
-                "full time resets all except {N} fails"
-            );
-        }
-
-        for _ in 0..limit.config.bcast_limit {
-            assert!(
-                matches!(limit.broadcast(&peer_id), Ok(None)),
-                "any ok after {N} fails resets all soft"
-            );
-        }
-
-        assert!(
-            matches!(limit.broadcast(&peer_id), Err(())),
-            "hard after all soft"
-        );
-
-        Ok(())
+        assert_eq!(sb.allows(now(), &config), Err(()), "hard after refill");
     }
 }
