@@ -164,10 +164,9 @@ impl RoundInspector {
                 .add_in_order(&author_counters)
             {
                 Ok(()) => {}
-                Err(err) => tracing::error!(
-                    author = display(author.alt()),
-                    error = display(err),
-                    "cannot report peer stats, skipping"
+                Err(err) => panic!(
+                    "cannot report peer stats, skipping: {err} author {} ",
+                    author.alt()
                 ),
             };
         }
