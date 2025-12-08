@@ -20,8 +20,7 @@ use tycho_util::time::now_sec;
 
 use super::{ColdBootType, StarterInner, ZerostateProvider};
 use crate::block_strider::{CheckProof, ProofChecker};
-use crate::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
-use crate::global_config::ZerostateId;
+use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
 use crate::storage::{
