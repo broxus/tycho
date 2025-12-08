@@ -41,7 +41,7 @@ struct PeerScheduleInner {
     task_tracker: TaskTracker,
 }
 
-#[derive(Copy, Clone, PartialEq, std::fmt::Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerState {
     /// Not yet ready to connect or already disconnected; always includes local peer id.
     Unknown,

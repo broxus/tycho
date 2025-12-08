@@ -8,16 +8,15 @@ use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, future};
-use rand::RngCore;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 use tracing::Instrument;
 use tycho_network::PeerId;
+use tycho_util::FastHashSet;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run_fifo;
-use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, TaskResult};
@@ -26,6 +25,7 @@ use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
 use crate::intercom::core::query::response::DownloadResponse;
 use crate::intercom::core::query::{DownloadQuery, QueryError};
 use crate::intercom::dependency::limiter::Limiter;
+use crate::intercom::dependency::peer_queue::PeerQueue;
 use crate::intercom::peer_schedule::PeerState;
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{PeerCount, Point, PointId, PointIntegrityError, StructureIssue};
@@ -79,18 +79,6 @@ impl DownloadType for LinearQuery {
         let download_peers = conf.consensus.download_peers.get() as usize;
         download_peers.saturating_add(download_peers.saturating_mul(attempt))
     }
-}
-
-#[derive(Debug)]
-struct PeerStatus {
-    state: PeerState,
-    failed_queries: usize,
-    /// `true` for peers that depend on current point, i.e. included it directly;
-    /// requests are made without waiting for next attempt;
-    /// entries are never deleted, because they may be not resolved at the moment of insertion
-    is_depender: bool,
-    /// has uncompleted request just now
-    is_in_flight: bool,
 }
 
 impl Downloader {
@@ -164,17 +152,7 @@ impl Downloader {
             // query author no matter if it is scheduled for the next round or not;
             // it won't affect 2F reliable `None` responses to break the task with `DagPoint::NotFound`:
             // author is a depender for its point, so its `NotFound` response is not reliable
-            .chain(iter::once((&point_id.author, &author_state)))
-            .map(|(peer_id, state)| {
-                let status = PeerStatus {
-                    state: *state,
-                    failed_queries: 0,
-                    is_depender: false, // `true` comes from channel to start immediate download
-                    is_in_flight: false,
-                };
-                (*peer_id, status)
-            })
-            .collect::<FastHashMap<_, _>>();
+            .chain(iter::once((&point_id.author, &author_state)));
 
         let mut task = DownloadTask::<T> {
             peer_schedule: self.inner.peer_schedule.clone(),
@@ -185,7 +163,7 @@ impl Downloader {
             // this node is +1 to 2F; count every peer uniquely, as they may be removed and resolved
             not_found: FastHashSet::with_capacity(peer_count.majority_of_others()),
             updates,
-            undone_peers,
+            undone_peers: PeerQueue::new(undone_peers),
             downloading: FuturesUnordered::new(),
             attempt: 0,
         };
@@ -219,7 +197,7 @@ struct DownloadTask<T> {
 
     updates: broadcast::Receiver<(PeerId, PeerState)>,
 
-    undone_peers: FastHashMap<PeerId, PeerStatus>,
+    undone_peers: PeerQueue,
     downloading: FuturesUnordered<BoxFuture<'static, QueryFutureOutput>>,
 
     attempt: u8,
@@ -269,67 +247,32 @@ impl<T: DownloadType> DownloadTask<T> {
     }
 
     fn add_depender(&mut self, peer_id: &PeerId) {
-        match self.undone_peers.get_mut(peer_id) {
-            Some(status) if !status.is_depender => {
-                status.is_depender = true;
-            }
-            _ => {} // either already marked or requested and removed, no panic
-        };
+        // may have requested and removed the peer, no panic
+        let _ = self.undone_peers.update(peer_id, |status| {
+            status.is_independent = false;
+        });
     }
 
     fn download_random(&mut self) {
-        let mut filtered = self
-            .undone_peers
-            .iter()
-            .filter(|(_, p)| p.state == PeerState::Resolved && !p.is_in_flight)
-            .map(|(peer_id, status)| {
-                (
-                    *peer_id,
-                    (
-                        // try every peer, until all are tried the same amount of times
-                        status.failed_queries,
-                        // try mandatory peers before others each loop
-                        u8::from(!status.is_depender),
-                        // randomise within group
-                        rand::rng().next_u32(),
-                    ),
-                )
-            })
-            .collect::<Vec<_>>();
-        filtered.sort_unstable_by(|(_, ord_l), (_, ord_r)| ord_l.cmp(ord_r));
-
-        let to_add = T::next_peers(
+        let amount = T::next_peers(
             self.attempt,
             self.downloading.len(),
             &self.peer_count,
             self.ctx.conf(),
-        )
-        .min(filtered.len());
+        );
 
-        for (peer_id, _) in filtered.into_iter().take(to_add) {
-            self.download_one(peer_id);
+        for _ in 0..amount {
+            let Some(peer_id) = self.undone_peers.take_to_flight() else {
+                break;
+            };
+            let query = self.query.clone();
+            self.downloading.push(Box::pin(async move {
+                let result = query.send(&peer_id).await;
+                QueryFutureOutput { peer_id, result }
+            }));
         }
 
         self.attempt = self.attempt.wrapping_add(1);
-    }
-
-    fn download_one(&mut self, peer_id: PeerId) {
-        let Some(status) = self.undone_peers.get_mut(&peer_id) else {
-            panic!("Coding error: peer not in map {}", peer_id.alt());
-        };
-        assert!(
-            !status.is_in_flight,
-            "already downloading from peer {} status {:?}",
-            peer_id.alt(),
-            status
-        );
-        status.is_in_flight = true;
-
-        let query = self.query.clone();
-        self.downloading.push(Box::pin(async move {
-            let result = query.send(&peer_id).await;
-            QueryFutureOutput { peer_id, result }
-        }));
     }
 
     async fn verify(
@@ -371,21 +314,23 @@ impl<T: DownloadType> DownloadTask<T> {
             Ok(DownloadResponse::DefinedNone) => LastResponse::DefinedNone,
             Err(QueryError::TlError(tl_error)) => LastResponse::TlError(tl_error),
             Ok(DownloadResponse::TryLater) => {
-                let Some(status) = self.undone_peers.get_mut(&out.peer_id) else {
+                // apply the same retry strategy as for network errors
+                if !self.undone_peers.update(&out.peer_id, |status| {
+                    status.is_in_flight = false;
+                    status.failed_queries = status.failed_queries.saturating_add(1);
+                }) {
                     panic!("Coding error: peer not in map {}", out.peer_id.alt());
                 };
-                status.is_in_flight = false;
-                // apply the same retry strategy as for network errors
-                status.failed_queries = status.failed_queries.saturating_add(1);
                 tracing::trace!(peer = display(out.peer_id.alt()), "try later");
                 return Ok(None);
             }
             Err(QueryError::Network(network_err)) => {
-                let Some(status) = self.undone_peers.get_mut(&out.peer_id) else {
-                    panic!("Coding error: peer not in map {}", out.peer_id.alt())
+                if !self.undone_peers.update(&out.peer_id, |status| {
+                    status.is_in_flight = false;
+                    status.failed_queries = status.failed_queries.saturating_add(1);
+                }) {
+                    panic!("Coding error: peer not in map {}", out.peer_id.alt());
                 };
-                status.is_in_flight = false;
-                status.failed_queries = status.failed_queries.saturating_add(1);
                 metrics::counter!("tycho_mempool_download_query_failed_count").increment(1);
                 tracing::debug!(
                     peer = display(out.peer_id.alt()),
@@ -411,7 +356,7 @@ impl<T: DownloadType> DownloadTask<T> {
                 DownloadCtx::meter_not_found();
                 tracing::debug!(
                     peer = display(out.peer_id.alt()),
-                    is_depender = Some(status.is_depender).filter(|x| *x),
+                    is_depender = (!status.is_independent).then_some(true),
                     "didn't return"
                 );
                 None
@@ -487,9 +432,8 @@ impl<T: DownloadType> DownloadTask<T> {
     ) -> TaskResult<()> {
         match result {
             Ok((peer_id, new)) => {
-                self.undone_peers.entry(peer_id).and_modify(|status| {
-                    status.state = new;
-                });
+                // may receive updates from other vset, do not panic
+                let _ = (self.undone_peers).update(&peer_id, |status| status.state.0 = new);
                 Ok(())
             }
             Err(err @ RecvError::Lagged(_)) => {
