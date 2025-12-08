@@ -60,11 +60,7 @@ impl RoundTaskReady {
         consensus_round: &RoundWatch<Consensus>,
         net: &EngineNetwork,
     ) -> Self {
-        let downloader = Downloader::new(
-            &net.dispatcher,
-            &net.peer_schedule,
-            consensus_round.receiver(),
-        );
+        let downloader = Downloader::new(&net.dispatcher, &net.peer_schedule);
         Self {
             state: RoundTaskState {
                 store: store.clone(),

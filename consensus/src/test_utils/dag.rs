@@ -13,7 +13,6 @@ use tycho_util::FastHashMap;
 use crate::dag::{AnchorStage, DagRound, ValidateResult, Verifier};
 use crate::effects::{Ctx, EngineCtx, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::MempoolConfig;
-use crate::engine::round_watch::{Consensus, RoundWatch};
 use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
 use crate::models::{
     AnchorStageRole, Cert, Digest, Link, PeerCount, Point, PointData, PointId, Round, Signature,
@@ -48,9 +47,7 @@ pub fn make_engine_parts<const PEER_COUNT: usize>(
     let init_peers = InitPeers::new(peers.iter().map(|(id, _)| *id).collect());
     peer_schedule.init(&merged_conf, &init_peers);
 
-    let stub_consensus_round = RoundWatch::<Consensus>::default();
-    let stub_downloader =
-        Downloader::new(&dispatcher, &peer_schedule, stub_consensus_round.receiver());
+    let stub_downloader = Downloader::new(&dispatcher, &peer_schedule);
 
     (peer_schedule, stub_downloader, genesis, engine_ctx)
 }

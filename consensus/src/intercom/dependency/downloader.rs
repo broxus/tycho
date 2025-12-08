@@ -1,5 +1,4 @@
 use std::iter;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,8 +19,7 @@ use tycho_util::sync::rayon_run_fifo;
 
 use crate::dag::{IllFormedReason, Verifier, VerifyError};
 use crate::effects::{AltFormat, Cancelled, Ctx, DownloadCtx, TaskResult};
-use crate::engine::round_watch::{Consensus, RoundWatcher};
-use crate::engine::{ConsensusConfigExt, MempoolConfig, NodeConfig};
+use crate::engine::{MempoolConfig, NodeConfig};
 use crate::intercom::core::query::response::DownloadResponse;
 use crate::intercom::core::query::{DownloadQuery, QueryError};
 use crate::intercom::dependency::limiter::Limiter;
@@ -45,54 +43,15 @@ struct DownloaderInner {
     dispatcher: Dispatcher,
     peer_schedule: PeerSchedule,
     limiter: Limiter,
-    consensus_round: RoundWatcher<Consensus>,
-}
-
-trait DownloadType: Send + 'static {
-    fn next_peers(
-        attempt: u8,
-        already_downloading: usize,
-        peer_count: &PeerCount,
-        conf: &MempoolConfig,
-    ) -> usize {
-        Self::max_downloads_per_attempt(attempt as usize, conf)
-            .min(peer_count.reliable_minority())
-            .saturating_sub(already_downloading)
-    }
-
-    fn max_downloads_per_attempt(attempt: usize, conf: &MempoolConfig) -> usize;
-}
-
-/// Exponential increase of peers to query
-struct ExponentialQuery;
-impl DownloadType for ExponentialQuery {
-    fn max_downloads_per_attempt(attempt: usize, conf: &MempoolConfig) -> usize {
-        let download_peers = conf.consensus.download_peers.get() as usize;
-        download_peers.saturating_mul(download_peers.saturating_pow(attempt as u32))
-    }
-}
-
-/// Linear increase of peers to query
-struct LinearQuery;
-impl DownloadType for LinearQuery {
-    fn max_downloads_per_attempt(attempt: usize, conf: &MempoolConfig) -> usize {
-        let download_peers = conf.consensus.download_peers.get() as usize;
-        download_peers.saturating_add(download_peers.saturating_mul(attempt))
-    }
 }
 
 impl Downloader {
-    pub fn new(
-        dispatcher: &Dispatcher,
-        peer_schedule: &PeerSchedule,
-        consensus_round: RoundWatcher<Consensus>,
-    ) -> Self {
+    pub fn new(dispatcher: &Dispatcher, peer_schedule: &PeerSchedule) -> Self {
         Self {
             inner: Arc::new(DownloaderInner {
                 dispatcher: dispatcher.clone(),
                 peer_schedule: peer_schedule.clone(),
                 limiter: Limiter::new(NodeConfig::get().max_download_tasks),
-                consensus_round,
             }),
         }
     }
@@ -110,31 +69,11 @@ impl Downloader {
         &self,
         point_id: &PointId,
         dependers_rx: mpsc::UnboundedReceiver<PeerId>,
-        verified_broadcast: oneshot::Receiver<DownloadResult>,
+        broadcast_result: oneshot::Receiver<DownloadResult>,
         ctx: DownloadCtx,
     ) -> TaskResult<DownloadResult> {
         let _guard = self.inner.limiter.enter(point_id.round).await;
 
-        if point_id.round + ctx.conf().consensus.min_front_rounds()
-            >= self.inner.consensus_round.get()
-        {
-            // for validation
-            self.run_task::<ExponentialQuery>(point_id, dependers_rx, verified_broadcast, ctx)
-                .await
-        } else {
-            // for sync
-            self.run_task::<LinearQuery>(point_id, dependers_rx, verified_broadcast, ctx)
-                .await
-        }
-    }
-
-    async fn run_task<T: DownloadType>(
-        &self,
-        point_id: &PointId,
-        dependers_rx: mpsc::UnboundedReceiver<PeerId>,
-        broadcast_result: oneshot::Receiver<DownloadResult>,
-        ctx: DownloadCtx,
-    ) -> TaskResult<DownloadResult> {
         let _task_duration = HistogramGuard::begin("tycho_mempool_download_task_time");
         ctx.meter_start(point_id);
         let entered_span = ctx.span().clone().entered();
@@ -154,9 +93,8 @@ impl Downloader {
             // author is a depender for its point, so its `NotFound` response is not reliable
             .chain(iter::once((&point_id.author, &author_state)));
 
-        let mut task = DownloadTask::<T> {
+        let mut task = DownloadTask {
             peer_schedule: self.inner.peer_schedule.clone(),
-            _phantom: PhantomData,
             ctx,
             query: DownloadQuery::new(self.inner.dispatcher.clone(), point_id),
             peer_count,
@@ -185,9 +123,8 @@ impl Downloader {
     }
 }
 
-struct DownloadTask<T> {
+struct DownloadTask {
     peer_schedule: PeerSchedule,
-    _phantom: PhantomData<T>,
     ctx: DownloadCtx,
 
     query: DownloadQuery,
@@ -208,7 +145,7 @@ struct QueryFutureOutput {
     result: Result<DownloadResponse<Bytes>, QueryError>,
 }
 
-impl<T: DownloadType> DownloadTask<T> {
+impl DownloadTask {
     // point's author is a top priority; fallback priority is (any) dependent point's author
     // recursively: every dependency is expected to be signed by 2/3+1
     pub async fn run(
@@ -234,12 +171,16 @@ impl<T: DownloadType> DownloadTask<T> {
                         break Ok(result);
                     } else if self.not_found.len() >= self.peer_count.majority_of_others() {
                         break Ok(DownloadResult::NotFound);
-                    } else if self.downloading.is_empty() {
-                        interval.reset_immediately(); // restart interval and tick immediately
+                    } else {
+                        self.download_random(); // keep the current request amount
                     }
                 },
                 // most rare arm to make progress despite slow responding peers
-                _ = interval.tick() => self.download_random(), // first tick fires immediately
+                _ = interval.tick() => {
+                    // first tick fires immediately
+                    self.download_random();
+                    self.attempt = self.attempt.wrapping_add(1);
+                },
             }
         }
         // on exit futures are dropped and receivers are cleaned,
@@ -254,7 +195,7 @@ impl<T: DownloadType> DownloadTask<T> {
     }
 
     fn download_random(&mut self) {
-        let amount = T::next_peers(
+        let amount = current_peers(
             self.attempt,
             self.downloading.len(),
             &self.peer_count,
@@ -271,8 +212,6 @@ impl<T: DownloadType> DownloadTask<T> {
                 QueryFutureOutput { peer_id, result }
             }));
         }
-
-        self.attempt = self.attempt.wrapping_add(1);
     }
 
     async fn verify(
@@ -466,78 +405,59 @@ impl DownloadCtx {
     }
 }
 
+fn current_peers(
+    attempt: u8,
+    already_downloading: usize,
+    peer_count: &PeerCount,
+    conf: &MempoolConfig,
+) -> usize {
+    let download_peers = conf.consensus.download_peers.get() as usize;
+    download_peers
+        .saturating_mul(attempt as usize)
+        .max(1) // for zero attempt
+        .min(peer_count.reliable_minority())
+        .saturating_sub(already_downloading)
+}
+
 #[cfg(test)]
 mod tests {
-    use anyhow::Result;
-
     use super::*;
-    use crate::models::PeerCount;
     use crate::test_utils::default_test_config;
 
-    fn test_impl<T: DownloadType>(
-        expected_to_add: &[usize],
+    #[test]
+    fn linear_basic() {
+        let expected_to_add = [1, 2, 4, 6, 8, 10, 11, 11];
+        let already_downloading = 0;
+        let peer_count = PeerCount::try_from(30).expect("must be enough");
+
+        test_impl(expected_to_add, already_downloading, peer_count);
+    }
+
+    #[test]
+    fn linear_already_downloading() {
+        let expected_to_add = [0, 0, 1, 3, 5, 7, 8, 8];
+        let already_downloading = 3;
+        let peer_count = PeerCount::try_from(30).expect("must be enough");
+
+        test_impl(expected_to_add, already_downloading, peer_count);
+    }
+
+    fn test_impl<const N: usize>(
+        expected: [usize; N],
         already_downloading: usize,
         peer_count: PeerCount,
-    ) -> Result<()> {
-        let mut attempt = 0;
-
+    ) {
         let merged_conf = default_test_config();
 
-        for (step, _) in expected_to_add.iter().enumerate() {
-            let actual_peers =
-                T::next_peers(attempt, already_downloading, &peer_count, &merged_conf.conf);
-
-            anyhow::ensure!(
-                expected_to_add[step] == actual_peers,
-                "step {}, attempt {}, already_downloading {}, expected {}, got {}",
-                step,
-                attempt,
+        let actual: [usize; N] = std::array::from_fn(|attempt| {
+            current_peers(
+                attempt as u8,
                 already_downloading,
-                expected_to_add[step],
-                actual_peers,
-            );
+                &peer_count,
+                &merged_conf.conf,
+            )
+        });
 
-            anyhow::ensure!(actual_peers + already_downloading <= peer_count.reliable_minority());
-
-            attempt = attempt.wrapping_add(1);
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn linear_basic() -> Result<()> {
-        let expected_to_add = [2, 4, 6, 8, 10, 11, 11];
-        let already_downloading = 0;
-        let peer_count = PeerCount::try_from(30)?;
-
-        test_impl::<LinearQuery>(&expected_to_add, already_downloading, peer_count)
-    }
-
-    #[test]
-    fn linear_already_downloading() -> Result<()> {
-        let expected_to_add = [0, 0, 2, 4, 6, 7, 7, 7];
-        let already_downloading = 4;
-        let peer_count = PeerCount::try_from(30)?;
-
-        test_impl::<LinearQuery>(&expected_to_add, already_downloading, peer_count)
-    }
-
-    #[test]
-    fn exponential_basic() -> Result<()> {
-        let expected_to_add = [2, 4, 8, 11, 11];
-        let already_downloading = 0;
-        let peer_count = PeerCount::try_from(30)?;
-
-        test_impl::<ExponentialQuery>(&expected_to_add, already_downloading, peer_count)
-    }
-
-    #[test]
-    fn exponential_already_downloading() -> Result<()> {
-        let expected_to_add = [0, 0, 4, 7, 7];
-        let already_downloading = 4;
-        let peer_count = PeerCount::try_from(30)?;
-
-        test_impl::<ExponentialQuery>(&expected_to_add, already_downloading, peer_count)
+        assert_eq!(expected, actual);
     }
 }
