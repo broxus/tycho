@@ -10,6 +10,7 @@ use object_store::{DynObjectStore, Error, ObjectStore};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::ArchiveVerifier;
 use tycho_types::models::BlockId;
+use tycho_util::serde_helpers;
 
 use crate::storage::PersistentStateKind;
 use crate::util::downloader::{DownloaderError, DownloaderResponseHandle, download_and_decompress};
@@ -43,6 +44,12 @@ pub struct S3ClientConfig {
     /// Default: 10 MB.
     #[serde(default = "default_chunk_size")]
     pub chunk_size: ByteSize,
+
+    /// Timeout for S3 request.
+    ///
+    /// Default: None
+    #[serde(with = "serde_helpers::humantime")]
+    pub timeout: Option<Duration>,
 
     /// Number of retries to download archives/blocks/states.
     ///
@@ -87,23 +94,29 @@ impl S3Client {
         );
 
         let client: Arc<DynObjectStore> = {
-            let mut b = object_store::aws::AmazonS3Builder::new()
+            let mut builder = object_store::aws::AmazonS3Builder::new()
                 .with_region(&config.region)
                 .with_endpoint(&config.endpoint)
                 .with_bucket_name(&config.bucket)
-                .with_client_options(object_store::ClientOptions::new().with_allow_http(true));
+                .with_client_options({
+                    let mut opts = object_store::ClientOptions::new().with_allow_http(true);
+                    if let Some(timeout) = config.timeout {
+                        opts = opts.with_timeout(timeout);
+                    }
+                    opts
+                });
 
             if let Some(credentials) = &config.credentials {
-                b = b
+                builder = builder
                     .with_access_key_id(&credentials.access_key)
                     .with_secret_access_key(&credentials.secret_key);
 
                 if let Some(token) = &credentials.token {
-                    b = b.with_token(token);
+                    builder = builder.with_token(token);
                 }
             }
 
-            b.build().map(Arc::new)?
+            builder.build().map(Arc::new)?
         };
 
         Ok(Self {
