@@ -64,6 +64,7 @@ futures-util = "0.3"
 getip = "0.2.0"
 hdrhistogram = "7.5.4"
 hex = "0.4"
+http-body-util = "0.1.3"
 humantime = "2"
 indexmap = "2.2"
 itertools = "0.14"
@@ -255,7 +256,11 @@ panic = "abort"
 inherits = "release"
 debug-assertions = true
 overflow-checks = true
-panic = "abort"
+
+
+[profile.release_check_no_lto]
+inherits = "release_check"
+lto = "off"
 
 [profile.dev.package.hex]
 opt-level = 3
