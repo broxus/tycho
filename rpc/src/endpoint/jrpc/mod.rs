@@ -15,6 +15,10 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
 pub use self::cache::JrpcEndpointCache;
+use self::stream::{
+    SubscribeAction, SubscriptionEmptyRequest, SubscriptionUpdateRequest, handle_list,
+    handle_status, handle_sub, handle_unsub_all,
+};
 use crate::models::{GenTimings, LastTransactionId};
 use crate::state::{
     CodeHashesIter, LoadedAccountState, RpcState, RpcStateError, TransactionsIterBuilder,
@@ -25,6 +29,7 @@ use crate::util::jrpc_extractor::{
 };
 
 mod cache;
+mod stream;
 
 declare_jrpc_method! {
     pub enum MethodParams: Method {
@@ -45,6 +50,11 @@ declare_jrpc_method! {
         GetBlockProof(GetBlockRequest),
         // NOTE: Temp endpoint. Must be enforced by limits and other stuff.
         GetBlockData(GetBlockRequest),
+        SubSubscribe(SubscriptionUpdateRequest),
+        SubUnsubscribe(SubscriptionUpdateRequest),
+        SubUnsubscribeAll(SubscriptionEmptyRequest),
+        SubStatus(SubscriptionEmptyRequest),
+        SubListSubscriptions(SubscriptionEmptyRequest),
     }
 }
 
@@ -226,6 +236,21 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<RfcBehaviour, Method
             })
             .await
         }
+        MethodParams::SubSubscribe(p) => with_subscriptions(&state, req.id, |subs| {
+            handle_sub(subs, p, SubscribeAction::Sub)
+        }),
+        MethodParams::SubUnsubscribe(p) => with_subscriptions(&state, req.id, |subs| {
+            handle_sub(subs, p, SubscribeAction::Unsub)
+        }),
+        MethodParams::SubUnsubscribeAll(p) => {
+            with_subscriptions(&state, req.id, |subs| handle_unsub_all(subs, p.uuid))
+        }
+        MethodParams::SubStatus(p) => {
+            with_subscriptions(&state, req.id, |subs| handle_status(subs, p.uuid))
+        }
+        MethodParams::SubListSubscriptions(p) => {
+            with_subscriptions(&state, req.id, |subs| handle_list(subs, p.uuid))
+        }
     }
 }
 
@@ -338,6 +363,17 @@ fn get_capabilities(state: &RpcState) -> &'static RawValue {
                 "getDstTransaction",
                 "getAccountsByCodeHash",
                 "getTransactionBlockId",
+            ]);
+        }
+
+        if state.subscriptions().is_some() {
+            capabilities.extend([
+                "subSubscribe",
+                "subUnsubscribe",
+                "subUnsubscribeAll",
+                "subStatus",
+                "subListSubscriptions",
+                "stream",
             ]);
         }
 
@@ -462,6 +498,20 @@ struct BlockDataResponse {
 
 fn encode_base64<T: AsRef<[u8]>>(value: T) -> String {
     BASE64_STANDARD.encode(value)
+}
+
+fn with_subscriptions<T, F>(state: &RpcState, id: i64, f: F) -> Response
+where
+    T: Serialize,
+    F: FnOnce(&crate::state::RpcSubscriptions) -> Result<T, RpcStateError>,
+{
+    match state.subscriptions() {
+        Some(subs) => match f(subs) {
+            Ok(res) => ok_to_response(id, res),
+            Err(e) => error_to_response(id, e),
+        },
+        None => error_to_response(id, RpcStateError::NotSupported),
+    }
 }
 
 fn ok_to_response<T: Serialize>(id: i64, result: T) -> Response {
