@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::mem;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -27,9 +28,16 @@ pub struct ClientStatus {
     pub max_addrs: u32,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RegisterError {
+    #[error(transparent)]
+    Subscribe(#[from] SubscribeError),
+}
+
 struct ClientQueue {
     uuid: Uuid,
     sender: mpsc::Sender<AccountUpdate>,
+    dropped: std::sync::atomic::AtomicU64,
 }
 
 pub struct RpcSubscriptions {
@@ -39,7 +47,7 @@ pub struct RpcSubscriptions {
 }
 
 thread_local! {
-    static CLIENT_IDS: RefCell<Vec<ClientId>> =const { RefCell::new(Vec::new())};
+    static CLIENT_IDS: RefCell<Vec<ClientId>> = const { RefCell::new(Vec::new()) };
 }
 
 impl RpcSubscriptions {
@@ -54,7 +62,7 @@ impl RpcSubscriptions {
 
     pub fn register(
         &self,
-    ) -> Result<(Uuid, ClientId, mpsc::Receiver<AccountUpdate>), SubscribeError> {
+    ) -> Result<(Uuid, ClientId, mpsc::Receiver<AccountUpdate>), RegisterError> {
         let (uuid, client_id) = loop {
             let uuid = Uuid::new_v4();
             match self.manager.register(uuid) {
@@ -67,8 +75,11 @@ impl RpcSubscriptions {
         };
         tracing::debug!(?client_id, "Registered new client");
         let (tx, rx) = mpsc::channel(self.queue_capacity);
-        self.queues
-            .insert(client_id, ClientQueue { uuid, sender: tx });
+        self.queues.insert(client_id, ClientQueue {
+            uuid,
+            sender: tx,
+            dropped: std::sync::atomic::AtomicU64::new(0),
+        });
         Ok((uuid, client_id, rx))
     }
 
@@ -124,6 +135,13 @@ impl RpcSubscriptions {
         self.manager.client_id(uuid)
     }
 
+    pub fn dropped(&self, uuid: Uuid) -> Option<u64> {
+        let client_id = self.manager.client_id(uuid)?;
+        self.queues
+            .get(&client_id)
+            .map(|x| x.dropped.load(Ordering::Relaxed))
+    }
+
     pub async fn fanout_updates<I>(&self, updates: I)
     where
         I: IntoIterator<Item = AccountUpdate>,
@@ -142,19 +160,21 @@ impl RpcSubscriptions {
 
             for client_id in &client_ids {
                 let Some(queue) = self.queues.get(client_id) else {
+                    tracing::warn!(%client_id, "No queue found for client, skipping update"); // something fucked up, todo: mb lower to debug
                     continue;
                 };
 
                 // WARN: should be pretty fast, so I assume that holding the lock for a short time is fine
                 let send_res = queue.sender.try_send(update.clone());
-                drop(queue);
 
                 if let Err(err) = send_res {
                     match err {
                         TrySendError::Full(_) => {
+                            queue.dropped.fetch_add(1, Ordering::Relaxed);
                             tracing::debug!(?client_id, "Queue full, dropping update");
                         }
                         TrySendError::Closed(_) => {
+                            drop(queue);
                             if let Some((_, removed)) = self.queues.remove(client_id) {
                                 self.manager.unregister(removed.uuid);
                             }
