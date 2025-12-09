@@ -162,6 +162,8 @@ pub struct SubscriptionsConfig {
     pub max_addrs: u32,
     /// Pending updates buffered per client; clamped to at least 1.
     pub queue_depth: usize,
+    #[serde(with = "serde_helpers::humantime")]
+    pub keep_alive: Duration,
 }
 
 impl Default for SubscriptionsConfig {
@@ -170,6 +172,7 @@ impl Default for SubscriptionsConfig {
             max_clients: 1_000_000,
             max_addrs: 1_000_000,
             queue_depth: 5,
+            keep_alive: Duration::from_secs(15),
         }
     }
 }
