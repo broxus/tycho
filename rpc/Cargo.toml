@@ -49,7 +49,7 @@ tycho-network = { workspace = true }
 tycho-util = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-core = { workspace = true, features = ["test"] }
-http-body-util = "0.1"
+http-body-util = { workspace = true }
 
 [features]
 default = ["http2"]

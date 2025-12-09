@@ -9,7 +9,7 @@ use axum::extract::FromRef;
 use futures_util::future::BoxFuture;
 use parking_lot::RwLock;
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, watch};
 use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
@@ -42,7 +42,6 @@ impl FromRef<RpcState> for jrpc::SubscriptionsState {
     fn from_ref(state: &RpcState) -> Self {
         Arc::new(jrpc::StreamContext {
             subs: state.inner.subscriptions.clone(),
-            keep_alive: state.inner.config.subscriptions.keep_alive,
         })
     }
 }
@@ -115,24 +114,34 @@ impl RpcStateBuilder {
         // NOTE: Only a stub here.
         let parsed_config = Arc::new(LatestBlockchainConfig::default());
 
+        let timings = GenTimings {
+            gen_lt: 0,
+            gen_utime: 0,
+        };
+        let tick = McTick {
+            seqno: 0,
+            lt: timings.gen_lt,
+            utime: timings.gen_utime,
+        };
+        let (mc_tick_tx, _) = watch::channel(tick);
+        let mc_info = LatestMcInfo {
+            block_id: Arc::new(BlockId {
+                shard: ShardIdent::MASTERCHAIN,
+                seqno: 0,
+                ..Default::default()
+            }),
+            timings,
+            state_hash: HashBytes::ZERO,
+        };
+
         Ok(RpcState {
             inner: Arc::new(Inner {
                 config,
                 core_storage,
                 rpc_storage,
                 blockchain_rpc_client,
-                mc_info: RwLock::new(LatestMcInfo {
-                    block_id: Arc::new(BlockId {
-                        shard: ShardIdent::MASTERCHAIN,
-                        seqno: 0,
-                        ..Default::default()
-                    }),
-                    timings: GenTimings {
-                        gen_lt: 0,
-                        gen_utime: 0,
-                    },
-                    state_hash: HashBytes::ZERO,
-                }),
+                mc_info: RwLock::new(mc_info),
+                mc_tick_tx,
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
                 run_get_method_semaphore,
@@ -287,6 +296,10 @@ impl RpcState {
 
     pub fn get_latest_mc_info(&self) -> LatestMcInfo {
         self.inner.mc_info.read().clone()
+    }
+
+    pub(crate) fn subscribe_mc_tick(&self) -> watch::Receiver<McTick> {
+        self.inner.mc_tick_tx.subscribe()
     }
 
     pub fn rpc_storage_snapshot(&self) -> Option<RpcSnapshot> {
@@ -610,6 +623,7 @@ struct Inner {
     rpc_storage: Option<Arc<RpcStorage>>,
     blockchain_rpc_client: BlockchainRpcClient,
     mc_info: RwLock<LatestMcInfo>,
+    mc_tick_tx: watch::Sender<McTick>,
     mc_accounts: RwLock<Option<CachedAccounts>>,
     sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,
     download_block_semaphore: Semaphore,
@@ -634,6 +648,13 @@ pub struct LatestMcInfo {
     pub block_id: Arc<BlockId>,
     pub timings: GenTimings,
     pub state_hash: HashBytes,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct McTick {
+    pub seqno: u32,
+    pub lt: u64,
+    pub utime: u32,
 }
 
 pub struct LatestBlockchainConfig {
@@ -945,15 +966,23 @@ impl Inner {
         let info = block.load_info()?;
         let state_update = block.block().state_update.load()?;
 
+        let seqno = block.id().seqno;
+        let timings = GenTimings {
+            gen_lt: info.end_lt,
+            gen_utime: info.gen_utime,
+        };
         let block_id = Arc::new(*block.id());
+        let tick = McTick {
+            seqno,
+            lt: timings.gen_lt,
+            utime: timings.gen_utime,
+        };
         *self.mc_info.write() = LatestMcInfo {
             block_id,
-            timings: GenTimings {
-                gen_lt: info.end_lt,
-                gen_utime: info.gen_utime,
-            },
+            timings,
             state_hash: state_update.new_hash,
         };
+        self.mc_tick_tx.send_replace(tick);
         Ok(())
     }
 
