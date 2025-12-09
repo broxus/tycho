@@ -228,6 +228,31 @@ impl Subscriptions {
         }
     }
 
+    pub fn list_subscriptions(
+        &self,
+        client_id: ClientId,
+        out: &mut Vec<StdAddr>,
+    ) -> Result<(), UnsubscribeError> {
+        out.clear();
+
+        let Some(subs) = self.client_to_int_addrs.get(&client_id) else {
+            return Err(UnsubscribeError::UnknownClient);
+        };
+
+        for addr_id in subs.iter() {
+            if let Some(addr_ref) = self.int_addr_to_addr.get(&addr_id) {
+                let addr = *addr_ref;
+                out.push(StdAddr {
+                    workchain: addr.wc,
+                    address: addr.address,
+                    anycast: None,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     /// Purges all subscriptions for `client_id`
     pub(crate) fn client_to_int_addrs_remove(
         &self,

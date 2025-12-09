@@ -156,6 +156,7 @@ tycho-consensus = { path = "./consensus", version = "0.3.5" }
 tycho-control = { path = "./control", version = "0.3.5" }
 tycho-core = { path = "./core", version = "0.3.5" }
 tycho-network = { path = "./network", version = "0.3.5" }
+tycho-rpc-subscriptions = { path = "./rpc-subscriptions", version = "0.3.5" }
 tycho-rpc = { path = "./rpc", version = "0.3.5" }
 tycho-storage = { path = "./storage", version = "0.3.5" }
 tycho-storage-traits = { path = "./storage-traits", version = "0.3.5" }
