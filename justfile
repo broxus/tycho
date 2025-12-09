@@ -65,10 +65,10 @@ test_cov:
 
     if [ -n "${CI:-}" ]; then
         # Running in GitHub Actions
-        cargo llvm-cov nextest --codecov --output-path codecov.json  -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control -p tycho-cli
+        cargo llvm-cov nextest --codecov --output-path codecov.json --workspace --features test
     else
         # Running locally
-        cargo llvm-cov nextest --open -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control -p tycho-cli
+        cargo llvm-cov nextest --open --workspace --features test
     fi
 
 check_dashboard:

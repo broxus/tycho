@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::Result;
 use axum::RequestExt;
 use axum::extract::{DefaultBodyLimit, FromRef, Request, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
@@ -81,6 +82,7 @@ impl<C> RpcEndpointBuilder<C> {
 impl<S> RpcEndpointBuilder<axum::Router<S>>
 where
     RpcState: FromRef<S>,
+    jrpc::SubscriptionsState: FromRef<S>,
     S: Send + Sync + Clone + 'static,
 {
     pub async fn bind(self, state: S) -> Result<RpcEndpoint> {
@@ -118,6 +120,7 @@ impl RpcEndpointBuilderCommon {
     fn build<S>(self) -> axum::Router<S>
     where
         RpcState: FromRef<S>,
+        jrpc::SubscriptionsState: FromRef<S>,
         S: Clone + Send + Sync + 'static,
     {
         let mut router = axum::Router::new();
@@ -128,6 +131,7 @@ impl RpcEndpointBuilderCommon {
         for route in self.base_routes {
             router = router.route(&route, post(common_route));
         }
+        router = router.merge(jrpc::stream_router::<S>());
 
         router
     }
@@ -159,7 +163,10 @@ impl RpcEndpoint {
         let service = ServiceBuilder::new()
             .layer(DefaultBodyLimit::max(MAX_REQUEST_SIZE))
             .layer(CorsLayer::permissive())
-            .layer(TimeoutLayer::new(Duration::from_secs(25)));
+            .layer(TimeoutLayer::with_status_code(
+                StatusCode::REQUEST_TIMEOUT,
+                Duration::from_secs(25),
+            ));
 
         #[cfg(feature = "compression")]
         let service = service.layer(tower_http::compression::CompressionLayer::new().gzip(true));

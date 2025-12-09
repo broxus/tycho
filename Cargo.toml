@@ -251,7 +251,11 @@ panic = "abort"
 inherits = "release"
 debug-assertions = true
 overflow-checks = true
-panic = "abort"
+
+
+[profile.release_check_no_lto]
+inherits = "release_check"
+lto = "off"
 
 [profile.dev.package.hex]
 opt-level = 3

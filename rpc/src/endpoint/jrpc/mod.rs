@@ -15,6 +15,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers::{self, Base64BytesWithLimit};
 
 pub use self::cache::JrpcEndpointCache;
+pub use self::stream::{StreamContext, SubscriptionsState, stream_route, stream_router};
 use self::stream::{
     SubscribeAction, SubscriptionEmptyRequest, SubscriptionUpdateRequest, handle_list,
     handle_status, handle_sub, handle_unsub_all,
@@ -366,7 +367,7 @@ fn get_capabilities(state: &RpcState) -> &'static RawValue {
             ]);
         }
 
-        if state.subscriptions().is_some() {
+        {
             capabilities.extend([
                 "subSubscribe",
                 "subUnsubscribe",
@@ -505,12 +506,9 @@ where
     T: Serialize,
     F: FnOnce(&crate::state::RpcSubscriptions) -> Result<T, RpcStateError>,
 {
-    match state.subscriptions() {
-        Some(subs) => match f(subs) {
-            Ok(res) => ok_to_response(id, res),
-            Err(e) => error_to_response(id, e),
-        },
-        None => error_to_response(id, RpcStateError::NotSupported),
+    match f(state.subscriptions()) {
+        Ok(res) => ok_to_response(id, res),
+        Err(e) => error_to_response(id, e),
     }
 }
 
