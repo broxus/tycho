@@ -40,6 +40,9 @@ pub struct RpcConfig {
     /// Configuration of getter requests.
     pub run_get_method: RunGetMethodConfig,
 
+    /// Subscriptions limits and buffering.
+    pub subscriptions: SubscriptionsConfig,
+
     #[important]
     pub storage: RpcStorageConfig,
 }
@@ -142,11 +145,31 @@ impl Default for RpcConfig {
             allow_huge_requests: false,
             max_parallel_block_downloads: 10,
             run_get_method: RunGetMethodConfig::default(),
+            subscriptions: SubscriptionsConfig::default(),
             storage: RpcStorageConfig::Full {
                 gc: Some(Default::default()),
                 force_reindex: false,
                 blacklist_path: None,
             },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, PartialConfig)]
+#[serde(default)]
+pub struct SubscriptionsConfig {
+    pub max_clients: u32,
+    pub max_addrs: u32,
+    /// Pending updates buffered per client; clamped to at least 1.
+    pub queue_depth: usize,
+}
+
+impl Default for SubscriptionsConfig {
+    fn default() -> Self {
+        Self {
+            max_clients: 1_000_000,
+            max_addrs: 1_000_000,
+            queue_depth: 5,
         }
     }
 }

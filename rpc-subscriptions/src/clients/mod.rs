@@ -112,4 +112,8 @@ impl Clients {
     pub(crate) fn uuid_to_id(&self) -> &FastDashMap<Uuid, ClientEntry> {
         &self.uuid_to_id
     }
+
+    pub fn id(&self, uuid: Uuid) -> Option<ClientId> {
+        self.uuid_to_id.get(&uuid).map(|entry| entry.id)
+    }
 }

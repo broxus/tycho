@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
+use axum::extract::FromRef;
 use futures_util::future::BoxFuture;
 use parking_lot::RwLock;
 use tokio::net::TcpListener;
@@ -18,6 +19,7 @@ use tycho_core::block_strider::{
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{CoreStorage, KeyBlocksDirection};
+use tycho_rpc_subscriptions::SubscriberManagerConfig;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::FastHashMap;
@@ -25,12 +27,29 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
 
 pub use self::storage::*;
+pub use self::subscriptions::{AccountUpdate, RegisterError, RpcSubscriptions};
 use crate::config::{BlackListConfig, RpcConfig, RpcStorageConfig, TransactionsGcConfig};
-use crate::endpoint::{JrpcEndpointCache, ProtoEndpointCache, RpcEndpoint};
+use crate::endpoint::{JrpcEndpointCache, ProtoEndpointCache, RpcEndpoint, jrpc};
 use crate::models::{GenTimings, StateTimings};
+
+impl FromRef<RpcState> for Arc<RpcSubscriptions> {
+    fn from_ref(state: &RpcState) -> Self {
+        state.inner.subscriptions.clone()
+    }
+}
+
+impl FromRef<RpcState> for jrpc::SubscriptionsState {
+    fn from_ref(state: &RpcState) -> Self {
+        Arc::new(jrpc::StreamContext {
+            subs: state.inner.subscriptions.clone(),
+            keep_alive: state.inner.config.subscriptions.keep_alive,
+        })
+    }
+}
 
 mod db;
 mod storage;
+mod subscriptions;
 pub mod tables;
 
 const RPC_DB_SUBDIR: &str = "rpc";
@@ -43,6 +62,7 @@ pub struct RpcStateBuilder<MandatoryFields = (CoreStorage, BlockchainRpcClient, 
 impl RpcStateBuilder {
     pub fn build(self) -> Result<RpcState> {
         let (core_storage, blockchain_rpc_client, zerostate_id) = self.mandatory_fields;
+        let config = self.config;
 
         let gc_notify = Arc::new(Notify::new());
 
@@ -50,7 +70,7 @@ impl RpcStateBuilder {
         let mut blacklisted_accounts = None::<BlacklistedAccounts>;
         let mut blacklist_watcher_handle = None;
 
-        let rpc_storage = match &self.config.storage {
+        let rpc_storage = match &config.storage {
             RpcStorageConfig::Full {
                 gc, blacklist_path, ..
             } => {
@@ -80,11 +100,16 @@ impl RpcStateBuilder {
             RpcStorageConfig::StateOnly => None,
         };
 
-        let download_block_semaphore =
-            tokio::sync::Semaphore::new(self.config.max_parallel_block_downloads);
+        let download_block_semaphore = Semaphore::new(config.max_parallel_block_downloads);
 
-        let run_get_method_semaphore = Arc::new(tokio::sync::Semaphore::new(
-            self.config.run_get_method.max_vms,
+        let run_get_method_semaphore = Arc::new(Semaphore::new(config.run_get_method.max_vms));
+
+        let subscriptions = Arc::new(RpcSubscriptions::new(
+            SubscriberManagerConfig::new(
+                config.subscriptions.max_addrs,
+                config.subscriptions.max_clients,
+            ),
+            config.subscriptions.queue_depth,
         ));
 
         // NOTE: Only a stub here.
@@ -92,7 +117,7 @@ impl RpcStateBuilder {
 
         Ok(RpcState {
             inner: Arc::new(Inner {
-                config: self.config,
+                config,
                 core_storage,
                 rpc_storage,
                 blockchain_rpc_client,
@@ -117,6 +142,7 @@ impl RpcStateBuilder {
                 blockchain_config: ArcSwap::new(parsed_config),
                 jrpc_cache: Default::default(),
                 proto_cache: Default::default(),
+                subscriptions,
                 zerostate_id,
                 gc_notify,
                 gc_handle,
@@ -249,6 +275,10 @@ impl RpcState {
 
     pub fn proto_cache(&self) -> &ProtoEndpointCache {
         &self.inner.proto_cache
+    }
+
+    pub fn subscriptions(&self) -> &RpcSubscriptions {
+        &self.inner.subscriptions
     }
 
     pub fn zerostate_id(&self) -> &ZerostateId {
@@ -589,6 +619,7 @@ struct Inner {
     blockchain_config: ArcSwap<LatestBlockchainConfig>,
     jrpc_cache: JrpcEndpointCache,
     proto_cache: ProtoEndpointCache,
+    subscriptions: Arc<RpcSubscriptions>,
     zerostate_id: ZerostateId,
     // GC
     gc_notify: Arc<Notify>,
@@ -800,10 +831,83 @@ impl Inner {
                     mc_block_id,
                     block.clone(),
                     self.blacklisted_accounts.as_ref(),
+                    &self.subscriptions,
                 )
                 .await?;
+        } else {
+            // with present storage we reuse parsed updates, so this step can't be a common case
+            let updates = Self::collect_updates_without_storage(
+                block.clone(),
+                self.blacklisted_accounts.as_ref(),
+            )
+            .await?;
+            if !updates.is_empty() {
+                self.subscriptions.fanout_updates(updates).await;
+            }
         }
         Ok(())
+    }
+
+    async fn collect_updates_without_storage(
+        block: BlockStuff,
+        rpc_blacklist: Option<&BlacklistedAccounts>,
+    ) -> Result<Vec<AccountUpdate>> {
+        let rpc_blacklist = rpc_blacklist.cloned();
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let Ok(workchain) = i8::try_from(block.id().shard.workchain()) else {
+                return Ok(Vec::new());
+            };
+
+            let info = block.load_info()?;
+            let extra = block.load_extra()?;
+            let account_blocks = extra.account_blocks.load()?;
+            if account_blocks.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let mut updates = FastHashMap::<HashBytes, u64>::default();
+            let rpc_blacklist = rpc_blacklist.map(|x| x.load());
+
+            for item in account_blocks.iter() {
+                let (account, _, account_block) = item?;
+
+                let is_blacklisted = rpc_blacklist.as_ref().is_some_and(|set| {
+                    let mut key = [0u8; 33];
+                    key[0] = workchain as u8;
+                    key[1..].copy_from_slice(account.as_slice());
+                    set.contains(&key)
+                });
+
+                if is_blacklisted {
+                    continue;
+                }
+
+                for tx_item in account_block.transactions.values() {
+                    let (_, tx_cell) = tx_item?;
+                    let tx = tx_cell.load()?;
+                    updates
+                        .entry(account)
+                        .and_modify(|lt| {
+                            if tx.lt > *lt {
+                                *lt = tx.lt;
+                            }
+                        })
+                        .or_insert(tx.lt);
+                }
+            }
+
+            let updates = updates
+                .into_iter()
+                .map(|(address, max_lt)| AccountUpdate {
+                    address: StdAddr::new(workchain, address),
+                    max_lt,
+                    gen_utime: info.gen_utime,
+                })
+                .collect();
+
+            Ok(updates)
+        })
+        .await?
     }
 
     fn update_mc_block_cache(&self, block: &BlockStuff) -> Result<()> {

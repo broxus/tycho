@@ -15,6 +15,20 @@ pub struct SubscriberManager {
 }
 
 impl SubscriberManager {
+    pub fn register(&self, uuid: Uuid) -> Result<ClientId, SubscribeError> {
+        let entry = self.inner.clients.register_client(uuid)?;
+
+        Ok(entry.id)
+    }
+
+    pub fn unregister(&self, uuid: Uuid) {
+        self.remove_client(uuid);
+    }
+
+    pub const fn config(&self) -> SubscriberManagerConfig {
+        self.config
+    }
+
     pub fn new(config: SubscriberManagerConfig) -> Self {
         Self {
             inner: Arc::new(Subscriptions::new(config)),
@@ -46,6 +60,24 @@ impl SubscriberManager {
         let guard = entry.lock.lock();
 
         self.inner.subscribe_many(addrs, entry.id, &guard)
+    }
+
+    pub fn unsubscribe_many<I>(&self, uuid: Uuid, addrs: I) -> Result<(), UnsubscribeError>
+    where
+        I: IntoIterator<Item = StdAddr>,
+    {
+        let entry = self
+            .inner
+            .clients
+            .get_entry(uuid)
+            .ok_or(UnsubscribeError::UnknownClient)?;
+        let guard = entry.lock.lock();
+
+        for addr in addrs {
+            self.inner.unsubscribe(addr, entry.id, &guard)?;
+        }
+
+        Ok(())
     }
 
     pub fn unsubscribe(&self, uuid: Uuid, addr: StdAddr) -> Result<(), UnsubscribeError> {
@@ -90,6 +122,10 @@ impl SubscriberManager {
         self.inner.addr_to_subs_clients(addr, out);
     }
 
+    pub fn client_id(&self, uuid: Uuid) -> Option<ClientId> {
+        self.inner.clients.id(uuid)
+    }
+
     pub fn client_count(&self) -> usize {
         self.inner.client_count()
     }
@@ -101,6 +137,20 @@ impl SubscriberManager {
     pub fn client_stats(&self, uuid: Uuid) -> Option<ClientStats> {
         let entry = self.inner.clients.get_entry(uuid)?;
         Some(self.inner.client_stats(entry.id))
+    }
+
+    pub fn list_subscriptions(&self, uuid: Uuid) -> Result<Vec<StdAddr>, UnsubscribeError> {
+        let entry = self
+            .inner
+            .clients
+            .get_entry(uuid)
+            .ok_or(UnsubscribeError::UnknownClient)?;
+        let guard = entry.lock.lock();
+
+        let mut out = Vec::new();
+        self.inner.list_subscriptions(entry.id, &mut out)?;
+        drop(guard);
+        Ok(out)
     }
 
     pub fn mem_snapshot(&self) -> MemorySnapshot {
