@@ -4232,6 +4232,7 @@ dependencies = [
  "bitflags",
  "bytes",
  "futures-util",
+ "http-body-util",
  "humantime",
  "metrics",
  "moka",
@@ -4249,10 +4250,12 @@ dependencies = [
  "tycho-block-util",
  "tycho-core",
  "tycho-network",
+ "tycho-rpc-subscriptions",
  "tycho-storage",
  "tycho-types",
  "tycho-util",
  "tycho-vm",
+ "uuid",
  "weedb",
 ]
 

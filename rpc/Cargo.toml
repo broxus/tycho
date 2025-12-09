@@ -34,6 +34,7 @@ tower-http = { workspace = true, features = ["cors", "timeout"] }
 tracing = { workspace = true }
 tycho-types = { workspace = true }
 tycho-vm = { workspace = true }
+uuid = { workspace = true }
 weedb = { workspace = true }
 
 # local deps
@@ -41,12 +42,14 @@ tycho-block-util = { workspace = true }
 tycho-core = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
+tycho-rpc-subscriptions = { workspace = true }
 
 [dev-dependencies]
 tycho-network = { workspace = true }
 tycho-util = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-core = { workspace = true, features = ["test"] }
+http-body-util = "0.1"
 
 [features]
 default = ["http2"]
