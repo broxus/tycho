@@ -61,11 +61,14 @@ impl ArchiveBlockProvider {
 
         let archives_manager = ArchivesManager::new();
 
+        let sync_tracker = SyncTracker::new(Archive::MAX_MC_BLOCKS_PER_ARCHIVE as usize);
+
         Self {
             inner: Arc::new(Inner {
                 client: client.into_archive_client(),
-                proof_checker,
                 archives: archives_manager,
+                proof_checker,
+                sync_tracker,
                 storage,
                 config,
             }),
@@ -98,7 +101,12 @@ impl ArchiveBlockProvider {
                 .checked_get_entry_by_id(&info.archive, block_id, block_id)
                 .await
             {
-                Ok(block) => return Some(Ok(block.clone())),
+                Ok(block) => {
+                    let block_time = block.data.load_info().ok()?.gen_utime;
+                    self.inner.sync_tracker.log(block.id().seqno, block_time);
+
+                    return Some(Ok(block.clone()));
+                }
                 Err(e) => {
                     tracing::error!(archive_key, %block_id, "invalid archive entry: {e:?}");
                     this.remove_archive_if_same(archive_key, &info);
@@ -174,6 +182,8 @@ struct Inner {
     proof_checker: ProofChecker,
 
     archives: ArchivesManager,
+
+    sync_tracker: SyncTracker,
 
     config: ArchiveBlockProviderConfig,
 }
@@ -901,5 +911,74 @@ impl std::ops::Not for HybridArchiveClientPart {
             Self::Primary => Self::Secondary,
             Self::Secondary => Self::Primary,
         }
+    }
+}
+
+struct SyncTracker {
+    inner: parking_lot::Mutex<SyncTrackerInner>,
+}
+
+struct SyncTrackerInner {
+    window: std::collections::VecDeque<(u32, u32)>, // (block time, insert time)
+    window_size: usize,
+}
+
+impl SyncTracker {
+    fn new(window_size: usize) -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(SyncTrackerInner {
+                window: std::collections::VecDeque::with_capacity(window_size),
+                window_size,
+            }),
+        }
+    }
+
+    fn log(&self, seqno: u32, block_time: u32) {
+        let mut inner = self.inner.lock();
+
+        let now = tycho_util::time::now_sec();
+
+        inner.window.push_back((block_time, now));
+
+        if inner.window.len() > inner.window_size {
+            inner.window.pop_front();
+        }
+
+        let Some((first_block_time, first_insert_time)) = inner.window.front() else {
+            return;
+        };
+
+        let Some((last_block_time, last_insert_time)) = inner.window.back() else {
+            return;
+        };
+
+        if first_block_time >= last_block_time || first_insert_time >= last_insert_time {
+            return;
+        }
+
+        let lag_secs = now.saturating_sub(*last_block_time);
+
+        let sync_rate = (last_block_time - first_block_time) as f64
+            / (last_insert_time - first_insert_time) as f64;
+
+        let eta_secs = (lag_secs as f64 / sync_rate) as u64;
+
+        fn format_duration(secs: u64) -> String {
+            if secs < 60 {
+                return format!("{}s", secs);
+            }
+            if secs < 3600 {
+                return format!("{}m", secs / 60);
+            }
+            format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+        }
+
+        tracing::info!(
+            seqno,
+            lag = format_duration(lag_secs as u64),
+            rate = format!("{:.2}x", sync_rate),
+            eta = format_duration(eta_secs),
+            "sync progress"
+        );
     }
 }
