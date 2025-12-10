@@ -54,6 +54,8 @@ impl ArchiveBlockProvider {
     ) -> Self {
         let proof_checker = ProofChecker::new(storage.clone());
 
+        let sync_tracker = SyncTracker::new();
+
         Self {
             inner: Arc::new(Inner {
                 client: client.into_archive_client(),
@@ -61,6 +63,7 @@ impl ArchiveBlockProvider {
 
                 known_archives: parking_lot::Mutex::new(Default::default()),
 
+                sync_tracker,
                 storage,
                 config,
             }),
@@ -93,7 +96,10 @@ impl ArchiveBlockProvider {
                 .checked_get_entry_by_id(&info.archive, block_id, block_id)
                 .await
             {
-                Ok(block) => return Some(Ok(block.clone())),
+                Ok(block) => {
+                    self.inner.sync_tracker.try_log(archive_key, &block);
+                    return Some(Ok(block.clone()));
+                }
                 Err(e) => {
                     tracing::error!(archive_key, %block_id, "invalid archive entry: {e:?}");
                     this.remove_archive_if_same(archive_key, &info);
@@ -169,6 +175,8 @@ struct Inner {
     proof_checker: ProofChecker,
 
     known_archives: parking_lot::Mutex<ArchivesMap>,
+
+    sync_tracker: SyncTracker,
 
     config: ArchiveBlockProviderConfig,
 }
@@ -726,5 +734,87 @@ impl std::ops::Not for HybridArchiveClientPart {
             Self::Primary => Self::Secondary,
             Self::Secondary => Self::Primary,
         }
+    }
+}
+
+struct SyncTracker {
+    inner: parking_lot::Mutex<SyncTrackerInner>,
+}
+
+struct SyncTrackerInner {
+    window: std::collections::VecDeque<(u32, u64, u64)>, // (seqno, gen time, insert time)
+    last_archive_key: Option<u32>,
+}
+
+impl SyncTracker {
+    /// Number of blocks to track for ETA calculation
+    const WINDOW_SIZE: usize = 300;
+
+    fn new() -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(SyncTrackerInner {
+                window: std::collections::VecDeque::with_capacity(Self::WINDOW_SIZE),
+                last_archive_key: None,
+            }),
+        }
+    }
+
+    fn try_log(&self, archive_key: u32, block: &BlockStuffAug) -> Option<()> {
+        let mut inner = self.inner.lock();
+
+        let seqno = block.id().seqno;
+
+        // Check if blocks are sequential. If not - clear buffer (provider switch or gap)
+        if let Some((last_seqno, _, _)) = inner.window.back()
+            && seqno != last_seqno + 1
+        {
+            inner.window.clear();
+            inner.last_archive_key = None;
+        }
+
+        let block_info = block.data.load_info().ok()?;
+
+        let now = tycho_util::time::now_millis();
+        let gen_utime = (block_info.gen_utime as u64) * 1000 + (block_info.gen_utime_ms as u64);
+        inner.window.push_back((seqno, gen_utime, now));
+
+        if inner.window.len() > Self::WINDOW_SIZE {
+            inner.window.pop_front();
+        }
+
+        // Check if we are ready to log (log on each archive)
+        if inner.last_archive_key == Some(archive_key) {
+            return None;
+        }
+        inner.last_archive_key = Some(archive_key);
+
+        let (_, first_gen_time, first_insert_time) = inner.window.front()?;
+        let (_, last_gen_time, last_insert_time) = inner.window.back()?;
+
+        if first_gen_time >= last_gen_time || first_insert_time >= last_insert_time {
+            return None;
+        }
+
+        let lag_ms = now.saturating_sub(*last_gen_time);
+
+        let sync_rate =
+            (last_gen_time - first_gen_time) as f64 / (last_insert_time - first_insert_time) as f64;
+
+        // NOTE: We use (sync_rate - 1) cause while syncing the blockchain continues to grow
+        let eta_ms = if sync_rate > 1.0 {
+            (lag_ms as f64 / (sync_rate - 1.0)) as u64
+        } else {
+            lag_ms // if sync_rate <= 1.0, we're falling behind - just show current lag
+        };
+
+        tracing::info!(
+            seqno = block.id().seqno,
+            lag = %humantime::format_duration(Duration::from_millis(lag_ms)),
+            rate = format!("{:.2}x", sync_rate),
+            eta = %humantime::format_duration(Duration::from_millis(eta_ms)),
+            "sync progress"
+        );
+
+        Some(())
     }
 }
