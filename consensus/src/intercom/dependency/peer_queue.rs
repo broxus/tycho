@@ -1,10 +1,9 @@
 use std::cmp::{Ordering, Reverse};
-use std::collections::BinaryHeap;
 
 use rand::RngCore;
 use tycho_network::PeerId;
-use tycho_util::FastHashMap;
 
+use crate::intercom::dependency::value_ordered_map::ValueOrderedMap;
 use crate::intercom::peer_schedule::PeerState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -55,36 +54,22 @@ impl PeerStatus {
 }
 
 // keeps order unique
-pub struct PeerQueue {
-    statuses: FastHashMap<PeerId, PeerStatus>,
-    min_heap: BinaryHeap<(Reverse<PeerStatus>, PeerId)>,
-}
+pub struct PeerQueue(ValueOrderedMap<PeerId, Reverse<PeerStatus>>);
 impl PeerQueue {
     pub fn new<'a>(states: impl Iterator<Item = (&'a PeerId, &'a PeerState)>) -> Self {
-        let statuses = states
-            .map(|(peer_id, state)| (*peer_id, PeerStatus::new(*state)))
-            .collect::<FastHashMap<_, _>>();
-        let mut orders = Vec::with_capacity(statuses.len());
-        for (peer_id, status) in &statuses {
-            orders.push((Reverse(*status), *peer_id));
-        }
-        Self {
-            statuses,
-            min_heap: BinaryHeap::from(orders),
-        }
+        let mapped = states.map(|(peer_id, state)| (*peer_id, Reverse(PeerStatus::new(*state))));
+        Self(mapped.collect())
     }
 
     pub fn take_to_flight(&mut self) -> Option<PeerId> {
-        let (Reverse(status), peer_id) = &mut *self.min_heap.peek_mut()?;
-        if !status.is_ready_to_query() {
-            return None;
+        let (&peer_id, &Reverse(mut status)) = self.0.max()?;
+        if status.is_ready_to_query() {
+            status.is_in_flight = true;
+            self.0.upsert(peer_id, Reverse(status), PartialEq::ne).ok();
+            Some(peer_id)
+        } else {
+            None
         }
-        status.is_in_flight = true;
-        let peer_id = *peer_id;
-        (self.statuses.get_mut(&peer_id))
-            .expect("must be in both collections")
-            .is_in_flight = true;
-        Some(peer_id)
     }
 
     /// returns `false` in case peer was not found
@@ -93,24 +78,15 @@ impl PeerQueue {
     where
         F: FnOnce(&mut PeerStatus),
     {
-        let Some(status) = self.statuses.get_mut(peer_id) else {
+        let Some(&Reverse(mut status)) = self.0.inner().get(peer_id) else {
             return false;
         };
-        let old = *status;
-        f(status);
-        let new = *status;
-        if old == new {
-            return true;
-        }
-        // TODO impl over IndexMap has the same O(N + logN), but may be a bit more efficient
-        self.min_heap.retain(|(_, p_id)| p_id != peer_id);
-        self.min_heap.push((Reverse(new), *peer_id));
+        f(&mut status);
+        self.0.upsert(*peer_id, Reverse(status), PartialEq::ne).ok();
         true
     }
 
     pub fn remove(&mut self, peer_id: &PeerId) -> Option<PeerStatus> {
-        let old = self.statuses.remove(peer_id)?;
-        self.min_heap.retain(|(_, p_id)| p_id != peer_id);
-        Some(old)
+        self.0.remove(peer_id).map(|Reverse(status)| status)
     }
 }

@@ -24,6 +24,7 @@ bumpalo = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
+indexmap = { workspace = true }
 itertools = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
