@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::{Seek, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -7,11 +8,13 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use tycho_block_util::block::ShardPrefix;
 use tycho_storage::fs::Dir;
+use tycho_types::cell::HashBytes;
 use tycho_types::models::BlockId;
 use tycho_util::fs::MappedFile;
 use tycho_util::{FastDashMap, FastHashSet};
 
 use super::PersistentStateKind;
+use crate::storage::ShardStateWriter;
 use crate::storage::shard_state::ShardStatePartInfo;
 
 #[derive(Debug, Eq, Hash, PartialEq)]
@@ -37,6 +40,7 @@ impl From<(&BlockId, PersistentStateKind)> for CacheKey {
 pub struct CachedState {
     pub mc_seqno: u32,
     pub file: MappedFile,
+    pub part_root_hash: Option<HashBytes>,
     pub parts_info: Option<Vec<ShardStatePartInfo>>,
 }
 
@@ -107,6 +111,7 @@ impl DescriptorCache {
         mc_seqno: u32,
         block_id: &BlockId,
         part_shard_prefix: Option<ShardPrefix>,
+        part_root_hash: Option<HashBytes>,
         parts_info: Option<Vec<ShardStatePartInfo>>,
     ) -> Result<PersistentState> {
         self.cache_state(
@@ -114,12 +119,20 @@ impl DescriptorCache {
             block_id,
             PersistentStateKind::Shard,
             part_shard_prefix,
+            part_root_hash,
             parts_info,
         )
     }
 
     pub fn cache_queue_state(&self, mc_seqno: u32, block_id: &BlockId) -> Result<PersistentState> {
-        self.cache_state(mc_seqno, block_id, PersistentStateKind::Queue, None, None)
+        self.cache_state(
+            mc_seqno,
+            block_id,
+            PersistentStateKind::Queue,
+            None,
+            None,
+            None,
+        )
     }
 
     pub fn cache_state(
@@ -128,10 +141,17 @@ impl DescriptorCache {
         block_id: &BlockId,
         kind: PersistentStateKind,
         part_shard_prefix: Option<ShardPrefix>,
+        part_root_hash: Option<HashBytes>,
         parts_info: Option<Vec<ShardStatePartInfo>>,
     ) -> Result<PersistentState> {
-        self.inner
-            .cache_state(mc_seqno, block_id, kind, part_shard_prefix, parts_info)
+        self.inner.cache_state(
+            mc_seqno,
+            block_id,
+            kind,
+            part_shard_prefix,
+            part_root_hash,
+            parts_info,
+        )
     }
 
     pub async fn try_reuse_persistent_state(
@@ -171,15 +191,33 @@ impl DescriptorCache {
             temp_file.rename(kind.make_file_name(&block_id, part_shard_prefix.as_ref()))?;
 
             let parts_info = cached.parts_info.clone();
+            let part_root_hash = cached.part_root_hash;
 
             drop(cached);
 
-            let new_cached =
-                this.cache_state(mc_seqno, &block_id, kind, part_shard_prefix, parts_info)?;
+            let new_cached = this.cache_state(
+                mc_seqno,
+                &block_id,
+                kind,
+                part_shard_prefix,
+                part_root_hash,
+                parts_info,
+            )?;
 
             Ok(Some(ReusePersistentStateResult::NewCached(new_cached)))
         })
         .await?
+    }
+
+    pub fn open_persistent_file(
+        &self,
+        mc_seqno: u32,
+        block_id: &BlockId,
+        part_shard_prefix: Option<&u64>,
+    ) -> Result<File> {
+        let states_dir = self.prepare_persistent_states_dir(mc_seqno)?;
+        let file_name = ShardStateWriter::file_name(block_id, part_shard_prefix);
+        states_dir.file(file_name).read(true).open()
     }
 }
 
@@ -278,6 +316,7 @@ impl Inner {
         block_id: &BlockId,
         kind: PersistentStateKind,
         part_shard_prefix: Option<ShardPrefix>,
+        part_root_hash: Option<HashBytes>,
         parts_info: Option<Vec<ShardStatePartInfo>>,
     ) -> Result<PersistentState> {
         use std::collections::btree_map;
@@ -315,6 +354,7 @@ impl Inner {
         let new_state = Arc::new(CachedState {
             mc_seqno,
             file,
+            part_root_hash,
             parts_info,
         });
 

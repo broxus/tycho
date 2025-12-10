@@ -1200,7 +1200,7 @@ impl StoreStateHint {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ShardStatePartInfo {
     pub hash: HashBytes,
     pub prefix: u64,

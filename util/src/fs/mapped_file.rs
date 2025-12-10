@@ -1,6 +1,8 @@
 use std::fs::File;
 use std::os::fd::AsRawFd;
 
+use tycho_util::compression::ZstdDecompressStream;
+
 /// Mutable memory buffer that is mapped to a file
 pub struct MappedFileMut {
     inner: MappedFile,
@@ -95,6 +97,8 @@ impl std::ops::DerefMut for MappedFileMut {
     }
 }
 
+pub const MIN_READ_CHUNK_SIZE: usize = 1024 * 128; // 128 Kb
+
 /// Memory buffer that is mapped to a file
 pub struct MappedFile {
     length: usize,
@@ -160,6 +164,40 @@ impl MappedFile {
     pub fn as_slice(&self) -> &[u8] {
         // SAFETY: ptr and length were initialized once on creation
         unsafe { std::slice::from_raw_parts(self.ptr.cast::<u8>(), self.length) }
+    }
+
+    pub fn read_chunk(&self, offset: usize, chunk_size: usize) -> Option<Vec<u8>> {
+        let chunk_size = std::cmp::max(MIN_READ_CHUNK_SIZE, chunk_size);
+
+        if offset % chunk_size != 0 {
+            return None;
+        }
+        if offset > self.length() {
+            return None;
+        }
+
+        let end = std::cmp::min(offset.saturating_add(chunk_size), self.length());
+        Some(self.as_slice()[offset..end].to_vec())
+    }
+
+    pub fn read_decompress_chunk(
+        &self,
+        offset: usize,
+        chunk_size: usize,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        // read compressed bytes
+        let Some(compressed_buffer) = self.read_chunk(offset, chunk_size) else {
+            return Ok(None);
+        };
+
+        // create decompress stream
+        let mut decompress_stream = ZstdDecompressStream::new(MIN_READ_CHUNK_SIZE)?;
+
+        // decompress bytes
+        let mut decompressed_buffer = vec![];
+        decompress_stream.write(&compressed_buffer, &mut decompressed_buffer)?;
+
+        Ok(Some(decompressed_buffer))
     }
 }
 

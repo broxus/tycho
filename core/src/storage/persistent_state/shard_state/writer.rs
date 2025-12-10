@@ -236,22 +236,28 @@ impl<'a> ShardStateWriter<'a> {
         let flags = 0b1000_0000u8 | (REF_SIZE as u8);
         buffer.write_all(&[0xb5, 0xee, 0x9c, 0x72, flags, offset_size as u8])?;
 
-        // Unique cell count | current len: 6
+        // Part prefix and root hash when writing part (8+32=40) | current len: 6 (part)
+        if let Some(part_shard_prefix) = self.part_shard_prefix {
+            buffer.write_all(&part_shard_prefix.to_be_bytes())?;
+            buffer.write_all(root_hash.as_slice())?;
+        }
+
+        // Unique cell count | current len: 6 (main) / +40 (part)
         buffer.write_all(&cell_count.to_be_bytes())?;
 
-        // Root count        | current len: 10
+        // Root count        | current len: 10 (main) / +40 (part)
         buffer.write_all(&1u32.to_be_bytes())?;
 
-        // Absent cell count | current len: 14
+        // Absent cell count | current len: 14 (main) / +40 (part)
         buffer.write_all(&[0, 0, 0, 0])?;
 
-        // Total cell size   | current len: 18
+        // Total cell size   | current len: 18 (main) / +40 (part)
         buffer.write_all(&intermediate.total_size.to_be_bytes()[(8 - offset_size)..8])?;
 
-        // Root index        | current len: 18 + offset_size
+        // Root index        | current len: 18 + offset_size (main) / +40 (part)
         buffer.write_all(&[0, 0, 0, 0])?;
 
-        // Cells index       | current len: 22 + offset_size
+        // Cells index       | current len: 22 + offset_size (main) / +40 (part)
         tracing::info!("started building index");
         {
             let mut next_offset = 0;
@@ -262,7 +268,7 @@ impl<'a> ShardStateWriter<'a> {
         }
         tracing::info!("finished building index");
 
-        // Cells             | current len: 22 + offset_size * (1 + cell_sizes.len())
+        // Cells             | current len: 22 + offset_size * (1 + cell_sizes.len())  (main) / +40 (part)
         let mut cell_buffer = [0; 2 + 128 + 4 * REF_SIZE];
 
         // write cells from the intermediate reverse file

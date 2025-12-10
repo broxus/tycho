@@ -7,7 +7,7 @@ use tycho_block_util::block::{DisplayShardPrefix, ShardPrefix};
 use tycho_storage::fs::TempFileStorage;
 use tycho_storage::kv::StoredValue;
 use tycho_types::cell::*;
-use tycho_types::models::BlockId;
+use tycho_types::models::{BlockId, ShardIdent};
 use tycho_types::util::ArrayVec;
 use tycho_util::fs::MappedFile;
 use tycho_util::io::ByteOrderRead;
@@ -31,22 +31,22 @@ pub struct StoreStateContext {
 
 impl StoreStateContext {
     // Stores shard state and returns the hash of its root cell.
-    #[tracing::instrument(skip_all, fields(block_id = %block_id.as_short_id(), shard_prefix = %DisplayShardPrefix(&_shard_prefix)))]
+    #[tracing::instrument(skip_all, fields(block_id = %block_id.as_short_id(), shard_prefix = %DisplayShardPrefix(&shard_prefix)))]
     pub fn store<R>(
         &self,
         block_id: &BlockId,
         reader: R,
         parts_info: Option<Vec<ShardStatePartInfo>>,
-        _shard_prefix: ShardPrefix,
+        shard_prefix: ShardPrefix,
     ) -> Result<HashBytes>
     where
         R: std::io::Read,
     {
-        let preprocessed = self.preprocess(reader)?;
+        let preprocessed = self.preprocess(reader, shard_prefix)?;
         self.finalize(block_id, preprocessed, parts_info)
     }
 
-    fn preprocess<R>(&self, reader: R) -> Result<PreprocessedState>
+    fn preprocess<R>(&self, reader: R, shard_prefix: ShardPrefix) -> Result<PreprocessedState>
     where
         R: std::io::Read,
     {
@@ -54,9 +54,18 @@ impl StoreStateContext {
             .exact_unit("cells")
             .build(|msg| tracing::info!("preprocessing state... {msg}"));
 
-        let mut reader = ShardStateReader::begin(reader)?;
+        let is_part = shard_prefix != ShardIdent::PREFIX_FULL;
+        let mut reader = ShardStateReader::begin(reader, is_part)?;
         let header = *reader.header();
         tracing::debug!(?header);
+
+        // check if expected part prefix matches one in the header
+        if let Some(part_info) = header.part_info.as_ref() {
+            anyhow::ensure!(
+                part_info.prefix == shard_prefix,
+                "shard prefix in the persistent shard part file does not match the expected",
+            );
+        }
 
         pg.set_progress(header.cell_count);
 
@@ -226,16 +235,26 @@ impl StoreStateContext {
         }
 
         // Current entry contains root cell
-        let root_hash = ctx.entries_buffer.repr_hash();
-        ctx.final_check(root_hash)?;
+        let repr_hash = ctx.entries_buffer.repr_hash();
+        let root_hash = HashBytes::from_slice(repr_hash);
+
+        // check if actual part root hash matches one in the header
+        if let Some(part_info) = header.part_info.as_ref() {
+            anyhow::ensure!(
+                part_info.hash == root_hash,
+                "persistent shard part root hash in the file header does not match the actual",
+            );
+        }
+
+        ctx.final_check(repr_hash)?;
 
         self.cell_storage
-            .apply_temp_cell(HashBytes::wrap(root_hash), &parts_hashes)?;
+            .apply_temp_cell(&root_hash, &parts_hashes)?;
         ctx.clear_temp_cells(&self.cells_db)?;
 
         let shard_state_key = block_id.to_vec();
         let entry = ShardStateEntry {
-            root_hash: HashBytes(*root_hash),
+            root_hash,
             parts_info,
         };
         self.cells_db
