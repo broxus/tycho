@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use tokio::sync::Semaphore;
 use tycho_block_util::block::DisplayShardPrefix;
 use tycho_storage::fs::Dir;
+use tycho_types::cell::HashBytes;
 use tycho_types::models::BlockId;
 
 use crate::storage::persistent_state::BASE_DIR;
@@ -24,6 +25,15 @@ pub struct PersistentStateStoragePartLocalImpl {
 }
 
 impl PersistentStateStoragePart for PersistentStateStoragePartLocalImpl {
+    fn preload_state(
+        &self,
+        mc_seqno: u32,
+        block_id: &BlockId,
+        part_root_hash: HashBytes,
+    ) -> Result<()> {
+        self.inner.preload_state(mc_seqno, block_id, part_root_hash)
+    }
+
     fn try_reuse_persistent_state(
         &self,
         mc_seqno: u32,
@@ -35,6 +45,7 @@ impl PersistentStateStoragePart for PersistentStateStoragePartLocalImpl {
             .try_reuse_persistent_state(mc_seqno, block_id);
         Box::pin(fut)
     }
+
     fn store_shard_state_part(
         &self,
         cx: StoreStatePartContext,
@@ -92,6 +103,22 @@ struct Inner {
 }
 
 impl Inner {
+    fn preload_state(
+        &self,
+        mc_seqno: u32,
+        block_id: &BlockId,
+        part_root_hash: HashBytes,
+    ) -> Result<()> {
+        self.descriptor_cache.cache_shard_state(
+            mc_seqno,
+            block_id,
+            Some(self.shard_states_part.shard_prefix()),
+            Some(part_root_hash),
+            None,
+        )?;
+        Ok(())
+    }
+
     async fn try_reuse_persistent_state(
         self: Arc<Self>,
         mc_seqno: u32,
@@ -184,6 +211,7 @@ impl Inner {
                     mc_seqno,
                     &block_id,
                     Some(this.shard_states_part.shard_prefix()),
+                    Some(root_hash),
                     None,
                 )?;
                 res = Some(cache_res);
@@ -211,6 +239,7 @@ impl Inner {
         let StoreStatePartFileContext {
             mc_seqno,
             block_id,
+            root_hash,
             file,
             cancelled,
         } = cx;
@@ -261,6 +290,7 @@ impl Inner {
                     mc_seqno,
                     &block_id,
                     Some(this.shard_states_part.shard_prefix()),
+                    Some(root_hash),
                     None,
                 )?;
                 res = Some(cache_res);
@@ -310,11 +340,10 @@ impl Inner {
             // Ensure that permit is dropped only after cached state is used.
             let _permit = permit;
 
-            let end = std::cmp::min(offset.saturating_add(chunk_size), cached.file.length());
-            cached.file.as_slice()[offset..end].to_vec()
+            cached.file.read_chunk(offset, chunk_size)
         })
         .await?;
 
-        Ok(Some(data))
+        Ok(data)
     }
 }

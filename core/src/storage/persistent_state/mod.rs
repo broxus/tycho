@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::num::{NonZeroU32, NonZeroU64};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -20,6 +20,7 @@ use tycho_types::cell::{Cell, CellDescriptor, CellFamily, HashBytes};
 use tycho_types::merkle::make_pruned_branch;
 use tycho_types::models::{BlockId, PrevBlockRef};
 use tycho_util::FastHashMap;
+use tycho_util::fs::MappedFile;
 use tycho_util::sync::CancellationFlag;
 
 pub use self::descriptor_cache::PersistentState;
@@ -199,9 +200,19 @@ impl PersistentStateStorage {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn preload_states(&self) -> Result<()> {
         // For each mc_seqno directory
         let process_states = |this: &Inner, dir: &PathBuf, mc_seqno: u32| -> Result<()> {
+            #[derive(Default)]
+            struct ShardStatePartsInfo {
+                has_main: bool,
+                parts: Vec<ShardStatePartInfo>,
+            }
+
+            let mut shard_states: FastHashMap<BlockId, ShardStatePartsInfo> =
+                FastHashMap::default();
+
             'outer: for entry in std::fs::read_dir(dir)?.flatten() {
                 let path = entry.path();
                 // Skip subdirectories
@@ -211,41 +222,109 @@ impl PersistentStateStorage {
                 }
 
                 'file: {
-                    // Try to parse the file name as a block_id
-                    let Ok(block_id) = path
-                        // TODO should use file_prefix
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_str()
-                        .unwrap_or_default()
-                        .parse::<BlockId>()
+                    let Some((block_id, kind, part_shard_prefix)) =
+                        Self::parse_persistent_state_file_name(&path)
                     else {
                         break 'file;
                     };
 
-                    let extension = path
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .unwrap_or_default();
+                    if kind == PersistentStateKind::Queue {
+                        this.descriptor_cache
+                            .cache_state(mc_seqno, &block_id, kind, None, None, None)?;
+                        continue 'outer;
+                    }
 
-                    let Some(kind) = PersistentStateKind::from_extension(extension) else {
-                        break 'file;
-                    };
+                    if let Some(prefix) = part_shard_prefix {
+                        let parts_info = shard_states.entry(block_id).or_default();
 
-                    // TODO: should handle parts from files. State may already gone from shard_states
-                    let parts_info = if kind == PersistentStateKind::Shard {
-                        this.shard_states
-                            .load_state_entry(&block_id)?
-                            .map(|entry| entry.parts_info.unwrap_or_default())
+                        // open file
+                        let file = this.descriptor_cache.open_persistent_file(
+                            mc_seqno,
+                            &block_id,
+                            part_shard_prefix.as_ref(),
+                        )?;
+
+                        // read and decompress bytes from the beginning
+                        let mapped_file = MappedFile::from_existing_file(file)?;
+                        let decompressed_buffer = mapped_file
+                            .read_decompress_chunk(0, 0)?
+                            .context("unable to read and decompress data from part file")?;
+
+                        // create reader over decompressed buffer
+                        let reader = std::io::Cursor::new(&decompressed_buffer);
+
+                        // read part info
+                        let part_info = ShardStateReader::read_part_info_only(reader)?;
+
+                        // check if prefix match
+                        anyhow::ensure!(
+                            part_info.prefix == prefix,
+                            "shard prefix in the persistent shard part file does not match the expected",
+                        );
+
+                        tracing::debug!(target: "local_debug",
+                            block_id = %block_id.as_short_id(),
+                            shard_prefix = %DisplayShardPrefix(&part_info.prefix),
+                            part_root_hash = %part_info.hash,
+                            "found persistent shard file part",
+                        );
+
+                        // cache part info
+                        parts_info.parts.push(part_info);
                     } else {
-                        None
-                    };
-                    this.descriptor_cache
-                        .cache_state(mc_seqno, &block_id, kind, None, parts_info)?;
+                        tracing::debug!(target: "local_debug",
+                            block_id = %block_id.as_short_id(),
+                            "found persistent shard file main",
+                        );
+
+                        shard_states.entry(block_id).or_default().has_main = true;
+                    }
+
                     continue 'outer;
                 }
                 tracing::warn!(path = %path.display(), "unexpected file");
             }
+
+            for (block_id, parts_info) in shard_states {
+                if !parts_info.has_main {
+                    tracing::warn!(
+                        block_id = %block_id,
+                        "persistent shard state without main file skipped"
+                    );
+                    continue;
+                }
+
+                // preload into storage parts descriptor cache
+                let storage_parts = this.storage_parts.try_as_ref_ext()?;
+                for part_info in &parts_info.parts {
+                    let storage_part = storage_parts.try_get_ext(&part_info.prefix)?;
+                    storage_part.preload_state(mc_seqno, &block_id, part_info.hash)?;
+
+                    tracing::debug!(target: "local_debug",
+                        block_id = %block_id.as_short_id(),
+                        shard_prefix = %DisplayShardPrefix(&part_info.prefix),
+                        part_root_hash = %part_info.hash,
+                        "preloaded to descriptor cache persistent shard file part",
+                    );
+                }
+
+                // preload into main descriptor cache
+                let parts_info = (!parts_info.parts.is_empty()).then_some(parts_info.parts);
+                this.descriptor_cache.cache_state(
+                    mc_seqno,
+                    &block_id,
+                    PersistentStateKind::Shard,
+                    None,
+                    None,
+                    parts_info,
+                )?;
+
+                tracing::debug!(target: "local_debug",
+                    block_id = %block_id.as_short_id(),
+                    "preloaded to descriptor cache persistent shard file main",
+                );
+            }
+
             Ok(())
         };
 
@@ -282,6 +361,27 @@ impl PersistentStateStorage {
             Ok(())
         })
         .await?
+    }
+
+    fn parse_persistent_state_file_name(
+        path: &Path,
+    ) -> Option<(BlockId, PersistentStateKind, Option<ShardPrefix>)> {
+        let extension = path.extension()?.to_str()?;
+        let kind = PersistentStateKind::from_extension(extension)?;
+        let stem = path.file_stem()?.to_str()?;
+
+        let (block_id_str, part_shard_prefix) = match stem.rsplit_once("_part_") {
+            Some((block_id_str, part_shard_prefix_str)) if kind == PersistentStateKind::Shard => {
+                let part_shard_prefix = u64::from_str_radix(part_shard_prefix_str, 16).ok()?;
+
+                (block_id_str, Some(part_shard_prefix))
+            }
+            Some(_) => return None,
+            None => (stem, None),
+        };
+
+        let block_id = block_id_str.parse().ok()?;
+        Some((block_id, kind, part_shard_prefix))
     }
 
     // NOTE: This is intentionally a method, not a constant because
@@ -435,12 +535,10 @@ impl PersistentStateStorage {
                     // Ensure that permit is dropped only after cached state is used.
                     let _permit = permit;
 
-                    let end =
-                        std::cmp::min(offset.saturating_add(chunk_size), cached.file.length());
-                    cached.file.as_slice()[offset..end].to_vec()
+                    cached.file.read_chunk(offset, chunk_size)
                 })
                 .await
-                .ok()
+                .ok()?
             }
         }
     }
@@ -541,7 +639,7 @@ impl PersistentStateStorage {
             let state = if stored {
                 let cached = this
                     .descriptor_cache
-                    .cache_shard_state(mc_seqno, &block_id, None, parts_info)?;
+                    .cache_shard_state(mc_seqno, &block_id, None, None, parts_info)?;
                 Some(cached)
             } else {
                 None
@@ -624,6 +722,56 @@ impl PersistentStateStorage {
         Ok(Some(Arc::new(pruned_parts)))
     }
 
+    #[tracing::instrument(skip_all, fields(block_id = %_block_id.as_short_id()))]
+    pub fn check_downloaded_persistent_state_files(
+        &self,
+        _block_id: &BlockId,
+        main_file: File,
+        part_files: Vec<(ShardStatePartInfo, File)>,
+    ) -> Result<()> {
+        tracing::debug!(target: "local_debug",
+            part_files_len = part_files.len(),
+            "will check persistent shard part files",
+        );
+
+        // when we have part files check their prefixes and root hashes
+        for (info, part_file) in part_files {
+            let mapped_file = MappedFile::from_existing_file(part_file)?;
+
+            // read the minimal amount of bytes from the beginning
+            let buffer = mapped_file
+                .read_chunk(0, 0)
+                .context("unable to read data from part file")?;
+
+            // create reader over buffer
+            let reader = std::io::Cursor::new(&buffer);
+
+            // read part info
+            let part_info = ShardStateReader::read_part_info_only(reader)?;
+
+            // check if prefix match
+            anyhow::ensure!(
+                part_info.prefix == info.prefix,
+                "shard prefix in the persistent shard part file does not match the expected",
+            );
+
+            // check if root hash match
+            anyhow::ensure!(
+                part_info.hash == info.hash,
+                "persistent shard part root hash in the file header does not match the expected",
+            );
+
+            tracing::debug!(target: "local_debug",
+                part_shard_prefix = %DisplayShardPrefix(&info.prefix),
+                part_root_hash = %info.hash,
+                "persistent shard part file successfully checked",
+            );
+        }
+
+        // TODO: compare with info from the main file
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
     pub async fn store_shard_state_file(
         &self,
@@ -662,6 +810,7 @@ impl PersistentStateStorage {
                     StoreStatePartFileContext {
                         mc_seqno,
                         block_id,
+                        root_hash: info.hash,
                         file: part_file,
                         cancelled: Some(cancelled.clone()),
                     },
@@ -695,6 +844,7 @@ impl PersistentStateStorage {
             let state = this.descriptor_cache.cache_shard_state(
                 mc_seqno,
                 &block_id,
+                None,
                 None,
                 in_parts_info,
             )?;

@@ -19,7 +19,13 @@ mod impls {
 }
 
 pub trait PersistentStateStoragePart: Send + Sync {
-    // TODO: remove unused
+    fn preload_state(
+        &self,
+        mc_seqno: u32,
+        block_id: &BlockId,
+        part_root_hash: HashBytes,
+    ) -> Result<()>;
+
     fn try_reuse_persistent_state(
         &self,
         mc_seqno: u32,
@@ -58,6 +64,7 @@ pub struct StoreStatePartContext {
 pub struct StoreStatePartFileContext {
     pub mc_seqno: u32,
     pub block_id: BlockId,
+    pub root_hash: HashBytes,
     pub file: File,
     pub cancelled: Option<CancellationFlag>,
 }

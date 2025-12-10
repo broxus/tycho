@@ -799,11 +799,11 @@ impl StarterInner {
 
         let temp = self.storage.context().temp_files();
 
-        let state_file = temp.file(format!("state_{block_id}"));
-        let state_file_path = state_file.path().to_owned();
+        let main_file_builder = temp.file(format!("state_{block_id}"));
+        let main_file_path = main_file_builder.path().to_owned();
 
         let remove_state_files = |parts_paths: &[PathBuf]| {
-            let mut paths = vec![state_file_path.clone()];
+            let mut paths = vec![main_file_path.clone()];
             paths.extend_from_slice(parts_paths);
             // NOTE: Intentionally dont spawn yet
             async move {
@@ -818,24 +818,27 @@ impl StarterInner {
             }
         };
 
+        let open_part_files = |part_files_builders: &[(ShardStatePartInfo, FileBuilder)]| {
+            let mut part_files_for_storage = Vec::with_capacity(part_files_builders.len());
+            for (info, builder) in part_files_builders {
+                let mut builder_for_read = builder.clone();
+                let file = builder_for_read.read(true).open()?;
+                part_files_for_storage.push((*info, file));
+            }
+            Ok::<_, anyhow::Error>(part_files_for_storage)
+        };
+
         let mc_seqno = mc_block_id.seqno;
         let try_save_persistent = |block_handle: &BlockHandle, from: StorePersistentStateFrom| {
             let block_handle = block_handle.clone();
             async move {
                 match from {
                     // Fast reuse the downloaded file if possible
-                    StorePersistentStateFrom::File {
-                        mut main,
-                        mut parts,
-                    } => {
-                        let state_file = main.read(true).open()?;
-                        let mut part_files = Vec::new();
-                        for (info, mut builder) in parts.drain(..) {
-                            let file = builder.read(true).open()?;
-                            part_files.push((info, file));
-                        }
+                    StorePersistentStateFrom::File { mut main, parts } => {
+                        let main_file = main.read(true).open()?;
+                        let part_files = open_part_files(&parts)?;
                         persistent_states
-                            .store_shard_state_file(mc_seqno, &block_handle, state_file, part_files)
+                            .store_shard_state_file(mc_seqno, &block_handle, main_file, part_files)
                             .await
                     }
                     // Possibly slow full state traversal
@@ -867,10 +870,25 @@ impl StarterInner {
             //      then pass them into StorePersistentStateFrom::File to save
 
             if !handle.has_persistent_shard_state() {
-                let from = if state_file.exists() {
+                let from = if main_file_builder.exists() {
+                    let part_files_builders = vec![];
+
+                    // check downloaded persistent state files match each other
+                    if !part_files_builders.is_empty() {
+                        // open part files for check
+                        let main_file_for_check = main_file_builder.clone().read(true).open()?;
+                        let part_files_for_check = open_part_files(&part_files_builders)?;
+                        // perform check
+                        persistent_states.check_downloaded_persistent_state_files(
+                            block_id,
+                            main_file_for_check,
+                            part_files_for_check,
+                        )?;
+                    }
+
                     StorePersistentStateFrom::File {
-                        main: state_file.clone(),
-                        parts: Vec::new(),
+                        main: main_file_builder,
+                        parts: part_files_builders,
                     }
                 } else {
                     StorePersistentStateFrom::State(state.clone())
@@ -909,7 +927,7 @@ impl StarterInner {
 
             // download main file
             let main_file = match self
-                .download_persistent_state_file(found_state, None, &state_file)
+                .download_persistent_state_file(found_state, None, &main_file_builder)
                 .await
             {
                 Ok(file) => file,
@@ -920,7 +938,7 @@ impl StarterInner {
             };
 
             // download parts if exist
-            let mut part_files = Vec::new();
+            let mut part_files_builders = Vec::new();
             for part in &found_state.parts {
                 let mut part_downloaded = false;
                 let builder = temp.file(format!(
@@ -949,7 +967,7 @@ impl StarterInner {
                         DisplayShardPrefix(&part.prefix),
                     );
                 }
-                part_files.push((
+                part_files_builders.push((
                     ShardStatePartInfo {
                         hash: part.hash,
                         prefix: part.prefix,
@@ -958,12 +976,21 @@ impl StarterInner {
                 ));
             }
 
-            let mut part_files_for_storage = Vec::with_capacity(part_files.len());
-            for (info, builder) in &part_files {
-                let mut builder_for_read = builder.clone();
-                let file = builder_for_read.read(true).open()?;
-                part_files_for_storage.push((info.clone(), file));
+            // check downloaded persistent state files match each other
+            if !part_files_builders.is_empty() {
+                // open part files for check
+                let main_file_for_check = main_file_builder.clone().read(true).open()?;
+                let part_files_for_check = open_part_files(&part_files_builders)?;
+                // perform check
+                persistent_states.check_downloaded_persistent_state_files(
+                    block_id,
+                    main_file_for_check,
+                    part_files_for_check,
+                )?;
             }
+
+            // open part files for storage
+            let part_files_for_storage = open_part_files(&part_files_builders)?;
 
             // NOTE: `store_state_file` error is mostly unrecoverable since the operation
             //       context is too large to be atomic.
@@ -997,15 +1024,15 @@ impl StarterInner {
                 block_handles.set_is_zerostate(&block_handle);
             }
 
-            let parts_paths: Vec<_> = part_files
+            let parts_paths: Vec<_> = part_files_builders
                 .iter()
                 .map(|(_, builder)| builder.path().to_owned())
                 .collect();
 
             // store persistent files
             let from = StorePersistentStateFrom::File {
-                main: state_file.clone(),
-                parts: part_files,
+                main: main_file_builder,
+                parts: part_files_builders,
             };
             try_save_persistent(&block_handle, from)
                 .await
