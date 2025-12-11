@@ -1,5 +1,6 @@
 use std::num::NonZeroUsize;
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -16,6 +17,16 @@ pub struct ThreadPoolConfig {
 impl ThreadPoolConfig {
     // don't assign unique names to threads, for example using indexes:
     // that way they'll be merged into a pretty-looking single one in flame graphs
+
+    /// Initializes all required threadpools and runs the future until completion.
+    ///
+    /// NOTE: Don't mix with other initializations.
+    pub fn init_all_and_run<T, F: Future<Output = Result<T>>>(self, future: F) -> Result<T> {
+        // NOTE: Don't forget to add all strange threadpool inits when needed here.
+        self.init_reclaimer()?;
+        self.init_global_rayon_pool()?;
+        self.build_tokio_runtime()?.block_on(future)
+    }
 
     pub fn init_global_rayon_pool(&self) -> Result<(), rayon::ThreadPoolBuildError> {
         rayon::ThreadPoolBuilder::new()

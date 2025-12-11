@@ -43,27 +43,27 @@ enum SubCmd {
 #[derive(Parser)]
 struct CmdRun {
     /// Path to the node config. Default: `$TYCHO_HOME/config.json`
-    #[clap(long)]
+    #[clap(short, long)]
     config: Option<PathBuf>,
 
     /// Path to the global config. Default: `$TYCHO_HOME/global-config.json`
-    #[clap(long)]
+    #[clap(short, long)]
     global_config: Option<PathBuf>,
 
     /// Path to the node keys. Default: `$TYCHO_HOME/node_keys.json`
-    #[clap(long)]
+    #[clap(short, long)]
     keys: Option<PathBuf>,
 
     /// Path to the control socket. Default: `$TYCHO_HOME/control.sock`
-    #[clap(long)]
+    #[clap(short = 't', long)]
     control_socket: Option<PathBuf>,
 
     /// Path to the logger config.
-    #[clap(long)]
+    #[clap(short, long)]
     logger_config: Option<PathBuf>,
 
     /// List of zerostate files to import.
-    #[clap(long)]
+    #[clap(short = 'z', long)]
     import_zerostate: Option<Vec<PathBuf>>,
 
     /// Path to the work units tuner config.
@@ -71,11 +71,11 @@ struct CmdRun {
     wu_tuner_config: Option<PathBuf>,
 
     /// Overwrite cold boot type. Default: `latest-persistent`
-    #[clap(long)]
+    #[clap(short = 'b', long)]
     cold_boot: Option<ColdBootType>,
 
     /// Pass this flag if you used `just gen_network 1` for manual tests
-    #[clap(long, action)]
+    #[clap(short = 's', long, action)]
     single_node: bool,
 }
 
@@ -85,26 +85,9 @@ impl CmdRun {
             .context("failed to load node config")?
             .with_relative_paths(&args.home);
 
-        node_config.threads.init_global_rayon_pool()?;
-        node_config.threads.init_reclaimer()?;
-
         node_config
             .threads
-            .build_tokio_runtime()?
-            .block_on(async move {
-                let run_fut = tokio::spawn(self.run_impl(args, node_config));
-                let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
-                tokio::select! {
-                    res = run_fut => res.unwrap(),
-                    signal = stop_fut => match signal {
-                        Ok(signal) => {
-                            tracing::info!(?signal, "received termination signal");
-                            Ok(())
-                        }
-                        Err(e) => Err(e.into()),
-                    }
-                }
-            })
+            .init_all_and_run(signal::run_or_terminate(self.run_impl(args, node_config)))
     }
 
     async fn run_impl(self, args: BaseArgs, mut node_config: NodeConfig) -> Result<()> {

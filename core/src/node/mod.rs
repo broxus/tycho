@@ -10,6 +10,8 @@ use tycho_network::{
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::models::{BlockId, ValidatorSet};
 
+#[cfg(feature = "cli")]
+pub use self::cli::{CmdRunArgs, CmdRunOnlyArgs, CmdRunStatus, LightNodeConfig, LightNodeContext};
 pub use self::config::NodeBaseConfig;
 pub use self::keys::NodeKeys;
 use crate::block_strider::{
@@ -26,6 +28,8 @@ use crate::overlay_client::{PublicOverlayClient, ValidatorsResolver};
 use crate::s3::S3Client;
 use crate::storage::{CoreStorage, CoreStorageConfig};
 
+#[cfg(feature = "cli")]
+mod cli;
 mod config;
 mod keys;
 
