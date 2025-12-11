@@ -301,12 +301,11 @@ impl MempoolStoreImpl for MempoolDb {
         let mut conf = status_t.new_read_config();
         conf.set_iterate_lower_bound(start);
         conf.set_iterate_upper_bound(end_excl);
-        let mut iter = db.iterator_cf_opt(&status_t.cf(), conf, IteratorMode::Start);
+        let iter = db.iterator_cf_opt(&status_t.cf(), conf, IteratorMode::Start);
 
         let mut batch = WriteBatch::default();
         batch.delete_range_cf(&status_t.cf(), start, end_excl);
-        loop {
-            let Some(kv) = iter.next() else { break };
+        for kv in iter {
             let (k, v) = kv.context("status iter next")?;
             let new_v =
                 match StatusFlags::try_from_stored(&v).with_context(|| format_point_key(&k))? {
