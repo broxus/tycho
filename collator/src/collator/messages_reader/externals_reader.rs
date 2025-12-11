@@ -21,6 +21,7 @@ use crate::collator::messages_reader::state::external::{
     ExternalsReaderState,
 };
 use crate::collator::messages_reader::state::internal::DebugInternalsRangeReaderState;
+use crate::collator::messages_reader::state::with_prev_map_and_current;
 use crate::collator::types::{
     AnchorsCache, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff, ParsedMessage,
 };
@@ -599,26 +600,6 @@ impl<'a> ExternalsReader<'a> {
         Ok(metrics_by_partitions)
     }
 
-    fn split_state_range_at_key(
-        &mut self,
-        key: BlockSeqno,
-    ) -> (
-        Vec<(&BlockSeqno, &ExternalsRangeReaderState)>,
-        &mut ExternalsRangeReaderState,
-    ) {
-        // SAFETY: We take elements from BTreeMap: range `..key` (excluding key) and separately element `key`.
-        // They don't overlap, so we can have both immutable and mutable references simultaneously.
-        // The borrow checker can't verify this statically, hence unsafe.
-        unsafe {
-            let ptr = &self.reader_state.ranges as *const BTreeMap<_, _> as *mut BTreeMap<_, _>;
-
-            let prev_vec: Vec<_> = (*ptr).range(..key).collect();
-            let current = (*ptr).get_mut(&key).expect("range state should exist");
-
-            (prev_vec, current)
-        }
-    }
-
     pub fn collect_messages<V: InternalMessageValue>(
         &mut self,
         par_id: QueuePartitionIdx,
@@ -657,70 +638,75 @@ impl<'a> ExternalsReader<'a> {
         // To avoid pop and use mut iteration, first collect all seqnos in order
         let seqnos: Vec<BlockSeqno> = self.reader_state.ranges.keys().cloned().collect();
 
-        // Now iterate over the collected seqnos
         for &seqno in &seqnos {
-            let (prev_states, current_state) = self.split_state_range_at_key(seqno);
+            let should_break = with_prev_map_and_current(
+                &mut self.reader_state.ranges,
+                seqno,
+                |prev_map, current_state| {
+                    let range_state_by_partition =
+                        current_state.get_state_by_partition_mut(par_id)?;
 
-            let range_state_by_partition = current_state.get_state_by_partition_mut(par_id)?;
+                    // skip up to skip offset
+                    if curr_processed_offset > range_state_by_partition.skip_offset {
+                        // setup messages filter
+                        let mut msg_filter = MsgFilter::IncludeAll(IncludeAllMessages);
 
-            // skip up to skip offset
-            if curr_processed_offset > range_state_by_partition.skip_offset {
-                // setup messages filter
-                // do not check for expired externals if check chain time was not changed
-                // or if minimal chain time in buffer is above the threshold
-                let mut msg_filter = MsgFilter::IncludeAll(IncludeAllMessages);
-                if matches!(range_state_by_partition.last_expire_check_on_ct, Some(last) if next_chain_time > last)
-                    || range_state_by_partition.last_expire_check_on_ct.is_none()
-                {
-                    range_state_by_partition.last_expire_check_on_ct = Some(next_chain_time);
-                    let chain_time_threshold_ms =
-                        next_chain_time.saturating_sub(externals_expire_timeout_ms);
-                    if range_state_by_partition.buffer.min_ext_chain_time()
-                        < chain_time_threshold_ms
-                    {
-                        msg_filter = MsgFilter::SkipExpiredExternals(SkipExpiredExternals {
-                            chain_time_threshold_ms,
-                            total_skipped: &mut expired_msgs_count,
-                        });
+                        if matches!(range_state_by_partition.last_expire_check_on_ct, Some(last) if next_chain_time > last)
+                            || range_state_by_partition.last_expire_check_on_ct.is_none()
+                        {
+                            range_state_by_partition.last_expire_check_on_ct =
+                                Some(next_chain_time);
+                            let chain_time_threshold_ms =
+                                next_chain_time.saturating_sub(externals_expire_timeout_ms);
+                            if range_state_by_partition.buffer.min_ext_chain_time()
+                                < chain_time_threshold_ms
+                            {
+                                msg_filter =
+                                    MsgFilter::SkipExpiredExternals(SkipExpiredExternals {
+                                        chain_time_threshold_ms,
+                                        total_skipped: &mut expired_msgs_count,
+                                    });
+                            }
+                        }
+
+                        res.metrics.add_to_message_groups_timer.start();
+                        let FillMessageGroupResult {
+                            ops_count,
+                            collected_count,
+                            ..
+                        } = range_state_by_partition.buffer.fill_message_group(
+                            msg_group,
+                            buffer_limits.slots_count,
+                            buffer_limits.slot_vert_size,
+                            already_skipped_accounts,
+                            |account_id| {
+                                should_skip_external_account(
+                                    par_id,
+                                    account_id,
+                                    prev_msg_groups,
+                                    prev_partitions_readers,
+                                    curr_partition_reader,
+                                    curr_processed_offset,
+                                    for_shard_id,
+                                    prev_map,
+                                )
+                            },
+                            msg_filter,
+                        );
+                        res.metrics
+                            .add_to_msgs_groups_ops_count
+                            .saturating_add_assign(ops_count);
+                        res.metrics.add_to_message_groups_timer.stop();
+                        res.collected_count.saturating_add_assign(collected_count);
                     }
-                }
 
-                res.metrics.add_to_message_groups_timer.start();
-                let FillMessageGroupResult {
-                    ops_count,
-                    collected_count,
-                    ..
-                } = range_state_by_partition.buffer.fill_message_group(
-                    msg_group,
-                    buffer_limits.slots_count,
-                    buffer_limits.slot_vert_size,
-                    already_skipped_accounts,
-                    |account_id| {
-                        should_skip_external_account(
-                            par_id,
-                            account_id,
-                            prev_msg_groups,
-                            prev_partitions_readers,
-                            curr_partition_reader,
-                            curr_processed_offset,
-                            for_shard_id,
-                            &prev_states,
-                        )
-                    },
-                    msg_filter,
-                );
-                res.metrics
-                    .add_to_msgs_groups_ops_count
-                    .saturating_add_assign(ops_count);
-                res.metrics.add_to_message_groups_timer.stop();
-                res.collected_count.saturating_add_assign(collected_count);
-            }
+                    let range_processed_offset = range_state_by_partition.processed_offset;
 
-            let range_processed_offset = range_state_by_partition.processed_offset;
+                    Ok::<_, anyhow::Error>(curr_processed_offset <= range_processed_offset)
+                },
+            )?;
 
-            // collect messages from the next range
-            // only when current range processed offset is reached
-            if curr_processed_offset <= range_processed_offset {
+            if should_break {
                 break;
             }
         }
@@ -794,7 +780,7 @@ struct ReadExternalsRangeResult {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn should_skip_external_account<'a, V: InternalMessageValue>(
+fn should_skip_external_account<V: InternalMessageValue>(
     par_id: QueuePartitionIdx,
     account_id: &HashBytes,
     prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
@@ -802,7 +788,7 @@ fn should_skip_external_account<'a, V: InternalMessageValue>(
     curr_partition_reader: Option<&InternalsPartitionReader<'_, V>>,
     curr_processed_offset: u32,
     for_shard_id: ShardIdent,
-    prev_states: &Vec<(&'a BlockSeqno, &'a ExternalsRangeReaderState)>,
+    prev_states: &BTreeMap<u32, ExternalsRangeReaderState>,
 ) -> (bool, u64) {
     let mut check_ops_count = 0;
 
@@ -863,7 +849,7 @@ fn should_skip_external_account<'a, V: InternalMessageValue>(
     }
 
     // // check by previous externals ranges (those with seqno < current seqno)
-    for (_, state) in prev_states {
+    for (_, state) in prev_states.iter() {
         let buffer = &state.get_state_by_partition(par_id).unwrap().buffer;
 
         // check buffer

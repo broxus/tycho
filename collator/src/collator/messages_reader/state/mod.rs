@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+
+use anyhow::anyhow;
 use tycho_block_util::queue::QueueKey;
 
 use crate::collator::messages_reader::state::external::{
@@ -168,4 +171,75 @@ impl std::fmt::Display for DisplayShardReaderState<'_> {
             .field("current_position", &self.0.current_position)
             .finish()
     }
+}
+
+pub fn with_prev_map_and_current<K, V, F, R>(
+    map: &mut BTreeMap<K, V>,
+    key: K,
+    f: F,
+) -> anyhow::Result<R>
+where
+    K: Ord + Clone + std::fmt::Debug,
+    F: for<'s> FnOnce(&'s BTreeMap<K, V>, &'s mut V) -> anyhow::Result<R>,
+{
+    struct SplitGuard<'m, K: Ord + Clone, V> {
+        left: &'m mut BTreeMap<K, V>,
+        right: BTreeMap<K, V>,
+        key: K,
+        current: Option<V>,
+    }
+
+    impl<'m, K: Ord + Clone, V> Drop for SplitGuard<'m, K, V> {
+        fn drop(&mut self) {
+            if let Some(current) = self.current.take() {
+                self.left.insert(self.key.clone(), current);
+            }
+            self.left.append(&mut self.right);
+        }
+    }
+
+    let left = map;
+    let mut right = left.split_off(&key);
+
+    let current = right
+        .remove(&key)
+        .ok_or_else(|| anyhow!("current state not found: {:?}", key))?;
+
+    let mut guard = SplitGuard {
+        left,
+        right,
+        key,
+        current: Some(current),
+    };
+
+    let prev_map: &BTreeMap<K, V> = &*guard.left;
+    let current_state: &mut V = guard.current.as_mut().unwrap();
+
+    f(prev_map, current_state)
+}
+
+pub fn with_prev_list_and_current<K, V, F, R>(
+    map: &mut BTreeMap<K, V>,
+    key: K,
+    prev_keys: &[K],
+    f: F,
+) -> anyhow::Result<R>
+where
+    K: Ord + Clone + Copy + std::fmt::Debug,
+    F: for<'s> FnOnce(Vec<&'s V>, &'s mut V) -> anyhow::Result<R>,
+{
+    with_prev_map_and_current(map, key, |prev_map, current| {
+        let mut prev = Vec::with_capacity(prev_keys.len());
+        for k in prev_keys {
+            debug_assert!(
+                k < &key,
+                "prev key must be < current key: prev={k:?} curr={key:?}"
+            );
+            let st = prev_map
+                .get(k)
+                .ok_or_else(|| anyhow!("state: {:?} not found", k))?;
+            prev.push(st);
+        }
+        f(prev, current)
+    })
 }
