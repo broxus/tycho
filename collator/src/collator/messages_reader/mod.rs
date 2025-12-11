@@ -222,14 +222,11 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             .or_default();
         partition_reader_states.entry(LP_PARTITION_ID).or_default();
 
-        let main_ptr = partition_reader_states.get_mut(&MAIN_PARTITION_ID).unwrap() as *mut _;
-        let lp_ptr = partition_reader_states.get_mut(&LP_PARTITION_ID).unwrap() as *mut _;
-
-        // SAFETY: We take two different elements from BTreeMap (different partition IDs) and pass them
-        // to different handlers (InternalsPartitionReader::new), they don't overlap. The borrow checker
-        // can't verify this statically, hence unsafe.
-        let main_state = unsafe { &mut *main_ptr };
-        let lp_state = unsafe { &mut *lp_ptr };
+        let [Some(main_state), Some(lp_state)] =
+            partition_reader_states.get_disjoint_mut([&MAIN_PARTITION_ID, &LP_PARTITION_ID])
+        else {
+            unreachable!("partition must exist after or_default()");
+        };
 
         let mut remaning_msg_stats = None;
         if let Some(internal_queue_statistics) = res.internal_queue_statistics.as_mut() {
@@ -401,7 +398,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             //      otherwise if we drop processing offset only in one partition
             //      when messages from other partitions are not collected
             //      then it will cause incorrect messages refill after sync
-            try_sync_processing_offsets(internals_reader, &mut self.externals_reader)?;
+            // try_sync_processing_offsets(internals_reader, &mut self.externals_reader)?;
         }
 
         // build queue diff
@@ -1540,6 +1537,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
     }
 }
 
+#[allow(dead_code)]
 fn try_sync_processing_offsets<V: InternalMessageValue>(
     par_reader: &mut InternalsPartitionReader<'_, V>,
     externals_reader: &mut ExternalsReader<'_>,

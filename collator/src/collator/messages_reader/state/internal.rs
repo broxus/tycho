@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_types::models::{IntAddr, ShardIdent};
+use tycho_util::FastHashMap;
 
 use crate::collator::messages_buffer::MessagesBuffer;
 use crate::collator::messages_reader::state::{DisplayShardReaderState, ShardReaderState};
@@ -13,7 +14,7 @@ use crate::types::{DebugIter, ProcessedTo};
 
 #[derive(Default)]
 pub struct InternalsReaderState {
-    pub partitions: BTreeMap<QueuePartitionIdx, InternalsPartitionReaderState>,
+    pub partitions: FastHashMap<QueuePartitionIdx, InternalsPartitionReaderState>,
     pub cumulative_statistics: Option<CumulativeStatistics>,
 }
 

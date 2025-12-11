@@ -15,10 +15,10 @@ use crate::collator::messages_reader::internals_range_reader::{
     CollectMessagesFromRangeReaderResult, InternalsRangeReader, InternalsRangeReaderInfo,
     InternalsRangeReaderKind,
 };
-use crate::collator::messages_reader::state::ShardReaderState;
 use crate::collator::messages_reader::state::internal::{
     DebugInternalsRangeReaderState, InternalsPartitionReaderState, InternalsRangeReaderState,
 };
+use crate::collator::messages_reader::state::{ShardReaderState, with_prev_list_and_current};
 use crate::collator::messages_reader::{
     GetNextMessageGroupMode, MessagesReaderMetrics, MessagesReaderStage, internals_range_reader,
 };
@@ -945,31 +945,37 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
 
             let curr_processed_offset = reader_state.curr_processed_offset;
 
-            let (prev_readers_states, current_range_state) =
-                get_reader_states_refs(reader_state, seqno, prev_readers_states_seqnos.as_slice())?;
+            let mut range_reader_processed_offset = 0u32;
+            with_prev_list_and_current(
+                &mut reader_state.ranges,
+                *seqno,
+                prev_readers_states_seqnos.as_slice(),
+                |prev_readers_states, current_range_state| {
+                    // skip up to skip offset
+                    if curr_processed_offset > current_range_state.skip_offset {
+                        res.metrics.add_to_message_groups_timer.start();
+                        let CollectMessagesFromRangeReaderResult {
+                            mut collected_int_msgs,
+                            ops_count,
+                        } = range_reader.collect_messages(
+                            msg_group,
+                            prev_par_readers,
+                            &prev_readers_states,
+                            prev_msg_groups,
+                            already_skipped_accounts,
+                            current_range_state,
+                        );
+                        res.metrics
+                            .add_to_msgs_groups_ops_count
+                            .saturating_add_assign(ops_count);
+                        res.metrics.add_to_message_groups_timer.stop();
+                        res.collected_int_msgs.append(&mut collected_int_msgs);
+                    }
 
-            // skip up to skip offset
-            if curr_processed_offset > current_range_state.skip_offset {
-                res.metrics.add_to_message_groups_timer.start();
-                let CollectMessagesFromRangeReaderResult {
-                    mut collected_int_msgs,
-                    ops_count,
-                } = range_reader.collect_messages(
-                    msg_group,
-                    prev_par_readers,
-                    &prev_readers_states,
-                    prev_msg_groups,
-                    already_skipped_accounts,
-                    current_range_state,
-                );
-                res.metrics
-                    .add_to_msgs_groups_ops_count
-                    .saturating_add_assign(ops_count);
-                res.metrics.add_to_message_groups_timer.stop();
-                res.collected_int_msgs.append(&mut collected_int_msgs);
-            }
-
-            let range_reader_processed_offset = current_range_state.processed_offset;
+                    range_reader_processed_offset = current_range_state.processed_offset;
+                    Ok(())
+                },
+            )?;
 
             prev_readers_states_seqnos.push(*seqno);
 
@@ -1151,39 +1157,4 @@ fn load_msg_stats<V: InternalMessageValue>(
     range_reader_state.msgs_stats = Some(Arc::new(msgs_stats));
 
     Ok(())
-}
-
-fn get_reader_states_refs<'a>(
-    reader_state: &'a mut InternalsPartitionReaderState,
-    current_seqno: &'a BlockSeqno,
-    prev_seqnos: &'a [BlockSeqno],
-) -> Result<(
-    Vec<&'a InternalsRangeReaderState>,
-    &'a mut InternalsRangeReaderState,
-)> {
-    assert!(
-        !prev_seqnos.contains(current_seqno),
-        "current_seqno should not be in prev_seqnos"
-    );
-
-    // collect immutable references to previous states
-    let mut prev_states = Vec::with_capacity(prev_seqnos.len());
-    for seqno in prev_seqnos {
-        let state_ptr = reader_state
-            .ranges
-            .get(seqno)
-            .ok_or_else(|| anyhow::anyhow!("State not found: {:?}", seqno))?
-            as *const InternalsRangeReaderState;
-
-        // SAFETY: we ensure that mutable reference to current_state is not overlapping
-        prev_states.push(unsafe { &*state_ptr });
-    }
-
-    // collect mutable reference to current state
-    let current_state = reader_state
-        .ranges
-        .get_mut(current_seqno)
-        .ok_or_else(|| anyhow::anyhow!("Current state not found: {:?}", current_seqno))?;
-
-    Ok((prev_states, current_state))
 }

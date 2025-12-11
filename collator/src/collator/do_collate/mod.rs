@@ -398,8 +398,6 @@ impl CollatorStdImpl {
             .clone();
 
         let block_id_short = state.collation_data.block_id_short;
-        let next_lt = state.collation_data.next_lt;
-        let start_lt = state.collation_data.start_lt;
         let prev_diff_hash = state
             .prev_shard_data
             .prev_queue_diff_hashes()
@@ -450,8 +448,8 @@ impl CollatorStdImpl {
             match messages.first_key_value().zip(messages.last_key_value()) {
                 Some(((min, _), (max, _))) => (*min, *max),
                 None => (
-                    QueueKey::min_for_lt(start_lt),
-                    QueueKey::max_for_lt(next_lt),
+                    QueueKey::min_for_lt(finalize_phase.state.collation_data.start_lt),
+                    QueueKey::max_for_lt(finalize_phase.state.collation_data.next_lt),
                 ),
             }
         };
