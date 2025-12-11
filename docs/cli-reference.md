@@ -197,18 +197,18 @@ Run a Tycho node
 
 ###### **Options:**
 
-* `--config <CONFIG>` — Path to the node config. Default: `$TYCHO_HOME/config.json`
-* `--global-config <GLOBAL_CONFIG>` — Path to the global config. Default: `$TYCHO_HOME/global-config.json`
-* `--keys <KEYS>` — Path to the node keys. Default: `$TYCHO_HOME/node_keys.json`
-* `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
-* `--logger-config <LOGGER_CONFIG>` — Path to the logger config
-* `--import-zerostate <IMPORT_ZEROSTATE>` — List of zerostate files to import
+* `-c`, `--config <CONFIG>` — Path to the node config. Default: `$TYCHO_HOME/config.json`
+* `-g`, `--global-config <GLOBAL_CONFIG>` — Path to the global config. Default: `$TYCHO_HOME/global-config.json`
+* `-k`, `--keys <KEYS>` — Path to the node keys. Default: `$TYCHO_HOME/node_keys.json`
+* `-t`, `--control-socket <CONTROL_SOCKET>` — Path to the control socket. Default: `$TYCHO_HOME/control.sock`
+* `-l`, `--logger-config <LOGGER_CONFIG>` — Path to the logger config
+* `-z`, `--import-zerostate <IMPORT_ZEROSTATE>` — List of zerostate files to import
 * `--wu-tuner-config <WU_TUNER_CONFIG>` — Path to the work units tuner config
-* `--cold-boot <COLD_BOOT>` — Overwrite cold boot type. Default: `latest-persistent`
+* `-b`, `--cold-boot <COLD_BOOT>` — Overwrite cold boot type. Default: `latest-persistent`
 
   Possible values: `genesis`, `latest-persistent`
 
-* `--single-node` — Pass this flag if you used `just gen_network 1` for manual tests
+* `-s`, `--single-node` — Pass this flag if you used `just gen_network 1` for manual tests
 
 
 

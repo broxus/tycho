@@ -91,6 +91,12 @@ impl Default for NodeBaseConfig {
 }
 
 impl NodeBaseConfig {
+    #[cfg(feature = "cli")]
+    pub async fn resolve_public_ip(&self) -> anyhow::Result<std::net::SocketAddr> {
+        let public_ip = tycho_util::cli::resolve_public_ip(self.public_ip).await?;
+        Ok(std::net::SocketAddr::new(public_ip, self.port))
+    }
+
     pub fn with_relative_paths<P: AsRef<Path>>(mut self, base_dir: P) -> Self {
         let base_dir = base_dir.as_ref();
         self.storage.root_dir = base_dir.join(self.storage.root_dir);

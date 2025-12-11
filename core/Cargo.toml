@@ -83,7 +83,7 @@ similar-asserts = { workspace = true }
 [features]
 default = ["cells-metrics"]
 test = []
-cli = ["dep:clap", "clap/derive"]
+cli = ["dep:clap", "clap/derive", "tycho-util/cli"]
 cells-metrics = []
 s3 = ["dep:object_store", "object_store/aws"]
 
