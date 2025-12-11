@@ -1,8 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
 use std::num::NonZeroU16;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use parking_lot::lock_api::MutexGuard;
+use parking_lot::{Mutex, RawMutex};
 use tokio::sync::{Semaphore, TryAcquireError};
 
 use crate::models::Round;
@@ -31,95 +32,144 @@ impl Limiter {
 
     #[must_use]
     pub async fn enter(&self, round: Round) -> LimiterGuard<'_> {
-        self.acquire(round).await;
-        LimiterGuard {
-            limiter: self,
-            round,
-        }
-    }
-
-    async fn acquire(&self, round: Round) {
-        let semaphore_opt = {
-            let mut inner = self.0.lock();
-            // permits cannot be zero: at least one is always allowed, others are concurrent to it
-            if inner.permits.checked_sub(1).is_some() {
-                tracing::trace!("{round:?} permits bypass");
-                inner.permits -= 1;
-                None
-            } else {
-                let waiter = inner.waiters.entry(round).or_insert_with(|| Waiter {
-                    semaphore: Arc::new(Semaphore::new(0)), // create locked
-                    inflight: 0,
-                });
-                waiter.inflight += 1;
-                tracing::trace!("{round:?} semaphore get, pos {}", waiter.inflight);
-                Some(waiter.clone())
-            }
+        let maybe_wait = {
+            let mut inner = self.lock();
+            inner.get_waiter(round)
         };
+        if let Some(wait) = maybe_wait {
+            let on_cancel = || self.lock().cancel_inflight(round, &wait.semaphore);
+            wait.acquire(round, on_cancel).await;
+        }
+        LimiterGuard { limiter: self }
+    }
 
-        if let Some(waiter) = semaphore_opt {
-            let permit_or_closed = match waiter.semaphore.try_acquire() {
-                Ok(permit) => Some(permit),
-                Err(TryAcquireError::NoPermits) => waiter.semaphore.acquire().await.ok(),
-                Err(TryAcquireError::Closed) => None,
-            };
-            match permit_or_closed {
-                Some(permit) => {
-                    tracing::trace!("{round:?} semaphore acquire, pos {}", waiter.inflight);
-                    permit.forget(); // may add permit to another round or to bypassed on drop
-                }
-                None => {
-                    // semaphore drop may follow last permit
-                    tracing::trace!(
-                        "{round:?} semaphore dropped before acquire, pos {}",
-                        waiter.inflight
-                    );
-                }
-            }
-        } else {
+    fn lock(&self) -> MutexGuard<'_, RawMutex, LimiterInner> {
+        self.0.lock()
+    }
+}
+
+impl LimiterInner {
+    fn get_waiter(&mut self, round: Round) -> Option<Waiter> {
+        // permits cannot be zero: at least one is always allowed, others are concurrent to it
+        if self.permits > 0 {
+            self.permits -= 1;
             tracing::trace!("{round:?} permits bypass");
+            None
+        } else {
+            let waiter = self.waiters.entry(round).or_insert_with(|| Waiter {
+                semaphore: Arc::new(Semaphore::new(0)), // create locked
+                inflight: 0,
+            });
+            waiter.inflight += 1;
+            tracing::trace!("{round:?} semaphore get, pos {}", waiter.inflight);
+            Some(waiter.clone())
         }
     }
 
-    fn exit(&self, round: Round) {
-        let mut inner = self.0.lock();
+    /// permit was not acquired, but may have been granted just before a wait was cancelled
+    fn cancel_inflight(&mut self, round: Round, semaphore: &Arc<Semaphore>) {
+        let mut has_free_permit = false;
+        match self.waiters.entry(round) {
+            btree_map::Entry::Occupied(mut entry) => {
+                let waiter = entry.get_mut();
+                if Arc::ptr_eq(&waiter.semaphore, semaphore) {
+                    // if there's a permit, then our task was granted under lock and then cancelled
+                    has_free_permit = semaphore.forget_permits(1) == 1;
+                } else {
+                    // ABA: our entry was removed after a chain of some `Self::exit()`,
+                    // so our semaphore was granted a permit for each inflight task;
+                    // our task is cancelled and our permit is in the semaphore,
+                    // maybe with some other cancelled task permits;
+                    // it's fair to pass our permit to other waiter, there is at least one waiting
+                    let drained = semaphore.forget_permits(1);
+                    assert_eq!(drained, 1, "must have been granted 1 permit under lock");
+                    waiter.semaphore.add_permits(drained);
+                }
+                // if `exit()` will not be called, reduce inflight manually
+                if !has_free_permit {
+                    match waiter.inflight.checked_sub(1) {
+                        Some(0) => {
+                            entry.remove(); // it was the last one
+                        }
+                        Some(decreased) => waiter.inflight = decreased,
+                        None => panic!("{round:?} limiter entry must have been removed"),
+                    }
+                }
+            }
+            btree_map::Entry::Vacant(_) => {
+                // some `Self::exit()` removed the last entry for us, granting 1 permit under lock;
+                // `Semaphore::acquire()` is cancel-safe, so it returned permits to the semaphore
+                has_free_permit = semaphore.forget_permits(1) == 1;
+                assert!(has_free_permit, "last inflight must have 1 permit");
+            }
+        }
+        if has_free_permit {
+            self.exit(); // redistribute keeping inflight counter right
+        }
+    }
 
-        if let Some(mut entry) = inner.waiters.last_entry() {
-            let key = *entry.key();
+    fn exit(&mut self) {
+        if let Some(mut entry) = self.waiters.last_entry() {
+            let round = *entry.key();
             let waiter = entry.get_mut();
-            tracing::trace!(
-                "{key:?} semaphore release from {round:?}, left {}",
-                waiter.inflight
-            );
+            tracing::trace!("{round:?} permit grant, left {}", waiter.inflight);
             waiter.semaphore.add_permits(1);
             match waiter.inflight.checked_sub(1) {
                 Some(0) => {
                     entry.remove(); // it was the last one
                 }
                 Some(decreased) => waiter.inflight = decreased,
-                None => panic!("limiter inflight counter for round {} underflow", key.0),
+                None => panic!("{round:?} limiter entry must have been removed"),
             }
         } else {
-            tracing::trace!("{round:?} permits release, left {}", inner.permits);
-            match inner.permits.checked_add(1) {
-                Some(increased) => inner.permits = increased,
-                None => {
-                    // It's OK if `ConsensusConfig.download_tasks` was decreased
-                    panic!("limiter permits counter overflow for round {}", round.0)
-                }
+            tracing::trace!("free permit released, left {}", self.permits);
+            match self.permits.checked_add(1) {
+                Some(increased) => self.permits = increased,
+                None => panic!("limiter permits counter overflow"),
             }
+        }
+    }
+}
+
+impl Waiter {
+    async fn acquire<F: FnOnce()>(&self, round: Round, on_cancel: F) {
+        let permit_or_closed = match self.semaphore.try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(TryAcquireError::NoPermits) => {
+                struct CancelGuard<F: FnOnce()>(Option<F>);
+                impl<F: FnOnce()> Drop for CancelGuard<F> {
+                    fn drop(&mut self) {
+                        if let Some(on_cancel) = self.0.take() {
+                            on_cancel();
+                        }
+                    }
+                }
+                let mut cancel_guard = CancelGuard(Some(on_cancel));
+                let permit_or_closed = self.semaphore.acquire().await.ok();
+                cancel_guard.0 = None;
+                permit_or_closed
+            }
+            Err(TryAcquireError::Closed) => None,
+        };
+
+        if let Some(permit) = permit_or_closed {
+            tracing::trace!("{round:?} semaphore acquire, pos {}", self.inflight);
+            permit.forget(); // may add permit to another round or to bypassed on drop
+        } else {
+            // semaphore drop may follow last permit
+            let inflight = self.inflight;
+            tracing::trace!("{round:?} semaphore dropped before acquire, pos {inflight}");
         }
     }
 }
 
 pub struct LimiterGuard<'a> {
     limiter: &'a Limiter,
-    round: Round,
 }
 
 impl Drop for LimiterGuard<'_> {
     fn drop(&mut self) {
-        self.limiter.exit(self.round);
+        self.limiter.lock().exit();
     }
 }
 
@@ -283,7 +333,7 @@ mod tests {
 
     fn ensure_roundtrip(limiter: Arc<Limiter>, permits: NonZeroU16) -> Result<()> {
         let limiter = Arc::into_inner(limiter).expect("must be last ref");
-        let inner = limiter.0.lock();
+        let inner = limiter.lock();
         anyhow::ensure!(
             inner.permits == permits.get(),
             "all bypass permit credits must be returned, got {}",
