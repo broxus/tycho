@@ -246,8 +246,6 @@ macro_rules! method_to_queued_async_closure {
 #[cfg(test)]
 #[tokio::test]
 async fn test() {
-    use crate::method_to_queued_async_closure;
-
     struct Worker {}
     impl Worker {
         async fn action(&mut self, arg: &str) -> Result<String> {

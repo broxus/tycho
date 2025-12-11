@@ -197,8 +197,6 @@ pub fn project_root() -> Result<PathBuf, std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     #[allow(dead_code)]
     fn realloc_enum() {
