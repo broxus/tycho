@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, btree_map};
 use std::num::NonZeroU64;
 use std::pin::pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use bytesize::ByteSize;
 use futures_util::future::BoxFuture;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
@@ -31,12 +32,22 @@ use crate::storage::CoreStorage;
 pub struct ArchiveBlockProviderConfig {
     /// Maximum memory allowed for archives.
     pub max_archive_to_memory_size: ByteSize,
+
+    /// How many of archives to prefetch ahead.
+    pub prefetch_archives: usize,
+
+    /// At most how much of archives to prefetch ahead.
+    ///
+    /// Default: 4 GB
+    pub prefetch_memory_soft_limit: ByteSize,
 }
 
 impl Default for ArchiveBlockProviderConfig {
     fn default() -> Self {
         Self {
             max_archive_to_memory_size: ByteSize::mb(100),
+            prefetch_archives: 10,
+            prefetch_memory_soft_limit: ByteSize::gb(4),
         }
     }
 }
@@ -60,11 +71,12 @@ impl ArchiveBlockProvider {
             inner: Arc::new(Inner {
                 client: client.into_archive_client(),
                 proof_checker,
-
-                known_archives: parking_lot::Mutex::new(Default::default()),
-
+                known_archives: Mutex::new(Default::default()),
                 storage,
                 memory,
+                prefetch_archives: config.prefetch_archives,
+                prefetch_memory_soft_limit: config.prefetch_memory_soft_limit.0,
+                cleaned_until: AtomicU32::new(0),
             }),
         }
     }
@@ -166,83 +178,143 @@ impl ArchiveBlockProvider {
 
 struct Inner {
     storage: CoreStorage,
-
     client: Arc<dyn ArchiveClient>,
     proof_checker: ProofChecker,
-
-    known_archives: parking_lot::Mutex<ArchivesMap>,
-
+    known_archives: Mutex<ArchivesMap>,
     memory: Arc<ArchiveMemoryUsage>,
+    prefetch_archives: usize,
+    prefetch_memory_soft_limit: u64,
+    cleaned_until: AtomicU32,
 }
 
 impl Inner {
     async fn get_archive(&self, mc_seqno: u32) -> Option<(u32, ArchiveInfo)> {
         loop {
-            let mut pending = 'pending: {
-                let mut guard = self.known_archives.lock();
-
-                // Search for the downloaded archive or for and existing downloader task.
-                for (archive_key, value) in guard.iter() {
-                    match value {
-                        ArchiveSlot::Downloaded(info) => {
-                            if info.archive.mc_block_ids.contains_key(&mc_seqno) {
-                                return Some((*archive_key, info.clone()));
-                            }
-                        }
-                        ArchiveSlot::Pending(task) => break 'pending task.clone(),
-                    }
-                }
-
-                // Start downloading otherwise
-                let task = self.make_downloader().spawn(mc_seqno);
-                guard.insert(mc_seqno, ArchiveSlot::Pending(task.clone()));
-
-                task
+            let mut pending = match self.find_downloaded_or_spawn(mc_seqno) {
+                // Archive for this seqno was already downloaded.
+                Ok(res) => return Some(res),
+                // Otherwise wait for the task to complete.
+                Err(pending) => pending,
             };
 
             // Wait until the pending task is finished or cancelled
-            let mut res = None;
-            let mut finished = false;
-            loop {
-                match &*pending.rx.borrow_and_update() {
-                    ArchiveTaskState::None => {}
-                    ArchiveTaskState::Finished(archive) => {
-                        res = archive.clone();
-                        finished = true;
-                        break;
-                    }
-                    ArchiveTaskState::Cancelled => break,
-                }
-                if pending.rx.changed().await.is_err() {
-                    break;
-                }
-            }
+            let (res, finished) = match pending.wait().await {
+                ArchiveTaskState::Finished(state) => (state, true),
+                ArchiveTaskState::Cancelled => (None, false),
+            };
 
             // Replace pending with downloaded
-            match self.known_archives.lock().entry(pending.archive_key) {
-                btree_map::Entry::Vacant(_) => {
-                    // Do nothing if the entry was already removed.
+            self.set_downloaded(pending.archive_key, res.as_ref());
+
+            // Handle task result.
+            match res {
+                _ if !finished => {
+                    tracing::warn!(mc_seqno, "archive task cancelled while in use");
                 }
-                btree_map::Entry::Occupied(mut entry) => match &res {
-                    None => {
-                        // Task was either cancelled or received `TooNew` so no archive received.
-                        entry.remove();
-                    }
-                    Some(info) => {
-                        // Task was finished with a non-empty result so store it.
-                        entry.insert(ArchiveSlot::Downloaded(info.clone()));
-                    }
-                },
+                Some(info) if !info.archive.mc_block_ids.contains_key(&mc_seqno) => {
+                    tracing::warn!(mc_seqno, "waited on an unrelated task");
+                }
+                None if pending.archive_key > mc_seqno => {
+                    tracing::warn!(mc_seqno, "waited on a prefetched block");
+                }
+                // Return result if finished on a proper task.
+                res => return res.map(|info| (pending.archive_key, info)),
             }
 
-            if finished {
-                return res.map(|info| (pending.archive_key, info));
-            }
-
-            tracing::warn!(mc_seqno, "archive task cancelled while in use");
             // Avoid spinloop just in case.
             tokio::task::yield_now().await;
         }
+    }
+
+    fn find_downloaded_or_spawn(&self, mc_seqno: u32) -> Result<(u32, ArchiveInfo), ArchiveTask> {
+        let mut guard = self.known_archives.lock();
+
+        let existing = 'existing: {
+            let until_next_archive = mc_seqno.saturating_add(Archive::MAX_MC_BLOCKS_PER_ARCHIVE);
+
+            // Check all downloaded archives that can potentially contain
+            // the specified `mc_seqno`.
+            for (archive_key, slot) in guard.range(..until_next_archive) {
+                match slot {
+                    ArchiveSlot::Downloaded(info) => {
+                        // Use the first archive which contains the specified `mc_seqno`.
+                        if info.archive.mc_block_ids.contains_key(&mc_seqno) {
+                            break 'existing (*archive_key, info.clone());
+                        }
+                    }
+                    // For "current" blocks we should download at most
+                    // one archive at a time. This task could be related
+                    // to the old entry, but we still need to wait it.
+                    ArchiveSlot::Pending(task) => return Err(task.clone()),
+                }
+            }
+
+            // If no pending or downloaded archives found, start
+            // downloading a new one for the specified `mc_seqno`.
+            let task = self.make_downloader().spawn(mc_seqno);
+            guard.insert(mc_seqno, ArchiveSlot::Pending(task.clone()));
+
+            // Wait this task.
+            return Err(task);
+        };
+
+        // Start prefetching the next archive if needed.
+        self.try_prefetch(guard);
+
+        // Use the downloaded existing one.
+        Ok(existing)
+    }
+
+    fn set_downloaded(&self, archive_key: u32, res: Option<&ArchiveInfo>) {
+        let mut guard = self.known_archives.lock();
+
+        match guard.entry(archive_key) {
+            // Do nothing if the entry was already removed.
+            btree_map::Entry::Vacant(_) => {}
+            btree_map::Entry::Occupied(mut entry) => match res {
+                // Task was either cancelled or received `TooNew` so no archive received.
+                None => {
+                    entry.remove();
+                }
+                // Task was finished with a non-empty result so store it.
+                Some(info) => {
+                    entry.insert(ArchiveSlot::Downloaded(info.clone()));
+                }
+            },
+        }
+
+        // Duplicate task on the first mc seqno of this archive.
+        if let Some(info) = res
+            && let Some((first_mc_seqno, _)) = info.archive.mc_block_ids.first_key_value()
+            && let btree_map::Entry::Vacant(entry) = guard.entry(*first_mc_seqno)
+        {
+            entry.insert(ArchiveSlot::Downloaded(info.clone()));
+        }
+
+        // Start prefetching the next archive if needed.
+        self.try_prefetch(guard);
+    }
+
+    fn try_prefetch(&self, _guard: parking_lot::MutexGuard<'_, ArchivesMap>) {
+        let Some(preload_since) = self.cleaned_until.load(Ordering::Acquire).checked_add(1) else {
+            return;
+        };
+
+        if self.memory.used.lock().total >= self.prefetch_memory_soft_limit {
+            return;
+        }
+
+        let min_archive_key = preload_since.saturating_sub(Archive::MAX_MC_BLOCKS_PER_ARCHIVE);
+
+        // let mut to_prefetch = None;
+        // for (_, slot) in guard.range(min_archive_key..) {
+        //     match slot {
+        //         // Don't preload more than one archive
+        //         ArchiveSlot::Pending(_) => return,
+        //     }
+        // }
+
+        // TODO
     }
 
     fn remove_archive_if_same(&self, archive_key: u32, prev: &ArchiveInfo) -> bool {
@@ -306,6 +378,8 @@ impl Inner {
             bound,
             "removed known archives"
         );
+
+        self.cleaned_until.fetch_max(bound, Ordering::Release);
     }
 }
 
@@ -333,13 +407,13 @@ impl ArchiveDownloader {
         // TODO: Use a proper backoff here?
         const INTERVAL: Duration = Duration::from_secs(1);
 
-        let (tx, rx) = watch::channel(ArchiveTaskState::None);
+        let (tx, rx) = watch::channel(None);
 
         let guard = scopeguard::guard(tx, move |tx| {
             tracing::warn!(mc_seqno, "cancelled preloading archive");
             tx.send_modify(|prev| {
-                if !matches!(prev, ArchiveTaskState::Finished(..)) {
-                    *prev = ArchiveTaskState::Cancelled;
+                if !matches!(prev, Some(ArchiveTaskState::Finished(..))) {
+                    *prev = Some(ArchiveTaskState::Cancelled);
                 }
             });
         });
@@ -355,7 +429,7 @@ impl ArchiveDownloader {
                 match self.try_download(mc_seqno).await {
                     Ok(res) => {
                         let tx = scopeguard::ScopeGuard::into_inner(guard);
-                        tx.send_modify(move |prev| *prev = ArchiveTaskState::Finished(res));
+                        tx.send_modify(move |prev| *prev = Some(ArchiveTaskState::Finished(res)));
                         break;
                     }
                     Err(e) => {
@@ -420,8 +494,20 @@ impl ArchiveDownloader {
 #[derive(Clone)]
 struct ArchiveTask {
     archive_key: u32,
-    rx: watch::Receiver<ArchiveTaskState>,
+    rx: watch::Receiver<Option<ArchiveTaskState>>,
     abort_handle: Arc<AbortOnDrop>,
+}
+
+impl ArchiveTask {
+    async fn wait(&mut self) -> ArchiveTaskState {
+        loop {
+            if let Some(state) = &*self.rx.borrow_and_update() {
+                break state.clone();
+            } else if self.rx.changed().await.is_err() {
+                break ArchiveTaskState::Cancelled;
+            }
+        }
+    }
 }
 
 #[repr(transparent)]
@@ -442,10 +528,8 @@ impl Drop for AbortOnDrop {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone)]
 enum ArchiveTaskState {
-    #[default]
-    None,
     Finished(Option<ArchiveInfo>),
     Cancelled,
 }
@@ -767,7 +851,7 @@ impl std::ops::Not for HybridArchiveClientPart {
 
 pub struct ArchiveMemoryUsage {
     memory_threshold: u64,
-    used: std::sync::Mutex<MemoryUsageState>,
+    used: Mutex<MemoryUsageState>,
 }
 
 impl ArchiveMemoryUsage {
@@ -779,7 +863,7 @@ impl ArchiveMemoryUsage {
     }
 
     pub fn alloc(self: &Arc<Self>, size: NonZeroU64) -> ArchiveMemoryAllocation {
-        let mut guard = self.used.lock().unwrap();
+        let mut guard = self.used.lock();
         let size = size.get();
         guard.total += size;
         let use_disk = if guard.memory + size > self.memory_threshold {
@@ -822,7 +906,7 @@ impl ArchiveMemoryAllocation {
 
 impl Drop for ArchiveMemoryAllocation {
     fn drop(&mut self) {
-        let mut guard = self.shared.used.lock().unwrap();
+        let mut guard = self.shared.used.lock();
         guard.total -= self.size;
         if !self.use_disk {
             guard.memory -= self.size;

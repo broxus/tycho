@@ -76,17 +76,22 @@ impl Archive {
         Ok(res)
     }
 
-    pub fn check_mc_blocks_range(&self) -> Result<()> {
+    /// Checks that archive contains continuous list of masterchain blocks.
+    ///
+    /// Returns seqno's of the first and the last mc block.
+    pub fn check_mc_blocks_range(&self) -> Result<(u32, u32)> {
         match (
             self.mc_block_ids.first_key_value(),
             self.mc_block_ids.last_key_value(),
         ) {
             (Some((first_seqno, _)), Some((last_seqno, _))) => {
+                // NOTE: `mc_block_ids` is a BTreeMap and is always sorted,
+                // the substraction will never overflow.
                 if (last_seqno - first_seqno + 1) != self.mc_block_ids.len() as u32 {
                     anyhow::bail!("archive does not contain some mc blocks")
                 }
 
-                Ok(())
+                Ok((*first_seqno, *last_seqno))
             }
             _ => {
                 anyhow::bail!("archive is empty")
