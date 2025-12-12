@@ -17,6 +17,7 @@ use tycho_core::block_strider::{
     StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, DataRequirement};
+use tycho_core::global_config::ZerostateId;
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::storage::{
     ArchiveId, BlockFlags, BlockMeta, CoreStorage, CoreStorageConfig, NewBlockMeta, PackageEntryKey,
@@ -252,8 +253,14 @@ async fn archives() -> Result<()> {
     let zerostate_data = utils::read_file(zerostate_file)?;
     let zerostate = utils::parse_zerostate(&zerostate_data)
         .with_context(|| format!("Failed to parse zerostate {}", zerostate_file))?;
-    let zerostate_id = *zerostate.block_id();
+    let zerostate_block_id = *zerostate.block_id();
     let storage = prepare_storage(config.clone(), zerostate.clone()).await?;
+
+    let zerostate_id = ZerostateId {
+        seqno: zerostate_block_id.seqno,
+        root_hash: zerostate_block_id.root_hash,
+        file_hash: zerostate_block_id.file_hash,
+    };
 
     // Init state applier
     let state_subscriber = DummySubscriber;
@@ -289,7 +296,7 @@ async fn archives() -> Result<()> {
 
     let archive_provider = ArchiveProvider {
         archives: parking_lot::Mutex::new(first_provider_archives),
-        proof_checker: ProofChecker::new(storage.clone()),
+        proof_checker: ProofChecker::new(zerostate_id, storage.clone()),
     };
 
     let mut next_provider_archives = ArchivesSet::new();
@@ -298,7 +305,7 @@ async fn archives() -> Result<()> {
 
     let next_archive_provider = ArchiveProvider {
         archives: parking_lot::Mutex::new(next_provider_archives),
-        proof_checker: ProofChecker::new(storage.clone()),
+        proof_checker: ProofChecker::new(zerostate_id, storage.clone()),
     };
 
     let mut last_provider_archives = ArchivesSet::new();
@@ -307,11 +314,11 @@ async fn archives() -> Result<()> {
 
     let last_archive_provider = ArchiveProvider {
         archives: parking_lot::Mutex::new(last_provider_archives),
-        proof_checker: ProofChecker::new(storage.clone()),
+        proof_checker: ProofChecker::new(zerostate_id, storage.clone()),
     };
 
     // Strider state
-    let strider_state = PersistentBlockStriderState::new(zerostate_id, storage.clone());
+    let strider_state = PersistentBlockStriderState::new(zerostate_block_id, storage.clone());
 
     // Init block strider
     let block_strider = BlockStrider::builder()
@@ -699,8 +706,14 @@ async fn heavy_archives() -> Result<()> {
         .with_context(|| format!("Failed to read {}", zerostate_path.display()))?;
     let zerostate = utils::parse_zerostate(&zerostate_data)
         .with_context(|| format!("Failed to parse zerostate {}", zerostate_path.display()))?;
-    let zerostate_id = *zerostate.block_id();
+    let zerostate_block_id = *zerostate.block_id();
     let storage = prepare_storage(config, zerostate).await?;
+
+    let zerostate_id = ZerostateId {
+        seqno: zerostate_block_id.seqno,
+        root_hash: zerostate_block_id.root_hash,
+        file_hash: zerostate_block_id.file_hash,
+    };
 
     // Init state applier
     let state_subscriber = DummySubscriber;
@@ -740,7 +753,7 @@ async fn heavy_archives() -> Result<()> {
 
     let archive_provider = ArchiveProvider {
         archives: parking_lot::Mutex::new(first_provider_archives),
-        proof_checker: ProofChecker::new(storage.clone()),
+        proof_checker: ProofChecker::new(zerostate_id, storage.clone()),
     };
 
     let mut next_provider_archives = ArchivesSet::new();
@@ -749,7 +762,7 @@ async fn heavy_archives() -> Result<()> {
 
     let next_archive_provider = ArchiveProvider {
         archives: parking_lot::Mutex::new(next_provider_archives),
-        proof_checker: ProofChecker::new(storage.clone()),
+        proof_checker: ProofChecker::new(zerostate_id, storage.clone()),
     };
 
     let mut last_provider_archives = ArchivesSet::new();
@@ -758,11 +771,11 @@ async fn heavy_archives() -> Result<()> {
 
     let last_archive_provider = ArchiveProvider {
         archives: parking_lot::Mutex::new(last_provider_archives),
-        proof_checker: ProofChecker::new(storage.clone()),
+        proof_checker: ProofChecker::new(zerostate_id, storage.clone()),
     };
 
     // Strider state
-    let strider_state = PersistentBlockStriderState::new(zerostate_id, storage.clone());
+    let strider_state = PersistentBlockStriderState::new(zerostate_block_id, storage.clone());
 
     // Init block strider
     let block_strider = BlockStrider::builder()
@@ -882,8 +895,12 @@ async fn heavy_archives() -> Result<()> {
 
     // Archive provider
     {
-        let archive_block_provider =
-            ArchiveBlockProvider::new(client, storage, ArchiveBlockProviderConfig::default());
+        let archive_block_provider = ArchiveBlockProvider::new(
+            client,
+            zerostate_id,
+            storage,
+            ArchiveBlockProviderConfig::default(),
+        );
 
         // getBlock
         for (_, mc_block_id) in archive.mc_block_ids.iter() {

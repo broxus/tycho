@@ -14,6 +14,7 @@ use tycho_collator::types::BlockStuffForSync;
 use tycho_core::block_strider::{
     BlockStrider, EmptyBlockProvider, PersistentBlockStriderState, PrintSubscriber,
 };
+use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{CoreStorage, CoreStorageConfig};
 use tycho_storage::StorageContext;
 use tycho_types::boc::Boc;
@@ -31,7 +32,11 @@ impl StateNodeEventListener for MockEventListener {
         self.accepted_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn on_block_accepted_external(&self, _state: &ShardStateStuff) -> Result<()> {
+    async fn on_block_accepted_external(
+        &self,
+        _: &BlockId,
+        _state: &ShardStateStuff,
+    ) -> Result<()> {
         Ok(())
     }
 }
@@ -47,8 +52,12 @@ async fn test_add_and_get_block() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let adapter =
-        StateNodeAdapterStdImpl::new(listener, mock_storage, CollatorSyncContext::Historical);
+    let adapter = StateNodeAdapterStdImpl::new(
+        listener,
+        mock_storage,
+        CollatorSyncContext::Historical,
+        ZerostateId::default(),
+    );
 
     // Test adding a block
 
@@ -99,8 +108,12 @@ async fn test_storage_accessors() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let adapter =
-        StateNodeAdapterStdImpl::new(listener, storage.clone(), CollatorSyncContext::Historical);
+    let adapter = StateNodeAdapterStdImpl::new(
+        listener,
+        storage.clone(),
+        CollatorSyncContext::Historical,
+        ZerostateId::default(),
+    );
 
     let last_mc_block_id = adapter.load_last_applied_mc_block_id().unwrap();
 
@@ -121,8 +134,12 @@ async fn test_add_and_get_next_block() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let adapter =
-        StateNodeAdapterStdImpl::new(listener, mock_storage, CollatorSyncContext::Historical);
+    let adapter = StateNodeAdapterStdImpl::new(
+        listener,
+        mock_storage,
+        CollatorSyncContext::Historical,
+        ZerostateId::default(),
+    );
 
     // Test adding a block
     let prev_block = BlockStuff::new_empty(ShardIdent::MASTERCHAIN, 1);
@@ -179,6 +196,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
         listener.clone(),
         storage.clone(),
         CollatorSyncContext::Historical,
+        ZerostateId::default(),
     ));
 
     let empty_block = get_empty_block();
@@ -253,7 +271,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                 )
                 .unwrap();
 
-                let handle_block = adapter.handle_state(&state).await;
+                let handle_block = adapter.handle_state(&block_id, &state).await;
                 assert!(
                     handle_block.is_ok(),
                     "Block {i} should be handled after being added",

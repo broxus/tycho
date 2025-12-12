@@ -11,6 +11,7 @@ use tycho_types::cell::{CellDescriptor, HashBytes};
 use tycho_types::models::*;
 use tycho_util::FastHashMap;
 use tycho_util::compression::ZstdCompressedFile;
+use tycho_util::progress_bar::ProgressBar;
 use tycho_util::sync::CancellationFlag;
 
 use crate::storage::CellsDb;
@@ -28,6 +29,14 @@ impl<'a> ShardStateWriter<'a> {
 
     // Partially written BOC file.
     const FILE_EXTENSION_TEMP: &'static str = "boc.temp";
+
+    pub fn file_name_str(name: &str) -> PathBuf {
+        PathBuf::from(name).with_extension(Self::FILE_EXTENSION)
+    }
+
+    pub fn temp_file_name_str(name: &str) -> PathBuf {
+        PathBuf::from(name).with_extension(Self::FILE_EXTENSION_TEMP)
+    }
 
     pub fn file_name(block_id: &BlockId) -> PathBuf {
         PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION)
@@ -90,7 +99,31 @@ impl<'a> ShardStateWriter<'a> {
         root_hash: &HashBytes,
         cancelled: Option<&CancellationFlag>,
     ) -> Result<HashBytes> {
-        let temp_file_name = Self::temp_file_name(self.block_id);
+        self.write_inner(root_hash, None, None, cancelled)
+    }
+
+    pub fn write_tracked(
+        &self,
+        root_hash: &HashBytes,
+        file_name: &str,
+        progress_bar: &mut ProgressBar,
+        cancelled: Option<&CancellationFlag>,
+    ) -> Result<HashBytes> {
+        self.write_inner(root_hash, Some(file_name), Some(progress_bar), cancelled)
+    }
+
+    fn write_inner(
+        &self,
+        root_hash: &HashBytes,
+        file_name: Option<&str>,
+        mut progress_bar: Option<&mut ProgressBar>,
+        cancelled: Option<&CancellationFlag>,
+    ) -> Result<HashBytes> {
+        let temp_file_name = match file_name {
+            Some(name) => Self::temp_file_name_str(name),
+            None => Self::temp_file_name(self.block_id),
+        };
+
         scopeguard::defer! {
             self.states_dir.remove_file(&temp_file_name).ok();
         }
@@ -110,6 +143,10 @@ impl<'a> ShardStateWriter<'a> {
         // Compute file size
         let file_size =
             22 + offset_size * (1 + cell_count as usize) + (intermediate.total_size as usize);
+
+        if let Some(pg) = progress_bar.as_mut() {
+            pg.set_total(file_size as u64);
+        }
 
         // Create states file
         let file = self
@@ -191,6 +228,9 @@ impl<'a> ShardStateWriter<'a> {
             }
 
             buffer.write_all(&cell_buffer[..cell_size as usize])?;
+            if let Some(pg) = progress_bar.as_mut() {
+                pg.add_progress(cell_size as u64);
+            }
         }
 
         let file_hash = match buffer.into_inner() {
@@ -208,9 +248,12 @@ impl<'a> ShardStateWriter<'a> {
             Err(e) => return Err(e.into_error()).context("failed to flush the compressed buffer"),
         };
 
-        self.states_dir
-            .file(&temp_file_name)
-            .rename(Self::file_name(self.block_id))?;
+        let name = match file_name {
+            None => Self::file_name(self.block_id),
+            Some(name) => Self::file_name_str(name),
+        };
+
+        self.states_dir.file(&temp_file_name).rename(name)?;
 
         Ok(file_hash)
     }

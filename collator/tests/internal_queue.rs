@@ -16,6 +16,7 @@ use tycho_collator::internal_queue::types::router::PartitionRouter;
 use tycho_collator::internal_queue::types::stats::DiffStatistics;
 use tycho_collator::storage::InternalQueueStorage;
 use tycho_collator::storage::snapshot::{AccountStatistics, InternalQueueSnapshot};
+use tycho_core::global_config::ZerostateId;
 use tycho_storage::StorageContext;
 use tycho_types::cell::{Cell, HashBytes, Lazy};
 use tycho_types::models::{
@@ -241,6 +242,7 @@ async fn test_queue() -> anyhow::Result<()> {
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
+        zerostate_id: ZerostateId::default(),
     };
 
     let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
@@ -706,6 +708,7 @@ async fn test_iteration_from_two_shards() -> anyhow::Result<()> {
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
+        zerostate_id: ZerostateId::default(),
     };
 
     let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
@@ -930,6 +933,7 @@ async fn test_queue_clear() -> anyhow::Result<()> {
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
+        zerostate_id: ZerostateId::default(),
     };
 
     let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
@@ -1235,6 +1239,7 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
+        zerostate_id: ZerostateId::default(),
     };
 
     let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
@@ -1447,6 +1452,7 @@ async fn test_version() -> anyhow::Result<()> {
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
+        zerostate_id: ZerostateId::default(),
     };
 
     let mut partitions = FastHashSet::default();
@@ -1553,6 +1559,7 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
+        zerostate_id: ZerostateId::default(),
     };
 
     let queue: QueueImpl<QueueStateStdImpl, StoredObject> = queue_factory.create()?;
@@ -1817,6 +1824,7 @@ async fn test_import_persistent_state() -> anyhow::Result<()> {
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),
         },
+        zerostate_id: ZerostateId::default(),
     };
     let storage = &queue_factory.state.storage;
 

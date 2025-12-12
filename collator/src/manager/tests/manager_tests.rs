@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use tracing::level_filters::LevelFilter;
@@ -10,6 +10,7 @@ use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{BlockHandle, NewBlockMeta, StoreStateHint};
 use tycho_types::boc::Boc;
 use tycho_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Lazy};
@@ -41,8 +42,8 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{CollatorSyncContext, StateNodeAdapter};
 use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
 use crate::types::processed_upto::{
-    InternalsProcessedUptoStuff, Lt, ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
-    find_min_processed_to_by_shards,
+    find_min_processed_to_by_shards, InternalsProcessedUptoStuff, Lt, ProcessedUptoInfoStuff,
+    ProcessedUptoPartitionStuff,
 };
 use crate::types::{
     BlockCandidate, BlockStuffForSync, ProcessedTo, ShardDescriptionShort,
@@ -3826,9 +3827,18 @@ where
             .unwrap()
             .try_into()
             .unwrap();
+
+        // TODO: some other block?
+        let mc_block_id = BlockId::default();
+
         let block_mismatch = match self
             .blocks_cache
-            .store_received(self.state_adapter.clone(), state_stuff, processed_upto)
+            .store_received(
+                self.state_adapter.clone(),
+                &mc_block_id,
+                state_stuff,
+                processed_upto,
+            )
             .await
             .unwrap()
         {
@@ -3880,6 +3890,7 @@ struct TestStateNodeAdapter {
         >,
     >,
     mcstate_tracker: MinRefMcStateTracker,
+    zerostate_id: ZerostateId,
 }
 
 impl Default for TestStateNodeAdapter {
@@ -3887,6 +3898,7 @@ impl Default for TestStateNodeAdapter {
         Self {
             storage: Default::default(),
             mcstate_tracker: MinRefMcStateTracker::new(),
+            zerostate_id: ZerostateId::default(),
         }
     }
 }
@@ -4242,11 +4254,15 @@ impl StateNodeAdapter for TestStateNodeAdapter {
     async fn wait_for_block_next(&self, _block_id: &BlockId) -> Option<Result<BlockStuffAug>> {
         unreachable!()
     }
-    async fn handle_state(&self, _state: &ShardStateStuff) -> Result<()> {
+    async fn handle_state(&self, _: &BlockId, _state: &ShardStateStuff) -> Result<()> {
         unreachable!()
     }
     fn set_sync_context(&self, _sync_context: CollatorSyncContext) {
         unreachable!()
+    }
+
+    fn zerostate_id(&self) -> &ZerostateId {
+        &self.zerostate_id
     }
 }
 

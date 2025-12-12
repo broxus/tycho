@@ -242,11 +242,13 @@ pub struct FileZerostateProvider(pub Vec<PathBuf>);
 
 impl ZerostateProvider for FileZerostateProvider {
     fn load_zerostates(&self) -> impl Iterator<Item = Result<Bytes>> {
-        self.0.iter().map(move |path| load_zerostate(path))
+        self.0.iter().map(load_zerostate)
     }
 }
 
 fn load_zerostate(path: &PathBuf) -> Result<Bytes> {
+    tracing::info!("loading zerostate {:?}", path);
+    #[allow(clippy::disallowed_methods)]
     let mf = MappedFile::from_existing_file(File::open(path)?)?;
     let bytes = Bytes::from_owner(mf);
     Ok(bytes)
