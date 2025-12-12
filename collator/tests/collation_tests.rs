@@ -19,6 +19,7 @@ use tycho_core::block_strider::{
     ShardStateApplier, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::node::NodeKeys;
+use tycho_core::global_config::ZerostateId;
 use tycho_crypto::ed25519;
 use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 
@@ -136,6 +137,14 @@ impl BlockProvider for CollatorBlockProvider {
     }
 }
 
+impl StateSubscriber for StrangeBlockProvider {
+    type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
+
+    fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
+       self.adapter.handle_state(&cx.mc_block_id, &cx.state)
+    }
+}
+
 /// run: `RUST_BACKTRACE=1 cargo test -p tycho-collator --features test --test collation_tests -- --nocapture`
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_collation_process_on_dump() {
@@ -157,7 +166,20 @@ async fn test_collation_process_on_dump() {
         dumped_anchors,
     } = load_info_from_dump(dump_path, ctx).await.unwrap();
 
-    let zerostate_id = mc_block_id;
+    let zerostate_id = ZerostateId {
+        seqno: mc_block_id.seqno,
+        root_hash: mc_block_id.root_hash,
+        file_hash: mc_block_id.file_hash,,
+    };
+
+    let block_strider = BlockStrider::builder()
+        .with_provider(EmptyBlockProvider)
+        .with_state(PersistentBlockStriderState::new(
+            zerostate_id.as_block_id(),
+            storage.clone(),
+        ))
+        .with_state_subscriber(storage.clone(), PrintSubscriber)
+        .build();
 
     let mc_state = storage
         .shard_state_storage()
@@ -188,13 +210,29 @@ async fn test_collation_process_on_dump() {
 
     let (engine_stop_tx, mut engine_stop_rx) = tokio::sync::mpsc::channel(1);
     let validator = ValidatorStub {};
+    let queue_state_factory = QueueStateImplFactory::new(storage.context().clone()).unwrap();
+
+    let queue_factory = QueueFactoryStdImpl {
+        state: queue_state_factory,
+        config: Default::default(),
+        zerostate_id,
+    };
+    let queue = queue_factory.create().unwrap();
+    let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
+
+    let now = tycho_util::time::now_millis();
 
     let manager = CollationManager::start(
         keypair,
         config,
         mq_adapter,
         |listener| {
-            StateNodeAdapterStdImpl::new(listener, storage.clone(), CollatorSyncContext::Historical)
+            StateNodeAdapterStdImpl::new(
+                listener,
+                storage.clone(),
+                CollatorSyncContext::Historical,
+                zerostate_id,
+            )
         },
         |listener| {
             MempoolAdapterStubImpl::with_anchors_from_dump(
@@ -233,7 +271,7 @@ async fn test_collation_process_on_dump() {
                 .chain(collator_block_provider),
         )
         .with_state(PersistentBlockStriderState::new(
-            zerostate_id,
+            zerostate_id.as_block_id(),
             storage.clone(),
         ))
         .with_block_subscriber(ShardStateApplier::new(storage.clone(), collator))
