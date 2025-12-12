@@ -416,6 +416,15 @@ impl StarterInner {
         let global_id = masterchain_zerostate.state().global_id;
         let gen_utime = masterchain_zerostate.state().gen_utime;
 
+        let persistent_states = self.storage.persistent_state_storage();
+        let handle_storage = self.storage.block_handle_storage();
+
+        let (handle, _) = handle_storage.create_or_load_handle(&zerostate_block_id, NewBlockMeta {
+            is_key_block: true,
+            gen_utime,
+            ref_by_mc_seqno: 0,
+        });
+
         for entry in masterchain_zerostate.shards()?.iter() {
             let (shard_ident, descr) = entry.context("invalid mc zerostate")?;
             // anyhow::ensure!(descr.seqno == 0, "invalid shard description {shard_ident}");
@@ -427,25 +436,57 @@ impl StarterInner {
                 file_hash: descr.file_hash,
             };
 
-            match zerostates.remove(&block_id.file_hash) {
+            let state = match zerostates.remove(&block_id.file_hash) {
                 Some(existing) => {
                     tracing::debug!(block_id = %block_id, "using custom zerostate");
 
                     let root_hash = state_storage.store_state_bytes(&block_id, existing).await?;
                     assert_eq!(root_hash, block_id.root_hash);
+
+                    state_storage.load_state(0, &block_id).await?
                 }
                 None => {
                     // try to get zerostate from init file
-                    tracing::debug!(block_id = %block_id, "creating default zerostate");
+                    tracing::debug!(block_id = %block_id, "creating default shard zerostate");
                     let state = make_shard_state(tracker, global_id, shard_ident, gen_utime)
                         .context("failed to create shard zerostate")?;
+
+                    let (handle, _) =
+                        handle_storage.create_or_load_handle(&block_id, NewBlockMeta {
+                            is_key_block: block_id.is_masterchain(),
+                            gen_utime,
+                            ref_by_mc_seqno: 0,
+                        });
+
+                    state_storage
+                        .store_state(&handle, &state, Default::default())
+                        .await?;
 
                     anyhow::ensure!(
                         state.block_id() == &block_id,
                         "custom zerostate must be provided for {shard_ident}",
                     );
+                    state
                 }
             };
+
+            let (handle, _) = handle_storage.create_or_load_handle(&block_id, NewBlockMeta {
+                is_key_block: block_id.is_masterchain(),
+                gen_utime,
+                ref_by_mc_seqno: 0,
+            });
+
+            tracing::debug!(block_id = %block_id, "loaded or created default shardstate block handle");
+
+            persistent_states
+                .store_shard_state(
+                    handle.id().seqno,
+                    &handle,
+                    state.ref_mc_state_handle().clone(),
+                )
+                .await?;
+
+            tracing::debug!(block_id = %block_id, "saved default persistent shard zerostate");
         }
 
         anyhow::ensure!(
@@ -454,13 +495,7 @@ impl StarterInner {
             zerostates.len()
         );
 
-        let handle_storage = self.storage.block_handle_storage();
         tracing::info!("imported zerostates");
-
-        // let state = state_storage.load_state(0, &zerostate_id).await?;
-        let handle = handle_storage
-            .load_handle(&zerostate_block_id)
-            .expect("shouldn't happen");
 
         Ok((handle, masterchain_zerostate))
     }

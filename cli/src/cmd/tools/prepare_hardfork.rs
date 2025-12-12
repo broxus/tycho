@@ -140,6 +140,8 @@ impl ShardStateHandler {
             shard_hashes.push((ident, shard_description));
         }
 
+        println!("Changed shards root and file hashes");
+
         custom.shards =
             ShardHashes::from_shards(shard_hashes.iter().map(|(ident, descr)| (ident, descr)))?;
         ssu.custom = Some(Lazy::new(&custom)?);
@@ -147,6 +149,9 @@ impl ShardStateHandler {
         let mut builder = CellBuilder::new();
         ssu.store_into(&mut builder, Cell::empty_context())?;
         let updated_master_state = builder.build()?;
+
+        println!("Built new cell");
+
         let clone = updated_master_state.clone();
         let root_hash = clone.repr_hash();
 
@@ -159,10 +164,14 @@ impl ShardStateHandler {
                     ref_by_mc_seqno: ssu.min_ref_mc_seqno,
                 });
 
+        println!("Saved block handle");
+
         self.storage
             .shard_state_storage()
             .store_state_root(&handle, updated_master_state, Default::default())
             .await?;
+
+        println!("Stored root");
 
         let writer = ShardStateWriter::new(self.storage.cells_db(), &self.output_path, mc_block_id);
         writer.write(root_hash, None)?;
