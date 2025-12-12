@@ -465,6 +465,7 @@ impl Display for McBlockSubgraphExtract {
 }
 
 pub struct HandledBlockFromBcCtx {
+    pub mc_block_id: BlockId,
     pub state: ShardStateStuff,
     pub processed_upto: ProcessedUptoInfo,
 }

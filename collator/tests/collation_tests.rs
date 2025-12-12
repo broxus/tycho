@@ -17,6 +17,7 @@ use tycho_core::block_strider::{
     BlockProvider, BlockStrider, EmptyBlockProvider, OptionalBlockStuff,
     PersistentBlockStriderState, PrintSubscriber, StateSubscriber, StateSubscriberContext,
 };
+use tycho_core::global_config::ZerostateId;
 use tycho_crypto::ed25519;
 use tycho_types::models::BlockId;
 
@@ -51,7 +52,7 @@ impl StateSubscriber for StrangeBlockProvider {
     type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        self.adapter.handle_state(&cx.state)
+        self.adapter.handle_state(&cx.mc_block_id, &cx.state)
     }
 }
 
@@ -64,12 +65,12 @@ async fn test_collation_process_on_stubs() {
 
     let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
 
-    let zerostate_id = BlockId::default();
+    let zerostate_id = ZerostateId::default();
 
     let block_strider = BlockStrider::builder()
         .with_provider(EmptyBlockProvider)
         .with_state(PersistentBlockStriderState::new(
-            zerostate_id,
+            zerostate_id.as_block_id(),
             storage.clone(),
         ))
         .with_state_subscriber(storage.clone(), PrintSubscriber)
@@ -80,7 +81,8 @@ async fn test_collation_process_on_stubs() {
     let node_1_secret = rand::random::<ed25519::SecretKey>();
     let node_1_keypair = Arc::new(ed25519::KeyPair::from(&node_1_secret));
 
-    let validator_network = common::make_validator_network(&node_1_secret, &zerostate_id);
+    let validator_network =
+        common::make_validator_network(&node_1_secret, &zerostate_id.as_block_id());
 
     let config = CollatorConfig {
         supported_block_version: 50,
@@ -98,9 +100,12 @@ async fn test_collation_process_on_stubs() {
 
     let queue_state_factory = QueueStateImplFactory::new(storage.context().clone()).unwrap();
 
+    let zerostate_id = ZerostateId::default();
+
     let queue_factory = QueueFactoryStdImpl {
         state: queue_state_factory,
         config: Default::default(),
+        zerostate_id,
     };
     let queue = queue_factory.create().unwrap();
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
@@ -112,7 +117,12 @@ async fn test_collation_process_on_stubs() {
         config,
         Arc::new(message_queue_adapter),
         |listener| {
-            StateNodeAdapterStdImpl::new(listener, storage.clone(), CollatorSyncContext::Historical)
+            StateNodeAdapterStdImpl::new(
+                listener,
+                storage.clone(),
+                CollatorSyncContext::Historical,
+                zerostate_id,
+            )
         },
         |listener| MempoolAdapterStubImpl::with_stub_externals(listener, Some(now)),
         ValidatorStdImpl::new(
@@ -133,7 +143,7 @@ async fn test_collation_process_on_stubs() {
     let block_strider = BlockStrider::builder()
         .with_provider(state_node_adapter.clone())
         .with_state(PersistentBlockStriderState::new(
-            zerostate_id,
+            zerostate_id.as_block_id(),
             storage.clone(),
         ))
         .with_state_subscriber(storage.clone(), state_node_adapter)

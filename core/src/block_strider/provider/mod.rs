@@ -26,6 +26,7 @@ pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProv
 pub use self::box_provider::BoxBlockProvider;
 use self::futures::SelectNonEmptyFut;
 pub use self::storage_provider::StorageBlockProvider;
+use crate::global_config::ZerostateId;
 use crate::storage::{CoreStorage, MaybeExistingHandle, NewBlockMeta};
 
 mod archive_provider;
@@ -504,14 +505,16 @@ pub struct ProofChecker {
     storage: CoreStorage,
     cached_zerostate: ArcSwapAny<Option<ShardStateStuff>>,
     cached_prev_key_block_proof: ArcSwapAny<Option<BlockProofStuff>>,
+    zerostate_id: ZerostateId,
 }
 
 impl ProofChecker {
-    pub fn new(storage: CoreStorage) -> Self {
+    pub fn new(zerostate_id: ZerostateId, storage: CoreStorage) -> Self {
         Self {
             storage,
             cached_zerostate: Default::default(),
             cached_prev_key_block_proof: Default::default(),
+            zerostate_id,
         }
     }
 
@@ -564,7 +567,7 @@ impl ProofChecker {
                     )
                 })?;
 
-            if handle.id().seqno == 0 {
+            if handle.id().seqno == self.zerostate_id.seqno {
                 let zerostate = 'zerostate: {
                     if let Some(zerostate) = self.cached_zerostate.load_full() {
                         break 'zerostate zerostate;

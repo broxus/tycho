@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -87,6 +87,12 @@ impl ShardStateStorage {
 
     pub fn cell_storage(&self) -> &Arc<CellStorage> {
         &self.cell_storage
+    }
+
+    /// Find mc block id from db snapshot
+    pub fn load_mc_block_id(&self, seqno: u32) -> Result<Option<BlockId>> {
+        let snapshot = self.cells_db.rocksdb().snapshot();
+        self.find_mc_block_id(seqno, &snapshot)
     }
 
     pub async fn store_state(

@@ -190,13 +190,18 @@ where
         Ok(())
     }
 
-    async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()> {
+    async fn on_block_accepted_external(
+        &self,
+        mc_block_id: &BlockId,
+        state: &ShardStateStuff,
+    ) -> Result<()> {
         let processed_upto = state.state().processed_upto.load()?;
 
         metrics_report_last_applied_block_and_anchor(state, &processed_upto)?;
 
         let state = state.clone();
         let ctx = HandledBlockFromBcCtx {
+            mc_block_id: *mc_block_id,
             state,
             processed_upto,
         };
@@ -520,6 +525,7 @@ where
     /// Returns `BlockId` if diff was applied.
     /// * `first_required_diffs` - contains ids of known first required diffs for queue for each shard
     fn apply_block_queue_diff_from_entry_stuff(
+        state_node_adapter: &dyn StateNodeAdapter,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         block_entry: &BlockCacheEntry,
         min_processed_to: Option<&QueueKey>,
@@ -527,7 +533,8 @@ where
     ) -> Result<Option<BlockId>> {
         let block_id = block_entry.block_id;
 
-        if block_id.seqno == 0 {
+        // TODO: error if <
+        if block_id.seqno <= state_node_adapter.zerostate_id().seqno {
             return Ok(None);
         }
 
@@ -1273,6 +1280,7 @@ where
             .blocks_cache
             .store_received(
                 self.state_node_adapter.clone(),
+                &ctx.mc_block_id,
                 state.clone(),
                 processed_upto,
             )
@@ -1683,7 +1691,7 @@ where
 
         // HACK: do not need to set master block latest chain time from zerostate when using mempool stub
         //      because anchors from stub have older chain time than in zerostate and it will brake collation
-        if last_mc_state.block_id().seqno != 0 {
+        if last_mc_state.block_id().seqno > self.state_node_adapter.zerostate_id().seqno {
             Self::renew_mc_block_latest_chain_time(
                 &mut self.collation_sync_state.lock(),
                 last_mc_state.get_gen_chain_time(),
@@ -1853,7 +1861,7 @@ where
             let mut prev_block_ids: VecDeque<_> = prev_block_ids.iter().cloned().collect();
 
             while let Some(prev_block_id) = prev_block_ids.pop_front() {
-                if prev_block_id.seqno == 0 {
+                if prev_block_id.seqno == state_node_adapter.zerostate_id().seqno {
                     continue;
                 }
 
@@ -2018,7 +2026,7 @@ where
 
             // apply queue diffs from blocks above 0
             // skip cached diffs below min_processed_to
-            if subgraph.master_block.block_id.seqno != 0 {
+            if subgraph.master_block.block_id.seqno > state_node_adapter.zerostate_id().seqno {
                 for block_entry in [mc_block_entry]
                     .into_iter()
                     .chain(subgraph.shard_blocks.iter())
@@ -2041,6 +2049,7 @@ where
 
                     if let Some(applied_diff_block_id) =
                         Self::apply_block_queue_diff_from_entry_stuff(
+                            state_node_adapter.as_ref(),
                             mq_adapter.clone(),
                             block_entry,
                             min_processed_to,
@@ -2457,6 +2466,7 @@ where
                             config: self.config.clone(),
                             collation_session: new_session_info.clone(),
                             listener: self.dispatcher.clone(),
+                            zerostate_id: *self.state_node_adapter.zerostate_id(),
                             shard_id,
                             prev_blocks_ids,
                             mc_data: mc_data.clone(),

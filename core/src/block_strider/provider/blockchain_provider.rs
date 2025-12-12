@@ -20,6 +20,7 @@ use crate::block_strider::provider::{
     BoxBlockProvider, CheckProof, OptionalBlockStuff, ProofChecker,
 };
 use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient, DataRequirement};
+use crate::global_config::ZerostateId;
 use crate::overlay_client::{Neighbour, PunishReason};
 use crate::storage::CoreStorage;
 
@@ -86,10 +87,11 @@ pub struct BlockchainBlockProvider {
 impl BlockchainBlockProvider {
     pub fn new(
         client: BlockchainRpcClient,
+        zerostate_id: ZerostateId,
         storage: CoreStorage,
         config: BlockchainBlockProviderConfig,
     ) -> Self {
-        let proof_checker = ProofChecker::new(storage);
+        let proof_checker = ProofChecker::new(zerostate_id, storage);
 
         Self {
             client,
