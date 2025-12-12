@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use bytesize::ByteSize;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,7 @@ use crate::storage::CoreStorage;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ArchiveBlockProviderConfig {
+    /// Maximum memory allowed for archives.
     pub max_archive_to_memory_size: ByteSize,
 }
 
@@ -53,6 +54,7 @@ impl ArchiveBlockProvider {
         config: ArchiveBlockProviderConfig,
     ) -> Self {
         let proof_checker = ProofChecker::new(storage.clone());
+        let memory = Arc::new(ArchiveMemoryUsage::new(config.max_archive_to_memory_size));
 
         Self {
             inner: Arc::new(Inner {
@@ -62,7 +64,7 @@ impl ArchiveBlockProvider {
                 known_archives: parking_lot::Mutex::new(Default::default()),
 
                 storage,
-                config,
+                memory,
             }),
         }
     }
@@ -170,7 +172,7 @@ struct Inner {
 
     known_archives: parking_lot::Mutex<ArchivesMap>,
 
-    config: ArchiveBlockProviderConfig,
+    memory: Arc<ArchiveMemoryUsage>,
 }
 
 impl Inner {
@@ -265,7 +267,7 @@ impl Inner {
         ArchiveDownloader {
             client: self.client.clone(),
             storage: self.storage.clone(),
-            memory_threshold: self.config.max_archive_to_memory_size,
+            memory: self.memory.clone(),
         }
     }
 
@@ -323,7 +325,7 @@ struct ArchiveInfo {
 struct ArchiveDownloader {
     client: Arc<dyn ArchiveClient>,
     storage: CoreStorage,
-    memory_threshold: ByteSize,
+    memory: Arc<ArchiveMemoryUsage>,
 }
 
 impl ArchiveDownloader {
@@ -374,7 +376,7 @@ impl ArchiveDownloader {
     async fn try_download(&self, mc_seqno: u32) -> Result<Option<ArchiveInfo>> {
         let ctx = ArchiveDownloadContext {
             storage: &self.storage,
-            memory_threshold: self.memory_threshold,
+            memory: self.memory.clone(),
         };
         let Some(found) = self.client.find_archive(mc_seqno, ctx).await? else {
             return Ok(None);
@@ -385,12 +387,12 @@ impl ArchiveDownloader {
         tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
-            let bytes = res.writer.try_freeze()?;
+            let (bytes, neighbour) = res.finalize()?;
 
             let archive = match Archive::new(bytes) {
                 Ok(array) => array,
                 Err(e) => {
-                    if let Some(neighbour) = res.neighbour {
+                    if let Some(neighbour) = neighbour {
                         neighbour.punish(PunishReason::Malicious);
                     }
                     return Err(e);
@@ -399,7 +401,7 @@ impl ArchiveDownloader {
 
             if let Err(e) = archive.check_mc_blocks_range() {
                 // TODO: Punish a bit less for missing mc blocks?
-                if let Some(neighbour) = res.neighbour {
+                if let Some(neighbour) = neighbour {
                     neighbour.punish(PunishReason::Malicious);
                 }
                 return Err(e);
@@ -407,7 +409,7 @@ impl ArchiveDownloader {
 
             Ok(ArchiveInfo {
                 archive: Arc::new(archive),
-                from: res.neighbour,
+                from: neighbour,
             })
         })
         .await?
@@ -468,24 +470,54 @@ impl BlockProvider for ArchiveBlockProvider {
 }
 
 pub struct ArchiveResponse {
-    writer: TargetWriter,
-    neighbour: Option<Neighbour>,
+    pub alloc: ArchiveMemoryAllocation,
+    pub writer: TargetWriter,
+    pub neighbour: Option<Neighbour>,
 }
 
-#[derive(Clone, Copy)]
+impl ArchiveResponse {
+    pub fn finalize(self) -> Result<(Bytes, Option<Neighbour>)> {
+        struct BytesWithAlloc {
+            inner: Bytes,
+            _alloc: ArchiveMemoryAllocation,
+        }
+
+        impl AsRef<[u8]> for BytesWithAlloc {
+            #[inline]
+            fn as_ref(&self) -> &[u8] {
+                self.inner.as_ref()
+            }
+        }
+
+        // NOTE: Archive will hold a reference to these bytes and
+        // this allocation so we will be able to precisely track the memory usage.
+        let bytes = Bytes::from_owner(BytesWithAlloc {
+            _alloc: self.alloc,
+            inner: self.writer.try_freeze()?,
+        });
+        Ok((bytes, self.neighbour))
+    }
+}
+
+#[derive(Clone)]
 pub struct ArchiveDownloadContext<'a> {
     pub storage: &'a CoreStorage,
-    pub memory_threshold: ByteSize,
+    pub memory: Arc<ArchiveMemoryUsage>,
 }
 
 impl<'a> ArchiveDownloadContext<'a> {
-    pub fn get_archive_writer(&self, size: NonZeroU64) -> Result<TargetWriter> {
-        Ok(if size.get() > self.memory_threshold.as_u64() {
+    pub fn get_archive_writer(
+        &self,
+        size: NonZeroU64,
+    ) -> Result<(ArchiveMemoryAllocation, TargetWriter)> {
+        let alloc = self.memory.alloc(size);
+        let writer = if alloc.use_disk() {
             let file = self.storage.context().temp_files().unnamed_file().open()?;
             TargetWriter::File(std::io::BufWriter::new(file))
         } else {
             TargetWriter::Bytes(BytesMut::new().writer())
-        })
+        };
+        Ok((alloc, writer))
     }
 
     pub fn estimate_archive_id(&self, mc_seqno: u32) -> u32 {
@@ -542,10 +574,11 @@ impl ArchiveClient for BlockchainRpcClient {
                     Box::pin(async move {
                         let neighbour = found.neighbour.clone();
 
-                        let output = ctx.get_archive_writer(found.size)?;
+                        let (alloc, output) = ctx.get_archive_writer(found.size)?;
                         let writer = self.download_archive(found, output).await?;
 
                         Ok(ArchiveResponse {
+                            alloc,
                             writer,
                             neighbour: Some(neighbour),
                         })
@@ -582,10 +615,11 @@ impl ArchiveClient for S3Client {
             archive_id: info.archive_id as u64,
             download: Box::new(move || {
                 Box::pin(async move {
-                    let output = ctx.get_archive_writer(info.size)?;
+                    let (alloc, output) = ctx.get_archive_writer(info.size)?;
                     let writer = self.download_archive(info.archive_id, output).await?;
 
                     Ok(ArchiveResponse {
+                        alloc,
                         writer,
                         neighbour: None,
                     })
@@ -636,13 +670,13 @@ where
             tracing::debug!(mc_seqno, ?prefer);
             match prefer {
                 HybridArchiveClientPart::Primary => {
-                    let res = self.primary.find_archive(mc_seqno, ctx).await;
+                    let res = self.primary.find_archive(mc_seqno, ctx.clone()).await;
                     if matches!(&res, Ok(Some(_))) {
                         return res;
                     }
                 }
                 HybridArchiveClientPart::Secondary => {
-                    let res = self.secondary.find_archive(mc_seqno, ctx).await;
+                    let res = self.secondary.find_archive(mc_seqno, ctx.clone()).await;
                     if matches!(&res, Ok(Some(_))) {
                         return res;
                     }
@@ -652,7 +686,7 @@ where
 
         self.prefer.set(None);
 
-        let primary = pin!(self.primary.find_archive(mc_seqno, ctx));
+        let primary = pin!(self.primary.find_archive(mc_seqno, ctx.clone()));
         let secondary = pin!(self.secondary.find_archive(mc_seqno, ctx));
         match futures_util::future::select(primary, secondary).await {
             futures_util::future::Either::Left((found, other)) => {
@@ -725,6 +759,73 @@ impl std::ops::Not for HybridArchiveClientPart {
         match self {
             Self::Primary => Self::Secondary,
             Self::Secondary => Self::Primary,
+        }
+    }
+}
+
+// === Memory management stuff ===
+
+pub struct ArchiveMemoryUsage {
+    memory_threshold: u64,
+    used: std::sync::Mutex<MemoryUsageState>,
+}
+
+impl ArchiveMemoryUsage {
+    fn new(memory_threshold: ByteSize) -> Self {
+        Self {
+            memory_threshold: memory_threshold.0,
+            used: Default::default(),
+        }
+    }
+
+    pub fn alloc(self: &Arc<Self>, size: NonZeroU64) -> ArchiveMemoryAllocation {
+        let mut guard = self.used.lock().unwrap();
+        let size = size.get();
+        guard.total += size;
+        let use_disk = if guard.memory + size > self.memory_threshold {
+            true
+        } else {
+            guard.memory += size;
+            false
+        };
+        drop(guard);
+
+        ArchiveMemoryAllocation {
+            size,
+            use_disk,
+            shared: self.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct MemoryUsageState {
+    total: u64,
+    memory: u64,
+}
+
+pub struct ArchiveMemoryAllocation {
+    size: u64,
+    use_disk: bool,
+    shared: Arc<ArchiveMemoryUsage>,
+}
+
+impl ArchiveMemoryAllocation {
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub fn use_disk(&self) -> bool {
+        self.use_disk
+    }
+}
+
+impl Drop for ArchiveMemoryAllocation {
+    fn drop(&mut self) {
+        let mut guard = self.shared.used.lock().unwrap();
+        guard.total -= self.size;
+        if !self.use_disk {
+            guard.memory -= self.size;
         }
     }
 }
