@@ -542,7 +542,7 @@ impl<B> Inner<B> {
                         size: NonZeroU64::new(size as _).unwrap(),
                         chunk_size: BlockStorage::DEFAULT_BLOB_CHUNK_SIZE,
                     },
-                    (ArchiveId::TooNew, Ok(None)) => ArchiveInfo::TooNew,
+                    (ArchiveId::Found(_) | ArchiveId::TooNew, Ok(None)) => ArchiveInfo::TooNew,
                     _ => ArchiveInfo::NotFound,
                 })
             }
