@@ -164,6 +164,7 @@ pub async fn create_test_queue_adapter<V: InternalMessageValue>()
     let (ctx, tmp_dir) = StorageContext::new_temp().await?;
     let queue_state_factory = QueueStateImplFactory::new(ctx)?;
     let queue_factory = QueueFactoryStdImpl {
+        zerostate_id: Default::default(),
         state: queue_state_factory,
         config: Default::default(),
     };

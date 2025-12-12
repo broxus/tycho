@@ -364,13 +364,19 @@ impl BlocksCache {
     pub async fn store_received(
         &self,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
+        mc_block_id: &BlockId,
         state: ShardStateStuff,
         processed_upto: ProcessedUptoInfoStuff,
     ) -> Result<Option<BlockCacheStoreResult>> {
         let block_id = *state.block_id();
 
-        let ctx =
-            ReceivedBlockContext::load(state_node_adapter.as_ref(), state, processed_upto).await?;
+        let ctx = ReceivedBlockContext::load(
+            state_node_adapter.as_ref(),
+            mc_block_id,
+            state,
+            processed_upto,
+        )
+        .await?;
 
         let received_and_collated;
         let last_collated_mc_block_id;
@@ -1097,13 +1103,17 @@ struct ReceivedBlockContext {
 impl ReceivedBlockContext {
     async fn load(
         state_node_adapter: &dyn StateNodeAdapter,
+        mc_block_id: &BlockId,
         state: ShardStateStuff,
         processed_upto: ProcessedUptoInfoStuff,
     ) -> Result<Self> {
         static EMPTY_OUT_MSGS: OnceLock<Lazy<OutMsgDescr>> = OnceLock::new();
 
+        let ref_by_mc_seqno = mc_block_id.seqno;
+
         let block_id = state.block_id();
-        if block_id.seqno == 0 {
+        // TODO: throw error if <
+        if block_id.seqno <= state_node_adapter.zerostate_id().seqno {
             let queue_diff = QueueDiffStuff::new_empty(block_id);
 
             return Ok(Self {
@@ -1113,14 +1123,10 @@ impl ReceivedBlockContext {
                 out_msgs: EMPTY_OUT_MSGS
                     .get_or_init(|| Lazy::new(&OutMsgDescr::new()).unwrap())
                     .clone(),
-                ref_by_mc_seqno: 0,
+                ref_by_mc_seqno,
                 processed_upto: Default::default(),
             });
         }
-
-        let Some(ref_by_mc_seqno) = state_node_adapter.get_ref_by_mc_seqno(block_id).await? else {
-            bail!("block not found: {block_id}");
-        };
 
         let Some(block_stuff) = state_node_adapter.load_block(block_id).await? else {
             bail!("block not found: {block_id}");

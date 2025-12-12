@@ -16,11 +16,13 @@ use tycho_consensus::test_utils::{AnchorConsumer, LastAnchorFile, test_logger};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::node::NodeKeys;
-use tycho_core::storage::{CoreStorage, NewBlockMeta};
+use tycho_core::storage::CoreStorage;
 use tycho_crypto::ed25519;
 use tycho_network::PeerId;
 use tycho_storage::StorageContext;
+use tycho_types::boc::Boc;
 use tycho_types::cell::HashBytes;
+use tycho_util::FastHashMap;
 use tycho_util::cli::logger::init_logger;
 use tycho_util::cli::metrics::init_metrics;
 use tycho_util::cli::{resolve_public_ip, signal};
@@ -332,32 +334,38 @@ async fn load_mc_zerostate(
     storage: &CoreStorage,
     mc_zerostate_id: &ZerostateId,
 ) -> Result<ShardStateStuff> {
-    let zerostates = provider
-        .load_zerostates(storage.shard_state_storage().min_ref_mc_state())
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut zerostates = FastHashMap::default();
 
-    let mc_block_id = mc_zerostate_id.as_block_id();
+    for loaded in provider.load_zerostates() {
+        let state = loaded?;
+        let file_hash = Boc::file_hash_blake(&state);
+        tracing::info!("inserting zerostate with hash: {file_hash}");
+        if zerostates.insert(file_hash, state).is_some() {
+            anyhow::bail!("duplicate zerostate {}", file_hash);
+        }
+    }
 
-    let mc_zerostate = zerostates
-        .into_iter()
-        .find(|state| state.block_id() == &mc_block_id)
-        .context("no masterchain zerostate provided")?;
+    let Some(masterchain_zerostate) = zerostates.remove(&mc_zerostate_id.file_hash) else {
+        anyhow::bail!(
+            "missing mc zerostate for file hash {}",
+            mc_zerostate_id.file_hash
+        );
+    };
 
-    let (mc_zerostate_handle, _) = storage.block_handle_storage().create_or_load_handle(
-        mc_zerostate.block_id(),
-        NewBlockMeta {
-            is_key_block: true,
-            gen_utime: mc_zerostate.as_ref().gen_utime,
-            ref_by_mc_seqno: 0,
-        },
-    );
-
-    storage
+    let zerostate_block_id = mc_zerostate_id.as_block_id();
+    tracing::info!("loading zerostate {:?}", zerostate_block_id);
+    let root_hash = storage
         .shard_state_storage()
-        .store_state(&mc_zerostate_handle, &mc_zerostate, Default::default())
+        .store_state_bytes(&zerostate_block_id, masterchain_zerostate)
+        .await?;
+    assert_eq!(root_hash, mc_zerostate_id.root_hash);
+
+    let masterchain_zerostate = storage
+        .shard_state_storage()
+        .load_state(zerostate_block_id.seqno, &zerostate_block_id)
         .await?;
 
-    Ok(mc_zerostate)
+    Ok(masterchain_zerostate)
 }
 
 /// Version of [`any_signal()`](tycho_util::cli::signal::any_signal)

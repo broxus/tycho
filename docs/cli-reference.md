@@ -59,6 +59,7 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho tool bc gen-proposal-vote`↴](#tycho-tool-bc-gen-proposal-vote)
 * [`tycho tool check-cells-db`↴](#tycho-tool-check-cells-db)
 * [`tycho tool dump-state`↴](#tycho-tool-dump-state)
+* [`tycho tool prepare-hardfork`↴](#tycho-tool-prepare-hardfork)
 * [`tycho elect`↴](#tycho-elect)
 * [`tycho elect run`↴](#tycho-elect-run)
 * [`tycho elect once`↴](#tycho-elect-once)
@@ -608,6 +609,7 @@ Work with blockchain stuff
 * `bc` — Blockchain stuff
 * `check-cells-db` — Check that the cells database is consistent
 * `dump-state` — Dumps node state for a specific block, intended for testing collation of the next block. This tool interacts directly with the node's database, bypassing the need for a running node, which is useful for analyzing failed nodes
+* `prepare-hardfork` — Saves masterchain and shardchain states to files to run network from
 
 
 
@@ -1020,6 +1022,20 @@ Dumps node state for a specific block, intended for testing collation of the nex
 
 
 
+## `tycho tool prepare-hardfork`
+
+Saves masterchain and shardchain states to files to run network from
+
+**Usage:** `tycho tool prepare-hardfork [OPTIONS] --mc-seqno <MC_SEQNO>`
+
+###### **Options:**
+
+* `--db <DB>` — Path to the node's database directory
+* `--output <OUTPUT>` — Path to the directory where the dump files will be saved
+* `-m`, `--mc-seqno <MC_SEQNO>` — Seqno of the masterchain block for which to dump the states
+
+
+
 ## `tycho elect`
 
 Participate in validator elections
@@ -1208,4 +1224,3 @@ Print a CLI help for all subcommands as Markdown
     This document was generated automatically by
     <a href="https://crates.io/crates/clap-markdown"><code>clap-markdown</code></a>.
 </i></small>
-

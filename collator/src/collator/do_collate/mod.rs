@@ -156,7 +156,9 @@ impl CollatorStdImpl {
             prev_shard_data.blocks_ids()[0], // TODO: consider split/merge
             &mc_data.shards,
         );
-        let part_stat_ranges = if is_first_block_after_prev_master && mc_data.block_id.seqno > 0 {
+        let part_stat_ranges = if is_first_block_after_prev_master
+            && mc_data.block_id.seqno > self.zerostate_id.seqno
+        {
             if next_block_id_short.is_masterchain() {
                 self.mc_compute_part_stat_ranges(&mc_data, top_shard_blocks_info.clone().unwrap())
                     .await?
@@ -1345,7 +1347,7 @@ impl CollatorStdImpl {
         }];
 
         for (shard, prev_id, curr_id) in shard_pairs {
-            if prev_id.seqno == 0 {
+            if prev_id.seqno == self.zerostate_id.seqno {
                 return Ok(None);
             }
 
