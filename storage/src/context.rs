@@ -137,6 +137,10 @@ impl StorageContext {
         self.inner.fdlimit
     }
 
+    pub fn fs_usage(&self) -> &FsUsageMonitor {
+        &self.inner.fs_usage
+    }
+
     pub fn rocksdb_table_context(&self) -> &TableContext {
         &self.inner.rocksdb_table_context
     }
