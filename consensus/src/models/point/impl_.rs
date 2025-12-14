@@ -61,7 +61,7 @@ impl Debug for Point {
     }
 }
 
-type ParseResult =
+pub type ParseResult =
     Result<Result<Result<Point, (Point, StructureIssue)>, PointIntegrityError>, TlError>;
 
 impl Point {
