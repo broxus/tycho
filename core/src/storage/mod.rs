@@ -38,14 +38,7 @@ mod db;
 mod node_state;
 mod persistent_state;
 mod shard_state;
-
-mod util {
-    pub use self::slot_subscriptions::*;
-    pub use self::stored_value::*;
-
-    mod slot_subscriptions;
-    mod stored_value;
-}
+mod util;
 
 const CORE_DB_SUBDIR: &str = "core";
 const CELLS_DB_SUBDIR: &str = "cells";

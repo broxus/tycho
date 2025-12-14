@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+from dataclasses import dataclass
 from typing import Union, List, Literal
 
 from dashboard_builder import (
@@ -35,6 +36,11 @@ from grafanalib.core import (
 )
 
 
+@dataclass(frozen=True)
+class FullWidth:
+    panel: Panel
+
+
 def heatmap_color_warm() -> HeatmapColor:
     return HeatmapColor()
 
@@ -62,6 +68,7 @@ def create_gauge_panel(
     unit_format=UNITS.NUMBER_FORMAT,
     labels=[],
     legend_format: str | None = None,
+    legend_placement: str = "right",
 ) -> Panel:
     if isinstance(expr, str):
         expr = [Expr(metric=expr, label_selectors=labels)]
@@ -86,6 +93,7 @@ def create_gauge_panel(
         title=title,
         targets=targets,
         unit=unit_format,
+        legend_placement=legend_placement,
     )
 
 
@@ -96,6 +104,7 @@ def create_counter_panel(
     labels_selectors: List[str] = [],
     legend_format: str | None = None,
     by_labels: list[str] = ["instance"],
+    legend_placement: str = "right",
 ) -> Panel:
     """
     Create a counter panel for visualization.
@@ -149,6 +158,7 @@ def create_counter_panel(
         title=title,
         targets=targets,
         unit=unit_format,
+        legend_placement=legend_placement,
     )
 
 
@@ -159,6 +169,7 @@ def create_percent_panel(
     group_by_labels: List[str] = ["instance"],
     label_selectors: List[str] = [],
     unit_format: str = UNITS.PERCENT_FORMAT,
+    legend_placement: str = "right",
 ) -> Panel:
     """
     create a panel showing the percentage of metric1 to metric2, grouped by specified labels.
@@ -187,7 +198,12 @@ def create_percent_panel(
 
     percent_target = target(percent_expr, legend_format=legend_format)
 
-    return timeseries_panel(title=title, targets=[percent_target], unit=unit_format)
+    return timeseries_panel(
+        title=title,
+        targets=[percent_target],
+        unit=unit_format,
+        legend_placement=legend_placement,
+    )
 
 
 def create_heatmap_panel(
@@ -195,6 +211,7 @@ def create_heatmap_panel(
     title,
     unit_format=yaxis(UNITS.SECONDS),
     labels=[],
+    legend_placement: str = "right",
 ) -> Panel:
     return heatmap_panel(
         title,
@@ -217,6 +234,7 @@ def create_heatmap_quantile_panel(
     title: str,
     unit_format: str = UNITS.NUMBER_FORMAT,
     quantile: AcceptedQuantile = "0.95",
+    legend_placement: str = "right",
 ) -> Panel:
     """
     Create a heatmap quantile panel for the given metric.
@@ -249,6 +267,7 @@ def create_heatmap_quantile_panel(
             )
         ],
         unit=unit_format,
+        legend_placement=legend_placement,
     )
 
 
@@ -256,9 +275,27 @@ def create_row(
     name: str, metrics, repeat: str | None = None, collapsed=True
 ) -> RowPanel:
     layout = Layout(name, repeat=repeat, collapsed=collapsed)
-    for i in range(0, len(metrics), 2):
-        chunk = metrics[i : i + 2]
-        layout.row(chunk)
+
+    half_width_panels = []
+
+    def flush_half_width_panels() -> None:
+        for i in range(0, len(half_width_panels), 2):
+            layout.row(half_width_panels[i : i + 2])
+        half_width_panels.clear()
+
+    for panel in metrics:
+        is_full = isinstance(panel, FullWidth)
+        real_panel = panel.panel if is_full else panel
+
+        if is_full:
+            flush_half_width_panels()
+            layout.row([real_panel])
+            continue
+
+        half_width_panels.append(real_panel)
+
+    flush_half_width_panels()
+
     return layout.row_panel
 
 

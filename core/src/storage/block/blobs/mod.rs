@@ -65,6 +65,7 @@ pub use self::types::{ArchiveId, BlockGcStats, BlockStorageError, OpenStats};
 pub use self::util::remove_blocks;
 use super::package_entry::{PackageEntryKey, PartialBlockId};
 use crate::storage::block_handle::BlockDataGuard;
+use crate::storage::util::spawn_cas_metrics_loop;
 use crate::storage::{BlockFlags, BlockHandle, BlockHandleStorage, BlockMeta, CoreDb, tables};
 
 // Default archive chunk size (no longer used for actual chunking, kept for protocol compatibility)
@@ -100,6 +101,8 @@ impl BlobStorage {
         };
         let blocks = Cas::open(blobdb_path.join("packages"), config.clone())?;
         let archives = Cas::open(blobdb_path.join("archives"), config)?;
+        spawn_cas_metrics_loop(&blocks);
+        spawn_cas_metrics_loop(&archives);
 
         let storage = Self {
             db,
