@@ -397,6 +397,10 @@ impl ShardStateStorage {
         }))
     }
 
+    pub fn part_split_depth(&self) -> u8 {
+        self.part_split_depth
+    }
+
     fn uses_parts(&self) -> bool {
         self.part_split_depth > 0
     }
@@ -735,6 +739,8 @@ impl ShardStateStorage {
             ctx.store(&block_id, boc, parts_info, ShardIdent::PREFIX_FULL)
         })
         .await??;
+
+        // TODO: check that actual pruned branches root hashes fully matche the root hashes from stored parts
 
         // wait for all store tasks in parts
         while let Some(store_res) = part_store_tasks.next().await {

@@ -264,7 +264,7 @@ impl ShardStateHandler {
             else {
                 unreachable!("main cell storage always use main cells db")
             };
-            let writer = ShardStateWriter::new(db, &output, handle.id(), None);
+            let writer = ShardStateWriter::new(db, &output, handle.id(), 0, None);
 
             let mut progress_bar = ProgressBar::builder()
                 .exact_unit("bytes")
