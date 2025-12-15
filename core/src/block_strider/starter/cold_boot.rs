@@ -31,7 +31,7 @@ use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::{KeyBlockProof, ZerostateProof};
 use crate::storage::{
     BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
-    PersistentStateKind, ShardStatePartInfo,
+    PersistentStateKind, PersistentStateStorage, ShardStatePartInfo,
 };
 
 impl StarterInner {
@@ -819,13 +819,13 @@ impl StarterInner {
         };
 
         let open_part_files = |part_files_builders: &[(ShardStatePartInfo, FileBuilder)]| {
-            let mut part_files_for_storage = Vec::with_capacity(part_files_builders.len());
+            let mut part_files = Vec::with_capacity(part_files_builders.len());
             for (info, builder) in part_files_builders {
                 let mut builder_for_read = builder.clone();
                 let file = builder_for_read.read(true).open()?;
-                part_files_for_storage.push((*info, file));
+                part_files.push((*info, file));
             }
-            Ok::<_, anyhow::Error>(part_files_for_storage)
+            Ok::<_, anyhow::Error>(part_files)
         };
 
         let mc_seqno = mc_block_id.seqno;
@@ -866,29 +866,65 @@ impl StarterInner {
                 .await
                 .context("failed to load state on downloaded shard state")?;
 
-            // TODO: should find existing part files and compare with state parts info,
-            //      then pass them into StorePersistentStateFrom::File to save
+            let mut parts_paths = vec![];
 
             if !handle.has_persistent_shard_state() {
-                let from = if main_file_builder.exists() {
-                    let part_files_builders = vec![];
+                let main_file_exists = main_file_builder.exists();
 
+                tracing::info!(target: "local_debug",
+                    main_file_path = %main_file_builder.path().display(),
+                    "try to use previously downloaded persistent state files",
+                );
+
+                let mut part_files_builders = vec![];
+
+                if main_file_exists {
+                    let file_prefix = format!("state_{block_id}_part_");
+                    if let Some(dir) = main_file_builder.path().parent() {
+                        // review all files in the temp directory
+                        if let Ok(entries) = std::fs::read_dir(dir) {
+                            for entry in entries.flatten() {
+                                // parse file name
+                                let path = entry.path();
+                                let Some((_, kind, shard_prefix)) =
+                                    PersistentStateStorage::parse_persistent_state_file_name(&path)
+                                else {
+                                    continue;
+                                };
+                                // if it is a persistent shard part file
+                                // that relates to main file then use it
+                                if kind == PersistentStateKind::Shard
+                                    && shard_prefix.is_some() // is a part file
+                                    && let Some(file_name) = path.file_name()
+                                    && let Some(file_name) = file_name.to_str()
+                                    // has the same prefix as main file
+                                    && file_name.starts_with(&file_prefix)
+                                {
+                                    part_files_builders.push(temp.file(file_name));
+                                    parts_paths.push(path);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let from = if main_file_exists {
                     // check downloaded persistent state files match each other
+                    let mut part_files_builders_with_info = vec![];
                     if !part_files_builders.is_empty() {
-                        // open part files for check
-                        let main_file_for_check = main_file_builder.clone().read(true).open()?;
-                        let part_files_for_check = open_part_files(&part_files_builders)?;
-                        // perform check
-                        persistent_states.check_downloaded_persistent_state_files(
-                            block_id,
-                            main_file_for_check,
-                            part_files_for_check,
-                        )?;
+                        let part_files_builders_for_check: Vec<_> =
+                            part_files_builders.into_iter().map(|b| (None, b)).collect();
+                        part_files_builders_with_info = persistent_states
+                            .check_downloaded_persistent_state_files(
+                                block_id,
+                                main_file_builder.clone(),
+                                part_files_builders_for_check,
+                            )?;
                     }
 
                     StorePersistentStateFrom::File {
                         main: main_file_builder,
-                        parts: part_files_builders,
+                        parts: part_files_builders_with_info,
                     }
                 } else {
                     StorePersistentStateFrom::State(state.clone())
@@ -898,7 +934,7 @@ impl StarterInner {
                     .context("failed to store persistent shard state")?;
             }
 
-            remove_state_files(&[]).await;
+            remove_state_files(&parts_paths).await;
 
             tracing::info!("using the stored shard state");
             return Ok((handle.clone(), state));
@@ -978,14 +1014,14 @@ impl StarterInner {
 
             // check downloaded persistent state files match each other
             if !part_files_builders.is_empty() {
-                // open part files for check
-                let main_file_for_check = main_file_builder.clone().read(true).open()?;
-                let part_files_for_check = open_part_files(&part_files_builders)?;
-                // perform check
-                persistent_states.check_downloaded_persistent_state_files(
+                let part_files_builders_for_check: Vec<_> = part_files_builders
+                    .into_iter()
+                    .map(|(i, b)| (Some(i), b))
+                    .collect();
+                part_files_builders = persistent_states.check_downloaded_persistent_state_files(
                     block_id,
-                    main_file_for_check,
-                    part_files_for_check,
+                    main_file_builder.clone(),
+                    part_files_builders_for_check,
                 )?;
             }
 

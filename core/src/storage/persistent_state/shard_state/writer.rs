@@ -25,6 +25,9 @@ pub struct ShardStateWriter<'a> {
     db: CellStorageDb,
     states_dir: &'a Dir,
     block_id: &'a BlockId,
+    /// Contains depth to split shard state on parts.
+    /// Filled with value > 0 for main file only.
+    split_depth: u8,
     /// Contains the shard prefix when used to store part file
     part_shard_prefix: Option<ShardPrefix>,
     /// Map of puned parts branches to write into main file
@@ -69,6 +72,7 @@ impl<'a> ShardStateWriter<'a> {
         db: CellsDb,
         states_dir: &'a Dir,
         block_id: &'a BlockId,
+        split_depth: u8,
         pruned_parts: Option<Arc<ShardStatePartsPrunedData>>,
     ) -> Self {
         Self::new_ext(
@@ -76,6 +80,7 @@ impl<'a> ShardStateWriter<'a> {
             states_dir,
             block_id,
             None,
+            split_depth,
             pruned_parts,
         )
     }
@@ -91,21 +96,24 @@ impl<'a> ShardStateWriter<'a> {
             states_dir,
             block_id,
             Some(part_shard_prefix),
+            0,
             None,
         )
     }
 
-    pub fn new_ext(
+    fn new_ext(
         db: CellStorageDb,
         states_dir: &'a Dir,
         block_id: &'a BlockId,
         part_shard_prefix: Option<ShardPrefix>,
+        split_depth: u8,
         pruned_parts: Option<Arc<ShardStatePartsPrunedData>>,
     ) -> Self {
         Self {
             db,
             states_dir,
             block_id,
+            split_depth,
             part_shard_prefix,
             pruned_parts,
         }
@@ -234,7 +242,21 @@ impl<'a> ShardStateWriter<'a> {
 
         // Header            | current len: 0
         let flags = 0b1000_0000u8 | (REF_SIZE as u8);
+
+        // store split depth if shard state was splitted in parts
+        let flags = if self.split_depth > 0 {
+            flags | FLAG_HAS_PARTS
+        } else {
+            flags
+        };
+
         buffer.write_all(&[0xb5, 0xee, 0x9c, 0x72, flags, offset_size as u8])?;
+
+        // Split depth when writing main file when shard state is splitted into parts
+        // current len: 6 (main with parts)
+        if self.split_depth > 0 {
+            buffer.write_all(&self.split_depth.to_be_bytes())?;
+        }
 
         // Part prefix and root hash when writing part (8+32=40) | current len: 6 (part)
         if let Some(part_shard_prefix) = self.part_shard_prefix {
@@ -242,22 +264,22 @@ impl<'a> ShardStateWriter<'a> {
             buffer.write_all(root_hash.as_slice())?;
         }
 
-        // Unique cell count | current len: 6 (main) / +40 (part)
+        // Unique cell count | current len: 6 (main) / +1 (main with parts) / +40 (part)
         buffer.write_all(&cell_count.to_be_bytes())?;
 
-        // Root count        | current len: 10 (main) / +40 (part)
+        // Root count        | current len: 10 (main) / +1 (main with parts) / +40 (part)
         buffer.write_all(&1u32.to_be_bytes())?;
 
-        // Absent cell count | current len: 14 (main) / +40 (part)
+        // Absent cell count | current len: 14 (main) / +1 (main with parts) / +40 (part)
         buffer.write_all(&[0, 0, 0, 0])?;
 
-        // Total cell size   | current len: 18 (main) / +40 (part)
+        // Total cell size   | current len: 18 (main) / +1 (main with parts) / +40 (part)
         buffer.write_all(&intermediate.total_size.to_be_bytes()[(8 - offset_size)..8])?;
 
-        // Root index        | current len: 18 + offset_size (main) / +40 (part)
+        // Root index        | current len: 18 + offset_size (main) / +1 (main with parts) / +40 (part)
         buffer.write_all(&[0, 0, 0, 0])?;
 
-        // Cells index       | current len: 22 + offset_size (main) / +40 (part)
+        // Cells index       | current len: 22 + offset_size (main) / +1 (main with parts) / +40 (part)
         tracing::info!("started building index");
         {
             let mut next_offset = 0;
@@ -268,7 +290,7 @@ impl<'a> ShardStateWriter<'a> {
         }
         tracing::info!("finished building index");
 
-        // Cells             | current len: 22 + offset_size * (1 + cell_sizes.len())  (main) / +40 (part)
+        // Cells             | current len: 22 + offset_size * (1 + cell_sizes.len())  (main) / +1 (main with parts) / +40 (part)
         let mut cell_buffer = [0; 2 + 128 + 4 * REF_SIZE];
 
         // write cells from the intermediate reverse file
@@ -617,6 +639,7 @@ impl std::ops::Deref for Index {
 
 const REF_SIZE: usize = std::mem::size_of::<u32>();
 const FILE_BUFFER_LEN: usize = 128 * 1024 * 1024; // 128 MB
+pub const FLAG_HAS_PARTS: u8 = 0b0000_1000u8;
 
 #[derive(thiserror::Error, Debug)]
 enum CellWriterError {

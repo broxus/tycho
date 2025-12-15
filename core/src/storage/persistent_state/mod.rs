@@ -12,16 +12,16 @@ use futures_util::stream::FuturesUnordered;
 use parking_lot::Mutex;
 use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::time::Instant;
-use tycho_block_util::block::{BlockStuff, DisplayShardPrefix, ShardPrefix};
+use tycho_block_util::block::{BlockStuff, DisplayShardPrefix, ShardPrefix, split_shard_ident};
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::RefMcStateHandle;
-use tycho_storage::fs::Dir;
+use tycho_storage::fs::{Dir, FileBuilder};
 use tycho_types::cell::{Cell, CellDescriptor, CellFamily, HashBytes};
 use tycho_types::merkle::make_pruned_branch;
 use tycho_types::models::{BlockId, PrevBlockRef};
-use tycho_util::FastHashMap;
 use tycho_util::fs::MappedFile;
 use tycho_util::sync::CancellationFlag;
+use tycho_util::{FastHashMap, FastHashSet};
 
 pub use self::descriptor_cache::PersistentState;
 use self::descriptor_cache::{CacheKey, DescriptorCache};
@@ -363,7 +363,7 @@ impl PersistentStateStorage {
         .await?
     }
 
-    fn parse_persistent_state_file_name(
+    pub fn parse_persistent_state_file_name(
         path: &Path,
     ) -> Option<(BlockId, PersistentStateKind, Option<ShardPrefix>)> {
         let extension = path.extension()?.to_str()?;
@@ -619,8 +619,14 @@ impl PersistentStateStorage {
             let states_dir = this
                 .descriptor_cache
                 .prepare_persistent_states_dir(mc_seqno)?;
-            let writer =
-                ShardStateWriter::new(this.cells_db.clone(), &states_dir, &block_id, pruned_parts);
+            let part_split_depth = this.shard_states.part_split_depth();
+            let writer = ShardStateWriter::new(
+                this.cells_db.clone(),
+                &states_dir,
+                &block_id,
+                part_split_depth,
+                pruned_parts,
+            );
 
             let stored = match writer.write(&root_hash, Some(&cancelled)) {
                 Ok(_) => {
@@ -726,16 +732,61 @@ impl PersistentStateStorage {
     pub fn check_downloaded_persistent_state_files(
         &self,
         _block_id: &BlockId,
-        main_file: File,
-        part_files: Vec<(ShardStatePartInfo, File)>,
-    ) -> Result<()> {
+        mut main_file_builder: FileBuilder,
+        part_files_builders: Vec<(Option<ShardStatePartInfo>, FileBuilder)>,
+    ) -> Result<Vec<(ShardStatePartInfo, FileBuilder)>> {
+        let mut res = vec![];
+
+        // try read split depth from the main file
+        let split_depth = {
+            let main_file = main_file_builder.read(true).open()?;
+            let mapped_file = MappedFile::from_existing_file(main_file)?;
+
+            // read the minimal amount of bytes from the beginning
+            let buffer = mapped_file
+                .read_chunk(0, 0)
+                .context("unable to read data from part file")?;
+
+            // create reader over buffer
+            let reader = std::io::Cursor::new(&buffer);
+
+            // read split depth
+            ShardStateReader::read_split_depth_only(reader)?
+        };
+
+        // nothing to check when split depth == 0
+        if split_depth == 0 {
+            return Ok(res);
+        }
+
+        // check expected parts count
+        let expected_parts_count = 1_usize << split_depth;
+
+        anyhow::ensure!(
+            part_files_builders.len() <= expected_parts_count,
+            "persistent shard part files count ({}) should be not more then expected ({}) \
+            according to split_depth ({}) from main file",
+            part_files_builders.len(),
+            expected_parts_count,
+            split_depth,
+        );
+
         tracing::debug!(target: "local_debug",
-            part_files_len = part_files.len(),
+            part_files_count = part_files_builders.len(),
+            expected_parts_count,
+            split_depth,
             "will check persistent shard part files",
         );
 
+        // get expected shards parts
+        let mut expected_shard_parts: FastHashSet<_> = split_shard_ident(0, split_depth)
+            .iter()
+            .map(|s| s.prefix())
+            .collect();
+
         // when we have part files check their prefixes and root hashes
-        for (info, part_file) in part_files {
+        for (info_opt, part_file_builder) in part_files_builders {
+            let part_file = part_file_builder.clone().read(true).open()?;
             let mapped_file = MappedFile::from_existing_file(part_file)?;
 
             // read the minimal amount of bytes from the beginning
@@ -747,29 +798,43 @@ impl PersistentStateStorage {
             let reader = std::io::Cursor::new(&buffer);
 
             // read part info
-            let part_info = ShardStateReader::read_part_info_only(reader)?;
+            let part_info_from_file = ShardStateReader::read_part_info_only(reader)?;
 
-            // check if prefix match
-            anyhow::ensure!(
-                part_info.prefix == info.prefix,
-                "shard prefix in the persistent shard part file does not match the expected",
-            );
+            // check if part is expected according to split depth from the main file
+            if !expected_shard_parts.remove(&part_info_from_file.prefix) {
+                anyhow::bail!(
+                    "persistent shard part prefix {} is not expected according to split depth",
+                    part_info_from_file.prefix,
+                );
+            }
 
-            // check if root hash match
-            anyhow::ensure!(
-                part_info.hash == info.hash,
-                "persistent shard part root hash in the file header does not match the expected",
-            );
+            if let Some(info) = info_opt {
+                // check if prefix match
+                anyhow::ensure!(
+                    part_info_from_file.prefix == info.prefix,
+                    "shard prefix in the persistent shard part file does not match the expected",
+                );
+
+                // check if root hash match
+                anyhow::ensure!(
+                    part_info_from_file.hash == info.hash,
+                    "persistent shard part root hash in the file header does not match the expected",
+                );
+            }
 
             tracing::debug!(target: "local_debug",
-                part_shard_prefix = %DisplayShardPrefix(&info.prefix),
-                part_root_hash = %info.hash,
+                part_shard_prefix = %DisplayShardPrefix(&part_info_from_file.prefix),
+                part_root_hash = %part_info_from_file.hash,
                 "persistent shard part file successfully checked",
             );
+
+            res.push((part_info_from_file, part_file_builder));
         }
 
-        // TODO: compare with info from the main file
-        Ok(())
+        // NOTE: we may not have separate files for some parts
+        //      if there are no any account in that shard
+
+        Ok(res)
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno, block_id = %handle.id()))]
@@ -836,8 +901,14 @@ impl PersistentStateStorage {
                 .descriptor_cache
                 .prepare_persistent_states_dir(mc_seqno)?;
 
-            let cell_writer =
-                ShardStateWriter::new(this.cells_db.clone(), &states_dir, &block_id, None);
+            let part_split_depth = this.shard_states.part_split_depth();
+            let cell_writer = ShardStateWriter::new(
+                this.cells_db.clone(),
+                &states_dir,
+                &block_id,
+                part_split_depth,
+                None,
+            );
             cell_writer.write_file(file, Some(&cancelled))?;
             this.block_handles
                 .set_has_persistent_shard_state_main(&handle_for_main);

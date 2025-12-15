@@ -223,7 +223,7 @@ impl Dumper {
         else {
             unreachable!("main cell storage always use main cells db")
         };
-        let writer = ShardStateWriter::new(db, &dir, block_id, None);
+        let writer = ShardStateWriter::new(db, &dir, block_id, 0, None);
         let ref_by_mc_seqno = self
             .storage
             .block_handle_storage()
