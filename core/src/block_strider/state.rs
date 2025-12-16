@@ -1,9 +1,23 @@
 use std::sync::Mutex;
 
-use tycho_block_util::block::ShardHeights;
+use anyhow::Result;
+use tycho_block_util::block::{BlockStuff, ShardHeights};
 use tycho_types::models::BlockId;
 
 use crate::storage::CoreStorage;
+
+pub struct UpdateGcState<'a> {
+    /// Related masterchain block id.
+    /// In case of context for mc block this id is the same as `block.id()`.
+    pub mc_block_id: &'a BlockId,
+    /// Related masterchain block flag.
+    /// In case of context for mc block this flag is the same as `is_key_block`.
+    pub mc_is_key_block: bool,
+    /// Whether the `block` from this context is a key block.
+    pub is_key_block: bool,
+    /// Parsed block data.
+    pub block: &'a BlockStuff,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct CommitMasterBlock<'a> {
@@ -21,6 +35,8 @@ pub trait BlockStriderState: Send + Sync + 'static {
     fn load_last_mc_block_id(&self) -> BlockId;
 
     fn is_committed(&self, block_id: &BlockId) -> bool;
+
+    fn update_gc_state(&self, ctx: UpdateGcState<'_>) -> Result<()>;
 
     fn commit_master(&self, ctx: CommitMasterBlock<'_>);
     fn commit_shard(&self, ctx: CommitShardBlock<'_>);
@@ -58,6 +74,11 @@ impl BlockStriderState for PersistentBlockStriderState {
                 None => false,
             }
         }
+    }
+
+    fn update_gc_state(&self, ctx: UpdateGcState<'_>) -> Result<()> {
+        self.storage.update_gc_state(ctx.is_key_block, ctx.block);
+        Ok(())
     }
 
     fn commit_master(&self, ctx: CommitMasterBlock<'_>) {
@@ -107,6 +128,10 @@ impl BlockStriderState for TempBlockStriderState {
         } else {
             shard_heights.contains_ext(block_id, |top_block, seqno| seqno <= top_block)
         }
+    }
+
+    fn update_gc_state(&self, _ctx: UpdateGcState<'_>) -> Result<()> {
+        Ok(())
     }
 
     fn commit_master(&self, ctx: CommitMasterBlock<'_>) {

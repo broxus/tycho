@@ -5,9 +5,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Args;
 use tycho_core::block_strider::{
-    BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt, ColdBootType,
-    FileZerostateProvider, GcSubscriber, MetricsSubscriber, PersistentBlockStriderState, Starter,
-    StarterConfig,
+    BlockProvider, BlockStrider, BlockSubscriber, ColdBootType, FileZerostateProvider,
+    MetricsSubscriber, PersistentBlockStriderState, Starter, StarterConfig,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener,
@@ -317,12 +316,10 @@ impl<C> Node<C> {
         let strider_state =
             PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
 
-        let gc_subscriber = GcSubscriber::new(self.storage.clone());
-
         let block_strider = BlockStrider::builder()
             .with_provider(provider)
             .with_state(strider_state)
-            .with_block_subscriber((subscriber, MetricsSubscriber).chain(gc_subscriber))
+            .with_block_subscriber((subscriber, MetricsSubscriber))
             .build();
 
         // Run block strider

@@ -11,13 +11,11 @@ use tycho_types::models::*;
 pub use self::futures::{
     DelayedTasks, DelayedTasksJoinHandle, DelayedTasksSpawner, OptionHandleFut, OptionPrepareFut,
 };
-pub use self::gc_subscriber::{GcSubscriber, ManualGcTrigger};
 pub use self::metrics_subscriber::MetricsSubscriber;
 pub use self::ps_subscriber::PsSubscriber;
 use crate::storage::CoreStorage;
 
 mod futures;
-mod gc_subscriber;
 mod metrics_subscriber;
 mod ps_subscriber;
 
