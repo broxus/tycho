@@ -150,4 +150,22 @@ mod tests {
             r#"{"important_field":123,"subconfig":{"important_field2":789}}"#
         );
     }
+
+    #[derive(Default, Clone, Copy, PartialConfig, Serialize, PartialEq, Eq)]
+    struct NewtypeConfig(#[partial] SubConfig);
+
+    #[test]
+    fn newtype_parsing_works() {
+        let tuple_config = NewtypeConfig::default();
+
+        // Compiler assert on fields
+        #[allow(unused)]
+        let NewtypeConfigPartial(SubConfigPartial { important_field2 }) =
+            tuple_config.into_partial();
+
+        let json = serde_json::to_string(&tuple_config.into_partial()).unwrap();
+
+        // NOTE: `serde_json` is used with `preserve_order` feature in dev dependencies.
+        assert_eq!(json, r#"{"important_field2":789}"#);
+    }
 }

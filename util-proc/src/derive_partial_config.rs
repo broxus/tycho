@@ -21,16 +21,27 @@ pub fn impl_derive(input: syn::DeriveInput) -> Result<TokenStream, Vec<syn::Erro
     let partial_ident = quote::format_ident!("{ident}Partial");
 
     let result = match container.data {
-        ast::Data::Struct(_style, fields) => {
+        ast::Data::Struct(style, fields) => {
             let value_ident = quote::format_ident!("value");
-            let (members, readers) = build_fields(&fields, quote! { #value_ident. });
+            let (members, readers) = build_fields(style, &fields, quote! { #value_ident. });
+
+            let partial_struct = match style {
+                ast::Style::Struct | ast::Style::Unit => quote! {
+                    #[derive(::tycho_util::__internal::serde::Serialize)]
+                    #[allow(unused)]
+                    #vis struct #partial_ident {
+                        #(#members,)*
+                    }
+                },
+                ast::Style::Tuple => quote! {
+                    #[derive(::tycho_util::__internal::serde::Serialize)]
+                    #[allow(unused)]
+                    #vis struct #partial_ident(#(#members,)*);
+                },
+            };
 
             quote! {
-                #[derive(::tycho_util::__internal::serde::Serialize)]
-                #[allow(unused)]
-                #vis struct #partial_ident {
-                    #(#members,)*
-                }
+                #partial_struct
 
                 #[automatically_derived]
                 impl<#impl_generics> ::tycho_util::config::PartialConfig for #ident {
@@ -65,10 +76,12 @@ pub fn impl_derive(input: syn::DeriveInput) -> Result<TokenStream, Vec<syn::Erro
 }
 
 fn build_fields(
+    style: ast::Style,
     fields: &[ast::Field<'_>],
     original: TokenStream,
 ) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let mut skipped = 0usize;
+    let is_struct = style != ast::Style::Tuple;
     fields
         .iter()
         .filter_map(|field| {
@@ -89,23 +102,37 @@ fn build_fields(
                 .iter()
                 .filter(|item| item.path() == symbol::SERDE);
 
-            if field.attrs.important {
-                let member = quote! {
-                    #(#serde_attrs)*
-                    #partial_ident: #ty
-                };
-                let read = quote! { #partial_ident: #original #ident };
-                Some((member, read))
-            } else if field.attrs.partial {
-                let member = quote! {
-                    #(#serde_attrs)*
-                    #partial_ident: <#ty as ::tycho_util::config::PartialConfig>::Partial
+            if field.attrs.partial {
+                let member = if is_struct {
+                    quote! {
+                        #(#serde_attrs)*
+                        #partial_ident: <#ty as ::tycho_util::config::PartialConfig>::Partial
+                    }
+                } else {
+                    quote! {
+                        #(#serde_attrs)*
+                        <#ty as ::tycho_util::config::PartialConfig>::Partial
+                    }
                 };
                 let read = quote! {
                     #partial_ident: <#ty as ::tycho_util::config::PartialConfig>::into_partial(
                         #original #ident
                     )
                 };
+                Some((member, read))
+            } else if field.attrs.important || !is_struct {
+                let member = if is_struct {
+                    quote! {
+                        #(#serde_attrs)*
+                        #partial_ident: #ty
+                    }
+                } else {
+                    quote! {
+                        #(#serde_attrs)*
+                        #ty
+                    }
+                };
+                let read = quote! { #partial_ident: #original #ident };
                 Some((member, read))
             } else {
                 skipped += 1;
