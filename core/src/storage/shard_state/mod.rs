@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use bytes::{Buf, Bytes};
 use bytesize::ByteSize;
 pub(super) use cell_storage::CellShardRouter;
@@ -693,16 +693,18 @@ impl ShardStateStorage {
         let mut part_store_tasks = FuturesUnordered::new();
         let parts_info = if !block_id.is_masterchain() && !part_files.is_empty() {
             let storage_parts = self.storage_parts.try_as_ref_ext()?;
-            ensure!(
-                storage_parts.len() == part_files.len(),
-                "shard state parts count mismatch",
+            anyhow::ensure!(
+                storage_parts.len() >= part_files.len(),
+                "shard state parts count ({}) mismatch with storage parts count ({})",
+                part_files.len(),
+                storage_parts.len(),
             );
 
             let mut parts_info = Vec::new();
 
             let mut remaining_prefixes: FastHashSet<_> = storage_parts.keys().cloned().collect();
             for (info, file) in part_files {
-                ensure!(
+                anyhow::ensure!(
                     remaining_prefixes.remove(&info.prefix),
                     "unexpected persistent shard state part {}",
                     DisplayShardPrefix(&info.prefix),
