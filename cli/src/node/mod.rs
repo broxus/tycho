@@ -22,9 +22,8 @@ use tycho_collator::validator::{
 };
 use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig, ControlServerVersion};
 use tycho_core::block_strider::{
-    BlockProvider, BlockProviderExt, BlockSubscriberExt, ColdBootType, GcSubscriber,
-    MetricsSubscriber, OptionalBlockStuff, PsSubscriber, ShardStateApplier, StateSubscriber,
-    StateSubscriberContext,
+    BlockProvider, BlockProviderExt, ColdBootType, MetricsSubscriber, OptionalBlockStuff,
+    PsSubscriber, ShardStateApplier, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::{BroadcastListener, SelfBroadcastListener};
 use tycho_core::global_config::{GlobalConfig, MempoolGlobalConfig};
@@ -244,14 +243,12 @@ impl Node {
 
         tracing::info!("collator started");
 
-        let gc_subscriber = GcSubscriber::new(base.core_storage.clone());
         let ps_subscriber = PsSubscriber::new(base.core_storage.clone());
 
         // Create control server
         let control_server = {
             let mut builder = ControlServer::builder()
                 .with_network(&base.network)
-                .with_gc_subscriber(gc_subscriber.clone())
                 .with_storage(base.core_storage.clone())
                 .with_blockchain_rpc_client(base.blockchain_rpc_client.clone())
                 .with_validator_keypair(base.keypair.clone())
@@ -331,8 +328,7 @@ impl Node {
                 rpc_block_subscriber,
                 base.validator_resolver().clone(),
                 MetricsSubscriber,
-            )
-                .chain(gc_subscriber),
+            ),
         );
 
         // Run block strider

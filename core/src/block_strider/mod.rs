@@ -26,6 +26,7 @@ pub use self::starter::{
     ColdBootType, FileZerostateProvider, QueueStateHandler, Starter, StarterBuilder, StarterConfig,
     ValidateQueueState, ZerostateProvider,
 };
+use self::state::UpdateGcState;
 pub use self::state::{
     BlockStriderState, CommitMasterBlock, CommitShardBlock, PersistentBlockStriderState,
     TempBlockStriderState,
@@ -36,8 +37,8 @@ pub use self::subscriber::test::PrintSubscriber;
 pub use self::subscriber::{
     ArchiveSubscriber, ArchiveSubscriberContext, ArchiveSubscriberExt, BlockSubscriber,
     BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, DelayedTasks,
-    DelayedTasksJoinHandle, DelayedTasksSpawner, GcSubscriber, ManualGcTrigger, MetricsSubscriber,
-    NoopSubscriber, PsSubscriber, StateSubscriber, StateSubscriberContext, StateSubscriberExt,
+    DelayedTasksJoinHandle, DelayedTasksSpawner, MetricsSubscriber, NoopSubscriber, PsSubscriber,
+    StateSubscriber, StateSubscriberContext, StateSubscriberExt,
 };
 use crate::storage::CoreStorage;
 
@@ -245,6 +246,14 @@ where
         let _histogram = HistogramGuard::begin("tycho_core_process_mc_block_time");
         self.subscriber.handle_block(&cx, prepared?).await?;
 
+        // Update GC state.
+        self.state.update_gc_state(UpdateGcState {
+            mc_block_id: &cx.mc_block_id,
+            mc_is_key_block: cx.is_key_block,
+            is_key_block: cx.is_key_block,
+            block: &cx.block,
+        })?;
+
         // Join delayed tasks after all processing is done.
         delayed_handle.join().await?;
 
@@ -362,6 +371,14 @@ where
 
             // Handle block by subscribers chain.
             self.subscriber.handle_block(&cx, prepared?).await?;
+
+            // Update GC state.
+            self.state.update_gc_state(UpdateGcState {
+                mc_block_id,
+                mc_is_key_block,
+                is_key_block: cx.is_key_block,
+                block: &cx.block,
+            })?;
 
             // Join delayed tasks after all processing is done.
             delayed_handle.join().await?;

@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
 use parking_lot::Mutex;
 use rand::Rng;
 use scopeguard::defer;
@@ -15,10 +14,10 @@ use tycho_block_util::block::BlockStuff;
 use tycho_types::models::BlockId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::block_strider::{
-    BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
+use super::{
+    ArchivesGcConfig, BlockHandleStorage, BlockStorage, BlocksGcConfig, BlocksGcType,
+    CoreStorageConfig, NodeStateStorage, PersistentStateStorage, ShardStateStorage, StatesGcConfig,
 };
-use crate::storage::{BlocksGcType, CoreStorage};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ManualGcTrigger {
@@ -28,16 +27,38 @@ pub enum ManualGcTrigger {
     Distance(u32),
 }
 
-#[derive(Clone)]
-#[repr(transparent)]
-pub struct GcSubscriber {
-    inner: Arc<Inner>,
+pub(crate) struct CoreStorageGc {
+    tick_tx: TickTx,
+    last_key_block_seqno: AtomicU32,
+    diff_tail_cache: DiffTailCache,
+
+    archives_gc_trigger: ManualTriggerTx,
+    blocks_gc_trigger: ManualTriggerTx,
+    states_gc_trigger: ManualTriggerTx,
+
+    blocks_gc_handle: AbortHandle,
+    states_gc_handle: AbortHandle,
+    archive_gc_handle: AbortHandle,
 }
 
-impl GcSubscriber {
-    pub fn new(storage: CoreStorage) -> Self {
-        let last_key_block_seqno = storage
-            .block_handle_storage()
+impl Drop for CoreStorageGc {
+    fn drop(&mut self) {
+        self.blocks_gc_handle.abort();
+        self.states_gc_handle.abort();
+        self.archive_gc_handle.abort();
+    }
+}
+
+impl CoreStorageGc {
+    pub fn new(
+        node_state: &NodeStateStorage,
+        block_handles: Arc<BlockHandleStorage>,
+        blocks: Arc<BlockStorage>,
+        shard_states: Arc<ShardStateStorage>,
+        persistent_states: PersistentStateStorage,
+        config: &CoreStorageConfig,
+    ) -> Self {
+        let last_key_block_seqno = block_handles
             .find_last_key_block()
             .map_or(0, |handle| handle.id().seqno);
 
@@ -49,21 +70,30 @@ impl GcSubscriber {
         let archives_gc = tokio::spawn(Self::archives_gc(
             tick_rx.clone(),
             archives_gc_rx,
-            storage.clone(),
+            persistent_states,
+            blocks.clone(),
+            config.archives_gc,
         ));
 
         let (blocks_gc_trigger, blocks_gc_rx) = watch::channel(None::<ManualGcTrigger>);
         let blocks_gc = tokio::spawn(Self::blocks_gc(
             tick_rx.clone(),
             blocks_gc_rx,
-            storage.clone(),
             diff_tail_cache.clone(),
+            block_handles,
+            blocks,
+            config.blocks_gc,
         ));
 
         let (states_gc_trigger, states_gc_rx) = watch::channel(None::<ManualGcTrigger>);
-        let states_gc = tokio::spawn(Self::states_gc(tick_rx, states_gc_rx, storage.clone()));
+        let states_gc = tokio::spawn(Self::states_gc(
+            tick_rx,
+            states_gc_rx,
+            shard_states,
+            config.states_gc,
+        ));
 
-        let last_known_mc_block = storage.node_state().load_last_mc_block_id();
+        let last_known_mc_block = node_state.load_last_mc_block_id();
         if let Some(mc_block_id) = last_known_mc_block {
             tracing::info!(
                 %mc_block_id,
@@ -77,50 +107,47 @@ impl GcSubscriber {
         }
 
         Self {
-            inner: Arc::new(Inner {
-                tick_tx,
-                last_key_block_seqno: AtomicU32::new(last_key_block_seqno),
-                diff_tail_cache,
+            tick_tx,
+            last_key_block_seqno: AtomicU32::new(last_key_block_seqno),
+            diff_tail_cache,
 
-                archives_gc_trigger,
-                blocks_gc_trigger,
-                states_gc_trigger,
+            archives_gc_trigger,
+            blocks_gc_trigger,
+            states_gc_trigger,
 
-                archive_gc_handle: archives_gc.abort_handle(),
-                blocks_gc_handle: blocks_gc.abort_handle(),
-                states_gc_handle: states_gc.abort_handle(),
-            }),
+            archive_gc_handle: archives_gc.abort_handle(),
+            blocks_gc_handle: blocks_gc.abort_handle(),
+            states_gc_handle: states_gc.abort_handle(),
         }
     }
 
     pub fn trigger_archives_gc(&self, trigger: ManualGcTrigger) {
-        self.inner.archives_gc_trigger.send_replace(Some(trigger));
+        self.archives_gc_trigger.send_replace(Some(trigger));
     }
 
     pub fn trigger_blocks_gc(&self, trigger: ManualGcTrigger) {
-        self.inner.blocks_gc_trigger.send_replace(Some(trigger));
+        self.blocks_gc_trigger.send_replace(Some(trigger));
     }
 
     pub fn trigger_states_gc(&self, trigger: ManualGcTrigger) {
-        self.inner.states_gc_trigger.send_replace(Some(trigger));
+        self.states_gc_trigger.send_replace(Some(trigger));
     }
 
-    fn handle_impl(&self, is_key_block: bool, block: &BlockStuff) {
+    pub fn handle_block(&self, is_key_block: bool, block: &BlockStuff) {
         // Accumulate diff tail len in cache for each block.
-        self.inner.diff_tail_cache.handle_block(block);
+        self.diff_tail_cache.handle_block(block);
 
         if !block.id().is_masterchain() {
             return;
         }
 
         if is_key_block {
-            self.inner
-                .last_key_block_seqno
+            self.last_key_block_seqno
                 .store(block.id().seqno, Ordering::Relaxed);
         }
 
-        self.inner.tick_tx.send_replace(Some(Tick {
-            last_key_block_seqno: self.inner.last_key_block_seqno.load(Ordering::Relaxed),
+        self.tick_tx.send_replace(Some(Tick {
+            last_key_block_seqno: self.last_key_block_seqno.load(Ordering::Relaxed),
             mc_block_id: *block.id(),
         }));
     }
@@ -129,9 +156,11 @@ impl GcSubscriber {
     async fn archives_gc(
         mut tick_rx: TickRx,
         mut manual_rx: ManualTriggerRx,
-        storage: CoreStorage,
+        persistent_states: PersistentStateStorage,
+        blocks: Arc<BlockStorage>,
+        config: Option<ArchivesGcConfig>,
     ) {
-        let Some(config) = storage.config().archives_gc else {
+        let Some(config) = config else {
             tracing::warn!("manager disabled");
             return;
         };
@@ -139,8 +168,6 @@ impl GcSubscriber {
         defer! {
             tracing::info!("manager stopped");
         }
-
-        let persistent_states = storage.persistent_state_storage();
 
         let compute_offset = |gen_utime: u32| -> Duration {
             let usable_at = std::time::UNIX_EPOCH
@@ -201,11 +228,7 @@ impl GcSubscriber {
                 tick.adjust(trigger)
             };
 
-            if let Err(e) = storage
-                .block_storage()
-                .remove_outdated_archives(target_seqno)
-                .await
-            {
+            if let Err(e) = blocks.remove_outdated_archives(target_seqno).await {
                 tracing::error!("failed to remove outdated archives: {e:?}");
             }
         }
@@ -215,10 +238,12 @@ impl GcSubscriber {
     async fn blocks_gc(
         mut tick_rx: TickRx,
         mut manual_rx: ManualTriggerRx,
-        storage: CoreStorage,
         diff_tail_cache: DiffTailCache,
+        block_handles: Arc<BlockHandleStorage>,
+        blocks: Arc<BlockStorage>,
+        config: Option<BlocksGcConfig>,
     ) {
-        let Some(config) = storage.config().blocks_gc else {
+        let Some(config) = config else {
             tracing::warn!("manager disabled");
             return;
         };
@@ -226,8 +251,6 @@ impl GcSubscriber {
         defer! {
             tracing::info!("manager stopped");
         }
-
-        let block_handles = storage.block_handle_storage();
 
         let mut last_tiggered_at = None::<Instant>;
         let mut sleep_until = None::<Instant>;
@@ -350,8 +373,7 @@ impl GcSubscriber {
             metrics::gauge!("tycho_core_mc_blocks_gc_lag")
                 .set(tick.mc_block_id.seqno.saturating_sub(target_seqno));
 
-            if let Err(e) = storage
-                .block_storage()
+            if let Err(e) = blocks
                 .remove_outdated_blocks(target_seqno, config.max_blocks_per_batch)
                 .await
             {
@@ -364,8 +386,13 @@ impl GcSubscriber {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn states_gc(mut tick_rx: TickRx, mut manual_rx: ManualTriggerRx, storage: CoreStorage) {
-        let Some(config) = storage.config().states_gc else {
+    async fn states_gc(
+        mut tick_rx: TickRx,
+        mut manual_rx: ManualTriggerRx,
+        shard_states: Arc<ShardStateStorage>,
+        config: Option<StatesGcConfig>,
+    ) {
+        let Some(config) = config else {
             tracing::warn!("manager disabled");
             return;
         };
@@ -443,11 +470,7 @@ impl GcSubscriber {
 
             let hist = HistogramGuard::begin("tycho_gc_states_time");
 
-            if let Err(e) = storage
-                .shard_state_storage()
-                .remove_outdated_states(target_seqno)
-                .await
-            {
+            if let Err(e) = shard_states.remove_outdated_states(target_seqno).await {
                 tracing::error!("failed to remove outdated states: {e:?}");
             }
 
@@ -458,28 +481,6 @@ impl GcSubscriber {
                 target_seqno
             );
         }
-    }
-}
-
-struct Inner {
-    tick_tx: TickTx,
-    last_key_block_seqno: AtomicU32,
-    diff_tail_cache: DiffTailCache,
-
-    archives_gc_trigger: ManualTriggerTx,
-    blocks_gc_trigger: ManualTriggerTx,
-    states_gc_trigger: ManualTriggerTx,
-
-    blocks_gc_handle: AbortHandle,
-    states_gc_handle: AbortHandle,
-    archive_gc_handle: AbortHandle,
-}
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        self.blocks_gc_handle.abort();
-        self.states_gc_handle.abort();
-        self.archive_gc_handle.abort();
     }
 }
 
@@ -535,34 +536,6 @@ async fn wait_with_sleep(
         trigger = manual_rx.changed() => {
             trigger.is_ok().then_some(GcSource::Manual)
         },
-    }
-}
-
-impl StateSubscriber for GcSubscriber {
-    type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
-
-    fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        self.handle_impl(cx.is_key_block, &cx.block);
-        futures_util::future::ready(Ok(()))
-    }
-}
-
-impl BlockSubscriber for GcSubscriber {
-    type Prepared = ();
-    type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
-    type HandleBlockFut<'a> = futures_util::future::Ready<Result<()>>;
-
-    fn prepare_block<'a>(&'a self, _: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
-        futures_util::future::ready(Ok(()))
-    }
-
-    fn handle_block<'a>(
-        &'a self,
-        cx: &'a BlockSubscriberContext,
-        _: Self::Prepared,
-    ) -> Self::HandleBlockFut<'a> {
-        self.handle_impl(cx.is_key_block, &cx.block);
-        futures_util::future::ready(Ok(()))
     }
 }
 

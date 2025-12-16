@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use tycho_block_util::block::BlockStuff;
 use tycho_storage::StorageContext;
 use tycho_storage::kv::ApplyMigrations;
 
@@ -18,6 +19,8 @@ pub use self::config::{
     StatesGcConfig,
 };
 pub use self::db::{CellsDb, CoreDb, CoreDbExt, CoreTables};
+use self::gc::CoreStorageGc;
+pub use self::gc::ManualGcTrigger;
 pub use self::node_state::{NodeStateStorage, NodeSyncState};
 pub use self::persistent_state::{
     BriefBocHeader, PersistentState, PersistentStateInfo, PersistentStateKind,
@@ -35,6 +38,7 @@ mod block_connection;
 mod block_handle;
 mod config;
 mod db;
+mod gc;
 mod node_state;
 mod persistent_state;
 mod shard_state;
@@ -94,12 +98,22 @@ impl CoreStorage {
 
         let node_state_storage = NodeStateStorage::new(db.clone());
 
+        let gc = CoreStorageGc::new(
+            &node_state_storage,
+            block_handle_storage.clone(),
+            block_storage.clone(),
+            shard_state_storage.clone(),
+            persistent_state_storage.clone(),
+            &config,
+        );
+
         Ok(Self {
             inner: Arc::new(Inner {
                 ctx,
                 db,
                 cells_db,
                 config,
+                gc,
                 block_handle_storage,
                 block_storage,
                 shard_state_storage,
@@ -153,6 +167,22 @@ impl CoreStorage {
     pub fn open_stats(&self) -> &OpenStats {
         self.inner.block_storage.open_stats()
     }
+
+    pub fn trigger_archives_gc(&self, trigger: ManualGcTrigger) {
+        self.inner.gc.trigger_archives_gc(trigger);
+    }
+
+    pub fn trigger_blocks_gc(&self, trigger: ManualGcTrigger) {
+        self.inner.gc.trigger_blocks_gc(trigger);
+    }
+
+    pub fn trigger_states_gc(&self, trigger: ManualGcTrigger) {
+        self.inner.gc.trigger_states_gc(trigger);
+    }
+
+    pub(crate) fn update_gc_state(&self, is_key_block: bool, block: &BlockStuff) {
+        self.inner.gc.handle_block(is_key_block, block);
+    }
 }
 
 struct Inner {
@@ -160,6 +190,7 @@ struct Inner {
     db: CoreDb,
     cells_db: CellsDb,
     config: CoreStorageConfig,
+    gc: CoreStorageGc,
 
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
