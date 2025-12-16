@@ -59,6 +59,7 @@ impl Default for NodeBootArgs {
 pub struct NodeBase {
     pub base_config: NodeBaseConfig,
     pub global_config: GlobalConfig,
+    pub initial_peer_count: usize,
 
     pub keypair: Arc<ed25519::KeyPair>,
     pub network: Network,
@@ -76,6 +77,8 @@ pub struct NodeBase {
 }
 
 impl NodeBase {
+    const DEFAULT_INITIAL_PEER_COUNT: usize = 3;
+
     pub fn builder<'a>(
         base_config: &'a NodeBaseConfig,
         global_config: &'a GlobalConfig,
@@ -91,13 +94,20 @@ impl NodeBase {
         import_zerostate: Option<Vec<PathBuf>>,
         queue_state_handler: Option<Box<dyn QueueStateHandler>>,
     ) -> Result<BlockId> {
-        self.wait_for_neighbours(3).await;
+        self.init_ext(NodeBootArgs {
+            boot_type,
+            zerostates: import_zerostate,
+            queue_state_handler,
+            ..Default::default()
+        })
+        .await
+    }
 
-        let init_block_id = self
-            .boot(boot_type, import_zerostate, queue_state_handler)
-            .await
-            .context("failed to init node")?;
+    /// Wait for some peers and boot the node.
+    pub async fn init_ext(&self, args: NodeBootArgs) -> Result<BlockId> {
+        self.wait_for_neighbours(self.initial_peer_count).await;
 
+        let init_block_id = self.boot_ext(args).await.context("failed to init node")?;
         tracing::info!(%init_block_id, "node initialized");
 
         Ok(init_block_id)
@@ -253,6 +263,7 @@ impl<'a> NodeBaseBuilder<'a, ()> {
             common: NodeBaseBuilderCommon {
                 base_config,
                 global_config,
+                initial_peer_count: NodeBase::DEFAULT_INITIAL_PEER_COUNT,
             },
             step: (),
         }
@@ -333,6 +344,7 @@ impl<'a> NodeBaseBuilder<'a, init::Final> {
         Ok(NodeBase {
             base_config: self.common.base_config.clone(),
             global_config: self.common.global_config.clone(),
+            initial_peer_count: self.common.initial_peer_count,
             keypair: net.keypair,
             network: net.network,
             dht_client: net.dht_client,
@@ -361,6 +373,15 @@ impl<'a, Step> NodeBaseBuilder<'a, Step> {
 
     pub fn global_config(&self) -> &'a GlobalConfig {
         self.common.global_config
+    }
+
+    pub fn initial_peer_count(&self) -> usize {
+        self.common.initial_peer_count
+    }
+
+    pub fn with_initial_peer_count(mut self, count: usize) -> Self {
+        self.common.initial_peer_count = count;
+        self
     }
 }
 
@@ -405,6 +426,7 @@ impl<Step: AsRef<init::Step2>> NodeBaseBuilder<'_, Step> {
 struct NodeBaseBuilderCommon<'a> {
     base_config: &'a NodeBaseConfig,
     global_config: &'a GlobalConfig,
+    initial_peer_count: usize,
 }
 
 pub mod init {
