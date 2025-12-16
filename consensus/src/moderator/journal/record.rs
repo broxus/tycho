@@ -5,12 +5,14 @@ use tycho_network::PeerId;
 use crate::models::{PointKey, UnixTime};
 use crate::moderator::RecordKey;
 
+#[cfg_attr(any(test, feature = "test"), derive(Debug, PartialEq))]
 pub struct RecordFull {
     pub key: RecordKey,
     pub value: RecordValue,
 }
 
 #[derive(TlRead, TlWrite)]
+#[cfg_attr(any(test, feature = "test"), derive(Debug, PartialEq))]
 #[tl(boxed, id = "journal.recordValue", scheme = "proto.tl")]
 pub struct RecordValue {
     pub is_ban_related: bool,
@@ -30,6 +32,7 @@ pub struct RecordValueShort {
 }
 
 #[derive(Debug, Clone, Copy, TlRead, TlWrite)]
+#[cfg_attr(any(test, feature = "test"), derive(PartialEq))]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum RecordKind {
     #[tl(id = "journal.recordKind.nodeStarted")]
