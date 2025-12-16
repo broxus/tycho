@@ -56,5 +56,6 @@ RUST_BACKTRACE=1 cargo run --bin tycho --features=debug -- debug mempool \
     --global-config "${base_dir}/global-config.json" \
     --import-zerostate "${base_dir}/zerostate.boc" \
     --logger-config "${root_dir}/logger.json" \
+    --control-socket "${base_dir}/control${N}.sock" \
     --top-known-anchor ${top_known_anchor} \
     --restarts ${restarts}

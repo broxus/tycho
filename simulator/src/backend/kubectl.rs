@@ -1,6 +1,6 @@
 use std::io;
 use std::io::Write;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 
 use anyhow::anyhow;
 
@@ -44,16 +44,19 @@ impl KubeCtl {
         }
     }
 
-    pub fn shell(pod_name: &str) -> Result<(), io::Error> {
-        Command::new("kubectl")
-            .arg("exec")
-            .arg(pod_name)
-            .arg("-it")
-            .arg("--")
-            .arg("/bin/bash")
-            .spawn()?
-            .wait()?;
-        Ok(())
+    pub fn shell(pod_name: &str, ctrl_args: Option<Vec<String>>) -> Result<(), io::Error> {
+        let mut cmd = Command::new("kubectl");
+        cmd.arg("exec").arg(pod_name).arg("-it").arg("--");
+        if let Some(ctrl_args) = ctrl_args {
+            cmd.arg("/app/tycho")
+                .arg("node")
+                .arg("mempool")
+                .args(ctrl_args);
+            Self::match_status(cmd.status()?, "kubectl exec")
+        } else {
+            cmd.arg("/bin/bash").status()?;
+            Ok(())
+        }
     }
 
     pub fn logs(pod_name: &str, follow: bool) -> Result<(), io::Error> {
@@ -72,6 +75,16 @@ impl KubeCtl {
             Ok(())
         } else {
             Self::match_output(child.wait_with_output()?)
+        }
+    }
+
+    fn match_status(status: ExitStatus, command: &str) -> Result<(), io::Error> {
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "{command} exited with status {status}"
+            )))
         }
     }
 
