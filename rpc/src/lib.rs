@@ -5,6 +5,7 @@ pub use self::config::{
 };
 pub use self::endpoint::{RpcEndpoint, RpcEndpointBuilder, jrpc, proto};
 pub use self::models::{GenTimings, LastTransactionId, StateTimings};
+pub use self::node::NodeBaseInitRpc;
 pub use self::state::{
     BadRequestError, BlacklistedAccounts, BlockTransactionIdsIter, BlockTransactionsCursor,
     BlockTransactionsIter, BlockTransactionsIterBuilder, BlocksByMcSeqnoIter, BriefBlockInfo,
@@ -18,6 +19,7 @@ pub use self::state::{
 mod config;
 mod endpoint;
 mod models;
+mod node;
 mod state;
 
 pub mod util {
