@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::Args;
+use clap::{ArgGroup, Args};
 use serde::{Deserialize, Serialize};
 use tycho_util::cli;
 use tycho_util::config::PartialConfig;
@@ -14,6 +14,7 @@ use crate::node::{NodeBase, NodeBaseConfig, NodeBootArgs, NodeKeys};
 
 /// Run the Tycho node.
 #[derive(Args)]
+#[clap(group(ArgGroup::new(Self::RUN_GROUP).multiple(true)))]
 pub struct CmdRunArgs {
     /// dump the node config template
     #[clap(short, long, conflicts_with = Self::RUN_GROUP)]
@@ -28,15 +29,15 @@ pub struct CmdRunArgs {
     pub force: bool,
 
     /// path to the node config
-    #[clap(short, long, required_unless_present = "init_config", group = Self::RUN_GROUP)]
+    #[clap(short, long, required_unless_present = Self::INIT_CONFIG, group = Self::RUN_GROUP)]
     pub config: Option<PathBuf>,
 
     /// path to the global config
-    #[clap(short, long, required_unless_present = "init_config", group = Self::RUN_GROUP)]
+    #[clap(short, long, required_unless_present = Self::INIT_CONFIG, group = Self::RUN_GROUP)]
     pub global_config: Option<PathBuf>,
 
     /// path to node keys
-    #[clap(short, long, required_unless_present = "init_config", group = Self::RUN_GROUP)]
+    #[clap(short, long, required_unless_present = Self::INIT_CONFIG, group = Self::RUN_GROUP)]
     pub keys: Option<PathBuf>,
 
     /// path to the logger config
@@ -53,6 +54,7 @@ pub struct CmdRunArgs {
 }
 
 impl CmdRunArgs {
+    pub const INIT_CONFIG: &str = "init_config";
     pub const RUN_GROUP: &str = "_run_args";
 
     /// Either initialized config or prepares the node to run.
@@ -106,7 +108,7 @@ pub enum CmdRunStatus {
 
 /// Run the Tycho node.
 #[derive(Args)]
-#[group(id = CmdRunArgs::RUN_GROUP)]
+#[group(id = CmdRunArgs::RUN_GROUP, multiple = true)]
 pub struct CmdRunOnlyArgs {
     /// path to the node config
     #[clap(short, long)]
@@ -222,4 +224,122 @@ pub trait LightNodeConfig: Default + PartialConfig + Serialize + for<'de> Deseri
     fn threads(&self) -> &cli::config::ThreadPoolConfig;
     fn metrics(&self) -> Option<&cli::metrics::MetricsConfig>;
     fn logger(&self) -> Option<&cli::logger::LoggerConfig>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_base_args() {
+        test_args::<CmdRunArgs>("run", [
+            Ok("--init-config config.json"),
+            Err("--init-config config.json --config not-expected.json"),
+            Err("--config config.json --global-config global-config.json"),
+            Ok("--config config.json --global-config global-config.json --keys keys.json"),
+            Ok(
+                "--config config.json --global-config global-config.json --keys keys.json \
+                --cold-boot latest-persistent",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn parses_extended_args() {
+        #[derive(clap::Parser)]
+        struct ExtendedArgs {
+            #[clap(flatten)]
+            base_args: CmdRunArgs,
+
+            #[clap(
+                long,
+                required_unless_present = CmdRunArgs::INIT_CONFIG,
+                group = CmdRunArgs::RUN_GROUP
+            )]
+            required: Option<String>,
+
+            #[clap(long, group = CmdRunArgs::RUN_GROUP)]
+            not_required_first: bool,
+            #[clap(long, group = CmdRunArgs::RUN_GROUP)]
+            not_required_second: bool,
+        }
+
+        test_args::<ExtendedArgs>("run", [
+            Ok("--init-config config.json"),
+            Err("--init-config config.json --not-required-first"),
+            Err("--config config.json --global-config global-config.json --keys keys.json"),
+            Ok(
+                "--config config.json --global-config global-config.json --keys keys.json \
+                --required testtest",
+            ),
+            Ok(
+                "--config config.json --global-config global-config.json --keys keys.json \
+                --required testtest --not-required-first --not-required-second",
+            ),
+            Err("--not-required-first --not-required-second"),
+        ]);
+    }
+
+    #[test]
+    fn parses_run_only_base_args() {
+        test_args::<CmdRunOnlyArgs>("run", [
+            Err("--config config.json --global-config global-config.json"),
+            Ok("--config config.json --global-config global-config.json --keys keys.json"),
+            Ok(
+                "--config config.json --global-config global-config.json --keys keys.json \
+                --cold-boot latest-persistent",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn parses_run_only_extended_args() {
+        #[derive(clap::Parser)]
+        struct ExtendedArgs {
+            #[clap(flatten)]
+            base_args: CmdRunOnlyArgs,
+
+            #[clap(long, group = CmdRunArgs::RUN_GROUP)]
+            required: String,
+
+            #[clap(long, group = CmdRunArgs::RUN_GROUP)]
+            not_required_first: bool,
+            #[clap(long, group = CmdRunArgs::RUN_GROUP)]
+            not_required_second: bool,
+        }
+
+        test_args::<ExtendedArgs>("run", [
+            Err("--config config.json --global-config global-config.json --keys keys.json"),
+            Ok(
+                "--config config.json --global-config global-config.json --keys keys.json \
+                --required testtest",
+            ),
+            Ok(
+                "--config config.json --global-config global-config.json --keys keys.json \
+                --required testtest --not-required-first --not-required-second",
+            ),
+            Err("--not-required-first --not-required-second"),
+        ]);
+    }
+
+    fn test_args<T: clap::Args>(
+        command_name: &'static str,
+        cases: impl IntoIterator<Item = Result<&'static str, &'static str>>,
+    ) {
+        let mut command = T::augment_args(clap::Command::new(command_name));
+        for case in cases {
+            let (should_succeed, args) = match case {
+                Ok(args) => (true, args),
+                Err(args) => (false, args),
+            };
+            let res = command.try_get_matches_from_mut(
+                std::iter::once(command_name).chain(args.split_whitespace()),
+            );
+            if should_succeed {
+                res.inspect_err(|_| println!("args: {args}")).unwrap();
+            } else {
+                res.inspect(|_| println!("args: {args}")).unwrap_err();
+            }
+        }
+    }
 }
