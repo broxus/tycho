@@ -335,15 +335,16 @@ impl<'a> FinalizationContext<'a> {
         // Prepare mask and counters
         let mut children_mask = LevelMask::new(0);
 
-        let mut children_are_pruned_parts = vec![];
-        let mut children_lvl_0_hashes = FastHashMap::default();
+        let mut children_are_parts_or_not_pruned = vec![];
+        let mut pruned_parts_lvl_0_hashes = FastHashMap::default();
 
         for (index, child) in children.iter() {
             children_mask |= child.level_mask();
 
             // check if child is a pruned part
+            let child_is_pruned = child.cell_type().is_pruned_branch();
             let mut child_is_pruned_part = false;
-            if child.cell_type().is_pruned_branch() {
+            if child_is_pruned {
                 let child_data = self
                     .pruned_branches
                     .get(index)
@@ -358,14 +359,13 @@ impl<'a> FinalizationContext<'a> {
                     .is_some_and(|parts| parts.contains(&HashBytes::from_slice(child_hash)))
                 {
                     child_is_pruned_part = true;
+                    pruned_parts_lvl_0_hashes.insert(*index, *child_hash);
                 }
-                // cache children hashes at level 0
-                children_lvl_0_hashes.insert(*index, *child_hash);
             }
-            children_are_pruned_parts.push(child_is_pruned_part);
+            children_are_parts_or_not_pruned.push(!child_is_pruned || child_is_pruned_part);
         }
 
-        let all_children_are_pruned_parts = children_are_pruned_parts.iter().all(|v| *v);
+        let all_pruned_children_are_parts = children_are_parts_or_not_pruned.iter().all(|v| *v);
 
         let mut is_merkle_cell = false;
         let mut is_pruned_cell = false;
@@ -373,7 +373,7 @@ impl<'a> FinalizationContext<'a> {
             CellType::Ordinary => {
                 // NOTE: when parts sub trees roots replaced with pruned branches in the main persistent state file
                 //      we do not recalculate ancestors levels, so we should take the original level mask
-                if all_children_are_pruned_parts {
+                if all_pruned_children_are_parts {
                     cell.descriptor.level_mask()
                 } else {
                     children_mask
@@ -526,12 +526,12 @@ impl<'a> FinalizationContext<'a> {
 
         // Write cell references
         for (index, child) in children.iter() {
+            let mut child_is_pruned_part = false;
             let child_hash = if child.cell_type().is_pruned_branch() {
-                if all_children_are_pruned_parts {
+                if let Some(child_lvl_0_hash) = pruned_parts_lvl_0_hashes.get(index) {
                     // when children are pruned parts we should store refs to original hashes at level 0
-                    children_lvl_0_hashes
-                        .get(index)
-                        .expect("child lvl 0 hash must exist when all children are pruned parts")
+                    child_is_pruned_part = true;
+                    child_lvl_0_hash
                 } else {
                     let child_data = self
                         .pruned_branches
@@ -548,7 +548,7 @@ impl<'a> FinalizationContext<'a> {
 
             // update cell usages only when child is not a pruned part
             // because we won't store pruned part
-            if !all_children_are_pruned_parts {
+            if !child_is_pruned_part {
                 *self.cell_usages.entry(*child_hash).or_default() += 1;
             }
             output_buffer.extend_from_slice(child_hash);
