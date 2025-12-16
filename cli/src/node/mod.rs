@@ -31,7 +31,7 @@ use tycho_core::global_config::{GlobalConfig, MempoolGlobalConfig};
 use tycho_core::node::{NodeBase, NodeKeys};
 use tycho_core::storage::NodeSyncState;
 use tycho_network::InboundRequestMeta;
-use tycho_rpc::{RpcConfig, RpcState};
+use tycho_rpc::{NodeBaseInitRpc, RpcConfig};
 use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 use tycho_wu_tuner::service::WuTunerServiceBuilder;
@@ -177,14 +177,9 @@ impl Node {
         }
 
         // Create RPC
-        let (rpc_block_subscriber, rpc_state_subscriber) = if let Some(config) = &self.rpc_config {
-            RpcState::init_simple(last_block_id, base, config)
-                .await
-                .map(Some)?
-        } else {
-            None
-        }
-        .unzip();
+        let (rpc_block_subscriber, rpc_state_subscriber) = base
+            .init_simple_rpc_opt(last_block_id, self.rpc_config.as_ref())
+            .await?;
 
         // start work units tuner
         let wu_tuner = WuTunerServiceBuilder::with_config_path(self.wu_tuner_config_path.clone())
