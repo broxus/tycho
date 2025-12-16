@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use bytesize::ByteSize;
+use tycho_block_util::block::split_shard_ident;
 use tycho_block_util::queue::{
     QueueDiffStuff, QueueKey, QueueStateHeader, RouterAddr, RouterPartitions,
 };
@@ -17,8 +20,10 @@ use tycho_types::num::Tokens;
 use tycho_util::FastHashSet;
 use tycho_util::compression::zstd_decompress_simple;
 
+use crate::storage::config::StatePartsConfig;
 use crate::storage::persistent_state::{
-    CacheKey, PersistentStateKind, QueueStateReader, QueueStateWriter,
+    CacheKey, PersistentStateKind, PersistentStateStorage, QueueStateReader, QueueStateWriter,
+    ShardStateWriter,
 };
 use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
 
@@ -438,4 +443,118 @@ async fn persistent_queue_state_read_write() -> Result<()> {
     reader.finish()?;
 
     Ok(())
+}
+
+#[tokio::test]
+async fn test_preload_persistent_states() -> Result<()> {
+    tycho_util::test::init_logger("test_preload_persistent_states", "debug");
+
+    let tests_data_path = open_tests_data_path();
+
+    let without_parts_src_dir = tests_data_path.join("persistent_states/38-without-parts");
+    let with_parts_src_dir = tests_data_path.join("persistent_states/40-with-parts");
+
+    let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+    let storage_dir = ctx.files_dir().create_subdir("states")?;
+
+    let mut config = CoreStorageConfig::new_potato();
+    config.state_parts = Some(StatePartsConfig {
+        split_depth: 2,
+        ..Default::default()
+    });
+
+    let storage = CoreStorage::open(ctx, config).await?;
+    let persistent_states = storage.persistent_state_storage();
+
+    copy_dir_contents(&without_parts_src_dir, &storage_dir.path().join("38"))?;
+    copy_dir_contents(&with_parts_src_dir, &storage_dir.path().join("40"))?;
+
+    persistent_states.preload_states().await?;
+
+    let mc38_block_ids = collect_block_ids(&without_parts_src_dir)?;
+    tracing::debug!(?mc38_block_ids);
+
+    let mc40_block_ids = collect_block_ids(&with_parts_src_dir)?;
+    tracing::debug!(?mc40_block_ids);
+
+    for block_id in &mc38_block_ids {
+        assert!(persistent_states.state_exists(block_id, PersistentStateKind::Shard));
+
+        if !block_id.is_masterchain() {
+            let info_without_parts = persistent_states
+                .get_state_info(block_id, PersistentStateKind::Shard)
+                .expect("state without parts should be preloaded");
+            tracing::debug!(?info_without_parts);
+            assert!(info_without_parts.parts.is_empty());
+        }
+    }
+
+    for block_id in &mc40_block_ids {
+        assert!(persistent_states.state_exists(block_id, PersistentStateKind::Shard));
+
+        if !block_id.is_masterchain() {
+            let info_with_parts = persistent_states
+                .get_state_info(block_id, PersistentStateKind::Shard)
+                .expect("state with parts should be preloaded");
+            tracing::debug!(?info_with_parts);
+
+            let part_prefixes: FastHashSet<_> = info_with_parts
+                .parts
+                .iter()
+                .map(|part| part.prefix)
+                .collect();
+            assert_eq!(part_prefixes.len(), 3);
+
+            let expected_prefixes: FastHashSet<_> =
+                split_shard_ident(0, 2).iter().map(|s| s.prefix()).collect();
+
+            for prefix in part_prefixes {
+                assert!(expected_prefixes.contains(&prefix));
+            }
+        }
+    }
+
+    let block_ids_index = persistent_states
+        .inner
+        .descriptor_cache
+        .mc_seqno_to_block_ids()
+        .lock();
+    assert_eq!(block_ids_index.get(&38), Some(&mc38_block_ids));
+    assert_eq!(block_ids_index.get(&40), Some(&mc40_block_ids));
+
+    Ok(())
+}
+
+fn open_tests_data_path() -> PathBuf {
+    let root_path = env!("CARGO_MANIFEST_DIR");
+    std::path::Path::new(root_path).join("tests/data")
+}
+
+fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            continue;
+        }
+        fs::copy(entry.path(), dst.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+fn collect_block_ids(dir: &Path) -> Result<FastHashSet<BlockId>> {
+    let mut res = FastHashSet::default();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some(ShardStateWriter::FILE_EXTENSION) {
+            continue;
+        }
+        if let Some((block_id, kind, _)) =
+            PersistentStateStorage::parse_persistent_state_file_name(&path)
+            && kind == PersistentStateKind::Shard
+        {
+            res.insert(block_id);
+        }
+    }
+    Ok(res)
 }
