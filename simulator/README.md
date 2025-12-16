@@ -58,6 +58,7 @@ simulator build local
 simulator start
 simulator node logs -f
 simulator node shell -n 0
+simulator node shell --ctrl list-events -- -t
 simulator stop
 simulator clean
 ```

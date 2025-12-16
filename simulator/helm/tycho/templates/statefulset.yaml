@@ -53,12 +53,15 @@ spec:
               --key $KEY
               --config "/app/config.json"
               --global-config "/app/global-config.json"
+              --control-socket ${TYCHO_CONTROL_SOCK}
               --import-zerostate "/app/zerostate.boc"
               --logger-config "/app/logger.json"
               --payload-step 50
               --steps-until-full 8;
               fi;
           env:
+            - name: TYCHO_CONTROL_SOCK
+              value: /app/control.sock
             - name: RUST_LOG
               value: {{ .Values.sharedConfigs.rustLog | quote }}
             - name: TYCHO_POD_IP
