@@ -12,12 +12,10 @@ pub use self::futures::{
     DelayedTasks, DelayedTasksJoinHandle, DelayedTasksSpawner, OptionHandleFut, OptionPrepareFut,
 };
 pub use self::metrics_subscriber::MetricsSubscriber;
-pub use self::ps_subscriber::PsSubscriber;
 use crate::storage::CoreStorage;
 
 mod futures;
 mod metrics_subscriber;
-mod ps_subscriber;
 
 // === trait BlockSubscriber ===
 

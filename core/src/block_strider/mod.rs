@@ -37,7 +37,7 @@ pub use self::subscriber::test::PrintSubscriber;
 pub use self::subscriber::{
     ArchiveSubscriber, ArchiveSubscriberContext, ArchiveSubscriberExt, BlockSubscriber,
     BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, DelayedTasks,
-    DelayedTasksJoinHandle, DelayedTasksSpawner, MetricsSubscriber, NoopSubscriber, PsSubscriber,
+    DelayedTasksJoinHandle, DelayedTasksSpawner, MetricsSubscriber, NoopSubscriber,
     StateSubscriber, StateSubscriberContext, StateSubscriberExt,
 };
 use crate::storage::CoreStorage;
