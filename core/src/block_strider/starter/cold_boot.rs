@@ -486,11 +486,11 @@ impl StarterInner {
 
         let mc_block_id = self.zerostate.as_block_id();
         tracing::info!(%mc_block_id, "importing masterchain zerostate");
-        let root_hash = state_storage
+        let store_res = state_storage
             .store_state_bytes(&mc_block_id, mc_zerostate)
             .await?;
         anyhow::ensure!(
-            root_hash == self.zerostate.root_hash,
+            store_res.root_hash == self.zerostate.root_hash,
             "imported zerostate root hash mismatch"
         );
 
@@ -546,11 +546,11 @@ impl StarterInner {
             };
 
             tracing::info!(%block_id, "importing shard zerostate");
-            let root_hash = state_storage
+            let store_res = state_storage
                 .store_state_bytes(&block_id, state_bytes)
                 .await?;
             anyhow::ensure!(
-                root_hash == block_id.root_hash,
+                store_res.root_hash == block_id.root_hash,
                 "imported zerostate root hash mismatch"
             );
 

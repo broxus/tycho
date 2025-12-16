@@ -28,6 +28,7 @@ use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
 use super::{BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CellsPartDb};
 use crate::storage::db::{CellStorageDb, CellsDbOps};
+use crate::storage::shard_state::store_state_raw::StoreStateFromFileResult;
 
 mod cell_storage;
 mod entries_buffer;
@@ -84,7 +85,7 @@ pub trait ShardStateStoragePart: Send + Sync {
         self: Arc<Self>,
         block_id: BlockId,
         boc: File,
-    ) -> Pin<Box<dyn Future<Output = Result<HashBytes>> + Send>>;
+    ) -> Pin<Box<dyn Future<Output = Result<StoreStateFromFileResult>> + Send>>;
     fn blocking_store_accounts_subtree(
         self: Arc<Self>,
         block_id: &BlockId,
@@ -155,7 +156,7 @@ impl ShardStateStoragePart for ShardStateStoragePartImpl {
         self: Arc<Self>,
         block_id: BlockId,
         boc: File,
-    ) -> Pin<Box<dyn Future<Output = Result<HashBytes>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<StoreStateFromFileResult>> + Send>> {
         let fut = self.store_accounts_subtree_from_file_impl(block_id, boc);
         Box::pin(fut)
     }
@@ -266,7 +267,7 @@ impl ShardStateStoragePartImpl {
         self: Arc<Self>,
         block_id: BlockId,
         boc: File,
-    ) -> Result<HashBytes> {
+    ) -> Result<StoreStateFromFileResult> {
         let ctx = StoreStateContext {
             cells_db: CellStorageDb::Part(self.cells_db.clone()),
             cell_storage: self.cell_storage.clone(),
@@ -279,7 +280,7 @@ impl ShardStateStoragePartImpl {
         };
 
         let shard_prefix = self.shard_prefix;
-        let root_hash = tokio::task::spawn_blocking(move || {
+        let res = tokio::task::spawn_blocking(move || {
             // NOTE: Ensure that GC lock is captured by the spawned thread.
             let _gc_lock = gc_lock;
 
@@ -287,7 +288,7 @@ impl ShardStateStoragePartImpl {
         })
         .await??;
 
-        Ok(root_hash)
+        Ok(res)
     }
 
     async fn remove_outdated_states_impl(
@@ -682,7 +683,7 @@ impl ShardStateStorage {
         block_id: &BlockId,
         boc: R,
         part_files: Vec<(ShardStatePartInfo, File)>,
-    ) -> Result<HashBytes>
+    ) -> Result<StoreStateFromFileResult>
     where
         R: std::io::Read + Send + 'static,
     {
@@ -732,7 +733,7 @@ impl ShardStateStorage {
             self.gc_lock.clone().lock_owned().await
         };
 
-        let root_hash = tokio::task::spawn_blocking(move || {
+        let main_res = tokio::task::spawn_blocking(move || {
             // NOTE: Ensure that GC lock is captured by the spawned thread.
             let _gc_lock = gc_lock;
 
@@ -740,14 +741,32 @@ impl ShardStateStorage {
         })
         .await??;
 
-        // TODO: check that actual pruned branches root hashes fully matche the root hashes from stored parts
-
         // wait for all store tasks in parts
-        while let Some(store_res) = part_store_tasks.next().await {
-            store_res??;
+        let mut pruned_parts_hashes = main_res.pruned_parts_hashes.clone();
+        while let Some(part_store_res) = part_store_tasks.next().await {
+            let part_store_res = part_store_res??;
+            // check if stored part matches any pruned branch in main file
+            anyhow::ensure!(
+                pruned_parts_hashes.remove(&part_store_res.root_hash),
+                "stored persistent shard part file (hash={}) \
+                does not match any of pruned branch in main file (block_id={}, root_hash={})",
+                part_store_res.root_hash,
+                block_id,
+                main_res.root_hash,
+            );
         }
 
-        Ok(root_hash)
+        // check if all pruned branches from main file stored as parts
+        anyhow::ensure!(
+            pruned_parts_hashes.is_empty(),
+            "some pruned branches of main file (block_id={}, root_hash={}) \
+            were not stored as separate parts: {:?}",
+            block_id,
+            main_res.root_hash,
+            pruned_parts_hashes,
+        );
+
+        Ok(main_res)
     }
 
     // Stores shard state and returns the hash of its root cell.
@@ -756,11 +775,15 @@ impl ShardStateStorage {
         block_id: &BlockId,
         boc: File,
         part_files: Vec<(ShardStatePartInfo, File)>,
-    ) -> Result<HashBytes> {
+    ) -> Result<StoreStateFromFileResult> {
         self.store_state_inner(block_id, boc, part_files).await
     }
 
-    pub async fn store_state_bytes(&self, block_id: &BlockId, boc: Bytes) -> Result<HashBytes> {
+    pub async fn store_state_bytes(
+        &self,
+        block_id: &BlockId,
+        boc: Bytes,
+    ) -> Result<StoreStateFromFileResult> {
         let cursor = Cursor::new(boc);
         self.store_state_inner(block_id, cursor, vec![]).await
     }
