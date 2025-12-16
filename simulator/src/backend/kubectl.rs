@@ -44,15 +44,18 @@ impl KubeCtl {
         }
     }
 
-    pub fn shell(pod_name: &str) -> Result<(), io::Error> {
-        Command::new("kubectl")
-            .arg("exec")
+    pub fn shell(pod_name: &str, ctrl_cmd: Option<String>) -> Result<(), io::Error> {
+        let mut cmd = Command::new("kubectl");
+        cmd.arg("exec")
             .arg(pod_name)
             .arg("-it")
             .arg("--")
-            .arg("/bin/bash")
-            .spawn()?
-            .wait()?;
+            .arg("/bin/bash");
+        if let Some(ctrl_cmd) = ctrl_cmd {
+            cmd.arg("-c")
+                .arg(format!("/app/tycho node mempool {ctrl_cmd}"));
+        }
+        cmd.spawn()?.wait()?;
         Ok(())
     }
 
