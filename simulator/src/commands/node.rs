@@ -19,7 +19,8 @@ impl NodeCommand {
                 KubeCtl::logs(&PodConfig::name(a.node_index), a.follow)?;
             }
             NodeCommand::Shell(a) => {
-                KubeCtl::shell(&PodConfig::name(a.node_index))?;
+                let args = a.ctrl.then_some(a.remaining);
+                KubeCtl::shell(&PodConfig::name(a.node_index), args)?;
             }
         }
         Ok(())
@@ -40,4 +41,11 @@ pub struct NodeShellCommand {
     #[clap(short, long)]
     #[clap(default_value_t = 0)]
     node_index: usize,
+
+    /// Everything passed after `--ctrl` is forwarded as argv to `/app/tycho node mempool ...`
+    #[arg(long)]
+    ctrl: bool,
+
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    remaining: Vec<String>,
 }

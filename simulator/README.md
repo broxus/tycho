@@ -58,6 +58,7 @@ simulator build local
 simulator start
 simulator node logs -f
 simulator node shell -n 0
+simulator node shell -n 0 --ctrl list-events -t
 simulator stop
 simulator clean
 ```
@@ -95,7 +96,7 @@ kubectl -n monitoring port-forward $POD_NAME 3000
 Generate dashboard into Wayland clipboard:
 ```shell
 ../scripts/install-python-deps.sh
-python ../scripts/gen-dashboard.py | wl-copy
+../scripts/gen-dashboard.py | wl-copy
 ```
 
 ### GKE
