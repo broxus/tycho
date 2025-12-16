@@ -30,7 +30,8 @@ pub struct StoreStateContext {
 }
 
 impl StoreStateContext {
-    // Stores shard state and returns the hash of its root cell.
+    /// Stores shard state, returns the hash of its root cell,
+    /// and pruned parts root cells
     #[tracing::instrument(skip_all, fields(block_id = %block_id.as_short_id(), shard_prefix = %DisplayShardPrefix(&shard_prefix)))]
     pub fn store<R>(
         &self,
@@ -38,7 +39,7 @@ impl StoreStateContext {
         reader: R,
         parts_info: Option<Vec<ShardStatePartInfo>>,
         shard_prefix: ShardPrefix,
-    ) -> Result<HashBytes>
+    ) -> Result<StoreStateFromFileResult>
     where
         R: std::io::Read,
     {
@@ -119,7 +120,7 @@ impl StoreStateContext {
         block_id: &BlockId,
         preprocessed: PreprocessedState,
         parts_info: Option<Vec<ShardStatePartInfo>>,
-    ) -> Result<HashBytes> {
+    ) -> Result<StoreStateFromFileResult> {
         // 2^7 bits + 1 bytes
         const MAX_DATA_SIZE: usize = 128;
         const CELLS_PER_BATCH: u64 = 1_000_000;
@@ -156,6 +157,8 @@ impl StoreStateContext {
 
         let total_size = file.length();
         pg.set_total(total_size as u64);
+
+        let mut pruned_parts_hashes = FastHashSet::default();
 
         let mut file_pos = total_size;
         let mut cell_index = header.cell_count;
@@ -207,7 +210,11 @@ impl StoreStateContext {
                     unsafe { hashes_file.read_exact_at(index as usize * HashesEntry::LEN, buffer) }
                 }
 
-                ctx.finalize_cell(cell_index as u32, cell)?;
+                if let FinalizeCellResult::PrunedBranch { lvl_0_hash, .. } =
+                    ctx.finalize_cell(cell_index as u32, cell)?
+                {
+                    pruned_parts_hashes.insert(lvl_0_hash);
+                }
 
                 // SAFETY: `entries_buffer` is guaranteed to be in separate memory area
                 unsafe {
@@ -265,10 +272,21 @@ impl StoreStateContext {
 
         // Load stored shard state
         match self.cells_db.shard_states().get(shard_state_key)? {
-            Some(value) => Ok(ShardStateEntry::from_slice(value.as_ref()).root_hash),
+            Some(value) => {
+                let root_hash = ShardStateEntry::from_slice(value.as_ref()).root_hash;
+                Ok(StoreStateFromFileResult {
+                    root_hash,
+                    pruned_parts_hashes,
+                })
+            }
             None => Err(StoreStateError::NotFound.into()),
         }
     }
+}
+
+pub struct StoreStateFromFileResult {
+    pub root_hash: HashBytes,
+    pub pruned_parts_hashes: FastHashSet<HashBytes>,
 }
 
 struct FinalizationContext<'a> {
@@ -305,7 +323,7 @@ impl<'a> FinalizationContext<'a> {
     }
 
     // TODO: Somehow reuse `tycho_types::cell::CellParts`.
-    fn finalize_cell(&mut self, cell_index: u32, cell: RawCell<'_>) -> Result<()> {
+    fn finalize_cell(&mut self, cell_index: u32, cell: RawCell<'_>) -> Result<FinalizeCellResult> {
         use sha2::{Digest, Sha256};
 
         let (mut current_entry, children) = self
@@ -464,19 +482,21 @@ impl<'a> FinalizationContext<'a> {
         }
 
         // get cell hash and check if it is a pruned part
+        let mut lvl_0_hash = HashBytes::default();
         let (repr_hash, is_pruned_part) = if is_pruned_cell {
             let repr_hash = current_entry
                 .as_reader()
                 .pruned_branch_hash(LevelMask::MAX_LEVEL, cell.data)
                 .context("Invalid pruned branch")?;
-            let lvl_0_hash = current_entry
+            let lvl_0_hash_slice = current_entry
                 .as_reader()
                 .pruned_branch_hash(0, cell.data)
                 .context("Invalid pruned branch")?;
+            lvl_0_hash = HashBytes::from_slice(lvl_0_hash_slice);
             let is_pruned_part = self
                 .pruned_parts_hashes
                 .as_ref()
-                .is_some_and(|parts| parts.contains(&HashBytes::from_slice(lvl_0_hash)));
+                .is_some_and(|parts| parts.contains(&lvl_0_hash));
             (*repr_hash, is_pruned_part)
         } else {
             let repr_hash = current_entry.as_reader().hash(LevelMask::MAX_LEVEL);
@@ -485,7 +505,7 @@ impl<'a> FinalizationContext<'a> {
 
         // do not store pruned part
         if is_pruned_part {
-            return Ok(());
+            return Ok(FinalizeCellResult::PrunedBranch { lvl_0_hash });
         }
 
         // Write cell data
@@ -540,7 +560,11 @@ impl<'a> FinalizationContext<'a> {
         self.cell_usages.insert(repr_hash, -1);
 
         // Done
-        Ok(())
+        if is_pruned_cell {
+            Ok(FinalizeCellResult::PrunedBranch { lvl_0_hash })
+        } else {
+            Ok(FinalizeCellResult::NotPruned)
+        }
     }
 
     fn finalize_cell_usages(&mut self) {
@@ -557,6 +581,11 @@ impl<'a> FinalizationContext<'a> {
         );
         Ok(())
     }
+}
+
+enum FinalizeCellResult {
+    PrunedBranch { lvl_0_hash: HashBytes },
+    NotPruned,
 }
 
 struct PreprocessedState {
