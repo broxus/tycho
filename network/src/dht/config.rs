@@ -70,6 +70,12 @@ pub struct DhtConfig {
     ///
     /// Default: 10.
     pub announced_peers_channel_capacity: usize,
+
+    /// A period of refilling bootstrap peers in the routing table.
+    ///
+    /// Default: 1 minutes.
+    #[serde(with = "serde_helpers::humantime")]
+    pub bootstrap_peers_refill_period: Option<Duration>,
 }
 
 impl Default for DhtConfig {
@@ -86,6 +92,7 @@ impl Default for DhtConfig {
             routing_table_refresh_period: Duration::from_secs(600),
             routing_table_refresh_period_max_jitter: Duration::from_secs(60),
             announced_peers_channel_capacity: 10,
+            bootstrap_peers_refill_period: Some(Duration::from_secs(60)),
         }
     }
 }

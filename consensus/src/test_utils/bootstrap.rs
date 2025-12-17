@@ -98,7 +98,7 @@ pub fn from_validator<T: ToSocket, A: Into<Address>>(
     }
     let peer_resolver = peer_resolver_builder.build(&network);
 
-    dht_tasks.spawn(&network);
+    dht_tasks.spawn_without_bootstrap(&network);
     overlay_tasks.spawn(&network);
 
     (

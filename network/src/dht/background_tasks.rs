@@ -14,11 +14,16 @@ use crate::proto::dht::{PeerValueKeyName, ValueRef};
 use crate::types::PeerInfo;
 
 impl DhtInner {
-    pub(crate) fn start_background_tasks(self: &Arc<Self>, network: WeakNetwork) {
+    pub(crate) fn start_background_tasks(
+        self: &Arc<Self>,
+        network: WeakNetwork,
+        bootstrap_peers: Vec<Arc<PeerInfo>>,
+    ) {
         enum Action {
             RefreshLocalPeerInfo,
             AnnounceLocalPeerInfo,
             RefreshRoutingTable,
+            RefillBootstrapPeers,
             AddPeer(Arc<PeerInfo>),
         }
 
@@ -32,6 +37,10 @@ impl DhtInner {
             self.config.routing_table_refresh_period,
             self.config.routing_table_refresh_period_max_jitter,
         );
+        let mut refill_bootstrap_peers_interval = self
+            .config
+            .bootstrap_peers_refill_period
+            .map(tokio::time::interval);
 
         let mut announced_peers = self.announced_peers.subscribe();
 
@@ -52,7 +61,13 @@ impl DhtInner {
                             tracing::warn!(lag, "announced peers channel lagged");
                             continue
                         },
-                    }
+                    },
+                    _ = async {
+                        match refill_bootstrap_peers_interval {
+                            Some(ref mut interval) => interval.tick().await,
+                            None => std::future::pending().await,
+                        }
+                    }, if refill_bootstrap_peers_interval.is_some() => Action::RefillBootstrapPeers
                 };
 
                 let (Some(this), Some(network)) = (this.upgrade(), network.upgrade()) else {
@@ -82,6 +97,10 @@ impl DhtInner {
                         prev_refresh_routing_table_fut = Some(tokio::spawn(async move {
                             this.refresh_routing_table(&network).await;
                         }));
+                    }
+                    Action::RefillBootstrapPeers => {
+                        this.refill_bootstrap_peers(&network, &bootstrap_peers)
+                            .await;
                     }
                     Action::AddPeer(peer_info) => {
                         let peer_id = peer_info.id;
@@ -219,5 +238,19 @@ impl DhtInner {
         }
 
         tracing::debug!(count, "found new peers");
+    }
+
+    #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
+    async fn refill_bootstrap_peers(&self, network: &Network, bootstrap_peers: &[Arc<PeerInfo>]) {
+        let mut count = 0usize;
+
+        for peer in bootstrap_peers {
+            let is_new = self.add_allow_outdated_peer_info(network, peer.clone());
+            count += is_new as usize;
+
+            tokio::task::yield_now().await;
+        }
+
+        tracing::debug!(count, "refilled bootstrap peers");
     }
 }
