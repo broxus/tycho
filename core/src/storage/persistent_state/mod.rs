@@ -37,6 +37,7 @@ use super::shard_state::{CellShardRouter, ShardStatePartInfo};
 use super::{
     BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, KeyBlocksDirection, ShardStateStorage,
 };
+use crate::storage::BlockFlags;
 use crate::storage::persistent_state::descriptor_cache::ReusePersistentStateResult;
 use crate::storage::persistent_state::parts::{StoreStatePartContext, StoreStatePartFileContext};
 
@@ -1219,8 +1220,24 @@ impl PersistentStateStorage {
             }
 
             // Remove cached states
-            this.descriptor_cache
-                .remove_outdated_cached_states(top_handle.id())
+            let removed_states_block_ids = this
+                .descriptor_cache
+                .remove_outdated_cached_states(top_handle.id())?;
+
+            // Update block handle flags
+            for block_id in removed_states_block_ids {
+                let Some(block_handle) = block_handles.load_handle(&block_id) else {
+                    continue;
+                };
+                block_handles.remove_flags(
+                    &block_handle,
+                    BlockFlags::HAS_PERSISTENT_QUEUE_STATE
+                        .union(BlockFlags::HAS_PERSISTENT_SHARD_STATE_MAIN)
+                        .union(BlockFlags::HAS_PERSISTENT_SHARD_STATE_PARTS),
+                );
+            }
+
+            Ok::<_, anyhow::Error>(())
         })
         .await?
     }
