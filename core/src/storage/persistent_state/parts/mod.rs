@@ -69,6 +69,7 @@ pub struct StoreStatePartFileContext {
     pub cancelled: Option<CancellationFlag>,
 }
 
+#[allow(dead_code)]
 pub struct StoreStatePartResult {
     pub prefix: ShardPrefix,
     pub file_size: usize,
