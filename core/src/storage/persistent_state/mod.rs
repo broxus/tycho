@@ -1445,3 +1445,41 @@ impl PrunedCellData {
         self.data.as_slice()
     }
 }
+
+pub fn read_persistent_shard_part_files(
+    block_id: &BlockId,
+    main_file_builder: &FileBuilder,
+) -> Result<Vec<FileBuilder>> {
+    let mut part_files_builders = vec![];
+
+    let file_prefix = format!("{block_id}_part_");
+    if let Some(dir_path) = main_file_builder.path().parent() {
+        let dir = tycho_storage::fs::Dir::new(dir_path)?;
+        // review all files in the temp directory
+        if let Ok(entries) = dir.entries() {
+            for entry in entries.flatten() {
+                // parse file name
+                let path = entry.path();
+                let Some((_, kind, shard_prefix)) =
+                    PersistentStateStorage::parse_persistent_state_file_name(&path)
+                else {
+                    continue;
+                };
+
+                // if it is a persistent shard part file
+                // that relates to main file then use it
+                if kind == PersistentStateKind::Shard
+                    && shard_prefix.is_some() // is a part file
+                    && let Some(file_name) = path.file_name()
+                    && let Some(file_name) = file_name.to_str()
+                    // has the same prefix as main file
+                    && file_name.starts_with(&file_prefix)
+                {
+                    part_files_builders.push(dir.file(file_name));
+                }
+            }
+        }
+    }
+
+    Ok(part_files_builders)
+}

@@ -31,7 +31,7 @@ use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::{KeyBlockProof, ZerostateProof};
 use crate::storage::{
     BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
-    PersistentStateKind, PersistentStateStorage, ShardStatePartInfo,
+    PersistentStateKind, ShardStatePartInfo, read_persistent_shard_part_files,
 };
 
 impl StarterInner {
@@ -876,44 +876,18 @@ impl StarterInner {
                     "try to use previously downloaded persistent state files",
                 );
 
-                let mut part_files_builders = vec![];
-
-                if main_file_exists {
-                    let file_prefix = format!("state_{block_id}_part_");
-                    if let Some(dir) = main_file_builder.path().parent() {
-                        // review all files in the temp directory
-                        if let Ok(entries) = std::fs::read_dir(dir) {
-                            for entry in entries.flatten() {
-                                // parse file name
-                                let path = entry.path();
-                                let Some((_, kind, shard_prefix)) =
-                                    PersistentStateStorage::parse_persistent_state_file_name(&path)
-                                else {
-                                    continue;
-                                };
-                                // if it is a persistent shard part file
-                                // that relates to main file then use it
-                                if kind == PersistentStateKind::Shard
-                                    && shard_prefix.is_some() // is a part file
-                                    && let Some(file_name) = path.file_name()
-                                    && let Some(file_name) = file_name.to_str()
-                                    // has the same prefix as main file
-                                    && file_name.starts_with(&file_prefix)
-                                {
-                                    part_files_builders.push(temp.file(file_name));
-                                    parts_paths.push(path);
-                                }
-                            }
-                        }
-                    }
-                }
-
                 let from = if main_file_exists {
+                    let part_files_builders =
+                        read_persistent_shard_part_files(block_id, &main_file_builder)?;
+
                     // check downloaded persistent state files match each other
                     let mut part_files_builders_with_info = vec![];
                     if !part_files_builders.is_empty() {
-                        let part_files_builders_for_check: Vec<_> =
-                            part_files_builders.into_iter().map(|b| (None, b)).collect();
+                        let mut part_files_builders_for_check = vec![];
+                        for file_builder in part_files_builders {
+                            parts_paths.push(file_builder.path().clone());
+                            part_files_builders_for_check.push((None, file_builder));
+                        }
                         part_files_builders_with_info = persistent_states
                             .check_downloaded_persistent_state_files(
                                 block_id,

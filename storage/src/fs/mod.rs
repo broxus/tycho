@@ -264,7 +264,7 @@ impl FileBuilder {
         self
     }
 
-    pub fn path(&self) -> &Path {
+    pub fn path(&self) -> &PathBuf {
         &self.path
     }
 }
