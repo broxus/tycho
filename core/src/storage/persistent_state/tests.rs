@@ -10,7 +10,7 @@ use tycho_block_util::queue::{
     QueueDiffStuff, QueueKey, QueueStateHeader, RouterAddr, RouterPartitions,
 };
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::fs::{Dir, FileBuilder, MappedFile};
+use tycho_storage::fs::{Dir, FileBuilder};
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::boc::Boc;
 use tycho_types::cell::{Cell, CellBuilder, CellSlice, HashBytes, Lazy};
@@ -21,15 +21,14 @@ use tycho_types::models::{
 use tycho_types::num::Tokens;
 use tycho_util::FastHashSet;
 use tycho_util::compression::zstd_decompress_simple;
+use tycho_util::fs::MappedFile;
 
 use crate::storage::config::StatePartsConfig;
 use crate::storage::persistent_state::{
     CacheKey, PersistentStateKind, PersistentStateStorage, QueueStateReader, QueueStateWriter,
     ShardStateWriter,
 };
-use crate::storage::{
-    CoreStorage, CoreStorageConfig, NewBlockMeta, read_persistent_shard_part_files,
-};
+use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
 
 #[tokio::test]
 async fn persistent_shard_state() -> Result<()> {
@@ -610,12 +609,11 @@ async fn store_and_check_persistent_states(
         // check downloaded
         let part_files_builders_for_check: Vec<_> =
             part_files_builders.into_iter().map(|b| (None, b)).collect();
-        let part_files_builders_with_info = persistent_states
-            .check_downloaded_persistent_state_files(
-                &block_id,
-                main_file_builder.clone(),
-                part_files_builders_for_check,
-            )?;
+        let part_files_builders_with_info = PersistentStateStorage::check_persistent_state_files(
+            &block_id,
+            main_file_builder.clone(),
+            part_files_builders_for_check,
+        )?;
 
         // open persistent state files
         let main_file = main_file_builder.clone().read(true).open()?;
@@ -754,7 +752,10 @@ fn decompress_persistent_states(
     }
 
     for (block_id, main_file_builder) in main_files_builders {
-        let part_files_builders = read_persistent_shard_part_files(&block_id, &main_file_builder)?;
+        let part_files_builders = PersistentStateStorage::read_persistent_shard_part_files(
+            &block_id,
+            &main_file_builder,
+        )?;
         decompressed_states.push((block_id, main_file_builder, part_files_builders));
     }
 

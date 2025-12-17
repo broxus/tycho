@@ -31,7 +31,7 @@ use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::{KeyBlockProof, ZerostateProof};
 use crate::storage::{
     BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
-    PersistentStateKind, ShardStatePartInfo, read_persistent_shard_part_files,
+    PersistentStateKind, PersistentStateStorage, ShardStatePartInfo,
 };
 
 impl StarterInner {
@@ -878,7 +878,10 @@ impl StarterInner {
 
                 let from = if main_file_exists {
                     let part_files_builders =
-                        read_persistent_shard_part_files(block_id, &main_file_builder)?;
+                        PersistentStateStorage::read_persistent_shard_part_files(
+                            block_id,
+                            &main_file_builder,
+                        )?;
 
                     // check downloaded persistent state files match each other
                     let mut part_files_builders_with_info = vec![];
@@ -888,8 +891,8 @@ impl StarterInner {
                             parts_paths.push(file_builder.path().clone());
                             part_files_builders_for_check.push((None, file_builder));
                         }
-                        part_files_builders_with_info = persistent_states
-                            .check_downloaded_persistent_state_files(
+                        part_files_builders_with_info =
+                            PersistentStateStorage::check_persistent_state_files(
                                 block_id,
                                 main_file_builder.clone(),
                                 part_files_builders_for_check,
@@ -992,7 +995,7 @@ impl StarterInner {
                     .into_iter()
                     .map(|(i, b)| (Some(i), b))
                     .collect();
-                part_files_builders = persistent_states.check_downloaded_persistent_state_files(
+                part_files_builders = PersistentStateStorage::check_persistent_state_files(
                     block_id,
                     main_file_builder.clone(),
                     part_files_builders_for_check,
