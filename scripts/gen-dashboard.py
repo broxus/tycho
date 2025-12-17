@@ -1082,10 +1082,6 @@ def storage() -> RowPanel:
             UNITS.BYTES,
             "0.999",
         ),
-        create_heatmap_panel(
-            "tycho_storage_state_store_time", "Time to store state with cell traversal"
-        ),
-        create_heatmap_panel("tycho_gc_states_time", "Time to garbage collect state"),
         timeseries_panel(
             targets=[
                 target(
@@ -1139,13 +1135,21 @@ def storage() -> RowPanel:
             "tycho_compaction_removes", "Number of deleted cells during compaction"
         ),
         create_counter_panel(
+            "tycho_storage_state_gc_cells_count", "number of deleted cells during gc"
+        ),
+        create_counter_panel(
             "tycho_storage_state_gc_count", "number of deleted states during gc"
         ),
         create_counter_panel(
-            "tycho_storage_state_gc_cells_count", "number of deleted cells during gc"
+            "tycho_storage_state_gc_parts_count",
+            "number of deleted states parts during gc",
         ),
         create_heatmap_panel(
-            "tycho_storage_state_gc_time_high", "time spent to gc single root"
+            "tycho_gc_states_time", "time to gc outdated states with parts"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_state_gc_time_high",
+            "time spent to gc single root (main or part)",
         ),
         create_heatmap_panel(
             "tycho_storage_cell_in_mem_remove_time_high",
