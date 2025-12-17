@@ -263,7 +263,7 @@ impl PersistentStateStorage {
                             "shard prefix in the persistent shard part file does not match the expected",
                         );
 
-                        tracing::debug!(target: "local_debug",
+                        tracing::debug!(
                             block_id = %block_id.as_short_id(),
                             shard_prefix = %DisplayShardPrefix(&part_info.prefix),
                             part_root_hash = %part_info.hash,
@@ -273,7 +273,7 @@ impl PersistentStateStorage {
                         // cache part info
                         parts_info.parts.push(part_info);
                     } else {
-                        tracing::debug!(target: "local_debug",
+                        tracing::debug!(
                             block_id = %block_id.as_short_id(),
                             "found persistent shard file main",
                         );
@@ -301,7 +301,7 @@ impl PersistentStateStorage {
                     let storage_part = storage_parts.try_get_ext(&part_info.prefix)?;
                     storage_part.preload_state(mc_seqno, &block_id, part_info.hash)?;
 
-                    tracing::debug!(target: "local_debug",
+                    tracing::debug!(
                         block_id = %block_id.as_short_id(),
                         shard_prefix = %DisplayShardPrefix(&part_info.prefix),
                         part_root_hash = %part_info.hash,
@@ -320,7 +320,7 @@ impl PersistentStateStorage {
                     parts_info,
                 )?;
 
-                tracing::debug!(target: "local_debug",
+                tracing::debug!(
                     block_id = %block_id.as_short_id(),
                     "preloaded to descriptor cache persistent shard file main",
                 );
@@ -773,7 +773,7 @@ impl PersistentStateStorage {
             split_depth,
         );
 
-        tracing::debug!(target: "local_debug",
+        tracing::debug!(
             part_files_count = part_files_builders.len(),
             expected_parts_count,
             split_depth,
@@ -824,7 +824,7 @@ impl PersistentStateStorage {
                 );
             }
 
-            tracing::debug!(target: "local_debug",
+            tracing::debug!(
                 part_shard_prefix = %DisplayShardPrefix(&part_info_from_file.prefix),
                 part_root_hash = %part_info_from_file.hash,
                 "persistent shard part file successfully checked",
