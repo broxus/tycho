@@ -238,6 +238,7 @@ impl ShardStateStoragePartImpl {
         })
         .await?;
 
+        metrics::counter!("tycho_storage_state_gc_parts_count").increment(1);
         metrics::counter!("tycho_storage_state_gc_cells_count").increment(cx.removed_cells as u64);
 
         Ok(cx.removed_cells)
@@ -693,7 +694,7 @@ impl ShardStateStorage {
             target_block_id = %top_blocks.mc_block,
             "started states GC",
         );
-        // TODO: add overall metric for main db and parts
+
         let started_at = Instant::now();
 
         // calculate split depth
