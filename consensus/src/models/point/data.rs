@@ -3,8 +3,8 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::models::point::proto_utils::{digests_map, signatures_map};
-use crate::models::point::{Digest, Round, UnixTime};
-use crate::models::{AnchorStageRole, PeerCount, PointMap, Signature, StructureIssue};
+use crate::models::point::{Digest, Round, UnixTime, proto_utils};
+use crate::models::{AnchorStageRole, PeerCount, PointKey, PointMap, Signature, StructureIssue};
 
 #[derive(Clone, Copy, Debug, PartialEq, TlRead, TlWrite)]
 #[tl(boxed, id = "consensus.pointId", scheme = "proto.tl")]
@@ -15,7 +15,12 @@ pub struct PointId {
 }
 
 impl PointId {
-    const MAX_TL_BYTES: usize = 68;
+    pub const MAX_TL_BYTES: usize =
+        4 + PeerId::MAX_TL_BYTES + Round::MAX_TL_SIZE + Digest::MAX_TL_BYTES;
+
+    pub fn key(&self) -> PointKey {
+        PointKey::new(self.round, self.digest)
+    }
 }
 
 #[derive(Clone, Debug, TlWrite, TlRead)]
@@ -59,7 +64,7 @@ pub enum Link {
 }
 
 impl Link {
-    pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + 4 + 32;
+    pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + 4 + PeerId::MAX_TL_BYTES;
 }
 
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
@@ -73,34 +78,26 @@ pub enum Through {
 
 impl PointData {
     pub(super) const MAX_BYTE_SIZE: usize = {
-        // 4 bytes of PointData tag
-        // Max peer count * (32 + 32) of includes
-        // Max peer count * (32 + 32) of witness
-        // Max peer count * (32 + 64) of evidence
-        // 4 + (32 + 32 + 32) + 4 + 32 of MAX possible anchor_trigger Link
-        // 4 + (32 + 32 + 32) + 4 + 32 of MAX possible anchor proof Link
-        // 8 bytes of time
-        // 8 bytes of anchor time
-
         let max_possible_maps: usize = PeerCount::MAX.full()
-            * ((PeerId::MAX_TL_BYTES + Digest::MAX_TL_BYTES)
-                + (PeerId::MAX_TL_BYTES + Digest::MAX_TL_BYTES)
-                + (PeerId::MAX_TL_BYTES + Signature::MAX_TL_BYTES));
+            * ((PeerId::MAX_TL_BYTES + Digest::MAX_TL_BYTES) // includes map
+                + (PeerId::MAX_TL_BYTES + Digest::MAX_TL_BYTES) // evidence map
+                + (PeerId::MAX_TL_BYTES + Signature::MAX_TL_BYTES)) // signatures map
+            + 3 * proto_utils::MAP_LEN_BYTES; // maps lengths
 
         4 + max_possible_maps + 2 * Link::MAX_TL_BYTES + 2 * UnixTime::MAX_TL_BYTES
     };
 
     /// counterpart of [`crate::dag::Verifier::verify`] that must be called earlier,
     /// does not require config and allows to use [`crate::models::Point`] methods
-    pub(super) fn check_maps(&self, author: PeerId, round: Round) -> Result<(), StructureIssue> {
+    pub(super) fn check_maps(&self, author: &PeerId, round: Round) -> Result<(), StructureIssue> {
         // proof for previous point consists of digest and 2F++ evidences
         // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
-        ((self.evidence.is_empty() == self.includes.contains_key(&author))
+        ((self.evidence.is_empty() == self.includes.contains_key(author))
             .then_some(PointMap::Includes))
         // evidence must contain only signatures of others
-        .or((self.evidence.contains_key(&author)).then_some(PointMap::Evidence))
+        .or((self.evidence.contains_key(author)).then_some(PointMap::Evidence))
         // also cannot witness own point
-        .or((self.witness.contains_key(&author)).then_some(PointMap::Witness))
+        .or((self.witness.contains_key(author)).then_some(PointMap::Witness))
         .map(StructureIssue::AuthorInMap)
         .map_or(Ok(()), Err)?;
         for role in [AnchorStageRole::Proof, AnchorStageRole::Trigger] {

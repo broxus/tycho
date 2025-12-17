@@ -6,7 +6,7 @@ use tycho_util::metrics::HistogramGuard;
 use weedb::WeeDb;
 use weedb::rocksdb::{IteratorMode, ReadOptions, WaitForCompactOptions, WriteBatch};
 
-use super::{POINT_KEY_LEN, format_point_key};
+use crate::models::{PointKey, Round};
 use crate::storage::tables::MempoolTables;
 
 pub struct MempoolDb {
@@ -34,11 +34,11 @@ impl MempoolDb {
     /// returns range of logically deleted keys
     pub(super) fn clean_points(
         &self,
-        up_to_exclusive: &[u8; POINT_KEY_LEN],
-    ) -> anyhow::Result<Option<(u32, u32)>> {
+        up_to_exclusive: &[u8; PointKey::MAX_TL_BYTES],
+    ) -> anyhow::Result<Option<(Round, Round)>> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_clean_points_time");
-        let zero = [0_u8; POINT_KEY_LEN];
-        let none = None::<[u8; POINT_KEY_LEN]>;
+        let zero = [0; PointKey::MAX_TL_BYTES];
+        let none = None::<[u8; PointKey::MAX_TL_BYTES]>;
 
         let status_cf = self.db.tables().points_status.cf();
         let info_cf = self.db.tables().points_info.cf();
@@ -52,12 +52,12 @@ impl MempoolDb {
         iter.seek_to_first();
         iter.status()?;
         let first = iter.key().map(|first_key| {
-            super::parse_round(first_key).unwrap_or_else(|| {
+            PointKey::parse_prefix(first_key).unwrap_or_else(|| {
                 tracing::error!(
                     "mempool lower clean bound will be shown as 0: {}",
-                    format_point_key(first_key)
+                    PointKey::format_loose(first_key)
                 );
-                0
+                Round::BOTTOM
             })
         });
         iter.status()?;
@@ -66,12 +66,12 @@ impl MempoolDb {
         let last = iter
             .key()
             .map(|last_key| {
-                super::parse_round(last_key).unwrap_or_else(|| {
+                PointKey::parse_prefix(last_key).unwrap_or_else(|| {
                     tracing::error!(
                         "mempool upper clean bound will be shown as 0: {}",
-                        format_point_key(last_key)
+                        PointKey::format_loose(last_key)
                     );
-                    0
+                    Round::BOTTOM
                 })
             })
             .or(first);

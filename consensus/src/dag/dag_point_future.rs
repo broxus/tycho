@@ -189,8 +189,6 @@ impl DagPointFuture {
         let cert_clone = cert.clone();
 
         let task = round_ctx.task().spawn(async move {
-            let point_id = point.info().id();
-
             let store_fn = {
                 let store = store.clone();
                 let status_ref = PointStatusStoredRef::Exists;
@@ -214,7 +212,7 @@ impl DagPointFuture {
                 Self::acquire_validated(&state, info, role, cert, validated, &validate_ctx);
 
             let store_fn = move || {
-                store.set_status(point_id.round, &point_id.digest, status.as_ref());
+                store.set_status(&dag_point.key(), status.as_ref());
                 state.resolve(&dag_point);
                 dag_point
             };
@@ -302,7 +300,7 @@ impl DagPointFuture {
 
                     let store_fn = move || {
                         let _guard = ctx.span().enter();
-                        store.set_status(dag_point.round(), dag_point.digest(), status.as_ref());
+                        store.set_status(&dag_point.key(), status.as_ref());
                         state.resolve(&dag_point);
                         dag_point
                     };
@@ -312,8 +310,7 @@ impl DagPointFuture {
                 DownloadResult::IllFormed(point, reason) => {
                     let mut status = PointStatusIllFormed::default();
                     state.acquire(&point_id, &mut status);
-                    let dag_point =
-                        DagPoint::new_ill_formed(point.info().id(), cert, &status, reason);
+                    let dag_point = DagPoint::new_ill_formed(point_id, cert, &status, reason);
                     let ctx = into_round_ctx.clone();
 
                     let store_fn = move || {
@@ -333,14 +330,13 @@ impl DagPointFuture {
                         author: point_id.author,
                     };
                     state.acquire(&point_id, &mut status);
-                    let dag_point =
-                        DagPoint::new_not_found(point_id.round, &point_id.digest, cert, &status);
+                    let dag_point = DagPoint::new_not_found(point_id.key(), cert, &status);
                     let ctx = into_round_ctx.clone();
 
                     let store_fn = move || {
                         let _guard = ctx.span().enter();
                         let status_ref = PointStatusStoredRef::NotFound(&status);
-                        store.set_status(point_id.round, &point_id.digest, status_ref);
+                        store.set_status(&point_id.key(), status_ref);
                         state.resolve(&dag_point);
                         dag_point
                     };
@@ -373,7 +369,7 @@ impl DagPointFuture {
         if let Some((includes, witness)) = match &point_restore {
             PointRestore::Validated(info, _) => Some((info.includes(), info.witness())),
             PointRestore::IllFormed(_, _) // will not certify its dependencies, can be certified
-            | PointRestore::Exists(_) | PointRestore::NotFound(_, _, _) => None,
+            | PointRestore::Exists(_) | PointRestore::NotFound(_, _) => None,
         } {
             let mut cert_deps = CertDirectDeps {
                 includes: FastHashMap::with_capacity(point_dag_round.peer_count().full()),
@@ -399,7 +395,7 @@ impl DagPointFuture {
             PointRestore::Exists(_) => false,
             PointRestore::Validated(_, status) => status.is_certified,
             PointRestore::IllFormed(_, status) => status.is_certified,
-            PointRestore::NotFound(_, _, status) => status.is_certified,
+            PointRestore::NotFound(_, status) => status.is_certified,
         } {
             cert.certify();
         }
@@ -422,8 +418,8 @@ impl DagPointFuture {
                 state.acquire_restore(&dag_point.id(), &status);
                 Either::Right(dag_point)
             }
-            PointRestore::NotFound(round, digest, status) => {
-                let dag_point = DagPoint::new_not_found(round, &digest, cert, &status);
+            PointRestore::NotFound(key, status) => {
+                let dag_point = DagPoint::new_not_found(key, cert, &status);
                 state.acquire_restore(&dag_point.id(), &status);
                 Either::Right(dag_point)
             }
@@ -457,7 +453,7 @@ impl DagPointFuture {
 
                     let store_fn = move || {
                         let _guard = ctx.span().enter();
-                        store.set_status(dag_point.round(), dag_point.digest(), status.as_ref());
+                        store.set_status(&dag_point.key(), status.as_ref());
                         state.resolve(&dag_point);
                         dag_point
                     };

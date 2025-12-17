@@ -77,11 +77,13 @@ impl PointRawRead<'_> {
     }
 }
 
+pub const MAP_LEN_BYTES: usize = 4;
+
 pub mod digests_map {
     use super::*;
 
     pub fn size_hint(items: &FastHashMap<PeerId, Digest>) -> usize {
-        4 + (items.len() * (32 + 32))
+        MAP_LEN_BYTES + (items.len() * (PeerId::MAX_TL_BYTES + Digest::MAX_TL_BYTES))
     }
 
     pub fn write<P: TlPacket>(items: &FastHashMap<PeerId, Digest>, packet: &mut P) {
@@ -97,7 +99,7 @@ pub mod signatures_map {
     use super::*;
 
     pub fn size_hint(items: &FastHashMap<PeerId, Signature>) -> usize {
-        4 + (items.len() * (32 + 64))
+        MAP_LEN_BYTES + (items.len() * (PeerId::MAX_TL_BYTES + Signature::MAX_TL_BYTES))
     }
 
     pub fn write<P: TlPacket>(items: &FastHashMap<PeerId, Signature>, packet: &mut P) {
