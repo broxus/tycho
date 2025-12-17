@@ -871,7 +871,7 @@ impl StarterInner {
             if !handle.has_persistent_shard_state() {
                 let main_file_exists = main_file_builder.exists();
 
-                tracing::info!(target: "local_debug",
+                tracing::info!(
                     main_file_path = %main_file_builder.path().display(),
                     "try to use previously downloaded persistent state files",
                 );
