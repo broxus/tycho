@@ -11,12 +11,10 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{ReadOptions, WriteBatch};
 
-use super::{
-    AnchorFlags, MempoolStore, POINT_KEY_LEN, fill_point_key, fill_point_prefix, format_point_key,
-};
+use super::{AnchorFlags, MempoolStore};
 use crate::effects::AltFormat;
 use crate::models::{
-    CommitHistoryPart, Point, PointInfo, PointRestore, PointRestoreSelect, PointStatus,
+    CommitHistoryPart, Point, PointInfo, PointKey, PointRestore, PointRestoreSelect, PointStatus,
     PointStatusValidated, Round,
 };
 use crate::storage::MempoolDb;
@@ -71,30 +69,29 @@ impl MempoolAdapterStore {
     pub fn expand_anchor_history_arena_size(&self, history: &[PointInfo]) -> usize {
         let payload_bytes =
             (history.iter()).fold(0, |acc, info| acc + info.payload_bytes() as usize);
-        let keys_bytes = history.len() * POINT_KEY_LEN;
+        let keys_bytes = history.len() * PointKey::MAX_TL_BYTES;
         payload_bytes + keys_bytes
     }
 
     fn load_payload<'b>(&self, history: &[PointInfo], bump: &'b Bump) -> Result<Vec<&'b [u8]>> {
         let _call_duration =
             HistogramGuard::begin("tycho_mempool_store_expand_anchor_history_time");
-        let mut buf = [0_u8; POINT_KEY_LEN];
+        let mut key_buf = [0; _];
         let mut keys = FastHashSet::<&'b [u8]>::with_capacity(history.len());
         for info in history {
-            fill_point_key(info.round().0, info.digest().inner(), &mut buf);
-            keys.insert(bump.alloc_slice_copy(&buf));
+            info.key().fill(&mut key_buf);
+            keys.insert(bump.alloc_slice_copy(&key_buf));
         }
-        buf.fill(0);
 
         let mut opt = ReadOptions::default();
 
         let first = (history.first()).context("anchor history must not be empty")?;
-        fill_point_prefix(first.round().0, &mut buf);
-        opt.set_iterate_lower_bound(buf);
+        PointKey::fill_prefix(first.round(), &mut key_buf);
+        opt.set_iterate_lower_bound(key_buf);
 
         let last = history.last().context("anchor history must not be empty")?;
-        fill_point_prefix(last.round().next().0, &mut buf);
-        opt.set_iterate_upper_bound(buf);
+        PointKey::fill_prefix(last.round().next(), &mut key_buf);
+        opt.set_iterate_upper_bound(key_buf);
 
         let db = self.0.db.rocksdb();
         let points_cf = self.0.db.points.cf();
@@ -131,16 +128,16 @@ impl MempoolAdapterStore {
             keys.is_empty(),
             "{} history points were not found id db:\n{}",
             keys.len(),
-            keys.iter().map(|key| format_point_key(key)).join(",\n")
+            keys.into_iter().map(PointKey::format_loose).join(",\n")
         );
         anyhow::ensure!(found.len() == history.len(), "stored point key collision");
 
         let mut result = Vec::with_capacity(total_payload_items);
         for info in history {
-            fill_point_key(info.round().0, info.digest().inner(), &mut buf);
+            info.key().fill(&mut key_buf);
             let payload = found
-                .remove(buf.as_slice())
-                .with_context(|| format_point_key(&buf))
+                .remove(&key_buf[..])
+                .with_context(|| PointKey::format_loose(&key_buf))
                 .context("key was searched in db but was not found")?;
             for msg in payload {
                 result.push(msg);
@@ -156,7 +153,7 @@ impl MempoolAdapterStore {
         let anchor_round =
             NonZeroU32::try_from(anchor.round().0).context("zero round cannot have points")?;
 
-        let mut buf = [0_u8; POINT_KEY_LEN];
+        let mut key_buf = [0; _];
 
         let db = self.0.db.rocksdb();
         let status_cf = self.0.db.points_status.cf();
@@ -170,8 +167,8 @@ impl MempoolAdapterStore {
         status.anchor_flags = AnchorFlags::Used;
         status.write_to(&mut status_encoded);
 
-        fill_point_key(anchor_round.get(), anchor.digest().inner(), &mut buf);
-        batch.merge_cf(&status_cf, buf.as_slice(), &status_encoded);
+        anchor.key().fill(&mut key_buf);
+        batch.merge_cf(&status_cf, &key_buf[..], &status_encoded);
         status_encoded.clear();
 
         status = PointStatusValidated::default();
@@ -183,8 +180,8 @@ impl MempoolAdapterStore {
 
             status.write_to(&mut status_encoded);
 
-            fill_point_key(info.round().0, info.digest().inner(), &mut buf);
-            batch.merge_cf(&status_cf, buf.as_slice(), &status_encoded);
+            info.key().fill(&mut key_buf);
+            batch.merge_cf(&status_cf, &key_buf[..], &status_encoded);
             status_encoded.clear();
         }
 

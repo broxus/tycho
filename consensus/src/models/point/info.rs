@@ -6,7 +6,8 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::models::{
-    AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature, StructureIssue, UnixTime,
+    AnchorStageRole, Digest, Link, PointData, PointId, PointKey, Round, Signature, StructureIssue,
+    UnixTime,
 };
 
 #[derive(Clone, TlRead, TlWrite)]
@@ -136,7 +137,7 @@ impl PointInfo {
     }
 
     pub(super) fn check_structure(&self) -> Result<(), StructureIssue> {
-        (self.0.data).check_maps(self.0.author, self.0.round)?;
+        (self.0.data).check_maps(self.author(), self.round())?;
         self.prev_digest()
             .is_none_or(|prev_proof| {
                 (self.evidence().iter()).all(|(peer, sig)| sig.verifies(peer, prev_proof))
@@ -159,6 +160,10 @@ impl PointInfo {
             round: self.0.round.prev(),
             digest: *self.prev_digest()?,
         })
+    }
+
+    pub fn key(&self) -> PointKey {
+        PointKey::new(self.round(), *self.digest())
     }
 
     pub fn anchor_link(&self, link_field: AnchorStageRole) -> &Link {

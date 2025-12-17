@@ -4,14 +4,14 @@ use std::num::NonZeroU32;
 use tycho_network::PeerId;
 
 use crate::effects::{AltFmt, AltFormat};
-use crate::models::{Digest, PointId, PointInfo, Round};
+use crate::models::{Digest, PointId, PointInfo, PointKey, Round};
 use crate::storage::{AnchorFlags, StatusFlags};
 
 pub enum PointRestoreSelect {
     /// Note: currently all points with `Exists` statuses must repeat `verify()`,
     ///       as this status also represents an error during merge of DB statuses;
     ///       also config or `v_set` may have changed after reboot if node lagged too far
-    NeedsVerify(Round, Digest),
+    NeedsVerify(PointKey),
     Ready(PointRestore),
 }
 pub enum PointRestore {
@@ -19,7 +19,7 @@ pub enum PointRestore {
     Exists(PointInfo),
     Validated(PointInfo, PointStatusValidated),
     IllFormed(PointId, PointStatusIllFormed),
-    NotFound(Round, Digest, PointStatusNotFound),
+    NotFound(PointKey, PointStatusNotFound),
 }
 impl PointRestore {
     /// required partial order: resolved + valid, resolved, valid, no flags, no status
@@ -36,7 +36,7 @@ impl PointRestore {
             PointRestore::Exists(_) => 0,
             PointRestore::Validated(_, status) => order_desc(status),
             PointRestore::IllFormed(_, status) => order_desc(status),
-            PointRestore::NotFound(_, _, status) => order_desc(status),
+            PointRestore::NotFound(_, status) => order_desc(status),
         };
         !desc // invert priority for ascending order
     }
@@ -44,21 +44,21 @@ impl PointRestore {
         match self {
             Self::Exists(info) | Self::Validated(info, _) => info.round(),
             Self::IllFormed(id, _) => id.round,
-            Self::NotFound(round, _, _) => *round,
+            Self::NotFound(key, _) => key.round,
         }
     }
     pub fn author(&self) -> &PeerId {
         match self {
             Self::Exists(info) | Self::Validated(info, _) => info.author(),
             Self::IllFormed(id, _) => &id.author,
-            Self::NotFound(_, _, status) => &status.author,
+            Self::NotFound(_, status) => &status.author,
         }
     }
     pub fn digest(&self) -> &Digest {
         match self {
             Self::Exists(info) | Self::Validated(info, _) => info.digest(),
             Self::IllFormed(id, _) => &id.digest,
-            Self::NotFound(_, digest, _) => digest,
+            Self::NotFound(key, _) => &key.digest,
         }
     }
     pub fn id(&self) -> PointId {
@@ -85,7 +85,7 @@ impl Debug for AltFmt<'_, PointRestore> {
             PointRestore::IllFormed(_, status) => {
                 write!(f, "{status}")?;
             }
-            PointRestore::NotFound(_, _, status) => {
+            PointRestore::NotFound(_, status) => {
                 let mut tuple = f.debug_tuple("NotFound");
                 if status.is_first_resolved {
                     tuple.field(&"first resolved");
@@ -351,7 +351,7 @@ impl PointStatusStored {
                 })
             }
         } else {
-            let mut author = [0_u8; 32];
+            let mut author = [0; 32];
             author.copy_from_slice(&stored[1..]);
             Self::NotFound(PointStatusNotFound {
                 author: PeerId(author),
@@ -372,7 +372,7 @@ impl CommitHistoryPart {
     }
     fn read(slice: &[u8]) -> Option<Self> {
         assert_eq!(slice.len(), 4 + 4, "slice len must be 8 bytes");
-        let mut u32_buf = [0_u8; 4];
+        let mut u32_buf = [0; 4];
 
         u32_buf.copy_from_slice(&slice[..4]);
         let anchor_round = NonZeroU32::new(u32::from_be_bytes(u32_buf))?;

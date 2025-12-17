@@ -9,7 +9,7 @@ use crate::effects::{AltFmt, AltFormat};
 use crate::models::cert::Cert;
 use crate::models::point::{Digest, PointId};
 use crate::models::{
-    PointInfo, PointStatusIllFormed, PointStatusNotFound, PointStatusValidated, Round,
+    PointInfo, PointKey, PointStatusIllFormed, PointStatusNotFound, PointStatusValidated, Round,
 };
 
 #[derive(Clone)]
@@ -71,17 +71,12 @@ impl DagPoint {
         })))
     }
 
-    pub fn new_not_found(
-        round: Round,
-        digest: &Digest,
-        cert: Cert,
-        status: &PointStatusNotFound,
-    ) -> Self {
+    pub fn new_not_found(key: PointKey, cert: Cert, status: &PointStatusNotFound) -> Self {
         DagPoint::NotFound(NotFoundPoint(Arc::new(NotFoundPointInner {
             id: PointId {
                 author: status.author,
-                round,
-                digest: *digest,
+                round: key.round,
+                digest: key.digest,
             },
             is_first_resolved: status.is_first_resolved,
             cert,
@@ -137,6 +132,10 @@ impl DagPoint {
             Self::IllFormed(ill) => &ill.id().digest,
             Self::NotFound(not_found) => &not_found.id().digest,
         }
+    }
+
+    pub fn key(&self) -> PointKey {
+        PointKey::new(self.round(), *self.digest())
     }
 
     pub fn is_first_resolved(&self) -> bool {

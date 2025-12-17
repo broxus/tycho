@@ -250,14 +250,9 @@ impl Engine {
                 let task = round_ctx.task().spawn_blocking({
                     let store = self.round_task.state.store.clone();
                     move || {
-                        let last = store
-                            .get_point(last_id.round, &last_id.digest)
-                            .expect("last bcast by id");
-                        let prev = last.info().prev_id().map(|id| {
-                            store
-                                .get_point(id.round, &id.digest)
-                                .expect("prev bcast by id")
-                        });
+                        let last = store.get_point(&last_id.key()).expect("last bcast by id");
+                        let prev = (last.info().prev_id())
+                            .map(|id| store.get_point(&id.key()).expect("prev bcast by id"));
                         (last, prev)
                     }
                 });
@@ -296,9 +291,7 @@ impl Engine {
                 let restores = store.load_restore(&range);
                 let (need_verify, ready): (Vec<_>, Vec<_>) =
                     restores.into_iter().partition_map(|r| match r {
-                        PointRestoreSelect::NeedsVerify(round, digest) => {
-                            Either::Left((round, digest))
-                        }
+                        PointRestoreSelect::NeedsVerify(key) => Either::Left(key),
                         PointRestoreSelect::Ready(ready) => Either::Right(ready),
                     });
                 let verified = need_verify

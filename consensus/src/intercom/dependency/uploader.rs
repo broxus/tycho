@@ -34,14 +34,14 @@ impl Uploader {
                 move || {
                     // we'll return any point that is signed by its author (we don't store others)
                     // despite its well-formedness or validation result (receiver decides on its own)
-                    let status_opt = store.get_status(point_id.round, &point_id.digest);
+                    let status_opt = store.get_status(&point_id.key());
                     let result = match &status_opt {
                         Some(
                             PointStatusStored::Validated(_)
                             | PointStatusStored::IllFormed(_)
                             | PointStatusStored::Exists,
                         ) => {
-                            match store.get_point_raw(point_id.round, &point_id.digest) {
+                            match store.get_point_raw(&point_id.key()) {
                                 Some(slice) => DownloadResponse::Defined(slice),
                                 // though point and its status are saved in one batch,
                                 // the deletion may occur between status and point reads
