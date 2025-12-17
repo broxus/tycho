@@ -599,63 +599,65 @@ impl PersistentStateStorage {
             }
         }
 
-        // TODO: skip store main file if reused
         // store main persistent state file
-        let this = self.inner.clone();
-        let cancelled = cancelled.clone();
-        let handle_for_main = handle.clone();
-        let parts_info = entry.parts_info.clone();
+        let mut state = None;
+        if !reused.reused_shard_main()? {
+            let this = self.inner.clone();
+            let cancelled = cancelled.clone();
+            let handle_for_main = handle.clone();
+            let parts_info = entry.parts_info.clone();
 
-        let span = tracing::Span::current();
-        let state = tokio::task::spawn_blocking(move || {
-            let _span = span.enter();
+            let span = tracing::Span::current();
+            state = tokio::task::spawn_blocking(move || {
+                let _span = span.enter();
 
-            let guard = scopeguard::guard((), |_| {
-                tracing::warn!("main cancelled");
-            });
+                let guard = scopeguard::guard((), |_| {
+                    tracing::warn!("main cancelled");
+                });
 
-            // NOTE: Ensure that the tracker handle will outlive the state writer.
-            let _tracker_handle = tracker_handle;
+                // NOTE: Ensure that the tracker handle will outlive the state writer.
+                let _tracker_handle = tracker_handle;
 
-            let states_dir = this
-                .descriptor_cache
-                .prepare_persistent_states_dir(mc_seqno)?;
-            let part_split_depth = this.shard_states.part_split_depth();
-            let writer = ShardStateWriter::new(
-                this.cells_db.clone(),
-                &states_dir,
-                &block_id,
-                part_split_depth,
-                pruned_parts,
-            );
-
-            let stored = match writer.write(&root_hash, Some(&cancelled)) {
-                Ok(_) => {
-                    this.block_handles
-                        .set_has_persistent_shard_state_main(&handle_for_main);
-                    tracing::info!("persistent shard state saved");
-                    true
-                }
-                Err(e) => {
-                    // NOTE: We are ignoring an error here. It might be intentional
-                    tracing::error!("failed to write persistent shard state: {e:?}");
-                    false
-                }
-            };
-
-            let state = if stored {
-                let cached = this
+                let states_dir = this
                     .descriptor_cache
-                    .cache_shard_state(mc_seqno, &block_id, None, None, parts_info)?;
-                Some(cached)
-            } else {
-                None
-            };
+                    .prepare_persistent_states_dir(mc_seqno)?;
+                let part_split_depth = this.shard_states.part_split_depth();
+                let writer = ShardStateWriter::new(
+                    this.cells_db.clone(),
+                    &states_dir,
+                    &block_id,
+                    part_split_depth,
+                    pruned_parts,
+                );
 
-            scopeguard::ScopeGuard::into_inner(guard);
-            Ok::<_, anyhow::Error>(state)
-        })
-        .await??;
+                let stored = match writer.write(&root_hash, Some(&cancelled)) {
+                    Ok(_) => {
+                        this.block_handles
+                            .set_has_persistent_shard_state_main(&handle_for_main);
+                        tracing::info!("persistent shard state saved");
+                        true
+                    }
+                    Err(e) => {
+                        // NOTE: We are ignoring an error here. It might be intentional
+                        tracing::error!("failed to write persistent shard state: {e:?}");
+                        false
+                    }
+                };
+
+                let state = if stored {
+                    let cached = this
+                        .descriptor_cache
+                        .cache_shard_state(mc_seqno, &block_id, None, None, parts_info)?;
+                    Some(cached)
+                } else {
+                    None
+                };
+
+                scopeguard::ScopeGuard::into_inner(guard);
+                Ok::<_, anyhow::Error>(state)
+            })
+            .await??;
+        }
 
         // wait for all store tasks in parts
         let mut all_parts_stored = true;
@@ -921,47 +923,49 @@ impl PersistentStateStorage {
             }
         }
 
-        // TODO: skip store main file if reused
         // store main persistent state file
-        let handle_for_main = handle.clone();
-        let this = self.inner.clone();
-        let cancelled = cancelled.clone();
+        let mut state = None;
+        if !reused.reused_shard_main()? {
+            let handle_for_main = handle.clone();
+            let this = self.inner.clone();
+            let cancelled = cancelled.clone();
 
-        let span = tracing::Span::current();
-        let state = tokio::task::spawn_blocking(move || {
-            let _span = span.enter();
+            let span = tracing::Span::current();
+            state = tokio::task::spawn_blocking(move || {
+                let _span = span.enter();
 
-            let guard = scopeguard::guard((), |_| {
-                tracing::warn!("cancelled");
-            });
+                let guard = scopeguard::guard((), |_| {
+                    tracing::warn!("cancelled");
+                });
 
-            let states_dir = this
-                .descriptor_cache
-                .prepare_persistent_states_dir(mc_seqno)?;
+                let states_dir = this
+                    .descriptor_cache
+                    .prepare_persistent_states_dir(mc_seqno)?;
 
-            let part_split_depth = this.shard_states.part_split_depth();
-            let cell_writer = ShardStateWriter::new(
-                this.cells_db.clone(),
-                &states_dir,
-                &block_id,
-                part_split_depth,
-                None,
-            );
-            cell_writer.write_file(file, Some(&cancelled))?;
-            this.block_handles
-                .set_has_persistent_shard_state_main(&handle_for_main);
-            let state = this.descriptor_cache.cache_shard_state(
-                mc_seqno,
-                &block_id,
-                None,
-                None,
-                in_parts_info,
-            )?;
+                let part_split_depth = this.shard_states.part_split_depth();
+                let cell_writer = ShardStateWriter::new(
+                    this.cells_db.clone(),
+                    &states_dir,
+                    &block_id,
+                    part_split_depth,
+                    None,
+                );
+                cell_writer.write_file(file, Some(&cancelled))?;
+                this.block_handles
+                    .set_has_persistent_shard_state_main(&handle_for_main);
+                let state = this.descriptor_cache.cache_shard_state(
+                    mc_seqno,
+                    &block_id,
+                    None,
+                    None,
+                    in_parts_info,
+                )?;
 
-            scopeguard::ScopeGuard::into_inner(guard);
-            Ok::<_, anyhow::Error>(state)
-        })
-        .await??;
+                scopeguard::ScopeGuard::into_inner(guard);
+                Ok::<_, anyhow::Error>(Some(state))
+            })
+            .await??;
+        }
 
         // wait for all store tasks in parts
         let mut all_parts_stored = true;
@@ -995,8 +999,10 @@ impl PersistentStateStorage {
                 .set_has_persistent_shard_state_parts(handle);
         }
 
-        // TODO: should handle parts as well
-        self.notify_with_persistent_state(&state).await;
+        if let Some(state) = state {
+            // TODO: should handle parts as well
+            self.notify_with_persistent_state(&state).await;
+        }
 
         Ok(())
     }
