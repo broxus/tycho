@@ -526,7 +526,8 @@ impl ShardStateStorage {
 
                 for v in split_at.values() {
                     if let Some(shard) = &v.shard
-                    // TODO: return error if storage part is not configured
+                    // we store subtree in a storage part only if it located at appropriate depth
+                    // (in other words when subtree shard matches storage part shard)
                         && let Some(storage_part) = storage_parts.get(&shard.prefix())
                     {
                         let storage_part = storage_part.clone();
