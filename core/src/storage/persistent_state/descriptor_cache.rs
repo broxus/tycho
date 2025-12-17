@@ -101,7 +101,7 @@ impl DescriptorCache {
         &self,
         recent_block_id: &BlockId,
         zerostate_seqno: u32,
-    ) -> Result<()> {
+    ) -> Result<Vec<BlockId>> {
         self.inner
             .remove_outdated_cached_states(recent_block_id, zerostate_seqno)
     }
@@ -241,11 +241,15 @@ impl Inner {
         Dir::new_readonly(self.storage_dir.path().join(mc_seqno.to_string()))
     }
 
+    /// Removes outdated persistent states (cache and files).
+    /// Returns block ids of removed persistent states.
     fn remove_outdated_cached_states(
         &self,
         recent_block_id: &BlockId,
         zerostate_seqno: u32,
-    ) -> Result<()> {
+    ) -> Result<Vec<BlockId>> {
+        let mut removed_states_block_ids = vec![];
+
         let mut index = self.mc_seqno_to_block_ids.lock();
         index.retain(|&mc_seqno, block_ids| {
             if mc_seqno >= recent_block_id.seqno || mc_seqno <= zerostate_seqno {
@@ -253,14 +257,16 @@ impl Inner {
             }
 
             for block_id in block_ids.drain() {
-                // TODO: Clear flag in block handle
                 self.clear_cache(&block_id);
+                removed_states_block_ids.push(block_id);
             }
             false
         });
 
         // Remove files
-        self.clear_outdated_state_entries(recent_block_id, zerostate_seqno)
+        self.clear_outdated_state_entries(recent_block_id, zerostate_seqno)?;
+
+        Ok(removed_states_block_ids)
     }
 
     fn clear_outdated_state_entries(

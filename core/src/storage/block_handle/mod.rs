@@ -36,6 +36,14 @@ impl BlockHandleStorage {
         updated
     }
 
+    pub fn remove_flags(&self, handle: &BlockHandle, flags: BlockFlags) -> bool {
+        let updated = handle.meta().remove_flags(flags);
+        if updated {
+            self.store_handle(handle, false);
+        }
+        updated
+    }
+
     pub fn set_flags(&self, handle: &BlockHandle, flags: BlockFlags) -> bool {
         let updated = handle.meta().add_flags(flags);
         if updated {
