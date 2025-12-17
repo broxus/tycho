@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::Write;
 use std::os::fd::AsRawFd;
 
 use tycho_util::compression::ZstdDecompressStream;
@@ -198,6 +199,24 @@ impl MappedFile {
         decompress_stream.write(&compressed_buffer, &mut decompressed_buffer)?;
 
         Ok(Some(decompressed_buffer))
+    }
+
+    /// Decompresses the entire mapped file to `dst`.
+    pub fn decompress_to_file(&self, mut dst: &File) -> anyhow::Result<()> {
+        let chunk_size = 1024 * 1024; // 1 Mb
+
+        let mut offset = 0;
+        while offset < self.length() {
+            let Some(chunk) = self.read_decompress_chunk(offset, chunk_size)? else {
+                break;
+            };
+            dst.write_all(&chunk)?;
+
+            // advance to the next chunk
+            offset = offset.saturating_add(chunk_size);
+        }
+
+        Ok(())
     }
 }
 
