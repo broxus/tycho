@@ -40,7 +40,7 @@ impl NodeBase {
             .build((Ipv4Addr::LOCALHOST, 0), router)
             .unwrap();
 
-        dht_tasks.spawn(&network);
+        dht_tasks.spawn_without_bootstrap(&network);
         overlay_tasks.spawn(&network);
 
         let peer_resolver = dht_service.make_peer_resolver().build(&network);

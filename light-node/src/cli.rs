@@ -153,7 +153,7 @@ impl<C> Node<C> {
             .build(local_addr, router)
             .context("failed to build node network")?;
 
-        dht_tasks.spawn(&network);
+        let bootstrap_peer_count = dht_tasks.spawn(&network, &global_config.bootstrap_peers)?;
         overlay_tasks.spawn(&network);
 
         let dht_client = dht_service.make_client(&network);
@@ -162,17 +162,11 @@ impl<C> Node<C> {
             .with_config(node_config.peer_resolver)
             .build(&network);
 
-        let mut bootstrap_peers = 0usize;
-        for peer in global_config.bootstrap_peers {
-            let is_new = dht_client.add_peer(Arc::new(peer))?;
-            bootstrap_peers += is_new as usize;
-        }
-
         tracing::info!(
             %local_id,
             %local_addr,
             %public_addr,
-            bootstrap_peers,
+            bootstrap_peer_count,
             "initialized network"
         );
 

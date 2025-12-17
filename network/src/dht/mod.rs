@@ -65,6 +65,12 @@ impl DhtClient {
         Ok(added)
     }
 
+    pub fn add_allow_outdated_peer(&self, peer: Arc<PeerInfo>) -> Result<bool> {
+        anyhow::ensure!(peer.verify(now_sec()), "invalid peer info");
+        let added = self.inner.add_allow_outdated_peer_info(&self.network, peer);
+        Ok(added)
+    }
+
     pub async fn get_node_info(&self, peer_id: &PeerId) -> Result<PeerInfo> {
         let res = self
             .network
@@ -270,9 +276,34 @@ pub struct DhtServiceBackgroundTasks {
 }
 
 impl DhtServiceBackgroundTasks {
-    pub fn spawn(self, network: &Network) {
+    pub fn spawn_without_bootstrap(self, network: &Network) {
         self.inner
-            .start_background_tasks(Network::downgrade(network));
+            .start_background_tasks(Network::downgrade(network), Vec::new());
+    }
+
+    pub fn spawn<I>(self, network: &Network, bootstrap_peers: I) -> Result<usize>
+    where
+        I: IntoIterator<Item: std::ops::Deref<Target = PeerInfo>>,
+    {
+        let mut peers = Vec::new();
+        for peer in bootstrap_peers {
+            let peer = &*peer;
+
+            anyhow::ensure!(
+                peer.verify(now_sec()),
+                "invalid peer info for id {}",
+                peer.id
+            );
+            let peer = Arc::new(peer.clone());
+            if self.inner.add_peer_info(network, peer.clone()) {
+                peers.push(peer);
+            }
+        }
+
+        let count = peers.len();
+        self.inner
+            .start_background_tasks(Network::downgrade(network), peers);
+        Ok(count)
     }
 }
 
@@ -584,6 +615,37 @@ impl DhtInner {
             &self.config.max_peer_info_ttl,
             |peer_info| network.known_peers().insert(peer_info, false).ok(),
         );
+        drop(routing_table);
+
+        if added {
+            self.peer_added.notify_waiters();
+        }
+
+        added
+    }
+
+    fn add_allow_outdated_peer_info(&self, network: &Network, peer_info: Arc<PeerInfo>) -> bool {
+        if peer_info.id == self.local_id {
+            return false;
+        }
+
+        let mut added = false;
+
+        let mut routing_table = self.routing_table.lock().unwrap();
+        if !routing_table.contains(&peer_info.id) {
+            added = routing_table.add(
+                peer_info.clone(),
+                self.config.max_k,
+                &self.config.max_peer_info_ttl,
+                |peer_info| {
+                    network
+                        .known_peers()
+                        .insert_allow_outdated(peer_info, false)
+                        .ok()
+                },
+            );
+        }
+        drop(routing_table);
 
         if added {
             self.peer_added.notify_waiters();

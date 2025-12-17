@@ -6,7 +6,6 @@
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -15,7 +14,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{EnvFilter, Layer, fmt};
 use tycho_crypto::ed25519;
 use tycho_network::{
-    Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, PeerId, PeerInfo, Router,
+    Address, DhtConfig, DhtService, Network, NetworkConfig, PeerId, PeerInfo, Router,
 };
 use tycho_util::time::now_sec;
 
@@ -109,18 +108,12 @@ impl CmdRun {
             self.addr.into(),
             self.remote_addr,
             node_config,
+            &global_config,
         )?;
-
-        let mut initial_peer_count = 0usize;
-        for peer in global_config.bootstrap_peers {
-            let is_new = node.dht.add_peer(Arc::new(peer))?;
-            initial_peer_count += is_new as usize;
-        }
 
         tracing::info!(
             local_id = %node.network.peer_id(),
             addr = %self.addr,
-            initial_peer_count,
             "node started"
         );
 
@@ -220,7 +213,6 @@ impl NodeConfig {
 
 struct Node {
     network: Network,
-    dht: DhtClient,
 }
 
 impl Node {
@@ -229,6 +221,7 @@ impl Node {
         address: Address,
         remote_addr: Address,
         config: NodeConfig,
+        global_config: &GlobalConfig,
     ) -> Result<Self> {
         let keypair = tycho_crypto::ed25519::KeyPair::from(&key);
 
@@ -244,10 +237,10 @@ impl Node {
             .with_remote_addr(remote_addr)
             .build(address, router)?;
 
-        dht_tasks.spawn(&network);
-        let dht = dht_service.make_client(&network);
+        let bootstrap_peer_count = dht_tasks.spawn(&network, &global_config.bootstrap_peers)?;
+        tracing::info!(bootstrap_peer_count);
 
-        Ok(Self { network, dht })
+        Ok(Self { network })
     }
 
     fn make_peer_info(

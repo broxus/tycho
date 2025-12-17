@@ -514,7 +514,7 @@ impl ConfiguredNetwork {
             .build(local_addr, router)
             .context("failed to build node network")?;
 
-        dht_tasks.spawn(&network);
+        let bootstrap_peer_count = dht_tasks.spawn(&network, bootstrap_peers)?;
         overlay_tasks.spawn(&network);
 
         let dht_client = dht_service.make_client(&network);
@@ -522,12 +522,6 @@ impl ConfiguredNetwork {
             .make_peer_resolver()
             .with_config(base_config.peer_resolver.clone())
             .build(&network);
-
-        let mut bootstrap_peer_count = 0usize;
-        for peer in bootstrap_peers {
-            let is_new = dht_client.add_peer(Arc::new(peer.clone()))?;
-            bootstrap_peer_count += is_new as usize;
-        }
 
         tracing::info!(
             %local_id,

@@ -45,7 +45,7 @@ impl Node {
             .unwrap();
 
         if spawn_dht_tasks {
-            dht_tasks.spawn(&network);
+            dht_tasks.spawn_without_bootstrap(&network);
         }
 
         let dht = dht_service.make_client(&network);
