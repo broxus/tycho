@@ -988,12 +988,18 @@ Create proposal voting payload
 
 Check that the cells database is consistent
 
-**Usage:** `tycho tool check-cells-db [OPTIONS] --db-root <DB_ROOT>`
+**Usage:** `tycho tool check-cells-db [OPTIONS] <DB_ROOT>`
+
+###### **Arguments:**
+
+* `<DB_ROOT>` — Path to the database root directory
 
 ###### **Options:**
 
-* `-d`, `--db-root <DB_ROOT>` — Path to the database root directory
-* `--temp-dir-path <TEMP_DIR_PATH>` — Optional path for the temporary directory
+* `--temp-dir <TEMP_DIR>` — Optional root for the temporary directory
+* `--accounts-split-depth <ACCOUNTS_SPLIT_DEPTH>` — Base workchain accounts split depth
+
+  Default value: `4`
 
 
 

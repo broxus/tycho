@@ -57,6 +57,10 @@ impl CellStorage {
         })
     }
 
+    pub fn db(&self) -> &CellsDb {
+        &self.cells_db
+    }
+
     pub fn apply_temp_cell(&self, root: &HashBytes) -> Result<()> {
         const MAX_NEW_CELLS_BATCH_SIZE: usize = 10000;
 

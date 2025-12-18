@@ -583,7 +583,7 @@ mod test {
         })
         .await?;
 
-        let cells_db = storage.cells_db().clone();
+        let cells_db = &storage.shard_state_storage().cells_db;
         let cell_storage = &storage.shard_state_storage().cell_storage;
 
         let store_ctx = StoreStateContext {
@@ -605,7 +605,7 @@ mod test {
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");
-        states_gc(cell_storage, &cells_db).await?;
+        states_gc(cell_storage, cells_db).await?;
 
         Ok(())
     }
@@ -649,7 +649,7 @@ mod test {
 
         let (ctx, _tempdir) = StorageContext::new_temp().await?;
         let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
-        let cells_db = storage.cells_db();
+        let cells_db = &storage.shard_state_storage().cells_db;
         let cell_storage = &storage.shard_state_storage().cell_storage;
 
         let mut rng = StdRng::seed_from_u64(1337);

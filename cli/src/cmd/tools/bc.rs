@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, hash_map};
-use std::future::Future;
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,7 +17,6 @@ use tycho_types::models::{
 use tycho_types::num::Tokens;
 use tycho_types::prelude::*;
 use tycho_util::cli::signal;
-use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;
 use tycho_util::{FastHashMap, serde_helpers};
 
@@ -35,18 +33,23 @@ pub struct Cmd {
 
 impl Cmd {
     pub fn run(self) -> Result<()> {
-        bc_rt(move || async move {
-            match self.cmd {
-                SubCmd::GetParam(cmd) => cmd.run().await,
-                SubCmd::SetParam(cmd) => cmd.run().await,
-                SubCmd::SetMasterKey(cmd) => cmd.run().await,
-                SubCmd::SetElectorCode(cmd) => cmd.run().await,
-                SubCmd::SetConfigCode(cmd) => cmd.run().await,
-                SubCmd::ListProposals(cmd) => cmd.run().await,
-                SubCmd::GenProposal(cmd) => cmd.run().await,
-                SubCmd::GenProposalVote(cmd) => cmd.run().await,
-            }
-        })
+        tracing_subscriber::fmt::init();
+
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(signal::run_or_terminate(async move {
+                match self.cmd {
+                    SubCmd::GetParam(cmd) => cmd.run().await,
+                    SubCmd::SetParam(cmd) => cmd.run().await,
+                    SubCmd::SetMasterKey(cmd) => cmd.run().await,
+                    SubCmd::SetElectorCode(cmd) => cmd.run().await,
+                    SubCmd::SetConfigCode(cmd) => cmd.run().await,
+                    SubCmd::ListProposals(cmd) => cmd.run().await,
+                    SubCmd::GenProposal(cmd) => cmd.run().await,
+                    SubCmd::GenProposalVote(cmd) => cmd.run().await,
+                }
+            }))
     }
 }
 
@@ -974,32 +977,6 @@ impl Action {
             }
         })
     }
-}
-
-fn bc_rt<F, FT>(f: F) -> Result<()>
-where
-    F: FnOnce() -> FT + Send + 'static,
-    FT: Future<Output = Result<()>> + Send,
-{
-    tracing_subscriber::fmt::init();
-
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async move {
-            let run_fut = JoinTask::new(async move { f().await });
-            let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
-            tokio::select! {
-                res = run_fut => res,
-                signal = stop_fut => match signal {
-                    Ok(signal) => {
-                        tracing::info!(?signal, "received termination signal");
-                        Ok(())
-                    }
-                    Err(e) => Err(e.into()),
-                }
-            }
-        })
 }
 
 const DEFAULT_TTL: u32 = 40; // seconds
