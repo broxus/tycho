@@ -170,7 +170,7 @@ impl MappedFile {
     pub fn read_chunk(&self, offset: usize, chunk_size: usize) -> Option<Vec<u8>> {
         let chunk_size = std::cmp::max(MIN_READ_CHUNK_SIZE, chunk_size);
 
-        if offset % chunk_size != 0 {
+        if !offset.is_multiple_of(chunk_size) {
             return None;
         }
         if offset > self.length() {
