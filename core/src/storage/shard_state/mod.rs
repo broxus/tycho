@@ -504,7 +504,7 @@ pub enum ShardStateStorageError {
     },
 }
 
-fn split_shard_accounts(
+pub fn split_shard_accounts(
     root_cell: impl AsRef<DynCell>,
     split_depth: u8,
 ) -> Result<FastHashMap<HashBytes, Cell>> {

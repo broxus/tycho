@@ -66,7 +66,7 @@ impl BlockSaver {
         }
 
         // Save block to archive if needed
-        if self.storage.config().archives_gc.is_some() {
+        if self.storage.config().store_archives {
             let storage = self.storage.clone();
             let handle = handle.clone();
             let mc_is_key_block = cx.mc_is_key_block;

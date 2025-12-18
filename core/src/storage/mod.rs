@@ -29,6 +29,7 @@ pub use self::persistent_state::{
 };
 pub use self::shard_state::{
     ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics, StoreStateHint,
+    split_shard_accounts,
 };
 
 pub mod tables;
@@ -44,8 +45,8 @@ mod persistent_state;
 mod shard_state;
 mod util;
 
-const CORE_DB_SUBDIR: &str = "core";
-const CELLS_DB_SUBDIR: &str = "cells";
+pub const CORE_DB_SUBDIR: &str = "core";
+pub const CELLS_DB_SUBDIR: &str = "cells";
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -111,7 +112,6 @@ impl CoreStorage {
             inner: Arc::new(Inner {
                 ctx,
                 db,
-                cells_db,
                 config,
                 gc,
                 block_handle_storage,
@@ -130,10 +130,6 @@ impl CoreStorage {
 
     pub fn db(&self) -> &CoreDb {
         &self.inner.db
-    }
-
-    pub fn cells_db(&self) -> &CellsDb {
-        &self.inner.cells_db
     }
 
     pub fn config(&self) -> &CoreStorageConfig {
@@ -188,7 +184,6 @@ impl CoreStorage {
 struct Inner {
     ctx: StorageContext,
     db: CoreDb,
-    cells_db: CellsDb,
     config: CoreStorageConfig,
     gc: CoreStorageGc,
 

@@ -19,6 +19,11 @@ pub struct CoreStorageConfig {
     /// Default: 3.
     pub drop_interval: u32,
 
+    /// Whether to pack blocks into archives.
+    ///
+    /// Default: `true`.
+    pub store_archives: bool,
+
     /// Archives storage config.
     ///
     /// Archives are disabled if this field is `None`.
@@ -49,8 +54,18 @@ impl CoreStorageConfig {
             blob_db: BlobDbConfig {
                 pre_create_cas_tree: false,
             },
+            archives_gc: None,
+            states_gc: None,
+            blocks_gc: None,
             ..Default::default()
         }
+    }
+
+    pub fn without_gc(mut self) -> Self {
+        self.archives_gc = None;
+        self.states_gc = None;
+        self.blocks_gc = None;
+        self
     }
 }
 
@@ -59,6 +74,7 @@ impl Default for CoreStorageConfig {
         Self {
             cells_cache_size: ByteSize::mb(256),
             drop_interval: 3,
+            store_archives: true,
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),
