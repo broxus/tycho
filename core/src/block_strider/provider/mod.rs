@@ -9,8 +9,8 @@ use arc_swap::{ArcSwapAny, ArcSwapOption};
 use futures_util::future::{self, BoxFuture};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{
-    BlockIdRelation, BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug,
-    check_with_master_state, check_with_prev_key_block_proof,
+    check_with_master_state, check_with_prev_key_block_proof, BlockIdRelation, BlockProofStuff, BlockProofStuffAug,
+    BlockStuff, BlockStuffAug,
 };
 use tycho_block_util::queue::QueueDiffStuffAug;
 use tycho_block_util::state::ShardStateStuff;
@@ -26,6 +26,7 @@ pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProv
 pub use self::box_provider::BoxBlockProvider;
 use self::futures::SelectNonEmptyFut;
 pub use self::storage_provider::StorageBlockProvider;
+use crate::global_config::ZerostateId;
 use crate::storage::{CoreStorage, MaybeExistingHandle, NewBlockMeta};
 
 mod archive_provider;
@@ -504,14 +505,16 @@ pub struct ProofChecker {
     storage: CoreStorage,
     cached_zerostate: ArcSwapAny<Option<ShardStateStuff>>,
     cached_prev_key_block_proof: ArcSwapAny<Option<BlockProofStuff>>,
+    zerostate_id: ZerostateId,
 }
 
 impl ProofChecker {
-    pub fn new(storage: CoreStorage) -> Self {
+    pub fn new(zerostate_id: ZerostateId, storage: CoreStorage) -> Self {
         Self {
             storage,
             cached_zerostate: Default::default(),
             cached_prev_key_block_proof: Default::default(),
+            zerostate_id,
         }
     }
 
@@ -564,7 +567,7 @@ impl ProofChecker {
                     )
                 })?;
 
-            if handle.id().seqno == 0 {
+            if handle.id().seqno == self.zerostate_id.seqno {
                 let zerostate = 'zerostate: {
                     if let Some(zerostate) = self.cached_zerostate.load_full() {
                         break 'zerostate zerostate;
@@ -654,8 +657,8 @@ impl Default for RetryConfig {
 
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     use tycho_block_util::block::{BlockIdExt, BlockStuff};
     use tycho_types::boc::Boc;

@@ -2,13 +2,14 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_core::global_config::ZerostateId;
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastDashMap, FastHashMap, FastHashSet, serde_helpers};
+use tycho_util::{serde_helpers, FastDashMap, FastHashMap, FastHashSet};
 
 use super::gc::GcEndKey;
 use super::types::SeparatedStatisticsByPartitions;
@@ -58,6 +59,7 @@ where
 }
 
 pub struct QueueFactoryStdImpl {
+    pub zerostate_id: ZerostateId,
     pub state: QueueStateImplFactory,
     pub config: QueueConfig,
 }
@@ -143,6 +145,7 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
         let gc = GcManager::start::<V>(state.clone(), self.config.gc_interval);
         Ok(QueueImpl {
             state,
+            zerostate_id: self.zerostate_id,
             gc,
             global_lock: RwLock::new(()),
             shard_locks: FastDashMap::default(),
@@ -157,6 +160,7 @@ where
     V: InternalMessageValue,
 {
     state: Arc<P>,
+    zerostate_id: ZerostateId,
     gc: GcManager,
     global_lock: RwLock<()>,
     shard_locks: FastDashMap<ShardIdent, Arc<Mutex<()>>>,
@@ -313,7 +317,8 @@ where
 
             let diff = match diff {
                 // If top shard block changed and diff not found, then bail
-                None if *top_shard_block_changed && mc_block_id.seqno != 0 => {
+                // TODO: err if <
+                None if *top_shard_block_changed && mc_block_id.seqno > self.zerostate_id.seqno => {
                     bail!("Diff not found for block_id: {}", block_id)
                 }
                 // If top shard block not changed and diff not found, then continue

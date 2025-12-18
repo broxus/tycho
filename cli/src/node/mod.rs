@@ -27,7 +27,7 @@ use tycho_core::block_strider::{
     StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::{BroadcastListener, SelfBroadcastListener};
-use tycho_core::global_config::{GlobalConfig, MempoolGlobalConfig};
+use tycho_core::global_config::{GlobalConfig, MempoolGlobalConfig, ZerostateId};
 use tycho_core::node::{NodeBase, NodeKeys};
 use tycho_core::storage::NodeSyncState;
 use tycho_network::InboundRequestMeta;
@@ -135,6 +135,8 @@ impl Node {
             .overwrite_cold_boot_type
             .unwrap_or(ColdBootType::LatestPersistent);
 
+        tracing::info!("cold boot started {:?}", zerostates.as_ref());
+
         self.base
             .boot(
                 boot_type,
@@ -196,6 +198,7 @@ impl Node {
         tracing::info!("starting collator");
 
         let queue_factory = QueueFactoryStdImpl {
+            zerostate_id: self.base.global_config.zerostate,
             state: self.queue_state_factory,
             config: self.internal_queue_config,
         };
@@ -230,7 +233,12 @@ impl Node {
             self.collator_config.clone(),
             Arc::new(message_queue_adapter),
             |listener| {
-                StateNodeAdapterStdImpl::new(listener, base.core_storage.clone(), sync_context)
+                StateNodeAdapterStdImpl::new(
+                    listener,
+                    base.core_storage.clone(),
+                    sync_context,
+                    self.base.global_config.zerostate,
+                )
             },
             mempool_adapter,
             validator.clone(),
@@ -242,7 +250,10 @@ impl Node {
         let collator = CollatorStateSubscriber {
             adapter: collation_manager.state_node_adapter().clone(),
         };
-        collator.adapter.handle_state(&mc_state).await?;
+        collator
+            .adapter
+            .handle_state(mc_state.block_id(), &mc_state)
+            .await?;
 
         // NOTE: Make sure to drop the state after handling it
         drop(mc_state);
@@ -390,7 +401,7 @@ impl StateSubscriber for CollatorStateSubscriber {
     type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        self.adapter.handle_state(&cx.state)
+        self.adapter.handle_state(&cx.mc_block_id, &cx.state)
     }
 }
 

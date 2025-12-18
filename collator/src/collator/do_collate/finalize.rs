@@ -2,27 +2,28 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use tycho_block_util::archive::WithArchiveData;
-use tycho_block_util::block::{BlockStuff, shard_ident_at_depth};
+use tycho_block_util::block::{shard_ident_at_depth, BlockStuff};
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::{
-    RelaxedAugDict, merge_relaxed_aug_dicts, split_aug_dict, split_aug_dict_raw,
+    merge_relaxed_aug_dicts, split_aug_dict, split_aug_dict_raw, RelaxedAugDict,
 };
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::ConsensusConfigExt;
+use tycho_core::global_config::ZerostateId;
 use tycho_types::boc;
 use tycho_types::cell::Lazy;
 use tycho_types::merkle::*;
 use tycho_types::models::{ShardIdent, *};
 use tycho_types::prelude::*;
-use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::FastHashMap;
 
-use super::PrevData;
 use super::phase::{Phase, PhaseState};
+use super::PrevData;
 use crate::collator::debug_info::BlockDebugInfo;
 use crate::collator::do_collate::work_units::FinalizeWu;
 use crate::collator::error::{CollationCancelReason, CollatorError};
@@ -65,6 +66,7 @@ pub struct FinalizeBlockContext {
 impl Phase<FinalizeState> {
     pub fn finalize_messages_reader(
         &mut self,
+        zerostate_id: &ZerostateId,
         messages_reader: MessagesReader<EnqueuedMessage>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     ) -> Result<
@@ -115,7 +117,7 @@ impl Phase<FinalizeState> {
         let mut other_updated_top_shard_diffs_info = FastHashMap::default();
 
         for top_block_id in top_other_updated_shard_blocks_ids.iter() {
-            if top_block_id.seqno == 0 {
+            if top_block_id.seqno == zerostate_id.seqno {
                 continue;
             }
 

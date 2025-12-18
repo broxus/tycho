@@ -247,6 +247,7 @@ impl ZerostateProvider for FileZerostateProvider {
 }
 
 fn load_zerostate(path: &PathBuf) -> Result<Bytes> {
+    tracing::info!("loading zerostate {:?}", path);
     let mf = MappedFile::from_existing_file(File::open(path)?)?;
     let bytes = Bytes::from_owner(mf);
     Ok(bytes)

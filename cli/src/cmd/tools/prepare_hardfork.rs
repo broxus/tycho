@@ -5,11 +5,17 @@ use bytesize::ByteSize;
 use clap::Parser;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::ZerostateId;
-use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta, ShardStateWriter};
+use tycho_core::storage::{
+    BlockHandle, BlockMeta, CoreStorage, CoreStorageConfig, NewBlockMeta, ShardStateWriter,
+};
 use tycho_storage::fs::Dir;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::cell::{CellSlice, HashBytes, Lazy};
-use tycho_types::models::{BlockId, ShardHashes, ShardStateUnsplit};
+use tycho_types::dict::AugDict;
+use tycho_types::models::{
+    BlockId, ConsensusInfo, GenesisInfo, McStateExtra, ShardHashes, ShardIdent, ShardStateUnsplit,
+    ValidatorInfo,
+};
 use tycho_types::prelude::{Cell, CellBuilder, CellFamily, Load, Store};
 
 #[derive(Parser)]
@@ -79,6 +85,7 @@ impl Cmd {
                 .shard_state_storage()
                 .load_state(0, &block_id)
                 .await?;
+
             let zerostate_id = handler.save_shard_state(&block_id, state).await?;
             zerostate_mapping.insert(block_id.file_hash, zerostate_id);
         }
@@ -102,12 +109,51 @@ impl ShardStateHandler {
         block_id: &BlockId,
         shard_state_stuff: ShardStateStuff,
     ) -> anyhow::Result<ZerostateId> {
-        let root_hash = shard_state_stuff.root_cell().repr_hash();
+        let state_cell = shard_state_stuff.root_cell();
+        let mut slice = CellSlice::new(state_cell.as_ref())?;
+        let mut ssu = ShardStateUnsplit::load_from(&mut slice)?;
+        ssu.min_ref_mc_seqno = u32::MAX;
+        ssu.processed_upto = ShardStateUnsplit::empty_processed_upto_info().clone();
+
+        let mut builder = CellBuilder::new();
+        ssu.store_into(&mut builder, Cell::empty_context())?;
+        let updated_shard_state = builder.build()?;
+
+        let handle = BlockHandle::new(
+            &BlockId {
+                shard: block_id.shard,
+                seqno: u32::MAX,
+                root_hash: block_id.root_hash,
+                file_hash: block_id.file_hash,
+            },
+            BlockMeta::with_data(NewBlockMeta {
+                is_key_block: true,
+                gen_utime: ssu.gen_utime,
+                ref_by_mc_seqno: ssu.min_ref_mc_seqno,
+            }),
+            Default::default(),
+        );
+
+        self.storage
+            .block_handle_storage()
+            .store_handle(&handle, true);
+
+        self.storage
+            .shard_state_storage()
+            .store_state_root(&handle, updated_shard_state.clone(), Default::default())
+            .await?;
+
+        let root_hash = updated_shard_state.repr_hash();
         let writer = ShardStateWriter::new(self.storage.cells_db(), &self.output_path, block_id);
-        let file_hash = writer.write(root_hash, None)?;
+        let file_hash = writer.write_with_name(root_hash, &block_id.shard.to_string(), None)?;
+
+        println!(
+            "Saved shard state for {}. root hash: {},  file hash: {},",
+            block_id.shard, root_hash, file_hash
+        );
 
         Ok(ZerostateId {
-            seqno: Some(block_id.seqno),
+            seqno: block_id.seqno,
             root_hash: *root_hash,
             file_hash,
         })
@@ -134,47 +180,97 @@ impl ShardStateHandler {
                     shard_description.file_hash
                 );
             };
+
+            shard_description.reg_mc_seqno = id.seqno;
             shard_description.file_hash = id.file_hash;
             shard_description.root_hash = id.root_hash;
+            shard_description.nx_cc_updated = true;
+            shard_description.next_catchain_seqno = 0;
+            shard_description.ext_processed_to_anchor_id = 0;
+            shard_description.min_ref_mc_seqno = u32::MAX;
+            shard_description.gen_utime = master_state.state().gen_utime;
 
             shard_hashes.push((ident, shard_description));
         }
 
-        println!("Changed shards root and file hashes");
+        let curr_vset = custom.config.params.get_current_validator_set()?;
+        let collation_config = custom.config.params.get_collation_config()?;
+        let session_seqno = 0;
+        let Some((_, validator_list_hash_short)) =
+            curr_vset.compute_mc_subset(session_seqno, collation_config.shuffle_mc_validators)
+        else {
+            anyhow::bail!(
+                "Failed to compute a validator subset for zerostate (shard_id = {}, session_seqno = {})",
+                ShardIdent::MASTERCHAIN,
+                session_seqno,
+            );
+        };
 
-        custom.shards =
-            ShardHashes::from_shards(shard_hashes.iter().map(|(ident, descr)| (ident, descr)))?;
-        ssu.custom = Some(Lazy::new(&custom)?);
+        ssu.processed_upto = ShardStateUnsplit::empty_processed_upto_info().clone();
+        ssu.custom = Some(Lazy::new(&McStateExtra {
+            shards: ShardHashes::from_shards(
+                shard_hashes.iter().map(|(ident, descr)| (ident, descr)),
+            )?,
+            config: custom.config,
+            validator_info: ValidatorInfo {
+                validator_list_hash_short,
+                catchain_seqno: session_seqno,
+                nx_cc_updated: true,
+            },
+            consensus_info: ConsensusInfo {
+                vset_switch_round: session_seqno,
+                prev_vset_switch_round: session_seqno,
+                genesis_info: GenesisInfo {
+                    start_round: 0,
+                    genesis_millis: (ssu.gen_utime as u64) * 1000,
+                },
+                prev_shuffle_mc_validators: collation_config.shuffle_mc_validators,
+            },
+            prev_blocks: AugDict::new(),
+            after_key_block: true,
+            last_key_block: None,
+            block_create_stats: None,
+            global_balance: ssu.total_balance.clone(),
+        })?);
 
         let mut builder = CellBuilder::new();
         ssu.store_into(&mut builder, Cell::empty_context())?;
         let updated_master_state = builder.build()?;
 
-        println!("Built new cell");
-
         let clone = updated_master_state.clone();
         let root_hash = clone.repr_hash();
 
-        let (handle, _) =
-            self.storage
-                .block_handle_storage()
-                .create_or_load_handle(mc_block_id, NewBlockMeta {
-                    is_key_block: true,
-                    gen_utime: ssu.gen_utime,
-                    ref_by_mc_seqno: ssu.min_ref_mc_seqno,
-                });
+        let handle = BlockHandle::new(
+            &BlockId {
+                shard: mc_block_id.shard,
+                seqno: u32::MAX,
+                root_hash: mc_block_id.root_hash,
+                file_hash: mc_block_id.file_hash,
+            },
+            BlockMeta::with_data(NewBlockMeta {
+                is_key_block: true,
+                gen_utime: ssu.gen_utime,
+                ref_by_mc_seqno: ssu.min_ref_mc_seqno,
+            }),
+            Default::default(),
+        );
 
-        println!("Saved block handle");
+        self.storage
+            .block_handle_storage()
+            .store_handle(&handle, true);
 
         self.storage
             .shard_state_storage()
             .store_state_root(&handle, updated_master_state, Default::default())
             .await?;
 
-        println!("Stored root");
-
         let writer = ShardStateWriter::new(self.storage.cells_db(), &self.output_path, mc_block_id);
-        writer.write(root_hash, None)?;
+        let file_hash = writer.write_with_name(root_hash, &mc_block_id.shard.to_string(), None)?;
+
+        println!(
+            "Saved mc state for {}. root hash: {},  file hash: {},",
+            mc_block_id.shard, root_hash, file_hash
+        );
 
         Ok(())
     }

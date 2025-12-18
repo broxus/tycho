@@ -91,6 +91,7 @@ impl BlockHandleStorage {
         match block_handles.get(block_id.root_hash.as_slice()).unwrap() {
             // Try to load block handle from an existing data
             Some(data) => {
+                println!("Found handle");
                 let meta = BlockMeta::from_slice(data.as_ref());
 
                 // Fill the cache with a new handle
@@ -100,6 +101,7 @@ impl BlockHandleStorage {
                 (handle, HandleCreationStatus::Fetched)
             }
             None => {
+                println!("Creating handle");
                 // Create a new handle
                 let handle = BlockHandle::new(
                     block_id,

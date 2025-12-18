@@ -48,9 +48,15 @@ tycho_bin=$(/usr/bin/env bash "${script_dir}/build-node.sh")
 $tycho_bin node run \
     --keys "${base_dir}/keys${N}.json" \
     --config "${base_dir}/config${N}.json" \
+    --import-zerostate "/Users/mrwad3r/Desktop/DexpaProjects/dag/tycho/.temp/states/0:8000000000000000.d.boc" \
+    --import-zerostate "/Users/mrwad3r/Desktop/DexpaProjects/dag/tycho/.temp/states/1:8000000000000000.d.boc" \
     --global-config "${base_dir}/global-config.json" \
-    --import-zerostate "${base_dir}/zerostate.boc" \
     --logger-config "${root_dir}/logger.json" \
     --control-socket "${base_dir}/control${N}.sock" \
     --wu-tuner-config "${base_dir}/wu-tuner-config${N}.json" \
     ${single_node}
+
+
+
+
+#--import-zerostate "${base_dir}/zerostate.boc" \

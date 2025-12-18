@@ -2,23 +2,24 @@ use std::collections::hash_map;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use humantime::format_duration;
 use phase::{ActualState, Phase};
 use prepare::PrepareState;
 use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::RefMcStateHandle;
+use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{NewBlockMeta, StoreStateHint};
 use tycho_types::models::*;
 use tycho_types::num::Tokens;
 use tycho_types::prelude::*;
-use tycho_util::FastHashMap;
 use tycho_util::futures::JoinTask;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::time::now_millis;
+use tycho_util::FastHashMap;
 
 use super::messages_reader::ReaderState;
 use super::types::{
@@ -186,6 +187,7 @@ impl CollatorStdImpl {
             },
         });
         let collation_is_cancelled = state.collation_is_cancelled.clone();
+        let zerostate_id = self.zerostate_id;
 
         let do_collate_fut = tycho_util::sync::rayon_run_fifo({
             let collation_session = self.collation_session.clone();
@@ -205,6 +207,7 @@ impl CollatorStdImpl {
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
+                    zerostate_id,
                 )
             }
         });
@@ -364,6 +367,7 @@ impl CollatorStdImpl {
         collation_session: Arc<CollationSessionInfo>,
         wu_used_from_last_anchor: u64,
         usage_tree: UsageTree,
+        zerostate_id: ZerostateId,
     ) -> Result<CollationResult, CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
@@ -417,7 +421,11 @@ impl CollatorStdImpl {
                 anchors_cache,
             },
             update_queue_task,
-        ) = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
+        ) = finalize_phase.finalize_messages_reader(
+            &zerostate_id,
+            messages_reader,
+            mq_adapter.clone(),
+        )?;
 
         // Use unified helper methods for min_processed_to calculation
         let all_shards_processed_to = build_all_shards_processed_to_by_partitions(

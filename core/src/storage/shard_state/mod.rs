@@ -95,6 +95,7 @@ impl ShardStateStorage {
         state: &ShardStateStuff,
         hint: StoreStateHint,
     ) -> Result<bool> {
+        println!("---------  we here111");
         anyhow::ensure!(
             handle.id() == state.block_id(),
             ShardStateStorageError::BlockHandleIdMismatch {
@@ -155,6 +156,7 @@ impl ShardStateStorage {
             } else {
                 let split_at = split_shard_accounts(&root_cell, accounts_split_depth)?;
 
+                println!("stored");
                 cell_storage.store_cell_mt(
                     root_cell.as_ref(),
                     &mut batch,
@@ -175,6 +177,7 @@ impl ShardStateStorage {
                 .record(estimated_update_size_bytes as f64);
 
             raw_db.write(batch)?;
+            println!("batch written");
 
             Reclaimer::instance().drop(root_cell);
 

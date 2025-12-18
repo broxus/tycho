@@ -1,7 +1,7 @@
 use std::fmt::{Debug, Display};
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tycho_block_util::queue::{QueueDiffStuff, QueuePartitionIdx};
@@ -465,6 +465,7 @@ impl Display for McBlockSubgraphExtract {
 }
 
 pub struct HandledBlockFromBcCtx {
+    pub mc_block_id: BlockId,
     pub state: ShardStateStuff,
     pub processed_upto: ProcessedUptoInfo,
 }
