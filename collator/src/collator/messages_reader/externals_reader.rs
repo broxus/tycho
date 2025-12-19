@@ -1141,15 +1141,15 @@ fn read_externals_into_buffers(
                             ))?;
                         reader_state_by_partition
                             .buffer
-                            .add_message(ParsedMessage::new(
-                                MsgInfo::ExtIn(ext_msg.info.clone()),
-                                true,
-                                ext_msg.cell.clone(),
-                                None,
-                                None,
-                                None,
-                                Some(anchor.chain_time),
-                            ));
+                            .add_message(Box::new(ParsedMessage {
+                                info: MsgInfo::ExtIn(ext_msg.info.clone()),
+                                dst_in_current_shard: true,
+                                cell: ext_msg.cell.clone(),
+                                special_origin: None,
+                                block_seqno: None,
+                                from_same_shard: None,
+                                ext_msg_chain_time: Some(anchor.chain_time),
+                            }));
                         par_metrics
                             .add_to_msgs_groups_ops_count
                             .saturating_add_assign(1);

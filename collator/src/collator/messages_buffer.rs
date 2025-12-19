@@ -27,7 +27,7 @@ pub struct MessagesBufferLimits {
 
 #[derive(Default)]
 pub struct MessagesBuffer {
-    msgs: FastIndexMap<HashBytes, VecDeque<ParsedMessage>>,
+    msgs: FastIndexMap<HashBytes, VecDeque<Box<ParsedMessage>>>,
     int_count: usize,
     ext_count: usize,
     sorted_index: BTreeMap<usize, FastHashSet<HashBytes>>,
@@ -59,25 +59,24 @@ impl MessagesBuffer {
         self.min_ext_chain_time.unwrap_or(u64::MAX)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&HashBytes, &VecDeque<ParsedMessage>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&HashBytes, &VecDeque<Box<ParsedMessage>>)> {
         self.msgs.iter()
     }
 
-    pub fn add_message(&mut self, msg: ParsedMessage) {
+    pub fn add_message(&mut self, msg: Box<ParsedMessage>) {
         assert_eq!(
-            msg.special_origin(),
-            None,
+            msg.special_origin, None,
             "unexpected special origin in ordinary messages set"
         );
 
-        let dst = match &msg.info() {
+        let dst = match &msg.info {
             MsgInfo::Int(IntMsgInfo { dst, .. }) => {
                 self.int_count += 1;
                 dst
             }
             MsgInfo::ExtIn(ExtInMsgInfo { dst, .. }) => {
                 self.ext_count += 1;
-                self.update_min_ext_chain_time(msg.ext_msg_chain_time());
+                self.update_min_ext_chain_time(msg.ext_msg_chain_time);
                 dst
             }
             MsgInfo::ExtOut(info) => {
@@ -467,7 +466,7 @@ impl MessagesBuffer {
                 // check and skip message if required
                 if msg_filter.should_skip(&msg) {
                     debug_assert!(
-                        msg.info().is_external_in(),
+                        msg.info.is_external_in(),
                         "we should only skip extenal messages"
                     );
                     ext_skipped_count += 1;
@@ -475,11 +474,11 @@ impl MessagesBuffer {
                 }
 
                 // collect message if it was not skipped
-                match &msg.info() {
+                match &msg.info {
                     MsgInfo::Int(info) => {
                         collected_int_msgs.push(QueueKey {
                             lt: info.created_lt,
-                            hash: *msg.cell().repr_hash(),
+                            hash: *msg.cell.repr_hash(),
                         });
                         int_collected_count += 1;
                     }
@@ -555,7 +554,7 @@ impl MessagesBuffer {
             account_msgs.retain(|msg| {
                 let skip = filter.should_skip(msg);
                 debug_assert!(
-                    !skip || msg.info().is_external_in(),
+                    !skip || msg.info.is_external_in(),
                     "we should only skip external messages"
                 );
                 self.ext_count -= skip as usize;
@@ -623,9 +622,9 @@ impl MessageFilter for SkipExpiredExternals<'_> {
     }
 
     fn should_skip(&mut self, msg: &ParsedMessage) -> bool {
-        let res = msg.info().is_external_in()
+        let res = msg.info.is_external_in()
             && msg
-                .ext_msg_chain_time()
+                .ext_msg_chain_time
                 .expect("external messages must have a chain time set")
                 < self.chain_time_threshold_ms;
         *self.total_skipped += res as u64;
@@ -699,7 +698,9 @@ impl MessagesBuffer {
 }
 
 #[cfg(test)]
-struct DebugMessagesBufferIndexMap<'a>(pub &'a FastIndexMap<HashBytes, VecDeque<ParsedMessage>>);
+struct DebugMessagesBufferIndexMap<'a>(
+    pub &'a FastIndexMap<HashBytes, VecDeque<Box<ParsedMessage>>>,
+);
 #[cfg(test)]
 impl std::fmt::Debug for DebugMessagesBufferIndexMap<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -731,7 +732,7 @@ struct SlotContext<'a> {
 #[derive(Default)]
 pub struct MessageGroup {
     #[allow(clippy::vec_box)]
-    msgs: FastHashMap<HashBytes, Vec<ParsedMessage>>,
+    msgs: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
     slots_info: SlotsInfo,
 }
 
@@ -817,8 +818,8 @@ impl std::ops::Add for MessageGroup {
 }
 
 impl IntoParallelIterator for MessageGroup {
-    type Item = (HashBytes, Vec<ParsedMessage>);
-    type Iter = rayon::collections::hash_map::IntoIter<HashBytes, Vec<ParsedMessage>>;
+    type Item = (HashBytes, Vec<Box<ParsedMessage>>);
+    type Iter = rayon::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
 
     fn into_par_iter(self) -> Self::Iter {
         self.msgs.into_par_iter()
@@ -826,8 +827,8 @@ impl IntoParallelIterator for MessageGroup {
 }
 
 impl IntoIterator for MessageGroup {
-    type Item = (HashBytes, Vec<ParsedMessage>);
-    type IntoIter = std::collections::hash_map::IntoIter<HashBytes, Vec<ParsedMessage>>;
+    type Item = (HashBytes, Vec<Box<ParsedMessage>>);
+    type IntoIter = std::collections::hash_map::IntoIter<HashBytes, Vec<Box<ParsedMessage>>>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.msgs.into_iter()
@@ -837,7 +838,7 @@ impl IntoIterator for MessageGroup {
 #[cfg(test)]
 impl MessageGroup {
     #[allow(clippy::vec_box)]
-    pub fn msgs(&self) -> &FastHashMap<HashBytes, Vec<ParsedMessage>> {
+    pub fn msgs(&self) -> &FastHashMap<HashBytes, Vec<Box<ParsedMessage>>> {
         &self.msgs
     }
 }
@@ -892,7 +893,7 @@ impl std::fmt::Debug for DebugMessageGroupDetailed<'_> {
 
 #[cfg(test)]
 #[allow(clippy::vec_box)]
-struct DebugMessageGroupHashMap<'a>(pub &'a FastHashMap<HashBytes, Vec<ParsedMessage>>);
+struct DebugMessageGroupHashMap<'a>(pub &'a FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>);
 #[cfg(test)]
 impl std::fmt::Debug for DebugMessageGroupHashMap<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

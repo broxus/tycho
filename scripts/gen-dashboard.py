@@ -2433,6 +2433,11 @@ def collator_core_operations_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_do_collate_serialize_queue_diff_time_high",
+            "Serialize queue diff",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_do_collate_apply_queue_diff_time_high",
             "async Apply message queue diff",
             labels=['workchain=~"$workchain"'],
