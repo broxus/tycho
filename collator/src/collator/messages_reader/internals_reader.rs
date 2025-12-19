@@ -664,15 +664,15 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
 
                     match iterator.next(false)? {
                         Some(int_msg) => {
-                            let msg = ParsedMessage::new(
-                                MsgInfo::Int(int_msg.item.message.info().clone()),
-                                true,
-                                int_msg.item.message.cell().clone(),
-                                None,
-                                None,
-                                Some(int_msg.item.source == self.for_shard_id),
-                                None,
-                            );
+                            let msg = Box::new(ParsedMessage {
+                                info: MsgInfo::Int(int_msg.item.message.info().clone()),
+                                dst_in_current_shard: true,
+                                cell: int_msg.item.message.cell().clone(),
+                                special_origin: None,
+                                block_seqno: None,
+                                from_same_shard: Some(int_msg.item.source == self.for_shard_id),
+                                ext_msg_chain_time: None,
+                            });
 
                             metrics.add_to_message_groups_timer.start();
                             reader_state.buffer.add_message(msg);

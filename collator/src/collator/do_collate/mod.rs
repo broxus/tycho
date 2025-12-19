@@ -454,6 +454,12 @@ impl CollatorStdImpl {
             }
         };
 
+        histogram_create_queue_diff.finish();
+
+        let histogram_serialize_queue_diff = HistogramGuard::begin_with_labels(
+            "tycho_do_collate_serialize_queue_diff_time_high",
+            &labels,
+        );
         let serialized_diff = serialize_diff(
             &queue_diff_with_msgs,
             &min_message,
@@ -463,7 +469,7 @@ impl CollatorStdImpl {
             reader_state.internals.get_min_processed_to_by_shards(),
         );
 
-        histogram_create_queue_diff.finish();
+        histogram_serialize_queue_diff.finish();
 
         let update_queue_task = create_apply_diff_task(
             &mq_adapter,

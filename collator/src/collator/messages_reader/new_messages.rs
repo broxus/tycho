@@ -305,15 +305,15 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
 
                     // add message to buffer
                     res.metrics.add_to_message_groups_timer.start();
-                    state.buffer.add_message(ParsedMessage::new(
-                        MsgInfo::Int(msg.message.info().clone()),
-                        true,
-                        msg.message.cell().clone(),
-                        None,
-                        Some(block_seqno),
-                        Some(msg.source == for_shard_id),
-                        None,
-                    ));
+                    state.buffer.add_message(Box::new(ParsedMessage {
+                        info: MsgInfo::Int(msg.message.info().clone()),
+                        dst_in_current_shard: true,
+                        cell: msg.message.cell().clone(),
+                        special_origin: None,
+                        block_seqno: Some(block_seqno),
+                        from_same_shard: Some(msg.source == for_shard_id),
+                        ext_msg_chain_time: None,
+                    }));
                     res.metrics
                         .add_to_msgs_groups_ops_count
                         .saturating_add_assign(1);

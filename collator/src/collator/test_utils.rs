@@ -9,7 +9,7 @@ pub fn make_stub_internal_parsed_message(
     dst: IntAddr,
     created_lt: u64,
     is_new: bool,
-) -> ParsedMessage {
+) -> Box<ParsedMessage> {
     let dst_wc = dst.workchain();
     let info = IntMsgInfo {
         dst,
@@ -18,15 +18,15 @@ pub fn make_stub_internal_parsed_message(
     };
     let cell = CellBuilder::build_from(&info).unwrap();
     let enq_msg = EnqueuedMessage { info, cell };
-    ParsedMessage::new(
-        MsgInfo::Int(enq_msg.info),
-        true,
-        enq_msg.cell,
-        None,
-        None,
-        (!is_new).then(|| dst_wc == src_shard.workchain()),
-        None,
-    )
+    Box::new(ParsedMessage {
+        info: MsgInfo::Int(enq_msg.info),
+        dst_in_current_shard: true,
+        cell: enq_msg.cell,
+        special_origin: None,
+        block_seqno: None,
+        from_same_shard: (!is_new).then(|| dst_wc == src_shard.workchain()),
+        ext_msg_chain_time: None,
+    })
 }
 
 #[cfg(test)]
@@ -35,15 +35,15 @@ pub fn make_stub_external_parsed_message(
     chain_time: u64,
     msg_idx: u32,
     dst: IntAddr,
-) -> ParsedMessage {
+) -> Box<ParsedMessage> {
     let ext_msg = crate::mempool::make_stub_external(anchor_id, chain_time, msg_idx, dst);
-    ParsedMessage::new(
-        MsgInfo::ExtIn(ext_msg.info),
-        true,
-        ext_msg.cell,
-        None,
-        None,
-        None,
-        Some(chain_time),
-    )
+    Box::new(ParsedMessage {
+        info: MsgInfo::ExtIn(ext_msg.info),
+        dst_in_current_shard: true,
+        cell: ext_msg.cell,
+        special_origin: None,
+        block_seqno: None,
+        from_same_shard: None,
+        ext_msg_chain_time: Some(chain_time),
+    })
 }

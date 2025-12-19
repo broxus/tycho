@@ -208,7 +208,7 @@ impl MessagesExecutor {
     #[allow(clippy::vec_box)]
     fn execute_subgroup(
         account_id: HashBytes,
-        msgs: Vec<ParsedMessage>,
+        msgs: Vec<Box<ParsedMessage>>,
         accounts_cache: &AccountsCache,
         min_next_lt: u64,
         config: &ParsedConfig,
@@ -254,7 +254,7 @@ impl MessagesExecutor {
                     tracing::trace!(
                         target: tracing_targets::EXEC_MANAGER,
                         account_addr = %executed.account_state.account_addr,
-                        message_hash = %tx.in_message.cell().repr_hash(),
+                        message_hash = %tx.in_message.cell.repr_hash(),
                         "skipped external message",
                     );
 
@@ -278,7 +278,7 @@ impl MessagesExecutor {
     #[allow(clippy::vec_box)]
     fn execute_messages(
         mut account_state: Box<ShardAccountStuff>,
-        msgs: Vec<ParsedMessage>,
+        msgs: Vec<Box<ParsedMessage>>,
         min_next_lt: u64,
         config: &ParsedConfig,
         params: &ExecutorParams,
@@ -315,7 +315,7 @@ impl MessagesExecutor {
     pub fn execute_ordinary_transaction(
         &mut self,
         mut account_stuff: Box<ShardAccountStuff>,
-        in_message: ParsedMessage,
+        in_message: Box<ParsedMessage>,
     ) -> Result<ExecutedOrdinaryTransaction> {
         let min_next_lt = self.min_next_lt;
         let config = self.config.clone();
@@ -435,7 +435,7 @@ pub struct ExecutedGroup {
 }
 
 pub struct ExecutedTickItem {
-    pub in_message: ParsedMessage,
+    pub in_message: Box<ParsedMessage>,
     pub executed: ExecutedTransaction,
 }
 
@@ -448,7 +448,7 @@ pub struct ExecutedTransactions {
 
 pub struct ExecutedOrdinaryTransaction {
     pub result: TransactionResult,
-    pub in_message: ParsedMessage,
+    pub in_message: Box<ParsedMessage>,
 }
 
 pub enum TransactionResult {
@@ -458,7 +458,7 @@ pub enum TransactionResult {
 
 fn execute_ordinary_transaction_impl(
     account_stuff: &mut ShardAccountStuff,
-    in_message: ParsedMessage,
+    in_message: Box<ParsedMessage>,
     min_lt: u64,
     config: &ParsedConfig,
     params: &ExecutorParams,
@@ -466,14 +466,14 @@ fn execute_ordinary_transaction_impl(
     tracing::trace!(
         target: tracing_targets::EXEC_MANAGER,
         account_addr = %account_stuff.account_addr,
-        message_hash = %in_message.cell().repr_hash(),
+        message_hash = %in_message.cell.repr_hash(),
         message_kind = ?in_message.kind(),
         "executing ordinary message",
     );
 
     let _histogram = HistogramGuard::begin("tycho_collator_execute_ordinary_time");
 
-    let is_external = matches!(in_message.info(), MsgInfo::ExtIn(_));
+    let is_external = matches!(in_message.info, MsgInfo::ExtIn(_));
 
     let mut inspector = ExecutorInspector::default();
     let uncommited = Executor::new(params, config)
@@ -481,7 +481,7 @@ fn execute_ordinary_transaction_impl(
         .begin_ordinary_ext(
             &account_stuff.make_std_addr(),
             is_external,
-            in_message.cell().clone(),
+            in_message.cell.clone(),
             &account_stuff.shard_account,
             Some(&mut inspector),
         );
