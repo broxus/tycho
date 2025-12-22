@@ -58,7 +58,7 @@ pub enum VerifyFailReason {
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum IllFormedReason {
     #[error("ill-formed after load from DB")]
-    AfterLoadFromDb, // TODO describe all reasons and save them to DB, then remove this stub
+    AfterLoadFromDb,
     #[error("structure issue: {0}")]
     Structure(StructureIssue),
     #[error("point before genesis cannot exist in this overlay")]
@@ -86,10 +86,10 @@ pub enum IllFormedReason {
     AnchorLink(AnchorStageRole),
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum InvalidReason {
-    #[error("invalid after load from DB")]
-    AfterLoadFromDb, // TODO describe all reasons and save them to DB, then remove this stub
+    #[error("invalid after load from DB, no_dag_round={no_dag_round}")]
+    AfterLoadFromDb { no_dag_round: bool },
     #[error("cannot validate point, no {0:?} round in DAG")]
     NoRoundInDag(PointMap),
     #[error("cannot validate point, dependency was dropped with its round")]
@@ -104,14 +104,53 @@ pub enum InvalidReason {
     MustHaveReferencedPrevPoint(PointId),
     #[error("must have skipped round after {:?}", .0.alt())]
     MustHaveSkippedRound(PointId),
-    #[error("invalid dependency {:?}", .0.alt())]
-    InvalidDependency(PointId),
     #[error("dependency time too far in future: {:?}", .0.alt())]
     DependencyTimeTooFarInFuture(PointId),
     #[error("newer anchor {:?} in dependency {:?}", .0.0, .0.1.alt())]
     NewerAnchorInDependency((AnchorStageRole, PointId)),
     #[error("anchor {:?} link leads to other destination through {:?}", .0.0, .0.1.alt())]
     AnchorLinkBadPath((AnchorStageRole, PointId)),
+    #[error("dependency {}{}", .0, .1.as_ref().map(|p| format!("; indirect through {:?}", p.alt())).unwrap_or_default())]
+    Dependency(Box<InvalidRootCause>, Option<PointId>),
+}
+
+impl InvalidReason {
+    /// root cause is because of no dag round: such points should not be a ban reason
+    pub fn no_dag_round(&self) -> bool {
+        match self {
+            Self::AfterLoadFromDb { no_dag_round } => *no_dag_round,
+            Self::NoRoundInDag(_) | Self::DependencyRoundDropped => true,
+            InvalidReason::Dependency(cause, _) => match &**cause {
+                InvalidRootCause::Invalid(_, reason) => match reason {
+                    Self::AfterLoadFromDb { no_dag_round } => *no_dag_round,
+                    Self::NoRoundInDag(_) | Self::DependencyRoundDropped => true,
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+}
+
+#[derive(thiserror::Error, Debug, Clone)]
+pub enum InvalidRootCause {
+    #[error("{:?} invalid: {}", .0.alt(), 0.1)]
+    Invalid(PointId, InvalidReason),
+    #[error("{:?} ill-formed: {}", .0.alt(), 0.1)]
+    IllFormed(PointId, IllFormedReason),
+    #[error("{:?} not found", .0.alt())]
+    NotFound(PointId),
+}
+
+impl InvalidRootCause {
+    pub fn point_id(&self) -> &PointId {
+        match self {
+            InvalidRootCause::Invalid(point_id, _)
+            | InvalidRootCause::IllFormed(point_id, _)
+            | InvalidRootCause::NotFound(point_id) => point_id,
+        }
+    }
 }
 
 // If any round exceeds dag rounds, the arg point @ r+0 is considered valid by itself.
@@ -373,8 +412,9 @@ impl Verifier {
                             dag_point.is_certified(),
                             "prev point was not marked as certified, Cert is broken"
                         );
-                        let Some(proven) = dag_point.trusted() else {
-                            return Ok(Some(InvalidReason::InvalidDependency(dag_point.id())));
+                        let proven = match Self::check_dependency_valid(&dag_point) {
+                            Ok(proven) => proven,
+                            Err(reason) => return Ok(Some(reason)),
                         };
                         if let Some(reason) = Self::is_proof_ok(&info, proven) {
                             return Ok(Some(reason));
@@ -404,8 +444,9 @@ impl Verifier {
                     }
                 }
             } else {
-                let Some(dep) = dag_point.trusted() else {
-                    return Ok(Some(InvalidReason::InvalidDependency(dag_point.id())));
+                let dep = match Self::check_dependency_valid(&dag_point) {
+                    Ok(dep) => dep,
+                    Err(reason) => return Ok(Some(reason)),
                 };
                 if dep.time() > max_allowed_dep_time {
                     // dependency time may exceed those in point only by a small value from config
@@ -441,6 +482,31 @@ impl Verifier {
             }
         }
         Ok(None)
+    }
+
+    /// keeps root cause acros dep tree for [`InvalidReason::no_dag_round`]
+    fn check_dependency_valid(dag_point: &DagPoint) -> Result<&PointInfo, InvalidReason> {
+        match dag_point {
+            DagPoint::Valid(valid) => Ok(valid.info()),
+            DagPoint::Invalid(invalid) if invalid.is_certified() => Ok(invalid.info()),
+            DagPoint::Invalid(invalid) => Err(match invalid.reason() {
+                InvalidReason::Dependency(root_cause, _) => {
+                    InvalidReason::Dependency(root_cause.clone(), Some(invalid.info().id()))
+                }
+                other => {
+                    let cause = InvalidRootCause::Invalid(invalid.info().id(), other.clone());
+                    InvalidReason::Dependency(Box::new(cause), None)
+                }
+            }),
+            DagPoint::IllFormed(ill) => {
+                let cause = InvalidRootCause::IllFormed(*ill.id(), ill.reason().clone());
+                Err(InvalidReason::Dependency(Box::new(cause), None))
+            }
+            DagPoint::NotFound(not_found) => {
+                let cause = InvalidRootCause::NotFound(*not_found.id());
+                Err(InvalidReason::Dependency(Box::new(cause), None))
+            }
+        }
     }
 
     /// blame author and every dependent point's author
