@@ -16,6 +16,7 @@ bitflags::bitflags! {
         const FirstValid = 0b_1 << 4;
         const FirstResolved = 0b_1 << 3;
         const Certified = 0b_1 << 2;
+        const RootCauseNoDagRound = 0b_1 << 0; // only for invalid
     }
 }
 

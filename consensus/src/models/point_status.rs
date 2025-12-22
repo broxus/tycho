@@ -160,6 +160,7 @@ pub struct PointStatusValidated {
     pub is_first_valid: bool,
     pub is_first_resolved: bool,
     pub is_certified: bool,
+    pub no_dag_round: bool,
     pub anchor_flags: AnchorFlags,
     pub committed: Option<CommitHistoryPart>,
 }
@@ -215,6 +216,7 @@ impl PointStatus for PointStatusValidated {
         flags.set(StatusFlags::FirstValid, self.is_first_valid);
         flags.set(StatusFlags::FirstResolved, self.is_first_resolved);
         flags.set(StatusFlags::Certified, self.is_certified);
+        flags.set(StatusFlags::RootCauseNoDagRound, self.no_dag_round);
 
         buffer.push(flags.bits());
         buffer.push(self.anchor_flags.bits());
@@ -341,6 +343,7 @@ impl PointStatusStored {
                     is_first_valid: flags.contains(StatusFlags::FirstValid),
                     is_first_resolved: flags.contains(StatusFlags::FirstResolved),
                     is_certified: flags.contains(StatusFlags::Certified),
+                    no_dag_round: flags.contains(StatusFlags::RootCauseNoDagRound),
                     anchor_flags: AnchorFlags::from_bits_retain(stored[1]),
                     committed: CommitHistoryPart::read(&stored[2..]),
                 })

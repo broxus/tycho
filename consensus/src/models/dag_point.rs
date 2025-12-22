@@ -202,6 +202,9 @@ impl InvalidPoint {
     pub fn is_certified(&self) -> bool {
         self.0.cert.is_certified()
     }
+    pub fn reason(&self) -> &InvalidReason {
+        &self.0.reason
+    }
 }
 
 #[derive(Clone)]
@@ -221,6 +224,9 @@ impl IllFormedPoint {
     }
     pub fn is_certified(&self) -> bool {
         self.0.cert.is_certified()
+    }
+    pub fn reason(&self) -> &IllFormedReason {
+        &self.0.reason
     }
 }
 
