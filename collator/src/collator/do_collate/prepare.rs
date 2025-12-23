@@ -64,11 +64,9 @@ impl<'a> Phase<PrepareState<'a>> {
             preloaded_bc_config,
             Arc::new(ExecutorParams {
                 libraries: self.state.mc_data.libraries.clone(),
-                // generated unix time
                 block_unixtime: self.state.collation_data.gen_utime,
-                // block's start logical time
                 block_lt: self.state.collation_data.start_lt,
-                // block random seed
+                prev_mc_block_id: Some(self.state.mc_data.block_id),
                 rand_seed: self.state.collation_data.rand_seed,
                 disable_delete_frozen_accounts: true,
                 full_body_in_bounced: capabilities.contains(GlobalCapability::CapFullBodyInBounced),
