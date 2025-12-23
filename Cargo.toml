@@ -159,6 +159,7 @@ tycho-wu-tuner = { path = "./wu-tuner", version = "0.3.4" }
 
 [patch.crates-io]
 # patches here
+quinn = { git = "https://github.com/Rexagon/quinn.git", rev = "9030ea7b444e069be5d6e36698f2fac10b0e92f2" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
