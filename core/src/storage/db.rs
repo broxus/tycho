@@ -1,3 +1,4 @@
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tycho_storage::kv::{
@@ -267,6 +268,7 @@ pub trait CellsDbOps: Send + Sync {
     fn cells(&self) -> &Table<tables::Cells>;
     fn temp_cells(&self) -> &Table<tables::TempCells>;
     fn rocksdb(&self) -> &Arc<rocksdb::DB>;
+    fn trigger_compaction(&self) -> Pin<Box<dyn Future<Output = ()> + Send>>;
 }
 
 #[derive(Clone)]
@@ -302,5 +304,16 @@ impl CellsDbOps for CellStorageDb {
             Self::Main(db) => db.rocksdb(),
             Self::Part(db) => db.rocksdb(),
         }
+    }
+
+    fn trigger_compaction(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let this = self.clone();
+        let fut = async move {
+            match &this {
+                Self::Main(db) => db.trigger_compaction().await,
+                Self::Part(db) => db.trigger_compaction().await,
+            };
+        };
+        Box::pin(fut)
     }
 }
