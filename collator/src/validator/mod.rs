@@ -4,9 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tycho_crypto::ed25519::PublicKey;
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
-use tycho_types::models::{
-    BlockId, BlockIdShort, IndexedValidatorDescription, ShardIdent, ValidatorDescription,
-};
+use tycho_types::models::{BlockId, BlockIdShort, IndexedValidatorDescription, ShardIdent};
 use tycho_util::FastHashMap;
 
 pub use self::impls::*;
