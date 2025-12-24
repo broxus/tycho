@@ -1128,10 +1128,6 @@ impl ReceivedBlockContext {
             });
         }
 
-        // let Some(ref_by_mc_seqno) = state_node_adapter.get_ref_by_mc_seqno(block_id).await? else {
-        //     bail!("block not found: {block_id}");
-        // };
-
         let Some(block_stuff) = state_node_adapter.load_block(block_id).await? else {
             bail!("block not found: {block_id}");
         };

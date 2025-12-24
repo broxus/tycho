@@ -465,14 +465,6 @@ impl StarterInner {
             handle_storage.set_has_shard_state(&handle);
             handle_storage.set_block_committed(&handle);
 
-            persistent_states
-                .store_shard_state(
-                    handle.id().seqno,
-                    &handle,
-                    state.ref_mc_state_handle().clone(),
-                )
-                .await?;
-
             tracing::debug!(%block_id, "imported persistent shard state");
         }
 
@@ -484,6 +476,14 @@ impl StarterInner {
 
         handle_storage.set_has_shard_state(&handle);
         handle_storage.set_block_committed(&handle);
+
+        persistent_states
+            .store_shard_state(
+                handle.id().seqno,
+                &handle,
+                masterchain_zerostate.ref_mc_state_handle().clone(),
+            )
+            .await?;
 
         tracing::info!("imported zerostates");
 

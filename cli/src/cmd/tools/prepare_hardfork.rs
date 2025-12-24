@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use anyhow::Context;
 use bytesize::ByteSize;
 use clap::Parser;
 use tycho_block_util::state::ShardStateStuff;
@@ -35,7 +36,7 @@ pub struct Cmd {
     output: Option<PathBuf>,
 
     /// Seqno of the masterchain block for which to dump the states
-    #[clap(short, long, allow_hyphen_values(true))]
+    #[clap(short, long)]
     mc_seqno: u32,
 }
 
@@ -61,9 +62,10 @@ impl Cmd {
 
         let Some(block_id) = storage
             .shard_state_storage()
-            .load_mc_block_id(self.mc_seqno)?
+            .load_mc_block_id(self.mc_seqno)
+            .with_context(|| format!("mc block not found. seqno {}", self.mc_seqno))?
         else {
-            anyhow::bail!("mc block not found");
+            anyhow::bail!("mc block not found. seqno {}", self.mc_seqno)
         };
 
         let ref_by_mc_seqno = storage
@@ -133,7 +135,7 @@ impl ShardStateHandler {
                 file_hash: block_id.file_hash,
             },
             BlockMeta::with_data(NewBlockMeta {
-                is_key_block: true,
+                is_key_block: false,
                 gen_utime: ssu.gen_utime,
                 ref_by_mc_seqno: ssu.min_ref_mc_seqno,
             }),
@@ -189,7 +191,10 @@ impl ShardStateHandler {
         let state_cell = master_state.root_cell();
         let mut slice = CellSlice::new(state_cell.as_ref())?;
         let mut ssu = ShardStateUnsplit::load_from(&mut slice)?;
-        let Some(custom) = ssu.load_custom()? else {
+        let Some(custom) = ssu
+            .load_custom()
+            .context("no custom found in mc shard state unsplit")?
+        else {
             anyhow::bail!("no custom found in mc shard state unsplit");
         };
 

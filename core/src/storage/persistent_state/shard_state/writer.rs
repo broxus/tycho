@@ -1,4 +1,5 @@
 use std::collections::hash_map;
+use std::fmt::Display;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -9,10 +10,10 @@ use tycho_storage::fs::Dir;
 use tycho_storage::kv::refcount;
 use tycho_types::cell::{CellDescriptor, HashBytes};
 use tycho_types::models::*;
-use tycho_util::FastHashMap;
 use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::progress_bar::ProgressBar;
 use tycho_util::sync::CancellationFlag;
+use tycho_util::FastHashMap;
 
 use crate::storage::CellsDb;
 
@@ -30,20 +31,18 @@ impl<'a> ShardStateWriter<'a> {
     // Partially written BOC file.
     const FILE_EXTENSION_TEMP: &'static str = "boc.temp";
 
-    pub fn file_name_str(name: &str) -> PathBuf {
-        PathBuf::from(name).with_extension(Self::FILE_EXTENSION)
+    pub fn file_name<S>(name: S) -> PathBuf
+    where
+        S: Display,
+    {
+        PathBuf::from(name.to_string()).with_extension(Self::FILE_EXTENSION)
     }
 
-    pub fn temp_file_name_str(name: &str) -> PathBuf {
-        PathBuf::from(name).with_extension(Self::FILE_EXTENSION_TEMP)
-    }
-
-    pub fn file_name(block_id: &BlockId) -> PathBuf {
-        PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION)
-    }
-
-    pub fn temp_file_name(block_id: &BlockId) -> PathBuf {
-        PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
+    pub fn temp_file_name<S>(name: S) -> PathBuf
+    where
+        S: Display,
+    {
+        PathBuf::from(name.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
     }
 
     pub fn new(db: &'a CellsDb, states_dir: &'a Dir, block_id: &'a BlockId) -> Self {
@@ -120,7 +119,7 @@ impl<'a> ShardStateWriter<'a> {
         cancelled: Option<&CancellationFlag>,
     ) -> Result<HashBytes> {
         let temp_file_name = match file_name {
-            Some(name) => Self::temp_file_name_str(name),
+            Some(name) => Self::temp_file_name(name),
             None => Self::temp_file_name(self.block_id),
         };
 
@@ -250,7 +249,7 @@ impl<'a> ShardStateWriter<'a> {
 
         let name = match file_name {
             None => Self::file_name(self.block_id),
-            Some(name) => Self::file_name_str(name),
+            Some(name) => Self::file_name(name),
         };
 
         self.states_dir.file(&temp_file_name).rename(name)?;
@@ -533,8 +532,9 @@ impl<W: Write> IntermediateHasher<W> {
 
 impl<W: Write> Write for IntermediateHasher<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.hasher.update(buf);
-        self.inner.write(buf)
+        let written = self.inner.write(buf)?;
+        self.hasher.update(&buf[..written]);
+        Ok(written)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

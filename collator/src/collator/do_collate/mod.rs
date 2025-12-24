@@ -2,7 +2,7 @@ use std::collections::hash_map;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use humantime::format_duration;
 use phase::{ActualState, Phase};
 use prepare::PrepareState;
@@ -14,12 +14,12 @@ use tycho_core::storage::{NewBlockMeta, StoreStateHint};
 use tycho_types::models::*;
 use tycho_types::num::Tokens;
 use tycho_types::prelude::*;
+use tycho_util::FastHashMap;
 use tycho_util::futures::JoinTask;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::time::now_millis;
-use tycho_util::FastHashMap;
 
 use super::types::{
     AnchorInfo, AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
