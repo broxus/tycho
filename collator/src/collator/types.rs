@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -13,7 +13,6 @@ use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::{AccountMeta, PublicLibraryChange, TransactionMeta};
-use tycho_network::PeerId;
 use tycho_types::boc;
 use tycho_types::cell::{Cell, CellFamily, HashBytes, Lazy, UsageTree, UsageTreeMode};
 use tycho_types::dict::{self, Dict};
@@ -34,14 +33,12 @@ use super::messages_reader::MessagesReaderMetrics;
 use crate::collator::do_collate::work_units::{DoCollateWu, ExecuteWu, FinalizeWu};
 use crate::collator::messages_reader::MetricsTimer;
 use crate::collator::messages_reader::state::ReaderState;
-use crate::collator::messages_reader::state::external::ExternalKey;
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValue};
 use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
 use crate::internal_queue::types::stats::{
     AccountStatistics, DiffStatistics, QueueStatistics, SeparatedStatisticsByPartitions,
 };
-use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::processed_upto::{
@@ -653,28 +650,8 @@ pub(super) struct CollatorStats {
     pub tps: u128,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct AnchorInfo {
-    pub id: MempoolAnchorId,
-    pub ct: u64,
-    #[allow(dead_code)]
-    pub all_exts_count: usize,
-    #[allow(dead_code)]
-    pub our_exts_count: usize,
-    pub author: PeerId,
-}
-
-impl AnchorInfo {
-    pub fn from_anchor(anchor: &MempoolAnchor, our_exts_count: usize) -> AnchorInfo {
-        Self {
-            id: anchor.id,
-            ct: anchor.chain_time,
-            all_exts_count: anchor.externals.len(),
-            our_exts_count,
-            author: anchor.author,
-        }
-    }
-}
+#[allow(unused_imports)]
+pub(super) use super::anchors_cache::{AnchorInfo, AnchorsCache, CachedAnchor};
 
 pub(super) type AccountId = HashBytes;
 
@@ -1161,147 +1138,6 @@ pub enum ParsedMessageKind {
 pub enum SpecialOrigin {
     Recover,
     Mint,
-}
-
-#[derive(Clone)]
-pub struct CachedAnchor {
-    pub anchor: Arc<MempoolAnchor>,
-    pub our_exts_count: usize,
-}
-
-#[derive(Default, Clone)]
-pub struct AnchorsCache {
-    /// The cache of imported from mempool anchors that were not processed yet.
-    /// Anchor is removed from the cache when all its externals are processed.
-    cache: VecDeque<(MempoolAnchorId, CachedAnchor)>,
-
-    imported_anchors_info_history: VecDeque<AnchorInfo>,
-
-    has_pending_externals: bool,
-}
-
-impl AnchorsCache {
-    pub fn add_imported_anchor_info(&mut self, anchor_info: AnchorInfo) {
-        self.imported_anchors_info_history.push_back(anchor_info);
-    }
-
-    fn remove_imported_anchors_info_before(&mut self, ct: u64) {
-        while let Some(info) = self.imported_anchors_info_history.front() {
-            if info.ct < ct && self.imported_anchors_info_history.len() > 1 {
-                self.imported_anchors_info_history.pop_front();
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn remove_imported_anchors_info_above(&mut self, ct: u64) {
-        while let Some(info) = self.imported_anchors_info_history.back() {
-            if info.ct > ct && self.imported_anchors_info_history.len() > 1 {
-                self.imported_anchors_info_history.pop_back();
-            } else {
-                break;
-            }
-        }
-    }
-
-    pub fn last_imported_anchor_info(&self) -> Option<&AnchorInfo> {
-        self.imported_anchors_info_history.back()
-    }
-
-    pub fn get_last_imported_anchor_id_and_ct(&self) -> Option<(u32, u64)> {
-        self.last_imported_anchor_info().map(|a| (a.id, a.ct))
-    }
-
-    pub fn add(&mut self, anchor: Arc<MempoolAnchor>, our_exts_count: usize) {
-        self.add_imported_anchor_info(AnchorInfo::from_anchor(&anchor, our_exts_count));
-
-        if our_exts_count > 0 {
-            self.has_pending_externals = true;
-            self.cache.push_back((anchor.id, CachedAnchor {
-                anchor,
-                our_exts_count,
-            }));
-        }
-    }
-
-    pub fn pop_front(&mut self) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
-        let removed = self.cache.pop_front();
-
-        if let Some((_, ca)) = &removed {
-            self.remove_imported_anchors_info_before(ca.anchor.chain_time);
-            self.has_pending_externals = !self.cache.is_empty();
-        }
-
-        removed.map(|(id, ca)| (id, ca.anchor))
-    }
-
-    /// Removes anchors from cache above specified chain time,
-    /// and updates the last imported anchor info.
-    pub fn remove_last_imported_above(&mut self, ct: u64) -> Option<&AnchorInfo> {
-        // remove anchors
-        let mut was_removed = false;
-        while let Some(last) = self.cache.back().map(|(_, ca)| ca) {
-            if last.anchor.chain_time > ct {
-                was_removed = true;
-                self.cache.pop_back();
-            } else {
-                break;
-            }
-        }
-
-        // remove anchors info
-        self.remove_imported_anchors_info_above(ct);
-
-        if was_removed {
-            self.has_pending_externals = !self.cache.is_empty();
-        }
-
-        self.last_imported_anchor_info()
-    }
-
-    pub fn clear(&mut self) {
-        self.cache.clear();
-        self.imported_anchors_info_history.clear();
-        self.has_pending_externals = false;
-    }
-
-    #[cfg(test)]
-    pub fn len(&self) -> usize {
-        self.cache.len()
-    }
-
-    pub fn get(&self, index: usize) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
-        self.cache
-            .get(index)
-            .map(|(id, ca)| (*id, ca.anchor.clone()))
-    }
-
-    pub fn iter(&self) -> std::collections::vec_deque::Iter<'_, (MempoolAnchorId, CachedAnchor)> {
-        self.cache.iter()
-    }
-
-    #[cfg(test)]
-    pub fn first_with_our_externals(&self) -> Option<&Arc<MempoolAnchor>> {
-        let mut idx = 0;
-        while let Some((_, ca)) = self.cache.get(idx) {
-            if ca.our_exts_count > 0 {
-                return Some(&ca.anchor);
-            }
-            idx += 1;
-        }
-        None
-    }
-
-    pub fn has_pending_externals(&self) -> bool {
-        self.has_pending_externals
-    }
-
-    pub fn check_has_pending_externals_in_range(&self, up_to: &ExternalKey) -> bool {
-        self.cache
-            .iter()
-            .any(|(id, ca)| id <= &up_to.anchor_id && ca.our_exts_count > 0)
-    }
 }
 
 pub struct FinalizeMessagesReaderResult {
