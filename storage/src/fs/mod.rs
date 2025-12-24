@@ -264,7 +264,7 @@ impl FileBuilder {
         self
     }
 
-    pub fn path(&self) -> &Path {
+    pub fn path(&self) -> &PathBuf {
         &self.path
     }
 }
@@ -275,7 +275,7 @@ pub struct UnnamedFileBuilder {
 }
 
 impl UnnamedFileBuilder {
-    pub fn open(self) -> Result<File> {
+    pub fn open(&self) -> Result<File> {
         let file = tempfile::tempfile_in(&self.base_dir)?;
         if let Some(prealloc) = self.prealloc {
             file.set_len(prealloc as u64)?;

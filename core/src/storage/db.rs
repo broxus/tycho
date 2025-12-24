@@ -1,13 +1,18 @@
+use std::pin::Pin;
+use std::sync::Arc;
+
 use tycho_storage::kv::{
-    Migrations, NamedTables, StateVersionProvider, TableContext, WithMigrations,
+    Migrations, NamedTables, StateVersionProvider, StoredValue, TableContext, WithMigrations,
 };
 use tycho_util::sync::CancellationFlag;
-use weedb::{MigrationError, Semver, VersionProvider, WeeDb};
+use weedb::{MigrationError, Semver, Table, VersionProvider, WeeDb, rocksdb};
 
+use super::block_handle::{BlockFlags, BlockMeta};
 use super::tables;
 
 pub type CoreDb = WeeDb<CoreTables>;
 pub type CellsDb = WeeDb<CellsTables>;
+pub type CellsPartDb = WeeDb<CellsPartTables>;
 
 pub trait CoreDbExt {
     fn normalize_version(&self) -> anyhow::Result<()>;
@@ -71,7 +76,7 @@ impl NamedTables for CoreTables {
 }
 
 impl WithMigrations for CoreTables {
-    const VERSION: Semver = [0, 0, 4];
+    const VERSION: Semver = [0, 0, 5];
 
     type VersionProvider = StateVersionProvider<tables::State>;
 
@@ -80,9 +85,79 @@ impl WithMigrations for CoreTables {
     }
 
     fn register_migrations(
-        _migrations: &mut Migrations<Self::VersionProvider, Self>,
-        _cancelled: CancellationFlag,
+        migrations: &mut Migrations<Self::VersionProvider, Self>,
+        cancelled: CancellationFlag,
     ) -> Result<(), MigrationError> {
+        let cancelled = cancelled.clone();
+        migrations.register([0, 0, 4], [0, 0, 5], move |db| {
+            const BATCH_LIMIT: usize = 1000;
+
+            let mut batch = rocksdb::WriteBatch::default();
+            let mut pending = 0;
+            let mut updated = 0;
+
+            let mut iter = db.block_handles.raw_iterator();
+            iter.seek_to_first();
+            iter.status().map_err(MigrationError::DbError)?;
+            let mut started = false;
+            while {
+                if started {
+                    iter.next();
+                }
+                iter.valid()
+            } {
+                started = true;
+
+                if cancelled.check() {
+                    return Err(MigrationError::Custom(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "migration cancelled",
+                    ))));
+                }
+
+                let key = match iter.key() {
+                    Some(key) => key,
+                    None => break,
+                };
+                let value = match iter.value() {
+                    Some(value) => value,
+                    None => continue,
+                };
+
+                let meta = BlockMeta::from_slice(value);
+                if !meta.add_flags(BlockFlags::HAS_STATE_PARTS) {
+                    continue;
+                }
+
+                batch.merge_cf(&db.block_handles.cf(), key, meta.to_vec());
+
+                // write batch when limit reached
+                pending += 1;
+                updated += 1;
+                if pending >= BATCH_LIMIT {
+                    db.rocksdb()
+                        .write_opt(batch, db.block_handles.write_config())
+                        .map_err(MigrationError::DbError)?;
+                    batch = rocksdb::WriteBatch::default();
+                    pending = 0;
+                }
+            }
+
+            // write last batch
+            if pending > 0 {
+                db.rocksdb()
+                    .write_opt(batch, db.block_handles.write_config())
+                    .map_err(MigrationError::DbError)?;
+            }
+
+            tracing::info!(
+                updated,
+                "migration: added HAS_STATE_PARTS flag to existing block handles"
+            );
+
+            Ok(())
+        })?;
+
         Ok(())
     }
 }
@@ -127,5 +202,118 @@ impl WithMigrations for CellsTables {
         _cancelled: CancellationFlag,
     ) -> Result<(), MigrationError> {
         Ok(())
+    }
+}
+
+weedb::tables! {
+    pub struct CellsPartTables<TableContext> {
+        pub state: tables::State,
+
+        pub shard_states: tables::ShardStates,
+        pub cells: tables::Cells,
+        pub temp_cells: tables::TempCells,
+    }
+}
+
+impl NamedTables for CellsPartTables {
+    const NAME: &'static str = "cells-part";
+}
+
+impl WithMigrations for CellsPartTables {
+    const VERSION: Semver = [0, 0, 1];
+
+    type VersionProvider = StateVersionProvider<tables::State>;
+
+    fn new_version_provider() -> Self::VersionProvider {
+        StateVersionProvider::new::<Self>()
+    }
+
+    fn register_migrations(
+        _migrations: &mut Migrations<Self::VersionProvider, Self>,
+        _cancelled: CancellationFlag,
+    ) -> Result<(), MigrationError> {
+        Ok(())
+    }
+}
+
+impl CoreDbExt for CellsPartDb {
+    fn normalize_version(&self) -> anyhow::Result<()> {
+        let provider = CellsPartTables::new_version_provider();
+
+        // Check if there is NO VERSION
+        if provider.get_version(self.raw())?.is_some() {
+            return Ok(());
+        }
+
+        // Check if the DB is NOT EMPTY
+        {
+            let mut cells_iter = self.cells.raw_iterator();
+            cells_iter.seek_to_first();
+            cells_iter.status()?;
+            if cells_iter.item().is_none() {
+                return Ok(());
+            }
+        }
+
+        // Set the initial version
+        tracing::warn!("normalizing DB version for cells parts");
+        provider.set_version(self.raw(), [0, 0, 1])?;
+        Ok(())
+    }
+}
+
+/// The abstraction over `CellsDb` and `CellsShardDb`
+pub trait CellsDbOps: Send + Sync {
+    fn shard_states(&self) -> &Table<tables::ShardStates>;
+    fn cells(&self) -> &Table<tables::Cells>;
+    fn temp_cells(&self) -> &Table<tables::TempCells>;
+    fn rocksdb(&self) -> &Arc<rocksdb::DB>;
+    fn trigger_compaction(&self) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+}
+
+#[derive(Clone)]
+pub enum CellStorageDb {
+    Main(CellsDb),
+    Part(CellsPartDb),
+}
+
+impl CellsDbOps for CellStorageDb {
+    fn shard_states(&self) -> &Table<tables::ShardStates> {
+        match self {
+            Self::Main(db) => &db.shard_states,
+            Self::Part(db) => &db.shard_states,
+        }
+    }
+
+    fn cells(&self) -> &Table<tables::Cells> {
+        match self {
+            Self::Main(db) => &db.cells,
+            Self::Part(db) => &db.cells,
+        }
+    }
+
+    fn temp_cells(&self) -> &Table<tables::TempCells> {
+        match self {
+            Self::Main(db) => &db.temp_cells,
+            Self::Part(db) => &db.temp_cells,
+        }
+    }
+
+    fn rocksdb(&self) -> &Arc<rocksdb::DB> {
+        match self {
+            Self::Main(db) => db.rocksdb(),
+            Self::Part(db) => db.rocksdb(),
+        }
+    }
+
+    fn trigger_compaction(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let this = self.clone();
+        let fut = async move {
+            match &this {
+                Self::Main(db) => db.trigger_compaction().await,
+                Self::Part(db) => db.trigger_compaction().await,
+            };
+        };
+        Box::pin(fut)
     }
 }

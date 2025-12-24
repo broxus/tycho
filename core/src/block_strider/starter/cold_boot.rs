@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,7 +8,9 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tycho_block_util::archive::{ArchiveData, WithArchiveData};
-use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
+use tycho_block_util::block::{
+    BlockProofStuff, BlockProofStuffAug, BlockStuff, DisplayShardPrefix, ShardPrefix,
+};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::fs::FileBuilder;
@@ -19,13 +22,14 @@ use tycho_util::sync::rayon_run;
 use tycho_util::time::now_sec;
 
 use super::{ColdBootType, StarterInner, ZerostateProvider};
+use crate::block_strider::starter::starter_client::FoundState;
 use crate::block_strider::{CheckProof, ProofChecker};
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
 use crate::storage::{
-    BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
-    PersistentStateKind,
+    BlockFlags, BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
+    PersistentStateKind, PersistentStateStorage, ShardStatePartInfo,
 };
 
 impl StarterInner {
@@ -68,6 +72,11 @@ impl StarterInner {
 
                 // Choose the latest key block with persistent state
                 let last_key_block = self.choose_key_block()?;
+
+                tracing::info!(
+                    last_key_block = %last_key_block.id(),
+                    "found latest key block with persistent state",
+                );
 
                 if last_key_block.id().seqno != 0 {
                     // If the last suitable key block is not zerostate, we must download all blocks
@@ -169,6 +178,11 @@ impl StarterInner {
                             Ok(res) => {
                                 let (handle, data) = res.split();
                                 handle.accept();
+
+                                tracing::debug!(
+                                    ids = ?data,
+                                    "downloaded key blocks ids",
+                                );
 
                                 if ids_tx.send((block_id, data.block_ids)).is_err() {
                                     tracing::debug!(%block_id, "stop downloading next key blocks");
@@ -641,8 +655,11 @@ impl StarterInner {
         mc_block_id: &BlockId,
         block_id: &BlockId,
     ) -> Result<(BlockHandle, ShardStateStuff)> {
-        enum StoreZeroStateFrom {
-            File(FileBuilder),
+        enum StorePersistentStateFrom {
+            File {
+                main: FileBuilder,
+                parts: Vec<(ShardStatePartInfo, FileBuilder)>,
+            },
             State(ShardStateStuff),
         }
 
@@ -652,34 +669,50 @@ impl StarterInner {
 
         let temp = self.storage.context().temp_files();
 
-        let state_file = temp.file(format!("state_{block_id}"));
-        let state_file_path = state_file.path().to_owned();
+        let main_file_builder = temp.file(format!("state_{block_id}"));
+        let main_file_path = main_file_builder.path().to_owned();
 
-        // NOTE: Intentionally dont spawn yet
-        let remove_state_file = async move {
-            if let Err(e) = tokio::fs::remove_file(&state_file_path).await {
-                tracing::warn!(
-                    path = %state_file_path.display(),
-                    "failed to remove downloaded shard state: {e:?}",
-                );
+        let remove_state_files = |parts_paths: &[PathBuf]| {
+            let mut paths = vec![main_file_path.clone()];
+            paths.extend_from_slice(parts_paths);
+            // NOTE: Intentionally dont spawn yet
+            async move {
+                for path in paths {
+                    if let Err(e) = tokio::fs::remove_file(&path).await {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "failed to remove downloaded shard state: {e:?}",
+                        );
+                    }
+                }
             }
         };
 
+        let open_part_files = |part_files_builders: &[(ShardStatePartInfo, FileBuilder)]| {
+            let mut part_files = Vec::with_capacity(part_files_builders.len());
+            for (info, builder) in part_files_builders {
+                let mut builder_for_read = builder.clone();
+                let file = builder_for_read.read(true).open()?;
+                part_files.push((*info, file));
+            }
+            Ok::<_, anyhow::Error>(part_files)
+        };
+
         let mc_seqno = mc_block_id.seqno;
-        let try_save_persistent = |block_handle: &BlockHandle, from: StoreZeroStateFrom| {
+        let try_save_persistent = |block_handle: &BlockHandle, from: StorePersistentStateFrom| {
             let block_handle = block_handle.clone();
             async move {
                 match from {
                     // Fast reuse the downloaded file if possible
-                    StoreZeroStateFrom::File(mut state_file) => {
-                        // Reuse downloaded (and validated) file as is.
-                        let state_file = state_file.read(true).open()?;
+                    StorePersistentStateFrom::File { mut main, parts } => {
+                        let main_file = main.read(true).open()?;
+                        let part_files = open_part_files(&parts)?;
                         persistent_states
-                            .store_shard_state_file(mc_seqno, &block_handle, state_file)
+                            .store_shard_state_file(mc_seqno, &block_handle, main_file, part_files)
                             .await
                     }
                     // Possibly slow full state traversal
-                    StoreZeroStateFrom::State(state) => {
+                    StorePersistentStateFrom::State(state) => {
                         // Store zerostate as is
                         persistent_states
                             .store_shard_state(
@@ -700,27 +733,81 @@ impl StarterInner {
         {
             let state = shard_states.load_state(mc_seqno, block_id).await?;
 
+            let mut parts_paths = vec![];
+
             if !handle.has_persistent_shard_state() {
-                let from = if state_file.exists() {
-                    StoreZeroStateFrom::File(state_file)
+                let main_file_exists = main_file_builder.exists();
+
+                tracing::info!(
+                    main_file_path = %main_file_builder.path().display(),
+                    "try to use previously downloaded persistent state files",
+                );
+
+                let from = if main_file_exists {
+                    let part_files_builders =
+                        PersistentStateStorage::read_persistent_shard_part_files(
+                            block_id,
+                            &main_file_builder,
+                        )?;
+
+                    // check downloaded persistent state files match each other
+                    let mut part_files_builders_with_info = vec![];
+                    if !part_files_builders.is_empty() {
+                        let mut part_files_builders_for_check = vec![];
+                        for file_builder in part_files_builders {
+                            parts_paths.push(file_builder.path().clone());
+                            part_files_builders_for_check.push((None, file_builder));
+                        }
+                        part_files_builders_with_info =
+                            PersistentStateStorage::check_persistent_state_files(
+                                block_id,
+                                main_file_builder.clone(),
+                                part_files_builders_for_check,
+                            )?;
+                    }
+
+                    StorePersistentStateFrom::File {
+                        main: main_file_builder,
+                        parts: part_files_builders_with_info,
+                    }
                 } else {
-                    StoreZeroStateFrom::State(state.clone())
+                    StorePersistentStateFrom::State(state.clone())
                 };
                 try_save_persistent(handle, from)
                     .await
                     .context("failed to store persistent shard state")?;
             }
 
-            remove_state_file.await;
+            remove_state_files(&parts_paths).await;
 
             tracing::info!("using the stored shard state");
             return Ok((handle.clone(), state));
         }
 
         // Try download the state
+        let mut cached_found_state: Option<FoundState<'_>> = None;
         for attempt in 0..MAX_PERSISTENT_STATE_RETRIES {
-            let file = match self
-                .download_persistent_state_file(block_id, PersistentStateKind::Shard, &state_file)
+            // find persistent state
+            if cached_found_state.is_none() {
+                tracing::info!(%block_id, "trying to find persistent state...");
+                match self
+                    .starter_client
+                    .find_persistent_state(block_id, PersistentStateKind::Shard)
+                    .await
+                {
+                    Ok(found_state) => cached_found_state = Some(found_state),
+                    Err(e) => {
+                        tracing::error!(attempt, "failed to find persistent shard state: {e:?}");
+                        continue;
+                    }
+                }
+            }
+            tracing::info!(%block_id, "found persistent state");
+            let found_state = cached_found_state.as_ref().unwrap();
+
+            // download main file
+            let main_file = match self
+                .download_persistent_state_file(found_state, None, &main_file_builder)
                 .await
             {
                 Ok(file) => file,
@@ -730,11 +817,67 @@ impl StarterInner {
                 }
             };
 
+            // download parts if exist
+            let mut part_files_builders = Vec::new();
+            for part in &found_state.parts {
+                let mut part_downloaded = false;
+                let builder = temp.file(format!(
+                    "state_{block_id}_part_{}",
+                    DisplayShardPrefix(&part.prefix)
+                ));
+                for attempt in 0..MAX_PERSISTENT_STATE_RETRIES {
+                    if let Err(e) = self
+                        .download_persistent_state_file(found_state, Some(part.prefix), &builder)
+                        .await
+                    {
+                        tracing::error!(
+                            attempt,
+                            prefix = %DisplayShardPrefix(&part.prefix),
+                            "failed to download persistent shard state part: {e:?}"
+                        );
+                        continue;
+                    }
+                    part_downloaded = true;
+                    break;
+                }
+                if !part_downloaded {
+                    anyhow::bail!(
+                        "ran out of attempts ({}): download persistent shard state part {}",
+                        MAX_PERSISTENT_STATE_RETRIES,
+                        DisplayShardPrefix(&part.prefix),
+                    );
+                }
+                part_files_builders.push((
+                    ShardStatePartInfo {
+                        hash: part.hash,
+                        prefix: part.prefix,
+                    },
+                    builder,
+                ));
+            }
+
+            // check downloaded persistent state files match each other
+            if !part_files_builders.is_empty() {
+                let part_files_builders_for_check: Vec<_> = part_files_builders
+                    .into_iter()
+                    .map(|(i, b)| (Some(i), b))
+                    .collect();
+                part_files_builders = PersistentStateStorage::check_persistent_state_files(
+                    block_id,
+                    main_file_builder.clone(),
+                    part_files_builders_for_check,
+                )?;
+            }
+
+            // open part files for storage
+            let part_files_for_storage = open_part_files(&part_files_builders)?;
+
             // NOTE: `store_state_file` error is mostly unrecoverable since the operation
             //       context is too large to be atomic.
+            // NOTE: store shard state from downloaded main file and part files
             // TODO: Make this operation recoverable to allow an infinite number of attempts.
             shard_states
-                .store_state_file(block_id, file)
+                .store_state_from_file(block_id, main_file, part_files_for_storage)
                 .await
                 .context("failed to store shard state file")?;
 
@@ -756,20 +899,36 @@ impl StarterInner {
             };
 
             // set flag that state stored
-            block_handles.set_has_shard_state(&block_handle);
+            block_handles.set_flags(
+                &block_handle,
+                BlockFlags::HAS_STATE_MAIN.union(BlockFlags::HAS_STATE_PARTS),
+            );
 
-            let from = StoreZeroStateFrom::File(state_file);
+            let parts_paths: Vec<_> = part_files_builders
+                .iter()
+                .map(|(_, builder)| builder.path().to_owned())
+                .collect();
+
+            // store persistent files
+            let from = StorePersistentStateFrom::File {
+                main: main_file_builder,
+                parts: part_files_builders,
+            };
             try_save_persistent(&block_handle, from)
                 .await
                 .context("failed to store persistent shard state")?;
 
-            remove_state_file.await;
+            // remove downloaded files
+            remove_state_files(&parts_paths).await;
 
             tracing::info!("using the downloaded shard state");
             return Ok((block_handle, state));
         }
 
-        anyhow::bail!("ran out of attempts")
+        anyhow::bail!(
+            "ran out of attempts ({}): download full persistent and store",
+            MAX_PERSISTENT_STATE_RETRIES,
+        )
     }
 
     #[tracing::instrument(skip_all, fields(block_id = %block_handle.id()))]
@@ -809,8 +968,20 @@ impl StarterInner {
         };
 
         for attempt in 0..MAX_PERSISTENT_STATE_RETRIES {
+            let found_state = match self
+                .starter_client
+                .find_persistent_state(block_id, PersistentStateKind::Queue)
+                .await
+            {
+                Ok(state) => state,
+                Err(e) => {
+                    tracing::error!(attempt, "failed to find persistent queue state: {e:?}");
+                    continue;
+                }
+            };
+
             let file = match self
-                .download_persistent_state_file(block_id, PersistentStateKind::Queue, &state_file)
+                .download_persistent_state_file(&found_state, None, &state_file)
                 .await
             {
                 Ok(file) => file,
@@ -839,8 +1010,8 @@ impl StarterInner {
 
     async fn download_persistent_state_file(
         &self,
-        block_id: &BlockId,
-        kind: PersistentStateKind,
+        pending_state: &FoundState<'_>,
+        part_prefix: Option<ShardPrefix>,
         state_file: &FileBuilder,
     ) -> Result<File> {
         let mut temp_file = state_file.with_extension("temp");
@@ -849,17 +1020,14 @@ impl StarterInner {
             std::fs::remove_file(temp_file_path).ok();
         };
 
-        let client = &self.starter_client;
         loop {
             if state_file.exists() {
                 // Use the downloaded state file if it exists
                 return state_file.clone().read(true).open();
             }
 
-            let pending_state = client.find_persistent_state(block_id, kind).await?;
-
             let output = temp_file.write(true).create(true).truncate(true).open()?;
-            _ = (pending_state.download)(output).await?;
+            _ = (pending_state.download)(output, part_prefix).await?;
 
             tokio::fs::rename(temp_file.path(), state_file.path()).await?;
 
