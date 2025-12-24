@@ -2,7 +2,9 @@ use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
+use indexmap::IndexMap;
 use tycho_types::models::{BlockId, IndexedValidatorDescription};
+use tycho_util::FastHasherState;
 
 // TODO: Decide how to be with this collator-defined type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -53,14 +55,24 @@ impl ValidatorEvents {
         &self,
         session_id: ValidationSessionId,
         first_mc_seqno: u32,
+        own_validator_idx: u16,
         validators: &[IndexedValidatorDescription],
     ) -> ValidatorSessionScope {
         self.listener
-            .on_session_started(session_id, first_mc_seqno, validators);
+            .on_session_started(session_id, first_mc_seqno, own_validator_idx, validators);
+
+        let mut remap = IndexMap::<u16, u16, FastHasherState>::with_capacity_and_hasher(
+            validators.len(),
+            Default::default(),
+        );
+        for (i, validator) in validators.iter().enumerate() {
+            remap.insert(validator.validator_idx, i as u16);
+        }
+
         ValidatorSessionScope {
             recorder: self.listener.clone(),
             session_id,
-            validator_count: validators.len(),
+            remap_ids: Arc::new(remap),
             is_sealed: AtomicBool::new(false),
         }
     }
@@ -69,7 +81,7 @@ impl ValidatorEvents {
 pub struct ValidatorSessionScope {
     recorder: Arc<dyn ValidatorEventsListener>,
     session_id: ValidationSessionId,
-    validator_count: usize,
+    remap_ids: Arc<IndexMap<u16, u16, FastHasherState>>,
     is_sealed: AtomicBool,
 }
 
@@ -78,8 +90,9 @@ impl ValidatorSessionScope {
         BlockValidationScope {
             recorder: self.recorder.clone(),
             session_id: self.session_id,
+            remap_ids: self.remap_ids.clone(),
             block_id: *block_id,
-            signature_slots: vec![0; self.validator_count]
+            signature_slots: vec![0; self.remap_ids.len()]
                 .into_iter()
                 .map(AtomicU8::new)
                 .collect::<Box<[_]>>(),
@@ -107,6 +120,7 @@ impl Drop for ValidatorSessionScope {
 pub struct BlockValidationScope {
     recorder: Arc<dyn ValidatorEventsListener>,
     session_id: ValidationSessionId,
+    remap_ids: Arc<IndexMap<u16, u16, FastHasherState>>,
     block_id: BlockId,
     signature_slots: Box<[AtomicU8]>,
     is_sealed: AtomicBool,
@@ -128,7 +142,11 @@ impl BlockValidationScope {
             ReceivedSignature::INVALID_SIGNATURE_BIT
         };
 
-        if let Some(status) = self.signature_slots.get(validator_idx as usize) {
+        let Some(slot_id) = self.remap_ids.get(&validator_idx) else {
+            return false;
+        };
+
+        if let Some(status) = self.signature_slots.get(*slot_id as usize) {
             status.fetch_or(mask, Ordering::Release) & mask == 0
         } else {
             false
@@ -138,7 +156,7 @@ impl BlockValidationScope {
     pub fn commit(&self) -> bool {
         if self.seal() {
             // TODO: Use some unsafe magic to make this closer to a NOOP.
-            let mut signatures = Arc::new_uninit_slice(self.signature_slots.len());
+            let mut signatures = Arc::new_uninit_slice(self.signature_slots.len() as usize);
             for (res, slot) in std::iter::zip(
                 Arc::get_mut(&mut signatures).unwrap(),
                 &self.signature_slots,
@@ -205,6 +223,7 @@ pub trait ValidatorEventsListener: Send + Sync + 'static {
         &self,
         session_id: ValidationSessionId,
         first_mc_seqno: u32,
+        own_validator_idx: u16,
         validators: &[IndexedValidatorDescription],
     );
 
@@ -231,6 +250,7 @@ impl ValidatorEventsListener for NoopValidatorEventsRecorder {
         &self,
         _session_id: ValidationSessionId,
         _first_mc_seqno: u32,
+        _own_validator_idx: u16,
         _validators: &[IndexedValidatorDescription],
     ) {
     }
@@ -258,9 +278,10 @@ macro_rules! impl_recorder_for_tuples {
                 &self,
                 session_id: ValidationSessionId,
                 first_mc_seqno: u32,
+                own_validator_idx: u16,
                 validators: &[IndexedValidatorDescription],
             ) {
-                $(self.$n.on_session_started(session_id, first_mc_seqno, validators);)+
+                $(self.$n.on_session_started(session_id, first_mc_seqno, own_validator_idx, validators);)+
             }
 
             fn on_session_finished(&self, session_id: ValidationSessionId) {
