@@ -14,11 +14,13 @@ license.workspace = true
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 dashmap = { workspace = true }
-futures-util = { workspace = true}
+futures-util = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 scopeguard = { workspace = true }
+serde = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 tycho-crypto = { workspace = true }
 tycho-types = { workspace = true }
