@@ -1,25 +1,37 @@
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::instrument;
+use tycho_crypto::ed25519;
 use tycho_slasher_traits::{ReceivedSignature, ValidationSessionId, ValidatorEventsListener};
 use tycho_types::models::{BlockId, IndexedValidatorDescription};
-use tycho_types::prelude::*;
 use tycho_util::{DashMapEntry, FastDashMap};
 
 use crate::bc::BlocksBatch;
+
+const INIT_QUEUE_CAPACITY: usize = 3;
 
 pub trait BlockBatchesStore {
     fn known_batch_size(&self) -> AtomicU32;
 }
 
-#[derive(Default)]
 pub struct ValidatorEventsCollector {
     default_batch_size: AtomicU32,
     sessions: FastDashMap<ValidationSessionId, SessionState>,
+    init_queue: Mutex<VecDeque<ValidatorSessionInfo>>,
+    init_queue_capacity: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidatorSessionInfo {
+    pub session_id: ValidationSessionId,
+    pub first_mc_seqno: u32,
+    pub own_validator_idx: u16,
+    pub validators: Arc<[IndexedValidatorDescription]>,
 }
 
 struct SessionState {
@@ -29,17 +41,45 @@ struct SessionState {
     current_batch: BlocksBatch,
     first_seqno: u32,
     next_expected_seqno: u32,
-    complete_batches: Option<mpsc::UnboundedSender<Cell>>,
+    complete_batches: Option<mpsc::UnboundedSender<BlocksBatch>>,
 }
+
+pub type BlocksBatchTx = mpsc::UnboundedSender<BlocksBatch>;
+pub type BlocksBatchRx = mpsc::UnboundedReceiver<BlocksBatch>;
 
 // === Collector impl ===
 
 impl ValidatorEventsCollector {
     pub fn new(default_batch_size: NonZeroU32) -> Self {
+        let init_queue_capacity = INIT_QUEUE_CAPACITY;
+        let init_queue = Mutex::new(VecDeque::with_capacity(init_queue_capacity));
+
         Self {
             default_batch_size: AtomicU32::new(default_batch_size.get()),
             sessions: Default::default(),
+            init_queue,
+            init_queue_capacity,
         }
+    }
+
+    pub fn pop_session_to_init(&self, mc_seqno: u32) -> Option<ValidatorSessionInfo> {
+        let mut queue = self.init_queue.lock().unwrap();
+        if let Some(info) = queue.front()
+            && info.first_mc_seqno > mc_seqno
+        {
+            return None;
+        }
+        queue.pop_front()
+    }
+
+    fn push_session_to_init(&self, info: ValidatorSessionInfo) {
+        let mut items = self.init_queue.lock().unwrap();
+        if items.len() >= self.init_queue_capacity
+            && let Some(info) = items.pop_front()
+        {
+            tracing::warn!(session_id = ?info.session_id, "session info dropped from init queue");
+        }
+        items.push_back(info);
     }
 
     pub fn set_default_batch_size(&self, batch_size: NonZeroU32) {
@@ -51,7 +91,7 @@ impl ValidatorEventsCollector {
         &self,
         session_id: ValidationSessionId,
         batch_size: NonZeroU32,
-        complete_batches: mpsc::UnboundedSender<Cell>,
+        complete_batches: BlocksBatchTx,
     ) -> bool {
         let Some(mut session) = self.sessions.get_mut(&session_id) else {
             return false;
@@ -84,6 +124,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
         &self,
         session_id: ValidationSessionId,
         first_mc_seqno: u32,
+        own_validator_idx: u16,
         validators: &[IndexedValidatorDescription],
     ) {
         tracing::debug!(first_mc_seqno, "on_session_open");
@@ -96,6 +137,8 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
         let batch_size = NonZeroU32::new(self.default_batch_size.load(Ordering::Acquire)).unwrap();
         let current_batch = BlocksBatch::new(first_mc_seqno, batch_size, &validator_indices);
 
+        let validators = Arc::<[IndexedValidatorDescription]>::from(validators);
+
         if let DashMapEntry::Vacant(v) = self.sessions.entry(session_id) {
             v.insert(SessionState {
                 batch_size,
@@ -106,6 +149,13 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
                 // Will be initialized later via `init_session`.
                 complete_batches: None,
             });
+
+            self.push_session_to_init(ValidatorSessionInfo {
+                session_id,
+                first_mc_seqno,
+                own_validator_idx,
+                validators,
+            });
         } else {
             tracing::warn!("duplicate session");
         }
@@ -115,7 +165,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
     fn on_session_finished(&self, session_id: ValidationSessionId) {
         tracing::debug!("on_session_drop");
         if let Some((_, session)) = self.sessions.remove(&session_id)
-            && let Err(e) = session.commit_batch(&session.current_batch)
+            && let Err(e) = session.commit_final_batch()
         {
             tracing::warn!("failed to commit blocks batch on finish: {e:?}");
         }
@@ -157,6 +207,22 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
     }
 }
 
+// === Validator session info impl ===
+
+impl ValidatorSessionInfo {
+    pub fn can_participate(&self, public_key: &ed25519::PublicKey) -> bool {
+        let Some(desc) = self
+            .validators
+            .iter()
+            .find(|item| item.validator_idx == self.own_validator_idx)
+        else {
+            return false;
+        };
+
+        public_key.as_bytes() == desc.public_key.as_array()
+    }
+}
+
 // === Session state impl ===
 
 impl SessionState {
@@ -176,7 +242,7 @@ impl SessionState {
         };
 
         if let Some(batch) = to_commit
-            && let Err(e) = self.commit_batch(&batch)
+            && let Err(e) = self.commit_batch(batch)
         {
             tracing::error!(event_type, "failed to commit blocks batch: {e:?}");
         }
@@ -200,20 +266,27 @@ impl SessionState {
         AdvanceBlockStatus::Replaced(prev_batch)
     }
 
-    fn commit_batch(&self, batch: &BlocksBatch) -> Result<()> {
+    fn commit_batch(&self, batch: BlocksBatch) -> Result<()> {
+        Self::commit_batch_impl(&self.complete_batches, batch)
+    }
+
+    fn commit_final_batch(self) -> Result<()> {
+        Self::commit_batch_impl(&self.complete_batches, self.current_batch)
+    }
+
+    fn commit_batch_impl(
+        complete_batches: &Option<BlocksBatchTx>,
+        batch: BlocksBatch,
+    ) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
 
-        let cell = batch
-            .build_cell()
-            .context("failed to pack batch into a cell")?;
-
-        let Some(tx) = &self.complete_batches else {
+        let Some(tx) = complete_batches else {
             anyhow::bail!("not initialized");
         };
 
-        if tx.send(cell).is_err() {
+        if tx.send(batch).is_err() {
             anyhow::bail!("channel closed");
         }
         Ok(())

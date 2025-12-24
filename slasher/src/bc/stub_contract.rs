@@ -17,8 +17,12 @@ impl SlasherContract for StubContract {
         Ok(None)
     }
 
+    fn default_batch_size(&self) -> NonZeroU32 {
+        NonZeroU32::new(100).unwrap()
+    }
+
     fn get_batch_size(&self, _state: &AccountState) -> Result<NonZeroU32> {
-        Ok(NonZeroU32::new(100).unwrap())
+        Ok(self.default_batch_size())
     }
 
     fn encode_blocks_batch_message(
