@@ -88,6 +88,7 @@ impl ValidatorSession {
         let events_scope = events.begin_session(
             info.session_id.into(),
             info.start_block_seqno,
+            own_validator_idx,
             info.validators,
         );
 
