@@ -17,7 +17,6 @@ mod stub_contract;
 
 #[derive(Clone, Copy)]
 pub struct EncodeBlocksBatchMessage<'a> {
-    pub state: &'a AccountState,
     pub session_id: ValidationSessionId,
     pub batch: &'a BlocksBatch,
     pub validator_idx: u16,
@@ -27,6 +26,8 @@ pub struct EncodeBlocksBatchMessage<'a> {
 
 pub trait SlasherContract: Send + Sync + 'static {
     fn find_account_address(&self, config: &BlockchainConfigParams) -> Result<Option<StdAddr>>;
+
+    fn default_batch_size(&self) -> NonZeroU32;
 
     fn get_batch_size(&self, state: &AccountState) -> Result<NonZeroU32>;
 
@@ -108,7 +109,7 @@ struct PendingMessage {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum MessageDeliveryStatus {
+pub enum MessageDeliveryStatus {
     Sent { tx_hash: HashBytes },
     Expired,
 }

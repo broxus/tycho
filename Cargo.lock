@@ -4358,7 +4358,9 @@ dependencies = [
  "metrics",
  "parking_lot",
  "scopeguard",
+ "serde",
  "tokio",
+ "tokio-util",
  "tracing",
  "tycho-block-util",
  "tycho-core",
@@ -4372,7 +4374,9 @@ dependencies = [
 name = "tycho-slasher-traits"
 version = "0.3.6"
 dependencies = [
+ "indexmap",
  "tycho-types",
+ "tycho-util",
 ]
 
 [[package]]
