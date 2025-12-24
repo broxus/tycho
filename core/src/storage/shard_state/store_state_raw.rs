@@ -688,7 +688,7 @@ mod test {
     use weedb::rocksdb::{IteratorMode, WriteBatch};
 
     use super::*;
-    use crate::storage::{CellsDb, CoreStorage, CoreStorageConfig};
+    use crate::storage::{CellsDbOps, CoreStorage, CoreStorageConfig};
 
     #[tokio::test]
     #[ignore]
@@ -730,7 +730,7 @@ mod test {
         let cell_storage = &storage.shard_state_storage().cell_storage;
 
         let store_ctx = StoreStateContext {
-            cells_db: CellStorageDb::Main(cells_db.clone()),
+            cells_db: cells_db.clone(),
             cell_storage: cell_storage.clone(),
             temp_file_storage: storage.context().temp_files().clone(),
         };
@@ -753,11 +753,11 @@ mod test {
         Ok(())
     }
 
-    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CellsDb) -> Result<()> {
-        let states_iterator = db.shard_states.iterator(IteratorMode::Start);
+    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CellStorageDb) -> Result<()> {
+        let states_iterator = db.shard_states().iterator(IteratorMode::Start);
         let bump = bumpalo::Bump::new();
 
-        let total_states = db.shard_states.iterator(IteratorMode::Start).count();
+        let total_states = db.shard_states().iterator(IteratorMode::Start).count();
 
         for (deleted, state) in states_iterator.enumerate() {
             let (_, value) = state?;
@@ -769,7 +769,7 @@ mod test {
             let (_, batch) = cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
             // execute batch
-            db.rocksdb().write_opt(batch, db.cells.write_config())?;
+            db.rocksdb().write_opt(batch, db.cells().write_config())?;
 
             tracing::info!("State deleted. Progress: {}/{total_states}", deleted + 1);
         }
@@ -778,7 +778,7 @@ mod test {
         db.trigger_compaction().await;
         db.trigger_compaction().await;
 
-        let cells_left = db.cells.iterator(IteratorMode::Start).count();
+        let cells_left = db.cells().iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
 
@@ -863,7 +863,7 @@ mod test {
 
             cells_db
                 .rocksdb()
-                .write_opt(batch, cells_db.cells.write_config())?;
+                .write_opt(batch, cells_db.cells().write_config())?;
 
             tracing::info!("Iteration {i} Finished. traversed: {traversed}",);
         }
@@ -880,7 +880,7 @@ mod test {
             let (res, batch) = cell_storage.remove_cell(&bump, &key)?;
             cells_db
                 .rocksdb()
-                .write_opt(batch, cells_db.cells.write_config())?;
+                .write_opt(batch, cells_db.cells().write_config())?;
             tracing::info!("Gc {id} of {total} done. Traversed: {res}",);
             bump.reset();
         }
@@ -889,7 +889,7 @@ mod test {
         cells_db.trigger_compaction().await;
         cells_db.trigger_compaction().await;
 
-        let cells_left = cells_db.cells.iterator(IteratorMode::Start).count();
+        let cells_left = cells_db.cells().iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
         Ok(())
