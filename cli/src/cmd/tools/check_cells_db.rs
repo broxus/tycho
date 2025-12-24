@@ -7,9 +7,7 @@ use clap::Parser;
 use tempfile::TempDir;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
-use tycho_core::storage::{
-    CellStorageDb, CellsDbOps, CoreStorage, CoreStorageConfig, split_shard_accounts,
-};
+use tycho_core::storage::{CellsDbOps, CoreStorage, CoreStorageConfig, split_shard_accounts};
 use tycho_storage::kv::StoredValue;
 use tycho_storage::{StorageConfig, StorageContext};
 use tycho_types::cell::Cell;
@@ -112,16 +110,8 @@ impl Cmd {
                 herd.reset();
             }
 
-            match cells_db {
-                CellStorageDb::Main(db) => {
-                    db.trigger_compaction().await;
-                    db.trigger_compaction().await;
-                }
-                CellStorageDb::Part(db) => {
-                    db.trigger_compaction().await;
-                    db.trigger_compaction().await;
-                }
-            }
+            cells_db.trigger_compaction().await;
+            cells_db.trigger_compaction().await;
 
             let cells_left = cells_db.cells().iterator(IteratorMode::Start).count();
             tracing::info!(total_states, total_cells, cells_left, "done");

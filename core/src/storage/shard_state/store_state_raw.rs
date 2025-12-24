@@ -682,7 +682,7 @@ mod test {
     use weedb::rocksdb::{IteratorMode, WriteBatch};
 
     use super::*;
-    use crate::storage::{CoreStorage, CoreStorageConfig};
+    use crate::storage::{CellsDbOps, CoreStorage, CoreStorageConfig};
 
     #[tokio::test]
     #[ignore]
