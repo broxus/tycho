@@ -23,7 +23,8 @@ use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
 use tycho_util::sync::rayon_run;
 use tycho_util::time::now_millis;
-use types::{AnchorInfo, AnchorsCache, MsgsExecutionParamsStuff};
+use anchors_cache::{AnchorInfo, AnchorsCache};
+use types::MsgsExecutionParamsStuff;
 
 use self::types::{BlockSerializerCache, CollatorStats, PrevData, WorkingState};
 use crate::internal_queue::types::message::EnqueuedMessage;
@@ -40,6 +41,7 @@ use crate::utils::async_queued_dispatcher::{
 };
 use crate::{method_to_queued_async_closure, tracing_targets};
 
+mod anchors_cache;
 mod debug_info;
 mod do_collate;
 mod error;
