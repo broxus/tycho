@@ -14,13 +14,13 @@ use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_crypto::ed25519;
 use tycho_slasher_traits::{ValidationSessionId, ValidatorEventsListener};
 use tycho_types::boc::Boc;
+use tycho_util::config::PartialConfig;
 use tycho_util::futures::JoinTask;
 use tycho_util::serde_helpers;
 
-use self::bc::MessageDeliveryStatus;
 pub use self::bc::{
-    BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, SignatureHistory, SignedMessage,
-    SlasherContract,
+    BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, MessageDeliveryStatus,
+    SignatureHistory, SignedMessage, SlasherContract, StubSlasherContract,
 };
 use self::collector::{ValidatorEventsCollector, ValidatorSessionInfo};
 
@@ -34,7 +34,7 @@ pub mod collector {
 mod bc;
 mod util;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
 pub struct SlasherConfig {
     /// TTL of messages to the slasher contract.
     ///
@@ -108,17 +108,20 @@ impl Slasher {
         let config_params = cx.state.config_params()?;
         let Some(slasher_address) = this
             .contract
-            .find_account_address(&config_params)
+            .find_account_address(config_params)
             .context("failed to find contract address")?
             .filter(|addr| addr.is_masterchain())
         else {
             return Ok(());
         };
 
+        tracing::trace!(%slasher_address);
+
         let subscription = match this.subscription.load_full() {
             Some(s) if s.address() == &slasher_address => s,
             // TODO: Use `ArcSwap::compare_and_swap`?
             _ => {
+                tracing::info!(%slasher_address, "slasher address changed");
                 let s = Arc::new(ContractSubscription::new(&slasher_address));
                 this.subscription.store(Some(s.clone()));
                 s
@@ -126,18 +129,19 @@ impl Slasher {
         };
 
         let extra = cx.block.load_extra()?.account_blocks.load()?;
-        if let Some((_, account_block)) = extra.get(&slasher_address.address)? {
+        if let Some((_, account_block)) = extra.get(slasher_address.address)? {
             subscription.handle_account_transactions(&account_block)?;
         }
 
         // TODO: Get or update batch size from the contract
-        let batch_size = NonZeroU32::new(100).unwrap();
+        let batch_size = NonZeroU32::new(10).unwrap();
 
         while let Some(session_info) = self
             .validator_events_collector
             .pop_session_to_init(mc_seqno)
         {
             let session_id = session_info.session_id;
+            tracing::info!(?session_id, "found session to init");
             if !session_info.can_participate(&this.node_keys.public_key) {
                 tracing::info!(?session_id, "skipping session");
                 continue;
@@ -220,18 +224,19 @@ impl SlasherSharedState {
         validator_idx: u16,
         batch: BlocksBatch,
     ) {
-        let params = EncodeBlocksBatchMessage {
-            session_id,
-            batch: &batch,
-            validator_idx,
-            keypair: &self.node_keys,
-            ttl: self.config.message_ttl,
-        };
-
         loop {
             let Some(subscription) = self.subscription.load_full() else {
                 tracing::warn!("no slasher contract subscription");
                 break;
+            };
+
+            let params = EncodeBlocksBatchMessage {
+                address: subscription.address(),
+                session_id,
+                batch: &batch,
+                validator_idx,
+                keypair: &self.node_keys,
+                ttl: self.config.message_ttl,
             };
 
             let signed = match self.contract.encode_blocks_batch_message(&params) {
@@ -241,11 +246,20 @@ impl SlasherSharedState {
                     return;
                 }
             };
-            let message_hash = *signed.message.repr_hash();
+            let msg_hash = *signed.message.repr_hash();
             let boc = Boc::encode(signed.message.into_inner());
 
-            match subscription.track_message(&message_hash, signed.expire_at) {
+            match subscription.track_message(&msg_hash, signed.expire_at) {
                 Ok(res) => {
+                    tracing::info!(
+                        %msg_hash,
+                        address = %params.address,
+                        session_id = ?params.session_id,
+                        validator_idx = params.validator_idx,
+                        batch_seqno = batch.start_seqno,
+                        block_count = batch.committed_blocks.len(),
+                        "sending blocks batch"
+                    );
                     self.blockchain_rpc_client
                         .broadcast_external_message(&boc)
                         .await;

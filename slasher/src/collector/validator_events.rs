@@ -127,7 +127,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
         own_validator_idx: u16,
         validators: &[IndexedValidatorDescription],
     ) {
-        tracing::debug!(first_mc_seqno, "on_session_open");
+        tracing::debug!(first_mc_seqno, "on_session_started");
 
         let validator_indices = validators
             .iter()
@@ -163,7 +163,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
 
     #[instrument(skip_all, fields(session_id = ?session_id))]
     fn on_session_finished(&self, session_id: ValidationSessionId) {
-        tracing::debug!("on_session_drop");
+        tracing::debug!("on_session_finished");
         if let Some((_, session)) = self.sessions.remove(&session_id)
             && let Err(e) = session.commit_final_batch()
         {
@@ -183,7 +183,7 @@ impl ValidatorEventsListener for ValidatorEventsCollector {
             return;
         }
 
-        tracing::debug!(%block_id, "on_validation_complete");
+        tracing::debug!(%block_id, "on_block_validated");
         let Some(mut session) = self.sessions.get_mut(&session_id) else {
             tracing::warn!("session not found, ignoring on_block_validated event");
             return;

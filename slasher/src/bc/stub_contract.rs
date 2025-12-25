@@ -1,6 +1,7 @@
 use std::num::NonZeroU32;
 
 use anyhow::{Context, Result};
+use tycho_types::abi::extend_signature_with_id;
 use tycho_types::cell::Lazy;
 use tycho_types::dict;
 use tycho_types::models::{
@@ -10,15 +11,21 @@ use tycho_types::prelude::*;
 
 use super::{BlocksBatch, SignedMessage, SlasherContract};
 
-pub struct StubContract;
+const PARAM_IDX: u32 = 666;
 
-impl SlasherContract for StubContract {
-    fn find_account_address(&self, _config: &BlockchainConfigParams) -> Result<Option<StdAddr>> {
-        Ok(None)
+pub struct StubSlasherContract;
+
+impl SlasherContract for StubSlasherContract {
+    fn find_account_address(&self, config: &BlockchainConfigParams) -> Result<Option<StdAddr>> {
+        let Some(raw) = config.get_raw_cell_ref(PARAM_IDX)? else {
+            return Ok(None);
+        };
+        let address = raw.parse::<HashBytes>()?;
+        Ok(Some(StdAddr::new(-1, address)))
     }
 
     fn default_batch_size(&self) -> NonZeroU32 {
-        NonZeroU32::new(100).unwrap()
+        NonZeroU32::new(10).unwrap()
     }
 
     fn get_batch_size(&self, _state: &AccountState) -> Result<NonZeroU32> {
@@ -33,16 +40,35 @@ impl SlasherContract for StubContract {
             .context("failed to serialize blocks batch")?;
 
         let now = tycho_util::time::now_millis();
-
         let expire_at = (now / 1000).saturating_add(params.ttl.as_secs()) as u32;
+        let body_to_sign = {
+            let mut b = CellBuilder::new();
+            b.store_u64(now)?;
+            b.store_u32(expire_at)?;
+            b.store_u16(params.validator_idx)?;
+            b.store_reference(cell)?;
+            b.build()?
+        };
+
+        // TODO: Add support for signature id.
+        let signature = params.keypair.sign_raw(&extend_signature_with_id(
+            body_to_sign.repr_hash().as_array(),
+            None,
+        ));
+        let body = {
+            let mut b = CellBuilder::new();
+            b.store_raw(&signature, 512)?;
+            b.store_slice(body_to_sign.as_slice()?)?;
+            b.build()?
+        };
+
         let message = Lazy::new(&OwnedMessage {
             info: MsgInfo::ExtIn(ExtInMsgInfo {
-                // Stub address.
-                dst: StdAddr::new(-1, HashBytes::ZERO).into(),
+                dst: params.address.clone().into(),
                 ..Default::default()
             }),
             init: None,
-            body: cell.into(),
+            body: body.into(),
             layout: None,
         })?;
 

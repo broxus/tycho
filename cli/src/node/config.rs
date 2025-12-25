@@ -10,6 +10,7 @@ use tycho_control::ControlServerConfig;
 use tycho_core::node::NodeBaseConfig;
 use tycho_crypto::ed25519;
 use tycho_rpc::RpcConfig;
+use tycho_slasher::SlasherConfig;
 use tycho_types::cell::HashBytes;
 use tycho_types::models::StdAddr;
 use tycho_util::cli::config::ThreadPoolConfig;
@@ -166,6 +167,9 @@ pub struct NodeConfig {
     pub validator: ValidatorStdImplConfig,
 
     #[partial]
+    pub slasher: SlasherConfig,
+
+    #[partial]
     pub rpc: Option<RpcConfig>,
 
     pub control: ControlServerConfig,
@@ -191,6 +195,7 @@ impl Default for NodeConfig {
             mempool: Default::default(),
             internal_queue: Default::default(),
             validator: Default::default(),
+            slasher: Default::default(),
             rpc: Some(Default::default()),
             control: Default::default(),
             metrics: Some(Default::default()),
