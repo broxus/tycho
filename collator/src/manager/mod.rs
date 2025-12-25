@@ -16,7 +16,7 @@ use tycho_core::storage::ShardStateStorageError;
 use tycho_crypto::ed25519::KeyPair;
 use tycho_types::models::{
     BlockId, BlockIdShort, CollationConfig, GlobalCapabilities, IndexedValidatorDescription,
-    ProcessedUptoInfo, ShardIdent, ValidatorDescription,
+    ProcessedUptoInfo, ShardIdent,
 };
 use tycho_util::futures::AwaitBlocking;
 use tycho_util::metrics::HistogramGuard;

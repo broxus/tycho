@@ -14,7 +14,7 @@ use scc::TreeIndex;
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use tycho_crypto::ed25519::KeyPair
+use tycho_crypto::ed25519::KeyPair;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay};
 use tycho_slasher_traits::{BlockValidationScope, ValidatorEvents, ValidatorSessionScope};
 use tycho_types::models::*;

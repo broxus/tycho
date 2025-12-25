@@ -6,10 +6,10 @@ import {
 } from "@tychosdk/emulator";
 import { Blockchain } from "@ton/sandbox";
 import { Address, Cell, Dictionary } from "@ton/core";
-import { Elector, loadElectorData } from "../wrappers/Elector";
+import { loadElectorData } from "../wrappers/Elector";
 
 const ELECTOR_ADDRESS = Address.parse(
-  "-1:3333333333333333333333333333333333333333333333333333333333333333"
+  "-1:3333333333333333333333333333333333333333333333333333333333333333",
 );
 
 async function main() {
@@ -44,7 +44,7 @@ async function main() {
     cs.remainingBits != 0
       ? cs.loadDict(
           Dictionary.Keys.BigUint(256),
-          Dictionary.Values.BitString(0)
+          Dictionary.Values.BitString(0),
         )
       : null;
 
