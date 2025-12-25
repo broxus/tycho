@@ -19,3 +19,4 @@ yarn build --all
 copy_code Elector
 copy_code ElectorPoA
 copy_code Config
+copy_code SlasherStub

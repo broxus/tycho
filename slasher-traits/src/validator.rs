@@ -156,7 +156,7 @@ impl BlockValidationScope {
     pub fn commit(&self) -> bool {
         if self.seal() {
             // TODO: Use some unsafe magic to make this closer to a NOOP.
-            let mut signatures = Arc::new_uninit_slice(self.signature_slots.len() as usize);
+            let mut signatures = Arc::new_uninit_slice(self.signature_slots.len());
             for (res, slot) in std::iter::zip(
                 Arc::get_mut(&mut signatures).unwrap(),
                 &self.signature_slots,

@@ -23,7 +23,7 @@ tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tycho-crypto = { workspace = true }
-tycho-types = { workspace = true }
+tycho-types = { workspace = true, features = ["abi", "models"] }
 
 # local deps
 tycho-block-util = { workspace = true }
