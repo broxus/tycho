@@ -14,13 +14,13 @@ use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_crypto::ed25519;
 use tycho_slasher_traits::{ValidationSessionId, ValidatorEventsListener};
 use tycho_types::boc::Boc;
+use tycho_util::config::PartialConfig;
 use tycho_util::futures::JoinTask;
 use tycho_util::serde_helpers;
 
-use self::bc::MessageDeliveryStatus;
 pub use self::bc::{
-    BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, SignatureHistory, SignedMessage,
-    SlasherContract,
+    BlocksBatch, ContractSubscription, EncodeBlocksBatchMessage, MessageDeliveryStatus,
+    SignatureHistory, SignedMessage, SlasherContract, StubSlasherContract,
 };
 use self::collector::{ValidatorEventsCollector, ValidatorSessionInfo};
 
@@ -34,7 +34,7 @@ pub mod collector {
 mod bc;
 mod util;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
 pub struct SlasherConfig {
     /// TTL of messages to the slasher contract.
     ///
@@ -108,7 +108,7 @@ impl Slasher {
         let config_params = cx.state.config_params()?;
         let Some(slasher_address) = this
             .contract
-            .find_account_address(&config_params)
+            .find_account_address(config_params)
             .context("failed to find contract address")?
             .filter(|addr| addr.is_masterchain())
         else {
@@ -126,7 +126,7 @@ impl Slasher {
         };
 
         let extra = cx.block.load_extra()?.account_blocks.load()?;
-        if let Some((_, account_block)) = extra.get(&slasher_address.address)? {
+        if let Some((_, account_block)) = extra.get(slasher_address.address)? {
             subscription.handle_account_transactions(&account_block)?;
         }
 
@@ -220,18 +220,19 @@ impl SlasherSharedState {
         validator_idx: u16,
         batch: BlocksBatch,
     ) {
-        let params = EncodeBlocksBatchMessage {
-            session_id,
-            batch: &batch,
-            validator_idx,
-            keypair: &self.node_keys,
-            ttl: self.config.message_ttl,
-        };
-
         loop {
             let Some(subscription) = self.subscription.load_full() else {
                 tracing::warn!("no slasher contract subscription");
                 break;
+            };
+
+            let params = EncodeBlocksBatchMessage {
+                address: subscription.address(),
+                session_id,
+                batch: &batch,
+                validator_idx,
+                keypair: &self.node_keys,
+                ttl: self.config.message_ttl,
             };
 
             let signed = match self.contract.encode_blocks_batch_message(&params) {
