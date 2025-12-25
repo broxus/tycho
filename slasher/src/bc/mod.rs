@@ -11,12 +11,14 @@ use tycho_types::models::{
 };
 use tycho_util::FastDashMap;
 
+pub use self::stub_contract::StubSlasherContract;
 use crate::util::AtomicBitSet;
 
 mod stub_contract;
 
 #[derive(Clone, Copy)]
 pub struct EncodeBlocksBatchMessage<'a> {
+    pub address: &'a StdAddr,
     pub session_id: ValidationSessionId,
     pub batch: &'a BlocksBatch,
     pub validator_idx: u16,
@@ -85,8 +87,10 @@ impl ContractSubscription {
             let Some(in_msg) = tx.in_msg else {
                 continue;
             };
+            let msg_hash = in_msg.repr_hash();
+            tracing::debug!(%tx_hash, %msg_hash, "found slasher transaction");
 
-            if let Some((_, pending)) = self.pending_messages.remove(in_msg.repr_hash()) {
+            if let Some((_, pending)) = self.pending_messages.remove(msg_hash) {
                 pending
                     .tx
                     .send(MessageDeliveryStatus::Sent { tx_hash: *tx_hash })
@@ -98,8 +102,15 @@ impl ContractSubscription {
     }
 
     pub fn cleanup_expired_messages(&self, now_sec: u32) {
-        self.pending_messages
-            .retain(|_, msg| msg.expire_at >= now_sec);
+        let mut dropped = 0usize;
+        self.pending_messages.retain(|_, msg| {
+            let retain = msg.expire_at >= now_sec;
+            dropped += !retain as usize;
+            retain
+        });
+        if dropped > 0 {
+            tracing::warn!(dropped, "dropped pending messages");
+        }
     }
 }
 

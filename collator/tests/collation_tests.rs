@@ -21,7 +21,6 @@ use tycho_core::block_strider::{
 use tycho_core::global_config::ZerostateId;
 use tycho_core::node::NodeKeys;
 use tycho_crypto::ed25519;
-use tycho_slasher_traits::NoopValidatorEventsListener;
 use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 
 mod common;

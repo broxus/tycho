@@ -9,9 +9,9 @@ use tycho_collator::validator::{
 };
 use tycho_crypto::ed25519;
 use tycho_network::{DhtClient, PeerInfo};
-use tycho_slasher_traits::NoopValidatorEventsListener;
+use tycho_slasher_traits::NoopValidatorEventsRecorder;
 use tycho_types::cell::HashBytes;
-use tycho_types::models::{BlockId, ShardIdent, ValidatorDescription};
+use tycho_types::models::{BlockId, IndexedValidatorDescription, ShardIdent, ValidatorDescription};
 use tycho_util::futures::JoinTask;
 
 mod common;
@@ -24,7 +24,7 @@ struct ValidatorNode {
 }
 
 impl ValidatorNode {
-    fn generate(zerostate_id: &BlockId, rng: &mut impl rand::Rng) -> Self {
+    fn generate(zerostate_id: &BlockId, rng: &mut impl rand::Rng, idx: u16) -> Self {
         let secret_key = rng.random::<ed25519::SecretKey>();
         let keypair = Arc::new(ed25519::KeyPair::from(&secret_key));
 
@@ -33,6 +33,7 @@ impl ValidatorNode {
             peer_id: *validator_network.network.peer_id(),
             public_key: keypair.public_key,
             weight: 1,
+            validator_idx: idx,
         };
 
         let network = &validator_network.network;
@@ -46,7 +47,7 @@ impl ValidatorNode {
             validator_network,
             keypair.clone(),
             ValidatorStdImplConfig::default(),
-            Arc::new(NoopValidatorEventsListener),
+            Arc::new(NoopValidatorEventsRecorder),
         );
 
         Self {
@@ -64,7 +65,7 @@ fn generate_network(
     rng: &mut impl rand::Rng,
 ) -> Vec<ValidatorNode> {
     let nodes = (0..node_count)
-        .map(|_| ValidatorNode::generate(zerostate_id, rng))
+        .map(|i| ValidatorNode::generate(zerostate_id, rng, i as u16))
         .collect::<Vec<_>>();
 
     for i in 0..nodes.len() {
@@ -83,16 +84,19 @@ fn generate_network(
     nodes
 }
 
-fn make_description(seqno: u32, nodes: &[ValidatorNode]) -> Vec<ValidatorDescription> {
+fn make_description(seqno: u32, nodes: &[ValidatorNode]) -> Vec<IndexedValidatorDescription> {
     let mut validators = Vec::with_capacity(nodes.len());
     let mut prev_total_weight = 0;
-    for node in nodes {
-        validators.push(ValidatorDescription {
-            public_key: HashBytes(*node.descr.public_key.as_bytes()),
-            weight: 1,
-            adnl_addr: Some(HashBytes(*node.descr.peer_id.as_bytes())),
-            mc_seqno_since: seqno,
-            prev_total_weight,
+    for (i, node) in nodes.iter().enumerate() {
+        validators.push(IndexedValidatorDescription {
+            desc: ValidatorDescription {
+                public_key: HashBytes(*node.descr.public_key.as_bytes()),
+                weight: 1,
+                adnl_addr: Some(HashBytes(*node.descr.peer_id.as_bytes())),
+                mc_seqno_since: seqno,
+                prev_total_weight,
+            },
+            validator_idx: i as u16,
         });
         prev_total_weight += node.descr.weight;
     }

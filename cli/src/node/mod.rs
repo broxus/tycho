@@ -31,6 +31,7 @@ use tycho_core::node::{NodeBase, NodeKeys};
 use tycho_core::storage::NodeSyncState;
 use tycho_network::InboundRequestMeta;
 use tycho_rpc::{NodeBaseInitRpc, RpcConfig};
+use tycho_slasher::SlasherConfig;
 use tycho_types::models::*;
 use tycho_util::futures::JoinTask;
 use tycho_wu_tuner::service::WuTunerServiceBuilder;
@@ -54,6 +55,7 @@ pub struct Node {
     collator_config: CollatorConfig,
     validator_config: ValidatorStdImplConfig,
     internal_queue_config: QueueConfig,
+    slasher_config: SlasherConfig,
     mempool_config_override: Option<MempoolGlobalConfig>,
 
     /// Path to the work units tuner config.
@@ -114,6 +116,7 @@ impl Node {
             collator_config: node_config.collator,
             validator_config: node_config.validator,
             internal_queue_config: node_config.internal_queue,
+            slasher_config: node_config.slasher,
             mempool_config_override: global_config.mempool,
             wu_tuner_config_path,
         })
@@ -206,7 +209,12 @@ impl Node {
         message_queue_adapter.clear_uncommitted_state(&top_shards)?;
 
         // NOTE: Stub
-        let slasher = tycho_slasher::Slasher::new(base.keypair.clone());
+        let slasher = tycho_slasher::Slasher::new(
+            base.keypair.clone(),
+            tycho_slasher::StubSlasherContract,
+            base.blockchain_rpc_client.clone(),
+            self.slasher_config,
+        );
 
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {
@@ -332,7 +340,7 @@ impl Node {
             (
                 ShardStateApplier::new(
                     base.core_storage.clone(),
-                    (collator, rpc_state_subscriber, control_server),
+                    (collator, rpc_state_subscriber, control_server, slasher),
                 ),
                 rpc_block_subscriber,
                 base.validator_resolver().clone(),
