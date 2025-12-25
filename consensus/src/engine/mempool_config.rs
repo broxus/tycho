@@ -162,6 +162,10 @@ pub struct MempoolNodeConfig {
     /// that may be more readable
     pub log_truncate_long_values: bool,
 
+    /// `true` to export metrics on how the current node views every other's points,
+    /// this is `NxN` amount of metrics (N labels from each of N nodes)
+    pub emit_stats_metrics: bool,
+
     /// How often (in rounds) delete obsolete data and trigger rocksDB compaction.
     pub clean_db_period_rounds: NonZeroU16,
 
@@ -187,6 +191,7 @@ impl Default for MempoolNodeConfig {
     fn default() -> Self {
         Self {
             log_truncate_long_values: true,
+            emit_stats_metrics: true,
             clean_db_period_rounds: 105.try_into().unwrap(),
             cache_future_broadcasts_rounds: 105,
             max_blocking_tasks: 250.try_into().unwrap(),

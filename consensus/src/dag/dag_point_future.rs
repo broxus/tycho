@@ -407,7 +407,9 @@ impl DagPointFuture {
                 let dag_point = if status.is_valid {
                     DagPoint::new_valid(info, cert, &status)
                 } else {
-                    DagPoint::new_invalid(info, cert, &status, InvalidReason::AfterLoadFromDb)
+                    DagPoint::new_invalid(info, cert, &status, InvalidReason::AfterLoadFromDb {
+                        no_dag_round: status.no_dag_round,
+                    })
                 };
                 state.acquire_restore(&dag_point.id(), &status);
                 Either::Right(dag_point)
@@ -499,6 +501,7 @@ impl DagPointFuture {
             }
             ValidateResult::Invalid(reason) => {
                 let mut status = Self::new_validated_status(role, &cert);
+                status.no_dag_round = reason.no_dag_round();
                 state.acquire(&id, &mut status);
                 (
                     DagPoint::new_invalid(info, cert, &status, reason),
