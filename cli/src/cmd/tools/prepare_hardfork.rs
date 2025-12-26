@@ -23,10 +23,6 @@ use tycho_util::progress_bar::ProgressBar;
 /// Saves masterchain and shardchain states to files to run network from
 #[derive(Parser)]
 pub struct Cmd {
-    /// Path to the node config. If not specified, will use db path
-    #[clap(long)]
-    config: Option<PathBuf>,
-
     /// Path to the node's database directory.
     #[clap(long)]
     db: Option<PathBuf>,
@@ -60,7 +56,7 @@ impl Cmd {
 
         let storage = CoreStorage::open(ctx, CoreStorageConfig::default()).await?;
 
-        let Some(block_id) = storage
+        let Some(mc_block_id) = storage
             .shard_state_storage()
             .load_mc_block_id(self.mc_seqno)
             .with_context(|| format!("mc block not found. seqno {}", self.mc_seqno))?
@@ -70,12 +66,12 @@ impl Cmd {
 
         let ref_by_mc_seqno = storage
             .block_handle_storage()
-            .load_handle(&block_id)
+            .load_handle(&mc_block_id)
             .map(|block_handle| block_handle.ref_by_mc_seqno());
 
         let state = storage
             .shard_state_storage()
-            .load_state(ref_by_mc_seqno.unwrap_or(block_id.seqno), &block_id)
+            .load_state(ref_by_mc_seqno.unwrap_or(mc_block_id.seqno), &mc_block_id)
             .await?;
 
         let handler = ShardStateHandler {
@@ -94,12 +90,14 @@ impl Cmd {
                 .load_state(0, &block_id)
                 .await?;
 
-            let zerostate_id = handler.save_shard_state(&block_id, state).await?;
+            let zerostate_id = handler
+                .save_shard_state(&mc_block_id, &block_id, state)
+                .await?;
             zerostate_mapping.insert(block_id.file_hash, zerostate_id);
         }
 
         handler
-            .save_master_state(&block_id, &state, &zerostate_mapping)
+            .save_master_state(&mc_block_id, &state, &zerostate_mapping)
             .await?;
 
         Ok(())
@@ -114,6 +112,7 @@ struct ShardStateHandler {
 impl ShardStateHandler {
     async fn save_shard_state(
         &self,
+        mc_block_id: &BlockId,
         block_id: &BlockId,
         shard_state_stuff: ShardStateStuff,
     ) -> anyhow::Result<ZerostateId> {
@@ -137,7 +136,7 @@ impl ShardStateHandler {
             BlockMeta::with_data(NewBlockMeta {
                 is_key_block: false,
                 gen_utime: ssu.gen_utime,
-                ref_by_mc_seqno: ssu.min_ref_mc_seqno,
+                ref_by_mc_seqno: mc_block_id.seqno,
             }),
             Default::default(),
         );
@@ -264,8 +263,7 @@ impl ShardStateHandler {
         ssu.store_into(&mut builder, Cell::empty_context())?;
         let updated_master_state = builder.build()?;
 
-        let clone = updated_master_state.clone();
-        let root_hash = clone.repr_hash();
+        let root_hash = *updated_master_state.repr_hash();
 
         let handle = BlockHandle::new(
             &BlockId {
@@ -302,7 +300,7 @@ impl ShardStateHandler {
             .build(move |msg| tracing::info!("Saving shard {} state to file... {msg}", shard_id));
 
         let file_hash = writer.write_tracked(
-            root_hash,
+            &root_hash,
             &mc_block_id.shard.to_string(),
             &mut progress_bar,
             None,

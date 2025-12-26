@@ -1013,7 +1013,6 @@ Saves masterchain and shardchain states to files to run network from
 
 ###### **Options:**
 
-* `--config <CONFIG>` — Path to the node config. If not specified, will use db path
 * `--db <DB>` — Path to the node's database directory
 * `--output <OUTPUT>` — Path to the directory where the dump files will be saved
 * `-m`, `--mc-seqno <MC_SEQNO>` — Seqno of the masterchain block for which to dump the states

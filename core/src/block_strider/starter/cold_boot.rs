@@ -44,7 +44,6 @@ impl StarterInner {
                 tracing::info!("Starting node from genesis");
                 // Either import or download a zerostate.
                 let init_block = self.prepare_init_block(zerostates).await?;
-                // assert_eq!(init_block.handle().id().seqno, 0);
 
                 // Always use zerostate id as an initial block id when doing sync from genesis.
                 *init_block.handle().id()
@@ -397,9 +396,6 @@ impl StarterInner {
         let masterchain_zerostate = state_storage
             .load_state(zerostate_block_id.seqno, &zerostate_block_id)
             .await?;
-
-        // Prepare the list of zerostates to import
-        // let mut to_import = vec![masterchain_zerostate.clone()];
 
         let global_id = masterchain_zerostate.state().global_id;
         let gen_utime = masterchain_zerostate.state().gen_utime;

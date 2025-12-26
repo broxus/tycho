@@ -318,7 +318,6 @@ where
 
             let diff = match diff {
                 // If top shard block changed and diff not found, then bail
-                // TODO: err if <
                 None if *top_shard_block_changed && mc_block_id.seqno > self.zerostate_id.seqno => {
                     bail!("Diff not found for block_id: {}", block_id)
                 }

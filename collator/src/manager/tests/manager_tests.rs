@@ -2160,7 +2160,7 @@ async fn test_queue_restore_on_sync() {
         .processed_to_stuff
         .set_processed_to(shard, test_adapter.last_mc_blocks.get(&1).unwrap());
 
-    let mc_block_id = BlockId {
+    let next_mc_block_id = BlockId {
         seqno: last_mc_block_stuff.data.id().seqno + 1,
         ..Default::default()
     };
@@ -2177,7 +2177,7 @@ async fn test_queue_restore_on_sync() {
         block_stuff: last_sc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
 
     // master processed to shard block 04, and master block 02
@@ -2211,11 +2211,17 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(last_mc_block_stuff.data.id(), generated_block_info)
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
         .await;
 
     // check top shard blocks of stored master block 03
@@ -2245,7 +2251,7 @@ async fn test_queue_restore_on_sync() {
         10,
     );
 
-    let mc_block_id = BlockId {
+    let next_mc_block_id = BlockId {
         seqno: last_mc_block_stuff.data.id().seqno + 1,
         ..Default::default()
     };
@@ -2253,7 +2259,7 @@ async fn test_queue_restore_on_sync() {
         block_stuff: last_sc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
 
     // master processed to shard block 05, and master block 03
@@ -2276,11 +2282,17 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(last_mc_block_stuff.id(), generated_block_info)
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
         .await;
 
     // shard processed to shard block 02
@@ -2301,7 +2313,7 @@ async fn test_queue_restore_on_sync() {
         10,
     );
 
-    let mc_block_id = BlockId {
+    let next_mc_block_id = BlockId {
         seqno: last_mc_block_stuff.data.id().seqno + 1,
         ..Default::default()
     };
@@ -2309,7 +2321,7 @@ async fn test_queue_restore_on_sync() {
         block_stuff: last_sc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
 
     // master processed to shard block 05, and master block 03
@@ -2332,11 +2344,16 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(last_mc_block_stuff.id(), generated_block_info)
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
         .await;
 
     // restore queue in case of sync
@@ -2488,12 +2505,12 @@ async fn test_queue_restore_on_sync() {
         last_mc_block_stuff.prev_block_info(),
         10,
     );
-    let mc_block_id = BlockId {
+    let next_mc_block_id = BlockId {
         seqno: last_mc_block_stuff.data.id().seqno + 1,
         ..Default::default()
     };
     let store_res = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
     last_sc_block_stuff = store_res.block_stuff;
 
@@ -2522,7 +2539,7 @@ async fn test_queue_restore_on_sync() {
         10,
     );
 
-    let mc_block_id = BlockId {
+    let next_mc_block_id = BlockId {
         seqno: last_mc_block_stuff.data.id().seqno + 1,
         ..Default::default()
     };
@@ -2530,7 +2547,7 @@ async fn test_queue_restore_on_sync() {
         block_stuff: last_sc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
 
     // master processed to shard block 08, and master block 05
@@ -2553,11 +2570,16 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(last_mc_block_stuff.id(), generated_block_info)
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
         .await;
 
     // master processed to shard block 08, and master block 06
@@ -2605,7 +2627,7 @@ async fn test_queue_restore_on_sync() {
         10,
     );
 
-    let mc_block_id = BlockId {
+    let next_mc_block_id = BlockId {
         seqno: last_mc_block_stuff.data.id().seqno + 1,
         ..Default::default()
     };
@@ -2613,7 +2635,7 @@ async fn test_queue_restore_on_sync() {
         block_stuff: last_sc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
 
     // shard processed to shard block 09
@@ -2637,7 +2659,7 @@ async fn test_queue_restore_on_sync() {
         block_stuff: last_sc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
 
     // master processed to shard block 09, and master block 07
@@ -2660,11 +2682,16 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(last_mc_block_stuff.id(), generated_block_info)
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
         .await;
 
     // shard processed to shard block 09
@@ -2685,7 +2712,7 @@ async fn test_queue_restore_on_sync() {
         10,
     );
 
-    let mc_block_id = BlockId {
+    let next_mc_block_id = BlockId {
         seqno: last_mc_block_stuff.data.id().seqno + 1,
         ..Default::default()
     };
@@ -2693,7 +2720,7 @@ async fn test_queue_restore_on_sync() {
         block_stuff: last_sc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
 
     // shard processed to shard block 09
@@ -2717,7 +2744,7 @@ async fn test_queue_restore_on_sync() {
         block_stuff: last_sc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
 
     // master processed to shard block 11, and master block 07
@@ -2740,11 +2767,16 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(last_mc_block_stuff.id(), generated_block_info)
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
         .await;
 
     // restore queue in case of sync
@@ -3003,7 +3035,7 @@ async fn test_queue_restore_on_sync() {
         10,
     );
 
-    let mc_block_id = BlockId {
+    let next_mc_block_id = BlockId {
         seqno: last_mc_block_stuff.data.id().seqno + 1,
         ..Default::default()
     };
@@ -3012,7 +3044,7 @@ async fn test_queue_restore_on_sync() {
         block_stuff: last_sc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
 
     // shard processed to shard block 12
@@ -3036,7 +3068,7 @@ async fn test_queue_restore_on_sync() {
         block_stuff: last_sc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
 
     // master processed to shard block 16, and master block 09
@@ -3059,11 +3091,16 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(last_mc_block_stuff.id(), generated_block_info)
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
         .await;
 
     // restore queue in case of sync
@@ -3342,7 +3379,7 @@ async fn test_queue_restore_on_sync() {
         last_mc_block_stuff.prev_block_info(),
         10,
     );
-    let mc_block_id = BlockId {
+    let next_mc_block_id = BlockId {
         seqno: last_mc_block_stuff.data.id().seqno + 1,
         ..Default::default()
     };
@@ -3350,7 +3387,7 @@ async fn test_queue_restore_on_sync() {
         block_stuff: last_sc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
 
     // shard processed to shard block 15
@@ -3374,7 +3411,7 @@ async fn test_queue_restore_on_sync() {
         block_stuff: last_sc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(&mc_block_id, generated_block_info)
+        .store_as_received(&next_mc_block_id, generated_block_info)
         .await;
 
     // master processed to shard block 21, and master block 14
@@ -3397,11 +3434,16 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(last_mc_block_stuff.id(), generated_block_info)
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
         .await;
     let _ = &last_mc_block_stuff;
 
