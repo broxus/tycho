@@ -155,6 +155,16 @@ async fn test_collation_process_on_dump() {
 
     let zerostate_id = mc_block_id;
 
+    let mc_state = storage
+        .shard_state_storage()
+        .load_state(mc_block_id.seqno, &mc_block_id)
+        .await
+        .unwrap();
+
+    let mc_state_extra = mc_state.state_extra().unwrap();
+    let mempool_start_round = mc_state_extra.consensus_info.genesis_info.start_round as u32;
+    let mempool_genesis_millis = mc_state_extra.consensus_info.genesis_info.genesis_millis;
+
     let node_keys_path = dump_path.join("keys.json");
     let node_keys = NodeKeys::from_file(node_keys_path).unwrap_or(NodeKeys::generate());
 
@@ -174,12 +184,6 @@ async fn test_collation_process_on_dump() {
 
     tracing::info!("Trying to start CollationManager");
 
-    let mc_state = storage
-        .shard_state_storage()
-        .load_state(mc_block_id.seqno, &mc_block_id)
-        .await
-        .unwrap();
-
     let mc_data = McData::load_from_state(&mc_state, Default::default()).unwrap();
 
     let (top_processed_to_anchor_mc, _) = mc_data
@@ -191,6 +195,10 @@ async fn test_collation_process_on_dump() {
 
     let (engine_stop_tx, mut engine_stop_rx) = tokio::sync::mpsc::channel(1);
     let validator = ValidatorStub {};
+
+    let consensus_config = tycho_consensus::test_utils::default_test_config()
+        .conf
+        .consensus;
 
     let manager = CollationManager::start(
         keypair,
@@ -205,7 +213,10 @@ async fn test_collation_process_on_dump() {
                 Some(mc_data.gen_chain_time),
                 top_processed_to_anchor_mc,
                 top_processed_to_anchor_shards,
-                dump_path.join("mempool"),
+                storage.context().clone(),
+                mempool_start_round,
+                mempool_genesis_millis,
+                consensus_config.clone(),
             )
             .unwrap()
         },
