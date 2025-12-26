@@ -18,6 +18,7 @@ use tycho_core::block_strider::{
     PersistentBlockStriderState, PrintSubscriber, StateSubscriber, StateSubscriberContext,
 };
 use tycho_crypto::ed25519;
+use tycho_slasher_traits::NoopValidatorEventsRecorder;
 use tycho_types::models::BlockId;
 
 mod common;
@@ -119,6 +120,7 @@ async fn test_collation_process_on_stubs() {
             validator_network,
             node_1_keypair.clone(),
             Default::default(),
+            Arc::new(NoopValidatorEventsRecorder),
         ),
         CollatorStdImplFactory {
             wu_tuner_event_sender: None,
