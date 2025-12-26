@@ -1,4 +1,5 @@
 use std::collections::hash_map;
+use std::fmt::Display;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use tycho_types::cell::{CellDescriptor, HashBytes};
 use tycho_types::models::*;
 use tycho_util::FastHashMap;
 use tycho_util::compression::ZstdCompressedFile;
+use tycho_util::progress_bar::ProgressBar;
 use tycho_util::sync::CancellationFlag;
 
 use crate::storage::CellsDb;
@@ -29,12 +31,18 @@ impl<'a> ShardStateWriter<'a> {
     // Partially written BOC file.
     const FILE_EXTENSION_TEMP: &'static str = "boc.temp";
 
-    pub fn file_name(block_id: &BlockId) -> PathBuf {
-        PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION)
+    pub fn file_name<S>(name: S) -> PathBuf
+    where
+        S: Display,
+    {
+        PathBuf::from(name.to_string()).with_extension(Self::FILE_EXTENSION)
     }
 
-    pub fn temp_file_name(block_id: &BlockId) -> PathBuf {
-        PathBuf::from(block_id.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
+    pub fn temp_file_name<S>(name: S) -> PathBuf
+    where
+        S: Display,
+    {
+        PathBuf::from(name.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
     }
 
     pub fn new(db: &'a CellsDb, states_dir: &'a Dir, block_id: &'a BlockId) -> Self {
@@ -85,8 +93,36 @@ impl<'a> ShardStateWriter<'a> {
             .map_err(Into::into)
     }
 
-    pub fn write(&self, root_hash: &HashBytes, cancelled: Option<&CancellationFlag>) -> Result<()> {
-        let temp_file_name = Self::temp_file_name(self.block_id);
+    pub fn write(
+        &self,
+        root_hash: &HashBytes,
+        cancelled: Option<&CancellationFlag>,
+    ) -> Result<HashBytes> {
+        self.write_inner(root_hash, None, None, cancelled)
+    }
+
+    pub fn write_tracked(
+        &self,
+        root_hash: &HashBytes,
+        file_name: &str,
+        progress_bar: &mut ProgressBar,
+        cancelled: Option<&CancellationFlag>,
+    ) -> Result<HashBytes> {
+        self.write_inner(root_hash, Some(file_name), Some(progress_bar), cancelled)
+    }
+
+    fn write_inner(
+        &self,
+        root_hash: &HashBytes,
+        file_name: Option<&str>,
+        mut progress_bar: Option<&mut ProgressBar>,
+        cancelled: Option<&CancellationFlag>,
+    ) -> Result<HashBytes> {
+        let temp_file_name = match file_name {
+            Some(name) => Self::temp_file_name(name),
+            None => Self::temp_file_name(self.block_id),
+        };
+
         scopeguard::defer! {
             self.states_dir.remove_file(&temp_file_name).ok();
         }
@@ -107,6 +143,10 @@ impl<'a> ShardStateWriter<'a> {
         let file_size =
             22 + offset_size * (1 + cell_count as usize) + (intermediate.total_size as usize);
 
+        if let Some(pg) = progress_bar.as_mut() {
+            pg.set_total(file_size as u64);
+        }
+
         // Create states file
         let file = self
             .states_dir
@@ -118,8 +158,10 @@ impl<'a> ShardStateWriter<'a> {
             .open()?;
         let file = ZstdCompressedFile::new(file, Self::COMPRESSION_LEVEL, FILE_BUFFER_LEN / 2)?;
 
+        let hasher = IntermediateHasher::new(file);
+
         // Write cells data in BOC format
-        let mut buffer = std::io::BufWriter::with_capacity(FILE_BUFFER_LEN / 2, file);
+        let mut buffer = std::io::BufWriter::with_capacity(FILE_BUFFER_LEN / 2, hasher);
 
         // Header            | current len: 0
         let flags = 0b1000_0000u8 | (REF_SIZE as u8);
@@ -185,24 +227,34 @@ impl<'a> ShardStateWriter<'a> {
             }
 
             buffer.write_all(&cell_buffer[..cell_size as usize])?;
+            if let Some(pg) = progress_bar.as_mut() {
+                pg.add_progress(cell_size as u64);
+            }
         }
 
-        match buffer.into_inner() {
-            Ok(file) => {
-                let mut file = file.finish()?;
+        let file_hash = match buffer.into_inner() {
+            Ok(intermediate_hasher) => {
+                let (hash, compressed_file) = intermediate_hasher.finalize();
+
+                let mut file = compressed_file.finish()?;
                 file.flush()?;
 
-                // Truncate file to the resulting file size
                 let file_size = file.stream_position()?;
                 file.set_len(file_size)?;
+
+                HashBytes(hash)
             }
             Err(e) => return Err(e.into_error()).context("failed to flush the compressed buffer"),
-        }
+        };
 
-        self.states_dir
-            .file(&temp_file_name)
-            .rename(Self::file_name(self.block_id))
-            .map_err(Into::into)
+        let name = match file_name {
+            None => Self::file_name(self.block_id),
+            Some(name) => Self::file_name(name),
+        };
+
+        self.states_dir.file(&temp_file_name).rename(name)?;
+
+        Ok(file_hash)
     }
 
     fn write_rev(
@@ -458,4 +510,34 @@ enum CellWriterError {
     CellNotFound,
     #[error("Invalid cell")]
     InvalidCell,
+}
+
+struct IntermediateHasher<W: Write> {
+    inner: W,
+    hasher: blake3::Hasher,
+}
+
+impl<W: Write> IntermediateHasher<W> {
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: blake3::Hasher::new(),
+        }
+    }
+
+    pub fn finalize(self) -> ([u8; 32], W) {
+        (self.hasher.finalize().into(), self.inner)
+    }
+}
+
+impl<W: Write> Write for IntermediateHasher<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.hasher.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }

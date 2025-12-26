@@ -10,6 +10,7 @@ use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{BlockHandle, NewBlockMeta, StoreStateHint};
 use tycho_types::boc::Boc;
 use tycho_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Lazy};
@@ -2159,6 +2160,11 @@ async fn test_queue_restore_on_sync() {
         .processed_to_stuff
         .set_processed_to(shard, test_adapter.last_mc_blocks.get(&1).unwrap());
 
+    let next_mc_block_id = BlockId {
+        seqno: last_mc_block_stuff.data.id().seqno + 1,
+        ..Default::default()
+    };
+
     // receive shard block 04
     let generated_block_info = test_adapter.gen_shard_block(
         shard,
@@ -2170,7 +2176,9 @@ async fn test_queue_restore_on_sync() {
     StoreBlockResult {
         block_stuff: last_sc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
 
     // master processed to shard block 04, and master block 02
     test_adapter.processed_to_stuff.set_processed_to(
@@ -2203,10 +2211,18 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
+        .await;
 
     // check top shard blocks of stored master block 03
     let top_sc_blocks = test_adapter
@@ -2234,10 +2250,17 @@ async fn test_queue_restore_on_sync() {
         last_mc_block_stuff.prev_block_info(),
         10,
     );
+
+    let next_mc_block_id = BlockId {
+        seqno: last_mc_block_stuff.data.id().seqno + 1,
+        ..Default::default()
+    };
     StoreBlockResult {
         block_stuff: last_sc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
 
     // master processed to shard block 05, and master block 03
     test_adapter.processed_to_stuff.set_processed_to(
@@ -2259,10 +2282,18 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
+        .await;
 
     // shard processed to shard block 02
     test_adapter
@@ -2281,10 +2312,17 @@ async fn test_queue_restore_on_sync() {
         last_mc_block_stuff.prev_block_info(),
         10,
     );
+
+    let next_mc_block_id = BlockId {
+        seqno: last_mc_block_stuff.data.id().seqno + 1,
+        ..Default::default()
+    };
     StoreBlockResult {
         block_stuff: last_sc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
 
     // master processed to shard block 05, and master block 03
     test_adapter.processed_to_stuff.set_processed_to(
@@ -2306,10 +2344,17 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
+        .await;
 
     // restore queue in case of sync
     tracing::trace!("queue restore - case 02");
@@ -2460,7 +2505,13 @@ async fn test_queue_restore_on_sync() {
         last_mc_block_stuff.prev_block_info(),
         10,
     );
-    let store_res = test_adapter.store_as_received(generated_block_info).await;
+    let next_mc_block_id = BlockId {
+        seqno: last_mc_block_stuff.data.id().seqno + 1,
+        ..Default::default()
+    };
+    let store_res = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
     last_sc_block_stuff = store_res.block_stuff;
 
     // clear uncommitted state because of block mismatch
@@ -2487,10 +2538,17 @@ async fn test_queue_restore_on_sync() {
         last_mc_block_stuff.prev_block_info(),
         10,
     );
+
+    let next_mc_block_id = BlockId {
+        seqno: last_mc_block_stuff.data.id().seqno + 1,
+        ..Default::default()
+    };
     StoreBlockResult {
         block_stuff: last_sc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
 
     // master processed to shard block 08, and master block 05
     test_adapter.processed_to_stuff.set_processed_to(
@@ -2512,10 +2570,17 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
+        .await;
 
     // master processed to shard block 08, and master block 06
     test_adapter.processed_to_stuff.set_processed_to(
@@ -2540,7 +2605,9 @@ async fn test_queue_restore_on_sync() {
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(last_mc_block_stuff.id(), generated_block_info)
+        .await;
 
     // shard processed to shard block 08
     test_adapter
@@ -2559,10 +2626,17 @@ async fn test_queue_restore_on_sync() {
         last_mc_block_stuff.prev_block_info(),
         10,
     );
+
+    let next_mc_block_id = BlockId {
+        seqno: last_mc_block_stuff.data.id().seqno + 1,
+        ..Default::default()
+    };
     StoreBlockResult {
         block_stuff: last_sc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
 
     // shard processed to shard block 09
     test_adapter
@@ -2584,7 +2658,9 @@ async fn test_queue_restore_on_sync() {
     StoreBlockResult {
         block_stuff: last_sc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
 
     // master processed to shard block 09, and master block 07
     test_adapter.processed_to_stuff.set_processed_to(
@@ -2606,10 +2682,17 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
+        .await;
 
     // shard processed to shard block 09
     test_adapter
@@ -2628,10 +2711,17 @@ async fn test_queue_restore_on_sync() {
         last_mc_block_stuff.prev_block_info(),
         10,
     );
+
+    let next_mc_block_id = BlockId {
+        seqno: last_mc_block_stuff.data.id().seqno + 1,
+        ..Default::default()
+    };
     StoreBlockResult {
         block_stuff: last_sc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
 
     // shard processed to shard block 09
     test_adapter
@@ -2653,7 +2743,9 @@ async fn test_queue_restore_on_sync() {
     StoreBlockResult {
         block_stuff: last_sc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
 
     // master processed to shard block 11, and master block 07
     test_adapter.processed_to_stuff.set_processed_to(
@@ -2675,10 +2767,17 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
+        .await;
 
     // restore queue in case of sync
     tracing::trace!("queue restore - case 03");
@@ -2935,10 +3034,18 @@ async fn test_queue_restore_on_sync() {
         last_mc_block_stuff.prev_block_info(),
         10,
     );
+
+    let next_mc_block_id = BlockId {
+        seqno: last_mc_block_stuff.data.id().seqno + 1,
+        ..Default::default()
+    };
+
     StoreBlockResult {
         block_stuff: last_sc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
 
     // shard processed to shard block 12
     test_adapter
@@ -2960,7 +3067,9 @@ async fn test_queue_restore_on_sync() {
     StoreBlockResult {
         block_stuff: last_sc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
 
     // master processed to shard block 16, and master block 09
     test_adapter.processed_to_stuff.set_processed_to(
@@ -2982,10 +3091,17 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
+        .await;
 
     // restore queue in case of sync
     tracing::trace!("queue restore - case 04");
@@ -3263,10 +3379,16 @@ async fn test_queue_restore_on_sync() {
         last_mc_block_stuff.prev_block_info(),
         10,
     );
+    let next_mc_block_id = BlockId {
+        seqno: last_mc_block_stuff.data.id().seqno + 1,
+        ..Default::default()
+    };
     StoreBlockResult {
         block_stuff: last_sc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
 
     // shard processed to shard block 15
     test_adapter
@@ -3288,7 +3410,9 @@ async fn test_queue_restore_on_sync() {
     StoreBlockResult {
         block_stuff: last_sc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(&next_mc_block_id, generated_block_info)
+        .await;
 
     // master processed to shard block 21, and master block 14
     test_adapter.processed_to_stuff.set_processed_to(
@@ -3310,10 +3434,17 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let generated_block_info_cloned = generated_block_info.clone();
+
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
-    } = test_adapter.store_as_received(generated_block_info).await;
+    } = test_adapter
+        .store_as_received(
+            generated_block_info_cloned.block_stuff.id(),
+            generated_block_info,
+        )
+        .await;
     let _ = &last_mc_block_stuff;
 
     // restore queue in case of sync
@@ -3812,6 +3943,7 @@ where
 
     async fn store_as_received(
         &mut self,
+        mc_block_id: &BlockId,
         generated_block_info: CreatedBlockInfo<V>,
     ) -> StoreBlockResult {
         let CreatedBlockInfo {
@@ -3826,9 +3958,15 @@ where
             .unwrap()
             .try_into()
             .unwrap();
+
         let block_mismatch = match self
             .blocks_cache
-            .store_received(self.state_adapter.clone(), state_stuff, processed_upto)
+            .store_received(
+                self.state_adapter.clone(),
+                mc_block_id,
+                state_stuff,
+                processed_upto,
+            )
             .await
             .unwrap()
         {
@@ -3880,6 +4018,7 @@ struct TestStateNodeAdapter {
         >,
     >,
     mcstate_tracker: MinRefMcStateTracker,
+    zerostate_id: ZerostateId,
 }
 
 impl Default for TestStateNodeAdapter {
@@ -3887,6 +4026,7 @@ impl Default for TestStateNodeAdapter {
         Self {
             storage: Default::default(),
             mcstate_tracker: MinRefMcStateTracker::new(),
+            zerostate_id: ZerostateId::default(),
         }
     }
 }
@@ -4242,11 +4382,15 @@ impl StateNodeAdapter for TestStateNodeAdapter {
     async fn wait_for_block_next(&self, _block_id: &BlockId) -> Option<Result<BlockStuffAug>> {
         unreachable!()
     }
-    async fn handle_state(&self, _state: &ShardStateStuff) -> Result<()> {
+    async fn handle_state(&self, _: &BlockId, _state: &ShardStateStuff) -> Result<()> {
         unreachable!()
     }
     fn set_sync_context(&self, _sync_context: CollatorSyncContext) {
         unreachable!()
+    }
+
+    fn zerostate_id(&self) -> &ZerostateId {
+        &self.zerostate_id
     }
 }
 

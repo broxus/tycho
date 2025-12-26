@@ -24,6 +24,11 @@ impl ProgressBar {
         self.total = Some(total.into());
     }
 
+    pub fn add_progress(&mut self, value: impl Into<u64>) {
+        self.current += value.into();
+        self.progress_message();
+    }
+
     pub fn set_progress(&mut self, current: impl Into<u64>) {
         let old = self.compute_current_progress();
         self.current = current.into();

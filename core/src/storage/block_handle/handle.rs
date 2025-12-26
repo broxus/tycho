@@ -28,7 +28,7 @@ pub struct BlockHandle {
 }
 
 impl BlockHandle {
-    pub(crate) fn new(id: &BlockId, meta: BlockMeta, cache: Arc<BlockHandleCache>) -> Self {
+    pub fn new(id: &BlockId, meta: BlockMeta, cache: Arc<BlockHandleCache>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 id: *id,
