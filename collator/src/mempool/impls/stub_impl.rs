@@ -11,14 +11,12 @@ use parking_lot::RwLock;
 use rand::Rng;
 use scopeguard::defer;
 use tycho_network::PeerId;
-use tycho_storage::StorageContext;
 use tycho_types::models::{ConsensusConfig, GenesisInfo, *};
 use tycho_types::prelude::*;
 
-use crate::mempool::impls::dump_anchors::DumpAnchors;
 use crate::mempool::{
-    DebugStateUpdateContext, ExternalMessage, GetAnchorResult, MempoolAdapter, MempoolAnchor,
-    MempoolAnchorId, MempoolEventListener, StateUpdateContext,
+    DebugStateUpdateContext, DumpedAnchor, ExternalMessage, GetAnchorResult, MempoolAdapter,
+    MempoolAnchor, MempoolAnchorId, MempoolEventListener, StateUpdateContext,
 };
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
@@ -85,24 +83,13 @@ impl MempoolAdapterStubImpl {
     pub fn with_anchors_from_dump(
         listener: Arc<dyn MempoolEventListener>,
         now: Option<u64>,
-        top_processed_to_anchor_mc: u32,
-        top_processed_to_anchor_shards: u32,
-        storage_context: StorageContext,
-        start_round: u32,
-        genesis_millis: u64,
-        consensus_config: ConsensusConfig,
+        top_processed_to_anchor: u32,
+        dumped_anchors: &[DumpedAnchor],
     ) -> Result<Arc<Self>> {
-        Self::with_generator(listener.clone(), Some(top_processed_to_anchor_shards), {
+        Self::with_generator(listener.clone(), Some(top_processed_to_anchor), {
+            let dumped_anchors = dumped_anchors.into_iter().cloned().collect();
             move |a| {
-                tokio::spawn(Self::anchors_generator(
-                    a,
-                    now,
-                    top_processed_to_anchor_mc,
-                    storage_context,
-                    start_round,
-                    genesis_millis,
-                    consensus_config,
-                ));
+                tokio::spawn(Self::anchors_generator(a, now, dumped_anchors));
                 Ok(())
             }
         })
@@ -152,39 +139,12 @@ impl MempoolAdapterStubImpl {
     async fn anchors_generator(
         self: Arc<Self>,
         now: Option<u64>,
-        top_processed_to_anchor_mc: u32,
-        storage_context: StorageContext,
-        start_round: u32,
-        genesis_millis: u64,
-        consensus_config: ConsensusConfig,
+        dumped_anchors: Vec<DumpedAnchor>,
     ) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "started");
         defer! {
             tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
         }
-
-        let dump_anchors =
-            DumpAnchors::new(&storage_context).expect("Failed to create DumpAnchors");
-
-        let mempool_node_config = tycho_consensus::prelude::MempoolNodeConfig {
-            clean_db_period_rounds: std::num::NonZeroU16::new(10).unwrap(),
-            ..Default::default()
-        };
-        let genesis_info = tycho_types::models::GenesisInfo {
-            start_round,
-            genesis_millis,
-        };
-
-        let dumped_anchors = dump_anchors
-            .load(
-                top_processed_to_anchor_mc,
-                &mempool_node_config,
-                &consensus_config,
-                genesis_info,
-            )
-            .expect("Failed to load dumped anchors")
-            .into_iter()
-            .map(Arc::new);
 
         tracing::info!("dumped anchors: {:#?}", dumped_anchors);
 
@@ -200,21 +160,12 @@ impl MempoolAdapterStubImpl {
                     "anchor added to cache",
                 );
 
-                cache.insert(anchor.id, anchor);
-            }
-        }
-
-        // Fill with empty anchors for missing ranges from top_processed_to_anchor to top_processed_to_anchor_mc
-        if top_processed_to_anchor_mc > self.top_processed_to_anchor.unwrap_or_default() {
-            let mut prev_anchor_id = self.top_processed_to_anchor.unwrap_or_default();
-            let start_anchor_id = prev_anchor_id;
-            for anchor_id in start_anchor_id..=top_processed_to_anchor_mc {
-                if !self.anchors_cache.read().contains_key(&anchor_id) {
-                    let chain_time = now.unwrap_or_default();
-                    let anchor = make_empty_anchor(anchor_id, prev_anchor_id, chain_time + 1336);
-                    self.anchors_cache.write().insert(anchor_id, anchor.clone());
-                }
-                prev_anchor_id = anchor_id;
+                cache.insert(
+                    anchor.id,
+                    Arc::new(
+                        MempoolAnchor::try_from(anchor).expect("Can not parse anchor from dump"),
+                    ),
+                );
             }
         }
 

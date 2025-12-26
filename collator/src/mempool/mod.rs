@@ -14,6 +14,7 @@ pub use self::state_update_context::*;
 use crate::types::processed_upto::BlockSeqno;
 
 mod impls {
+    pub use self::dump_anchors::{DumpAnchors, DumpedAnchor, DumpedExternal};
     pub use self::single_node_impl::MempoolAdapterSingleNodeImpl;
     pub use self::std_impl::MempoolAdapterStdImpl;
     pub use self::stub_impl::MempoolAdapterStubImpl;

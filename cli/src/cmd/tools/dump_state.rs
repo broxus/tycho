@@ -1,12 +1,14 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tokio::fs;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::QueueStateHeader;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_collator::mempool::{DumpAnchors, DumpedAnchor, DumpedExternal};
+use tycho_collator::types::processed_upto::ProcessedUptoInfoExtension;
 use tycho_collator::types::{McData, ShardDescriptionShortExt};
 use tycho_core::node::ConfiguredStorage;
 use tycho_core::storage::{
@@ -101,7 +103,6 @@ impl Cmd {
 
         println!("Master block found: {}", master_block_id);
 
-        // Dump master block and its state
         println!("Dumping master block and state...");
         let master_state = dumper
             .dump_block_and_state(&master_block_id, master_block_id.seqno)
@@ -128,7 +129,6 @@ impl Cmd {
             };
         }
 
-        // Dump master block's queue state
         println!("Dumping master block queue state...");
         dumper.dump_queue_state(&master_block_id).await?;
 
@@ -148,9 +148,10 @@ impl Cmd {
             }
         }
 
-        // Dump mempool state
         println!("Dumping mempool state...");
-        dumper.dump_mempool_state(root_dir).await?;
+        dumper
+            .dump_mempool_state(root_dir, master_state, mc_data)
+            .await?;
 
         println!("Dump completed successfully to: {}", self.output.display());
 
@@ -203,7 +204,11 @@ impl Dumper {
         master_block_seqno: u32,
     ) -> Result<ShardStateStuff> {
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
-        let writer = ShardStateWriter::new(self.storage.cells_db(), &dir, block_id);
+        let writer = ShardStateWriter::new(
+            self.storage.shard_state_storage().cell_storage().db(),
+            &dir,
+            block_id,
+        );
         let ref_by_mc_seqno = self
             .storage
             .block_handle_storage()
@@ -336,38 +341,83 @@ impl Dumper {
         self.storage.block_storage().load_block_data(&handle).await
     }
 
-    async fn dump_mempool_state(&self, root_dir: PathBuf) -> Result<()> {
-        let src_dir = root_dir.join("mempool");
-        if !src_dir.exists() {
-            println!(" - Mempool directory does not exist, skipping");
-            return Ok(());
-        }
+    async fn dump_mempool_state(
+        &self,
+        root_dir: PathBuf,
+        mc_state: ShardStateStuff,
+        mc_data: Arc<McData>,
+    ) -> Result<()> {
+        let (mut top_processed_to_anchor_mc, _) = mc_data
+            .processed_upto
+            .get_min_externals_processed_to()
+            .unwrap_or_default();
+
+        top_processed_to_anchor_mc =
+            std::cmp::min(mc_data.top_processed_to_anchor, top_processed_to_anchor_mc);
+
+        let mc_state_extra = mc_state.state_extra().unwrap();
+
+        let storage_config = tycho_storage::StorageConfig {
+            root_dir,
+            ..Default::default()
+        };
+        let storage_context = tycho_storage::StorageContext::new(storage_config)
+            .await
+            .context("Failed to create storage context")?;
+
+        let dump_anchors =
+            DumpAnchors::new(&storage_context).context("Failed to create DumpAnchors")?;
+
+        let mempool_node_config = tycho_consensus::prelude::MempoolNodeConfig {
+            clean_db_period_rounds: std::num::NonZeroU16::new(10).unwrap(),
+            ..Default::default()
+        };
+        let genesis_info = tycho_types::models::GenesisInfo {
+            start_round: mc_state_extra.consensus_info.genesis_info.start_round as u32,
+            genesis_millis: mc_state_extra.consensus_info.genesis_info.genesis_millis,
+        };
+
+        let consensus_config = mc_state_extra.config.get_consensus_config().unwrap();
+
+        let dumped_anchors = dump_anchors
+            .load(
+                top_processed_to_anchor_mc,
+                &mempool_node_config,
+                &consensus_config,
+                genesis_info,
+            )
+            .context("Failed to load dumped anchors")?;
 
         let dst_dir = self.output_dir.path().join("mempool");
-        self.copy_dir(&src_dir, &dst_dir).await?;
-        println!(" - Mempool state saved");
-        Ok(())
-    }
+        tokio::fs::create_dir_all(&dst_dir).await?;
 
-    async fn copy_dir(&self, src: &PathBuf, dst: &PathBuf) -> Result<()> {
-        fs::create_dir_all(dst)
-            .await
-            .context("Failed to create destination directory")?;
+        for dumped_anchor in dumped_anchors {
+            let filename = format!("anchor_{}.json", dumped_anchor.id);
+            let filepath = dst_dir.join(filename);
 
-        let mut entries = fs::read_dir(src)
-            .await
-            .context("Failed to read source directory")?;
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .context("Failed to read directory entry")?
-        {
-            let entry_path = entry.path();
-            let dst_path = dst.join(entry.file_name());
-            fs::copy(&entry_path, &dst_path)
-                .await
-                .context(format!("Failed to copy file {:?}", entry_path))?;
+            let mut externals = Vec::new();
+            for external in &dumped_anchor.externals {
+                let boc_data = Boc::encode_base64(&external.cell.clone());
+                externals.push(DumpedExternal {
+                    boc: boc_data,
+                    info: external.info.clone(),
+                });
+            }
+
+            let content = serde_json::to_string(&DumpedAnchor {
+                id: dumped_anchor.id,
+                prev_id: dumped_anchor.prev_id,
+                author: dumped_anchor.author,
+                chain_time: dumped_anchor.chain_time,
+                externals: externals,
+            })
+            .unwrap();
+
+            tokio::fs::write(&filepath, &content.as_bytes()).await?;
         }
+
+        println!(" - Mempool state saved");
+
         Ok(())
     }
 }

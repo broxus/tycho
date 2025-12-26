@@ -1,20 +1,66 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use bumpalo::Bump;
 use tycho_consensus::prelude::{
     AnchorStageRole, ConsensusConfigExt, MempoolAdapterStore, MempoolConfigBuilder, MempoolDb,
     MempoolNodeConfig,
 };
+use tycho_network::PeerId;
 use tycho_storage::StorageContext;
-use tycho_types::models::{ConsensusConfig, GenesisInfo};
+use tycho_types::boc::Boc;
+use tycho_types::models::{ConsensusConfig, ExtInMsgInfo, GenesisInfo};
 
 use crate::mempool::impls::common::parser::{Parser, ParserOutput};
-use crate::mempool::{MempoolAnchor, MempoolAnchorId};
+use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct DumpedExternal {
+    pub boc: String,
+    pub info: ExtInMsgInfo,
+}
+
+impl TryFrom<DumpedExternal> for ExternalMessage {
+    type Error = anyhow::Error;
+    fn try_from(value: DumpedExternal) -> Result<Self> {
+        Ok(ExternalMessage {
+            cell: Boc::decode_base64(value.boc).context("failed to build cell")?,
+            info: value.info,
+        })
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct DumpedAnchor {
+    pub id: MempoolAnchorId,
+    pub prev_id: Option<MempoolAnchorId>,
+    pub author: PeerId,
+    pub chain_time: u64,
+    pub externals: Vec<DumpedExternal>,
+}
+
+impl TryFrom<DumpedAnchor> for MempoolAnchor {
+    type Error = anyhow::Error;
+    fn try_from(value: DumpedAnchor) -> Result<Self> {
+        let externals: Vec<Arc<ExternalMessage>> = value
+            .externals
+            .into_iter()
+            .map(|ext| ExternalMessage::try_from(ext).map(Arc::new))
+            .collect::<Result<_>>()?;
+        Ok(MempoolAnchor {
+            id: value.id,
+            prev_id: value.prev_id,
+            author: value.author,
+            chain_time: value.chain_time,
+            externals,
+        })
+    }
+}
 
 pub struct DumpAnchors {
     store: MempoolAdapterStore,
 }
 
-#[allow(dead_code, reason = "not yet used")] // FIXME bind code and remove this
 impl DumpAnchors {
     pub fn new(storage_context: &StorageContext) -> Result<Self> {
         let mempool_db = MempoolDb::open(storage_context.clone())

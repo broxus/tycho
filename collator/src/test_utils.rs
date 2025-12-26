@@ -23,6 +23,7 @@ use tycho_util::compression::zstd_decompress_simple;
 use crate::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use crate::internal_queue::state::storage::QueueStateImplFactory;
 use crate::internal_queue::types::message::InternalMessageValue;
+use crate::mempool::DumpedAnchor;
 use crate::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 
 pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilter) {
@@ -179,6 +180,7 @@ pub async fn load_storage_from_dump<V: InternalMessageValue>(
     Arc<dyn MessageQueueAdapter<V>>,
     tempfile::TempDir,
     BlockId,
+    Vec<DumpedAnchor>,
 )> {
     let (ctx, temp_dir) = tycho_storage::StorageContext::new_temp().await?;
     let storage = CoreStorage::open(
@@ -332,15 +334,17 @@ pub async fn load_storage_from_dump<V: InternalMessageValue>(
         }
     }
 
-    // Copy mempool files
+    let mut dump_anchors = vec![];
     let dump_mempool_path = dump_path.join("mempool");
-    let mempool_dir = storage.context().root_dir().create_subdir("mempool")?;
     if dump_mempool_path.is_dir() {
         for entry in std::fs::read_dir(dump_mempool_path)? {
             let entry = entry?;
             let path = entry.path();
             if path.is_file() {
-                std::fs::copy(&path, mempool_dir.path().join(entry.file_name()))?;
+                let data = std::fs::read_to_string(&path).context("Failed to read mempool file")?;
+                let decoded: DumpedAnchor =
+                    serde_json::from_str(&data).context("Failed to deserialize mempool file")?;
+                dump_anchors.push(decoded);
             }
         }
     }
@@ -360,5 +364,6 @@ pub async fn load_storage_from_dump<V: InternalMessageValue>(
         Arc::new(message_queue_adapter),
         temp_dir,
         latest_mc_block_id,
+        dump_anchors,
     ))
 }

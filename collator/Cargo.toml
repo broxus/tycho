@@ -45,6 +45,7 @@ rayon = { workspace = true }
 scc = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tl-proto = { workspace = true }
