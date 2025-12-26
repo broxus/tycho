@@ -58,6 +58,7 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho tool bc gen-proposal set-config-code`↴](#tycho-tool-bc-gen-proposal-set-config-code)
 * [`tycho tool bc gen-proposal-vote`↴](#tycho-tool-bc-gen-proposal-vote)
 * [`tycho tool check-cells-db`↴](#tycho-tool-check-cells-db)
+* [`tycho tool dump-state`↴](#tycho-tool-dump-state)
 * [`tycho elect`↴](#tycho-elect)
 * [`tycho elect run`↴](#tycho-elect-run)
 * [`tycho elect once`↴](#tycho-elect-once)
@@ -606,6 +607,7 @@ Work with blockchain stuff
 * `gen-account` — Generate an account state
 * `bc` — Blockchain stuff
 * `check-cells-db` — Check that the cells database is consistent
+* `dump-state` — Dumps node state for a specific block, intended for testing collation of the next block. This tool interacts directly with the node's database, bypassing the need for a running node, which is useful for analyzing failed nodes
 
 
 
@@ -1000,6 +1002,21 @@ Check that the cells database is consistent
 * `--accounts-split-depth <ACCOUNTS_SPLIT_DEPTH>` — Base workchain accounts split depth
 
   Default value: `4`
+
+
+
+## `tycho tool dump-state`
+
+Dumps node state for a specific block, intended for testing collation of the next block. This tool interacts directly with the node's database, bypassing the need for a running node, which is useful for analyzing failed nodes
+
+**Usage:** `tycho tool dump-state [OPTIONS] --output <OUTPUT> --block-id <BLOCK_ID>`
+
+###### **Options:**
+
+* `--config <CONFIG>` — Path to the node config. If not specified, will use db path
+* `--db <DB>` — Path to the node's database directory
+* `--output <OUTPUT>` — Path to the directory where the dump files will be saved
+* `-b`, `--block-id <BLOCK_ID>` — The ID of the block for which to dump the state. Can be a masterchain or a shardchain block
 
 
 
