@@ -16,7 +16,9 @@ use crate::dag::commit::anchor_chain::EnqueuedAnchor;
 use crate::dag::{DagRound, HistoryConflict};
 use crate::effects::{AltFmt, AltFormat, Cancelled};
 use crate::engine::MempoolConfig;
-use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PointInfo, Round, ValidPoint};
+use crate::models::{
+    AnchorStageRole, ChainedAnchorProof, DagPoint, Digest, Link, PointInfo, Round, ValidPoint,
+};
 
 #[derive(Default)]
 pub struct DagBack {
@@ -343,8 +345,12 @@ impl DagBack {
             .info()
             .clone();
 
+            lookup_proof_id = match proof.chained_anchor_proof() {
+                ChainedAnchorProof::Chained(link) => link.to,
+                ChainedAnchorProof::Inapplicable => proof.anchor_id(AnchorStageRole::Proof),
+            };
+
             let Some(anchor_id) = proof.prev_id() else {
-                lookup_proof_id = proof.anchor_id(AnchorStageRole::Proof);
                 continue;
             };
 
@@ -379,7 +385,6 @@ impl DagBack {
             {
                 direct_trigger = Some(trigger.clone());
             }
-            lookup_proof_id = anchor.anchor_id(AnchorStageRole::Proof);
 
             // iter is from newest to oldest, restore historical order
             result.push_front(EnqueuedAnchor {

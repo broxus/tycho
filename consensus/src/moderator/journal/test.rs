@@ -9,8 +9,8 @@ use tycho_storage::StorageContext;
 use crate::dag::InvalidReason;
 use crate::intercom::QueryRequestTag;
 use crate::models::{
-    Cert, DagPoint, Digest, Link, Point, PointData, PointStatusStored, PointStatusValidated, Round,
-    UnixTime,
+    Cert, ChainedAnchorProof, DagPoint, Digest, Link, Point, PointData, PointStatusStored,
+    PointStatusValidated, Round, UnixTime,
 };
 use crate::moderator::journal::batch::batch;
 use crate::moderator::journal::item::{JournalItem, JournalItemFull};
@@ -118,6 +118,7 @@ fn gen_point() -> Point {
             includes: Default::default(),
             witness: Default::default(),
             evidence: Default::default(),
+            chained_anchor_proof: ChainedAnchorProof::Inapplicable,
             anchor_trigger: Link::ToSelf,
             anchor_proof: Link::ToSelf,
             time: UnixTime::now(),

@@ -7,8 +7,8 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::models::{
-    AnchorStageRole, Digest, Link, PointData, PointId, PointKey, Round, Signature, StructureIssue,
-    UnixTime,
+    AnchorStageRole, ChainedAnchorProof, Digest, Link, PointData, PointId, PointKey, Round,
+    Signature, StructureIssue, UnixTime,
 };
 
 #[derive(Clone, TlRead, TlWrite)]
@@ -183,6 +183,10 @@ impl PointInfo {
 
     pub fn anchor_round(&self, link_field: AnchorStageRole) -> Round {
         (self.0.data).anchor_round(link_field, self.0.round)
+    }
+
+    pub fn chained_anchor_proof(&self) -> &ChainedAnchorProof {
+        &self.0.data.chained_anchor_proof
     }
 
     /// the final destination of an anchor link

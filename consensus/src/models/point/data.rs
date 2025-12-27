@@ -43,6 +43,8 @@ pub struct PointData {
     /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
     #[tl(with = "signatures_map")]
     pub evidence: FastHashMap<PeerId, Signature>,
+    /// every anchor proof has a link to previous anchor proof; otherwise i
+    pub chained_anchor_proof: ChainedAnchorProof,
     /// last included by author; defines author's last committed anchor
     pub anchor_trigger: Link,
     /// last included by author; maintains anchor chain linked without explicit DAG traverse
@@ -55,17 +57,41 @@ pub struct PointData {
 
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
 #[tl(boxed, scheme = "proto.tl")]
+pub enum ChainedAnchorProof {
+    #[tl(id = "point.chainedAnchorProof.inapplicable")]
+    Inapplicable,
+    #[tl(id = "point.chainedAnchorProof.chained")]
+    Chained(IndirectLink),
+}
+
+impl ChainedAnchorProof {
+    pub const MAX_TL_BYTES: usize = 4 + IndirectLink::MAX_TL_BYTES;
+}
+
+#[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
+#[tl(boxed, id = "consensus.indirectLink", scheme = "proto.tl")]
+pub struct IndirectLink {
+    pub to: PointId,
+    pub path: Through,
+}
+
+impl IndirectLink {
+    pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + 4 + PeerId::MAX_TL_BYTES;
+}
+
+#[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
+#[tl(boxed, scheme = "proto.tl")]
 pub enum Link {
     #[tl(id = "point.link.to_self")]
     ToSelf,
     #[tl(id = "point.link.direct")]
     Direct(Through),
     #[tl(id = "point.link.indirect")]
-    Indirect { to: PointId, path: Through },
+    Indirect(IndirectLink),
 }
 
 impl Link {
-    pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + 4 + PeerId::MAX_TL_BYTES;
+    pub const MAX_TL_BYTES: usize = 4 + IndirectLink::MAX_TL_BYTES;
 }
 
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite, Serialize)]
@@ -85,7 +111,10 @@ impl PointData {
                 + (PeerId::MAX_TL_BYTES + Signature::MAX_TL_BYTES)) // signatures map
             + 3 * proto_utils::MAP_LEN_BYTES; // maps lengths
 
-        4 + max_possible_maps + 2 * Link::MAX_TL_BYTES + 2 * UnixTime::MAX_TL_BYTES
+        4 + max_possible_maps
+            + ChainedAnchorProof::MAX_TL_BYTES
+            + 2 * Link::MAX_TL_BYTES
+            + 2 * UnixTime::MAX_TL_BYTES
     };
 
     /// counterpart of [`crate::dag::Verifier::verify`] that must be called earlier,
@@ -118,15 +147,15 @@ impl PointData {
             Link::Direct(Through::Witness(peer)) => {
                 (!self.witness.contains_key(peer)).then_some(PointMap::Witness)
             }
-            Link::Indirect {
+            Link::Indirect(IndirectLink {
                 path: Through::Includes(peer),
                 to,
-            } => (!self.includes.contains_key(peer) || to.round.next() >= round)
+            }) => (!self.includes.contains_key(peer) || to.round.next() >= round)
                 .then_some(PointMap::Includes),
-            Link::Indirect {
+            Link::Indirect(IndirectLink {
                 path: Through::Witness(peer),
                 to,
-            } => (!self.witness.contains_key(peer) || to.round.next().next() >= round)
+            }) => (!self.witness.contains_key(peer) || to.round.next().next() >= round)
                 .then_some(PointMap::Witness),
         }
     }
@@ -146,7 +175,7 @@ impl PointData {
             Link::ToSelf => round,
             Link::Direct(Through::Includes(_)) => round.prev(),
             Link::Direct(Through::Witness(_)) => round.prev().prev(),
-            Link::Indirect { to, .. } => to.round,
+            Link::Indirect(IndirectLink { to, .. }) => to.round,
         }
     }
 
@@ -154,7 +183,7 @@ impl PointData {
     /// resulting None should be replaced with id of wrapping point
     pub(super) fn anchor_id(&self, link_field: AnchorStageRole, round: Round) -> Option<PointId> {
         match self.anchor_link(link_field) {
-            Link::Indirect { to, .. } => Some(*to),
+            Link::Indirect(IndirectLink { to, .. }) => Some(*to),
             _direct => self.anchor_link_id(link_field, round),
         }
     }
@@ -169,15 +198,15 @@ impl PointData {
         let (map, author, round) = match self.anchor_link(link_field) {
             Link::ToSelf => return None,
             Link::Direct(Through::Includes(peer))
-            | Link::Indirect {
+            | Link::Indirect(IndirectLink {
                 path: Through::Includes(peer),
                 ..
-            } => (&self.includes, *peer, round.prev()),
+            }) => (&self.includes, *peer, round.prev()),
             Link::Direct(Through::Witness(peer))
-            | Link::Indirect {
+            | Link::Indirect(IndirectLink {
                 path: Through::Witness(peer),
                 ..
-            } => (&self.witness, *peer, round.prev().prev()),
+            }) => (&self.witness, *peer, round.prev().prev()),
         };
         Some(PointId {
             author,
