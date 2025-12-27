@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 pub(crate) mod bc;
 mod check_cells_db;
+mod dump_state;
 mod gen_account;
 mod gen_dht;
 mod gen_key;
@@ -24,6 +25,7 @@ impl Cmd {
             SubCmd::GenAccount(cmd) => cmd.run(),
             SubCmd::Bc(cmd) => cmd.run(),
             SubCmd::CheckCellsDb(cmd) => cmd.run(),
+            SubCmd::DumpState(cmd) => cmd.run(),
         }
     }
 }
@@ -36,4 +38,5 @@ enum SubCmd {
     GenAccount(gen_account::Cmd),
     Bc(bc::Cmd),
     CheckCellsDb(check_cells_db::Cmd),
+    DumpState(dump_state::Cmd),
 }
