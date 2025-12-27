@@ -8,7 +8,7 @@ use crate::intercom::PeerSchedule;
 use crate::models::{AnchorStageRole, Round};
 
 /// Commit leader is changed every 4 rounds
-const WAVE_ROUNDS: u32 = 4;
+const WAVE_ROUNDS: u32 = 3;
 
 #[derive(Debug)]
 pub struct AnchorStage {
@@ -56,16 +56,15 @@ impl AnchorStage {
     fn role(round: Round) -> Option<AnchorStageRole> {
         #[allow(clippy::match_same_arms, reason = "comments")]
         match round.0 % WAVE_ROUNDS {
-            1 => None, // anchor candidate (surprisingly, nothing special about this point)
-            2 => Some(AnchorStageRole::Proof),
-            3 => Some(AnchorStageRole::Trigger),
-            0 => None, // leaderless support round (that actually follows every leader point chain)
+            0 => None, // anchor candidate (surprisingly, nothing special about this point)
+            1 => Some(AnchorStageRole::Proof),
+            2 => Some(AnchorStageRole::Trigger),
             _ => unreachable!(),
         }
     }
 
     pub fn align_genesis(start_round: u32) -> Round {
-        Round(((start_round + 1) / WAVE_ROUNDS) * WAVE_ROUNDS + 2)
+        Round(((start_round + 1) / WAVE_ROUNDS).max(1) * WAVE_ROUNDS + 1)
     }
 }
 
@@ -84,11 +83,14 @@ mod tests {
                 "genesis round must not be less than start round after alignment, \
                  start_round={start_round}, genesis_round={genesis_round}",
             );
-            ensure!(
-                genesis_round < start_round + WAVE_ROUNDS,
-                "aligned genesis increased too much, \
-                start_round={start_round}, genesis_round={genesis_round}",
-            );
+            if start_round >= WAVE_ROUNDS {
+                // skip check for near zero value - it's unimportant and impossible
+                ensure!(
+                    genesis_round < start_round + WAVE_ROUNDS,
+                    "aligned genesis increased too much, \
+                    start_round={start_round}, genesis_round={genesis_round}",
+                );
+            }
             anyhow::ensure!(
                 genesis_round > Round::BOTTOM.0,
                 "aligned genesis {genesis_round:?} is too low and will make code panic"

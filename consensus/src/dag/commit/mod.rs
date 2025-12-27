@@ -364,10 +364,10 @@ mod test {
             .await;
 
             if round.0 == 33 {
-                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 7);
+                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 9);
             }
             if round.0 == 66 {
-                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 4);
+                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 5);
             }
         }
 
@@ -398,7 +398,7 @@ mod test {
             restore_point(&mut committer.dag, pack);
         }
 
-        assert_eq!(commit(&mut committer, None, conf).len(), 2);
+        assert_eq!(commit(&mut committer, None, conf).len(), 4);
 
         restore_point(&mut committer.dag, r_leader);
 
@@ -406,7 +406,7 @@ mod test {
 
         restore_round(&mut committer.dag, r_round);
 
-        assert_eq!(commit(&mut committer, None, conf).len(), 7);
+        assert_eq!(commit(&mut committer, None, conf).len(), 10);
 
         std::io::stderr().flush().ok();
         std::io::stdout().flush().ok();

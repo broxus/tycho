@@ -15,8 +15,8 @@ use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, Link, PeerCount, PointId, PointInfo,
-    PointMap, Round, StructureIssue, UnixTime,
+    AnchorStageRole, Cert, CertDirectDeps, ChainedAnchorProof, DagPoint, Digest, Link, PeerCount,
+    PointId, PointInfo, PointMap, Round, StructureIssue, UnixTime,
 };
 use crate::storage::MempoolStore;
 // Note on equivocation.
@@ -79,6 +79,9 @@ pub enum IllFormedReason {
     AnchorTime,
     #[error("anchor stage role {0:?}")]
     SelfAnchorStage(AnchorStageRole),
+    /// `false` for "must NOT have used chained proof"
+    #[error("must{} have used chained proof", .0.then_some("").unwrap_or(" not"))]
+    ChainedProofMustUse(bool),
     // Errors below are thrown from `validate()` because they require DagRound
     #[error("self link")]
     SelfLink,
@@ -110,6 +113,10 @@ pub enum InvalidReason {
     NewerAnchorInDependency((AnchorStageRole, PointId)),
     #[error("anchor {:?} link leads to other destination through {:?}", .0.0, .0.1.alt())]
     AnchorLinkBadPath((AnchorStageRole, PointId)),
+    #[error("chained proof link leads to other destination through {:?}", .0.alt())]
+    ChainedProofBadPath(PointId),
+    #[error("newer proof to chain in dependency {:?}", .0.alt())]
+    NewerProofToChainInDependency(PointId),
     #[error("dependency {}{}", .0, .1.as_ref().map(|p| format!("; indirect through {:?}", p.alt())).unwrap_or_default())]
     Dependency(Box<InvalidRootCause>, Option<PointId>),
 }
@@ -393,9 +400,9 @@ impl Verifier {
         // until the current peer makes a gap in its far outdated DAG.
         let anchor_trigger_id = info.anchor_id(AnchorStageRole::Trigger);
         let anchor_proof_id = info.anchor_id(AnchorStageRole::Proof);
-        let anchor_trigger_link_id = info.anchor_link_id(AnchorStageRole::Trigger);
-        let anchor_proof_link_id = info.anchor_link_id(AnchorStageRole::Proof);
-
+        let anchor_trigger_through = info.anchor_link_through(AnchorStageRole::Trigger);
+        let anchor_proof_through = info.anchor_link_through(AnchorStageRole::Proof);
+        let chained_proof_to_through = info.chained_proof_to_through();
         let max_allowed_dep_time =
             info.time() + UnixTime::from_millis(conf.consensus.clock_skew_millis.get() as _);
 
@@ -403,7 +410,7 @@ impl Verifier {
             let Some(dag_point) = task_result? else {
                 return Ok(Some(InvalidReason::DependencyRoundDropped));
             };
-            if dag_point.round() == prev_round && dag_point.author() == info.author() {
+            let dep = if dag_point.round() == prev_round && dag_point.author() == info.author() {
                 match prev_digest_in_point {
                     Some(prev_digest_in_point) if prev_digest_in_point == dag_point.digest() => {
                         // we validate a point that is a well-formed certificate for the previous,
@@ -419,6 +426,7 @@ impl Verifier {
                         if let Some(reason) = Self::is_proof_ok(&info, proven) {
                             return Ok(Some(reason));
                         }
+                        proven
                     }
                     Some(_) | None => {
                         match dag_point {
@@ -441,46 +449,64 @@ impl Verifier {
                                 } // else: skip, because it may be some other point's dependency
                             }
                         }
+                        continue;
                     }
                 }
             } else {
-                let dep = match Self::check_dependency_valid(&dag_point) {
+                match Self::check_dependency_valid(&dag_point) {
                     Ok(dep) => dep,
                     Err(reason) => return Ok(Some(reason)),
-                };
-                if dep.time() > max_allowed_dep_time {
-                    // dependency time may exceed those in point only by a small value from config
-                    return Ok(Some(InvalidReason::DependencyTimeTooFarInFuture(dep.id())));
                 }
-                for (anchor_role, anchor_role_round) in [
-                    (AnchorStageRole::Trigger, anchor_trigger_id.round),
-                    (AnchorStageRole::Proof, anchor_proof_id.round),
-                ] {
-                    if dep.anchor_round(anchor_role) > anchor_role_round {
-                        let tuple = (anchor_role, dep.id());
-                        return Ok(Some(InvalidReason::NewerAnchorInDependency(tuple)));
-                    }
-                }
+            };
+            let dep_id = dep.id();
 
-                let dep_id = dep.id();
-                if dep_id == anchor_trigger_link_id
-                    && dep.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
-                {
-                    let tuple = (AnchorStageRole::Trigger, dep_id);
+            if dep.time() > max_allowed_dep_time {
+                // dependency time may exceed those in point only by a small value from config
+                return Ok(Some(InvalidReason::DependencyTimeTooFarInFuture(dep_id)));
+            }
+
+            for (anchor_role, anchor_role_round) in [
+                (AnchorStageRole::Trigger, anchor_trigger_id.round),
+                (AnchorStageRole::Proof, anchor_proof_id.round),
+            ] {
+                if dep.anchor_round(anchor_role) > anchor_role_round {
+                    let tuple = (anchor_role, dep_id);
+                    return Ok(Some(InvalidReason::NewerAnchorInDependency(tuple)));
+                }
+            }
+
+            if dep_id == anchor_trigger_through
+                && dep.anchor_id(AnchorStageRole::Trigger) != anchor_trigger_id
+            {
+                let tuple = (AnchorStageRole::Trigger, dep_id);
+                return Ok(Some(InvalidReason::AnchorLinkBadPath(tuple)));
+            }
+
+            if dep_id == anchor_proof_through {
+                if dep.anchor_id(AnchorStageRole::Proof) != anchor_proof_id {
+                    let tuple = (AnchorStageRole::Proof, dep_id);
                     return Ok(Some(InvalidReason::AnchorLinkBadPath(tuple)));
                 }
-                if dep_id == anchor_proof_link_id {
-                    if dep.anchor_id(AnchorStageRole::Proof) != anchor_proof_id {
-                        let tuple = (AnchorStageRole::Proof, dep_id);
-                        return Ok(Some(InvalidReason::AnchorLinkBadPath(tuple)));
-                    }
-                    if dep.anchor_time() != info.anchor_time() {
-                        // anchor candidate's time is not inherited from its proof
-                        return Ok(Some(InvalidReason::AnchorTimeNotInheritedFromProof(dep_id)));
-                    }
+                if dep.anchor_time() != info.anchor_time() {
+                    // anchor candidate's time is not inherited from its proof
+                    return Ok(Some(InvalidReason::AnchorTimeNotInheritedFromProof(dep_id)));
+                }
+            }
+
+            // "chained" and "proof through" branches are mutually exclusive
+            // because point struct allows "chained" value only if "proof through"==Link::ToSelf
+
+            if let Some((&to, through)) = chained_proof_to_through {
+                let dep_anchor_proof_id = dep.anchor_id(AnchorStageRole::Proof);
+                if dep_id == through && dep_anchor_proof_id != to {
+                    return Ok(Some(InvalidReason::ChainedProofBadPath(dep_id)));
+                }
+                if dep_anchor_proof_id.round > to.round {
+                    return Ok(Some(InvalidReason::NewerProofToChainInDependency(dep_id)));
                 }
             }
         }
+
         Ok(None)
     }
 
@@ -503,6 +529,7 @@ impl Verifier {
                 Err(InvalidReason::Dependency(Box::new(cause), None))
             }
             DagPoint::NotFound(not_found) => {
+                // if certified, will cause mempool restart with `FixHistoryFlag`
                 let cause = InvalidRootCause::NotFound(*not_found.id());
                 Err(InvalidReason::Dependency(Box::new(cause), None))
             }
@@ -705,6 +732,9 @@ impl Verifier {
             if info.anchor_trigger() != &Link::ToSelf {
                 return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Trigger));
             }
+            if info.chained_anchor_proof() != &ChainedAnchorProof::Inapplicable {
+                return Some(IllFormedReason::ChainedProofMustUse(false));
+            }
             if info.time() != info.anchor_time() {
                 return Some(IllFormedReason::AnchorTime);
             }
@@ -721,6 +751,15 @@ impl Verifier {
                 if info.anchor_trigger() == &Link::ToSelf {
                     return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Trigger));
                 }
+            }
+            match info.chained_anchor_proof() {
+                ChainedAnchorProof::Inapplicable if info.anchor_proof() == &Link::ToSelf => {
+                    return Some(IllFormedReason::ChainedProofMustUse(true));
+                }
+                ChainedAnchorProof::Chained(_) if info.anchor_proof() != &Link::ToSelf => {
+                    return Some(IllFormedReason::ChainedProofMustUse(false));
+                }
+                _ => {}
             }
             if info.time() <= info.anchor_time() {
                 // point time must be greater than anchor time
