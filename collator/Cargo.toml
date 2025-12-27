@@ -30,6 +30,7 @@ anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 backon = { workspace = true }
+base64 = { workspace = true }
 blake3 = { workspace = true }
 bumpalo = { workspace = true }
 bytes = { workspace = true }

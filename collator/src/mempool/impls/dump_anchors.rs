@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use bumpalo::Bump;
 use tycho_consensus::prelude::{
     AnchorStageRole, ConsensusConfigExt, MempoolAdapterStore, MempoolConfigBuilder, MempoolDb,
@@ -8,8 +9,7 @@ use tycho_consensus::prelude::{
 };
 use tycho_network::PeerId;
 use tycho_storage::StorageContext;
-use tycho_types::boc::Boc;
-use tycho_types::models::{ConsensusConfig, ExtInMsgInfo, GenesisInfo};
+use tycho_types::models::{ConsensusConfig, GenesisInfo};
 
 use crate::mempool::impls::common::parser::{Parser, ParserOutput};
 use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
@@ -17,16 +17,14 @@ use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct DumpedExternal {
     pub boc: String,
-    pub info: ExtInMsgInfo,
 }
 
-impl TryFrom<DumpedExternal> for ExternalMessage {
+impl TryFrom<DumpedExternal> for Arc<ExternalMessage> {
     type Error = anyhow::Error;
     fn try_from(value: DumpedExternal) -> Result<Self> {
-        Ok(ExternalMessage {
-            cell: Boc::decode_base64(value.boc).context("failed to build cell")?,
-            info: value.info,
-        })
+        let message = base64::engine::general_purpose::STANDARD.decode(value.boc)?;
+        Parser::parse_message_bytes(&message)
+            .ok_or_else(|| anyhow::anyhow!("Can not parse message"))
     }
 }
 
@@ -45,7 +43,7 @@ impl TryFrom<DumpedAnchor> for MempoolAnchor {
         let externals: Vec<Arc<ExternalMessage>> = value
             .externals
             .into_iter()
-            .map(|ext| ExternalMessage::try_from(ext).map(Arc::new))
+            .map(Arc::<ExternalMessage>::try_from)
             .collect::<Result<_>>()?;
         Ok(MempoolAnchor {
             id: value.id,

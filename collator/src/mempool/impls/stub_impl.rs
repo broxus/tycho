@@ -84,10 +84,9 @@ impl MempoolAdapterStubImpl {
         listener: Arc<dyn MempoolEventListener>,
         now: Option<u64>,
         top_processed_to_anchor: u32,
-        dumped_anchors: &[DumpedAnchor],
+        dumped_anchors: Vec<DumpedAnchor>,
     ) -> Result<Arc<Self>> {
         Self::with_generator(listener.clone(), Some(top_processed_to_anchor), {
-            let dumped_anchors = dumped_anchors.into_iter().cloned().collect();
             move |a| {
                 tokio::spawn(Self::anchors_generator(a, now, dumped_anchors));
                 Ok(())

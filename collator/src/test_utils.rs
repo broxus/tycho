@@ -172,16 +172,18 @@ pub async fn create_test_queue_adapter<V: InternalMessageValue>()
     Ok((Arc::new(message_queue_adapter), tmp_dir))
 }
 
+pub struct LoadedInfoFromDump<V: InternalMessageValue> {
+    pub storage: CoreStorage,
+    pub mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
+    pub temp_dir: tempfile::TempDir,
+    pub mc_block_id: BlockId,
+    pub dumped_anchors: Vec<DumpedAnchor>,
+}
+
 #[allow(clippy::disallowed_methods)]
-pub async fn load_storage_from_dump<V: InternalMessageValue>(
+pub async fn load_info_from_dump<V: InternalMessageValue>(
     dump_path: &Path,
-) -> Result<(
-    CoreStorage,
-    Arc<dyn MessageQueueAdapter<V>>,
-    tempfile::TempDir,
-    BlockId,
-    Vec<DumpedAnchor>,
-)> {
+) -> Result<LoadedInfoFromDump<V>> {
     let (ctx, temp_dir) = tycho_storage::StorageContext::new_temp().await?;
     let storage = CoreStorage::open(
         ctx.clone(),
@@ -334,7 +336,7 @@ pub async fn load_storage_from_dump<V: InternalMessageValue>(
         }
     }
 
-    let mut dump_anchors = vec![];
+    let mut dumped_anchors = vec![];
     let dump_mempool_path = dump_path.join("mempool");
     if dump_mempool_path.is_dir() {
         for entry in std::fs::read_dir(dump_mempool_path)? {
@@ -344,26 +346,22 @@ pub async fn load_storage_from_dump<V: InternalMessageValue>(
                 let data = std::fs::read_to_string(&path).context("Failed to read mempool file")?;
                 let decoded: DumpedAnchor =
                     serde_json::from_str(&data).context("Failed to deserialize mempool file")?;
-                dump_anchors.push(decoded);
+                dumped_anchors.push(decoded);
             }
         }
     }
 
-    let latest_mc_block_id = latest_mc_block_id.context("No master block found in dump")?;
-    storage
-        .node_state()
-        .store_last_mc_block_id(&latest_mc_block_id);
-    storage
-        .node_state()
-        .store_init_mc_block_id(&latest_mc_block_id);
+    let mc_block_id = latest_mc_block_id.context("No master block found in dump")?;
+    storage.node_state().store_last_mc_block_id(&mc_block_id);
+    storage.node_state().store_init_mc_block_id(&mc_block_id);
 
     let queue = queue_factory.create()?;
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
-    Ok((
+    Ok(LoadedInfoFromDump {
         storage,
-        Arc::new(message_queue_adapter),
+        mq_adapter: Arc::new(message_queue_adapter),
         temp_dir,
-        latest_mc_block_id,
-        dump_anchors,
-    ))
+        mc_block_id,
+        dumped_anchors,
+    })
 }

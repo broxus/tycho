@@ -78,7 +78,7 @@ impl Parser {
         }
     }
 
-    fn parse_message_bytes(message: &[u8]) -> Option<Arc<ExternalMessage>> {
+    pub fn parse_message_bytes(message: &[u8]) -> Option<Arc<ExternalMessage>> {
         let cell = Boc::decode(message).ok()?;
         if cell.is_exotic() || cell.level() != 0 || cell.repr_depth() > ExtMsgRepr::MAX_REPR_DEPTH {
             return None;

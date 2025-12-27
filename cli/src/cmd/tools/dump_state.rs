@@ -347,15 +347,13 @@ impl Dumper {
         mc_state: ShardStateStuff,
         mc_data: Arc<McData>,
     ) -> Result<()> {
-        let (mut top_processed_to_anchor_mc, _) = mc_data
-            .processed_upto
-            .get_min_externals_processed_to()
-            .unwrap_or_default();
+        let (mut top_processed_to_anchor_mc, _) =
+            mc_data.processed_upto.get_min_externals_processed_to()?;
 
         top_processed_to_anchor_mc =
             std::cmp::min(mc_data.top_processed_to_anchor, top_processed_to_anchor_mc);
 
-        let mc_state_extra = mc_state.state_extra().unwrap();
+        let mc_state_extra = mc_state.state_extra()?;
 
         let storage_config = tycho_storage::StorageConfig {
             root_dir,
@@ -368,23 +366,16 @@ impl Dumper {
         let dump_anchors =
             DumpAnchors::new(&storage_context).context("Failed to create DumpAnchors")?;
 
-        let mempool_node_config = tycho_consensus::prelude::MempoolNodeConfig {
-            clean_db_period_rounds: std::num::NonZeroU16::new(10).unwrap(),
-            ..Default::default()
-        };
-        let genesis_info = tycho_types::models::GenesisInfo {
-            start_round: mc_state_extra.consensus_info.genesis_info.start_round as u32,
-            genesis_millis: mc_state_extra.consensus_info.genesis_info.genesis_millis,
-        };
+        let mempool_node_config = tycho_consensus::prelude::MempoolNodeConfig::default();
 
-        let consensus_config = mc_state_extra.config.get_consensus_config().unwrap();
+        let consensus_config = mc_state_extra.config.get_consensus_config()?;
 
         let dumped_anchors = dump_anchors
             .load(
                 top_processed_to_anchor_mc,
                 &mempool_node_config,
                 &consensus_config,
-                genesis_info,
+                mc_state_extra.consensus_info.genesis_info,
             )
             .context("Failed to load dumped anchors")?;
 
@@ -397,10 +388,8 @@ impl Dumper {
 
             let mut externals = Vec::new();
             for external in &dumped_anchor.externals {
-                let boc_data = Boc::encode_base64(&external.cell.clone());
                 externals.push(DumpedExternal {
-                    boc: boc_data,
-                    info: external.info.clone(),
+                    boc: Boc::encode_base64(&external.cell),
                 });
             }
 
@@ -409,9 +398,8 @@ impl Dumper {
                 prev_id: dumped_anchor.prev_id,
                 author: dumped_anchor.author,
                 chain_time: dumped_anchor.chain_time,
-                externals: externals,
-            })
-            .unwrap();
+                externals,
+            })?;
 
             tokio::fs::write(&filepath, &content.as_bytes()).await?;
         }

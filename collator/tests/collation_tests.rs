@@ -9,7 +9,7 @@ use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
-use tycho_collator::test_utils::{load_storage_from_dump, try_init_test_tracing};
+use tycho_collator::test_utils::{LoadedInfoFromDump, load_info_from_dump, try_init_test_tracing};
 use tycho_collator::types::processed_upto::ProcessedUptoInfoExtension;
 use tycho_collator::types::{CollatorConfig, McData, supported_capabilities};
 use tycho_collator::validator::{
@@ -150,8 +150,13 @@ async fn test_collation_process_on_dump() {
         shard: ShardIdent::MASTERCHAIN,
     };
 
-    let (storage, mq_adapter, _temp_dir, mc_block_id, dump_anchors) =
-        load_storage_from_dump(dump_path).await.unwrap();
+    let LoadedInfoFromDump {
+        storage,
+        mq_adapter,
+        mc_block_id,
+        dumped_anchors,
+        ..
+    } = load_info_from_dump(dump_path).await.unwrap();
 
     let zerostate_id = mc_block_id;
 
@@ -205,7 +210,7 @@ async fn test_collation_process_on_dump() {
                 listener,
                 Some(mc_data.gen_chain_time),
                 top_processed_to_anchor_mc,
-                &dump_anchors,
+                dumped_anchors,
             )
             .unwrap()
         },

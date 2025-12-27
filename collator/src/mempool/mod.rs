@@ -31,15 +31,15 @@ mod impls {
 // === Factory ===
 
 pub trait MempoolAdapterFactory {
-    fn create(&self, listener: Arc<dyn MempoolEventListener>) -> Arc<dyn MempoolAdapter>;
+    fn create(self, listener: Arc<dyn MempoolEventListener>) -> Arc<dyn MempoolAdapter>;
 }
 
 impl<F, R> MempoolAdapterFactory for F
 where
-    F: Fn(Arc<dyn MempoolEventListener>) -> Arc<R>,
+    F: FnOnce(Arc<dyn MempoolEventListener>) -> Arc<R>,
     R: MempoolAdapter,
 {
-    fn create(&self, listener: Arc<dyn MempoolEventListener>) -> Arc<dyn MempoolAdapter> {
+    fn create(self, listener: Arc<dyn MempoolEventListener>) -> Arc<dyn MempoolAdapter> {
         self(listener)
     }
 }
@@ -96,8 +96,8 @@ pub trait MempoolAdapter: Send + Sync + 'static {
 }
 
 impl MempoolAdapterFactory for Arc<dyn MempoolAdapter> {
-    fn create(&self, _listener: Arc<dyn MempoolEventListener>) -> Arc<dyn MempoolAdapter> {
-        self.clone()
+    fn create(self, _listener: Arc<dyn MempoolEventListener>) -> Arc<dyn MempoolAdapter> {
+        self
     }
 }
 
