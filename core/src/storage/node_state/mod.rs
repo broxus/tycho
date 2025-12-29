@@ -1,16 +1,23 @@
 use std::cmp::Ordering;
+use std::sync::Arc;
 
-use parking_lot::Mutex;
+use arc_swap::ArcSwapOption;
 use tycho_storage::kv::InstanceId;
 use tycho_types::models::*;
+use tycho_types::prelude::*;
+use tycho_util::FastHasherState;
+use weedb::rocksdb;
 
 use super::CoreDb;
 use super::util::{read_block_id_le, write_block_id_le};
+use crate::global_config::ZerostateId;
 
 pub struct NodeStateStorage {
     db: CoreDb,
     last_mc_block_id: BlockIdCache,
     init_mc_block_id: BlockIdCache,
+    zerostate_id: ArcSwapOption<ZerostateId>,
+    zerostate_proof: ArcSwapOption<Cell>,
 }
 
 pub enum NodeSyncState {
@@ -24,6 +31,8 @@ impl NodeStateStorage {
             db,
             last_mc_block_id: (Default::default(), LAST_MC_BLOCK_ID),
             init_mc_block_id: (Default::default(), INIT_MC_BLOCK_ID),
+            zerostate_id: Default::default(),
+            zerostate_proof: Default::default(),
         };
 
         let state = &this.db.state;
@@ -63,23 +72,76 @@ impl NodeStateStorage {
         self.load_block_id(&self.init_mc_block_id)
     }
 
+    pub fn store_zerostate_info(&self, zerostate_id: &ZerostateId, zerostate_proof: &Cell) {
+        let node_states = &self.db.state;
+
+        let mut value = Vec::with_capacity(256);
+
+        let mut batch = rocksdb::WriteBatch::default();
+
+        // Insert zerostate ID.
+        value.extend_from_slice(&zerostate_id.seqno.to_le_bytes());
+        value.extend_from_slice(zerostate_id.root_hash.as_slice());
+        value.extend_from_slice(zerostate_id.file_hash.as_slice());
+        batch.put_cf(&node_states.cf(), ZEROSTATE_ID, value.as_slice());
+
+        // Insert zerostate proof.
+        value.clear();
+        tycho_types::boc::ser::BocHeader::<FastHasherState>::with_root(zerostate_proof.as_ref())
+            .encode(&mut value);
+        batch.put_cf(&node_states.cf(), ZEROSTATE_PROOF, value);
+
+        // Apply
+        node_states
+            .db()
+            .write_opt(batch, node_states.write_config())
+            .unwrap();
+    }
+
+    pub fn load_zerostate_id(&self) -> Option<ZerostateId> {
+        if let Some(cached) = &*self.zerostate_id.load() {
+            return Some(*cached.as_ref());
+        }
+
+        let value = self.db.state.get(ZEROSTATE_ID).unwrap()?;
+        let value = value.as_ref();
+        let value = ZerostateId {
+            seqno: u32::from_le_bytes(value[0..4].try_into().unwrap()),
+            root_hash: HashBytes::from_slice(&value[4..36]),
+            file_hash: HashBytes::from_slice(&value[36..68]),
+        };
+        self.zerostate_id.store(Some(Arc::new(value)));
+        Some(value)
+    }
+
+    pub fn load_zerostate_proof(&self) -> Option<Cell> {
+        if let Some(cached) = &*self.zerostate_proof.load() {
+            return Some(cached.as_ref().clone());
+        }
+
+        let value = self.db.state.get(ZEROSTATE_PROOF).unwrap()?;
+        let value = Boc::decode(value).unwrap();
+        self.zerostate_proof.store(Some(Arc::new(value.clone())));
+        Some(value)
+    }
+
     #[inline(always)]
     fn store_block_id(&self, (cache, key): &BlockIdCache, block_id: &BlockId) {
         let node_states = &self.db.state;
         node_states
             .insert(key, write_block_id_le(block_id))
             .unwrap();
-        *cache.lock() = Some(*block_id);
+        cache.store(Some(Arc::new(*block_id)));
     }
 
     #[inline(always)]
     fn load_block_id(&self, (cache, key): &BlockIdCache) -> Option<BlockId> {
-        if let Some(cached) = &*cache.lock() {
-            return Some(*cached);
+        if let Some(cached) = &*cache.load() {
+            return Some(*cached.as_ref());
         }
 
         let value = read_block_id_le(&self.db.state.get(key).unwrap()?);
-        *cache.lock() = Some(value);
+        cache.store(Some(Arc::new(value)));
         Some(value)
     }
 
@@ -89,8 +151,10 @@ impl NodeStateStorage {
     }
 }
 
-type BlockIdCache = (Mutex<Option<BlockId>>, &'static [u8]);
+type BlockIdCache = (ArcSwapOption<BlockId>, &'static [u8]);
 
 const LAST_MC_BLOCK_ID: &[u8] = b"last_mc_block";
 const INIT_MC_BLOCK_ID: &[u8] = b"init_mc_block";
 const INSTANCE_ID: &[u8] = b"instance_id";
+const ZEROSTATE_ID: &[u8] = b"zerostate_id";
+const ZEROSTATE_PROOF: &[u8] = b"zerostate_proof";

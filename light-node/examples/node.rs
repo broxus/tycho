@@ -4,7 +4,6 @@ use tycho_core::block_strider::{
     ArchiveBlockProvider, BlockProviderExt, BlockSaver, BlockchainBlockProvider, ColdBootType,
     PrintSubscriber, StorageBlockProvider,
 };
-use tycho_core::global_config::ZerostateId;
 use tycho_light_node::CmdRun;
 use tycho_util::cli::logger::init_logger;
 
@@ -42,15 +41,8 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     node.update_validator_set(&init_block_id).await?;
 
-    let zerostate_id = ZerostateId {
-        seqno: init_block_id.seqno,
-        root_hash: init_block_id.root_hash,
-        file_hash: init_block_id.file_hash,
-    };
-
     let archive_block_provider = ArchiveBlockProvider::new(
         node.blockchain_rpc_client().clone(),
-        zerostate_id,
         node.storage().clone(),
         config.archive_block_provider.clone(),
     );
@@ -59,7 +51,6 @@ async fn main() -> anyhow::Result<()> {
 
     let blockchain_block_provider = BlockchainBlockProvider::new(
         node.blockchain_rpc_client().clone(),
-        zerostate_id,
         node.storage().clone(),
         config.blockchain_block_provider.clone(),
     )
