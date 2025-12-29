@@ -27,7 +27,7 @@ impl MinRefMcStateTracker {
     }
 
     pub fn insert(&self, state: &ShardStateUnsplit) -> RefMcStateHandle {
-        if state.seqno == 0 {
+        if state.seqno == 0 || state.min_ref_mc_seqno == u32::MAX {
             // Insert zerostates as untracked states to prevent their cache
             // to hold back the global archives GC. This handle will still
             // point to a shared tracker, but will have not touch any ref.
