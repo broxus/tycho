@@ -35,9 +35,6 @@ pub struct StarterConfig {
     /// Default: None
     #[important]
     pub start_from: Option<u32>,
-
-    /// Max zerostate byte size in size to download on cold start
-    pub zerostate_max_size: u64,
 }
 
 pub struct StarterBuilder<
@@ -247,7 +244,7 @@ impl ZerostateProvider for FileZerostateProvider {
 }
 
 fn load_zerostate(path: &PathBuf) -> Result<Bytes> {
-    tracing::info!("loading zerostate {:?}", path);
+    tracing::info!(path = %path.display(), "loading zerostate");
     #[allow(clippy::disallowed_methods)]
     let mf = MappedFile::from_existing_file(File::open(path)?)?;
     let bytes = Bytes::from_owner(mf);
