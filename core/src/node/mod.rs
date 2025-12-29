@@ -213,7 +213,6 @@ impl NodeBase {
                 #[cfg(feature = "s3")]
                 self.s3_client.clone(),
             ),
-            self.global_config.zerostate,
             self.core_storage.clone(),
             self.base_config.archive_block_provider.clone(),
         )
@@ -222,7 +221,6 @@ impl NodeBase {
     pub fn build_blockchain_block_provider(&self) -> BlockchainBlockProvider {
         BlockchainBlockProvider::new(
             self.blockchain_rpc_client.clone(),
-            self.global_config.zerostate,
             self.core_storage.clone(),
             self.base_config.blockchain_block_provider.clone(),
         )

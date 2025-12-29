@@ -4,7 +4,7 @@ use tycho_types::models::ShardIdent;
 pub use self::block_id_ext::{BlockIdExt, BlockIdRelation, calc_next_block_id_short};
 pub use self::block_proof_stuff::{
     AlwaysInclude, BlockProofStuff, BlockProofStuffAug, ValidatorSubsetInfo,
-    check_with_master_state, check_with_prev_key_block_proof,
+    check_with_master_state, check_with_prev_key_block_proof, prepare_master_state_proof,
 };
 pub use self::block_stuff::{BlockStuff, BlockStuffAug};
 pub use self::top_blocks::{ShardHeights, TopBlocks, TopBlocksShortIdsIter};

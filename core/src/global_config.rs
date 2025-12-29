@@ -29,7 +29,7 @@ impl GlobalConfig {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZerostateId {
     #[serde(default)]
     pub seqno: u32,

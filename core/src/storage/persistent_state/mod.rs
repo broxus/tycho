@@ -26,7 +26,8 @@ pub use self::queue_state::writer::QueueStateWriter;
 pub use self::shard_state::reader::{BriefBocHeader, ShardStateReader};
 pub use self::shard_state::writer::ShardStateWriter;
 use super::{
-    BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, KeyBlocksDirection, ShardStateStorage,
+    BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, KeyBlocksDirection, NodeStateStorage,
+    ShardStateStorage,
 };
 
 mod queue_state {
@@ -88,6 +89,7 @@ impl PersistentStateStorage {
     pub fn new(
         cells_db: CellsDb,
         files_dir: &Dir,
+        node_state: Arc<NodeStateStorage>,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
         shard_state_storage: Arc<ShardStateStorage>,
@@ -100,6 +102,7 @@ impl PersistentStateStorage {
             inner: Arc::new(Inner {
                 cells_db,
                 storage_dir,
+                node_state,
                 block_handles: block_handle_storage,
                 blocks: block_storage,
                 shard_states: shard_state_storage,
@@ -636,8 +639,15 @@ impl PersistentStateStorage {
         }
 
         let this = self.inner.clone();
+
+        let zerostate_seqno = match self.inner.node_state.load_zerostate_id() {
+            Some(zerostate_id) => zerostate_id.seqno,
+            // Fallback to the original behavior.
+            None => 0,
+        };
+
         let mut top_handle = top_handle.clone();
-        if top_handle.id().seqno == 0 {
+        if top_handle.id().seqno <= zerostate_seqno {
             // Nothing to clear for the zerostate
             return Ok(());
         }
@@ -672,7 +682,7 @@ impl PersistentStateStorage {
             // Remove cached states
             let mut index = this.mc_seqno_to_block_ids.lock();
             index.retain(|&mc_seqno, block_ids| {
-                if mc_seqno >= top_handle.id().seqno || mc_seqno == 0 {
+                if mc_seqno >= top_handle.id().seqno || mc_seqno <= zerostate_seqno {
                     return true;
                 }
 
@@ -684,7 +694,7 @@ impl PersistentStateStorage {
             });
 
             // Remove files
-            this.clear_outdated_state_entries(top_handle.id())
+            this.clear_outdated_state_entries(top_handle.id(), zerostate_seqno)
         })
         .await?
     }
@@ -752,6 +762,7 @@ impl PersistentStateStorage {
 struct Inner {
     cells_db: CellsDb,
     storage_dir: Dir,
+    node_state: Arc<NodeStateStorage>,
     block_handles: Arc<BlockHandleStorage>,
     blocks: Arc<BlockStorage>,
     shard_states: Arc<ShardStateStorage>,
@@ -779,7 +790,11 @@ impl Inner {
         Dir::new_readonly(self.storage_dir.path().join(mc_seqno.to_string()))
     }
 
-    fn clear_outdated_state_entries(&self, recent_block_id: &BlockId) -> Result<()> {
+    fn clear_outdated_state_entries(
+        &self,
+        recent_block_id: &BlockId,
+        zerostate_seqno: u32,
+    ) -> Result<()> {
         let mut directories_to_remove: Vec<PathBuf> = Vec::new();
         let mut files_to_remove: Vec<PathBuf> = Vec::new();
 
@@ -798,7 +813,7 @@ impl Inner {
 
             let is_recent = matches!(
                 name.parse::<u32>(),
-                Ok(seqno) if seqno >= recent_block_id.seqno || seqno == 0
+                Ok(seqno) if seqno >= recent_block_id.seqno || seqno <= zerostate_seqno
             );
             if !is_recent {
                 directories_to_remove.push(path);

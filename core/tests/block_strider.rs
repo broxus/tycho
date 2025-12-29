@@ -9,7 +9,6 @@ use tycho_core::block_strider::{
     BlockProvider, BlockProviderExt, BlockchainBlockProvider, RetryConfig, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
-use tycho_core::global_config::ZerostateId;
 use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
 use tycho_network::PeerId;
 
@@ -131,16 +130,12 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
             PublicOverlayClientConfig::default(),
         ))
         .build();
-    let provider = BlockchainBlockProvider::new(
-        client,
-        ZerostateId::default(),
-        storage.clone(),
-        Default::default(),
-    )
-    .retry(RetryConfig {
-        attempts: 10,
-        interval: Duration::from_millis(100),
-    });
+    let provider = BlockchainBlockProvider::new(client, storage.clone(), Default::default()).retry(
+        RetryConfig {
+            attempts: 10,
+            interval: Duration::from_millis(100),
+        },
+    );
 
     let archive_file = "archive_1.bin";
     let archive_data = utils::read_file(archive_file)?;

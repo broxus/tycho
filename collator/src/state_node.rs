@@ -619,7 +619,7 @@ fn prepare_block_proof(
 ) -> Result<PreparedProof> {
     let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_prepare_block_proof_time");
 
-    let usage_tree = UsageTree::new(UsageTreeMode::OnLoad).with_subtrees();
+    let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
     let tracked_cell = usage_tree.track(block_stuff.root_cell());
     let block = tracked_cell.parse::<Block>()?;
     block.value_flow.inner().as_ref().touch_recursive();

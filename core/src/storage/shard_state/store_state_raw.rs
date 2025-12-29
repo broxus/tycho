@@ -16,7 +16,7 @@ use weedb::{BoundedCfHandle, rocksdb};
 
 use super::cell_storage::*;
 use super::entries_buffer::*;
-use crate::storage::{BriefBocHeader, CellsDb, ShardStateParams, ShardStateReader};
+use crate::storage::{BriefBocHeader, CellsDb, ShardStateReader};
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
@@ -28,17 +28,12 @@ pub struct StoreStateContext {
 
 impl StoreStateContext {
     // Stores shard state and returns the hash of its root cell.
-    pub fn store<R>(
-        &self,
-        block_id: &BlockId,
-        reader: R,
-        params: ShardStateParams,
-    ) -> Result<HashBytes>
+    pub fn store<R>(&self, block_id: &BlockId, reader: R) -> Result<HashBytes>
     where
         R: std::io::Read,
     {
         let preprocessed = self.preprocess(reader)?;
-        self.finalize(block_id, preprocessed, params)
+        self.finalize(block_id, preprocessed)
     }
 
     fn preprocess<R>(&self, reader: R) -> Result<PreprocessedState>
@@ -100,12 +95,7 @@ impl StoreStateContext {
         }
     }
 
-    fn finalize(
-        &self,
-        block_id: &BlockId,
-        preprocessed: PreprocessedState,
-        params: ShardStateParams,
-    ) -> Result<HashBytes> {
+    fn finalize(&self, block_id: &BlockId, preprocessed: PreprocessedState) -> Result<HashBytes> {
         // 2^7 bits + 1 bytes
         const MAX_DATA_SIZE: usize = 128;
         const CELLS_PER_BATCH: u64 = 1_000_000;
@@ -218,15 +208,14 @@ impl StoreStateContext {
         let root_hash = ctx.entries_buffer.repr_hash();
         ctx.final_check(root_hash)?;
 
-        let mut value = Vec::with_capacity(33);
-        params.encode_value(HashBytes::wrap(root_hash), &mut value);
-
         self.cell_storage
             .apply_temp_cell(HashBytes::wrap(root_hash))?;
         ctx.clear_temp_cells(&self.cells_db)?;
 
         let shard_state_key = block_id.to_vec();
-        self.cells_db.shard_states.insert(&shard_state_key, value)?;
+        self.cells_db
+            .shard_states
+            .insert(&shard_state_key, root_hash.as_slice())?;
 
         pg.complete();
 
@@ -613,9 +602,7 @@ mod test {
             #[allow(clippy::disallowed_methods)]
             let file = File::open(file.path())?;
 
-            store_ctx.store(&block_id, file, ShardStateParams {
-                is_zerostate: false,
-            })?;
+            store_ctx.store(&block_id, file)?;
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");

@@ -15,6 +15,7 @@ use tycho_block_util::block::{
 use tycho_block_util::queue::QueueDiffStuffAug;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_types::models::BlockId;
+use tycho_types::prelude::*;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers;
 
@@ -26,8 +27,7 @@ pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProv
 pub use self::box_provider::BoxBlockProvider;
 use self::futures::SelectNonEmptyFut;
 pub use self::storage_provider::StorageBlockProvider;
-use crate::global_config::ZerostateId;
-use crate::storage::{CoreStorage, MaybeExistingHandle, NewBlockMeta};
+use crate::storage::{BlockHandle, CoreStorage, MaybeExistingHandle, NewBlockMeta};
 
 mod archive_provider;
 mod blockchain_provider;
@@ -503,18 +503,18 @@ pub struct CheckProof<'a> {
 //       and I don't want to parse block info twice to check queue diff separately.
 pub struct ProofChecker {
     storage: CoreStorage,
+    zerostate_seqno: AtomicU32,
     cached_zerostate: ArcSwapAny<Option<ShardStateStuff>>,
     cached_prev_key_block_proof: ArcSwapAny<Option<BlockProofStuff>>,
-    zerostate_id: ZerostateId,
 }
 
 impl ProofChecker {
-    pub fn new(zerostate_id: ZerostateId, storage: CoreStorage) -> Self {
+    pub fn new(storage: CoreStorage) -> Self {
         Self {
             storage,
+            zerostate_seqno: AtomicU32::new(UNINIT_MC_SEQNO),
             cached_zerostate: Default::default(),
             cached_prev_key_block_proof: Default::default(),
-            zerostate_id,
         }
     }
 
@@ -567,22 +567,11 @@ impl ProofChecker {
                     )
                 })?;
 
-            if handle.id().seqno == self.zerostate_id.seqno {
-                let zerostate = 'zerostate: {
-                    if let Some(zerostate) = self.cached_zerostate.load_full() {
-                        break 'zerostate zerostate;
-                    }
-
-                    let shard_states = self.storage.shard_state_storage();
-                    let zerostate = shard_states
-                        .load_state(0, handle.id())
-                        .await
-                        .context("failed to load mc zerostate to check proof")?;
-
-                    self.cached_zerostate.store(Some(zerostate.clone()));
-
-                    zerostate
-                };
+            if handle.id().seqno == self.load_zerostate_seqno() {
+                let zerostate = self
+                    .load_zerostate(&handle)
+                    .await
+                    .context("failed to load zerostate to check proof")?;
 
                 check_with_master_state(proof, &zerostate, &virt_block, &virt_block_info)?;
             } else {
@@ -629,7 +618,50 @@ impl ProofChecker {
 
         Ok(meta)
     }
+
+    fn load_zerostate_seqno(&self) -> u32 {
+        let seqno = self.zerostate_seqno.load(Ordering::Acquire);
+        if seqno != UNINIT_MC_SEQNO {
+            return seqno;
+        }
+
+        let seqno = match self.storage.node_state().load_zerostate_id() {
+            Some(zerostate) => zerostate.seqno,
+            // Fallback to the previos behavior.
+            None => 0,
+        };
+        self.zerostate_seqno.store(seqno, Ordering::Release);
+        seqno
+    }
+
+    async fn load_zerostate(&self, handle: &BlockHandle) -> Result<ShardStateStuff> {
+        if let Some(zerostate) = self.cached_zerostate.load_full() {
+            return Ok(zerostate);
+        }
+
+        let zerostate = if let Some(proof) = self.storage.node_state().load_zerostate_proof() {
+            let untracked = self
+                .storage
+                .shard_state_storage()
+                .min_ref_mc_state()
+                .insert_untracked();
+
+            ShardStateStuff::from_root(handle.id(), Cell::virtualize(proof), untracked)
+                .context("failed to parse zerostate proof")?
+        } else {
+            // Fallback to the previos behavior.
+            self.storage
+                .shard_state_storage()
+                .load_state(0, handle.id())
+                .await?
+        };
+
+        self.cached_zerostate.store(Some(zerostate.clone()));
+        Ok(zerostate)
+    }
 }
+
+const UNINIT_MC_SEQNO: u32 = u32::MAX;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 #[serde(default)]
