@@ -25,8 +25,7 @@ impl ProgressBar {
     }
 
     pub fn add_progress(&mut self, value: impl Into<u64>) {
-        self.current += value.into();
-        self.progress_message();
+        self.set_progress(self.current + value.into());
     }
 
     pub fn set_progress(&mut self, current: impl Into<u64>) {
