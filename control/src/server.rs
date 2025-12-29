@@ -175,7 +175,8 @@ impl ControlServerBuilder {
             let mc_state = storage
                 .shard_state_storage()
                 .load_state(mc_block_id.seqno, &mc_block_id)
-                .await?;
+                .await
+                .context("failed to load mc state for control server")?;
 
             let config = mc_state.config_params()?;
 
@@ -550,7 +551,8 @@ impl proto::ControlServer for ControlServer {
                 .storage
                 .shard_state_storage()
                 .load_state(block_handle.ref_by_mc_seqno(), block_handle.id())
-                .await?;
+                .await
+                .context("failed to load account state")?;
 
             // Find the account state in it
             match state.as_ref().load_accounts()?.get(req.address.address)? {

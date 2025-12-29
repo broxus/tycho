@@ -16,7 +16,7 @@ use tycho_consensus::test_utils::{AnchorConsumer, LastAnchorFile, test_logger};
 use tycho_core::block_strider::{FileZerostateProvider, ZerostateProvider};
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::node::NodeKeys;
-use tycho_core::storage::CoreStorage;
+use tycho_core::storage::{CoreStorage, ShardStateParams};
 use tycho_crypto::ed25519;
 use tycho_network::PeerId;
 use tycho_storage::StorageContext;
@@ -356,14 +356,19 @@ async fn load_mc_zerostate(
     tracing::info!("loading zerostate {:?}", zerostate_block_id);
     let root_hash = storage
         .shard_state_storage()
-        .store_state_bytes(&zerostate_block_id, masterchain_zerostate)
+        .store_state_bytes(
+            &zerostate_block_id,
+            masterchain_zerostate,
+            ShardStateParams { is_zerostate: true },
+        )
         .await?;
     assert_eq!(root_hash, mc_zerostate_id.root_hash);
 
     let masterchain_zerostate = storage
         .shard_state_storage()
         .load_state(zerostate_block_id.seqno, &zerostate_block_id)
-        .await?;
+        .await
+        .context("Failed to load zerostate for mempool")?;
 
     Ok(masterchain_zerostate)
 }

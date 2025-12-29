@@ -197,7 +197,8 @@ impl NodeBase {
             .core_storage
             .shard_state_storage()
             .load_state(block_id.seqno, block_id)
-            .await?;
+            .await
+            .context("update_validator_set_from_shard_state failed to load state")?;
 
         let config = mc_state.config_params()?;
         let current_vset = config.get_current_validator_set()?;

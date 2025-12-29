@@ -72,6 +72,14 @@ impl BlockHandleStorage {
         updated
     }
 
+    pub fn set_is_zerostate(&self, handle: &BlockHandle) -> bool {
+        let updated = handle.meta().add_flags(BlockFlags::IS_ZEROSTATE);
+        if updated {
+            self.store_handle(handle, false);
+        }
+        updated
+    }
+
     pub fn create_or_load_handle(
         &self,
         block_id: &BlockId,

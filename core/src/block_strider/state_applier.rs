@@ -214,6 +214,7 @@ where
 
         state_storage
             .store_state(handle, &new_state, StoreStateHint {
+                is_zerostate: false,
                 block_data_size: Some(block.data_size()),
             })
             .await
