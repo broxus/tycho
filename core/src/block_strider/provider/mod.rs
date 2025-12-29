@@ -577,7 +577,7 @@ impl ProofChecker {
                     let zerostate = shard_states
                         .load_state(0, handle.id())
                         .await
-                        .context("failed to load mc zerostate")?;
+                        .context("failed to load mc zerostate to check proof")?;
 
                     self.cached_zerostate.store(Some(zerostate.clone()));
 

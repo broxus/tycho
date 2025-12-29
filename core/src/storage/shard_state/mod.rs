@@ -27,6 +27,39 @@ mod cell_storage;
 mod entries_buffer;
 mod store_state_raw;
 
+// TODO: Revert when https://github.com/broxus/tycho/issues/990 is implemented,
+// we will store zerostate proof.
+// NOTE: If some other data is needed during insert, add to these params.
+#[derive(Debug, Clone)]
+pub struct ShardStateParams {
+    pub is_zerostate: bool,
+}
+
+impl ShardStateParams {
+    fn encode_value(&self, root_hash: &HashBytes, output: &mut Vec<u8>) {
+        let mut flags = ShardStateFlags::empty();
+        flags.set(ShardStateFlags::IS_ZEROSTATE, self.is_zerostate);
+
+        output.extend_from_slice(root_hash.as_slice());
+        output.push(flags.bits());
+    }
+
+    fn decode_value(value: &[u8]) -> (HashBytes, Self) {
+        let root_hash = HashBytes::from_slice(&value[0..32]);
+        let flags = ShardStateFlags::from_bits_retain(value.get(32).copied().unwrap_or_default());
+        (root_hash, Self {
+            is_zerostate: flags.contains(ShardStateFlags::IS_ZEROSTATE),
+        })
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ShardStateFlags: u8 {
+        const IS_ZEROSTATE = 1 << 7;
+    }
+}
+
 pub struct ShardStateStorage {
     cells_db: CellsDb,
 
@@ -172,7 +205,15 @@ impl ShardStateStorage {
             in_mem_store.finish();
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
-            batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
+            let mut flags = ShardStateFlags::empty();
+            flags.set(ShardStateFlags::IS_ZEROSTATE, hint.is_zerostate);
+
+            let params = ShardStateParams {
+                is_zerostate: hint.is_zerostate,
+            };
+            let mut value = Vec::with_capacity(33);
+            params.encode_value(&root_hash, &mut value);
+            batch.put_cf(&cf.bound(), block_id.to_vec(), value);
 
             let hist = HistogramGuard::begin("tycho_storage_state_update_time_high");
             metrics::histogram!("tycho_storage_state_update_size_bytes")
@@ -209,7 +250,12 @@ impl ShardStateStorage {
         Ok(updated)
     }
 
-    async fn store_state_inner<R>(&self, block_id: &BlockId, boc: R) -> Result<HashBytes>
+    async fn store_state_inner<R>(
+        &self,
+        block_id: &BlockId,
+        boc: R,
+        params: ShardStateParams,
+    ) -> Result<HashBytes>
     where
         R: std::io::Read + Send + 'static,
     {
@@ -226,19 +272,29 @@ impl ShardStateStorage {
             // NOTE: Ensure that GC lock is captured by the spawned thread.
             let _gc_lock = gc_lock;
 
-            ctx.store(&block_id, boc)
+            ctx.store(&block_id, boc, params)
         })
         .await?
     }
 
     // Stores shard state and returns the hash of its root cell.
-    pub async fn store_state_file(&self, block_id: &BlockId, boc: File) -> Result<HashBytes> {
-        self.store_state_inner(block_id, boc).await
+    pub async fn store_state_file(
+        &self,
+        block_id: &BlockId,
+        boc: File,
+        params: ShardStateParams,
+    ) -> Result<HashBytes> {
+        self.store_state_inner(block_id, boc, params).await
     }
 
-    pub async fn store_state_bytes(&self, block_id: &BlockId, boc: Bytes) -> Result<HashBytes> {
+    pub async fn store_state_bytes(
+        &self,
+        block_id: &BlockId,
+        boc: Bytes,
+        params: ShardStateParams,
+    ) -> Result<HashBytes> {
         let cursor = Cursor::new(boc);
-        self.store_state_inner(block_id, cursor).await
+        self.store_state_inner(block_id, cursor, params).await
     }
 
     // NOTE: DO NOT try to make a separate `load_state_root` method
@@ -321,10 +377,11 @@ impl ShardStateStorage {
             };
 
             let block_id = BlockId::from_slice(key);
-            let root_hash = HashBytes::from_slice(value);
+            let (root_hash, params) = ShardStateParams::decode_value(value);
 
             // Skip blocks from zero state and top blocks
             if block_id.seqno == 0
+                || params.is_zerostate
                 || top_blocks.contains_shard_seqno(&block_id.shard, block_id.seqno)
             {
                 iter.next();
@@ -492,6 +549,7 @@ impl ShardStateStorage {
 
 #[derive(Default, Debug, Clone, Copy)]
 pub struct StoreStateHint {
+    pub is_zerostate: bool,
     pub block_data_size: Option<usize>,
 }
 

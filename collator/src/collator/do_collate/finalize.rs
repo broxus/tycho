@@ -13,6 +13,7 @@ use tycho_block_util::dict::{
 use tycho_block_util::queue::{QueuePartitionIdx, SerializedQueueDiff};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::prelude::ConsensusConfigExt;
+use tycho_core::global_config::ZerostateId;
 use tycho_types::boc;
 use tycho_types::cell::Lazy;
 use tycho_types::merkle::*;
@@ -68,6 +69,7 @@ impl Phase<FinalizeState> {
         &mut self,
         messages_reader: MessagesReader<'a, EnqueuedMessage>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
+        zerostate_id: ZerostateId,
     ) -> Result<FinalizeMessagesReaderResult, CollatorError> {
         // get top other updated shard blocks ids
         let top_other_updated_shard_blocks_ids =
@@ -100,7 +102,7 @@ impl Phase<FinalizeState> {
         let mut other_updated_top_shard_diffs_info = FastHashMap::default();
 
         for top_block_id in top_other_updated_shard_blocks_ids.iter() {
-            if top_block_id.seqno == 0 {
+            if top_block_id.seqno == zerostate_id.seqno {
                 continue;
             }
 

@@ -155,7 +155,8 @@ impl Node {
             .core_storage
             .shard_state_storage()
             .load_state(last_block_id.seqno, last_block_id)
-            .await?;
+            .await
+            .context("failed to load mc zerostate on run")?;
 
         {
             let config = mc_state.config_params()?;

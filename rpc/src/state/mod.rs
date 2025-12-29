@@ -650,7 +650,8 @@ impl Inner {
             } else {
                 let state = shard_states
                     .load_state(handle.id().seqno, handle.id())
-                    .await?;
+                    .await
+                    .context("failed to load key block state on rpc init")?;
                 let state = state.as_ref();
 
                 let Some(extra) = state.load_custom()? else {
@@ -664,7 +665,8 @@ impl Inner {
 
         let mut mc_state = shard_states
             .load_state(mc_block_id.seqno, mc_block_id)
-            .await?;
+            .await
+            .context("failed to load state on rpc init")?;
         self.update_timings(mc_state.as_ref().gen_utime, mc_state.as_ref().seqno);
 
         if let Some(rpc_storage) = &self.rpc_storage {
@@ -698,7 +700,8 @@ impl Inner {
 
                     let state = shard_states
                         .load_state(mc_block_id.seqno, &block_id)
-                        .await?;
+                        .await
+                        .context("failed to load shard state on init")?;
 
                     // Reset shard accounts.
                     // NOTE: Consume shard state to prevent if from being fully loaded.
@@ -713,7 +716,8 @@ impl Inner {
                 // Reload mc state.
                 mc_state = shard_states
                     .load_state(mc_block_id.seqno, mc_block_id)
-                    .await?;
+                    .await
+                    .context("failed to reload mc state for rpc")?;
             }
 
             // Fill config.
@@ -728,7 +732,8 @@ impl Inner {
                 let block_id = item?;
                 let state = shard_states
                     .load_state(mc_block_id.seqno, &block_id)
-                    .await?;
+                    .await
+                    .context("failed to load shard state to fill cache")?;
 
                 // Fill accounts cache.
                 self.sc_accounts

@@ -207,7 +207,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             .storage
             .shard_state_storage()
             .load_state(ref_by_mc_seqno, block_id)
-            .await?;
+            .await
+            .context("failed to load state for node state adapter")?;
 
         Ok(state)
     }

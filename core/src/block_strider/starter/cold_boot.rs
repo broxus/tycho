@@ -26,7 +26,7 @@ use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
 use crate::storage::{
     BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
-    PersistentStateKind,
+    PersistentStateKind, ShardStateParams,
 };
 
 impl StarterInner {
@@ -394,7 +394,9 @@ impl StarterInner {
         let mc_block_id = self.zerostate.as_block_id();
         tracing::info!(%mc_block_id, "importing masterchain zerostate");
         let root_hash = state_storage
-            .store_state_bytes(&mc_block_id, mc_zerostate)
+            .store_state_bytes(&mc_block_id, mc_zerostate, ShardStateParams {
+                is_zerostate: true,
+            })
             .await?;
         anyhow::ensure!(
             root_hash == self.zerostate.root_hash,
@@ -442,7 +444,9 @@ impl StarterInner {
 
             tracing::info!(%block_id, "importing shard zerostate");
             let root_hash = state_storage
-                .store_state_bytes(&block_id, state_bytes)
+                .store_state_bytes(&block_id, state_bytes, ShardStateParams {
+                    is_zerostate: true,
+                })
                 .await?;
             anyhow::ensure!(
                 root_hash == block_id.root_hash,
@@ -462,8 +466,17 @@ impl StarterInner {
             anyhow::ensure!(state.state().shard_ident == block_id.shard);
             anyhow::ensure!(state.state().seqno == block_id.seqno);
 
+            handle_storage.set_is_zerostate(&handle);
             handle_storage.set_has_shard_state(&handle);
             handle_storage.set_block_committed(&handle);
+
+            persistent_states
+                .store_shard_state(
+                    mc_block_id.seqno,
+                    &handle,
+                    state.ref_mc_state_handle().clone(),
+                )
+                .await?;
 
             tracing::debug!(%block_id, "imported persistent shard state");
         }
@@ -474,6 +487,7 @@ impl StarterInner {
             zerostates.len()
         );
 
+        handle_storage.set_is_zerostate(&handle);
         handle_storage.set_has_shard_state(&handle);
         handle_storage.set_block_committed(&handle);
 
@@ -495,12 +509,14 @@ impl StarterInner {
         tracing::info!(zerostate_id = %zerostate_id, "download zerostates");
 
         let (handle, state) = self
-            .download_shard_state(&zerostate_id, &zerostate_id)
+            .download_shard_state(&zerostate_id, &zerostate_id, true)
             .await?;
 
         for item in state.shards()?.latest_blocks() {
             let block_id = item?;
-            let _state = self.download_shard_state(&zerostate_id, &block_id).await?;
+            let _state = self
+                .download_shard_state(&zerostate_id, &block_id, true)
+                .await?;
         }
 
         Ok((handle, state))
@@ -521,7 +537,9 @@ impl StarterInner {
         if !self.ignore_states {
             let state_update = block.as_ref().load_state_update()?;
 
-            let (_, shard_state) = self.download_shard_state(mc_block_id, block_id).await?;
+            let (_, shard_state) = self
+                .download_shard_state(mc_block_id, block_id, false)
+                .await?;
             let state_hash = *shard_state.root_cell().repr_hash();
             anyhow::ensure!(
                 state_update.new_hash == state_hash,
@@ -650,6 +668,7 @@ impl StarterInner {
         &self,
         mc_block_id: &BlockId,
         block_id: &BlockId,
+        is_zerostate: bool,
     ) -> Result<(BlockHandle, ShardStateStuff)> {
         enum StoreZeroStateFrom {
             File(FileBuilder),
@@ -708,7 +727,10 @@ impl StarterInner {
         if let Some(handle) = &block_handle
             && handle.has_state()
         {
-            let state = shard_states.load_state(mc_seqno, block_id).await?;
+            let state = shard_states
+                .load_state(mc_seqno, block_id)
+                .await
+                .context("failed to load state on downloaded shard state")?;
 
             if !handle.has_persistent_shard_state() {
                 let from = if state_file.exists() {
@@ -744,7 +766,7 @@ impl StarterInner {
             //       context is too large to be atomic.
             // TODO: Make this operation recoverable to allow an infinite number of attempts.
             shard_states
-                .store_state_file(block_id, file)
+                .store_state_file(block_id, file, ShardStateParams { is_zerostate })
                 .await
                 .context("failed to store shard state file")?;
 

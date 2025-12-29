@@ -9,6 +9,7 @@ use prepare::PrepareState;
 use tycho_block_util::config::{apply_price_factor, compute_gas_price_factor};
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, SerializedQueueDiff};
 use tycho_block_util::state::RefMcStateHandle;
+use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{NewBlockMeta, StoreStateHint};
 use tycho_types::models::*;
 use tycho_types::num::Tokens;
@@ -198,6 +199,8 @@ impl CollatorStdImpl {
         });
         let collation_is_cancelled = state.collation_is_cancelled.clone();
 
+        let zerostate_id = self.zerostate_id;
+
         let do_collate_fut = tycho_util::sync::rayon_run_fifo({
             let collation_session = self.collation_session.clone();
             let config = self.config.clone();
@@ -216,6 +219,7 @@ impl CollatorStdImpl {
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
+                    zerostate_id,
                 );
 
                 CollationOutput {
@@ -383,6 +387,7 @@ impl CollatorStdImpl {
         collation_session: Arc<CollationSessionInfo>,
         wu_used_from_last_anchor: u64,
         usage_tree: UsageTree,
+        zerostate_id: ZerostateId,
     ) -> Result<CollationResult, CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
@@ -438,7 +443,11 @@ impl CollatorStdImpl {
             queue_diff_with_msgs,
             has_unprocessed_messages,
             current_msgs_exec_params,
-        } = finalize_phase.finalize_messages_reader(messages_reader, mq_adapter.clone())?;
+        } = finalize_phase.finalize_messages_reader(
+            messages_reader,
+            mq_adapter.clone(),
+            zerostate_id,
+        )?;
 
         let histogram_create_queue_diff = HistogramGuard::begin_with_labels(
             "tycho_do_collate_create_queue_diff_time_high",
@@ -1031,6 +1040,7 @@ impl CollatorStdImpl {
             let adapter = self.state_node_adapter.clone();
             let new_state_root = finalized.new_state_root.clone();
             let hint = StoreStateHint {
+                is_zerostate: false,
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
             };
             async move {
