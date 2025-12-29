@@ -8,7 +8,9 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tycho_block_util::archive::{ArchiveData, WithArchiveData};
-use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
+use tycho_block_util::block::{
+    BlockProofStuff, BlockProofStuffAug, BlockStuff, prepare_master_state_proof,
+};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::fs::FileBuilder;
@@ -26,7 +28,7 @@ use crate::overlay_client::PunishReason;
 use crate::proto::blockchain::KeyBlockProof;
 use crate::storage::{
     BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
-    PersistentStateKind, ShardStateParams,
+    PersistentStateKind,
 };
 
 impl StarterInner {
@@ -99,14 +101,42 @@ impl StarterInner {
             "old storage cannot be resued for hardforks"
         );
 
+        if let Some(stored_zerostate_id) = node_state.load_zerostate_id() {
+            anyhow::ensure!(
+                stored_zerostate_id == self.zerostate,
+                "stored zerostate id mismatch: stored={stored_zerostate_id:?}, expected={:?}",
+                self.zerostate
+            );
+        }
+
         tracing::info!(init_block_id = %block_id, "preparing init block");
         let prev_key_block = if block_id.seqno == self.zerostate.seqno {
             tracing::info!(%block_id, "using zero state");
 
             let (handle, state) = match zerostates {
                 Some(zerostates) => self.import_zerostates(zerostates).await?,
+                // TODO: Add special case to import only zerostate proof,
+                // but we need to check for some key blocks first.
                 None => self.download_zerostates().await?,
             };
+
+            node_state.store_zerostate_info(
+                &self.zerostate,
+                &prepare_master_state_proof(state.root_cell())
+                    .context("failed to build zerostate proof")?,
+            );
+
+            // NOTE: Reload zerostate proof here to get rid of `StorageCell`.
+            let state = node_state.load_zerostate_proof().expect("we just saved it");
+
+            let untracked = self
+                .storage
+                .shard_state_storage()
+                .min_ref_mc_state()
+                .insert_untracked();
+
+            let state = ShardStateStuff::from_root(handle.id(), Cell::virtualize(state), untracked)
+                .context("failed to parse zerostate proof")?;
 
             // NOTE: Ensure that init block id is always present
             node_state.store_init_mc_block_id(handle.id());
@@ -394,9 +424,7 @@ impl StarterInner {
         let mc_block_id = self.zerostate.as_block_id();
         tracing::info!(%mc_block_id, "importing masterchain zerostate");
         let root_hash = state_storage
-            .store_state_bytes(&mc_block_id, mc_zerostate, ShardStateParams {
-                is_zerostate: true,
-            })
+            .store_state_bytes(&mc_block_id, mc_zerostate)
             .await?;
         anyhow::ensure!(
             root_hash == self.zerostate.root_hash,
@@ -444,9 +472,7 @@ impl StarterInner {
 
             tracing::info!(%block_id, "importing shard zerostate");
             let root_hash = state_storage
-                .store_state_bytes(&block_id, state_bytes, ShardStateParams {
-                    is_zerostate: true,
-                })
+                .store_state_bytes(&block_id, state_bytes)
                 .await?;
             anyhow::ensure!(
                 root_hash == block_id.root_hash,
@@ -579,7 +605,7 @@ impl StarterInner {
             }
         }
 
-        let proof_checker = ProofChecker::new(self.zerostate, self.storage.clone());
+        let proof_checker = ProofChecker::new(self.storage.clone());
 
         // TODO: add retry count to interrupt infinite loop
         'outer: loop {
@@ -766,7 +792,7 @@ impl StarterInner {
             //       context is too large to be atomic.
             // TODO: Make this operation recoverable to allow an infinite number of attempts.
             shard_states
-                .store_state_file(block_id, file, ShardStateParams { is_zerostate })
+                .store_state_file(block_id, file)
                 .await
                 .context("failed to store shard state file")?;
 
@@ -789,6 +815,9 @@ impl StarterInner {
 
             // set flag that state stored
             block_handles.set_has_shard_state(&block_handle);
+            if is_zerostate {
+                block_handles.set_is_zerostate(&block_handle);
+            }
 
             let from = StoreZeroStateFrom::File(state_file);
             try_save_persistent(&block_handle, from)

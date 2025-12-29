@@ -28,8 +28,8 @@ pub use self::persistent_state::{
     ShardStateWriter,
 };
 pub use self::shard_state::{
-    ShardStateParams, ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics,
-    StoreStateHint, split_shard_accounts,
+    ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics, StoreStateHint,
+    split_shard_accounts,
 };
 
 pub mod tables;
@@ -64,6 +64,8 @@ impl CoreStorage {
         cells_db.normalize_version()?;
         cells_db.apply_migrations().await?;
 
+        let node_state_storage = Arc::new(NodeStateStorage::new(db.clone()));
+
         let blocks_storage_config = BlockStorageConfig {
             blocks_cache: config.blocks_cache,
             blobs_root: ctx.root_dir().path().join("blobs"),
@@ -90,14 +92,13 @@ impl CoreStorage {
         let persistent_state_storage = PersistentStateStorage::new(
             cells_db.clone(),
             ctx.files_dir(),
+            node_state_storage.clone(),
             block_handle_storage.clone(),
             block_storage.clone(),
             shard_state_storage.clone(),
         )?;
 
         persistent_state_storage.preload().await?;
-
-        let node_state_storage = NodeStateStorage::new(db.clone());
 
         let gc = CoreStorageGc::new(
             &node_state_storage,
@@ -191,6 +192,6 @@ struct Inner {
     block_connection_storage: Arc<BlockConnectionStorage>,
     block_storage: Arc<BlockStorage>,
     shard_state_storage: Arc<ShardStateStorage>,
-    node_state_storage: NodeStateStorage,
+    node_state_storage: Arc<NodeStateStorage>,
     persistent_state_storage: PersistentStateStorage,
 }

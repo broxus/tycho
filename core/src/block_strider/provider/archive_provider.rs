@@ -21,7 +21,6 @@ use tycho_util::fs::TargetWriter;
 use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc;
 use crate::blockchain_rpc::BlockchainRpcClient;
-use crate::global_config::ZerostateId;
 use crate::overlay_client::{Neighbour, PunishReason};
 #[cfg(feature = "s3")]
 use crate::s3::S3Client;
@@ -50,11 +49,10 @@ pub struct ArchiveBlockProvider {
 impl ArchiveBlockProvider {
     pub fn new(
         client: impl IntoArchiveClient,
-        zerostate_id: ZerostateId,
         storage: CoreStorage,
         config: ArchiveBlockProviderConfig,
     ) -> Self {
-        let proof_checker = ProofChecker::new(zerostate_id, storage.clone());
+        let proof_checker = ProofChecker::new(storage.clone());
 
         Self {
             inner: Arc::new(Inner {

@@ -1040,7 +1040,6 @@ impl CollatorStdImpl {
             let adapter = self.state_node_adapter.clone();
             let new_state_root = finalized.new_state_root.clone();
             let hint = StoreStateHint {
-                is_zerostate: false,
                 block_data_size: Some(finalized.block_candidate.block.data_size()),
             };
             async move {
