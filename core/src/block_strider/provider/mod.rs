@@ -625,11 +625,11 @@ impl ProofChecker {
             return seqno;
         }
 
-        let seqno = match self.storage.node_state().load_zerostate_id() {
-            Some(zerostate) => zerostate.seqno,
-            // Fallback to the previos behavior.
-            None => 0,
-        };
+        let seqno = self
+            .storage
+            .node_state()
+            .load_zerostate_mc_seqno()
+            .unwrap_or_default();
         self.zerostate_seqno.store(seqno, Ordering::Release);
         seqno
     }
