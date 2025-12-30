@@ -153,6 +153,7 @@ impl ShardStateHandler {
             shard_description.nx_cc_updated = true;
             shard_description.next_catchain_seqno = 0;
             shard_description.ext_processed_to_anchor_id = 0;
+            shard_description.top_sc_block_updated = false;
             shard_description.min_ref_mc_seqno = u32::MAX;
             shard_description.gen_utime = ssu.gen_utime;
 

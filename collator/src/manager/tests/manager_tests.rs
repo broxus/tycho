@@ -47,7 +47,7 @@ use crate::types::processed_upto::{
 };
 use crate::types::{
     BlockCandidate, BlockStuffForSync, ProcessedTo, ShardDescriptionShort,
-    ShardDescriptionShortExt as _, ShardHashesExt, ShardIdentExt,
+    ShardDescriptionShortExt as _, ShardHashesExt, ShardIdentExt, TopBlockId,
 };
 use crate::validator::{ValidationComplete, ValidationStatus, ValidatorStdImpl};
 
@@ -1894,7 +1894,7 @@ async fn test_queue_restore_on_sync() {
     // test state updater
     let state_adapter = Arc::new(TestStateNodeAdapter::default());
     // blocks cache
-    let blocks_cache = BlocksCache::new();
+    let blocks_cache = BlocksCache::new(&Default::default());
 
     //---------
     // test data
@@ -2025,6 +2025,7 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let mc_block_id_1 = *generated_block_info.block_stuff.id();
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
@@ -2106,8 +2107,16 @@ async fn test_queue_restore_on_sync() {
         .mq_adapter
         .commit_diff(
             [
-                (test_adapter.last_sc_block_id, false),
-                (test_adapter.last_mc_block_id, true),
+                TopBlockId {
+                    ref_by_mc_seqno: test_adapter.last_mc_block_id.seqno,
+                    block_id: test_adapter.last_mc_block_id,
+                    updated: true,
+                },
+                TopBlockId {
+                    ref_by_mc_seqno: test_adapter.last_mc_block_id.seqno,
+                    block_id: test_adapter.last_sc_block_id,
+                    updated: false,
+                },
             ]
             .into_iter()
             .collect(),
@@ -2119,7 +2128,7 @@ async fn test_queue_restore_on_sync() {
     test_adapter
         .blocks_cache
         .store_master_block_validation_result(
-            test_adapter.last_mc_blocks.get(&1).unwrap().id(),
+            &mc_block_id_1,
             ValidationStatus::Complete(ValidationComplete {
                 signatures: Default::default(),
                 total_weight: 100,
@@ -2127,7 +2136,7 @@ async fn test_queue_restore_on_sync() {
         );
     let extracted_subgraph = test_adapter
         .blocks_cache
-        .extract_mc_block_subgraph_for_sync(test_adapter.last_mc_blocks.get(&1).unwrap().id());
+        .extract_mc_block_subgraph_for_sync(&mc_block_id_1);
     assert!(matches!(
         extracted_subgraph,
         McBlockSubgraphExtract::Extracted(_)
@@ -2137,8 +2146,16 @@ async fn test_queue_restore_on_sync() {
         .mq_adapter
         .commit_diff(
             [
-                (test_adapter.last_sc_block_id, true),
-                (*test_adapter.last_mc_blocks.get(&1).unwrap().id(), true),
+                TopBlockId {
+                    ref_by_mc_seqno: mc_block_id_1.seqno,
+                    block_id: mc_block_id_1,
+                    updated: true,
+                },
+                TopBlockId {
+                    ref_by_mc_seqno: mc_block_id_1.seqno,
+                    block_id: test_adapter.last_sc_block_id,
+                    updated: true,
+                },
             ]
             .into_iter()
             .collect(),
@@ -2211,17 +2228,12 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
-
-    let generated_block_info_cloned = generated_block_info.clone();
-
+    let mc_block_id_3 = *generated_block_info.block_stuff.id();
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(
-            generated_block_info_cloned.block_stuff.id(),
-            generated_block_info,
-        )
+        .store_as_received(&mc_block_id_3, generated_block_info)
         .await;
 
     // check top shard blocks of stored master block 03
@@ -2282,17 +2294,12 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
-
-    let generated_block_info_cloned = generated_block_info.clone();
-
+    let mc_block_id_4 = *generated_block_info.block_stuff.id();
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(
-            generated_block_info_cloned.block_stuff.id(),
-            generated_block_info,
-        )
+        .store_as_received(&mc_block_id_4, generated_block_info)
         .await;
 
     // shard processed to shard block 02
@@ -2344,16 +2351,12 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
-    let generated_block_info_cloned = generated_block_info.clone();
-
+    let mc_block_id_5 = *generated_block_info.block_stuff.id();
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(
-            generated_block_info_cloned.block_stuff.id(),
-            generated_block_info,
-        )
+        .store_as_received(&mc_block_id_5, generated_block_info)
         .await;
 
     // restore queue in case of sync
@@ -2570,16 +2573,12 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
-    let generated_block_info_cloned = generated_block_info.clone();
-
+    let mc_block_id_6 = *generated_block_info.block_stuff.id();
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(
-            generated_block_info_cloned.block_stuff.id(),
-            generated_block_info,
-        )
+        .store_as_received(&mc_block_id_6, generated_block_info)
         .await;
 
     // master processed to shard block 08, and master block 06
@@ -2602,11 +2601,12 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
+    let mc_block_id_7 = *generated_block_info.block_stuff.id();
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(last_mc_block_stuff.id(), generated_block_info)
+        .store_as_received(&mc_block_id_7, generated_block_info)
         .await;
 
     // shard processed to shard block 08
@@ -2682,16 +2682,12 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
-    let generated_block_info_cloned = generated_block_info.clone();
-
+    let mc_block_id_8 = *generated_block_info.block_stuff.id();
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(
-            generated_block_info_cloned.block_stuff.id(),
-            generated_block_info,
-        )
+        .store_as_received(&mc_block_id_8, generated_block_info)
         .await;
 
     // shard processed to shard block 09
@@ -2767,16 +2763,12 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
-    let generated_block_info_cloned = generated_block_info.clone();
-
+    let mc_block_id_9 = *generated_block_info.block_stuff.id();
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(
-            generated_block_info_cloned.block_stuff.id(),
-            generated_block_info,
-        )
+        .store_as_received(&mc_block_id_9, generated_block_info)
         .await;
 
     // restore queue in case of sync
@@ -2957,7 +2949,7 @@ async fn test_queue_restore_on_sync() {
     } = test_adapter.store_as_candidate(generated_block_info);
 
     // node was stopped here, blocks cache was dropped
-    test_adapter.blocks_cache = BlocksCache::new();
+    test_adapter.blocks_cache = BlocksCache::new(&Default::default());
 
     // shard processed to shard block 10
     test_adapter
@@ -3091,16 +3083,12 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
-    let generated_block_info_cloned = generated_block_info.clone();
-
+    let mc_block_id_12 = *generated_block_info.block_stuff.id();
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(
-            generated_block_info_cloned.block_stuff.id(),
-            generated_block_info,
-        )
+        .store_as_received(&mc_block_id_12, generated_block_info)
         .await;
 
     // restore queue in case of sync
@@ -3257,7 +3245,7 @@ async fn test_queue_restore_on_sync() {
     test_adapter.store_as_candidate(generated_block_info);
 
     // node was stopped here, blocks cache was dropped
-    test_adapter.blocks_cache = BlocksCache::new();
+    test_adapter.blocks_cache = BlocksCache::new(&Default::default());
 
     // create different shard block 17 but do not receive it (will not be stored into cache)
     let generated_block_info = test_adapter.gen_shard_block(
@@ -3434,16 +3422,12 @@ async fn test_queue_restore_on_sync() {
         false,
         5,
     );
-    let generated_block_info_cloned = generated_block_info.clone();
-
+    let mc_block_id_15 = *generated_block_info.block_stuff.id();
     StoreBlockResult {
         block_stuff: last_mc_block_stuff,
         ..
     } = test_adapter
-        .store_as_received(
-            generated_block_info_cloned.block_stuff.id(),
-            generated_block_info,
-        )
+        .store_as_received(&mc_block_id_15, generated_block_info)
         .await;
     let _ = &last_mc_block_stuff;
 
@@ -3859,12 +3843,13 @@ where
                     .as_vec()
                     .unwrap()
                     .iter()
-                    .map(|(shard_id, shard_descr): &(_, ShardDescriptionShort)| {
-                        (
-                            shard_descr.get_block_id(*shard_id),
-                            shard_descr.top_sc_block_updated,
-                        )
-                    })
+                    .map(
+                        |(shard_id, shard_descr): &(_, ShardDescriptionShort)| TopBlockId {
+                            ref_by_mc_seqno: state_stuff.block_id().seqno,
+                            block_id: shard_descr.get_block_id(*shard_id),
+                            updated: shard_descr.top_sc_block_updated,
+                        },
+                    )
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -3881,7 +3866,7 @@ where
             prev_blocks_ids: vec![prev_block_id],
             top_shard_blocks_ids: mc_top_shard_blocks_info
                 .iter()
-                .map(|(block_id, _updated)| *block_id)
+                .map(|item| item.block_id)
                 .collect(),
             chain_time: 0,
             processed_to_anchor_id: 0,

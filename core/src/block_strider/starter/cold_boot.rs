@@ -435,6 +435,17 @@ impl StarterInner {
             .load_state(mc_block_id.seqno, &mc_block_id)
             .await?;
 
+        let block_id_from_state = BlockIdShort {
+            shard: mc_zerostate.state().shard_ident,
+            seqno: mc_zerostate.state().seqno,
+        };
+        anyhow::ensure!(
+            block_id_from_state == mc_block_id.as_short_id(),
+            "masterchain zerostate block id mismatch: expected={}, loaded={}",
+            mc_block_id.as_short_id(),
+            block_id_from_state
+        );
+
         let global_id = mc_zerostate.state().global_id;
         let gen_utime = mc_zerostate.state().gen_utime;
 
@@ -488,9 +499,16 @@ impl StarterInner {
                 .load_state(mc_block_id.seqno, handle.id())
                 .await?;
 
-            // todo: error text
-            anyhow::ensure!(state.state().shard_ident == block_id.shard);
-            anyhow::ensure!(state.state().seqno == block_id.seqno);
+            let block_id_from_state = BlockIdShort {
+                shard: state.state().shard_ident,
+                seqno: state.state().seqno,
+            };
+            anyhow::ensure!(
+                block_id_from_state == block_id.as_short_id(),
+                "shard zerostate block id mismatch: expected={}, loaded={}",
+                block_id.as_short_id(),
+                block_id_from_state
+            );
 
             handle_storage.set_is_zerostate(&handle);
             handle_storage.set_has_shard_state(&handle);
@@ -517,6 +535,7 @@ impl StarterInner {
         handle_storage.set_has_shard_state(&handle);
         handle_storage.set_block_committed(&handle);
 
+        // TODO: Somehow save the original file.
         persistent_states
             .store_shard_state(
                 mc_block_id.seqno,

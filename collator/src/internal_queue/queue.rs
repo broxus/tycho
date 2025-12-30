@@ -24,6 +24,7 @@ use crate::internal_queue::types::stats::{
     AccountStatistics, DiffStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::storage::models::DiffInfo;
+use crate::types::TopBlockId;
 use crate::{internal_queue, tracing_targets};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -92,7 +93,7 @@ where
     /// Commit diffs to the state and update GC
     fn commit_diff(
         &self,
-        mc_top_blocks: &[(BlockId, bool)],
+        mc_top_blocks: &[TopBlockId],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
 
@@ -280,7 +281,7 @@ where
 
     fn commit_diff(
         &self,
-        mc_top_blocks: &[(BlockId, bool)],
+        mc_top_blocks: &[TopBlockId],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {
         // Take global lock
@@ -288,8 +289,7 @@ where
 
         let mc_block_id = mc_top_blocks
             .iter()
-            .find(|(block_id, _)| block_id.is_masterchain())
-            .map(|(block_id, _)| block_id)
+            .find_map(|item| item.block_id.is_masterchain().then_some(&item.block_id))
             .ok_or_else(|| anyhow!("Masterchain block not found in commit_diff"))?;
 
         // check current commit pointer. If it is greater than committing diff then skip
@@ -310,7 +310,9 @@ where
 
         let mut commit_pointers = FastHashMap::default();
 
-        for (block_id, top_shard_block_changed) in mc_top_blocks {
+        for item in mc_top_blocks {
+            let block_id = &item.block_id;
+
             // Check if the diff is already applied
             let diff = self
                 .state
@@ -318,7 +320,7 @@ where
 
             let diff = match diff {
                 // If top shard block changed and diff not found, then bail
-                None if *top_shard_block_changed && mc_block_id.seqno > self.zerostate_id.seqno => {
+                None if item.updated && item.ref_by_mc_seqno > self.zerostate_id.seqno => {
                     bail!("Diff not found for block_id: {}", block_id)
                 }
                 // If top shard block not changed and diff not found, then continue

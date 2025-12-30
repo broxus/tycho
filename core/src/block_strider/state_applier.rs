@@ -241,9 +241,8 @@ where
             let prev_utime = this
                 .last_key_block_utime
                 .swap(block_info.gen_utime, Ordering::Relaxed);
-            let is_persistent = BlockStuff::compute_is_persistent(block_info.gen_utime, prev_utime);
 
-            if is_persistent && cx.block.id().seqno != 0 {
+            if BlockStuff::compute_is_persistent(block_info.gen_utime, prev_utime) {
                 let mut prev_task = this.prev_state_task.lock().await;
                 if let Some(task) = &mut *prev_task {
                     task.join().await?;
@@ -398,11 +397,6 @@ impl<S> Inner<S> {
         mc_block_handle: BlockHandle,
         mc_block: BlockStuff,
     ) -> Result<()> {
-        if mc_block_handle.id().seqno == 0 {
-            // No queue states for zerostate.
-            return Ok(());
-        }
-
         let blocks = self.storage.block_storage();
         let block_handles = self.storage.block_handle_storage();
         let persistent_states = self.storage.persistent_state_storage();
@@ -411,11 +405,6 @@ impl<S> Inner<S> {
 
         for entry in mc_block.load_custom()?.shards.latest_blocks() {
             let block_id = entry?;
-            if block_id.seqno == 0 {
-                // No queue states for zerostate.
-                continue;
-            }
-
             let Some(block_handle) = block_handles.load_handle(&block_id) else {
                 anyhow::bail!("top shard block handle not found: {block_id}");
             };

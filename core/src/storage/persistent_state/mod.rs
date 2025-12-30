@@ -639,12 +639,10 @@ impl PersistentStateStorage {
         }
 
         let this = self.inner.clone();
-
-        let zerostate_seqno = match self.inner.node_state.load_zerostate_id() {
-            Some(zerostate_id) => zerostate_id.seqno,
-            // Fallback to the original behavior.
-            None => 0,
-        };
+        let zerostate_seqno = this
+            .node_state
+            .load_zerostate_mc_seqno()
+            .unwrap_or_default();
 
         let mut top_handle = top_handle.clone();
         if top_handle.id().seqno <= zerostate_seqno {

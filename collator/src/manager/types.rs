@@ -19,7 +19,7 @@ use crate::types::processed_upto::{
 };
 use crate::types::{
     ArcSignature, BlockCandidate, BlockStuffForSync, DebugDisplayOpt, ShardDescriptionShortExt,
-    ShardHashesExt,
+    ShardHashesExt, TopBlockId,
 };
 use crate::utils::block::detect_top_processed_to_anchor;
 
@@ -296,11 +296,11 @@ pub(super) struct BlockCacheEntry {
 
     /// Ids of 1 (or 2 in case of merge) previous blocks in shard or master chain
     pub prev_blocks_ids: Vec<BlockId>,
-    /// List of (`top_block_id`, `to_block_updated`) included in current block.
-    /// `to_block_updated` indicates if `top_block_id` was updated since previous block.
+    /// List of shard block ids included in current block.
+    /// `updated` indicates if `block_id` was updated since previous block.
     /// It must be filled for master block.
     /// It could be filled for shard blocks if shards can exchange shard blocks with each other without master.
-    pub top_shard_blocks_info: Vec<(BlockId, bool)>,
+    pub top_shard_blocks_info: Vec<TopBlockId>,
     /// For master block will contain top processed to anchor among master and all shards.
     pub top_processed_to_anchor: Option<MempoolAnchorId>,
 
@@ -311,7 +311,7 @@ pub(super) struct BlockCacheEntry {
 impl BlockCacheEntry {
     pub fn from_collated(
         candidate: Box<BlockCandidate>,
-        top_shard_blocks_info: Vec<(BlockId, bool)>,
+        top_shard_blocks_info: Vec<TopBlockId>,
         top_processed_to_anchor: Option<MempoolAnchorId>,
     ) -> Result<Self> {
         let block_id = *candidate.block.id();
@@ -352,10 +352,13 @@ impl BlockCacheEntry {
         let cached_state = if block_id.is_masterchain() {
             for item in state.shards()?.iter() {
                 let (shard_id, shard_descr) = item?;
-                top_shard_blocks_info.push((
-                    shard_descr.get_block_id(shard_id),
-                    shard_descr.top_sc_block_updated,
-                ));
+                top_shard_blocks_info.push(TopBlockId {
+                    // NOTE: We use `block_id.seqno` here instead of `ref_by_mc_seqno`
+                    // because we specify shard blocks referenced by the `state`.
+                    ref_by_mc_seqno: block_id.seqno,
+                    block_id: shard_descr.get_block_id(shard_id),
+                    updated: shard_descr.top_sc_block_updated,
+                });
             }
             top_processed_to_anchor = Some(detect_top_processed_to_anchor(
                 state.shards()?.as_vec()?.iter().map(|(_, d)| *d),
@@ -393,7 +396,7 @@ impl BlockCacheEntry {
     }
 
     pub fn iter_top_shard_blocks_ids(&self) -> impl Iterator<Item = &BlockId> {
-        self.top_shard_blocks_info.iter().map(|(id, _)| id)
+        self.top_shard_blocks_info.iter().map(|item| &item.block_id)
     }
 
     pub fn get_top_blocks_keys(&self) -> Result<Vec<BlockCacheKey>> {
