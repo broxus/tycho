@@ -113,6 +113,7 @@ pub fn supported_capabilities() -> GlobalCapabilities {
         GlobalCapability::CapsTvmBugfixes2022,
         GlobalCapability::CapSuspendByMarks,
         GlobalCapability::CapOmitMasterBlockHistory,
+        GlobalCapability::CapSignatureDomain,
     ])
 }
 
