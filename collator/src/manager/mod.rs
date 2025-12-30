@@ -48,7 +48,7 @@ use crate::types::processed_upto::{
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
     DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
-    ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt,
+    ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt, TopBlockId,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -336,6 +336,8 @@ where
         let ready_to_sync = Arc::new(Notify::new());
         ready_to_sync.notify_one();
 
+        let blocks_cache = BlocksCache::new(state_node_adapter.zerostate_id());
+
         let collation_manager = Self {
             keypair,
             config: Arc::new(config),
@@ -351,7 +353,7 @@ where
             active_collators: Default::default(),
             collators_to_stop: Default::default(),
 
-            blocks_cache: BlocksCache::new(),
+            blocks_cache,
 
             blocks_from_bc_queue_sender,
 
@@ -492,7 +494,7 @@ where
     fn commit_block_queue_diff(
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         block_id: &BlockId,
-        top_shard_blocks_info: &[(BlockId, bool)],
+        top_shard_blocks_info: &[TopBlockId],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {
         if !block_id.is_masterchain() {
@@ -501,11 +503,12 @@ where
 
         let _histogram = HistogramGuard::begin("tycho_collator_commit_queue_diffs_time");
 
-        let mut top_blocks: Vec<_> = top_shard_blocks_info
-            .iter()
-            .map(|(id, updated)| (*id, *updated))
-            .collect();
-        top_blocks.push((*block_id, true));
+        let mut top_blocks = top_shard_blocks_info.to_vec();
+        top_blocks.push(TopBlockId {
+            ref_by_mc_seqno: block_id.seqno,
+            block_id: *block_id,
+            updated: true,
+        });
 
         if let Err(err) = mq_adapter.commit_diff(top_blocks, partitions) {
             bail!(
@@ -899,11 +902,10 @@ where
                     mc_data
                         .shards
                         .iter()
-                        .map(|(shard_id, shard_descr)| {
-                            (
-                                shard_descr.get_block_id(*shard_id),
-                                shard_descr.top_sc_block_updated,
-                            )
+                        .map(|(shard_id, shard_descr)| TopBlockId {
+                            ref_by_mc_seqno: block_id.seqno,
+                            block_id: shard_descr.get_block_id(*shard_id),
+                            updated: shard_descr.top_sc_block_updated,
                         })
                         .collect::<Vec<_>>()
                 })
@@ -1212,7 +1214,7 @@ where
                     // find last master block in buffer
                     // will skip sync for all master blocks before it
                     let mut last_mc_block_id_opt = None;
-                    for HandledBlockFromBcCtx {state, ..} in batch.iter().rev() {
+                    for HandledBlockFromBcCtx { state, .. } in batch.iter().rev() {
                         if state.block_id().is_masterchain() {
                             last_mc_block_id_opt = Some(*state.block_id());
                         }
@@ -1265,10 +1267,9 @@ where
         );
 
         let block_id = *ctx.state.block_id();
+        debug_assert!(!block_id.is_masterchain() || block_id == ctx.mc_block_id);
 
         let _histogram = HistogramGuard::begin("tycho_collator_handle_block_from_bc_time");
-
-        let state = ctx.state;
 
         // sync cache and collator state access
         self.ready_to_sync.notified().await;
@@ -1281,7 +1282,7 @@ where
             .store_received(
                 self.state_node_adapter.clone(),
                 &ctx.mc_block_id,
-                state.clone(),
+                ctx.state.clone(),
                 processed_upto,
             )
             .await?
@@ -1341,7 +1342,7 @@ where
         }
 
         // when received block is master
-        let is_key_block = state.state_extra()?.after_key_block;
+        let is_key_block = ctx.state.state_extra()?.after_key_block;
 
         // stop any running validations up to this block
         // try to get the validation session ID from active collation sessions
@@ -1757,17 +1758,18 @@ where
     ) -> Result<FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>> {
         let mut result = FastHashMap::default();
 
-        if mc_block_key.seqno == 0 {
+        let zerostate_mc_seqno = blocks_cache.zerostate_mc_seqno();
+        if mc_block_key.seqno <= zerostate_mc_seqno {
             return Ok(result);
         }
 
         let from_cache = blocks_cache.get_top_blocks_processed_to_by_partitions(mc_block_key)?;
 
-        for (top_block_id, (updated, processed_to_opt)) in from_cache {
-            let processed_to = match processed_to_opt {
+        for (top_block_id, item) in from_cache {
+            let processed_to = match item.by {
                 Some(processed_to) => processed_to,
                 None => {
-                    if top_block_id.seqno == 0 {
+                    if item.ref_by_mc_seqno <= zerostate_mc_seqno {
                         FastHashMap::default()
                     } else {
                         // get from state
@@ -1781,7 +1783,7 @@ where
                 }
             };
 
-            result.insert(top_block_id.shard, (updated, processed_to));
+            result.insert(top_block_id.shard, (item.updated, processed_to));
         }
 
         Ok(result)

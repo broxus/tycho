@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 use parking_lot::Mutex;
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_core::global_config::ZerostateId;
 use tycho_types::cell::Lazy;
 use tycho_types::models::{
     BlockId, BlockIdShort, ConsensusInfo, OutMsgDescr, ShardFeeCreated, ShardIdent, ValueFlow,
@@ -22,6 +23,7 @@ use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
 use crate::types::{
     BlockCandidate, DisplayIntoIter, DisplayIter, ProcessedToByPartitions, TopBlockDescription,
+    TopBlockId,
 };
 use crate::validator::ValidationStatus;
 
@@ -30,6 +32,7 @@ use crate::validator::ValidationStatus;
 pub(super) mod tests;
 
 struct BlocksCacheInner {
+    zerostate_mc_seqno: u32,
     masters: Mutex<MasterBlocksCache>,
     shards: FastDashMap<ShardIdent, ShardBlocksCache>,
 }
@@ -40,15 +43,20 @@ pub struct BlocksCache {
 }
 
 impl BlocksCache {
-    pub fn new() -> Self {
+    pub fn new(zerostate_id: &ZerostateId) -> Self {
         metrics::gauge!("tycho_blocks_count_in_collation_manager_cache").set(0);
 
         Self {
             inner: Arc::new(BlocksCacheInner {
+                zerostate_mc_seqno: zerostate_id.seqno,
                 masters: Default::default(),
                 shards: Default::default(),
             }),
         }
+    }
+
+    pub fn zerostate_mc_seqno(&self) -> u32 {
+        self.inner.zerostate_mc_seqno
     }
 
     /// Find top shard blocks in cache for the next master block collation
@@ -102,7 +110,7 @@ impl BlocksCache {
                 master
                     .top_shard_blocks_info
                     .iter()
-                    .map(|(block_id, _)| (block_id.shard, block_id.seqno))
+                    .map(|item| (item.block_id.shard, item.block_id.seqno))
                     .collect(),
             );
         }
@@ -119,7 +127,7 @@ impl BlocksCache {
             for top_shard_id in master
                 .top_shard_blocks_info
                 .iter()
-                .map(|(block_id, _)| block_id.shard)
+                .map(|item| item.block_id.shard)
             {
                 res.push(top_shard_id);
             }
@@ -167,10 +175,10 @@ impl BlocksCache {
     pub fn get_top_blocks_processed_to_by_partitions(
         &self,
         mc_block_key: &BlockCacheKey,
-    ) -> Result<FastHashMap<BlockId, (bool, Option<ProcessedToByPartitions>)>> {
+    ) -> Result<FastHashMap<BlockId, ProcessedTopBlock>> {
         let mut result = FastHashMap::default();
 
-        if mc_block_key.seqno == 0 {
+        if mc_block_key.seqno <= self.inner.zerostate_mc_seqno {
             return Ok(result);
         }
 
@@ -188,22 +196,24 @@ impl BlocksCache {
                 .data
                 .processed_upto()
                 .get_internals_processed_to_by_partitions();
-            result.insert(
-                mc_block_entry.block_id,
-                (true, Some(processed_to_by_partitions)),
-            );
+            result.insert(mc_block_entry.block_id, ProcessedTopBlock {
+                ref_by_mc_seqno: mc_block_key.seqno,
+                updated: true,
+                by: Some(processed_to_by_partitions),
+            });
 
             top_shard_blocks_info = mc_block_entry.top_shard_blocks_info.clone();
         }
 
-        for (top_sc_block_id, updated) in top_shard_blocks_info {
-            if top_sc_block_id.seqno == 0 {
+        for item in top_shard_blocks_info {
+            if item.ref_by_mc_seqno <= self.inner.zerostate_mc_seqno {
                 continue;
             }
 
             let mut processed_to_by_partitions_opt = None;
 
             // try to find in cache
+            let top_sc_block_id = &item.block_id;
             if let Some(shard_cache) = self.inner.shards.get(&top_sc_block_id.shard)
                 && let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno)
             {
@@ -215,7 +225,11 @@ impl BlocksCache {
                 );
             }
 
-            result.insert(top_sc_block_id, (updated, processed_to_by_partitions_opt));
+            result.insert(*top_sc_block_id, ProcessedTopBlock {
+                ref_by_mc_seqno: item.ref_by_mc_seqno,
+                updated: item.updated,
+                by: processed_to_by_partitions_opt,
+            });
         }
 
         Ok(result)
@@ -235,7 +249,7 @@ impl BlocksCache {
     ) -> Result<BeforeTailIdsResult> {
         let mut result = BTreeMap::new();
 
-        if mc_block_key.seqno == 0 {
+        if mc_block_key.seqno <= self.inner.zerostate_mc_seqno {
             return Ok(result);
         }
 
@@ -264,6 +278,9 @@ impl BlocksCache {
         }
 
         while let Some((prev_sc_block_id, force_include)) = prev_shard_blocks_ids.pop_front() {
+            // NOTE: There will be no entry for shard zerostates so this check is
+            // redundant, and there is no need to check seqno against a more meaninful
+            // `ref_by_mc_seqno`.
             if prev_sc_block_id.seqno == 0 {
                 // skip not existed shard block with seqno 0
                 continue;
@@ -317,7 +334,7 @@ impl BlocksCache {
     pub fn store_collated(
         &self,
         candidate: Box<BlockCandidate>,
-        top_shard_blocks_info: Vec<(BlockId, bool)>,
+        top_shard_blocks_info: Vec<TopBlockId>,
         top_processed_to_anchor: Option<MempoolAnchorId>,
     ) -> Result<BlockCacheStoreResult> {
         let block_id = *candidate.block.id();
@@ -597,9 +614,10 @@ impl BlocksCache {
         let mut prev_shard_blocks_ids = mc_block_entry
             .top_shard_blocks_info
             .iter()
-            .filter(|(_, updated)| *updated)
-            .map(|(id, _)| id)
-            .cloned()
+            .filter_map(|item| {
+                (item.updated && item.ref_by_mc_seqno > self.inner.zerostate_mc_seqno)
+                    .then_some(item.block_id)
+            })
             .collect::<VecDeque<_>>();
 
         let mut subgraph = McBlockSubgraph {
@@ -609,11 +627,6 @@ impl BlocksCache {
 
         // 4. Recursively find prev shard blocks until the end or top shard blocks of prev master reached
         while let Some(prev_shard_block_id) = prev_shard_blocks_ids.pop_front() {
-            if prev_shard_block_id.seqno == 0 {
-                // skip not existed shard block with seqno 0
-                continue;
-            }
-
             let Some(mut shard_cache) = self.inner.shards.get_mut(&prev_shard_block_id.shard)
             else {
                 continue;
@@ -780,6 +793,12 @@ impl BlocksCache {
     }
 }
 
+pub struct ProcessedTopBlock {
+    pub ref_by_mc_seqno: u32,
+    pub updated: bool,
+    pub by: Option<ProcessedToByPartitions>,
+}
+
 type MasterBlocksCache = BlocksCacheGroup<MasterBlocksCacheData>;
 type ShardBlocksCache = BlocksCacheGroup<ShardBlocksCacheData>;
 
@@ -796,7 +815,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
     fn store_collated_block(
         &mut self,
         candidate: Box<BlockCandidate>,
-        top_shard_blocks_info: Vec<(BlockId, bool)>,
+        top_shard_blocks_info: Vec<TopBlockId>,
         top_processed_to_anchor: Option<MempoolAnchorId>,
     ) -> Result<StoredBlock> {
         let block_id = *candidate.block.id();
@@ -1110,10 +1129,17 @@ impl ReceivedBlockContext {
         static EMPTY_OUT_MSGS: OnceLock<Lazy<OutMsgDescr>> = OnceLock::new();
 
         let ref_by_mc_seqno = mc_block_id.seqno;
+        debug_assert!(!state.block_id().is_masterchain() || state.block_id() == mc_block_id);
 
         let block_id = state.block_id();
-        // TODO: throw error if <
-        if block_id.seqno <= state_node_adapter.zerostate_id().seqno {
+        let zerostate_mc_seqno = state_node_adapter.zerostate_id().seqno;
+        anyhow::ensure!(
+            block_id.seqno >= zerostate_mc_seqno,
+            "received masterchain block older than zerostate: \
+            zerostate_seqno={zerostate_mc_seqno}, block_id={block_id}"
+        );
+
+        if block_id.seqno == state_node_adapter.zerostate_id().seqno {
             let queue_diff = QueueDiffStuff::new_empty(block_id);
 
             return Ok(Self {

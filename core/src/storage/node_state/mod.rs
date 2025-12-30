@@ -103,15 +103,29 @@ impl NodeStateStorage {
             return Some(*cached.as_ref());
         }
 
+        let value = self.load_zerostate_id_no_cache()?;
+        self.zerostate_id.store(Some(Arc::new(value)));
+        Some(value)
+    }
+
+    pub fn load_zerostate_mc_seqno(&self) -> Option<u32> {
+        if let Some(cached) = &*self.zerostate_id.load() {
+            return Some(cached.seqno);
+        }
+
+        let value = self.load_zerostate_id_no_cache()?;
+        self.zerostate_id.store(Some(Arc::new(value)));
+        Some(value.seqno)
+    }
+
+    fn load_zerostate_id_no_cache(&self) -> Option<ZerostateId> {
         let value = self.db.state.get(ZEROSTATE_ID).unwrap()?;
         let value = value.as_ref();
-        let value = ZerostateId {
+        Some(ZerostateId {
             seqno: u32::from_le_bytes(value[0..4].try_into().unwrap()),
             root_hash: HashBytes::from_slice(&value[4..36]),
             file_hash: HashBytes::from_slice(&value[36..68]),
-        };
-        self.zerostate_id.store(Some(Arc::new(value)));
-        Some(value)
+        })
     }
 
     pub fn load_zerostate_proof(&self) -> Option<Cell> {

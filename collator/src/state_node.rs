@@ -312,6 +312,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "handle_state: block {}", state.block_id());
         let block_id = *state.block_id();
+        debug_assert!(!block_id.is_masterchain() || &block_id == mc_block_id);
 
         let mut to_split = Vec::new();
 
