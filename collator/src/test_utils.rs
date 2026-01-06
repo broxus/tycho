@@ -13,6 +13,7 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_block_util::state::ShardStateStuff;
+use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta, QueueStateReader};
 use tycho_storage::StorageContext;
 use tycho_types::boc::{Boc, BocRepr};
@@ -371,7 +372,11 @@ pub async fn load_info_from_dump<V: InternalMessageValue>(
     )
     .await?;
 
+    // TODO: Replace with `load_zerostate_id`
+    let zerostate_id = ZerostateId::default();
+
     let queue_factory = QueueFactoryStdImpl {
+        zerostate_id,
         state: QueueStateImplFactory::new(ctx)?,
         config: QueueConfig {
             gc_interval: Duration::from_secs(1),

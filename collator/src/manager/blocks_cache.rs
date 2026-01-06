@@ -23,7 +23,7 @@ use crate::tracing_targets;
 use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
 use crate::types::{
     BlockCandidate, DisplayIntoIter, DisplayIter, ProcessedToByPartitions, TopBlockDescription,
-    TopBlockId,
+    TopBlockIdUpdated,
 };
 use crate::validator::ValidationStatus;
 
@@ -110,7 +110,7 @@ impl BlocksCache {
                 master
                     .top_shard_blocks_info
                     .iter()
-                    .map(|item| (item.block_id.shard, item.block_id.seqno))
+                    .map(|item| (item.block.block_id.shard, item.block.block_id.seqno))
                     .collect(),
             );
         }
@@ -127,7 +127,7 @@ impl BlocksCache {
             for top_shard_id in master
                 .top_shard_blocks_info
                 .iter()
-                .map(|item| item.block_id.shard)
+                .map(|item| item.block.block_id.shard)
             {
                 res.push(top_shard_id);
             }
@@ -206,14 +206,14 @@ impl BlocksCache {
         }
 
         for item in top_shard_blocks_info {
-            if item.ref_by_mc_seqno <= self.inner.zerostate_mc_seqno {
+            if item.block.ref_by_mc_seqno <= self.inner.zerostate_mc_seqno {
                 continue;
             }
 
             let mut processed_to_by_partitions_opt = None;
 
             // try to find in cache
-            let top_sc_block_id = &item.block_id;
+            let top_sc_block_id = &item.block.block_id;
             if let Some(shard_cache) = self.inner.shards.get(&top_sc_block_id.shard)
                 && let Some(sc_block_entry) = shard_cache.blocks.get(&top_sc_block_id.seqno)
             {
@@ -226,7 +226,7 @@ impl BlocksCache {
             }
 
             result.insert(*top_sc_block_id, ProcessedTopBlock {
-                ref_by_mc_seqno: item.ref_by_mc_seqno,
+                ref_by_mc_seqno: item.block.ref_by_mc_seqno,
                 updated: item.updated,
                 by: processed_to_by_partitions_opt,
             });
@@ -334,7 +334,7 @@ impl BlocksCache {
     pub fn store_collated(
         &self,
         candidate: Box<BlockCandidate>,
-        top_shard_blocks_info: Vec<TopBlockId>,
+        top_shard_blocks_info: Vec<TopBlockIdUpdated>,
         top_processed_to_anchor: Option<MempoolAnchorId>,
     ) -> Result<BlockCacheStoreResult> {
         let block_id = *candidate.block.id();
@@ -615,8 +615,8 @@ impl BlocksCache {
             .top_shard_blocks_info
             .iter()
             .filter_map(|item| {
-                (item.updated && item.ref_by_mc_seqno > self.inner.zerostate_mc_seqno)
-                    .then_some(item.block_id)
+                (item.updated && item.block.ref_by_mc_seqno > self.inner.zerostate_mc_seqno)
+                    .then_some(item.block.block_id)
             })
             .collect::<VecDeque<_>>();
 
@@ -815,7 +815,7 @@ impl<T: BlocksCacheData> BlocksCacheGroup<T> {
     fn store_collated_block(
         &mut self,
         candidate: Box<BlockCandidate>,
-        top_shard_blocks_info: Vec<TopBlockId>,
+        top_shard_blocks_info: Vec<TopBlockIdUpdated>,
         top_processed_to_anchor: Option<MempoolAnchorId>,
     ) -> Result<StoredBlock> {
         let block_id = *candidate.block.id();
@@ -1134,12 +1134,12 @@ impl ReceivedBlockContext {
         let block_id = state.block_id();
         let zerostate_mc_seqno = state_node_adapter.zerostate_id().seqno;
         anyhow::ensure!(
-            block_id.seqno >= zerostate_mc_seqno,
+            mc_block_id.seqno >= zerostate_mc_seqno,
             "received masterchain block older than zerostate: \
             zerostate_seqno={zerostate_mc_seqno}, block_id={block_id}"
         );
 
-        if block_id.seqno == state_node_adapter.zerostate_id().seqno {
+        if mc_block_id.seqno == state_node_adapter.zerostate_id().seqno {
             let queue_diff = QueueDiffStuff::new_empty(block_id);
 
             return Ok(Self {

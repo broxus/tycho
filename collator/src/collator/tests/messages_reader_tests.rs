@@ -35,7 +35,9 @@ use crate::test_utils::{create_test_queue_adapter, try_init_test_tracing};
 use crate::types::processed_upto::{
     BlockSeqno, Lt, ProcessedUptoInfoExtension, ProcessedUptoInfoStuff,
 };
-use crate::types::{DebugDisplay, DebugIter, ProcessedToByPartitions, TopBlockId};
+use crate::types::{
+    DebugDisplay, DebugIter, ProcessedToByPartitions, TopBlockId, TopBlockIdUpdated,
+};
 
 const DEX_PAIR_USDC_NATIVE: u8 = 10;
 const DEX_PAIR_NATIVE_ETH: u8 = 11;
@@ -699,19 +701,23 @@ where
             && self.sc_collator.block_seqno != 2
         {
             let mc_block_id = self.mc_collator.get_block_id();
-            let mut mc_top_blocks = vec![TopBlockId {
-                ref_by_mc_seqno: mc_block_id.seqno,
-                block_id: mc_block_id,
+            let mut mc_top_blocks = vec![TopBlockIdUpdated {
+                block: TopBlockId {
+                    ref_by_mc_seqno: mc_block_id.seqno,
+                    block_id: mc_block_id,
+                },
                 updated: true,
             }];
             mc_top_blocks.extend(self.mc_collator.last_mc_top_shards_blocks_info.iter().map(
-                |(shard_id, seqno, _)| TopBlockId {
-                    ref_by_mc_seqno: mc_block_id.seqno,
-                    block_id: BlockId {
-                        shard: *shard_id,
-                        seqno: *seqno,
-                        root_hash: HashBytes::default(),
-                        file_hash: HashBytes::default(),
+                |(shard_id, seqno, _)| TopBlockIdUpdated {
+                    block: TopBlockId {
+                        ref_by_mc_seqno: mc_block_id.seqno,
+                        block_id: BlockId {
+                            shard: *shard_id,
+                            seqno: *seqno,
+                            root_hash: HashBytes::default(),
+                            file_hash: HashBytes::default(),
+                        },
                     },
                     updated: true,
                 },

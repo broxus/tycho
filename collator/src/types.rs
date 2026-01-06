@@ -435,10 +435,22 @@ pub type ProcessedTo = BTreeMap<ShardIdent, QueueKey>;
 pub type ProcessedToByPartitions = FastHashMap<QueuePartitionIdx, ProcessedTo>;
 
 #[derive(Debug, Clone)]
+pub struct TopBlockIdUpdated {
+    pub block: TopBlockId,
+    pub updated: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct TopBlockId {
     pub ref_by_mc_seqno: u32,
     pub block_id: BlockId,
-    pub updated: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShardPair {
+    pub shard_ident: ShardIdent,
+    pub prev_block_id: TopBlockId,
+    pub current_block_id: TopBlockId,
 }
 
 #[derive(Debug)]
@@ -601,6 +613,7 @@ where
 pub struct ShardDescriptionShort {
     pub ext_processed_to_anchor_id: u32,
     pub top_sc_block_updated: bool,
+    pub reg_mc_seqno: u32,
     pub end_lt: u64,
     pub seqno: u32,
     pub root_hash: HashBytes,
@@ -615,6 +628,7 @@ impl<BorrowShardDescription: Borrow<ShardDescription>> From<BorrowShardDescripti
         Self {
             ext_processed_to_anchor_id: shard.ext_processed_to_anchor_id,
             top_sc_block_updated: shard.top_sc_block_updated,
+            reg_mc_seqno: shard.reg_mc_seqno,
             end_lt: shard.end_lt,
             seqno: shard.seqno,
             root_hash: shard.root_hash,

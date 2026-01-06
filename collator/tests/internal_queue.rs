@@ -16,7 +16,7 @@ use tycho_collator::internal_queue::types::router::PartitionRouter;
 use tycho_collator::internal_queue::types::stats::DiffStatistics;
 use tycho_collator::storage::InternalQueueStorage;
 use tycho_collator::storage::snapshot::{AccountStatistics, InternalQueueSnapshot};
-use tycho_collator::types::TopBlockId;
+use tycho_collator::types::{TopBlockId, TopBlockIdUpdated};
 use tycho_core::global_config::ZerostateId;
 use tycho_storage::StorageContext;
 use tycho_types::cell::{Cell, HashBytes, Lazy};
@@ -564,14 +564,18 @@ async fn test_queue() -> anyhow::Result<()> {
 
     queue.commit_diff(
         &[
-            TopBlockId {
-                ref_by_mc_seqno: mc_block.seqno,
-                block_id: mc_block,
+            TopBlockIdUpdated {
+                block: TopBlockId {
+                    ref_by_mc_seqno: mc_block.seqno,
+                    block_id: mc_block,
+                },
                 updated: true,
             },
-            TopBlockId {
-                ref_by_mc_seqno: mc_block.seqno,
-                block_id: block1,
+            TopBlockIdUpdated {
+                block: TopBlockId {
+                    ref_by_mc_seqno: mc_block.seqno,
+                    block_id: block1,
+                },
                 updated: true,
             },
         ],
@@ -698,14 +702,18 @@ async fn test_queue() -> anyhow::Result<()> {
 
     queue.commit_diff(
         &[
-            TopBlockId {
-                ref_by_mc_seqno: mc_block2.seqno,
-                block_id: mc_block2,
+            TopBlockIdUpdated {
+                block: TopBlockId {
+                    ref_by_mc_seqno: mc_block.seqno,
+                    block_id: mc_block2,
+                },
                 updated: true,
             },
-            TopBlockId {
-                ref_by_mc_seqno: mc_block2.seqno,
-                block_id: block2,
+            TopBlockIdUpdated {
+                block: TopBlockId {
+                    ref_by_mc_seqno: mc_block.seqno,
+                    block_id: block2,
+                },
                 updated: true,
             },
         ],
@@ -1396,9 +1404,11 @@ async fn test_queue_tail_and_diff_info() -> anyhow::Result<()> {
     // -- test case 2
     // commit first diff
     queue.commit_diff(
-        &[TopBlockId {
-            ref_by_mc_seqno: block_mc1.seqno,
-            block_id: block_mc1,
+        &[TopBlockIdUpdated {
+            block: TopBlockId {
+                ref_by_mc_seqno: block_mc1.seqno,
+                block_id: block_mc1,
+            },
             updated: true,
         }],
         &partitions,
@@ -1567,9 +1577,11 @@ async fn test_version() -> anyhow::Result<()> {
     assert_eq!(version, None);
 
     queue.commit_diff(
-        &[TopBlockId {
-            ref_by_mc_seqno: block_mc1.seqno,
-            block_id: block_mc1,
+        &[TopBlockIdUpdated {
+            block: TopBlockId {
+                ref_by_mc_seqno: block_mc1.seqno,
+                block_id: block_mc1,
+            },
             updated: true,
         }],
         &partitions,
@@ -1586,9 +1598,11 @@ async fn test_version() -> anyhow::Result<()> {
         Some(DiffZone::Committed),
     )?;
     queue.commit_diff(
-        &[TopBlockId {
-            ref_by_mc_seqno: block_mc2.seqno,
-            block_id: block_mc2,
+        &[TopBlockIdUpdated {
+            block: TopBlockId {
+                ref_by_mc_seqno: block_mc2.seqno,
+                block_id: block_mc2,
+            },
             updated: true,
         }],
         &partitions,
@@ -1810,14 +1824,18 @@ async fn test_commit_wrong_sequence() -> anyhow::Result<()> {
 
     queue.commit_diff(
         &[
-            TopBlockId {
-                ref_by_mc_seqno: mc_block2.seqno,
-                block_id: mc_block2,
+            TopBlockIdUpdated {
+                block: TopBlockId {
+                    ref_by_mc_seqno: mc_block2.seqno,
+                    block_id: mc_block2,
+                },
                 updated: true,
             },
-            TopBlockId {
-                ref_by_mc_seqno: mc_block2.seqno,
-                block_id: block2,
+            TopBlockIdUpdated {
+                block: TopBlockId {
+                    ref_by_mc_seqno: mc_block2.seqno,
+                    block_id: block2,
+                },
                 updated: true,
             },
         ],

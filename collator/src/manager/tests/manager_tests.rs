@@ -47,7 +47,7 @@ use crate::types::processed_upto::{
 };
 use crate::types::{
     BlockCandidate, BlockStuffForSync, ProcessedTo, ShardDescriptionShort,
-    ShardDescriptionShortExt as _, ShardHashesExt, ShardIdentExt, TopBlockId,
+    ShardDescriptionShortExt as _, ShardHashesExt, ShardIdentExt, TopBlockId, TopBlockIdUpdated,
 };
 use crate::validator::{ValidationComplete, ValidationStatus, ValidatorStdImpl};
 
@@ -2107,14 +2107,18 @@ async fn test_queue_restore_on_sync() {
         .mq_adapter
         .commit_diff(
             [
-                TopBlockId {
-                    ref_by_mc_seqno: test_adapter.last_mc_block_id.seqno,
-                    block_id: test_adapter.last_mc_block_id,
+                TopBlockIdUpdated {
+                    block: TopBlockId {
+                        ref_by_mc_seqno: test_adapter.last_mc_block_id.seqno,
+                        block_id: test_adapter.last_mc_block_id,
+                    },
                     updated: true,
                 },
-                TopBlockId {
-                    ref_by_mc_seqno: test_adapter.last_mc_block_id.seqno,
-                    block_id: test_adapter.last_sc_block_id,
+                TopBlockIdUpdated {
+                    block: TopBlockId {
+                        ref_by_mc_seqno: test_adapter.last_mc_block_id.seqno,
+                        block_id: test_adapter.last_sc_block_id,
+                    },
                     updated: false,
                 },
             ]
@@ -2146,14 +2150,18 @@ async fn test_queue_restore_on_sync() {
         .mq_adapter
         .commit_diff(
             [
-                TopBlockId {
-                    ref_by_mc_seqno: mc_block_id_1.seqno,
-                    block_id: mc_block_id_1,
+                TopBlockIdUpdated {
+                    block: TopBlockId {
+                        ref_by_mc_seqno: mc_block_id_1.seqno,
+                        block_id: mc_block_id_1,
+                    },
                     updated: true,
                 },
-                TopBlockId {
-                    ref_by_mc_seqno: mc_block_id_1.seqno,
-                    block_id: test_adapter.last_sc_block_id,
+                TopBlockIdUpdated {
+                    block: TopBlockId {
+                        ref_by_mc_seqno: mc_block_id_1.seqno,
+                        block_id: test_adapter.last_sc_block_id,
+                    },
                     updated: true,
                 },
             ]
@@ -3844,9 +3852,11 @@ where
                     .unwrap()
                     .iter()
                     .map(
-                        |(shard_id, shard_descr): &(_, ShardDescriptionShort)| TopBlockId {
-                            ref_by_mc_seqno: state_stuff.block_id().seqno,
-                            block_id: shard_descr.get_block_id(*shard_id),
+                        |(shard_id, shard_descr): &(_, ShardDescriptionShort)| TopBlockIdUpdated {
+                            block: TopBlockId {
+                                ref_by_mc_seqno: shard_descr.reg_mc_seqno,
+                                block_id: shard_descr.get_block_id(*shard_id),
+                            },
                             updated: shard_descr.top_sc_block_updated,
                         },
                     )
@@ -3866,7 +3876,7 @@ where
             prev_blocks_ids: vec![prev_block_id],
             top_shard_blocks_ids: mc_top_shard_blocks_info
                 .iter()
-                .map(|item| item.block_id)
+                .map(|item| item.block.block_id)
                 .collect(),
             chain_time: 0,
             processed_to_anchor_id: 0,

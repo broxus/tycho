@@ -20,7 +20,7 @@ use crate::internal_queue::types::stats::{
 use crate::storage::models::DiffInfo;
 use crate::storage::snapshot::AccountStatistics;
 use crate::tracing_targets;
-use crate::types::{DebugDisplayOpt, DebugIter, TopBlockId};
+use crate::types::{DebugDisplayOpt, DebugIter, TopBlockIdUpdated};
 
 pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
     queue: QueueImpl<QueueStateStdImpl, V>,
@@ -59,7 +59,7 @@ where
     /// Commit previously applied diffs, updating commit pointers (waiting for the operation to complete)
     fn commit_diff(
         &self,
-        mc_top_blocks: Vec<TopBlockId>,
+        mc_top_blocks: Vec<TopBlockIdUpdated>,
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
 
@@ -203,7 +203,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     #[instrument(skip_all, fields(?partitions))]
     fn commit_diff(
         &self,
-        mc_top_blocks: Vec<TopBlockId>,
+        mc_top_blocks: Vec<TopBlockIdUpdated>,
         // TODO: get partitions from queue state
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {

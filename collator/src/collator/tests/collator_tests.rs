@@ -399,6 +399,7 @@ fn test_get_anchors_processing_info() {
             seqno: 0,
             ext_processed_to_anchor_id: 0,
             top_sc_block_updated: false,
+            reg_mc_seqno: 0,
             end_lt: 0,
             root_hash: Default::default(),
             file_hash: Default::default(),

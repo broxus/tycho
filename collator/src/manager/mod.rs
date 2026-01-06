@@ -4,6 +4,7 @@ use std::sync::Arc;
 use ahash::HashMapExt;
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
+use futures_util::TryFutureExt;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -48,7 +49,7 @@ use crate::types::processed_upto::{
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionId, CollationSessionInfo, CollatorConfig,
     DebugIter, DisplayAsShortId, DisplayBlockIdsIntoIter, McData, ProcessedToByPartitions,
-    ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt, TopBlockId,
+    ShardDescriptionShort, ShardDescriptionShortExt, ShardHashesExt, TopBlockId, TopBlockIdUpdated,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::block::detect_top_processed_to_anchor;
@@ -380,7 +381,10 @@ where
                 .process_handle_block_from_bc_queue(
                     blocks_from_bc_queue_receiver,
                     cancel_async_tasks.clone(),
-                ),
+                )
+                .map_err(|e| {
+                    tracing::error!("initial process_handle_block_from_bc_queue failed: {e:?}");
+                }),
         );
 
         // start tasks dispatcher
@@ -494,7 +498,7 @@ where
     fn commit_block_queue_diff(
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         block_id: &BlockId,
-        top_shard_blocks_info: &[TopBlockId],
+        top_shard_blocks_info: &[TopBlockIdUpdated],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {
         if !block_id.is_masterchain() {
@@ -504,9 +508,11 @@ where
         let _histogram = HistogramGuard::begin("tycho_collator_commit_queue_diffs_time");
 
         let mut top_blocks = top_shard_blocks_info.to_vec();
-        top_blocks.push(TopBlockId {
-            ref_by_mc_seqno: block_id.seqno,
-            block_id: *block_id,
+        top_blocks.push(TopBlockIdUpdated {
+            block: TopBlockId {
+                ref_by_mc_seqno: block_id.seqno,
+                block_id: *block_id,
+            },
             updated: true,
         });
 
@@ -537,7 +543,7 @@ where
         let block_id = block_entry.block_id;
 
         // TODO: error if <
-        if block_id.seqno <= state_node_adapter.zerostate_id().seqno {
+        if block_entry.ref_by_mc_seqno <= state_node_adapter.zerostate_id().seqno {
             return Ok(None);
         }
 
@@ -902,9 +908,11 @@ where
                     mc_data
                         .shards
                         .iter()
-                        .map(|(shard_id, shard_descr)| TopBlockId {
-                            ref_by_mc_seqno: block_id.seqno,
-                            block_id: shard_descr.get_block_id(*shard_id),
+                        .map(|(shard_id, shard_descr)| TopBlockIdUpdated {
+                            block: TopBlockId {
+                                ref_by_mc_seqno: shard_descr.reg_mc_seqno,
+                                block_id: shard_descr.get_block_id(*shard_id),
+                            },
                             updated: shard_descr.top_sc_block_updated,
                         })
                         .collect::<Vec<_>>()
@@ -1863,7 +1871,16 @@ where
             let mut prev_block_ids: VecDeque<_> = prev_block_ids.iter().cloned().collect();
 
             while let Some(prev_block_id) = prev_block_ids.pop_front() {
-                if prev_block_id.seqno == state_node_adapter.zerostate_id().seqno {
+                // NOTE: We don't skip prev block ids for shard zerostates because
+                // it is quite hard to propagate `ref_by_mc_seqno` here (we construct
+                // prev ids based just on `BlockId` here). There seems to be no problems
+                // with that because we are checking `init_mc_block_reached` using
+                // the handle data so zerostate ids will be skipped in any case.
+                // This check is just to not change the old behavior just in case.
+                if prev_block_id.seqno == 0
+                    || prev_block_id.is_masterchain()
+                        && prev_block_id.seqno <= state_node_adapter.zerostate_id().seqno
+                {
                     continue;
                 }
 
@@ -2026,7 +2043,7 @@ where
 
             let mc_block_entry = &subgraph.master_block;
 
-            // apply queue diffs from blocks above 0
+            // apply queue diffs from blocks above zerostate seqno
             // skip cached diffs below min_processed_to
             if subgraph.master_block.block_id.seqno > state_node_adapter.zerostate_id().seqno {
                 for block_entry in [mc_block_entry]
