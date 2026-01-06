@@ -15,7 +15,7 @@ consensus.pointBody
     author:transport.PeerId
     round:int
     payload:(vector bytes)
-    pointData:consensus.pointData
+    data:consensus.pointData
     = consensus.PointBody;
 
 consensus.pointId
@@ -31,12 +31,10 @@ consensus.point
     = consensus.PointInner;
 
 consensus.pointInfo
-    digest:int256
+    id:consensus.pointId
     signature:bytes
-    author:int256
-    round:int
-    payloadLen:int
-    payloadBytes:int
+    payload_len:int
+    payload_bytes:int
     data:consensus.pointData
     = consensus.PointInfo;
 

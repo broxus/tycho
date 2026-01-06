@@ -365,7 +365,7 @@ impl DownloadTask {
                 let reason = IllFormedReason::Structure(issue);
                 Some(DownloadResult::IllFormed(point, reason))
             }
-            LastResponse::Point(point) if point.info().id() != *self.query.point_id() => {
+            LastResponse::Point(point) if point.info().id() != self.query.point_id() => {
                 self.not_found.insert(out.peer_id);
                 DownloadCtx::meter_unreliable();
                 let wrong_id = point.info().id();

@@ -12,7 +12,7 @@ use tycho_util::metrics::HistogramGuard;
 use crate::engine::MempoolConfig;
 use crate::models::point::proto_utils::{PointBodyWrite, PointRawRead, PointRead, PointWrite};
 use crate::models::point::{Digest, PointData, Signature};
-use crate::models::{PointInfo, Round};
+use crate::models::{PointId, PointInfo, Round};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PointIntegrityError {
@@ -103,25 +103,22 @@ impl Point {
 
         let body_offset = 4 + Digest::MAX_TL_BYTES + Signature::MAX_TL_BYTES;
 
-        let digest = Digest::new(&serialized[body_offset..]);
-        let signature = Signature::new(local_keypair, &digest);
+        let id = PointId {
+            digest: Digest::new(&serialized[body_offset..]),
+            author,
+            round,
+        };
 
-        serialized[4..4 + Digest::MAX_TL_BYTES].copy_from_slice(digest.inner());
+        let signature = Signature::new(local_keypair, &id.digest);
+
+        serialized[4..4 + Digest::MAX_TL_BYTES].copy_from_slice(id.digest.inner());
         serialized[4 + Digest::MAX_TL_BYTES..body_offset].copy_from_slice(signature.inner());
 
         let payload_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
         let payload_bytes =
             u32::try_from(payload.iter().fold(0, |acc, b| acc + b.len())).unwrap_or(u32::MAX);
 
-        let info = PointInfo::new(
-            digest,
-            signature,
-            author,
-            round,
-            payload_len,
-            payload_bytes,
-            data,
-        );
+        let info = PointInfo::new(id, signature, payload_len, payload_bytes, data);
 
         Self {
             serialized: Arc::new(serialized),
@@ -137,11 +134,15 @@ impl Point {
         let payload_bytes = u32::try_from(read.body.payload.iter().fold(0, |acc, b| acc + b.len()))
             .unwrap_or(u32::MAX);
 
+        let id = PointId {
+            digest: read.digest,
+            author: read.body.author,
+            round: read.body.round,
+        };
+
         let info = PointInfo::new(
-            read.digest,
+            id,
             read.signature,
-            read.body.author,
-            read.body.round,
             payload_len,
             payload_bytes,
             read.body.data,
