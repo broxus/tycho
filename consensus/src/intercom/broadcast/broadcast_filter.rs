@@ -159,7 +159,7 @@ impl BroadcastFilter {
         };
 
         let cache_info = self.cache(
-            &id,
+            id,
             &checked,
             store,
             peer_schedule,
