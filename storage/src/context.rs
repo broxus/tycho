@@ -220,7 +220,7 @@ impl StorageContext {
         if let Some(name) = db.db_name() {
             self.add_rocksdb_instance(name, db.raw());
         }
-
+        db.refresh_metrics();
         tracing::debug!(current_rocksdb_buffer_usage = ?self.rocksdb_table_context().buffer_usage());
 
         Ok(db)

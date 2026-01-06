@@ -1036,6 +1036,14 @@ def storage() -> RowPanel:
             "Raw cells cache size",
             UNITS.BYTES_IEC,
         ),
+        create_gauge_panel(
+            "tycho_storage_cells_next_idx",
+            "Cells next idx",
+        ),
+        create_gauge_panel(
+            "tycho_storage_cells_free_idx_len",
+            "Cells free list len",
+        ),
         create_heatmap_quantile_panel(
             "tycho_storage_store_block_data_size",
             "Block data size",

@@ -8,7 +8,7 @@ use bytesize::ByteSize;
 use tycho_block_util::block::*;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
-use tycho_storage::fs::TempFileStorage;
+use tycho_storage::fs::{Dir, TempFileStorage};
 use tycho_storage::kv::StoredValue;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -48,10 +48,12 @@ impl ShardStateStorage {
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
         temp_file_storage: TempFileStorage,
+        files_dir: &Dir,
         cache_size_bytes: ByteSize,
         drop_interval: u32,
     ) -> Result<Arc<Self>> {
-        let cell_storage = CellStorage::new(cells_db.clone(), cache_size_bytes, drop_interval);
+        let cell_storage =
+            CellStorage::new(cells_db.clone(), files_dir, cache_size_bytes, drop_interval);
 
         Ok(Arc::new(Self {
             cells_db,
