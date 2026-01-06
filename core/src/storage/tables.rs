@@ -157,117 +157,48 @@ impl ColumnFamilyOptions<TableContext> for Cells {
     fn options(opts: &mut Options, ctx: &mut TableContext) {
         opts.set_level_compaction_dynamic_level_bytes(true);
 
-        opts.set_merge_operator_associative("cell_merge", refcount::merge_operator);
-        opts.set_compaction_filter("cell_compaction", refcount::compaction_filter);
+        let write_buf = 256 * 1024 * 1024; // 256MiB start point
+        opts.set_write_buffer_size(write_buf);
+        opts.set_max_write_buffer_number(4);
+        opts.set_min_write_buffer_number_to_merge(1); // no merges - don merge merge 🤓☝️💡😎🤓
 
-        // optimize for bulk inserts and single writer
+        opts.set_memtable_whole_key_filtering(false);
+        opts.set_memtable_prefix_bloom_ratio(0.00); // disable bloom for memtables
 
-        // Uses 8 * 512MB = 4GB
-        let buffer_size = ByteSize::mib(512);
-        let buffers_to_merge = 2;
-        let buffer_count = 8;
-        opts.set_write_buffer_size(buffer_size.as_u64() as _);
-        opts.set_max_write_buffer_number(buffer_count);
-        opts.set_min_write_buffer_number_to_merge(buffers_to_merge); // allow early flush
-        ctx.track_buffer_usage(
-            ByteSize(buffer_size.as_u64() * buffers_to_merge as u64),
-            ByteSize(buffer_size.as_u64() * buffer_count as u64),
-        );
+        let mut bb = BlockBasedOptions::default();
+        bb.set_block_cache(&ctx.caches().block_cache);
+        bb.set_block_size(4096);
+        bb.set_format_version(6);
 
-        opts.set_max_successive_merges(0); // it will eat cpu, we are doing first merge in hashmap anyway.
+        // Whole-key bloom (raise bits if misses are expensive)
+        bb.set_whole_key_filtering(true);
+        bb.set_bloom_filter(12.0, false);
 
-        // - Write batch size: 500K entries
-        // - Entry size: ~244 bytes (32 SHA + 8 seq + 192 value + 12 overhead)
-        // - Memtable size: 512MB
+        bb.set_data_block_index_type(DataBlockIndexType::BinaryAndHash);
+        bb.set_data_block_hash_ratio(0.75);
 
-        // 1. Entries per memtable = 512MB / 244B ≈ 2.2M entries
-        // 2. Target bucket load factor = 10-12 entries per bucket (RocksDB recommendation)
-        // 3. Bucket count = entries / target_load = 2.2M / 11 ≈ 200K
-        opts.set_memtable_factory(MemtableFactory::HashLinkList {
-            bucket_count: 200_000,
-        });
+        bb.set_cache_index_and_filter_blocks(true);
+        bb.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        bb.set_pin_top_level_index_and_filter(true);
 
-        opts.set_memtable_prefix_bloom_ratio(0.1); // we use hash-based memtable so bloom filter is not that useful
-        opts.set_bloom_locality(1); // Optimize bloom filter locality
+        bb.set_index_type(BlockBasedIndexType::TwoLevelIndexSearch);
+        bb.set_partition_filters(true);
 
-        let mut block_factory = BlockBasedOptions::default();
+        opts.set_block_based_table_factory(&bb);
 
-        // todo: some how make block cache separate for cells,
-        // using 3/4 of all available cache space
-        block_factory.set_block_cache(&ctx.caches().block_cache);
+        // --- Compaction sizing ---
+        opts.set_target_file_size_base(write_buf as _);
+        opts.set_level_zero_file_num_compaction_trigger(4);
 
-        // 10 bits per key, stored at the end of the sst
-        block_factory.set_bloom_filter(10.0, false);
-        block_factory.set_optimize_filters_for_memory(true);
-        block_factory.set_whole_key_filtering(true);
-
-        // to match fs block size
-        block_factory.set_block_size(4096);
-        block_factory.set_format_version(6);
-
-        // we have 4096 / 256 = 16 keys per block, so binary search is enough
-        block_factory.set_data_block_index_type(DataBlockIndexType::BinarySearch);
-
-        block_factory.set_index_type(BlockBasedIndexType::HashSearch);
-        block_factory.set_pin_l0_filter_and_index_blocks_in_cache(true);
-
-        opts.set_block_based_table_factory(&block_factory);
-        opts.set_prefix_extractor(SliceTransform::create_noop());
-
-        opts.set_memtable_whole_key_filtering(true);
-        opts.set_memtable_prefix_bloom_ratio(0.25);
-
-        opts.set_compression_type(DBCompressionType::None);
-
-        opts.set_compaction_pri(CompactionPri::OldestSmallestSeqFirst);
-        opts.set_level_zero_file_num_compaction_trigger(8);
-
-        opts.set_target_file_size_base(512 * 1024 * 1024); // smaller files for more efficient GC
-
-        opts.set_max_bytes_for_level_base(4 * 1024 * 1024 * 1024); // 4GB per level
+        // L1 size should scale up with larger memtables
+        opts.set_max_bytes_for_level_base(4 * 1024 * 1024 * 1024); // 4GiB start
         opts.set_max_bytes_for_level_multiplier(8.0);
+        opts.set_num_levels(6);
 
-        // 512MB per file; less files - less compactions
-        opts.set_target_file_size_base(512 * 1024 * 1024);
-        // L1: 4GB
-        // L2: ~32GB
-        // L3: ~256GB
-        // L4: ~2TB
-        opts.set_num_levels(5);
-
-        opts.set_optimize_filters_for_hits(true);
-
-        // we have our own cache and don't want `kcompactd` goes brrr scenario
         opts.set_use_direct_reads(true);
         opts.set_use_direct_io_for_flush_and_compaction(true);
 
-        opts.add_compact_on_deletion_collector_factory(
-            100, // N: examine 100 consecutive entries
-            // Small enough window to detect local delete patterns
-            // Large enough to avoid spurious compactions
-            45, // D: trigger on 45 deletions in window
-            // Balance between the space reclaim and compaction frequency
-            // ~45% deletion density trigger
-            0.5, /* deletion_ratio: trigger if 50% of a total file is deleted
-                  * Backup trigger for overall file health
-                  * Higher than window trigger to prefer local optimization */
-        );
-
-        // single writer optimizations
-        opts.set_enable_write_thread_adaptive_yield(false);
-        opts.set_allow_concurrent_memtable_write(false);
-        opts.set_enable_pipelined_write(true);
-        opts.set_inplace_update_support(false);
-        opts.set_unordered_write(true); // we don't use snapshots
-        opts.set_avoid_unnecessary_blocking_io(true); // schedule unnecessary IO in background;
-
-        opts.set_auto_tuned_ratelimiter(
-            256 * 1024 * 1024, // 256MB/s base rate
-            100_000,           // 100ms refill (standard value)
-            10,                // fairness (standard value)
-        );
-
-        opts.set_periodic_compaction_seconds(3600 * 24); // force compaction once a day
+        opts.set_unordered_write(true);
     }
 }
 
