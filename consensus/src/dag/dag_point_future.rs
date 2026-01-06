@@ -99,7 +99,7 @@ impl DagPointFuture {
 
                 let mut status = Self::new_validated_status(role, &cert);
                 status.is_valid = true;
-                state.acquire(&point.info().id(), &mut status); // only after persisted
+                state.acquire(point.info().id(), &mut status); // only after persisted
 
                 assert!(
                     status.is_first_valid,
@@ -156,9 +156,9 @@ impl DagPointFuture {
                 let id = point.info().id();
 
                 let mut status = PointStatusIllFormed::default();
-                state.acquire(&id, &mut status); // only after persisted
+                state.acquire(id, &mut status); // only after persisted
 
-                let dag_point = DagPoint::new_ill_formed(id, cert, &status, reason);
+                let dag_point = DagPoint::new_ill_formed(*id, cert, &status, reason);
                 store.insert_point(&point, PointStatusStoredRef::IllFormed(&status));
 
                 state.resolve(&dag_point);
@@ -392,18 +392,18 @@ impl DagPointFuture {
                         no_dag_round: status.no_dag_round,
                     })
                 };
-                state.acquire_restore(&dag_point.id(), &status);
+                state.acquire_restore(dag_point.id(), &status);
                 Either::Right(dag_point)
             }
             PointRestore::IllFormed(id, status) => {
                 let dag_point =
                     DagPoint::new_ill_formed(id, cert, &status, IllFormedReason::AfterLoadFromDb);
-                state.acquire_restore(&dag_point.id(), &status);
+                state.acquire_restore(dag_point.id(), &status);
                 Either::Right(dag_point)
             }
             PointRestore::NotFound(key, status) => {
                 let dag_point = DagPoint::new_not_found(key, cert, &status);
-                state.acquire_restore(&dag_point.id(), &status);
+                state.acquire_restore(dag_point.id(), &status);
                 Either::Right(dag_point)
             }
         };
@@ -474,7 +474,7 @@ impl DagPointFuture {
             ValidateResult::Valid => {
                 let mut status = Self::new_validated_status(role, &cert);
                 status.is_valid = true;
-                state.acquire(&id, &mut status);
+                state.acquire(id, &mut status);
                 (
                     DagPoint::new_valid(info, cert, &status),
                     PointStatusStored::Validated(status),
@@ -483,7 +483,7 @@ impl DagPointFuture {
             ValidateResult::Invalid(reason) => {
                 let mut status = Self::new_validated_status(role, &cert);
                 status.no_dag_round = reason.no_dag_round();
-                state.acquire(&id, &mut status);
+                state.acquire(id, &mut status);
                 (
                     DagPoint::new_invalid(info, cert, &status, reason),
                     PointStatusStored::Validated(status),
@@ -494,9 +494,9 @@ impl DagPointFuture {
                     is_certified: cert.is_certified(),
                     ..Default::default()
                 };
-                state.acquire(&id, &mut status);
+                state.acquire(id, &mut status);
                 (
-                    DagPoint::new_ill_formed(id, cert, &status, reason),
+                    DagPoint::new_ill_formed(*id, cert, &status, reason),
                     PointStatusStored::IllFormed(status),
                 )
             }

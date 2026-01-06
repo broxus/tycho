@@ -361,7 +361,7 @@ impl DagBack {
 
             let mut direct_trigger = None;
             if proof.round() == trigger.round().prev()
-                && proof.id() == trigger.anchor_id(AnchorStageRole::Proof)
+                && *proof.id() == trigger.anchor_id(AnchorStageRole::Proof)
             {
                 direct_trigger = Some(trigger.clone());
             }
