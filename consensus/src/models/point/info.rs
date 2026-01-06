@@ -18,10 +18,8 @@ pub struct PointInfo(Arc<PointInfoInner>);
 #[derive(TlWrite, TlRead)]
 #[cfg_attr(test, derive(PartialEq))]
 struct PointInfoInner {
-    digest: Digest,
+    id: PointId,
     signature: Signature,
-    author: PeerId,
-    round: Round,
     payload_len: u32,
     payload_bytes: u32,
     data: PointData,
@@ -58,27 +56,27 @@ impl PointInfo {
     };
 
     pub(super) fn new(
-        digest: Digest,
+        id: PointId,
         signature: Signature,
-        author: PeerId,
-        round: Round,
         payload_len: u32,
         payload_bytes: u32,
         data: PointData,
     ) -> Self {
         Self(Arc::new(PointInfoInner {
-            digest,
+            id,
             signature,
-            author,
-            round,
             payload_len,
             payload_bytes,
             data,
         }))
     }
 
+    pub fn id(&self) -> &PointId {
+        &self.0.id
+    }
+
     pub fn digest(&self) -> &Digest {
-        &self.0.digest
+        &self.0.id.digest
     }
 
     pub fn signature(&self) -> &Signature {
@@ -86,11 +84,11 @@ impl PointInfo {
     }
 
     pub fn author(&self) -> &PeerId {
-        &self.0.author
+        &self.0.id.author
     }
 
     pub fn round(&self) -> Round {
-        self.0.round
+        self.0.id.round
     }
 
     pub fn payload_len(&self) -> u32 {
@@ -133,7 +131,7 @@ impl PointInfo {
     }
 
     pub fn prev_digest(&self) -> Option<&Digest> {
-        (self.0.data).includes.get(&self.0.author)
+        (self.0.data).includes.get(self.author())
     }
 
     pub(super) fn check_structure(&self) -> Result<(), StructureIssue> {
@@ -146,18 +144,10 @@ impl PointInfo {
             .ok_or(StructureIssue::EvidenceSig)
     }
 
-    pub fn id(&self) -> PointId {
-        PointId {
-            author: self.0.author,
-            round: self.0.round,
-            digest: self.0.digest,
-        }
-    }
-
     pub fn prev_id(&self) -> Option<PointId> {
         Some(PointId {
-            author: self.0.author,
-            round: self.0.round.prev(),
+            author: *self.author(),
+            round: self.round().prev(),
             digest: *self.prev_digest()?,
         })
     }
@@ -171,20 +161,20 @@ impl PointInfo {
     }
 
     pub fn anchor_round(&self, link_field: AnchorStageRole) -> Round {
-        (self.0.data).anchor_round(link_field, self.0.round)
+        (self.0.data).anchor_round(link_field, self.round())
     }
 
     /// the final destination of an anchor link
     pub fn anchor_id(&self, link_field: AnchorStageRole) -> PointId {
         (self.0.data)
-            .anchor_id(link_field, self.0.round)
-            .unwrap_or_else(|| self.id())
+            .anchor_id(link_field, self.round())
+            .unwrap_or_else(|| *self.id())
     }
 
     /// next point in path from `&self` to the anchor
     pub fn anchor_link_through(&self, link_field: AnchorStageRole) -> PointId {
         (self.0.data)
-            .anchor_link_id(link_field, self.0.round)
-            .unwrap_or_else(|| self.id())
+            .anchor_link_id(link_field, self.round())
+            .unwrap_or_else(|| *self.id())
     }
 }
