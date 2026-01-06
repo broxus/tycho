@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use smallvec::SmallVec;
 use tycho_storage::fs::Dir;
-use tycho_storage::kv::refcount;
 use tycho_types::cell::{CellDescriptor, HashBytes};
 use tycho_types::models::*;
 use tycho_util::FastHashMap;
@@ -258,7 +257,7 @@ impl<'a> ShardStateWriter<'a> {
                         .get_pinned_cf_opt(&cf, hash, read_options)?
                         .ok_or(CellWriterError::CellNotFound)?;
 
-                    let value = match refcount::strip_refcount(value.as_ref()) {
+                    let value = match strip_cell_idx(value.as_ref()) {
                         Some(bytes) => bytes,
                         None => {
                             return Err(CellWriterError::CellNotFound.into());
@@ -417,6 +416,12 @@ fn deserialize_cell<'a>(
 
 fn number_of_bytes_to_fit(l: u64) -> u32 {
     8 - l.leading_zeros() / 8
+}
+
+fn strip_cell_idx(bytes: &[u8]) -> Option<&[u8]> {
+    const CELL_INDEX_BYTES: usize = 4;
+
+    bytes.get(CELL_INDEX_BYTES..)
 }
 
 struct Index {

@@ -84,6 +84,7 @@ impl CoreStorage {
             block_handle_storage.clone(),
             block_storage.clone(),
             ctx.temp_files().clone(),
+            ctx.files_dir(),
             config.cells_cache_size,
             config.drop_interval,
         )?;
