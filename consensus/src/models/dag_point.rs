@@ -98,44 +98,29 @@ impl DagPoint {
         }
     }
 
-    pub fn id(&self) -> PointId {
+    pub fn id(&self) -> &PointId {
         match self {
             Self::Valid(valid) => valid.info().id(),
             Self::Invalid(invalid) => invalid.info().id(),
-            Self::IllFormed(ill) => *ill.id(),
-            Self::NotFound(not_found) => *not_found.id(),
+            Self::IllFormed(ill) => ill.id(),
+            Self::NotFound(not_found) => not_found.id(),
         }
     }
 
     pub fn author(&self) -> &PeerId {
-        match self {
-            Self::Valid(valid) => valid.info().author(),
-            Self::Invalid(invalid) => invalid.info().author(),
-            Self::IllFormed(ill) => &ill.id().author,
-            Self::NotFound(not_found) => &not_found.id().author,
-        }
+        &self.id().author
     }
 
     pub fn round(&self) -> Round {
-        match self {
-            Self::Valid(valid) => valid.info().round(),
-            Self::Invalid(invalid) => invalid.info().round(),
-            Self::IllFormed(ill) => ill.id().round,
-            Self::NotFound(not_found) => not_found.id().round,
-        }
+        self.id().round
     }
 
     pub fn digest(&self) -> &Digest {
-        match self {
-            Self::Valid(valid) => valid.info().digest(),
-            Self::Invalid(invalid) => invalid.info().digest(),
-            Self::IllFormed(ill) => &ill.id().digest,
-            Self::NotFound(not_found) => &not_found.id().digest,
-        }
+        &self.id().digest
     }
 
     pub fn key(&self) -> PointKey {
-        PointKey::new(self.round(), *self.digest())
+        self.id().key()
     }
 
     pub fn is_first_resolved(&self) -> bool {

@@ -226,7 +226,7 @@ impl Engine {
                 .iter()
                 .filter_map(|dp| dp.trusted()) // will repeat valid only, but choose top round
                 .min_by_key(|info| info.time()) // in case of a fork after db deletion
-                .map(|info| info.id());
+                .map(|info| *info.id());
             if let Some(last_id) = earliest {
                 tracing::info!(
                     parent: round_ctx.span(),
@@ -311,7 +311,7 @@ impl Engine {
                                     // return back as they were, now with prev_proof filled
                                     PointRestore::Exists(info)
                                 } else {
-                                    PointRestore::IllFormed(info.id(), Default::default())
+                                    PointRestore::IllFormed(*info.id(), Default::default())
                                 }
                             })
                             .collect::<Vec<_>>()

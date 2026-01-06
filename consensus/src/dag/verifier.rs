@@ -414,7 +414,7 @@ impl Verifier {
                 }
                 break;
             };
-            let dep_id = dag_point.id();
+            let dep_id = *dag_point.id();
 
             let is_prev_point = if dep_id.round == prev_round && dep_id.author == info.author() {
                 match prev_digest_in_point {
@@ -541,7 +541,7 @@ impl Verifier {
             *inv_dep = Some(InvalidDependency {
                 reason: Box::new(reason.clone()),
                 link: IndirectLink {
-                    to: root_cause_id,
+                    to: *root_cause_id,
                     path: indirect_through.cloned().unwrap_or_else(|| {
                         if dag_point.round() == prev_round {
                             Through::Includes(*dag_point.author())
@@ -802,12 +802,12 @@ impl Verifier {
         );
         if info.time() <= proven.time() {
             // time must be increasing by the same author until it stops referencing previous points
-            return Some(InvalidReason::TimeNotGreaterThanInPrevPoint(proven.id()));
+            return Some(InvalidReason::TimeNotGreaterThanInPrevPoint(*proven.id()));
         }
         if info.anchor_proof() == &AnchorLink::ToSelf && info.anchor_time() != proven.time() {
             // anchor proof must inherit its candidate's time
             return Some(InvalidReason::AnchorProofDoesntInheritAnchorTime(
-                proven.id(),
+                *proven.id(),
             ));
         }
         None
