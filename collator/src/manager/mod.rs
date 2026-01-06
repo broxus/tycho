@@ -4,6 +4,7 @@ use std::sync::Arc;
 use ahash::HashMapExt;
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
+use futures_util::TryFutureExt;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -380,7 +381,10 @@ where
                 .process_handle_block_from_bc_queue(
                     blocks_from_bc_queue_receiver,
                     cancel_async_tasks.clone(),
-                ),
+                )
+                .map_err(|e| {
+                    tracing::error!("initial process_handle_block_from_bc_queue failed: {e:?}");
+                }),
         );
 
         // start tasks dispatcher
@@ -537,7 +541,7 @@ where
         let block_id = block_entry.block_id;
 
         // TODO: error if <
-        if block_id.seqno <= state_node_adapter.zerostate_id().seqno {
+        if block_entry.ref_by_mc_seqno <= state_node_adapter.zerostate_id().seqno {
             return Ok(None);
         }
 
@@ -2026,7 +2030,7 @@ where
 
             let mc_block_entry = &subgraph.master_block;
 
-            // apply queue diffs from blocks above 0
+            // apply queue diffs from blocks above zerostate seqno
             // skip cached diffs below min_processed_to
             if subgraph.master_block.block_id.seqno > state_node_adapter.zerostate_id().seqno {
                 for block_entry in [mc_block_entry]

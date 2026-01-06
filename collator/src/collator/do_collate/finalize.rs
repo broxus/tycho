@@ -102,11 +102,7 @@ impl Phase<FinalizeState> {
         let mut other_updated_top_shard_diffs_info = FastHashMap::default();
 
         for top_block_id in top_other_updated_shard_blocks_ids.iter() {
-            // FIXME: Use `zerostate_id.seqno` here, but we need to check
-            // against `ref_by_mc_seqno`.
-            if top_block_id.seqno == 0
-                || top_block_id.is_masterchain() && top_block_id.seqno <= zerostate_id.seqno
-            {
+            if top_block_id.seqno == 0 || self.state.mc_data.block_id.seqno <= zerostate_id.seqno {
                 continue;
             }
 

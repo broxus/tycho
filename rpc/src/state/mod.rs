@@ -647,6 +647,22 @@ impl Inner {
             if handle.has_data() {
                 let key_block = blocks.load_block_data(&handle).await?;
                 self.update_mc_block_cache(&key_block)?;
+            } else if handle.is_zerostate() {
+                let proof = self
+                    .core_storage
+                    .node_state()
+                    .load_zerostate_proof()
+                    .context("no zerostate proof found")?
+                    .virtualize()
+                    .parse::<ShardStateUnsplit>()
+                    .context("failed to deserialize zerostate proof")?;
+
+                let Some(extra) = proof.load_custom()? else {
+                    anyhow::bail!("masterchain state without extra");
+                };
+
+                self.update_config(proof.global_id, proof.seqno, &extra.config);
+                tracing::warn!("no key block found during initialization");
             } else {
                 let state = shard_states
                     .load_state(handle.id().seqno, handle.id())

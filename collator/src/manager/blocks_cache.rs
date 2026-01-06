@@ -1134,12 +1134,12 @@ impl ReceivedBlockContext {
         let block_id = state.block_id();
         let zerostate_mc_seqno = state_node_adapter.zerostate_id().seqno;
         anyhow::ensure!(
-            block_id.seqno >= zerostate_mc_seqno,
+            mc_block_id.seqno >= zerostate_mc_seqno,
             "received masterchain block older than zerostate: \
             zerostate_seqno={zerostate_mc_seqno}, block_id={block_id}"
         );
 
-        if block_id.seqno == state_node_adapter.zerostate_id().seqno {
+        if mc_block_id.seqno == state_node_adapter.zerostate_id().seqno {
             let queue_diff = QueueDiffStuff::new_empty(block_id);
 
             return Ok(Self {
