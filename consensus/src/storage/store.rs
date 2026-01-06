@@ -373,7 +373,7 @@ impl MempoolStoreImpl for MempoolDb {
                 PointStatusStored::IllFormed(status) => {
                     let info = get_value::<PointInfo>(&mut info_iter, &key_bytes)
                         .with_context(|| format!("table point info, status {status} {key:?}"))?;
-                    let ready = PointRestore::IllFormed(info.id(), status);
+                    let ready = PointRestore::IllFormed(*info.id(), status);
                     result.push(PointRestoreSelect::Ready(ready));
                 }
             }
