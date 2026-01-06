@@ -130,7 +130,7 @@ impl ColumnFamilyOptions<TableContext> for FullBlockIds {
 
 /// Maps `BlockId` to root cell hash
 /// - Key: `BlockId`
-/// - Value: `[u8; 32] (state root hash), u8 (flags)`
+/// - Value: `[u8; 32] (state root hash)`
 pub struct ShardStates;
 
 impl ColumnFamily for ShardStates {

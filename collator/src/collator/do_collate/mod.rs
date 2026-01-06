@@ -44,7 +44,7 @@ use crate::types::processed_upto::{
 use crate::types::{
     BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
     DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort,
-    ShardDescriptionShortExt, TopBlockDescription, TopShardBlockInfo,
+    ShardDescriptionShortExt, ShardPair, TopBlockDescription, TopBlockId, TopShardBlockInfo,
 };
 
 #[cfg(test)]
@@ -549,6 +549,7 @@ impl CollatorStdImpl {
                     processed_upto,
                     diff_tail_len,
                     block_serializer_cache,
+                    zerostate_id,
                 })
             },
             // run update queue task and wait before returning collation result
@@ -1304,7 +1305,17 @@ impl CollatorStdImpl {
                 && *shard != block_id_short.shard
                 && let Some(prev) = prev_shards.get(shard)
             {
-                shard_pairs.push((*shard, prev.get_block_id(*shard), curr.get_block_id(*shard)));
+                shard_pairs.push(ShardPair {
+                    shard_ident: *shard,
+                    prev_block_id: TopBlockId {
+                        ref_by_mc_seqno: prev.reg_mc_seqno,
+                        block_id: prev.get_block_id(*shard),
+                    },
+                    current_block_id: TopBlockId {
+                        ref_by_mc_seqno: curr.reg_mc_seqno,
+                        block_id: curr.get_block_id(*shard),
+                    },
+                });
             }
         }
 
@@ -1324,11 +1335,17 @@ impl CollatorStdImpl {
         let mut shard_pairs = Vec::new();
         for top in top_shard_blocks_info {
             if let Some(prev) = prev_shards.get(&top.block_id.shard) {
-                shard_pairs.push((
-                    top.block_id.shard,
-                    prev.get_block_id(top.block_id.shard),
-                    top.block_id,
-                ));
+                shard_pairs.push(ShardPair {
+                    shard_ident: top.block_id.shard,
+                    prev_block_id: TopBlockId {
+                        ref_by_mc_seqno: prev.reg_mc_seqno,
+                        block_id: prev.get_block_id(top.block_id.shard),
+                    },
+                    current_block_id: TopBlockId {
+                        ref_by_mc_seqno: mc_data.block_id.seqno,
+                        block_id: top.block_id,
+                    },
+                });
             }
         }
 
@@ -1338,7 +1355,7 @@ impl CollatorStdImpl {
     async fn build_ranges(
         &self,
         master_block_id: &BlockId,
-        shard_pairs: Vec<(ShardIdent, BlockId, BlockId)>,
+        shard_pairs: Vec<ShardPair>,
     ) -> Result<Option<Vec<QueueShardBoundedRange>>> {
         let Some(master_max_msg) = self
             .get_diff_max_message(master_block_id)
@@ -1355,20 +1372,20 @@ impl CollatorStdImpl {
             to: Bound::Included(master_max_msg),
         }];
 
-        for (shard, prev_id, curr_id) in shard_pairs {
-            if prev_id.seqno == self.zerostate_id.seqno {
+        for pair in shard_pairs {
+            if pair.prev_block_id.ref_by_mc_seqno == self.zerostate_id.seqno {
                 return Ok(None);
             }
 
             let (first_msg, last_msg) = tokio::try_join!(
-                self.get_diff_max_message(&prev_id),
-                self.get_diff_max_message(&curr_id)
+                self.get_diff_max_message(&pair.prev_block_id.block_id),
+                self.get_diff_max_message(&pair.current_block_id.block_id)
             )
             .context("loading shard diffs")?;
 
             match (first_msg, last_msg) {
                 (Some(first), Some(last)) => ranges.push(QueueShardBoundedRange {
-                    shard_ident: shard,
+                    shard_ident: pair.shard_ident,
                     from: Bound::Excluded(first),
                     to: Bound::Included(last),
                 }),

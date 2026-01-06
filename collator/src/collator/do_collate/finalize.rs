@@ -62,6 +62,7 @@ pub struct FinalizeBlockContext {
     pub processed_upto: ProcessedUptoInfoStuff,
     pub diff_tail_len: u32,
     pub block_serializer_cache: BlockSerializerCache,
+    pub zerostate_id: ZerostateId,
 }
 
 impl Phase<FinalizeState> {
@@ -102,11 +103,7 @@ impl Phase<FinalizeState> {
         let mut other_updated_top_shard_diffs_info = FastHashMap::default();
 
         for top_block_id in top_other_updated_shard_blocks_ids.iter() {
-            // FIXME: Use `zerostate_id.seqno` here, but we need to check
-            // against `ref_by_mc_seqno`.
-            if top_block_id.seqno == 0
-                || top_block_id.is_masterchain() && top_block_id.seqno <= zerostate_id.seqno
-            {
+            if top_block_id.seqno == 0 || self.state.mc_data.block_id.seqno <= zerostate_id.seqno {
                 continue;
             }
 
@@ -178,6 +175,7 @@ impl Phase<FinalizeState> {
             processed_upto,
             diff_tail_len,
             block_serializer_cache,
+            zerostate_id,
         } = ctx;
 
         let accounts_split_depth = collator_config.accounts_split_depth;
@@ -317,6 +315,7 @@ impl Phase<FinalizeState> {
                 prev_state,
                 prev_processed_to_anchor,
                 collator_config,
+                zerostate_id,
             )?;
             self.state
                 .collation_data
@@ -795,6 +794,7 @@ impl Phase<FinalizeState> {
         prev_state: &ShardStateStuff,
         prev_processed_to_anchor: u32,
         collator_config: Arc<CollatorConfig>,
+        zerostate_id: ZerostateId,
     ) -> Result<(McStateExtra, u32)> {
         // 1. update config params and detect key block
         let prev_state_extra = prev_state.state_extra()?;
@@ -962,7 +962,7 @@ impl Phase<FinalizeState> {
         });
 
         // 6. update prev_blocks (add prev block's id to the dictionary)
-        let prev_is_key_block = collation_data.block_id_short.seqno == 1 // prev block is a keyblock if it is a zerostate
+        let prev_is_key_block = collation_data.block_id_short.seqno == zerostate_id.seqno + 1 // prev block is a keyblock if it is a zerostate
             || prev_state_extra.after_key_block;
         let mut prev_blocks = prev_state_extra.prev_blocks.clone();
         let prev_blk_ref = BlockRef {

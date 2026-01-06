@@ -154,7 +154,7 @@ impl Cmd {
                 root_dir: root_dir.clone(),
                 ..Default::default()
             };
-            let core_storage_config = CoreStorageConfig::default();
+            let core_storage_config = CoreStorageConfig::default().without_gc();
             let context = StorageContext::new(storage_config)
                 .await
                 .context("Failed to create storage context")?;

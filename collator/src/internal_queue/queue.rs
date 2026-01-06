@@ -24,7 +24,7 @@ use crate::internal_queue::types::stats::{
     AccountStatistics, DiffStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::storage::models::DiffInfo;
-use crate::types::TopBlockId;
+use crate::types::TopBlockIdUpdated;
 use crate::{internal_queue, tracing_targets};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,7 +93,7 @@ where
     /// Commit diffs to the state and update GC
     fn commit_diff(
         &self,
-        mc_top_blocks: &[TopBlockId],
+        mc_top_blocks: &[TopBlockIdUpdated],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
 
@@ -281,7 +281,7 @@ where
 
     fn commit_diff(
         &self,
-        mc_top_blocks: &[TopBlockId],
+        mc_top_blocks: &[TopBlockIdUpdated],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {
         // Take global lock
@@ -289,7 +289,12 @@ where
 
         let mc_block_id = mc_top_blocks
             .iter()
-            .find_map(|item| item.block_id.is_masterchain().then_some(&item.block_id))
+            .find_map(|item| {
+                item.block
+                    .block_id
+                    .is_masterchain()
+                    .then_some(&item.block.block_id)
+            })
             .ok_or_else(|| anyhow!("Masterchain block not found in commit_diff"))?;
 
         // check current commit pointer. If it is greater than committing diff then skip
@@ -311,7 +316,7 @@ where
         let mut commit_pointers = FastHashMap::default();
 
         for item in mc_top_blocks {
-            let block_id = &item.block_id;
+            let block_id = &item.block.block_id;
 
             // Check if the diff is already applied
             let diff = self
@@ -320,8 +325,13 @@ where
 
             let diff = match diff {
                 // If top shard block changed and diff not found, then bail
-                None if item.updated && item.ref_by_mc_seqno > self.zerostate_id.seqno => {
-                    bail!("Diff not found for block_id: {}", block_id)
+                None if item.updated && item.block.ref_by_mc_seqno > self.zerostate_id.seqno => {
+                    bail!(
+                        "Diff not found for block_id: {} ref {} zerostate {}",
+                        block_id,
+                        item.block.ref_by_mc_seqno,
+                        self.zerostate_id.seqno
+                    )
                 }
                 // If top shard block not changed and diff not found, then continue
                 None => continue,
