@@ -439,13 +439,13 @@ fn deserialize_cell<'a>(
         offset: 0,
     };
 
-    index.require(4)?;
+    index.require(6)?;
     let mut descriptor = CellDescriptor::new([value[*index], value[*index + 1]]);
     descriptor.d1 &= !CellDescriptor::STORE_HASHES_MASK;
 
     index.advance(2);
     let bit_length = u16::from_le_bytes([value[*index], value[*index + 1]]);
-    index.advance(2);
+    index.advance(4); // also skip repr depth
 
     let data_len = descriptor.byte_len() as usize;
     index.require(data_len)?;
@@ -454,7 +454,7 @@ fn deserialize_cell<'a>(
 
     assert_eq!((bit_length as usize).div_ceil(8), data_len);
 
-    index.advance((32 + 2) * descriptor.hash_count() as usize);
+    index.advance((32 + 2) * (descriptor.hash_count() - 1) as usize);
 
     for _ in 0..descriptor.reference_count() {
         index.require(32)?;

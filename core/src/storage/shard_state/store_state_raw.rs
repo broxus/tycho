@@ -266,13 +266,9 @@ impl<'a> FinalizationContext<'a> {
 
         // Prepare mask and counters
         let mut children_mask = LevelMask::new(0);
-        let mut tree_bits_count = cell.bit_len as u64;
-        let mut tree_cell_count = 1u64;
 
         for (_, child) in children.iter() {
             children_mask |= child.level_mask();
-            tree_bits_count = tree_bits_count.saturating_add(child.tree_bits_count());
-            tree_cell_count = tree_cell_count.saturating_add(child.tree_cell_count());
         }
 
         let mut is_merkle_cell = false;
@@ -297,8 +293,6 @@ impl<'a> FinalizationContext<'a> {
         // Save mask and counters
         current_entry.set_level_mask(level_mask);
         current_entry.set_cell_type(cell.descriptor.cell_type());
-        current_entry.set_tree_bits_count(tree_bits_count);
-        current_entry.set_tree_cell_count(tree_cell_count);
 
         // Calculate hashes
         let hash_count = if is_pruned_cell {
@@ -387,11 +381,14 @@ impl<'a> FinalizationContext<'a> {
         let output_buffer = &mut self.output_buffer;
         output_buffer.clear();
 
+        let repr_hash_idx = hash_count - 1;
+
         output_buffer.extend_from_slice(&[cell.descriptor.d1, cell.descriptor.d2]);
         output_buffer.extend_from_slice(&cell.bit_len.to_le_bytes());
+        output_buffer.extend_from_slice(current_entry.get_depth_slice(repr_hash_idx));
         output_buffer.extend_from_slice(cell.data);
 
-        for i in 0..hash_count {
+        for i in 0..repr_hash_idx {
             output_buffer.extend_from_slice(current_entry.get_hash_slice(i));
             output_buffer.extend_from_slice(current_entry.get_depth_slice(i));
         }
@@ -414,9 +411,6 @@ impl<'a> FinalizationContext<'a> {
             *self.cell_usages.entry(*child_hash).or_default() += 1;
             output_buffer.extend_from_slice(child_hash);
         }
-
-        // Write counters
-        output_buffer.extend_from_slice(current_entry.get_tree_counters());
 
         // Save serialized data
         let repr_hash = if is_pruned_cell {

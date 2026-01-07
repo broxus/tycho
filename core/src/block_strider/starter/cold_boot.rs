@@ -433,7 +433,8 @@ impl StarterInner {
 
         let mc_zerostate = state_storage
             .load_state(mc_block_id.seqno, &mc_block_id)
-            .await?;
+            .await
+            .context("failed to reload mc zerostate")?;
 
         let block_id_from_state = BlockIdShort {
             shard: mc_zerostate.state().shard_ident,

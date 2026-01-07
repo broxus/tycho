@@ -69,18 +69,6 @@ impl HashesEntryWriter<'_> {
         self.0[1] = cell_type.into();
     }
 
-    pub fn set_tree_bits_count(&mut self, count: u64) {
-        self.0[4..12].copy_from_slice(&count.to_le_bytes());
-    }
-
-    pub fn set_tree_cell_count(&mut self, count: u64) {
-        self.0[12..20].copy_from_slice(&count.to_le_bytes());
-    }
-
-    pub fn get_tree_counters(&mut self) -> &[u8] {
-        &self.0[4..20]
-    }
-
     pub fn set_hash(&mut self, i: u8, hash: &[u8]) {
         self.get_hash_slice(i).copy_from_slice(hash);
     }
@@ -105,13 +93,11 @@ pub struct HashesEntry<'a>(&'a [u8; HashesEntry::LEN]);
 
 impl<'a> HashesEntry<'a> {
     // 4 bytes - info (1 byte level mask, 1 byte cell type, 2 bytes padding)
-    // 8 bytes - tree bits count
-    // 8 bytes - cell count
     // 32 * 4 bytes - hashes
     // 2 * 4 bytes - depths
-    pub const LEN: usize = 4 + 8 + 8 + 32 * 4 + 2 * 4;
-    pub const HASHES_OFFSET: usize = 4 + 8 + 8;
-    pub const DEPTHS_OFFSET: usize = 4 + 8 + 8 + 32 * 4;
+    pub const LEN: usize = 4 + 32 * 4 + 2 * 4;
+    pub const HASHES_OFFSET: usize = 4;
+    pub const DEPTHS_OFFSET: usize = 4 + 32 * 4;
 
     pub fn level_mask(&self) -> LevelMask {
         // SAFETY: loaded from `set_level_mask`
@@ -126,14 +112,6 @@ impl<'a> HashesEntry<'a> {
             4 => CellType::MerkleUpdate,
             _ => CellType::Ordinary,
         }
-    }
-
-    pub fn tree_bits_count(&self) -> u64 {
-        u64::from_le_bytes(self.0[4..12].try_into().unwrap())
-    }
-
-    pub fn tree_cell_count(&self) -> u64 {
-        u64::from_le_bytes(self.0[12..20].try_into().unwrap())
     }
 
     pub fn hash(&self, n: u8) -> &'a [u8; 32] {
