@@ -167,7 +167,7 @@ impl StorageContext {
         items.retain(|_, item| !weedb::WeakWeeDbRaw::ptr_eq(&db, &item.weak));
 
         // Insert a new item.
-        match items.entry(name.to_owned()) {
+        let updated = match items.entry(name.to_owned()) {
             hash_map::Entry::Vacant(entry) => {
                 entry.insert(Arc::new(KnownInstance::new(name, db)));
                 true
@@ -180,7 +180,11 @@ impl StorageContext {
                     false
                 }
             }
-        }
+        };
+
+        // Store the updated items back
+        self.inner.rocksdb_instances.store(Arc::new(items));
+        updated
     }
 
     pub fn validate_options<T>(&self) -> Result<()>
