@@ -64,6 +64,7 @@ use messages_reader::state::ReaderState;
 pub use types::{ForceMasterCollation, ShardDescriptionExt};
 
 mod state;
+mod statistics;
 #[cfg(test)]
 #[path = "tests/collator_tests.rs"]
 pub(super) mod tests;
