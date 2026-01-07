@@ -108,11 +108,11 @@ impl CellStorage {
 
     /// Moves cells tree from temp cells db to the main.
     ///
-    /// * `split_at_parts` - parts subtrees roots that will be stored in separate storages.
+    /// * `skip_roots` - subtrees roots that will be stored in separate storages.
     pub fn apply_temp_cell(
         &self,
         root: &HashBytes,
-        split_at_parts: &Option<FastHashSet<HashBytes>>,
+        skip_roots: Option<&FastHashSet<HashBytes>>,
     ) -> Result<()> {
         const MAX_NEW_CELLS_BATCH_SIZE: usize = 10000;
 
@@ -304,8 +304,8 @@ impl CellStorage {
             };
 
             for ref child in iter {
-                // skip parts subtrees roots because they will be stored in separate storages
-                if split_at_parts.as_ref().is_some_and(|at| at.contains(child)) {
+                // skip children that will be stored in a separate storages
+                if skip_roots.as_ref().is_some_and(|l| l.contains(child)) {
                     continue;
                 }
 
@@ -419,12 +419,11 @@ impl CellStorage {
 
                     for child in &mut *iter {
                         let child_hash = child.repr_hash();
-                        if self.split_at.contains_key(child_hash) {
-                            // skip if subtree should be stored in the part
-                            if self.split_on_parts {
-                                continue 'outer;
-                            }
-
+                        let split_at_reached = self.split_at.contains_key(child_hash);
+                        let is_part_subtree_root_cell = split_at_reached && self.split_on_parts;
+                        // NOTE: when we split on parts we store part subtree root cell to the main storage
+                        //      to have the complete top part of tree that we able to split again on split_depth
+                        if split_at_reached && !is_part_subtree_root_cell {
                             // skip cell to store it in parallel
                             let mut delayed_additions = self.delayed_additions.lock().unwrap();
                             match delayed_additions.entry(*child_hash) {
@@ -448,7 +447,11 @@ impl CellStorage {
                         }
 
                         if self.insert_cell(child, &mut alloc, depth)? {
-                            stack.push(child.references());
+                            // NOTE: do not process refs if child is a part subtree root cell
+                            if !is_part_subtree_root_cell {
+                                stack.push(child.references());
+                            }
+
                             continue 'outer;
                         }
                     }
@@ -960,41 +963,42 @@ impl CellStorage {
 
                     for child_hash in iter.by_ref() {
                         let split_at_reached = self.split_at.contains(child_hash);
-                        if split_at_reached {
-                            if self.split_on_parts {
-                                // do not try to remove subtree in parallel if splitted on parts
-                                // subtree will be removed from the part in a separate task
-                                continue 'outer;
-                            } else {
-                                // Skip cell to remove it later in parallel
-                                let mut delayed_removes = self.delayed_removes.lock().unwrap();
-                                match delayed_removes.entry(*child_hash) {
-                                    hash_map::Entry::Vacant(entry) => {
-                                        // This subtree will be removed by another thread,
-                                        // so no removes is needed on first occurrence.
-                                        entry.insert(0);
-                                        drop(delayed_removes);
+                        let is_part_subtree_root_cell = split_at_reached && self.split_on_parts;
+                        // NOTE: when we split on parts we store part subtree root cell to the main storage,
+                        //      so we need to remove this root cell but do not travers children in the main storage
+                        if split_at_reached && !is_part_subtree_root_cell {
+                            // Skip cell to remove it later in parallel
+                            let mut delayed_removes = self.delayed_removes.lock().unwrap();
+                            match delayed_removes.entry(*child_hash) {
+                                hash_map::Entry::Vacant(entry) => {
+                                    // This subtree will be removed by another thread,
+                                    // so no removes is needed on first occurrence.
+                                    entry.insert(0);
+                                    drop(delayed_removes);
 
-                                        // Spawn processing.
-                                        scope.spawn(|| self.traverse_cell(child_hash, scope));
-                                    }
-                                    hash_map::Entry::Occupied(mut entry) => {
-                                        // Other thread will remove this subtree only once,
-                                        // so we need to adjust references to keep them in sync.
-                                        *entry.get_mut() += 1;
-                                    }
+                                    // Spawn processing.
+                                    scope.spawn(|| self.traverse_cell(child_hash, scope));
                                 }
-
-                                continue 'outer;
+                                hash_map::Entry::Occupied(mut entry) => {
+                                    // Other thread will remove this subtree only once,
+                                    // so we need to adjust references to keep them in sync.
+                                    *entry.get_mut() += 1;
+                                }
                             }
+
+                            continue 'outer;
                         }
 
                         // Process the current cell
                         let refs = self.remove_cell(child_hash, &mut alloc)?;
 
+                        // And proceed to its refs if any.
                         if let Some(refs) = refs {
-                            // And proceed to its refs if any.
-                            stack.push(refs.iter());
+                            // NOTE: do not process refs if child is a part subtree root cell
+                            if !is_part_subtree_root_cell {
+                                stack.push(refs.iter());
+                            }
+
                             continue 'outer;
                         }
                     }

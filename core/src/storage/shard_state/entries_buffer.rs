@@ -69,6 +69,10 @@ impl HashesEntryWriter<'_> {
         self.0[1] = cell_type.into();
     }
 
+    pub fn set_is_absent(&mut self, is_absent: bool) {
+        self.0[2] = is_absent as u8;
+    }
+
     pub fn set_hash(&mut self, i: u8, hash: &[u8]) {
         self.get_hash_slice(i).copy_from_slice(hash);
     }
@@ -92,7 +96,7 @@ impl HashesEntryWriter<'_> {
 pub struct HashesEntry<'a>(&'a [u8; HashesEntry::LEN]);
 
 impl<'a> HashesEntry<'a> {
-    // 4 bytes - info (1 byte level mask, 1 byte cell type, 2 bytes padding)
+    // 4 bytes - info (1 byte level mask, 1 byte cell type, 1 byte is absent, 1 byte padding)
     // 32 * 4 bytes - hashes
     // 2 * 4 bytes - depths
     pub const LEN: usize = 4 + 32 * 4 + 2 * 4;
@@ -114,6 +118,10 @@ impl<'a> HashesEntry<'a> {
         }
     }
 
+    pub fn is_absent(&self) -> bool {
+        self.0[2] != 0
+    }
+
     pub fn hash(&self, n: u8) -> &'a [u8; 32] {
         let offset = Self::HASHES_OFFSET + 32 * self.level_mask().hash_index(n) as usize;
         unsafe { &*self.0.as_ptr().add(offset).cast() }
@@ -132,16 +140,12 @@ impl<'a> HashesEntry<'a> {
         let index = level_mask.hash_index(n) as usize;
         let level = level_mask.level() as usize;
 
-        Some(if index == level {
+        if index == level {
             let offset = Self::HASHES_OFFSET;
-            unsafe { &*self.0.as_ptr().add(offset).cast() }
+            Some(unsafe { &*self.0.as_ptr().add(offset).cast() })
         } else {
-            let offset = 1 + 1 + index * 32;
-            if data.len() < offset + 32 {
-                return None;
-            }
-            unsafe { &*data.as_ptr().add(offset).cast() }
-        })
+            read_stored_hash_by_index(index, data, 1 + 1)
+        }
     }
 
     pub fn pruned_branch_depth(&self, n: u8, data: &[u8]) -> u16 {
@@ -153,8 +157,41 @@ impl<'a> HashesEntry<'a> {
             let offset = Self::DEPTHS_OFFSET;
             u16::from_le_bytes([self.0[offset], self.0[offset + 1]])
         } else {
-            let offset = 1 + 1 + level * 32 + index * 2;
-            u16::from_be_bytes([data[offset], data[offset + 1]])
+            read_stored_depth_by_index(level, index, data, 1 + 1)
         }
     }
+}
+
+pub fn read_stored_hash(
+    level_mask: LevelMask,
+    n: u8,
+    data: &[u8],
+    hashes_offset: usize,
+) -> Option<&[u8; 32]> {
+    let index = level_mask.hash_index(n) as usize;
+    read_stored_hash_by_index(index, data, hashes_offset)
+}
+
+fn read_stored_hash_by_index(index: usize, data: &[u8], hashes_offset: usize) -> Option<&[u8; 32]> {
+    let offset = hashes_offset + index * 32;
+    if data.len() < offset + 32 {
+        return None;
+    }
+    Some(unsafe { &*data.as_ptr().add(offset).cast() })
+}
+
+pub fn read_stored_depth(level_mask: LevelMask, n: u8, data: &[u8], hashes_offset: usize) -> u16 {
+    let index = level_mask.hash_index(n) as usize;
+    let level = level_mask.level() as usize;
+    read_stored_depth_by_index(level, index, data, hashes_offset)
+}
+
+fn read_stored_depth_by_index(
+    level: usize,
+    index: usize,
+    data: &[u8],
+    hashes_offset: usize,
+) -> u16 {
+    let offset = hashes_offset + (level + 1) * 32 + index * 2;
+    u16::from_be_bytes([data[offset], data[offset + 1]])
 }

@@ -28,7 +28,7 @@ use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
 use super::{BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CellsPartDb};
 use crate::storage::db::{CellStorageDb, CellsDbOps};
-use crate::storage::shard_state::store_state_raw::StoreStateFromFileResult;
+use crate::storage::shard_state::store_state_raw::StoreStateResult;
 
 mod cell_storage;
 mod entries_buffer;
@@ -85,7 +85,7 @@ pub trait ShardStateStoragePart: Send + Sync {
         self: Arc<Self>,
         block_id: BlockId,
         boc: File,
-    ) -> Pin<Box<dyn Future<Output = Result<StoreStateFromFileResult>> + Send>>;
+    ) -> Pin<Box<dyn Future<Output = Result<StoreStateResult>> + Send>>;
     fn blocking_store_accounts_subtree(
         self: Arc<Self>,
         block_id: &BlockId,
@@ -156,7 +156,7 @@ impl ShardStateStoragePart for ShardStateStoragePartImpl {
         self: Arc<Self>,
         block_id: BlockId,
         boc: File,
-    ) -> Pin<Box<dyn Future<Output = Result<StoreStateFromFileResult>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<StoreStateResult>> + Send>> {
         let fut = self.store_accounts_subtree_from_file_impl(block_id, boc);
         Box::pin(fut)
     }
@@ -267,7 +267,7 @@ impl ShardStateStoragePartImpl {
         self: Arc<Self>,
         block_id: BlockId,
         boc: File,
-    ) -> Result<StoreStateFromFileResult> {
+    ) -> Result<StoreStateResult> {
         let ctx = StoreStateContext {
             cells_db: CellStorageDb::Part(self.cells_db.clone()),
             cell_storage: self.cell_storage.clone(),
@@ -284,7 +284,7 @@ impl ShardStateStoragePartImpl {
             // NOTE: Ensure that GC lock is captured by the spawned thread.
             let _gc_lock = gc_lock;
 
-            ctx.store(&block_id, boc, None, shard_prefix)
+            ctx.store(&block_id, boc, shard_prefix)
         })
         .await??;
 
@@ -495,20 +495,10 @@ impl ShardStateStorage {
             FastHashMap::default()
         };
 
-        // compute parts info for ShardStateEntry
+        // build parts info for ShardStateEntry
         let parts_info = if !block_id.is_masterchain() && self.uses_parts() && !split_at.is_empty()
         {
-            let mut parts_info = Vec::new();
-            for (hash, entry) in &split_at {
-                if let Some(shard) = &entry.shard {
-                    parts_info.push(ShardStatePartInfo {
-                        hash: *hash,
-                        prefix: shard.prefix(),
-                    });
-                }
-            }
-            parts_info.sort_unstable();
-            Some(parts_info)
+            Some(build_parts_info(&split_at))
         } else {
             None
         };
@@ -678,51 +668,19 @@ impl ShardStateStorage {
         Ok(updated)
     }
 
-    // Stores shard state from file and returns the hash of its root cell.
-    pub async fn store_state_inner<R>(
+    /// Stores shard state main part from file and
+    /// returns the hash of its root cell
+    /// and parts info if split depth provided.
+    pub async fn store_state_main_from_inner<R>(
         &self,
         block_id: &BlockId,
         boc: R,
-        part_files: Vec<(ShardStatePartInfo, File)>,
+        part_split_depth: u8,
     ) -> Result<StoreStateFromFileResult>
     where
         R: std::io::Read + Send + 'static,
     {
         let block_id = *block_id;
-
-        // run store tasks in parts
-        let mut part_store_tasks = FuturesUnordered::new();
-        let parts_info = if !block_id.is_masterchain() && !part_files.is_empty() {
-            let storage_parts = self.storage_parts.try_as_ref_ext()?;
-            anyhow::ensure!(
-                storage_parts.len() >= part_files.len(),
-                "shard state parts count ({}) mismatch with storage parts count ({})",
-                part_files.len(),
-                storage_parts.len(),
-            );
-
-            let mut parts_info = Vec::new();
-
-            let mut remaining_prefixes: FastHashSet<_> = storage_parts.keys().cloned().collect();
-            for (info, file) in part_files {
-                anyhow::ensure!(
-                    remaining_prefixes.remove(&info.prefix),
-                    "unexpected persistent shard state part {}",
-                    DisplayShardPrefix(&info.prefix),
-                );
-
-                let storage_part = storage_parts.try_get_ext(&info.prefix)?.clone();
-                part_store_tasks.push(tokio::spawn(
-                    storage_part.store_accounts_subtree_from_file(block_id, file),
-                ));
-
-                parts_info.push(info);
-            }
-
-            Some(parts_info)
-        } else {
-            None
-        };
 
         // store main state in a separate task
         let ctx = StoreStateContext {
@@ -736,59 +694,150 @@ impl ShardStateStorage {
             self.gc_lock.clone().lock_owned().await
         };
 
-        let main_res = tokio::task::spawn_blocking(move || {
+        let store_res = tokio::task::spawn_blocking(move || {
             // NOTE: Ensure that GC lock is captured by the spawned thread.
             let _gc_lock = gc_lock;
 
-            ctx.store(&block_id, boc, parts_info, ShardIdent::PREFIX_FULL)
+            ctx.store(&block_id, boc, ShardIdent::PREFIX_FULL)
         })
         .await??;
 
+        // finish if state is not splitted
+        // NOTE: master state should not be splitted
+        if part_split_depth == 0 || block_id.is_masterchain() {
+            anyhow::ensure!(
+                store_res.absent_cells_hashes.is_empty(),
+                "if state not splitted it should not contain absent cells \
+                (block_id={}, root_hash={})",
+                block_id,
+                store_res.root_hash,
+            );
+
+            return Ok(StoreStateFromFileResult {
+                root_hash: store_res.root_hash,
+                parts_info: None,
+            });
+        }
+
+        // if state should be splitted then build parts info
+        // and check with absent cells from main file
+
+        // load state root
+        let root = self.cell_storage.load_cell(&store_res.root_hash, 0)?;
+        let root = Cell::from(root as Arc<_>);
+
+        // split shard accounts to obtain parts
+        let split_at = split_shard_accounts(&block_id.shard, &root, part_split_depth)?;
+
+        // check that all absent cells are children for part branches roots
+        for SplitAccountEntry { cell: _cell, .. } in split_at.values() {
+            // TODO: somehow read children hashes from cell,
+            //      check if they exists in `store_res.absent_cells_hashes`,
+            //      and check that all absent cells referenced
+        }
+
+        // build parts info
+        let parts_info = build_parts_info(&split_at);
+
+        // update shard state handle
+        let shard_state_key = block_id.to_vec();
+        let entry = ShardStateEntry {
+            root_hash: store_res.root_hash,
+            parts_info: Some(parts_info.clone()),
+        };
+        self.cells_db
+            .shard_states()
+            .insert(&shard_state_key, entry.to_vec())?;
+
+        Ok(StoreStateFromFileResult {
+            root_hash: store_res.root_hash,
+            parts_info: Some(parts_info),
+        })
+    }
+
+    pub async fn store_state_parts_from_files(
+        &self,
+        block_id: &BlockId,
+        part_files: Vec<(ShardStatePartInfo, File)>,
+    ) -> Result<StoreStatePartsFromFilesResult> {
+        if block_id.is_masterchain() || part_files.is_empty() {
+            return Ok(StoreStatePartsFromFilesResult { stored: true });
+        }
+
+        let block_id = *block_id;
+
+        // run store tasks in parts
+        let mut part_store_tasks = FuturesUnordered::new();
+        let storage_parts = self.storage_parts.try_as_ref_ext()?;
+        anyhow::ensure!(
+            storage_parts.len() >= part_files.len(),
+            "shard state parts count ({}) mismatch with storage parts count ({})",
+            part_files.len(),
+            storage_parts.len(),
+        );
+
+        let mut parts_hashes = FastHashSet::default();
+
+        let mut remaining_prefixes: FastHashSet<_> = storage_parts.keys().cloned().collect();
+        for (info, file) in part_files {
+            anyhow::ensure!(
+                remaining_prefixes.remove(&info.prefix),
+                "unexpected persistent shard state part {}",
+                DisplayShardPrefix(&info.prefix),
+            );
+
+            let storage_part = storage_parts.try_get_ext(&info.prefix)?.clone();
+            part_store_tasks.push(tokio::spawn(
+                storage_part.store_accounts_subtree_from_file(block_id, file),
+            ));
+
+            parts_hashes.insert(info.hash);
+        }
+
         // wait for all store tasks in parts
-        let mut pruned_parts_hashes = main_res.pruned_parts_hashes.clone();
         while let Some(part_store_res) = part_store_tasks.next().await {
             let part_store_res = part_store_res??;
-            // check if stored part matches any pruned branch in main file
+            // check if stored part matches provided parts info
             anyhow::ensure!(
-                pruned_parts_hashes.remove(&part_store_res.root_hash),
-                "stored persistent shard part file (hash={}) \
-                does not match any of pruned branch in main file (block_id={}, root_hash={})",
+                parts_hashes.remove(&part_store_res.root_hash),
+                "stored persistent shard part file (hash={}, prefix={}) \
+                does not match any part in main file (block_id={})",
                 part_store_res.root_hash,
+                DisplayShardPrefix(&part_store_res.shard_prefix),
                 block_id,
-                main_res.root_hash,
             );
         }
 
-        // check if all pruned branches from main file stored as parts
+        // check if all required parts stored
         anyhow::ensure!(
-            pruned_parts_hashes.is_empty(),
-            "some pruned branches of main file (block_id={}, root_hash={}) \
-            were not stored as separate parts: {:?}",
-            block_id,
-            main_res.root_hash,
-            pruned_parts_hashes,
+            parts_hashes.is_empty(),
+            "not all expected state parts stored, remaining hashes: {:?}",
+            parts_hashes,
         );
 
-        Ok(main_res)
+        Ok(StoreStatePartsFromFilesResult { stored: true })
     }
 
     // Stores shard state and returns the hash of its root cell.
-    pub async fn store_state_file(
+    pub async fn store_state_main_from_file(
         &self,
         block_id: &BlockId,
         boc: File,
-        part_files: Vec<(ShardStatePartInfo, File)>,
+        part_split_depth: u8,
     ) -> Result<StoreStateFromFileResult> {
-        self.store_state_inner(block_id, boc, part_files).await
+        self.store_state_main_from_inner(block_id, boc, part_split_depth)
+            .await
     }
 
-    pub async fn store_state_bytes(
+    pub async fn store_state_main_from_bytes(
         &self,
         block_id: &BlockId,
         boc: Bytes,
+        part_split_depth: u8,
     ) -> Result<StoreStateFromFileResult> {
         let cursor = Cursor::new(boc);
-        self.store_state_inner(block_id, cursor, vec![]).await
+        self.store_state_main_from_inner(block_id, cursor, part_split_depth)
+            .await
     }
 
     // NOTE: DO NOT try to make a separate `load_state_root` method
@@ -1215,6 +1264,15 @@ struct RemoveStateResult {
     inner_alloc: bumpalo_herd::Herd,
 }
 
+pub struct StoreStateFromFileResult {
+    pub root_hash: HashBytes,
+    pub parts_info: Option<Vec<ShardStatePartInfo>>,
+}
+
+pub struct StoreStatePartsFromFilesResult {
+    pub stored: bool,
+}
+
 #[derive(Default, Debug, Clone, Copy)]
 pub struct StoreStateHint {
     pub block_data_size: Option<usize>,
@@ -1369,6 +1427,9 @@ fn split_accounts_subtree(
     Ok(result)
 }
 
+/// Splits shard accounts dict by shards, skips empty shards,
+/// and returns map of **not empty** shard branch root cells by hashes:
+/// `{ hash: (cell, shard) }`.
 pub fn split_shard_accounts(
     state_shard: &ShardIdent,
     root_cell: impl AsRef<DynCell>,
@@ -1398,6 +1459,22 @@ pub fn split_shard_accounts(
     }
 
     Ok(result)
+}
+
+fn build_parts_info(
+    split_at: &FastHashMap<HashBytes, SplitAccountEntry>,
+) -> Vec<ShardStatePartInfo> {
+    let mut parts_info = Vec::new();
+    for (hash, entry) in split_at {
+        if let Some(shard) = &entry.shard {
+            parts_info.push(ShardStatePartInfo {
+                hash: *hash,
+                prefix: shard.prefix(),
+            });
+        }
+    }
+    parts_info.sort_unstable();
+    parts_info
 }
 
 #[tracing::instrument(skip_all)]

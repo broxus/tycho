@@ -711,6 +711,7 @@ impl<B> Inner<B> {
                 return PersistentStateInfo::FoundWithParts {
                     size: info.size,
                     chunk_size: info.chunk_size,
+                    split_depth: info.split_depth as u32,
                     parts: info.parts.into_iter().map(Into::into).collect(),
                 };
             }

@@ -7,7 +7,7 @@ use tycho_block_util::block::{DisplayShardPrefix, ShardPrefix};
 use tycho_storage::fs::TempFileStorage;
 use tycho_storage::kv::StoredValue;
 use tycho_types::cell::*;
-use tycho_types::models::{BlockId, ShardIdent};
+use tycho_types::models::BlockId;
 use tycho_types::util::ArrayVec;
 use tycho_util::fs::MappedFile;
 use tycho_util::io::ByteOrderRead;
@@ -15,9 +15,9 @@ use tycho_util::progress_bar::*;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::{BoundedCfHandle, rocksdb};
 
+use super::ShardStateEntry;
 use super::cell_storage::*;
 use super::entries_buffer::*;
-use super::{ShardStateEntry, ShardStatePartInfo};
 use crate::storage::db::{CellStorageDb, CellsDbOps};
 use crate::storage::{BriefBocHeader, ShardStateReader};
 
@@ -37,17 +37,16 @@ impl StoreStateContext {
         &self,
         block_id: &BlockId,
         reader: R,
-        parts_info: Option<Vec<ShardStatePartInfo>>,
         shard_prefix: ShardPrefix,
-    ) -> Result<StoreStateFromFileResult>
+    ) -> Result<StoreStateResult>
     where
         R: std::io::Read,
     {
-        let preprocessed = self.preprocess(reader, shard_prefix)?;
-        self.finalize(block_id, preprocessed, parts_info)
+        let preprocessed = self.preprocess(reader)?;
+        self.finalize(block_id, preprocessed, shard_prefix)
     }
 
-    fn preprocess<R>(&self, reader: R, shard_prefix: ShardPrefix) -> Result<PreprocessedState>
+    fn preprocess<R>(&self, reader: R) -> Result<PreprocessedState>
     where
         R: std::io::Read,
     {
@@ -55,18 +54,9 @@ impl StoreStateContext {
             .exact_unit("cells")
             .build(|msg| tracing::info!("preprocessing state... {msg}"));
 
-        let is_part = shard_prefix != ShardIdent::PREFIX_FULL;
-        let mut reader = ShardStateReader::begin(reader, is_part)?;
+        let mut reader = ShardStateReader::begin(reader)?;
         let header = *reader.header();
         tracing::debug!(?header);
-
-        // check if expected part prefix matches one in the header
-        if let Some(part_info) = header.part_info.as_ref() {
-            anyhow::ensure!(
-                part_info.prefix == shard_prefix,
-                "shard prefix in the persistent shard part file does not match the expected",
-            );
-        }
 
         pg.set_progress(header.cell_count);
 
@@ -119,8 +109,8 @@ impl StoreStateContext {
         &self,
         block_id: &BlockId,
         preprocessed: PreprocessedState,
-        parts_info: Option<Vec<ShardStatePartInfo>>,
-    ) -> Result<StoreStateFromFileResult> {
+        shard_prefix: ShardPrefix,
+    ) -> Result<StoreStateResult> {
         // 2^7 bits + 1 bytes
         const MAX_DATA_SIZE: usize = 128;
         const CELLS_PER_BATCH: u64 = 1_000_000;
@@ -142,13 +132,7 @@ impl StoreStateContext {
         let raw = self.cells_db.rocksdb().as_ref();
         let write_options = self.cells_db.temp_cells().write_config();
 
-        let parts_hashes = parts_info.as_ref().map(|parts| {
-            parts
-                .iter()
-                .map(|part| part.hash)
-                .collect::<FastHashSet<_>>()
-        });
-        let mut ctx = FinalizationContext::new(self.cells_db.temp_cells().cf(), &parts_hashes);
+        let mut ctx = FinalizationContext::new(self.cells_db.temp_cells().cf());
         ctx.clear_temp_cells(&self.cells_db)?;
 
         // Allocate on heap to prevent big future size
@@ -158,7 +142,7 @@ impl StoreStateContext {
         let total_size = file.length();
         pg.set_total(total_size as u64);
 
-        let mut pruned_parts_hashes = FastHashSet::default();
+        let mut absent_cells_hashes = FastHashSet::default();
 
         let mut file_pos = total_size;
         let mut cell_index = header.cell_count;
@@ -200,6 +184,7 @@ impl StoreStateContext {
                     &mut data_buffer,
                 )?;
 
+                // read children entries from hashes file
                 for (&index, buffer) in cell
                     .reference_indices
                     .as_ref()
@@ -210,12 +195,13 @@ impl StoreStateContext {
                     unsafe { hashes_file.read_exact_at(index as usize * HashesEntry::LEN, buffer) }
                 }
 
-                if let FinalizeCellResult::PrunedBranch { lvl_0_hash, .. } =
+                if let FinalizeCellResult::Absent { hash, .. } =
                     ctx.finalize_cell(cell_index as u32, cell)?
                 {
-                    pruned_parts_hashes.insert(lvl_0_hash);
+                    absent_cells_hashes.insert(hash);
                 }
 
+                // write current entry to hashes file
                 // SAFETY: `entries_buffer` is guaranteed to be in separate memory area
                 unsafe {
                     hashes_file.write_all_at(
@@ -245,24 +231,16 @@ impl StoreStateContext {
         let repr_hash = ctx.entries_buffer.repr_hash();
         let root_hash = HashBytes::from_slice(repr_hash);
 
-        // check if actual part root hash matches one in the header
-        if let Some(part_info) = header.part_info.as_ref() {
-            anyhow::ensure!(
-                part_info.hash == root_hash,
-                "persistent shard part root hash in the file header does not match the actual",
-            );
-        }
-
         ctx.final_check(repr_hash)?;
 
-        self.cell_storage
-            .apply_temp_cell(&root_hash, &parts_hashes)?;
+        let skip_roots = (!absent_cells_hashes.is_empty()).then_some(&absent_cells_hashes);
+        self.cell_storage.apply_temp_cell(&root_hash, skip_roots)?;
         ctx.clear_temp_cells(&self.cells_db)?;
 
         let shard_state_key = block_id.to_vec();
         let entry = ShardStateEntry {
             root_hash,
-            parts_info,
+            parts_info: None,
         };
         self.cells_db
             .shard_states()
@@ -274,9 +252,10 @@ impl StoreStateContext {
         match self.cells_db.shard_states().get(shard_state_key)? {
             Some(value) => {
                 let root_hash = ShardStateEntry::from_slice(value.as_ref()).root_hash;
-                Ok(StoreStateFromFileResult {
+                Ok(StoreStateResult {
                     root_hash,
-                    pruned_parts_hashes,
+                    shard_prefix,
+                    absent_cells_hashes,
                 })
             }
             None => Err(StoreStateError::NotFound.into()),
@@ -284,9 +263,10 @@ impl StoreStateContext {
     }
 }
 
-pub struct StoreStateFromFileResult {
+pub struct StoreStateResult {
     pub root_hash: HashBytes,
-    pub pruned_parts_hashes: FastHashSet<HashBytes>,
+    pub shard_prefix: ShardPrefix,
+    pub absent_cells_hashes: FastHashSet<HashBytes>,
 }
 
 struct FinalizationContext<'a> {
@@ -294,23 +274,17 @@ struct FinalizationContext<'a> {
     cell_usages: FastHashMap<[u8; 32], i32>,
     entries_buffer: EntriesBuffer,
     output_buffer: Vec<u8>,
-    /// Contains map of original parts roots hashes
-    pruned_parts_hashes: &'a Option<FastHashSet<HashBytes>>,
     temp_cells_cf: BoundedCfHandle<'a>,
     write_batch: rocksdb::WriteBatch,
 }
 
 impl<'a> FinalizationContext<'a> {
-    fn new(
-        temp_cells_cf: BoundedCfHandle<'a>,
-        pruned_parts_hashes: &'a Option<FastHashSet<HashBytes>>,
-    ) -> Self {
+    fn new(temp_cells_cf: BoundedCfHandle<'a>) -> Self {
         Self {
             pruned_branches: Default::default(),
             cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
             entries_buffer: EntriesBuffer::new(),
             output_buffer: Vec::with_capacity(1 << 10),
-            pruned_parts_hashes,
             temp_cells_cf,
             write_batch: rocksdb::WriteBatch::default(),
         }
@@ -335,50 +309,20 @@ impl<'a> FinalizationContext<'a> {
         // Prepare mask and counters
         let mut children_mask = LevelMask::new(0);
 
-        let mut children_are_parts_or_not_pruned = vec![];
-        let mut pruned_parts_lvl_0_hashes = FastHashMap::default();
-
-        for (index, child) in children.iter() {
+        for (_, child) in children.iter() {
             children_mask |= child.level_mask();
-
-            // check if child is a pruned part
-            let child_is_pruned = child.cell_type().is_pruned_branch();
-            let mut child_is_pruned_part = false;
-            if child_is_pruned {
-                let child_data = self
-                    .pruned_branches
-                    .get(index)
-                    .ok_or(StoreStateError::InvalidCell)
-                    .context("Pruned branch data not found")?;
-                let child_hash = child
-                    .pruned_branch_hash(0, child_data)
-                    .context("Invalid pruned branch")?;
-                if self
-                    .pruned_parts_hashes
-                    .as_ref()
-                    .is_some_and(|parts| parts.contains(&HashBytes::from_slice(child_hash)))
-                {
-                    child_is_pruned_part = true;
-                    pruned_parts_lvl_0_hashes.insert(*index, *child_hash);
-                }
-            }
-            children_are_parts_or_not_pruned.push(!child_is_pruned || child_is_pruned_part);
         }
-
-        let all_pruned_children_are_parts = children_are_parts_or_not_pruned.iter().all(|v| *v);
 
         let mut is_merkle_cell = false;
         let mut is_pruned_cell = false;
+        let mut is_absent_cell = false;
+
         let level_mask = match cell.descriptor.cell_type() {
-            CellType::Ordinary => {
-                // NOTE: when parts sub trees roots replaced with pruned branches in the main persistent state file
-                //      we do not recalculate ancestors levels, so we should take the original level mask
-                if all_pruned_children_are_parts {
-                    cell.descriptor.level_mask()
-                } else {
-                    children_mask
-                }
+            CellType::Ordinary if cell.descriptor.is_absent() => {
+                is_absent_cell = true;
+                cell.descriptor.level_mask()
             }
+            CellType::Ordinary => children_mask,
             CellType::PrunedBranch => {
                 is_pruned_cell = true;
                 cell.descriptor.level_mask()
@@ -397,6 +341,7 @@ impl<'a> FinalizationContext<'a> {
         // Save mask and counters
         current_entry.set_level_mask(level_mask);
         current_entry.set_cell_type(cell.descriptor.cell_type());
+        current_entry.set_is_absent(is_absent_cell);
 
         // Calculate hashes
         let hash_count = if is_pruned_cell {
@@ -412,6 +357,20 @@ impl<'a> FinalizationContext<'a> {
             if level != 0 && (is_pruned_cell || !level_mask.contains(level)) {
                 continue;
             }
+
+            // for absent cell read depth and hash from data
+            if is_absent_cell {
+                let depth = read_stored_depth(level_mask, level, cell.data, 0);
+                current_entry.set_depth(hash_idx, depth);
+
+                let hash = read_stored_hash(level_mask, level, cell.data, 0)
+                    .context("invalid absent cell")?;
+                current_entry.set_hash(hash_idx, hash);
+
+                hash_idx += 1;
+                continue;
+            }
+
             let mut hasher = Sha256::new();
 
             let level_mask = if is_pruned_cell {
@@ -481,9 +440,9 @@ impl<'a> FinalizationContext<'a> {
             self.pruned_branches.insert(cell_index, cell.data.to_vec());
         }
 
-        // get cell hash and check if it is a pruned part
+        // get cell hash
         let mut lvl_0_hash = HashBytes::default();
-        let (repr_hash, is_pruned_part) = if is_pruned_cell {
+        let repr_hash = if is_pruned_cell {
             let repr_hash = current_entry
                 .as_reader()
                 .pruned_branch_hash(LevelMask::MAX_LEVEL, cell.data)
@@ -493,19 +452,17 @@ impl<'a> FinalizationContext<'a> {
                 .pruned_branch_hash(0, cell.data)
                 .context("Invalid pruned branch")?;
             lvl_0_hash = HashBytes::from_slice(lvl_0_hash_slice);
-            let is_pruned_part = self
-                .pruned_parts_hashes
-                .as_ref()
-                .is_some_and(|parts| parts.contains(&lvl_0_hash));
-            (*repr_hash, is_pruned_part)
+            *repr_hash
         } else {
             let repr_hash = current_entry.as_reader().hash(LevelMask::MAX_LEVEL);
-            (*repr_hash, false)
+            *repr_hash
         };
 
-        // do not store pruned part
-        if is_pruned_part {
-            return Ok(FinalizeCellResult::PrunedBranch { lvl_0_hash });
+        // do not store absent cell to storage
+        if is_absent_cell {
+            return Ok(FinalizeCellResult::Absent {
+                hash: HashBytes::from_slice(&repr_hash),
+            });
         }
 
         // Write cell data
@@ -526,29 +483,22 @@ impl<'a> FinalizationContext<'a> {
 
         // Write cell references
         for (index, child) in children.iter() {
-            let mut child_is_pruned_part = false;
             let child_hash = if child.cell_type().is_pruned_branch() {
-                if let Some(child_lvl_0_hash) = pruned_parts_lvl_0_hashes.get(index) {
-                    // when children are pruned parts we should store refs to original hashes at level 0
-                    child_is_pruned_part = true;
-                    child_lvl_0_hash
-                } else {
-                    let child_data = self
-                        .pruned_branches
-                        .get(index)
-                        .ok_or(StoreStateError::InvalidCell)
-                        .context("Pruned branch data not found")?;
-                    child
-                        .pruned_branch_hash(LevelMask::MAX_LEVEL, child_data)
-                        .context("Invalid pruned branch")?
-                }
+                let child_data = self
+                    .pruned_branches
+                    .get(index)
+                    .ok_or(StoreStateError::InvalidCell)
+                    .context("Pruned branch data not found")?;
+                child
+                    .pruned_branch_hash(LevelMask::MAX_LEVEL, child_data)
+                    .context("Invalid pruned branch")?
             } else {
                 child.hash(LevelMask::MAX_LEVEL)
             };
 
-            // update cell usages only when child is not a pruned part
-            // because we won't store pruned part
-            if !child_is_pruned_part {
+            // update cell usages only when child is not absent
+            // because we won't store absent cells
+            if !child.is_absent() {
                 *self.cell_usages.entry(*child_hash).or_default() += 1;
             }
             output_buffer.extend_from_slice(child_hash);
@@ -563,7 +513,7 @@ impl<'a> FinalizationContext<'a> {
         if is_pruned_cell {
             Ok(FinalizeCellResult::PrunedBranch { lvl_0_hash })
         } else {
-            Ok(FinalizeCellResult::NotPruned)
+            Ok(FinalizeCellResult::Other)
         }
     }
 
@@ -583,9 +533,11 @@ impl<'a> FinalizationContext<'a> {
     }
 }
 
+#[allow(dead_code)]
 enum FinalizeCellResult {
     PrunedBranch { lvl_0_hash: HashBytes },
-    NotPruned,
+    Absent { hash: HashBytes },
+    Other,
 }
 
 struct PreprocessedState {
@@ -617,21 +569,32 @@ impl<'a> RawCell<'a> {
         let byte_len = descriptor.byte_len() as usize;
         let ref_count = descriptor.reference_count() as usize;
 
-        if descriptor.is_absent() || ref_count > 4 {
+        if ref_count > 4 && !descriptor.is_absent() {
             return Err(parser_error("invalid preprocessed cell descriptor"));
         }
 
-        let data = &mut data_buffer[0..byte_len];
+        // for absent cells read stored hashes and depth into data
+        let data_len = if descriptor.is_absent() {
+            descriptor.hash_count() as usize * (32 + 2) + byte_len
+        } else {
+            byte_len
+        };
+
+        let data = &mut data_buffer[0..data_len];
         src.read_exact(data)?;
 
         let mut reference_indices = ArrayVec::new();
-        for _ in 0..ref_count {
-            let index = src.read_be_uint(ref_size)? as usize;
-            if index > cell_count || index <= cell_index {
-                return Err(parser_error("reference index out of range"));
-            } else {
-                // SAFETY: `ref_count` is in range 0..=4
-                unsafe { reference_indices.push(index as u32) };
+
+        // skip refs for absent cells
+        if !descriptor.is_absent() {
+            for _ in 0..ref_count {
+                let index = src.read_be_uint(ref_size)? as usize;
+                if index > cell_count || index <= cell_index {
+                    return Err(parser_error("reference index out of range"));
+                } else {
+                    // SAFETY: `ref_count` is in range 0..=4
+                    unsafe { reference_indices.push(index as u32) };
+                }
             }
         }
 
@@ -738,7 +701,7 @@ mod test {
             #[allow(clippy::disallowed_methods)]
             let file = File::open(file.path())?;
 
-            store_ctx.store(&block_id, file, None, ShardIdent::PREFIX_FULL)?;
+            store_ctx.store(&block_id, file, ShardIdent::PREFIX_FULL)?;
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");

@@ -2,10 +2,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
-use tycho_block_util::tl::{
-    block_id as tl_block_id, block_id_vec as tl_block_id_vec, hash_bytes as tl_hash_bytes,
-};
-use tycho_types::cell::HashBytes;
+use tycho_block_util::tl::{block_id as tl_block_id, block_id_vec as tl_block_id_vec};
 
 /// Data for computing a public overlay id.
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
@@ -76,6 +73,7 @@ pub enum PersistentStateInfo {
     FoundWithParts {
         size: NonZeroU64,
         chunk_size: NonZeroU32,
+        split_depth: u32,
         parts: Vec<PersistentStatePartInfo>,
     },
 }
@@ -83,8 +81,6 @@ pub enum PersistentStateInfo {
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "blockchain.persistentStatePartInfo", scheme = "proto.tl")]
 pub struct PersistentStatePartInfo {
-    #[tl(with = "tl_hash_bytes")]
-    pub hash: HashBytes,
     pub prefix: u64,
     pub size: NonZeroU64,
 }
@@ -92,7 +88,6 @@ pub struct PersistentStatePartInfo {
 impl From<crate::storage::PersistentStatePartInfo> for PersistentStatePartInfo {
     fn from(value: crate::storage::PersistentStatePartInfo) -> Self {
         Self {
-            hash: value.hash,
             prefix: value.prefix,
             size: value.size,
         }

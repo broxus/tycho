@@ -139,12 +139,10 @@ blockchain.archiveInfo.notFound = blockchain.ArchiveInfo;
 /**
 * Persistent state part metadata
 *
-* @param hash          state part root hash
 * @param prefix        shard prefix of the state part
 * @param size          state part file size in bytes
 */
 blockchain.persistentStatePartInfo
-    hash:bytes
     prefix:long
     size:long
     = blockchain.PersistentStatePartInfo;
@@ -167,11 +165,13 @@ blockchain.persistentStateInfo.found
 *
 * @param size           state main file size in bytes
 * @param chunk_size     chunk size in bytes
+* @param split_depth    state split depth on parts
 * @param parts          list of state parts files
 */
 blockchain.persistentStateInfo.foundWithParts
     size:long
     chunk_size:long
+    split_depth:int
     parts:(vector blockchain.PersistentStatePartInfo)
     = blockchain.PersistentStateInfo;
 

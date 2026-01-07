@@ -263,6 +263,9 @@ pub fn split_dict_raw(
     Ok(shards)
 }
 
+/// Splits aug dict by shards, preserving empty shards.
+/// E.g. if `depth == 1` and all entries are in the left shard,
+/// then will return `None` cell for the right shard.
 pub fn split_aug_dict_raw_by_shards<K, A, V>(
     workchain: i32,
     dict: AugDict<K, A, V>,
