@@ -223,7 +223,7 @@ impl Dumper {
         else {
             unreachable!("main cell storage always use main cells db")
         };
-        let writer = ShardStateWriter::new(db, &dir, block_id, 0, None);
+        let writer = ShardStateWriter::new(db, &dir, block_id);
         let ref_by_mc_seqno = self
             .storage
             .block_handle_storage()
@@ -237,7 +237,7 @@ impl Dumper {
             .await?;
 
         writer
-            .write(state.root_cell().repr_hash(), None)
+            .write(state.root_cell().repr_hash(), None, None)
             .context(format!("Failed to write state for {}", block_id))?;
         println!(" - Persistent state saved");
         Ok(state)

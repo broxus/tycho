@@ -8,9 +8,7 @@ use tycho_types::models::BlockId;
 
 #[cfg(feature = "s3")]
 pub(crate) use self::s3::{HybridStarterClient, S3StarterClient};
-use crate::blockchain_rpc::{
-    BlockDataFull, BlockchainRpcClient, DataRequirement, PendingPersistentStatePart,
-};
+use crate::blockchain_rpc::{BlockDataFull, BlockchainRpcClient, DataRequirement};
 use crate::overlay_client::PunishReason;
 use crate::storage::PersistentStateKind;
 
@@ -36,7 +34,7 @@ impl StarterClient for BlockchainRpcClient {
         let pending_state = self.find_persistent_state(block_id, kind).await?;
         let this = self.clone();
 
-        let parts = pending_state.parts.clone();
+        let part_split_depth = pending_state.part_split_depth;
 
         Ok(FoundState {
             download: Box::new(move |output, part_shard_prefix| {
@@ -49,7 +47,7 @@ impl StarterClient for BlockchainRpcClient {
                     Ok(output)
                 })
             }),
-            parts,
+            part_split_depth,
         })
     }
 
@@ -79,7 +77,7 @@ pub struct FoundBlockDataFull {
 
 pub struct FoundState<'a> {
     pub download: Box<DownloadFn<'a>>,
-    pub parts: Vec<PendingPersistentStatePart>,
+    pub part_split_depth: u8,
 }
 
 type DownloadFn<'a> =
@@ -142,7 +140,7 @@ mod s3 {
                         Ok(output)
                     })
                 }),
-                parts: vec![],
+                part_split_depth: 0,
             })
         }
 

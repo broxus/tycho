@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use bytesize::ByteSize;
 use tempfile::TempDir;
-use tycho_block_util::block::split_shard_ident;
+use tycho_block_util::block::{ShardPrefix, split_shard_ident};
 use tycho_block_util::queue::{
     QueueDiffStuff, QueueKey, QueueStateHeader, RouterAddr, RouterPartitions,
 };
@@ -19,15 +19,16 @@ use tycho_types::models::{
     MsgInfo, OutMsg, OutMsgDescr, OutMsgNew, OutMsgQueueUpdates, ShardIdent, StdAddr,
 };
 use tycho_types::num::Tokens;
-use tycho_util::FastHashSet;
 use tycho_util::compression::zstd_decompress_simple;
 use tycho_util::fs::MappedFile;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::storage::config::StatePartsConfig;
 use crate::storage::persistent_state::{
     CacheKey, PersistentStateKind, PersistentStateStorage, QueueStateReader, QueueStateWriter,
     ShardStateWriter,
 };
+use crate::storage::shard_state::StoreStateFromFileResult;
 use crate::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta};
 
 #[tokio::test]
@@ -599,35 +600,66 @@ async fn test_store_shard_state_from_file() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::type_complexity)]
 async fn store_and_check_persistent_states(
     storage: &CoreStorage,
     mc_seqno: u32,
-    downloaded_persistent_states: Vec<(BlockId, FileBuilder, Vec<FileBuilder>)>,
+    downloaded_persistent_states: Vec<(BlockId, FileBuilder, u8, Vec<(ShardPrefix, FileBuilder)>)>,
 ) -> Result<()> {
     let persistent_states = storage.persistent_state_storage();
-    for (block_id, main_file_builder, part_files_builders) in downloaded_persistent_states {
+    for (block_id, main_file_builder, part_split_depth, part_files_builders) in
+        downloaded_persistent_states
+    {
         // check downloaded
-        let part_files_builders_for_check: Vec<_> =
-            part_files_builders.into_iter().map(|b| (None, b)).collect();
-        let part_files_builders_with_info = PersistentStateStorage::check_persistent_state_files(
-            &block_id,
-            main_file_builder.clone(),
-            part_files_builders_for_check,
+        let parts_prefixes: FastHashSet<_> = part_files_builders
+            .iter()
+            .map(|(prefix, _)| *prefix)
+            .collect();
+        PersistentStateStorage::check_parts_info_matches_split_depth(
+            parts_prefixes,
+            part_split_depth,
         )?;
 
-        // open persistent state files
+        // store main file
         let main_file = main_file_builder.clone().read(true).open()?;
-        let mut part_files_with_info = vec![];
-        for (info, part_file_builder) in &part_files_builders_with_info {
-            let part_file = part_file_builder.clone().read(true).open()?;
-            part_files_with_info.push((*info, part_file));
+        let StoreStateFromFileResult { parts_info, .. } = storage
+            .shard_state_storage()
+            .store_state_main_from_file(&block_id, main_file, part_split_depth)
+            .await?;
+
+        // make a map of parts info
+        let mut parts_info_map: FastHashMap<_, _> = parts_info
+            .unwrap_or_default()
+            .into_iter()
+            .map(|part_info| (part_info.prefix, part_info))
+            .collect();
+
+        // match with files
+        let mut part_files_builders_with_info = vec![];
+        for (prefix, file_builder) in part_files_builders {
+            if let Some(part_info) = parts_info_map.remove(&prefix) {
+                part_files_builders_with_info.push((part_info, file_builder));
+            }
         }
 
-        // store state and block
+        assert!(
+            parts_info_map.is_empty(),
+            "not all required parts files exist",
+        );
+
+        // open part files
+        let mut part_files = vec![];
+        for (info, part_file_builder) in &part_files_builders_with_info {
+            let part_file = part_file_builder.clone().read(true).open()?;
+            part_files.push((*info, part_file));
+        }
+
+        // store state parts and block
         storage
             .shard_state_storage()
-            .store_state_from_file(&block_id, main_file, part_files_with_info)
+            .store_state_parts_from_files(&block_id, part_files)
             .await?;
+
         let state = storage
             .shard_state_storage()
             .load_state(mc_seqno, &block_id)
@@ -643,15 +675,21 @@ async fn store_and_check_persistent_states(
 
         // reopen persistent state files
         let main_file = main_file_builder.clone().read(true).open()?;
-        let mut part_files_with_info = vec![];
+        let mut part_files = vec![];
         for (info, part_file_builder) in &part_files_builders_with_info {
             let part_file = part_file_builder.clone().read(true).open()?;
-            part_files_with_info.push((*info, part_file));
+            part_files.push((*info, part_file));
         }
 
         // store persistent state
         persistent_states
-            .store_shard_state_file(mc_seqno, &block_handle, main_file, part_files_with_info)
+            .store_shard_state_file(
+                mc_seqno,
+                &block_handle,
+                main_file,
+                part_files,
+                part_split_depth,
+            )
             .await?;
 
         assert!(persistent_states.state_exists(&block_id, PersistentStateKind::Shard));
@@ -708,7 +746,10 @@ fn check_persistent_state_files_stored(
 #[allow(clippy::type_complexity)]
 fn decompress_persistent_states(
     src_dir: &Path,
-) -> Result<(TempDir, Vec<(BlockId, FileBuilder, Vec<FileBuilder>)>)> {
+) -> Result<(
+    TempDir,
+    Vec<(BlockId, FileBuilder, u8, Vec<(ShardPrefix, FileBuilder)>)>,
+)> {
     let temp_dir = tempfile::tempdir()?;
     let download_dir = Dir::new(temp_dir.path())?;
 
@@ -752,11 +793,20 @@ fn decompress_persistent_states(
     }
 
     for (block_id, main_file_builder) in main_files_builders {
+        let part_split_depth =
+            PersistentStateStorage::read_persistent_metadata(&block_id, &main_file_builder)?
+                .map(|m| m.part_split_depth)
+                .unwrap_or_default();
         let part_files_builders = PersistentStateStorage::read_persistent_shard_part_files(
             &block_id,
             &main_file_builder,
         )?;
-        decompressed_states.push((block_id, main_file_builder, part_files_builders));
+        decompressed_states.push((
+            block_id,
+            main_file_builder,
+            part_split_depth,
+            part_files_builders,
+        ));
     }
 
     Ok((temp_dir, decompressed_states))

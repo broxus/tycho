@@ -14,7 +14,6 @@ use tokio::sync::mpsc;
 use tycho_block_util::archive::ArchiveVerifier;
 use tycho_block_util::block::ShardPrefix;
 use tycho_network::{PublicOverlay, Request};
-use tycho_types::cell::HashBytes;
 use tycho_types::models::BlockId;
 use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
@@ -417,16 +416,19 @@ impl BlockchainRpcClient {
             };
 
             let info_match = match info {
-                PersistentStateInfo::Found { size, chunk_size } => Some((size, chunk_size, vec![])),
+                PersistentStateInfo::Found { size, chunk_size } => {
+                    Some((size, chunk_size, 0, vec![]))
+                }
                 PersistentStateInfo::FoundWithParts {
                     size,
                     chunk_size,
+                    split_depth,
                     parts,
-                } => Some((size, chunk_size, parts)),
+                } => Some((size, chunk_size, split_depth as u8, parts)),
                 PersistentStateInfo::NotFound => None,
             };
 
-            if let Some((size, chunk_size, parts)) = info_match {
+            if let Some((size, chunk_size, part_split_depth, parts)) = info_match {
                 let neighbour = handle.accept();
                 tracing::debug!(
                     peer_id = %neighbour.peer_id(),
@@ -443,6 +445,7 @@ impl BlockchainRpcClient {
                     size,
                     chunk_size,
                     neighbour,
+                    part_split_depth,
                     parts: parts.into_iter().map(Into::into).collect(),
                 });
             }
@@ -695,6 +698,7 @@ pub struct PendingPersistentState {
     pub size: NonZeroU64,
     pub chunk_size: NonZeroU32,
     pub neighbour: Neighbour,
+    pub part_split_depth: u8,
     pub parts: Vec<PendingPersistentStatePart>,
 }
 
@@ -706,7 +710,6 @@ impl PendingPersistentState {
 
 #[derive(Debug, Clone)]
 pub struct PendingPersistentStatePart {
-    pub hash: HashBytes,
     pub prefix: ShardPrefix,
     pub size: NonZeroU64,
 }
@@ -714,7 +717,6 @@ pub struct PendingPersistentStatePart {
 impl From<PersistentStatePartInfo> for PendingPersistentStatePart {
     fn from(value: PersistentStatePartInfo) -> Self {
         Self {
-            hash: value.hash,
             prefix: value.prefix,
             size: value.size,
         }

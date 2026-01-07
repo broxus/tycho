@@ -2,36 +2,31 @@ use std::collections::hash_map;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use tycho_block_util::block::{DisplayShardPrefix, ShardPrefix};
 use tycho_storage::fs::Dir;
 use tycho_storage::kv::refcount;
-use tycho_types::cell::{CellDescriptor, HashBytes};
+use tycho_types::cell::{Cell, CellDescriptor, HashBytes};
 use tycho_types::models::*;
 use tycho_util::FastHashMap;
 use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::progress_bar::ProgressBar;
 use tycho_util::sync::CancellationFlag;
+use weedb::rocksdb::DBPinnableSlice;
 
 use crate::storage::db::{CellStorageDb, CellsDbOps};
-use crate::storage::persistent_state::ShardStatePartsPrunedData;
 use crate::storage::{CellsDb, CellsPartDb};
 
 pub struct ShardStateWriter<'a> {
     db: CellStorageDb,
     states_dir: &'a Dir,
     block_id: &'a BlockId,
-    /// Contains depth to split shard state on parts.
-    /// Filled with value > 0 for main file only.
-    split_depth: u8,
     /// Contains the shard prefix when used to store part file
     part_shard_prefix: Option<ShardPrefix>,
-    /// Map of puned parts branches to write into main file
-    pruned_parts: Option<Arc<ShardStatePartsPrunedData>>,
 }
 
 impl<'a> ShardStateWriter<'a> {
@@ -41,6 +36,8 @@ impl<'a> ShardStateWriter<'a> {
 
     // Partially written BOC file.
     const FILE_EXTENSION_TEMP: &'static str = "boc.temp";
+
+    pub const META_FILE_EXTENSION: &'static str = "meta.json";
 
     fn build_file_name_base<S>(name_base: S, part_shard_prefix: Option<&ShardPrefix>) -> String
     where
@@ -68,21 +65,13 @@ impl<'a> ShardStateWriter<'a> {
         PathBuf::from(base).with_extension(Self::FILE_EXTENSION_TEMP)
     }
 
-    pub fn new(
-        db: CellsDb,
-        states_dir: &'a Dir,
-        block_id: &'a BlockId,
-        split_depth: u8,
-        pruned_parts: Option<Arc<ShardStatePartsPrunedData>>,
-    ) -> Self {
-        Self::new_ext(
-            CellStorageDb::Main(db),
-            states_dir,
-            block_id,
-            None,
-            split_depth,
-            pruned_parts,
-        )
+    pub fn meta_file_name(block_id: &BlockId) -> PathBuf {
+        let base = Self::build_file_name_base(block_id, None);
+        PathBuf::from(base).with_extension(Self::META_FILE_EXTENSION)
+    }
+
+    pub fn new(db: CellsDb, states_dir: &'a Dir, block_id: &'a BlockId) -> Self {
+        Self::new_ext(CellStorageDb::Main(db), states_dir, block_id, None)
     }
 
     pub fn new_for_shard(
@@ -96,8 +85,6 @@ impl<'a> ShardStateWriter<'a> {
             states_dir,
             block_id,
             Some(part_shard_prefix),
-            0,
-            None,
         )
     }
 
@@ -106,16 +93,12 @@ impl<'a> ShardStateWriter<'a> {
         states_dir: &'a Dir,
         block_id: &'a BlockId,
         part_shard_prefix: Option<ShardPrefix>,
-        split_depth: u8,
-        pruned_parts: Option<Arc<ShardStatePartsPrunedData>>,
     ) -> Self {
         Self {
             db,
             states_dir,
             block_id,
-            split_depth,
             part_shard_prefix,
-            pruned_parts,
         }
     }
 
@@ -165,19 +148,29 @@ impl<'a> ShardStateWriter<'a> {
     pub fn write(
         &self,
         root_hash: &HashBytes,
+        // Map of cells that should become absent in main file
+        to_make_absent_cells: Option<FastHashMap<HashBytes, Cell>>,
         cancelled: Option<&CancellationFlag>,
     ) -> Result<HashBytes> {
-        self.write_inner(root_hash, None, None, cancelled)
+        self.write_inner(root_hash, None, to_make_absent_cells, None, cancelled)
     }
 
     pub fn write_tracked(
         &self,
         root_hash: &HashBytes,
         file_name: &str,
+        // Map of cells that should become absent in main file
+        to_make_absent_cells: Option<FastHashMap<HashBytes, Cell>>,
         progress_bar: &mut ProgressBar,
         cancelled: Option<&CancellationFlag>,
     ) -> Result<HashBytes> {
-        self.write_inner(root_hash, Some(file_name), Some(progress_bar), cancelled)
+        self.write_inner(
+            root_hash,
+            Some(file_name),
+            to_make_absent_cells,
+            Some(progress_bar),
+            cancelled,
+        )
     }
 
     #[tracing::instrument(skip_all,
@@ -190,6 +183,8 @@ impl<'a> ShardStateWriter<'a> {
         &self,
         root_hash: &HashBytes,
         file_name: Option<&str>,
+        // Map of cells that should become absent in main file
+        to_make_absent_cells: Option<FastHashMap<HashBytes, Cell>>,
         mut progress_bar: Option<&mut ProgressBar>,
         cancelled: Option<&CancellationFlag>,
     ) -> Result<HashBytes> {
@@ -207,7 +202,7 @@ impl<'a> ShardStateWriter<'a> {
         //   and the root will be at the end with the maximum index
         tracing::info!("started loading cells");
         let mut intermediate = self
-            .write_rev(&root_hash.0, cancelled)
+            .write_rev(&root_hash.0, to_make_absent_cells, cancelled)
             .context("Failed to write reversed cells data")?;
         tracing::info!("finished loading cells");
         let cell_count = intermediate.cell_sizes.len() as u32;
@@ -243,43 +238,24 @@ impl<'a> ShardStateWriter<'a> {
         // Header            | current len: 0
         let flags = 0b1000_0000u8 | (REF_SIZE as u8);
 
-        // store split depth if shard state was splitted in parts
-        let flags = if self.split_depth > 0 {
-            flags | FLAG_HAS_PARTS
-        } else {
-            flags
-        };
-
         buffer.write_all(&[0xb5, 0xee, 0x9c, 0x72, flags, offset_size as u8])?;
 
-        // Split depth when writing main file when shard state is splitted into parts
-        // current len: 6 (main with parts)
-        if self.split_depth > 0 {
-            buffer.write_all(&self.split_depth.to_be_bytes())?;
-        }
-
-        // Part prefix and root hash when writing part (8+32=40) | current len: 6 (part)
-        if let Some(part_shard_prefix) = self.part_shard_prefix {
-            buffer.write_all(&part_shard_prefix.to_be_bytes())?;
-            buffer.write_all(root_hash.as_slice())?;
-        }
-
-        // Unique cell count | current len: 6 (main) / +1 (main with parts) / +40 (part)
+        // Unique cell count | current len: 6
         buffer.write_all(&cell_count.to_be_bytes())?;
 
-        // Root count        | current len: 10 (main) / +1 (main with parts) / +40 (part)
+        // Root count        | current len: 10
         buffer.write_all(&1u32.to_be_bytes())?;
 
-        // Absent cell count | current len: 14 (main) / +1 (main with parts) / +40 (part)
-        buffer.write_all(&[0, 0, 0, 0])?;
+        // Absent cell count | current len: 14
+        buffer.write_all(&intermediate.absent_cells_count.to_be_bytes())?;
 
-        // Total cell size   | current len: 18 (main) / +1 (main with parts) / +40 (part)
+        // Total cell size   | current len: 18
         buffer.write_all(&intermediate.total_size.to_be_bytes()[(8 - offset_size)..8])?;
 
-        // Root index        | current len: 18 + offset_size (main) / +1 (main with parts) / +40 (part)
+        // Root index        | current len: 18 + offset_size
         buffer.write_all(&[0, 0, 0, 0])?;
 
-        // Cells index       | current len: 22 + offset_size (main) / +1 (main with parts) / +40 (part)
+        // Cells index       | current len: 22 + offset_size
         tracing::info!("started building index");
         {
             let mut next_offset = 0;
@@ -290,7 +266,7 @@ impl<'a> ShardStateWriter<'a> {
         }
         tracing::info!("finished building index");
 
-        // Cells             | current len: 22 + offset_size * (1 + cell_sizes.len())  (main) / +1 (main with parts) / +40 (part)
+        // Cells             | current len: 22 + offset_size * (1 + cell_sizes.len())
         let mut cell_buffer = [0; 2 + 128 + 4 * REF_SIZE];
 
         // write cells from the intermediate reverse file
@@ -300,6 +276,7 @@ impl<'a> ShardStateWriter<'a> {
         // will write cells in the reverse order like this
         // A[0; ref 3, 1] B[1; ref 2] D[2; ] C[3; ref 4] E[4; ]
 
+        tracing::info!("started writing cells");
         let mut cancelled = cancelled.map(|c| c.debounce(1000));
         for &cell_size in intermediate.cell_sizes.iter().rev() {
             if let Some(cancelled) = &mut cancelled
@@ -321,13 +298,21 @@ impl<'a> ShardStateWriter<'a> {
                 d2: cell_buffer[1],
             };
 
-            let ref_offset = 2 + descriptor.byte_len() as usize;
-            for r in 0..descriptor.reference_count() as usize {
-                let ref_offset = ref_offset + r * REF_SIZE;
-                let slice = &mut cell_buffer[ref_offset..ref_offset + REF_SIZE];
+            // skip refs for absent cells
+            if !descriptor.is_absent() {
+                let hash_depth_len = if descriptor.store_hashes() {
+                    descriptor.hash_count() * (32 + 2)
+                } else {
+                    0
+                };
+                let ref_offset = 2 + hash_depth_len as usize + descriptor.byte_len() as usize;
+                for r in 0..descriptor.reference_count() as usize {
+                    let ref_offset = ref_offset + r * REF_SIZE;
+                    let slice = &mut cell_buffer[ref_offset..ref_offset + REF_SIZE];
 
-                let index = u32::from_be_bytes(slice.try_into().unwrap());
-                slice.copy_from_slice(&(cell_count - index - 1).to_be_bytes());
+                    let index = u32::from_be_bytes(slice.try_into().unwrap());
+                    slice.copy_from_slice(&(cell_count - index - 1).to_be_bytes());
+                }
             }
 
             buffer.write_all(&cell_buffer[..cell_size as usize])?;
@@ -335,6 +320,7 @@ impl<'a> ShardStateWriter<'a> {
                 pg.add_progress(cell_size as u64);
             }
         }
+        tracing::info!("finished writing cells");
 
         let file_hash = match buffer.into_inner() {
             Ok(intermediate_hasher) => {
@@ -365,9 +351,11 @@ impl<'a> ShardStateWriter<'a> {
     fn write_rev(
         &self,
         root_hash: &[u8; 32],
+        mut to_make_absent_cells: Option<FastHashMap<HashBytes, Cell>>,
         cancelled: Option<&CancellationFlag>,
     ) -> Result<IntermediateState> {
         enum StackItem {
+            /// .0 - hash
             New([u8; 32]),
             Loaded(LoadedCell),
         }
@@ -387,10 +375,16 @@ impl<'a> ShardStateWriter<'a> {
 
         let mut references_buffer = SmallVec::<[[u8; 32]; 4]>::with_capacity(4);
 
+        // data buffer for absent cell
+        let mut absent_data_buffer = vec![];
+
+        let mut absent_cells_count = 0;
+
         let mut indices = FastHashMap::default();
         let mut remap = FastHashMap::default();
         let mut cell_sizes = Vec::<u8>::with_capacity(FILE_BUFFER_LEN);
         let mut stack = Vec::with_capacity(32);
+        let mut cell_pinned_value: Option<DBPinnableSlice<'_>>;
 
         let mut total_size = 0u64;
         let mut iteration = 0u32;
@@ -423,41 +417,47 @@ impl<'a> ShardStateWriter<'a> {
 
             match data {
                 StackItem::New(hash) => {
-                    // write pruned cell instead of part branch
                     let hash_bytes = HashBytes::from(hash);
-                    if let Some(pruned_parts) = &self.pruned_parts
-                        && let Some(pruned_cell) = pruned_parts.get(&hash_bytes)
+
+                    let to_make_absent_cell = to_make_absent_cells
+                        .as_mut()
+                        .and_then(|map| map.remove(&hash_bytes));
+
+                    let (descriptor, data) = if let Some(to_make_absent_cell) = &to_make_absent_cell
                     {
-                        stack.push((
-                            index,
-                            StackItem::Loaded(LoadedCell {
-                                hash,
-                                descriptor: pruned_cell.descriptor(),
-                                data: SmallVec::from_slice(pruned_cell.data()),
-                                // write no references for pruned cell
-                                indices: SmallVec::new(),
-                            }),
-                        ));
+                        // count absent cells
+                        absent_cells_count += 1;
+
+                        let descriptor =
+                            make_absent_cell_data(to_make_absent_cell, &mut absent_data_buffer);
+                        let data = absent_data_buffer.as_slice();
+
                         references_buffer.clear();
-                        continue;
-                    }
+                        (descriptor, data)
+                    } else {
+                        // read cell from db
+                        cell_pinned_value = raw.get_pinned_cf_opt(&cf, hash, read_options)?;
+                        let value = cell_pinned_value
+                            .as_ref()
+                            .ok_or(CellWriterError::CellNotFound)?
+                            .as_ref();
 
-                    let value = raw
-                        .get_pinned_cf_opt(&cf, hash, read_options)?
-                        .ok_or(CellWriterError::CellNotFound)?;
-
-                    let value = match refcount::strip_refcount(value.as_ref()) {
-                        Some(bytes) => bytes,
-                        None => {
-                            return Err(CellWriterError::CellNotFound.into());
+                        let value = match refcount::strip_refcount(value) {
+                            Some(bytes) => bytes,
+                            None => {
+                                return Err(CellWriterError::CellNotFound.into());
+                            }
+                        };
+                        if value.is_empty() {
+                            return Err(CellWriterError::InvalidCell.into());
                         }
-                    };
-                    if value.is_empty() {
-                        return Err(CellWriterError::InvalidCell.into());
-                    }
 
-                    let (descriptor, data) = deserialize_cell(value, &mut references_buffer)
-                        .ok_or(CellWriterError::InvalidCell)?;
+                        let DeserializedCell { descriptor, data } =
+                            deserialize_cell(value, &mut references_buffer)
+                                .ok_or(CellWriterError::InvalidCell)?;
+
+                        (descriptor, data)
+                    };
 
                     let mut reference_indices = SmallVec::with_capacity(references_buffer.len());
 
@@ -508,8 +508,8 @@ impl<'a> ShardStateWriter<'a> {
 
                         for i in 0..preload_count {
                             let index = indices_buffer[i];
-                            let hash = unsafe { *keys[i].cast::<[u8; 32]>() };
-                            stack.push((index, StackItem::New(hash)));
+                            let child_hash = unsafe { *keys[i].cast::<[u8; 32]>() };
+                            stack.push((index, StackItem::New(child_hash)));
                         }
                     }
 
@@ -556,6 +556,7 @@ impl<'a> ShardStateWriter<'a> {
             file,
             cell_sizes,
             total_size,
+            absent_cells_count,
         })
     }
 }
@@ -564,12 +565,45 @@ struct IntermediateState {
     file: File,
     cell_sizes: Vec<u8>,
     total_size: u64,
+    absent_cells_count: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PersistentStateMeta {
+    pub part_split_depth: u8,
+}
+
+impl PersistentStateMeta {
+    pub fn new(part_split_depth: u8) -> Self {
+        Self { part_split_depth }
+    }
+
+    pub fn write_metadata(&self, states_dir: &Dir, block_id: &BlockId) -> Result<()> {
+        let file_name = ShardStateWriter::meta_file_name(block_id);
+        let file_path = states_dir.path().join(&file_name);
+
+        tycho_util::serde_helpers::save_json_to_file(self, file_path)?;
+
+        Ok(())
+    }
+
+    pub fn read_metadata(states_dir_path: &Path, block_id: &BlockId) -> Result<Option<Self>> {
+        let file_name = ShardStateWriter::meta_file_name(block_id);
+        let file_path = states_dir_path.join(&file_name);
+
+        if file_path.exists() {
+            let meta = tycho_util::serde_helpers::load_json_from_file(file_path).ok();
+            return Ok(meta);
+        }
+
+        Ok(None)
+    }
 }
 
 fn deserialize_cell<'a>(
     value: &'a [u8],
     references_buffer: &mut SmallVec<[[u8; 32]; 4]>,
-) -> Option<(CellDescriptor, &'a [u8])> {
+) -> Option<DeserializedCell<'a>> {
     let mut index = Index {
         value_len: value.len(),
         offset: 0,
@@ -590,6 +624,7 @@ fn deserialize_cell<'a>(
 
     assert_eq!((bit_length as usize).div_ceil(8), data_len);
 
+    // skip hashes and depths
     index.advance((32 + 2) * (descriptor.hash_count() - 1) as usize);
 
     for _ in 0..descriptor.reference_count() {
@@ -600,7 +635,36 @@ fn deserialize_cell<'a>(
         index.advance(32);
     }
 
-    Some((descriptor, data))
+    Some(DeserializedCell { descriptor, data })
+}
+
+struct DeserializedCell<'a> {
+    descriptor: CellDescriptor,
+    data: &'a [u8],
+}
+
+fn make_absent_cell_data(cell: &Cell, absent_data_buffer: &mut Vec<u8>) -> CellDescriptor {
+    let level_mask = cell.level_mask();
+    let d1 = 0x17 | level_mask.to_byte() << 5;
+    let absent_descriptor = CellDescriptor::new([d1, 0]);
+
+    let hash_count = absent_descriptor.hash_count();
+    absent_data_buffer.clear();
+    absent_data_buffer.reserve(hash_count as usize * (32 + 2));
+
+    // TODO: should I use CellDataBuilder here?
+
+    for lvl in level_mask {
+        let hash = cell.hash(lvl);
+        absent_data_buffer.extend_from_slice(hash.as_slice());
+    }
+
+    for lvl in level_mask {
+        let depth = cell.depth(lvl);
+        absent_data_buffer.extend_from_slice(&depth.to_be_bytes());
+    }
+
+    absent_descriptor
 }
 
 fn number_of_bytes_to_fit(l: u64) -> u32 {
@@ -639,7 +703,6 @@ impl std::ops::Deref for Index {
 
 const REF_SIZE: usize = std::mem::size_of::<u32>();
 const FILE_BUFFER_LEN: usize = 128 * 1024 * 1024; // 128 MB
-pub const FLAG_HAS_PARTS: u8 = 0b0000_1000u8;
 
 #[derive(thiserror::Error, Debug)]
 enum CellWriterError {

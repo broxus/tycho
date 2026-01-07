@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use tokio::sync::Semaphore;
 use tycho_block_util::block::DisplayShardPrefix;
 use tycho_storage::fs::Dir;
-use tycho_types::cell::HashBytes;
 use tycho_types::models::BlockId;
 
 use crate::storage::persistent_state::BASE_DIR;
@@ -25,13 +24,8 @@ pub struct PersistentStateStoragePartLocalImpl {
 }
 
 impl PersistentStateStoragePart for PersistentStateStoragePartLocalImpl {
-    fn preload_state(
-        &self,
-        mc_seqno: u32,
-        block_id: &BlockId,
-        part_root_hash: HashBytes,
-    ) -> Result<()> {
-        self.inner.preload_state(mc_seqno, block_id, part_root_hash)
+    fn preload_state(&self, mc_seqno: u32, block_id: &BlockId) -> Result<()> {
+        self.inner.preload_state(mc_seqno, block_id)
     }
 
     fn try_reuse_persistent_state(
@@ -103,18 +97,13 @@ struct Inner {
 }
 
 impl Inner {
-    fn preload_state(
-        &self,
-        mc_seqno: u32,
-        block_id: &BlockId,
-        part_root_hash: HashBytes,
-    ) -> Result<()> {
+    fn preload_state(&self, mc_seqno: u32, block_id: &BlockId) -> Result<()> {
         self.descriptor_cache.cache_shard_state(
             mc_seqno,
             block_id,
             Some(self.shard_states_part.shard_prefix()),
-            Some(part_root_hash),
             None,
+            0,
         )?;
         Ok(())
     }
@@ -184,7 +173,7 @@ impl Inner {
                 this.shard_states_part.shard_prefix(),
             );
 
-            let stored = match writer.write(&root_hash, cancelled.as_ref()) {
+            let stored = match writer.write(&root_hash, None, cancelled.as_ref()) {
                 Ok(_) => {
                     tracing::info!(
                         "persistent shard state part {} saved",
@@ -211,8 +200,8 @@ impl Inner {
                     mc_seqno,
                     &block_id,
                     Some(this.shard_states_part.shard_prefix()),
-                    Some(root_hash),
                     None,
+                    0,
                 )?;
                 res = Some(cache_res);
             }
@@ -239,7 +228,6 @@ impl Inner {
         let StoreStatePartFileContext {
             mc_seqno,
             block_id,
-            root_hash,
             file,
             cancelled,
         } = cx;
@@ -290,8 +278,8 @@ impl Inner {
                     mc_seqno,
                     &block_id,
                     Some(this.shard_states_part.shard_prefix()),
-                    Some(root_hash),
                     None,
+                    0,
                 )?;
                 res = Some(cache_res);
             }

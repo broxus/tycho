@@ -53,6 +53,7 @@ quick_cache = { workspace = true }
 rand = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 smallvec = { workspace = true }
 tempfile = { workspace = true }

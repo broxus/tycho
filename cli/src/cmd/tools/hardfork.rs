@@ -264,7 +264,7 @@ impl ShardStateHandler {
             else {
                 unreachable!("main cell storage always use main cells db")
             };
-            let writer = ShardStateWriter::new(db, &output, handle.id(), 0, None);
+            let writer = ShardStateWriter::new(db, &output, handle.id());
 
             let mut progress_bar = ProgressBar::builder()
                 .exact_unit("bytes")
@@ -279,6 +279,7 @@ impl ShardStateHandler {
             let file_hash = writer.write_tracked(
                 &root_hash,
                 &block_id.shard.to_string(),
+                None,
                 &mut progress_bar,
                 Some(&cancelled),
             )?;
