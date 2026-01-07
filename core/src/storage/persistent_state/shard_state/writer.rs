@@ -316,7 +316,8 @@ impl<'a> ShardStateWriter<'a> {
         cancelled: Option<&CancellationFlag>,
     ) -> Result<IntermediateState> {
         enum StackItem {
-            New([u8; 32]),
+            /// .0 - hash; .1 - `make_absent: bool`
+            New(([u8; 32], bool)),
             Loaded(LoadedCell),
         }
 
@@ -334,6 +335,9 @@ impl<'a> ShardStateWriter<'a> {
         let cf = self.db.cells().cf();
 
         let mut references_buffer = SmallVec::<[[u8; 32]; 4]>::with_capacity(4);
+
+        // data buffer for absent cell
+        let mut absent_data_buffer = vec![];
 
         let mut indices = FastHashMap::default();
         let mut remap = FastHashMap::default();
@@ -356,7 +360,7 @@ impl<'a> ShardStateWriter<'a> {
         // the intermediate file will contain
         // E[0; ] C[1; ref 0] D[2; ] B[3; ref 2] A[4; ref 1,3]
 
-        stack.push((iteration, StackItem::New(*root_hash)));
+        stack.push((iteration, StackItem::New((*root_hash, false))));
         indices.insert(*root_hash, (iteration, false));
 
         let mut temp_file_buffer = std::io::BufWriter::with_capacity(FILE_BUFFER_LEN, &mut file);
@@ -370,26 +374,16 @@ impl<'a> ShardStateWriter<'a> {
             }
 
             match data {
-                StackItem::New(hash) => {
-                    // write pruned cell instead of part branch
+                StackItem::New((hash, make_absent)) => {
+                    // check if current cell is a part root
+                    // and rise flag to make children cells absent
                     let hash_bytes = HashBytes::from(hash);
-                    if let Some(pruned_parts) = &self.pruned_parts
-                        && let Some(pruned_cell) = pruned_parts.get(&hash_bytes)
-                    {
-                        stack.push((
-                            index,
-                            StackItem::Loaded(LoadedCell {
-                                hash,
-                                descriptor: pruned_cell.descriptor(),
-                                data: SmallVec::from_slice(pruned_cell.data()),
-                                // write no references for pruned cell
-                                indices: SmallVec::new(),
-                            }),
-                        ));
-                        references_buffer.clear();
-                        continue;
-                    }
+                    let make_children_absent = self
+                        .pruned_parts
+                        .as_ref()
+                        .is_some_and(|parts| parts.get(&hash_bytes).is_some());
 
+                    // read cell from db
                     let value = raw
                         .get_pinned_cf_opt(&cf, hash, read_options)?
                         .ok_or(CellWriterError::CellNotFound)?;
@@ -404,8 +398,29 @@ impl<'a> ShardStateWriter<'a> {
                         return Err(CellWriterError::InvalidCell.into());
                     }
 
-                    let (descriptor, data) = deserialize_cell(value, &mut references_buffer)
-                        .ok_or(CellWriterError::InvalidCell)?;
+                    let (descriptor, data) = {
+                        let DeserializedCell {
+                            mut descriptor,
+                            mut data,
+                            hash_depths,
+                        } = deserialize_cell(value, &mut references_buffer)
+                            .ok_or(CellWriterError::InvalidCell)?;
+
+                        // make absent cell data from this child if required
+                        if make_absent {
+                            descriptor = make_absent_cell_data(
+                                descriptor,
+                                hash_depths,
+                                &mut absent_data_buffer,
+                            );
+                            data = absent_data_buffer.as_slice();
+
+                            // drop references for absent cell
+                            references_buffer.clear();
+                        }
+
+                        (descriptor, data)
+                    };
 
                     let mut reference_indices = SmallVec::with_capacity(references_buffer.len());
 
@@ -457,7 +472,7 @@ impl<'a> ShardStateWriter<'a> {
                         for i in 0..preload_count {
                             let index = indices_buffer[i];
                             let hash = unsafe { *keys[i].cast::<[u8; 32]>() };
-                            stack.push((index, StackItem::New(hash)));
+                            stack.push((index, StackItem::New((hash, make_children_absent))));
                         }
                     }
 
@@ -517,7 +532,7 @@ struct IntermediateState {
 fn deserialize_cell<'a>(
     value: &'a [u8],
     references_buffer: &mut SmallVec<[[u8; 32]; 4]>,
-) -> Option<(CellDescriptor, &'a [u8])> {
+) -> Option<DeserializedCell<'a>> {
     let mut index = Index {
         value_len: value.len(),
         offset: 0,
@@ -538,7 +553,16 @@ fn deserialize_cell<'a>(
 
     assert_eq!((bit_length as usize).div_ceil(8), data_len);
 
-    index.advance((32 + 2) * descriptor.hash_count() as usize);
+    // read hashes and depths
+    let mut hash_depths = vec![];
+    for _ in descriptor.level_mask() {
+        let hash = &value[*index..*index + 32];
+        index.advance(32);
+        let depth = u16::from_le_bytes([value[*index], value[*index + 1]]);
+        index.advance(2);
+
+        hash_depths.push((hash, depth));
+    }
 
     for _ in 0..descriptor.reference_count() {
         index.require(32)?;
@@ -548,7 +572,45 @@ fn deserialize_cell<'a>(
         index.advance(32);
     }
 
-    Some((descriptor, data))
+    Some(DeserializedCell {
+        descriptor,
+        data,
+        hash_depths,
+    })
+}
+
+struct DeserializedCell<'a> {
+    descriptor: CellDescriptor,
+    data: &'a [u8],
+    hash_depths: Vec<(&'a [u8], u16)>,
+}
+
+fn make_absent_cell_data(
+    descriptor: CellDescriptor,
+    hash_depths: Vec<(&[u8], u16)>,
+    absent_data_buffer: &mut Vec<u8>,
+) -> CellDescriptor {
+    let level_mask = descriptor.level_mask();
+    let d1 = 0x17 | level_mask.to_byte() << 5;
+    let absent_descriptor = CellDescriptor::new([d1, 0]);
+
+    let hash_count = absent_descriptor.hash_count();
+    absent_data_buffer.clear();
+    absent_data_buffer.reserve(hash_count as usize * (32 + 2));
+
+    // TODO: should I use CellDataBuilder here?
+
+    for lvl in level_mask {
+        let item = &hash_depths[lvl as usize];
+        absent_data_buffer.extend_from_slice(item.0);
+    }
+
+    for lvl in level_mask {
+        let item = &hash_depths[lvl as usize];
+        absent_data_buffer.extend_from_slice(&item.1.to_be_bytes());
+    }
+
+    absent_descriptor
 }
 
 fn number_of_bytes_to_fit(l: u64) -> u32 {
