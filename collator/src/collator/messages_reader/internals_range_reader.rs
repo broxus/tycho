@@ -137,7 +137,7 @@ impl<V: InternalMessageValue> InternalsRangeReader<V> {
                     check_ops_count.saturating_add_assign(1);
 
                     if let Some(remaning_msgs_stats) = &prev_par_reader.remaning_msgs_stats
-                        && remaning_msgs_stats.statistics().contains_key(&dst_addr)
+                        && remaning_msgs_stats.contains(&dst_addr)
                     {
                         return (true, check_ops_count);
                     }
@@ -209,8 +209,8 @@ pub fn partitions_have_intersecting_accounts<V: InternalMessageValue>(
     }
 
     // Check next_stats
-    for item in next_stats.statistics() {
-        let addr = item.key();
+    for entry in next_stats.iter() {
+        let addr = entry.key();
         if current_stats.contains(addr) {
             return Ok(Some(addr.clone()));
         }

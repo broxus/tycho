@@ -7,7 +7,7 @@ use tycho_util::FastHashMap;
 
 use crate::collator::messages_buffer::MessagesBuffer;
 use crate::collator::messages_reader::state::{DisplayShardReaderState, ShardReaderState};
-use crate::collator::types::CumulativeStatistics;
+use crate::collator::statistics::cumulative::CumulativeStatistics;
 use crate::internal_queue::types::stats::QueueStatistics;
 use crate::types::processed_upto::{BlockSeqno, InternalsProcessedUptoStuff, InternalsRangeStuff};
 use crate::types::{DebugIter, ProcessedTo};
