@@ -139,10 +139,10 @@ impl CellStorage {
 
                     let descriptor = CellDescriptor::new([data[0], data[1]]);
                     let byte_len = descriptor.byte_len() as usize;
-                    let hash_count = descriptor.hash_count() as usize;
+                    let hash_count = descriptor.hash_count() as usize - 1;
                     let ref_count = descriptor.reference_count();
 
-                    let offset = 4usize + byte_len + (32 + 2) * hash_count;
+                    let offset = 6usize + byte_len + StorageCell::HASHES_ITEM_LEN * hash_count;
                     if data.len() < offset + (ref_count as usize) * 32 {
                         return Err(CellStorageError::InvalidCell);
                     }
@@ -674,10 +674,12 @@ impl CellStorage {
         }
 
         let mut cell = match self.raw_cells_cache.get_raw(&self.cells_db, hash) {
-            Ok(Some(value)) => match StorageCell::deserialize(self.clone(), &value.slice, epoch) {
-                Some(cell) => Arc::new(cell),
-                None => return Err(CellStorageError::InvalidCell),
-            },
+            Ok(Some(value)) => {
+                match StorageCell::deserialize(self.clone(), hash, &value.slice, epoch) {
+                    Some(cell) => Arc::new(cell),
+                    None => return Err(CellStorageError::InvalidCell),
+                }
+            }
             Ok(None) => return Err(CellStorageError::CellNotFound),
             Err(e) => return Err(CellStorageError::Internal(e)),
         };
@@ -1098,8 +1100,11 @@ pub struct StorageCell {
     bit_len: u16,
     data_ptr: *const u8,
     data_len: u8,
-    hash_count: u8,
+    other_hash_count: u8,
     epoch: u32,
+
+    repr_depth: u16,
+    repr_hash: HashBytes,
 
     reference_states: [AtomicU8; 4],
     reference_data: [UnsafeCell<StorageCellReferenceData>; 4],
@@ -1112,24 +1117,34 @@ impl StorageCell {
 
     const HASHES_ITEM_LEN: usize = 32 + 2;
 
-    pub fn deserialize(cell_storage: Arc<CellStorage>, buffer: &[u8], epoch: u32) -> Option<Self> {
+    pub fn deserialize(
+        cell_storage: Arc<CellStorage>,
+        repr_hash: &HashBytes,
+        buffer: &[u8],
+        epoch: u32,
+    ) -> Option<Self> {
         if buffer.len() < 4 {
             return None;
         }
 
         let descriptor = CellDescriptor::new([buffer[0], buffer[1]]);
         let bit_len = u16::from_le_bytes([buffer[2], buffer[3]]);
-        let byte_len = descriptor.byte_len() as usize;
-        let hash_count = descriptor.hash_count() as usize;
+        let repr_depth = u16::from_le_bytes([buffer[4], buffer[5]]);
+        let level = descriptor.level_mask().level() as usize;
         let ref_count = descriptor.reference_count() as usize;
 
-        let allocated_len = byte_len + hash_count * Self::HASHES_ITEM_LEN;
-        let total_len = 4usize + allocated_len + 32 * ref_count;
+        let is_pruned = descriptor.is_exotic() && ref_count == 0 && level > 0;
+        let other_hash_count = (!is_pruned) as usize * level;
+        debug_assert!(other_hash_count <= 3);
+
+        let byte_len = descriptor.byte_len() as usize;
+        let allocated_len = byte_len + other_hash_count * Self::HASHES_ITEM_LEN;
+        let total_len = 6usize + allocated_len + 32 * ref_count;
         if buffer.len() < total_len {
             return None;
         }
 
-        let data_ptr = Box::into_raw(Box::<[u8]>::from(&buffer[4..4 + allocated_len])).cast::<u8>();
+        let data_ptr = Box::into_raw(Box::<[u8]>::from(&buffer[6..6 + allocated_len])).cast::<u8>();
 
         let reference_states = Default::default();
         let mut reference_data = unsafe {
@@ -1139,7 +1154,7 @@ impl StorageCell {
         const { assert!(std::mem::size_of::<UnsafeCell<StorageCellReferenceData>>() == 32) };
         unsafe {
             std::ptr::copy_nonoverlapping(
-                buffer.as_ptr().add(4 + allocated_len),
+                buffer.as_ptr().add(6 + allocated_len),
                 reference_data.as_mut_ptr().cast::<u8>(),
                 32 * ref_count,
             );
@@ -1151,23 +1166,26 @@ impl StorageCell {
             descriptor,
             data_ptr,
             data_len: byte_len as u8,
-            hash_count: hash_count as u8,
+            other_hash_count: other_hash_count as u8,
             epoch,
+            repr_depth,
+            repr_hash: *repr_hash,
             reference_states,
             reference_data,
         })
     }
 
     pub fn deserialize_references(data: &[u8], target: &mut Vec<HashBytes>) -> bool {
-        if data.len() < 4 {
+        if data.len() < 6 {
             return false;
         }
 
         let descriptor = CellDescriptor::new([data[0], data[1]]);
-        let hash_count = descriptor.hash_count();
+        let hash_count = descriptor.hash_count() - 1;
         let ref_count = descriptor.reference_count() as usize;
 
-        let mut offset = 4usize + descriptor.byte_len() as usize + (32 + 2) * hash_count as usize;
+        let mut offset =
+            6usize + descriptor.byte_len() as usize + Self::HASHES_ITEM_LEN * hash_count as usize;
         if data.len() < offset + 32 * ref_count {
             return false;
         }
@@ -1181,27 +1199,42 @@ impl StorageCell {
         true
     }
 
+    // NOTE: Repr hash is not stored into value because it is already a key.
     pub fn serialize_to(cell: &DynCell, target: &mut Vec<u8>) -> Result<()> {
         let descriptor = cell.descriptor();
-        let hash_count = descriptor.hash_count();
+        let level = descriptor.level_mask().level() as usize;
         let ref_count = descriptor.reference_count();
 
+        let is_pruned = descriptor.is_exotic() && ref_count == 0 && level > 0;
+        // The total amount of hashes is `1 + level`. We don't
+        // need to store the `repr_hash` (hash for the highest level)
+        // because it is already a key for this value. So we only
+        // store `level` hashes for non-pruned cells, and no
+        // hashes for pruned cells (they store everyting in data).
+        let other_hash_count = (!is_pruned) as usize * level;
+
         target.reserve(
-            4usize
+            6usize
                 + descriptor.byte_len() as usize
-                + (32 + 2) * hash_count as usize
+                + Self::HASHES_ITEM_LEN * other_hash_count
                 + 32 * ref_count as usize,
         );
 
         target.extend_from_slice(&[descriptor.d1, descriptor.d2]);
         target.extend_from_slice(&cell.bit_len().to_le_bytes());
+        target.extend_from_slice(&cell.repr_depth().to_le_bytes());
         target.extend_from_slice(cell.data());
         assert_eq!(cell.data().len(), descriptor.byte_len() as usize);
 
-        for i in 0..descriptor.hash_count() {
-            target.extend_from_slice(cell.hash(i).as_array());
-            target.extend_from_slice(&cell.depth(i).to_le_bytes());
+        let len_before = target.len();
+        for level in descriptor.level_mask().into_iter().take(other_hash_count) {
+            target.extend_from_slice(cell.hash(level).as_array());
+            target.extend_from_slice(&cell.depth(level).to_le_bytes());
         }
+        debug_assert_eq!(
+            (target.len() - len_before) / Self::HASHES_ITEM_LEN,
+            other_hash_count
+        );
 
         for i in 0..descriptor.reference_count() {
             let cell = cell.reference(i).context("Child not found")?;
@@ -1245,6 +1278,16 @@ impl StorageCell {
         res.unwrap();
 
         Some(unsafe { &(*slot).storage_cell })
+    }
+
+    /// Returns hash index, max level and whether the cell is pruned.
+    #[inline]
+    fn map_level(&self, level: u8) -> (u8, u8, bool) {
+        let hash_index = self.descriptor.level_mask().hash_index(level);
+        let max_level = self.descriptor.level_mask().level();
+        let is_pruned = max_level > 0 && self.other_hash_count == 0;
+        debug_assert!(hash_index <= max_level);
+        (hash_index, max_level, is_pruned)
     }
 
     fn initialize_inner(state: &AtomicU8, init: &mut impl FnMut() -> bool) {
@@ -1332,22 +1375,41 @@ impl CellImpl for StorageCell {
     }
 
     fn hash(&self, level: u8) -> &HashBytes {
-        let i = self.descriptor.level_mask().hash_index(level);
-        let offset = self.data_len as usize + (i as usize) * Self::HASHES_ITEM_LEN;
-        HashBytes::wrap(unsafe { &*self.data_ptr.add(offset).cast::<[u8; 32]>() })
+        let (hash_index, max_level, is_pruned) = self.map_level(level);
+        if hash_index == max_level {
+            &self.repr_hash
+        } else {
+            // Compute offset branchless.
+            let offset = (is_pruned as usize) * (2 + hash_index as usize * 32)
+                + (!is_pruned as usize)
+                    * (self.data_len as usize + (hash_index as usize) * Self::HASHES_ITEM_LEN);
+
+            debug_assert!(offset + 32 <= self.data_len as usize);
+            HashBytes::wrap(unsafe { &*self.data_ptr.add(offset).cast::<[u8; 32]>() })
+        }
     }
 
     fn depth(&self, level: u8) -> u16 {
-        let i = self.descriptor.level_mask().hash_index(level);
-        let offset = self.data_len as usize + (i as usize) * Self::HASHES_ITEM_LEN + 32;
-        u16::from_le_bytes(unsafe { *self.data_ptr.add(offset).cast::<[u8; 2]>() })
+        let (hash_index, max_level, is_pruned) = self.map_level(level);
+        if hash_index == max_level {
+            self.repr_depth
+        } else {
+            // Compute offset branchless.
+            let offset = (is_pruned as usize)
+                * (2 + max_level as usize * 32 + hash_index as usize * 2)
+                + (!is_pruned as usize)
+                    * (self.data_len as usize + (hash_index as usize) * Self::HASHES_ITEM_LEN + 32);
+
+            debug_assert!(offset + 2 <= self.data_len as usize);
+            u16::from_le_bytes(unsafe { *self.data_ptr.add(offset).cast::<[u8; 2]>() })
+        }
     }
 }
 
 impl Drop for StorageCell {
     fn drop(&mut self) {
         let allocated_len =
-            self.data_len as usize + (self.hash_count as usize) * Self::HASHES_ITEM_LEN;
+            self.data_len as usize + (self.other_hash_count as usize) * Self::HASHES_ITEM_LEN;
 
         _ = unsafe {
             Box::from_raw(std::ptr::slice_from_raw_parts_mut(
