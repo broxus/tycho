@@ -22,9 +22,9 @@ use crate::collator::messages_reader::state::{ShardReaderState, with_prev_list_a
 use crate::collator::messages_reader::{
     GetNextMessageGroupMode, MessagesReaderMetrics, MessagesReaderStage, internals_range_reader,
 };
+use crate::collator::statistics::queue::ConcurrentQueueStatistics;
 use crate::collator::types::{
-    ConcurrentQueueStatistics, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff,
-    ParsedMessage,
+    MsgsExecutionParamsExtension, MsgsExecutionParamsStuff, ParsedMessage,
 };
 use crate::internal_queue::types::diff::DiffZone;
 use crate::internal_queue::types::message::InternalMessageValue;
@@ -159,14 +159,14 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
         self.update_new_messages_reader_to_boundary(current_next_lt)?;
 
         if let Some(remaning_msgs_stats) = &self.remaning_msgs_stats {
-            tracing::trace!(target: tracing_targets::COLLATOR,
-                partition_id = %self.partition_id,
-                remaning_msgs_stats = ?DebugIter(remaning_msgs_stats.statistics().iter().map(|item| {
-                    let (addr, count) = item.pair();
-                    (get_short_addr_string(addr), *count)
-                })),
-                "internals partition reader remaning_msgs_stats on finalize",
-            );
+            // !!! tracing::trace!(target: tracing_targets::COLLATOR,
+            //     partition_id = %self.partition_id,
+            //     remaning_msgs_stats = ?DebugIter(remaning_msgs_stats.iter().map(|item| {
+            //         let (addr, count) = item.pair();
+            //         (get_short_addr_string(addr), *count)
+            //     })),
+            //     "internals partition reader remaning_msgs_stats on finalize",
+            // );
         }
 
         self.cleanup_redundant_range_readers();
@@ -1020,17 +1020,17 @@ pub(super) fn log_remaining_msgs_stats<V: InternalMessageValue>(
     remaning_msgs_stats_just_loaded: bool,
     msg: &str,
 ) {
-    if let Some(remaning_msgs_stats) = &par_reader.remaning_msgs_stats {
-        tracing::trace!(target: tracing_targets::COLLATOR,
-            partition_id = %par_reader.partition_id,
-            remaning_msgs_stats_just_loaded,
-            remaning_msgs_stats = ?DebugIter(remaning_msgs_stats.statistics().iter().map(|item| {
-                let (addr, count) = item.pair();
-                (get_short_addr_string(addr), *count)
-            })),
-            "{}", msg,
-        );
-    }
+    // !!! if let Some(remaning_msgs_stats) = &par_reader.remaning_msgs_stats {
+    //     tracing::trace!(target: tracing_targets::COLLATOR,
+    //         partition_id = %par_reader.partition_id,
+    //         remaning_msgs_stats_just_loaded,
+    //         remaning_msgs_stats = ?DebugIter(remaning_msgs_stats.iter().map(|item| {
+    //             let (addr, count) = item.pair();
+    //             (get_short_addr_string(addr), *count)
+    //         })),
+    //         "{}", msg,
+    //     );
+    // }
 }
 
 #[derive(Default)]
@@ -1101,14 +1101,15 @@ fn create_existing_range_reader<V: InternalMessageValue>(
             }
 
             // reduce remaining stats
-            tracing::trace!(target: tracing_targets::COLLATOR,
-                partition_id = %partition_id,
-                seqno,
-                read_stats = ?DebugIter(range_reader_state.read_stats.statistics().iter().map(|(addr, count)| (addr.to_string(), *count))),
-                "reduce cumulative remaning_msgs_stats by read_stats from range reader",
-            );
+            // !!!
+            // tracing::trace!(target: tracing_targets::COLLATOR,
+            //     partition_id = %partition_id,
+            //     seqno,
+            //     read_stats = ?DebugIter(range_reader_state.read_stats.statistics().iter().map(|(addr, count)| (addr.to_string(), count))),
+            //     "reduce cumulative remaning_msgs_stats by read_stats from range reader",
+            // );
 
-            for (account_addr, &count) in range_reader_state.read_stats.statistics() {
+            for (account_addr, count) in range_reader_state.read_stats.statistics() {
                 remaining_msgs_stats.decrement_for_account(account_addr.clone(), count);
             }
         }

@@ -15,10 +15,7 @@ use self::internals_reader::*;
 use self::new_messages::*;
 use super::error::CollatorError;
 use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
-use super::types::{
-    AnchorsCache, ConcurrentQueueStatistics, CumulativeStatistics, MsgsExecutionParamsExtension,
-    MsgsExecutionParamsStuff,
-};
+use super::types::{AnchorsCache, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff};
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::collator::messages_reader::internals_range_reader::{
     InternalsRangeReader, InternalsRangeReaderKind,
@@ -26,6 +23,8 @@ use crate::collator::messages_reader::internals_range_reader::{
 use crate::collator::messages_reader::state::internal::{
     DebugInternalsRangeReaderState, InternalsReaderState,
 };
+use crate::collator::statistics::cumulative::CumulativeStatistics;
+use crate::collator::statistics::queue::ConcurrentQueueStatistics;
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::InternalMessageValue;
 use crate::internal_queue::types::ranges::QueueShardBoundedRange;
@@ -185,7 +184,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
             {
                 new_messages.init_partition_router(
                     LP_PARTITION_ID,
-                    partition_stats.initial_stats.statistics(),
+                    partition_stats.initial_stats.statistics().into_iter(),
                 );
             }
         }
@@ -560,13 +559,13 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
     ) -> Result<FastHashSet<HashBytes>> {
         let mut moved_from_par_0_accounts = FastHashSet::default();
 
-        for (dest_int_address, msgs_count) in aggregated_stats {
-            let existing_partition = partition_router.get_partition(None, &dest_int_address);
+        for (dest_int_address, msgs_count) in aggregated_stats.statistics() {
+            let existing_partition = partition_router.get_partition(None, dest_int_address);
             if !existing_partition.is_zero() {
                 continue;
             }
 
-            if for_shard_id.contains_address(&dest_int_address) {
+            if for_shard_id.contains_address(dest_int_address) {
                 tracing::trace!(target: tracing_targets::COLLATOR,
                     "check address {} for partition 0 because it is in current shard",
                     dest_int_address,
@@ -579,7 +578,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                         "move address {} to partition 1 because it has {} messages",
                         dest_int_address, msgs_count,
                     );
-                    partition_router.insert_dst(&dest_int_address, LP_PARTITION_ID)?;
+                    partition_router.insert_dst(dest_int_address, LP_PARTITION_ID)?;
                     moved_from_par_0_accounts.insert(dest_int_address.get_address());
                 }
             } else {
@@ -590,7 +589,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                 // if we have account for another shard then take info from that shard
                 let remote_shard_diff_info = other_updated_top_shard_diffs_info
                     .iter()
-                    .find(|(shard_id, _)| shard_id.contains_address(&dest_int_address))
+                    .find(|(shard_id, _)| shard_id.contains_address(dest_int_address))
                     .map(|(_, diff)| diff.clone());
 
                 // try to get partition from remote shard top diff
@@ -609,7 +608,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
                             dest_int_address,
                         );
                         // getting partition from remote shard diff
-                        let remote_shard_partition = router.get_partition(None, &dest_int_address);
+                        let remote_shard_partition = router.get_partition(None, dest_int_address);
 
                         tracing::trace!(target: tracing_targets::COLLATOR,
                             "remote shard top diff partition for address {} is {}",
@@ -1570,16 +1569,17 @@ fn try_sync_processing_offsets<V: InternalMessageValue>(
 }
 
 fn log_cumulative_remaining_msgs_stats(stats: &CumulativeStatistics, msg: &str) {
-    for (par_id, par_stats) in stats.result() {
-        tracing::trace!(target: tracing_targets::COLLATOR,
-            partition_id = %par_id,
-            remaning_msgs_stats = ?DebugIter(par_stats.remaning_stats.statistics().iter().map(|item| {
-                let (addr, count) = item.pair();
-                (get_short_addr_string(addr), *count)
-            })),
-            "{}", msg,
-        );
-    }
+
+    // !!! for (par_id, par_stats) in stats.result() {
+    //     tracing::trace!(target: tracing_targets::COLLATOR,
+    //         partition_id = %par_id,
+    //         remaning_msgs_stats = ?DebugIter(par_stats.remaning_stats.iter().map(|item| {
+    //             let (addr, count) = item.pair();
+    //             (get_short_addr_string(addr), *count)
+    //         })),
+    //         "{}", msg,
+    //     );
+    // }
 }
 
 pub(crate) struct DebugDiffStatistics<'a>(pub &'a DiffStatistics);
