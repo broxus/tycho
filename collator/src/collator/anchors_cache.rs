@@ -163,7 +163,6 @@ impl AnchorsCache {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 enum UndoOp {
     Add {
         anchor_id: MempoolAnchorId,
@@ -177,14 +176,12 @@ enum UndoOp {
     },
 }
 
-#[allow(dead_code)]
 pub struct AnchorsCacheTransaction<'a> {
     cache: &'a mut AnchorsCache,
     undo_log: Vec<UndoOp>,
     committed: bool,
 }
 
-#[allow(dead_code)]
 impl<'a> AnchorsCacheTransaction<'a> {
     pub fn new(cache: &'a mut AnchorsCache) -> Self {
         Self {
@@ -235,11 +232,11 @@ impl<'a> AnchorsCacheTransaction<'a> {
         self.cache.pop_front()
     }
 
-    pub fn commit(mut self) {
+    pub fn commit(&mut self) {
         self.committed = true;
     }
 
-    fn rollback(&mut self) {
+    pub fn rollback(&mut self) {
         while let Some(op) = self.undo_log.pop() {
             match op {
                 UndoOp::Add {

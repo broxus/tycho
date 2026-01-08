@@ -7,6 +7,7 @@ use super::execute::ExecuteState;
 use super::execution_wrapper::ExecutorWrapper;
 use super::phase::{Phase, PhaseState};
 use crate::collator::CollationCancelReason;
+use crate::collator::anchors_cache::AnchorsCacheTransaction;
 use crate::collator::do_collate::phase::ActualState;
 use crate::collator::error::CollatorError;
 use crate::collator::execution_manager::MessagesExecutor;
@@ -23,7 +24,7 @@ use crate::types::processed_upto::build_all_shards_processed_to_by_partitions;
 pub struct PrepareState<'a> {
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     reader_state: &'a mut ReaderState,
-    anchors_cache: &'a mut AnchorsCache,
+    anchors_cache: &'a mut AnchorsCacheTransaction<'a>,
 }
 
 impl<'a> PhaseState for PrepareState<'a> {}
@@ -32,7 +33,7 @@ impl<'a> Phase<PrepareState<'a>> {
     pub fn new(
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         reader_state: &'a mut ReaderState,
-        anchors_cache: &'a mut AnchorsCache,
+        anchors_cache: &'a mut AnchorsCacheTransaction<'a>,
         state: Box<ActualState>,
     ) -> Self {
         Self {

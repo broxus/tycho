@@ -35,16 +35,16 @@ impl ReaderState {
                 });
             for (seqno, range_info) in &par.externals.ranges {
                 ext_reader_state
-                    .ranges
+                    .ranges_mut()
                     .entry(*seqno)
                     .and_modify(|r| {
-                        r.by_partitions.insert(*par_id, range_info.into());
+                        r.insert_partition(*par_id, range_info.into());
                     })
-                    .or_insert(ExternalsRangeReaderState {
-                        range: ExternalsReaderRange::from_range_info(range_info, processed_to),
-                        by_partitions: [(*par_id, range_info.into())].into(),
-                        fully_read: false,
-                    });
+                    // TODO transitions neccessary?
+                    .or_insert(ExternalsRangeReaderState::new(
+                        ExternalsReaderRange::from_range_info(range_info, processed_to),
+                        [(*par_id, range_info.into())].into(),
+                    ));
             }
         }
         Self {
@@ -72,7 +72,7 @@ impl ReaderState {
                         processed_to: ext_reader_state_by_partition.processed_to.into(),
                         ranges: self
                             .externals
-                            .ranges
+                            .ranges()
                             .iter()
                             .map(|(k, v)| {
                                 let ext_range_reader_state_by_partition =
@@ -98,9 +98,9 @@ impl ReaderState {
         }
 
         self.externals
-            .ranges
+            .ranges()
             .values()
-            .any(|r| r.by_partitions.values().any(|par| par.processed_offset > 0))
+            .any(|r| r.partitions().values().any(|par| par.processed_offset > 0))
     }
 
     pub fn has_messages_in_buffers(&self) -> bool {
@@ -115,8 +115,8 @@ impl ReaderState {
     }
 
     pub fn has_externals_in_buffers(&self) -> bool {
-        self.externals.ranges.values().any(|r| {
-            r.by_partitions
+        self.externals.ranges().values().any(|r| {
+            r.partitions()
                 .values()
                 .any(|par| par.buffer.msgs_count() > 0)
         })
