@@ -26,6 +26,7 @@ use super::types::{
     FinalizeMessagesReaderResult, PrevData, WorkingState,
 };
 use super::{CollatorStdImpl, ForceMasterCollation, ShardDescriptionExt};
+use crate::collator::anchors_cache::AnchorsCacheTransaction;
 use crate::collator::do_collate::finalize::FinalizeBlockContext;
 use crate::collator::do_collate::work_units::{DoCollateWu, WuEvent, WuEventData};
 use crate::collator::error::{CollationCancelReason, CollatorError};
@@ -202,19 +203,26 @@ impl CollatorStdImpl {
             let mq_adapter = self.mq_adapter.clone();
             let span = tracing::Span::current();
             move || {
+                let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut anchors_cache);
                 let _span = span.enter();
 
                 let result = Self::run(
                     config,
                     mq_adapter,
                     &mut reader_state,
-                    &mut anchors_cache,
+                    &mut anchor_cache_tx,
                     block_serializer_cache,
                     state,
                     collation_session,
                     wu_used_from_last_anchor,
                     usage_tree,
                 );
+
+                if result.is_ok() {
+                    anchor_cache_tx.commit();
+                }
+
+                drop(anchor_cache_tx);
 
                 CollationOutput {
                     reader_state,
@@ -375,7 +383,7 @@ impl CollatorStdImpl {
         collator_config: Arc<CollatorConfig>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         reader_state: &mut ReaderState,
-        anchors_cache: &mut AnchorsCache,
+        anchors_cache: &mut AnchorsCacheTransaction,
         block_serializer_cache: BlockSerializerCache,
         state: Box<ActualState>,
         collation_session: Arc<CollationSessionInfo>,
