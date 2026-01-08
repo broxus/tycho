@@ -1,20 +1,58 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use bumpalo::Bump;
 use tycho_consensus::prelude::{
     AnchorStageRole, ConsensusConfigExt, MempoolAdapterStore, MempoolConfigBuilder, MempoolDb,
     MempoolNodeConfig,
 };
+use tycho_network::PeerId;
 use tycho_storage::StorageContext;
-use tycho_types::models::{ConsensusConfig, GenesisInfo};
+use tycho_types::boc::Boc;
+use tycho_types::models::{ConsensusConfig, GenesisInfo, Message, MsgInfo};
 
 use crate::mempool::impls::common::parser::{Parser, ParserOutput};
-use crate::mempool::{MempoolAnchor, MempoolAnchorId};
+use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct DumpedAnchor {
+    pub id: MempoolAnchorId,
+    pub prev_id: Option<MempoolAnchorId>,
+    pub author: PeerId,
+    pub chain_time: u64,
+    pub externals: Vec<String>,
+}
+
+impl TryFrom<DumpedAnchor> for MempoolAnchor {
+    type Error = anyhow::Error;
+    fn try_from(value: DumpedAnchor) -> Result<Self> {
+        let mut externals: Vec<Arc<ExternalMessage>> = vec![];
+
+        for data in value.externals {
+            let cell = Boc::decode_base64(data)?;
+            let message: Message<'_> = cell.parse()?;
+
+            if let MsgInfo::ExtIn(info) = message.info {
+                externals.push(Arc::new(ExternalMessage { cell, info }));
+            } else {
+                return Err(anyhow::anyhow!("Can not parse message"));
+            }
+        }
+
+        Ok(MempoolAnchor {
+            id: value.id,
+            prev_id: value.prev_id,
+            author: value.author,
+            chain_time: value.chain_time,
+            externals,
+        })
+    }
+}
 
 pub struct DumpAnchors {
     store: MempoolAdapterStore,
 }
 
-#[allow(dead_code, reason = "not yet used")] // FIXME bind code and remove this
 impl DumpAnchors {
     pub fn new(storage_context: &StorageContext) -> Result<Self> {
         let mempool_db = MempoolDb::open(storage_context.clone())

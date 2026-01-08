@@ -11,12 +11,12 @@ use parking_lot::RwLock;
 use rand::Rng;
 use scopeguard::defer;
 use tycho_network::PeerId;
-use tycho_types::models::*;
+use tycho_types::models::{ConsensusConfig, GenesisInfo, *};
 use tycho_types::prelude::*;
 
 use crate::mempool::{
-    DebugStateUpdateContext, ExternalMessage, GetAnchorResult, MempoolAdapter, MempoolAnchor,
-    MempoolAnchorId, MempoolEventListener, StateUpdateContext,
+    DebugStateUpdateContext, DumpedAnchor, ExternalMessage, GetAnchorResult, MempoolAdapter,
+    MempoolAnchor, MempoolAnchorId, MempoolEventListener, StateUpdateContext,
 };
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
@@ -73,6 +73,20 @@ impl MempoolAdapterStubImpl {
         Ok(adapter)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_anchors_from_dump(
+        listener: Arc<dyn MempoolEventListener>,
+        now: Option<u64>,
+        dumped_anchors: Vec<DumpedAnchor>,
+    ) -> Result<Arc<Self>> {
+        Self::with_generator(listener.clone(), {
+            move |a| {
+                tokio::spawn(Self::anchors_generator(a, now, dumped_anchors));
+                Ok(())
+            }
+        })
+    }
+
     #[tracing::instrument(skip_all)]
     async fn stub_externals_generator(self: Arc<Self>, now: Option<u64>) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "started");
@@ -81,7 +95,8 @@ impl MempoolAdapterStubImpl {
         }
 
         let mut prev_anchor_id = 0;
-        for anchor_id in 1.. {
+        let start_anchor_id = prev_anchor_id + 1;
+        for anchor_id in start_anchor_id.. {
             if self.sleep_between_anchors.load(Ordering::Acquire) {
                 tokio::time::sleep(make_round_interval() * 4).await;
             } else {
@@ -96,6 +111,78 @@ impl MempoolAdapterStubImpl {
             }
 
             let anchor = Arc::new(anchor);
+
+            self.anchors_cache.write().insert(anchor_id, anchor.clone());
+
+            tracing::debug!(
+                target: tracing_targets::MEMPOOL_ADAPTER,
+                anchor_id = anchor.id,
+                chain_time = anchor.chain_time,
+                externals = anchor.externals.len(),
+                "anchor added to cache",
+            );
+
+            self.listener.on_new_anchor(anchor).await.unwrap();
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn anchors_generator(
+        self: Arc<Self>,
+        now: Option<u64>,
+        dumped_anchors: Vec<DumpedAnchor>,
+    ) {
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "started");
+        defer! {
+            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
+        }
+
+        let max_anchor_id = dumped_anchors
+            .iter()
+            .map(|a| a.id)
+            .max()
+            .unwrap_or_default();
+        // Preload dumped anchors into cache
+        {
+            let mut cache = self.anchors_cache.write();
+            for anchor in dumped_anchors {
+                tracing::debug!(
+                    target: tracing_targets::MEMPOOL_ADAPTER,
+                    anchor_id = anchor.id,
+                    chain_time = anchor.chain_time,
+                    externals = anchor.externals.len(),
+                    "anchor added to cache",
+                );
+
+                cache.insert(
+                    anchor.id,
+                    Arc::new(
+                        MempoolAnchor::try_from(anchor).expect("Can not parse anchor from dump"),
+                    ),
+                );
+            }
+        }
+
+        let mut prev_anchor_id = max_anchor_id;
+        let mut prev_chain_time = self
+            .anchors_cache
+            .read()
+            .get(&prev_anchor_id)
+            .map(|prev_anchor| prev_anchor.chain_time)
+            .or(now)
+            .unwrap_or_default();
+
+        for anchor_id in max_anchor_id + 1.. {
+            if self.sleep_between_anchors.load(Ordering::Acquire) {
+                tokio::time::sleep(make_round_interval() * 4).await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            let anchor = make_empty_anchor(anchor_id, prev_anchor_id, prev_chain_time + 1336);
+
+            prev_anchor_id = anchor_id;
+            prev_chain_time = anchor.chain_time;
 
             self.anchors_cache.write().insert(anchor_id, anchor.clone());
 
@@ -190,8 +277,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                     .anchors_cache
                     .read()
                     .last_key_value()
-                    .map(|(_, last_anchor)| last_anchor.id)
-                    .unwrap_or_default();
+                    .map_or(0, |(_, last_anchor)| last_anchor.id);
                 if last_anchor_id > anchor_id {
                     return Ok(GetAnchorResult::NotExist);
                 } else {
@@ -279,8 +365,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                     .anchors_cache
                     .read()
                     .last_key_value()
-                    .map(|(_, last_anchor)| last_anchor.id)
-                    .unwrap_or_default();
+                    .map_or(0, |(_, last_anchor)| last_anchor.id);
                 let delta = prev_anchor_id.saturating_sub(last_anchor_id);
                 if delta >= 20 {
                     tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,

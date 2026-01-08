@@ -1,45 +1,89 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use futures_util::future::BoxFuture;
+use async_trait::async_trait;
+use futures_util::future::{self, BoxFuture};
 use tycho_block_util::block::BlockIdRelation;
 use tycho_collator::collator::CollatorStdImplFactory;
-use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
-use tycho_collator::internal_queue::state::storage::QueueStateImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStubImpl;
-use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{CollatorSyncContext, StateNodeAdapter, StateNodeAdapterStdImpl};
-use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
-use tycho_collator::types::{CollatorConfig, supported_capabilities};
-use tycho_collator::validator::ValidatorStdImpl;
-use tycho_core::block_strider::{
-    BlockProvider, BlockStrider, EmptyBlockProvider, OptionalBlockStuff,
-    PersistentBlockStriderState, PrintSubscriber, StateSubscriber, StateSubscriberContext,
+use tycho_collator::test_utils::{LoadedInfoFromDump, load_info_from_dump, try_init_test_tracing};
+use tycho_collator::types::{CollatorConfig, McData, supported_capabilities};
+use tycho_collator::validator::{
+    AddSession, ValidationComplete, ValidationSessionId, ValidationStatus, Validator,
 };
+use tycho_core::block_strider::{
+    BlockProvider, BlockProviderExt, BlockStrider, OptionalBlockStuff, PersistentBlockStriderState,
+    ShardStateApplier, StateSubscriber, StateSubscriberContext,
+};
+use tycho_core::node::NodeKeys;
 use tycho_crypto::ed25519;
-use tycho_types::models::BlockId;
+use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 
 mod common;
 
 #[derive(Clone)]
-struct StrangeBlockProvider {
-    adapter: Arc<dyn StateNodeAdapter>,
-}
+struct ValidatorStub {}
 
-impl BlockProvider for StrangeBlockProvider {
-    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type CleanupFut<'a> = futures_util::future::Ready<Result<()>>;
-
-    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        tracing::info!("Get next block: {:?}", prev_block_id);
-        self.adapter.wait_for_block(prev_block_id)
+#[async_trait]
+impl Validator for ValidatorStub {
+    /// Adds a new session for the specified shard.
+    fn add_session(&self, _info: AddSession<'_>) -> Result<()> {
+        Ok(())
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
-        tracing::info!("Get block: {:?}", block_id);
-        self.adapter.wait_for_block(&block_id.block_id)
+    /// Collects signatures for the specified block.
+    async fn validate(
+        &self,
+        _session_id: ValidationSessionId,
+        block_id: &BlockId,
+    ) -> Result<ValidationStatus> {
+        tracing::info!("Got block on validation {}", block_id);
+
+        Ok(ValidationStatus::Complete(ValidationComplete {
+            signatures: Default::default(),
+            total_weight: 0,
+        }))
+    }
+
+    /// Cancels validation before the specified block.
+    ///
+    /// If `session_id` is provided, it will be used to directly cancel the specific session,
+    /// avoiding unnecessary lookups and potential ambiguity.
+    fn cancel_validation(
+        &self,
+        _before: &BlockIdShort,
+        _session_id: Option<ValidationSessionId>,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct CollatorStateSubscriber {
+    adapter: Arc<dyn StateNodeAdapter>,
+    engine_stop_tx: tokio::sync::mpsc::Sender<()>,
+    block_id_to_handle: BlockIdShort,
+}
+
+struct SetSyncContext {
+    adapter: Arc<dyn StateNodeAdapter>,
+    ctx: CollatorSyncContext,
+}
+
+impl BlockProvider for SetSyncContext {
+    type GetNextBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
+    type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
+    type CleanupFut<'a> = futures_util::future::Ready<Result<()>>;
+
+    fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        self.adapter.set_sync_context(self.ctx);
+        futures_util::future::ready(None)
+    }
+
+    fn get_block<'a>(&'a self, _: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
+        futures_util::future::ready(None)
     }
 
     fn cleanup_until(&self, _mc_seqno: u32) -> Self::CleanupFut<'_> {
@@ -47,43 +91,87 @@ impl BlockProvider for StrangeBlockProvider {
     }
 }
 
-impl StateSubscriber for StrangeBlockProvider {
+impl CollatorStateSubscriber {
+    fn new_sync_point(&self, ctx: CollatorSyncContext) -> SetSyncContext {
+        SetSyncContext {
+            adapter: self.adapter.clone(),
+            ctx,
+        }
+    }
+}
+
+impl StateSubscriber for CollatorStateSubscriber {
     type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        self.adapter.handle_state(&cx.state)
+        Box::pin(async move {
+            if cx.block.id().as_short_id() == self.block_id_to_handle {
+                let _ = self.engine_stop_tx.send(()).await;
+            }
+
+            self.adapter.handle_state(&cx.state).await
+        })
+    }
+}
+
+struct CollatorBlockProvider {
+    adapter: Arc<dyn StateNodeAdapter>,
+}
+
+impl BlockProvider for CollatorBlockProvider {
+    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type CleanupFut<'a> = future::Ready<Result<()>>;
+
+    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        self.adapter.wait_for_block_next(prev_block_id)
+    }
+
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
+        self.adapter.wait_for_block(&block_id_relation.block_id)
+    }
+
+    fn cleanup_until(&self, _mc_seqno: u32) -> Self::CleanupFut<'_> {
+        futures_util::future::ready(Ok(()))
     }
 }
 
 /// run: `RUST_BACKTRACE=1 cargo test -p tycho-collator --features test --test collation_tests -- --nocapture`
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore] // TEMP: Ignoring until graceful shutdown is implemented properly
-async fn test_collation_process_on_stubs() {
+async fn test_collation_process_on_dump() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
-    tycho_util::test::init_logger("test_collation_process_on_stubs", "debug");
+    tycho_util::test::init_logger("test_collation_process_on_dump", "debug");
 
-    let (storage, _tmp_dir) = prepare_test_storage().await.unwrap();
+    let dump_path = Path::new("../test/data/dump/"); // TODO: insert real dump
+    let block_id_to_handle = BlockIdShort {
+        // TODO: Fill with correct block seqno
+        seqno: 58,
+        shard: ShardIdent::MASTERCHAIN,
+    };
+    let (ctx, _temp_dir) = tycho_storage::StorageContext::new_temp().await.unwrap();
 
-    let zerostate_id = BlockId::default();
+    let LoadedInfoFromDump {
+        storage,
+        mq_adapter,
+        mc_block_id,
+        dumped_anchors,
+    } = load_info_from_dump(dump_path, ctx).await.unwrap();
 
-    let block_strider = BlockStrider::builder()
-        .with_provider(EmptyBlockProvider)
-        .with_state(PersistentBlockStriderState::new(
-            zerostate_id,
-            storage.clone(),
-        ))
-        .with_state_subscriber(storage.clone(), PrintSubscriber)
-        .build();
+    let zerostate_id = mc_block_id;
 
-    block_strider.run().await.unwrap();
+    let mc_state = storage
+        .shard_state_storage()
+        .load_state(mc_block_id.seqno, &mc_block_id)
+        .await
+        .unwrap();
 
-    let node_1_secret = rand::random::<ed25519::SecretKey>();
-    let node_1_keypair = Arc::new(ed25519::KeyPair::from(&node_1_secret));
+    let node_keys_path = dump_path.join("keys.json");
+    let node_keys = NodeKeys::from_file(node_keys_path).unwrap_or(NodeKeys::generate());
 
-    let validator_network = common::make_validator_network(&node_1_secret, &zerostate_id);
+    let keypair = Arc::new(ed25519::KeyPair::from(&node_keys.as_secret()));
 
     let config = CollatorConfig {
-        supported_block_version: 50,
+        supported_block_version: 100,
         supported_capabilities: supported_capabilities(),
         min_mc_block_delta_from_bc_to_sync: 3,
         check_value_flow: false,
@@ -96,63 +184,75 @@ async fn test_collation_process_on_stubs() {
 
     tracing::info!("Trying to start CollationManager");
 
-    let queue_state_factory = QueueStateImplFactory::new(storage.context().clone()).unwrap();
+    let mc_data = McData::load_from_state(&mc_state, Default::default()).unwrap();
 
-    let queue_factory = QueueFactoryStdImpl {
-        state: queue_state_factory,
-        config: Default::default(),
-    };
-    let queue = queue_factory.create().unwrap();
-    let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
-
-    let now = tycho_util::time::now_millis();
+    let (engine_stop_tx, mut engine_stop_rx) = tokio::sync::mpsc::channel(1);
+    let validator = ValidatorStub {};
 
     let manager = CollationManager::start(
-        node_1_keypair.clone(),
+        keypair,
         config,
-        Arc::new(message_queue_adapter),
+        mq_adapter,
         |listener| {
             StateNodeAdapterStdImpl::new(listener, storage.clone(), CollatorSyncContext::Historical)
         },
-        |listener| MempoolAdapterStubImpl::with_stub_externals(listener, Some(now)),
-        ValidatorStdImpl::new(
-            validator_network,
-            node_1_keypair.clone(),
-            Default::default(),
-        ),
+        |listener| {
+            MempoolAdapterStubImpl::with_anchors_from_dump(
+                listener,
+                Some(mc_data.gen_chain_time),
+                dumped_anchors,
+            )
+            .unwrap()
+        },
+        validator,
         CollatorStdImplFactory {
             wu_tuner_event_sender: None,
         },
         None,
     );
 
-    let state_node_adapter = StrangeBlockProvider {
+    let collator = CollatorStateSubscriber {
+        adapter: manager.state_node_adapter().clone(),
+        engine_stop_tx,
+        block_id_to_handle,
+    };
+    collator.adapter.handle_state(&mc_state).await.unwrap();
+
+    // NOTE: Make sure to drop the state after handling it
+    drop(mc_state);
+
+    let collator_block_provider = CollatorBlockProvider {
         adapter: manager.state_node_adapter().clone(),
     };
 
     let block_strider = BlockStrider::builder()
-        .with_provider(state_node_adapter.clone())
+        .with_provider(
+            collator
+                .new_sync_point(CollatorSyncContext::Historical)
+                .chain(collator.new_sync_point(CollatorSyncContext::Recent))
+                .chain(collator_block_provider),
+        )
         .with_state(PersistentBlockStriderState::new(
             zerostate_id,
             storage.clone(),
         ))
-        .with_state_subscriber(storage.clone(), state_node_adapter)
+        .with_block_subscriber(ShardStateApplier::new(storage.clone(), collator))
         .build();
 
     let strider_handle = block_strider.run();
 
     tokio::select! {
         _ = strider_handle => {
-            println!();
-            println!("block_strider finished");
+            tracing::info!("block_strider finished");
         },
         _ = tokio::signal::ctrl_c() => {
-            println!();
-            println!("Ctrl-C received, shutting down the test");
+            tracing::info!("Ctrl-C received, shutting down the test");
         },
-        _ = tokio::time::sleep(tokio::time::Duration::from_secs(20)) => {
-            println!();
-            println!("Test timeout elapsed");
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+            tracing::info!("Test timeout elapsed");
+        }
+        _ = engine_stop_rx.recv() => {
+            tracing::info!("Stopped, found block: {}", block_id_to_handle);
         }
     }
 }
