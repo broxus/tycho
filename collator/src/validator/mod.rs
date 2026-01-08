@@ -53,9 +53,9 @@ pub struct ValidatorNetworkContext {
 }
 
 /// (seqno, subset `short_hash`)
-pub(super) type ValidationSessionId = (u32, u32);
+pub type ValidationSessionId = (u32, u32);
 
-pub(super) trait CompositeValidationSessionId {
+pub trait CompositeValidationSessionId {
     fn seqno(&self) -> u32;
 }
 
