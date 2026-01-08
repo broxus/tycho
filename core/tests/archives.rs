@@ -252,7 +252,7 @@ async fn archives() -> Result<()> {
     let zerostate_data = utils::read_file(zerostate_file)?;
     let zerostate = utils::parse_zerostate(&zerostate_data)
         .with_context(|| format!("Failed to parse zerostate {}", zerostate_file))?;
-    let zerostate_id = *zerostate.block_id();
+    let zerostate_block_id = *zerostate.block_id();
     let storage = prepare_storage(config.clone(), zerostate.clone()).await?;
 
     // Init state applier
@@ -311,7 +311,7 @@ async fn archives() -> Result<()> {
     };
 
     // Strider state
-    let strider_state = PersistentBlockStriderState::new(zerostate_id, storage.clone());
+    let strider_state = PersistentBlockStriderState::new(zerostate_block_id, storage.clone());
 
     // Init block strider
     let block_strider = BlockStrider::builder()
@@ -406,7 +406,7 @@ async fn test_pagination(storage: CoreStorage) -> Result<Vec<BlockId>> {
                 .await?;
 
             let encoded_data = Boc::encode(block_data.root_cell());
-            let expected_file_hash = Boc::file_hash(&encoded_data);
+            let expected_file_hash = Boc::file_hash_blake(&encoded_data);
 
             assert_eq!(
                 block.file_hash, expected_file_hash,
@@ -699,7 +699,7 @@ async fn heavy_archives() -> Result<()> {
         .with_context(|| format!("Failed to read {}", zerostate_path.display()))?;
     let zerostate = utils::parse_zerostate(&zerostate_data)
         .with_context(|| format!("Failed to parse zerostate {}", zerostate_path.display()))?;
-    let zerostate_id = *zerostate.block_id();
+    let zerostate_block_id = *zerostate.block_id();
     let storage = prepare_storage(config, zerostate).await?;
 
     // Init state applier
@@ -762,7 +762,7 @@ async fn heavy_archives() -> Result<()> {
     };
 
     // Strider state
-    let strider_state = PersistentBlockStriderState::new(zerostate_id, storage.clone());
+    let strider_state = PersistentBlockStriderState::new(zerostate_block_id, storage.clone());
 
     // Init block strider
     let block_strider = BlockStrider::builder()

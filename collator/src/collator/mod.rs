@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
-use tycho_core::global_config::MempoolGlobalConfig;
+use tycho_core::global_config::{MempoolGlobalConfig, ZerostateId};
 use tycho_network::PeerId;
 use tycho_types::cell::{Cell, HashBytes};
 use tycho_types::merkle::MerkleUpdate;
@@ -88,6 +88,7 @@ pub struct CollatorContext {
 
     /// For graceful collation cancellation
     pub cancel_collation: Arc<Notify>,
+    pub zerostate_id: ZerostateId,
 }
 
 #[async_trait]
@@ -179,6 +180,7 @@ impl CollatorFactory for CollatorStdImplFactory {
             cx.config,
             cx.collation_session,
             cx.listener,
+            cx.zerostate_id,
             cx.shard_id,
             cx.prev_blocks_ids,
             cx.mc_data,
@@ -272,6 +274,7 @@ pub struct CollatorStdImpl {
 
     /// Events sender for Work Units tuner service
     wu_tuner_event_sender: Option<tokio::sync::mpsc::Sender<work_units::WuEvent>>,
+    zerostate_id: ZerostateId,
 }
 
 impl CollatorStdImpl {
@@ -283,6 +286,7 @@ impl CollatorStdImpl {
         config: Arc<CollatorConfig>,
         collation_session: Arc<CollationSessionInfo>,
         listener: Arc<dyn CollatorEventListener>,
+        zerostate_id: ZerostateId,
         shard_id: ShardIdent,
         prev_blocks_ids: Vec<BlockId>,
         mc_data: Arc<McData>,
@@ -332,6 +336,7 @@ impl CollatorStdImpl {
             mempool_config_override,
             cancel_collation,
             wu_tuner_event_sender,
+            zerostate_id,
         };
 
         // finalize new state store tasks in background

@@ -208,13 +208,14 @@ impl StoreStateContext {
         let root_hash = ctx.entries_buffer.repr_hash();
         ctx.final_check(root_hash)?;
 
-        self.cell_storage.apply_temp_cell(&HashBytes(*root_hash))?;
+        self.cell_storage
+            .apply_temp_cell(HashBytes::wrap(root_hash))?;
         ctx.clear_temp_cells(&self.cells_db)?;
 
         let shard_state_key = block_id.to_vec();
         self.cells_db
             .shard_states
-            .insert(&shard_state_key, root_hash)?;
+            .insert(&shard_state_key, root_hash.as_slice())?;
 
         pg.complete();
 
@@ -620,7 +621,7 @@ mod test {
             let (_, value) = state?;
 
             // check that state actually exists
-            let cell = cell_storage.load_cell(&HashBytes::from_slice(value.as_ref()), 0)?;
+            let cell = cell_storage.load_cell(&HashBytes::from_slice(value[..32].as_ref()), 0)?;
 
             let (_, batch) = cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
 

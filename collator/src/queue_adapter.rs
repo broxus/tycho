@@ -20,7 +20,7 @@ use crate::internal_queue::types::stats::{
 use crate::storage::models::DiffInfo;
 use crate::storage::snapshot::AccountStatistics;
 use crate::tracing_targets;
-use crate::types::{DebugDisplayOpt, DebugIter, DisplayIter, DisplayTupleRef};
+use crate::types::{DebugDisplayOpt, DebugIter, TopBlockId};
 
 pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
     queue: QueueImpl<QueueStateStdImpl, V>,
@@ -59,7 +59,7 @@ where
     /// Commit previously applied diffs, updating commit pointers (waiting for the operation to complete)
     fn commit_diff(
         &self,
-        mc_top_blocks: Vec<(BlockId, bool)>,
+        mc_top_blocks: Vec<TopBlockId>,
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
 
@@ -203,7 +203,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     #[instrument(skip_all, fields(?partitions))]
     fn commit_diff(
         &self,
-        mc_top_blocks: Vec<(BlockId, bool)>,
+        mc_top_blocks: Vec<TopBlockId>,
         // TODO: get partitions from queue state
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {
@@ -213,7 +213,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
 
         let elapsed = start_time.elapsed();
         tracing::info!(target: tracing_targets::MQ_ADAPTER,
-            mc_top_blocks = %DisplayIter(mc_top_blocks.iter().map(DisplayTupleRef)),
+            mc_top_blocks = ?mc_top_blocks,
             elapsed = %humantime::format_duration(elapsed),
             "commit_diff completed"
         );

@@ -28,7 +28,7 @@ pub struct BlockHandle {
 }
 
 impl BlockHandle {
-    pub(crate) fn new(id: &BlockId, meta: BlockMeta, cache: Arc<BlockHandleCache>) -> Self {
+    pub fn new(id: &BlockId, meta: BlockMeta, cache: Arc<BlockHandleCache>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 id: *id,
@@ -74,6 +74,10 @@ impl BlockHandle {
 
     pub fn is_persistent(&self) -> bool {
         self.inner.meta.flags().contains(BlockFlags::IS_PERSISTENT) || self.inner.id.seqno == 0
+    }
+
+    pub fn is_zerostate(&self) -> bool {
+        self.inner.meta.flags().contains(BlockFlags::IS_ZEROSTATE) || self.inner.id.seqno == 0
     }
 
     pub fn has_data(&self) -> bool {

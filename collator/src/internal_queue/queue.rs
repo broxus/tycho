@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_core::global_config::ZerostateId;
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_util::metrics::HistogramGuard;
@@ -23,6 +24,7 @@ use crate::internal_queue::types::stats::{
     AccountStatistics, DiffStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::storage::models::DiffInfo;
+use crate::types::TopBlockId;
 use crate::{internal_queue, tracing_targets};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,6 +61,7 @@ where
 }
 
 pub struct QueueFactoryStdImpl {
+    pub zerostate_id: ZerostateId,
     pub state: QueueStateImplFactory,
     pub config: QueueConfig,
 }
@@ -90,7 +93,7 @@ where
     /// Commit diffs to the state and update GC
     fn commit_diff(
         &self,
-        mc_top_blocks: &[(BlockId, bool)],
+        mc_top_blocks: &[TopBlockId],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()>;
 
@@ -144,6 +147,7 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
         let gc = GcManager::start::<V>(state.clone(), self.config.gc_interval);
         Ok(QueueImpl {
             state,
+            zerostate_id: self.zerostate_id,
             gc,
             global_lock: RwLock::new(()),
             shard_locks: FastDashMap::default(),
@@ -158,6 +162,7 @@ where
     V: InternalMessageValue,
 {
     state: Arc<P>,
+    zerostate_id: ZerostateId,
     gc: GcManager,
     global_lock: RwLock<()>,
     shard_locks: FastDashMap<ShardIdent, Arc<Mutex<()>>>,
@@ -276,7 +281,7 @@ where
 
     fn commit_diff(
         &self,
-        mc_top_blocks: &[(BlockId, bool)],
+        mc_top_blocks: &[TopBlockId],
         partitions: &FastHashSet<QueuePartitionIdx>,
     ) -> Result<()> {
         // Take global lock
@@ -284,8 +289,7 @@ where
 
         let mc_block_id = mc_top_blocks
             .iter()
-            .find(|(block_id, _)| block_id.is_masterchain())
-            .map(|(block_id, _)| block_id)
+            .find_map(|item| item.block_id.is_masterchain().then_some(&item.block_id))
             .ok_or_else(|| anyhow!("Masterchain block not found in commit_diff"))?;
 
         // check current commit pointer. If it is greater than committing diff then skip
@@ -306,7 +310,9 @@ where
 
         let mut commit_pointers = FastHashMap::default();
 
-        for (block_id, top_shard_block_changed) in mc_top_blocks {
+        for item in mc_top_blocks {
+            let block_id = &item.block_id;
+
             // Check if the diff is already applied
             let diff = self
                 .state
@@ -314,8 +320,13 @@ where
 
             let diff = match diff {
                 // If top shard block changed and diff not found, then bail
-                None if *top_shard_block_changed && mc_block_id.seqno != 0 => {
-                    bail!("Diff not found for block_id: {}", block_id)
+                None if item.updated && item.ref_by_mc_seqno > self.zerostate_id.seqno => {
+                    bail!(
+                        "Diff not found for block_id: {} ref {} zerostate {}",
+                        block_id,
+                        item.ref_by_mc_seqno,
+                        self.zerostate_id.seqno
+                    )
                 }
                 // If top shard block not changed and diff not found, then continue
                 None => continue,

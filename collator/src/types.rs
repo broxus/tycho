@@ -434,6 +434,13 @@ pub struct TopShardBlockInfo {
 pub type ProcessedTo = BTreeMap<ShardIdent, QueueKey>;
 pub type ProcessedToByPartitions = FastHashMap<QueuePartitionIdx, ProcessedTo>;
 
+#[derive(Debug, Clone)]
+pub struct TopBlockId {
+    pub ref_by_mc_seqno: u32,
+    pub block_id: BlockId,
+    pub updated: bool,
+}
+
 #[derive(Debug)]
 pub struct ShortAddr {
     workchain: i32,
@@ -587,20 +594,6 @@ where
         f.debug_list()
             .entries(self.0.clone().into_iter().map(DisplayAsShortId))
             .finish()
-    }
-}
-
-pub(super) struct DisplayTupleRef<'a, T1, T2>(pub &'a (T1, T2));
-impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Debug for DisplayTupleRef<'_, T1, T2> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display
-    for DisplayTupleRef<'_, T1, T2>
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({}, {})", self.0.0, self.0.1)
     }
 }
 

@@ -132,6 +132,7 @@ bitflags::bitflags! {
         const IS_PERSISTENT = 1 << 12;
 
         const IS_REMOVED = 1 << 15;
+        const IS_ZEROSTATE = 1 << 16;
 
         // Composite flags
         const HAS_ALL_BLOCK_PARTS =

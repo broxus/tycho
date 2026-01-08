@@ -29,8 +29,10 @@ impl GlobalConfig {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZerostateId {
+    #[serde(default)]
+    pub seqno: u32,
     pub root_hash: HashBytes,
     pub file_hash: HashBytes,
 }
@@ -39,7 +41,7 @@ impl ZerostateId {
     pub fn as_block_id(&self) -> BlockId {
         BlockId {
             shard: ShardIdent::MASTERCHAIN,
-            seqno: 0,
+            seqno: self.seqno,
             root_hash: self.root_hash,
             file_hash: self.file_hash,
         }

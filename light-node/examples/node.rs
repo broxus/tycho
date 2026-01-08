@@ -36,6 +36,11 @@ async fn main() -> anyhow::Result<()> {
 
     let mut node = args.node.create(config.clone()).await?;
 
+    let init_block_id = node
+        .init(ColdBootType::LatestPersistent, import_zerostate, false)
+        .await?;
+    node.update_validator_set(&init_block_id).await?;
+
     let archive_block_provider = ArchiveBlockProvider::new(
         node.blockchain_rpc_client().clone(),
         node.storage().clone(),
@@ -50,11 +55,6 @@ async fn main() -> anyhow::Result<()> {
         config.blockchain_block_provider.clone(),
     )
     .with_fallback(archive_block_provider.clone());
-
-    let init_block_id = node
-        .init(ColdBootType::LatestPersistent, import_zerostate, false)
-        .await?;
-    node.update_validator_set(&init_block_id).await?;
 
     // will only save blocks and wont apply them to state
     // it's faster than StateApplier and ok for testing purposes when we don't need state

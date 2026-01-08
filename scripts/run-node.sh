@@ -48,8 +48,8 @@ tycho_bin=$(/usr/bin/env bash "${script_dir}/build-node.sh")
 $tycho_bin node run \
     --keys "${base_dir}/keys${N}.json" \
     --config "${base_dir}/config${N}.json" \
-    --global-config "${base_dir}/global-config.json" \
     --import-zerostate "${base_dir}/zerostate.boc" \
+    --global-config "${base_dir}/global-config.json" \
     --logger-config "${root_dir}/logger.json" \
     --control-socket "${base_dir}/control${N}.sock" \
     --wu-tuner-config "${base_dir}/wu-tuner-config${N}.json" \

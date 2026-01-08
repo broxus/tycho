@@ -58,6 +58,7 @@ This document contains the help content for the `tycho` command-line program.
 * [`tycho tool bc gen-proposal set-config-code`↴](#tycho-tool-bc-gen-proposal-set-config-code)
 * [`tycho tool bc gen-proposal-vote`↴](#tycho-tool-bc-gen-proposal-vote)
 * [`tycho tool check-cells-db`↴](#tycho-tool-check-cells-db)
+* [`tycho tool hardfork`↴](#tycho-tool-hardfork)
 * [`tycho elect`↴](#tycho-elect)
 * [`tycho elect run`↴](#tycho-elect-run)
 * [`tycho elect once`↴](#tycho-elect-once)
@@ -606,6 +607,7 @@ Work with blockchain stuff
 * `gen-account` — Generate an account state
 * `bc` — Blockchain stuff
 * `check-cells-db` — Check that the cells database is consistent
+* `hardfork` — Saves masterchain and shardchain states to files to run network from
 
 
 
@@ -1000,6 +1002,25 @@ Check that the cells database is consistent
 * `--accounts-split-depth <ACCOUNTS_SPLIT_DEPTH>` — Base workchain accounts split depth
 
   Default value: `4`
+
+
+
+## `tycho tool hardfork`
+
+Saves masterchain and shardchain states to files to run network from
+
+**Usage:** `tycho tool hardfork [OPTIONS] --output <OUTPUT> <DB> <MC_SEQNO>`
+
+###### **Arguments:**
+
+* `<DB>` — Path to the node's database directory
+* `<MC_SEQNO>` — Seqno of the masterchain block for which to dump the states
+
+###### **Options:**
+
+* `--output <OUTPUT>` — Path to the directory where the dump files will be saved
+* `--global-id <GLOBAL_ID>` — Override global id
+* `--time <TIME>` — Override time (in milliseconds)
 
 
 

@@ -8,6 +8,7 @@ use tokio::sync::{broadcast, watch};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{
     BlockHandle, CoreStorage, MaybeExistingHandle, NewBlockMeta, StoreStateHint,
 };
@@ -50,7 +51,11 @@ pub trait StateNodeEventListener: Send + Sync {
     /// When our collated block was accepted and applied
     async fn on_block_accepted(&self, state: &ShardStateStuff) -> Result<()>;
     /// When new block was received and applied from blockchain
-    async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()>;
+    async fn on_block_accepted_external(
+        &self,
+        mc_block_id: &BlockId,
+        state: &ShardStateStuff,
+    ) -> Result<()>;
 }
 
 #[async_trait]
@@ -86,12 +91,13 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// Waits for the specified block by `prev_id` to be received and returns it
     async fn wait_for_block_next(&self, prev_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Handle state after block was applied
-    async fn handle_state(&self, state: &ShardStateStuff) -> Result<()>;
+    async fn handle_state(&self, mc_block_id: &BlockId, state: &ShardStateStuff) -> Result<()>;
     /// Load queue diff
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
     /// Handle sync context update
     fn set_sync_context(&self, sync_context: CollatorSyncContext);
     fn load_init_block_id(&self) -> Option<BlockId>;
+    fn zerostate_id(&self) -> &ZerostateId;
 }
 
 pub struct StateNodeAdapterStdImpl {
@@ -103,6 +109,7 @@ pub struct StateNodeAdapterStdImpl {
     sync_context_tx: watch::Sender<CollatorSyncContext>,
 
     delayed_state_notifier: DelayedStateNotifier,
+    zerostate_id: ZerostateId,
 }
 
 impl StateNodeAdapterStdImpl {
@@ -110,6 +117,7 @@ impl StateNodeAdapterStdImpl {
         listener: Arc<dyn StateNodeEventListener>,
         storage: CoreStorage,
         initial_sync_context: CollatorSyncContext,
+        zerostate_id: ZerostateId,
     ) -> Self {
         let (sync_context_tx, mut sync_context_rx) = watch::channel(initial_sync_context);
         let (broadcaster, _) = broadcast::channel(10000);
@@ -120,6 +128,7 @@ impl StateNodeAdapterStdImpl {
             broadcaster,
             sync_context_tx,
             delayed_state_notifier: DelayedStateNotifier::default(),
+            zerostate_id,
         };
 
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Start watching for sync context updates");
@@ -167,6 +176,9 @@ impl StateNodeAdapterStdImpl {
 
 #[async_trait]
 impl StateNodeAdapter for StateNodeAdapterStdImpl {
+    fn zerostate_id(&self) -> &ZerostateId {
+        &self.zerostate_id
+    }
     fn load_last_applied_mc_block_id(&self) -> Result<BlockId> {
         let las_applied_mc_block_id = self
             .storage
@@ -195,7 +207,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             .storage
             .shard_state_storage()
             .load_state(ref_by_mc_seqno, block_id)
-            .await?;
+            .await
+            .context("failed to load state for node state adapter")?;
 
         Ok(state)
     }
@@ -292,13 +305,14 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         self.wait_for_block_ext(block_id).await
     }
 
-    async fn handle_state(&self, state: &ShardStateStuff) -> Result<()> {
+    async fn handle_state(&self, mc_block_id: &BlockId, state: &ShardStateStuff) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_handle_state_time");
 
         let sync_context = *self.sync_context_tx.borrow();
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "handle_state: block {}", state.block_id());
         let block_id = *state.block_id();
+        debug_assert!(!block_id.is_masterchain() || &block_id == mc_block_id);
 
         let mut to_split = Vec::new();
 
@@ -331,6 +345,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             self.delayed_state_notifier
                 .send_or_delay(
                     self.listener.clone(),
+                    mc_block_id,
                     state.clone(),
                     !has_block,
                     sync_context,
@@ -499,6 +514,7 @@ impl StateNodeAdapterStdImpl {
 
 #[derive(Clone)]
 struct DelayedStateContext {
+    pub mc_block_id: BlockId,
     pub state: ShardStateStuff,
     pub is_external: bool,
     pub sync_context: CollatorSyncContext,
@@ -534,6 +550,7 @@ impl DelayedStateNotifier {
     pub async fn send_or_delay<F>(
         &self,
         listener: Arc<dyn StateNodeEventListener>,
+        mc_block_id: &BlockId,
         state: ShardStateStuff,
         is_external: bool,
         sync_context: CollatorSyncContext,
@@ -543,6 +560,7 @@ impl DelayedStateNotifier {
         F: Fn(CollatorSyncContext) -> bool,
     {
         let state_cx = DelayedStateContext {
+            mc_block_id: *mc_block_id,
             state,
             is_external,
             sync_context,
@@ -569,7 +587,10 @@ impl DelayedStateNotifier {
         state_cx: Option<DelayedStateContext>,
     ) -> Result<()> {
         let Some(DelayedStateContext {
-            state, is_external, ..
+            mc_block_id,
+            state,
+            is_external,
+            ..
         }) = state_cx
         else {
             return Ok(());
@@ -577,7 +598,9 @@ impl DelayedStateNotifier {
 
         if is_external {
             tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "handle_state: handled external: {}", state.block_id());
-            listener.on_block_accepted_external(&state).await
+            listener
+                .on_block_accepted_external(&mc_block_id, &state)
+                .await
         } else {
             tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "handle_state: handled own: {}", state.block_id());
             listener.on_block_accepted(&state).await
@@ -597,7 +620,7 @@ fn prepare_block_proof(
 ) -> Result<PreparedProof> {
     let _histogram = HistogramGuard::begin("tycho_collator_state_adapter_prepare_block_proof_time");
 
-    let usage_tree = UsageTree::new(UsageTreeMode::OnLoad).with_subtrees();
+    let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
     let tracked_cell = usage_tree.track(block_stuff.root_cell());
     let block = tracked_cell.parse::<Block>()?;
     block.value_flow.inner().as_ref().touch_recursive();
