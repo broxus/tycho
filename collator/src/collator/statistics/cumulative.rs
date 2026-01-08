@@ -120,8 +120,6 @@ impl CumulativeStatistics {
             ranges
         );
 
-        // self.load_internal(mq_adapter, partitions, ranges)
-
         for range in ranges {
             let stats_by_partitions = mq_adapter
                 .load_separated_diff_statistics(partitions, &range)
@@ -468,7 +466,10 @@ mod tests {
     use crate::types::ProcessedTo;
 
     fn addr(workchain: i8, id: u8) -> IntAddr {
-        IntAddr::Std(tycho_types::models::StdAddr::new(workchain, [id; 32].into()))
+        IntAddr::Std(tycho_types::models::StdAddr::new(
+            workchain,
+            [id; 32].into(),
+        ))
     }
 
     fn diff_statistics(
@@ -516,22 +517,16 @@ mod tests {
         let partition1 = QueuePartitionIdx(1);
 
         let by_partitions = processed_to_by_partitions(vec![
-            (
-                partition0,
-                vec![
-                    (ShardIdent::MASTERCHAIN, QueueKey::min_for_lt(5)),
-                    (current_shard, QueueKey::min_for_lt(11)),
-                    (other_shard, QueueKey::min_for_lt(21)),
-                ],
-            ),
-            (
-                partition1,
-                vec![
-                    (ShardIdent::MASTERCHAIN, QueueKey::min_for_lt(7)),
-                    (current_shard, QueueKey::min_for_lt(9)),
-                    (other_shard, QueueKey::min_for_lt(25)),
-                ],
-            ),
+            (partition0, vec![
+                (ShardIdent::MASTERCHAIN, QueueKey::min_for_lt(5)),
+                (current_shard, QueueKey::min_for_lt(11)),
+                (other_shard, QueueKey::min_for_lt(21)),
+            ]),
+            (partition1, vec![
+                (ShardIdent::MASTERCHAIN, QueueKey::min_for_lt(7)),
+                (current_shard, QueueKey::min_for_lt(9)),
+                (other_shard, QueueKey::min_for_lt(25)),
+            ]),
         ]);
 
         let mut all_shards = FastHashMap::default();
@@ -583,18 +578,10 @@ mod tests {
         let addr_b = addr(1, 2);
         let addr_c = addr(0, 3);
 
-        let diff_stats = diff_statistics(
-            diff_shard,
-            1,
-            2,
-            vec![
-                (
-                    partition_a,
-                    vec![(addr_a.clone(), 2), (addr_b.clone(), 3)],
-                ),
-                (partition_b, vec![(addr_c.clone(), 4)]),
-            ],
-        );
+        let diff_stats = diff_statistics(diff_shard, 1, 2, vec![
+            (partition_a, vec![(addr_a.clone(), 2), (addr_b.clone(), 3)]),
+            (partition_b, vec![(addr_c.clone(), 4)]),
+        ]);
 
         let mut stats = CumulativeStatistics::new(for_shard, FastHashMap::default());
         stats.begin_transaction();
@@ -624,15 +611,10 @@ mod tests {
         let addr_dst = addr(0, 1);
         let addr_keep = addr(1, 2);
 
-        let diff_stats = diff_statistics(
-            diff_shard,
-            9,
-            10,
-            vec![(
-                partition,
-                vec![(addr_dst.clone(), 5), (addr_keep.clone(), 7)],
-            )],
-        );
+        let diff_stats = diff_statistics(diff_shard, 9, 10, vec![(partition, vec![
+            (addr_dst.clone(), 5),
+            (addr_keep.clone(), 7),
+        ])]);
 
         let mut stats = CumulativeStatistics::new(for_shard, FastHashMap::default());
         stats.begin_transaction();
@@ -649,16 +631,28 @@ mod tests {
         stats.handle_processed_to_update(dst_shard, processed_to);
 
         let partition_stats = stats.result().get(&partition).unwrap();
-        assert_eq!(partition_stats.initial_stats.statistics().get(&addr_dst), None);
-        assert_eq!(partition_stats.initial_stats.statistics().get(&addr_keep), Some(7));
+        assert_eq!(
+            partition_stats.initial_stats.statistics().get(&addr_dst),
+            None
+        );
+        assert_eq!(
+            partition_stats.initial_stats.statistics().get(&addr_keep),
+            Some(7)
+        );
         assert_eq!(partition_stats.remaning_stats.get(&addr_dst), None);
         assert_eq!(partition_stats.remaning_stats.get(&addr_keep), Some(7));
 
         stats.commit(vec![addr_dst.clone(), addr_keep.clone()].into_iter());
 
         let partition_stats = stats.result().get(&partition).unwrap();
-        assert_eq!(partition_stats.initial_stats.statistics().get(&addr_dst), None);
-        assert_eq!(partition_stats.initial_stats.statistics().get(&addr_keep), Some(7));
+        assert_eq!(
+            partition_stats.initial_stats.statistics().get(&addr_dst),
+            None
+        );
+        assert_eq!(
+            partition_stats.initial_stats.statistics().get(&addr_keep),
+            Some(7)
+        );
         assert_eq!(partition_stats.remaning_stats.get(&addr_dst), None);
         assert_eq!(partition_stats.remaning_stats.get(&addr_keep), Some(7));
 
