@@ -214,9 +214,12 @@ impl<'a> AnchorsCacheTransaction<'a> {
 
         let mut removed_infos = Vec::new();
         let chain_time = cached_anchor.anchor.chain_time;
+        let mut remaining_len = self.cache.imported_anchors_info_history.len();
+
         for info in &self.cache.imported_anchors_info_history {
-            if info.ct < chain_time && self.cache.imported_anchors_info_history.len() > 1 {
+            if info.ct < chain_time && remaining_len > 1 {
                 removed_infos.push(info.clone());
+                remaining_len -= 1; // ← ключевое исправление
             } else {
                 break;
             }
@@ -315,6 +318,8 @@ mod tests {
         })
     }
 
+    // ==================== BASIC TESTS ====================
+
     #[test]
     fn test_transaction_commit() {
         let mut cache = AnchorsCache::default();
@@ -328,6 +333,7 @@ mod tests {
 
         assert_eq!(cache.len(), 2);
         assert!(cache.has_pending_externals());
+        assert_eq!(cache.imported_anchors_info_history.len(), 2);
     }
 
     #[test]
@@ -338,34 +344,64 @@ mod tests {
             let mut tx = AnchorsCacheTransaction::new(&mut cache);
             tx.add(make_anchor(1, 100), 5);
             tx.add(make_anchor(2, 200), 3);
+            // no commit
         }
 
         assert_eq!(cache.len(), 0);
         assert!(!cache.has_pending_externals());
+        assert_eq!(cache.imported_anchors_info_history.len(), 0);
     }
 
-    #[test]
-    fn test_transaction_pop_front_rollback() {
-        let mut cache = AnchorsCache::default();
-        cache.add(make_anchor(1, 100), 5);
-        cache.add(make_anchor(2, 200), 3);
+    // ==================== ADD WITH ZERO EXTERNALS ====================
 
-        assert_eq!(cache.len(), 2);
+    #[test]
+    fn test_add_zero_externals_commit() {
+        let mut cache = AnchorsCache::default();
 
         {
             let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            let popped = tx.pop_front();
-            assert!(popped.is_some());
-            assert_eq!(popped.unwrap().0, 1);
+            tx.add(make_anchor(1, 100), 0);
+            tx.commit();
         }
 
-        assert_eq!(cache.len(), 2);
-        let (id, _) = cache.get(0).unwrap();
-        assert_eq!(id, 1);
+        assert_eq!(cache.len(), 0); // not added to cache
+        assert!(!cache.has_pending_externals());
+        assert_eq!(cache.imported_anchors_info_history.len(), 1); // but added to history
     }
 
     #[test]
-    fn test_transaction_pop_front_commit() {
+    fn test_add_zero_externals_rollback() {
+        let mut cache = AnchorsCache::default();
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            tx.add(make_anchor(1, 100), 0);
+        }
+
+        assert_eq!(cache.len(), 0);
+        assert!(cache.imported_anchors_info_history.is_empty());
+    }
+
+    #[test]
+    fn test_add_mixed_externals_rollback() {
+        let mut cache = AnchorsCache::default();
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            tx.add(make_anchor(1, 100), 5); // will be added to cache
+            tx.add(make_anchor(2, 200), 0); // won't be added to cache
+            tx.add(make_anchor(3, 300), 3); // will be added to cache
+        }
+
+        assert_eq!(cache.len(), 0);
+        assert!(cache.imported_anchors_info_history.is_empty());
+        assert!(!cache.has_pending_externals());
+    }
+
+    // ==================== POP_FRONT ====================
+
+    #[test]
+    fn test_pop_front_commit() {
         let mut cache = AnchorsCache::default();
         cache.add(make_anchor(1, 100), 5);
         cache.add(make_anchor(2, 200), 3);
@@ -373,17 +409,204 @@ mod tests {
         {
             let mut tx = AnchorsCacheTransaction::new(&mut cache);
             let popped = tx.pop_front();
-            assert!(popped.is_some());
+            assert_eq!(popped.unwrap().0, 1);
             tx.commit();
         }
 
         assert_eq!(cache.len(), 1);
-        let (id, _) = cache.get(0).unwrap();
-        assert_eq!(id, 2);
+        assert_eq!(cache.get(0).unwrap().0, 2);
     }
 
     #[test]
-    fn test_transaction_mixed_operations_rollback() {
+    fn test_pop_front_rollback() {
+        let mut cache = AnchorsCache::default();
+        cache.add(make_anchor(1, 100), 5);
+        cache.add(make_anchor(2, 200), 3);
+
+        let original_history_len = cache.imported_anchors_info_history.len();
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            let popped = tx.pop_front();
+            assert!(popped.is_some());
+        }
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get(0).unwrap().0, 1);
+        assert_eq!(
+            cache.imported_anchors_info_history.len(),
+            original_history_len
+        );
+    }
+
+    #[test]
+    fn test_pop_front_empty_cache() {
+        let mut cache = AnchorsCache::default();
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            let popped = tx.pop_front();
+            assert!(popped.is_none());
+            tx.commit();
+        }
+
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_multiple_pop_front_commit() {
+        let mut cache = AnchorsCache::default();
+        cache.add(make_anchor(1, 100), 5);
+        cache.add(make_anchor(2, 200), 3);
+        cache.add(make_anchor(3, 300), 2);
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            assert_eq!(tx.pop_front().unwrap().0, 1);
+            assert_eq!(tx.pop_front().unwrap().0, 2);
+            tx.commit();
+        }
+
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(0).unwrap().0, 3);
+    }
+
+    #[test]
+    fn test_multiple_pop_front_rollback() {
+        let mut cache = AnchorsCache::default();
+        cache.add(make_anchor(1, 100), 5);
+        cache.add(make_anchor(2, 200), 3);
+        cache.add(make_anchor(3, 300), 2);
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            tx.pop_front();
+            tx.pop_front();
+        }
+
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.get(0).unwrap().0, 1);
+        assert_eq!(cache.get(1).unwrap().0, 2);
+        assert_eq!(cache.get(2).unwrap().0, 3);
+    }
+
+    // ==================== IMPORTED_ANCHORS_INFO REMOVAL ====================
+
+    #[test]
+    fn test_pop_front_removes_old_infos() {
+        let mut cache = AnchorsCache::default();
+        // Add anchors with different chain_time
+        cache.add(make_anchor(1, 100), 5);
+        cache.add(make_anchor(2, 200), 3);
+        cache.add(make_anchor(3, 300), 2);
+
+        assert_eq!(cache.imported_anchors_info_history.len(), 3);
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            // pop anchor with ct=100, should remove info with ct < 100 (none)
+            tx.pop_front();
+            tx.commit();
+        }
+
+        // After pop(ct=100): info where ct < 100 are removed, but len > 1
+        // We have [100, 200, 300] -> nothing will be removed (100 is not < 100)
+        assert_eq!(cache.imported_anchors_info_history.len(), 3);
+    }
+
+    #[test]
+    fn test_pop_front_removes_multiple_old_infos() {
+        let mut cache = AnchorsCache::default();
+
+        // Add anchor without externals (only to history)
+        cache.add(make_anchor(1, 50), 0);
+        cache.add(make_anchor(2, 80), 0);
+        // Add anchor with externals
+        cache.add(make_anchor(3, 100), 5);
+        cache.add(make_anchor(4, 200), 3);
+
+        assert_eq!(cache.imported_anchors_info_history.len(), 4);
+        assert_eq!(cache.len(), 2); // only 2 in cache
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            // pop anchor with ct=100, should remove info with ct < 100
+            tx.pop_front();
+            tx.commit();
+        }
+
+        // [50, 80, 100, 200] -> pop(ct=100) -> remove 50, then 80 (len is still > 1)
+        // Remains [100, 200]
+        assert_eq!(cache.imported_anchors_info_history.len(), 2);
+        assert_eq!(cache.imported_anchors_info_history.front().unwrap().ct, 100);
+    }
+
+    #[test]
+    fn test_pop_front_info_removal_rollback() {
+        let mut cache = AnchorsCache::default();
+
+        cache.add(make_anchor(1, 50), 0);
+        cache.add(make_anchor(2, 80), 0);
+        cache.add(make_anchor(3, 100), 5);
+        cache.add(make_anchor(4, 200), 3);
+
+        let original_history: Vec<_> = cache
+            .imported_anchors_info_history
+            .iter()
+            .map(|i| i.ct)
+            .collect();
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            tx.pop_front();
+            // no commit - rollback
+        }
+
+        let restored_history: Vec<_> = cache
+            .imported_anchors_info_history
+            .iter()
+            .map(|i| i.ct)
+            .collect();
+        assert_eq!(original_history, restored_history);
+    }
+
+    #[test]
+    fn test_pop_front_keeps_at_least_one_info() {
+        let mut cache = AnchorsCache::default();
+        cache.add(make_anchor(1, 100), 5);
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            tx.pop_front();
+            tx.commit();
+        }
+
+        // Even after removal, at least 1 info should remain (condition len > 1)
+        assert_eq!(cache.imported_anchors_info_history.len(), 1);
+    }
+
+    // ==================== MIXED OPERATIONS ====================
+
+    #[test]
+    fn test_mixed_operations_commit() {
+        let mut cache = AnchorsCache::default();
+        cache.add(make_anchor(1, 100), 5);
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            tx.pop_front();
+            tx.add(make_anchor(2, 200), 3);
+            tx.add(make_anchor(3, 300), 2);
+            tx.commit();
+        }
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get(0).unwrap().0, 2);
+        assert_eq!(cache.get(1).unwrap().0, 3);
+    }
+
+    #[test]
+    fn test_mixed_operations_rollback() {
         let mut cache = AnchorsCache::default();
         cache.add(make_anchor(1, 100), 5);
 
@@ -395,35 +618,197 @@ mod tests {
         }
 
         assert_eq!(cache.len(), 1);
-        let (id, _) = cache.get(0).unwrap();
-        assert_eq!(id, 1);
+        assert_eq!(cache.get(0).unwrap().0, 1);
     }
 
     #[test]
-    fn test_transaction_add_with_zero_externals() {
+    fn test_add_pop_add_rollback() {
         let mut cache = AnchorsCache::default();
 
         {
             let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.add(make_anchor(1, 100), 0);
+            tx.add(make_anchor(1, 100), 5);
+            tx.pop_front();
+            tx.add(make_anchor(2, 200), 3);
+        }
+
+        assert_eq!(cache.len(), 0);
+        assert!(cache.imported_anchors_info_history.is_empty());
+    }
+
+    // ==================== HAS_PENDING_EXTERNALS ====================
+
+    #[test]
+    fn test_has_pending_externals_after_pop_all() {
+        let mut cache = AnchorsCache::default();
+        cache.add(make_anchor(1, 100), 5);
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            tx.pop_front();
+            assert!(!tx.has_pending_externals());
             tx.commit();
         }
 
-        assert_eq!(cache.len(), 0);
-        assert!(cache.last_imported_anchor_info().is_some());
+        assert!(!cache.has_pending_externals());
     }
 
     #[test]
-    fn test_transaction_add_with_zero_externals_rollback() {
+    fn test_has_pending_externals_restored_on_rollback() {
         let mut cache = AnchorsCache::default();
+        cache.add(make_anchor(1, 100), 5);
+
+        assert!(cache.has_pending_externals());
 
         {
             let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.add(make_anchor(1, 100), 0);
+            tx.pop_front();
+            assert!(!tx.has_pending_externals());
         }
 
-        assert_eq!(cache.len(), 0);
-        assert!(cache.last_imported_anchor_info().is_none());
+        assert!(cache.has_pending_externals());
+    }
+
+    // ==================== EDGE CASES ====================
+
+    #[test]
+    fn test_empty_transaction_commit() {
+        let mut cache = AnchorsCache::default();
+        cache.add(make_anchor(1, 100), 5);
+
+        {
+            let tx = AnchorsCacheTransaction::new(&mut cache);
+            tx.commit();
+        }
+
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_empty_transaction_rollback() {
+        let mut cache = AnchorsCache::default();
+        cache.add(make_anchor(1, 100), 5);
+
+        {
+            let _tx = AnchorsCacheTransaction::new(&mut cache);
+        }
+
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_pop_until_empty_then_add() {
+        let mut cache = AnchorsCache::default();
+        cache.add(make_anchor(1, 100), 5);
+        cache.add(make_anchor(2, 200), 3);
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            tx.pop_front();
+            tx.pop_front();
+            assert!(tx.pop_front().is_none());
+            tx.add(make_anchor(3, 300), 2);
+            tx.commit();
+        }
+
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(0).unwrap().0, 3);
+    }
+
+    // ==================== CHECKING CORRECTNESS OF remaining_len LOGIC ====================
+
+    #[test]
+    fn test_remaining_len_logic_boundary() {
+        let mut cache = AnchorsCache::default();
+
+        // Create a situation: [ct=50, ct=80] in history, pop anchor with ct=100
+        // Original: will only remove ct=50 (after that len=1, condition > 1 is false)
+        cache.add(make_anchor(1, 50), 0);
+        cache.add(make_anchor(2, 80), 0);
+        cache.add(make_anchor(3, 100), 5);
+
+        assert_eq!(cache.imported_anchors_info_history.len(), 3);
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            tx.pop_front();
+            tx.commit();
+        }
+
+        // After pop: [50, 80, 100] -> remove where ct < 100 and len > 1
+        // Step 1: 50 < 100 && 3 > 1 -> remove, len=2
+        // Step 2: 80 < 100 && 2 > 1 -> remove, len=1
+        // Step 3: 100 < 100 -> false, stop
+        // Expected: only [100] remains
+        assert_eq!(cache.imported_anchors_info_history.len(), 1);
+        assert_eq!(cache.imported_anchors_info_history.front().unwrap().ct, 100);
+    }
+
+    #[test]
+    fn test_remaining_len_logic_boundary_rollback() {
+        let mut cache = AnchorsCache::default();
+
+        cache.add(make_anchor(1, 50), 0);
+        cache.add(make_anchor(2, 80), 0);
+        cache.add(make_anchor(3, 100), 5);
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+            tx.pop_front();
+            // rollback
+        }
+
+        // Should restore exactly 3 info: [50, 80, 100]
+        assert_eq!(cache.imported_anchors_info_history.len(), 3);
+        let cts: Vec<_> = cache
+            .imported_anchors_info_history
+            .iter()
+            .map(|i| i.ct)
+            .collect();
+        assert_eq!(cts, vec![50, 80, 100]);
+    }
+
+    // ==================== ACCESSOR METHODS IN TRANSACTION ====================
+
+    #[test]
+    fn test_transaction_accessors() {
+        let mut cache = AnchorsCache::default();
+        cache.add(make_anchor(1, 100), 5);
+        cache.add(make_anchor(2, 200), 3);
+
+        {
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
+
+            assert_eq!(tx.get(0).unwrap().0, 1);
+            assert_eq!(tx.get(1).unwrap().0, 2);
+            assert!(tx.get(2).is_none());
+
+            assert!(tx.has_pending_externals());
+
+            let (id, ct) = tx.get_last_imported_anchor_id_and_ct().unwrap();
+            assert_eq!(id, 2);
+            assert_eq!(ct, 200);
+
+            tx.pop_front();
+
+            assert_eq!(tx.get(0).unwrap().0, 2);
+            assert!(tx.get(1).is_none());
+
+            tx.commit();
+        }
+    }
+
+    #[test]
+    fn test_transaction_iter() {
+        let mut cache = AnchorsCache::default();
+        cache.add(make_anchor(1, 100), 5);
+        cache.add(make_anchor(2, 200), 3);
+
+        {
+            let tx = AnchorsCacheTransaction::new(&mut cache);
+            let ids: Vec<_> = tx.iter().map(|(id, _)| *id).collect();
+            assert_eq!(ids, vec![1, 2]);
+            tx.commit();
+        }
     }
 }
-
