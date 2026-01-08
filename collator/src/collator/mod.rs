@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anchors_cache::{AnchorInfo, AnchorsCache};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use error::CollatorError;
@@ -23,7 +24,6 @@ use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::{HistogramGuard, HistogramGuardWithLabels};
 use tycho_util::sync::rayon_run;
 use tycho_util::time::now_millis;
-use anchors_cache::{AnchorInfo, AnchorsCache};
 use types::MsgsExecutionParamsStuff;
 
 use self::types::{BlockSerializerCache, CollatorStats, PrevData, WorkingState};
