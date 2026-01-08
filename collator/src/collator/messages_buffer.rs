@@ -26,15 +26,66 @@ pub struct MessagesBufferLimits {
 }
 
 #[derive(Default)]
+pub struct BufferTransaction {
+    account_snapshots: FastHashMap<HashBytes, VecDeque<ParsedMessage>>,
+    snapshot_int_count: usize,
+    snapshot_ext_count: usize,
+    snapshot_min_ext_chain_time: Option<u64>,
+    snapshot_sorted_index: BTreeMap<usize, FastHashSet<HashBytes>>,
+}
+
+#[derive(Default)]
 pub struct MessagesBuffer {
     msgs: FastIndexMap<HashBytes, VecDeque<ParsedMessage>>,
     int_count: usize,
     ext_count: usize,
     sorted_index: BTreeMap<usize, FastHashSet<HashBytes>>,
     min_ext_chain_time: Option<u64>,
+    tx: BufferTransaction,
+}
+
+// Transactional operations
+impl MessagesBuffer {
+    pub fn begin(&mut self) {
+        self.tx = BufferTransaction {
+            account_snapshots: FastHashMap::default(),
+            snapshot_int_count: self.int_count,
+            snapshot_ext_count: self.ext_count,
+            snapshot_min_ext_chain_time: self.min_ext_chain_time,
+            snapshot_sorted_index: self.sorted_index.clone(),
+        };
+    }
+
+    pub fn commit(&mut self) {
+        self.tx = BufferTransaction::default();
+    }
+
+    pub fn rollback(&mut self) {
+        let tx = std::mem::take(&mut self.tx);
+
+        for (account_id, msgs) in tx.account_snapshots {
+            if msgs.is_empty() {
+                self.msgs.swap_remove(&account_id);
+            } else {
+                self.msgs.insert(account_id, msgs);
+            }
+        }
+
+        self.int_count = tx.snapshot_int_count;
+        self.ext_count = tx.snapshot_ext_count;
+        self.min_ext_chain_time = tx.snapshot_min_ext_chain_time;
+        self.sorted_index = tx.snapshot_sorted_index;
+    }
 }
 
 impl MessagesBuffer {
+    fn backup_account(&mut self, account_id: &HashBytes) {
+        self.tx
+            .account_snapshots
+            .entry(*account_id)
+            .or_insert_with(|| self.msgs.get(account_id).cloned().unwrap_or_default());
+    }
+
     pub fn account_messages_count(&self, account_id: &HashBytes) -> usize {
         self.msgs
             .get(account_id)
@@ -443,6 +494,7 @@ impl MessagesBuffer {
         let mut ext_skipped_count = 0;
 
         let mut should_add_account_to_slot_index = false;
+        self.backup_account(&account_id);
 
         if let Some(account_msgs) = self.msgs.get_mut(&account_id) {
             res.ops_count.saturating_add_assign(1);
@@ -458,10 +510,12 @@ impl MessagesBuffer {
             should_add_account_to_slot_index = slot_account_msgs.is_empty();
 
             slot_account_msgs.reserve(amount);
+
             while int_collected_count + ext_collected_count < amount {
                 let Some(msg) = account_msgs.pop_front() else {
                     break;
                 };
+
                 res.ops_count.saturating_add_assign(1);
 
                 // check and skip message if required
@@ -550,6 +604,7 @@ impl MessagesBuffer {
         if !filter.can_skip() {
             return;
         }
+        self.backup_account(account_id);
 
         if let Some(account_msgs) = self.msgs.get_mut(account_id) {
             account_msgs.retain(|msg| {
