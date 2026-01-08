@@ -16,6 +16,7 @@ use self::new_messages::*;
 use super::error::CollatorError;
 use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
 use super::types::{AnchorsCache, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff};
+use crate::collator::anchors_cache::AnchorsCacheTransaction;
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::collator::messages_reader::internals_range_reader::{
     InternalsRangeReader, InternalsRangeReaderKind,
@@ -93,7 +94,7 @@ pub(super) struct MessagesReaderContext<'a> {
     pub prev_state_gen_lt: Lt,
     pub mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
     pub reader_state: &'a mut ReaderState,
-    pub anchors_cache: &'a mut AnchorsCache,
+    pub anchors_cache: &'a mut AnchorsCacheTransaction<'a>,
     pub is_first_block_after_prev_master: bool,
     pub cumulative_stats_calc_params: Option<CumulativeStatsCalcParams>,
     pub part_stat_ranges: Option<Vec<QueueShardBoundedRange>>,
