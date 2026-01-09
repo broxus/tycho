@@ -16,7 +16,7 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_core::storage::{CoreStorage, CoreStorageConfig, NewBlockMeta, QueueStateReader};
 use tycho_storage::StorageContext;
 use tycho_types::boc::{Boc, BocRepr};
-use tycho_types::cell::CellBuilder;
+use tycho_types::cell::{BuildTrustedCellHasher, CellBuilder};
 use tycho_types::models::{Block, BlockId, ShardStateUnsplit};
 use tycho_util::compression::zstd_decompress_simple;
 
@@ -56,7 +56,9 @@ pub async fn prepare_test_storage() -> anyhow::Result<(CoreStorage, tempfile::Te
         BlockId::from_str(mc_block_id_str)?
     };
 
-    let master_root = master_block.load_state_update()?.apply(&zerostate)?;
+    let master_root = master_block
+        .load_state_update()?
+        .apply::<BuildTrustedCellHasher>(&zerostate)?;
     let master_state = master_root.parse::<Box<ShardStateUnsplit>>()?;
 
     let mc_state_extra = master_state.load_custom()?;

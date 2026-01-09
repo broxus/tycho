@@ -1305,7 +1305,7 @@ impl RpcStorage {
                     if let Some(msg_hash) = msg_hash {
                         buffer.extend_from_slice(msg_hash.as_slice());
                     }
-                    tycho_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(
+                    tycho_types::boc::ser::BocHeader::<BuildCellHasher>::with_root(
                         tx_cell.inner().as_ref(),
                     )
                     .encode(&mut buffer);

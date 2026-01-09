@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -7,7 +8,7 @@ use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
-use tycho_types::cell::{Cell, HashBytes};
+use tycho_types::cell::{BuildTrustedCellHasher, Cell, HashBytesKey};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
@@ -97,9 +98,12 @@ where
                     .await
                     .context("failed to load prev shard state")?;
 
-                let old_split_at = split_aug_dict_raw(prev_state.state().load_accounts()?, 5)?
-                    .into_keys()
-                    .collect::<ahash::HashSet<_>>();
+                let old_split_at = split_aug_dict_raw::<_, _, _, BuildTrustedCellHasher>(
+                    prev_state.state().load_accounts()?,
+                    5,
+                )?
+                .into_keys()
+                .collect::<HashSet<HashBytesKey, BuildTrustedCellHasher>>();
 
                 match &prev_id_alt {
                     Some(prev_id) => {
@@ -187,7 +191,7 @@ where
         block: &BlockStuff,
         handle: &BlockHandle,
         prev_root: Cell,
-        split_at: ahash::HashSet<HashBytes>,
+        split_at: HashSet<HashBytesKey, BuildTrustedCellHasher>,
         ref_mc_state_handle: RefMcStateHandle,
     ) -> Result<ShardStateStuff> {
         let labels = [("workchain", block.id().shard.workchain().to_string())];

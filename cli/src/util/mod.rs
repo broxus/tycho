@@ -48,7 +48,7 @@ pub fn compute_storage_used(account: &Account) -> Result<StorageUsed> {
     };
 
     let res = cell
-        .compute_unique_stats(usize::MAX)
+        .compute_unique_stats::<BuildCellHasher>(usize::MAX)
         .context("max size exceeded")?;
 
     let res = StorageUsed {

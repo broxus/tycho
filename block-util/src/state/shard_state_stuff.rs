@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
@@ -6,7 +7,6 @@ use tycho_types::cell::Lazy;
 use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
-use tycho_util::FastHashSet;
 use tycho_util::mem::Reclaimer;
 
 use crate::dict::split_aug_dict_raw;
@@ -176,10 +176,10 @@ impl ShardStateStuff {
                 .parse::<ShardAccounts>()
                 .context("failed to load shard accounts")?;
 
-            split_aug_dict_raw(shard_accounts, depth)
+            split_aug_dict_raw::<_, _, _, BuildTrustedCellHasher>(shard_accounts, depth)
                 .context("failed to split shard accounts")?
                 .into_keys()
-                .collect::<FastHashSet<_>>()
+                .collect::<HashSet<HashBytesKey, BuildTrustedCellHasher>>()
         } else {
             Default::default()
         };

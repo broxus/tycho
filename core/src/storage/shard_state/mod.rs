@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -14,7 +15,6 @@ use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
 use self::cell_storage::*;
@@ -335,7 +335,7 @@ impl ShardStateStorage {
 
                     let split_at = split_shard_accounts(&root_cell, accounts_split_depth)?
                         .into_keys()
-                        .collect::<FastHashSet<HashBytes>>();
+                        .collect::<HashSet<HashBytesKey, BuildTrustedCellHasher>>();
                     cell_storage.remove_cell_mt(&alloc, &root_hash, split_at)?
                 };
 
@@ -507,7 +507,7 @@ pub enum ShardStateStorageError {
 pub fn split_shard_accounts(
     root_cell: impl AsRef<DynCell>,
     split_depth: u8,
-) -> Result<FastHashMap<HashBytes, Cell>> {
+) -> Result<HashMap<HashBytesKey, Cell, BuildTrustedCellHasher>> {
     // Cell#0 - processed_upto
     // Cell#1 - accounts
     let shard_accounts = root_cell
@@ -517,5 +517,6 @@ pub fn split_shard_accounts(
         .parse::<ShardAccounts>()
         .context("failed to load shard accounts")?;
 
-    split_aug_dict_raw(shard_accounts, split_depth).context("failed to split shard accounts")
+    split_aug_dict_raw::<_, _, _, BuildTrustedCellHasher>(shard_accounts, split_depth)
+        .context("failed to split shard accounts")
 }

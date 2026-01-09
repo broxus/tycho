@@ -41,9 +41,10 @@ impl BlockProofStuff {
         };
 
         let root = CellBuilder::build_from(&block).unwrap();
-        let root = MerkleProofBuilder::new(root.as_ref(), AlwaysInclude)
-            .build()
-            .unwrap();
+        let root =
+            MerkleProofBuilder::<_, BuildTrustedCellHasher>::new(root.as_ref(), AlwaysInclude)
+                .build()
+                .unwrap();
 
         Self::from_proof(Box::new(BlockProof {
             proof_for: *block_id,

@@ -5,6 +5,7 @@ use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, RouterAddr, RouterPar
 use tycho_core::storage::QueueStateReader;
 use tycho_storage::StorageContext;
 use tycho_storage::kv::StoredValue;
+use tycho_types::cell::BuildCellHasher;
 use tycho_types::models::{BlockId, IntAddr, Message, MsgInfo, OutMsgQueueUpdates, ShardIdent};
 use tycho_util::FastHashMap;
 use tycho_util::fs::MappedFile;
@@ -169,7 +170,7 @@ impl InternalQueueStorage {
                     buffer.clear();
                     buffer.push(dest.workchain as u8);
                     buffer.extend_from_slice(&dest.prefix().to_le_bytes());
-                    BocHeader::<ahash::RandomState>::with_root(cell.as_ref()).encode(&mut buffer);
+                    BocHeader::<BuildCellHasher>::with_root(cell.as_ref()).encode(&mut buffer);
                     batch.put_cf(&messages_cf, key.to_vec(), &buffer);
 
                     let partition_stats = statistics.entry(partition).or_default();

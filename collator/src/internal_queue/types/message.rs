@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use anyhow::Context;
 use tycho_block_util::queue::QueueKey;
 use tycho_types::boc::Boc;
-use tycho_types::cell::{Cell, HashBytes, Load};
+use tycho_types::cell::{BuildCellHasher, Cell, HashBytes, Load};
 use tycho_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo};
 
 #[derive(Debug, Clone)]
@@ -106,7 +106,7 @@ impl InternalMessageValue for EnqueuedMessage {
     where
         Self: Sized,
     {
-        tycho_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(self.cell.as_ref())
+        tycho_types::boc::ser::BocHeader::<BuildCellHasher>::with_root(self.cell.as_ref())
             .encode(buffer);
     }
 

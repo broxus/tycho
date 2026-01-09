@@ -15,7 +15,9 @@ use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::{AccountMeta, PublicLibraryChange, TransactionMeta};
 use tycho_network::PeerId;
 use tycho_types::boc;
-use tycho_types::cell::{Cell, CellFamily, HashBytes, Lazy, UsageTree, UsageTreeMode};
+use tycho_types::cell::{
+    BuildCellHasher, Cell, CellFamily, HashBytes, Lazy, UsageTree, UsageTreeMode,
+};
 use tycho_types::dict::{self, Dict};
 use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::{
@@ -1099,7 +1101,7 @@ struct BlockSerializerCacheInner {
     boc_header: BocHeaderCache,
 }
 
-type BocHeaderCache = boc::ser::BocHeaderCache<ahash::RandomState>;
+type BocHeaderCache = boc::ser::BocHeaderCache<BuildCellHasher>;
 
 #[derive(Clone, Debug)]
 pub struct ExecutedTransaction {

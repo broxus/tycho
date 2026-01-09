@@ -341,13 +341,15 @@ mod test {
 
         // Close enough merkle depth.
         unwrap_msg({
-            let leaf_proof = MerkleProof::create(Cell::empty_cell_ref(), AlwaysInclude)
-                .build()
-                .and_then(CellBuilder::build_from)?;
+            let leaf_proof =
+                MerkleProof::create::<_, BuildCellHasher>(Cell::empty_cell_ref(), AlwaysInclude)
+                    .build()
+                    .and_then(CellBuilder::build_from)?;
 
-            let body = MerkleProof::create(leaf_proof.as_ref(), AlwaysInclude)
-                .build()
-                .and_then(CellBuilder::build_from)?;
+            let body =
+                MerkleProof::create::<_, BuildCellHasher>(leaf_proof.as_ref(), AlwaysInclude)
+                    .build()
+                    .and_then(CellBuilder::build_from)?;
 
             CellBuilder::build_from(OwnedMessage {
                 info: MsgInfo::ExtIn(Default::default()),
@@ -493,15 +495,17 @@ mod test {
     }
 
     fn create_deep_merkle() -> anyhow::Result<Cell> {
-        let leaf_proof = MerkleProof::create(Cell::empty_cell_ref(), AlwaysInclude)
-            .build()
-            .and_then(CellBuilder::build_from)?;
+        let leaf_proof =
+            MerkleProof::create::<_, BuildCellHasher>(Cell::empty_cell_ref(), AlwaysInclude)
+                .build()
+                .and_then(CellBuilder::build_from)?;
 
-        let inner_proof = MerkleProof::create(leaf_proof.as_ref(), AlwaysInclude)
-            .build()
-            .and_then(CellBuilder::build_from)?;
+        let inner_proof =
+            MerkleProof::create::<_, BuildCellHasher>(leaf_proof.as_ref(), AlwaysInclude)
+                .build()
+                .and_then(CellBuilder::build_from)?;
 
-        let body = MerkleProof::create(inner_proof.as_ref(), AlwaysInclude)
+        let body = MerkleProof::create::<_, BuildCellHasher>(inner_proof.as_ref(), AlwaysInclude)
             .build()
             .and_then(CellBuilder::build_from)?;
 

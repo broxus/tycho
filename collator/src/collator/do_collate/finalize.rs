@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -528,17 +529,19 @@ impl Phase<FinalizeState> {
 
             new_state_root = CellBuilder::build_from(&new_observable_state)?;
 
-            let old_split_at = split_aug_dict_raw(
+            let old_split_at = split_aug_dict_raw::<_, _, _, BuildTrustedCellHasher>(
                 self.state.prev_shard_data.observable_accounts().clone(),
                 merkle_split_depth,
             )?
             .into_keys()
-            .collect::<ahash::HashSet<_>>();
+            .collect::<HashSet<HashBytesKey, BuildTrustedCellHasher>>();
 
-            let new_split_at =
-                split_aug_dict_raw(new_observable_state.accounts.load()?, merkle_split_depth)?
-                    .into_keys()
-                    .collect::<ahash::HashSet<_>>();
+            let new_split_at = split_aug_dict_raw::<_, _, _, BuildTrustedCellHasher>(
+                new_observable_state.accounts.load()?,
+                merkle_split_depth,
+            )?
+            .into_keys()
+            .collect::<HashSet<HashBytesKey, BuildTrustedCellHasher>>();
 
             total_validator_fees = new_observable_state.total_validator_fees.clone();
 
@@ -628,7 +631,7 @@ impl Phase<FinalizeState> {
 
             let mut data = Vec::new();
             {
-                let header = boc::ser::BocHeader::<ahash::RandomState>::with_root_and_cache(
+                let header = boc::ser::BocHeader::<BuildCellHasher>::with_root_and_cache(
                     root.as_ref(),
                     block_serializer_cache.take_boc_header_cache(),
                 );
@@ -1506,20 +1509,23 @@ struct ProcessedAccounts {
     build_accounts_blocks_elapsed: Duration,
 }
 
-fn create_merkle_update(
+fn create_merkle_update<S>(
     shard_id: &ShardIdent,
     old_state_root: &Cell,
     new_state_root: &Cell,
     usage_tree: UsageTree,
-    old_split_at: ahash::HashSet<HashBytes>,
-    new_split_at: ahash::HashSet<HashBytes>,
-) -> Result<MerkleUpdate> {
+    old_split_at: HashSet<HashBytesKey, S>,
+    new_split_at: HashSet<HashBytesKey, S>,
+) -> Result<MerkleUpdate>
+where
+    S: BuildHasher + Default + Clone + Send + Sync,
+{
     let labels = [("workchain", shard_id.workchain().to_string())];
     let histogram =
         HistogramGuard::begin_with_labels("tycho_collator_create_merkle_update_time_high", &labels);
 
     let merkle_update_builder =
-        MerkleUpdate::create(old_state_root.as_ref(), new_state_root.as_ref(), usage_tree);
+        MerkleUpdate::create::<_, S>(old_state_root.as_ref(), new_state_root.as_ref(), usage_tree);
 
     let state_update = merkle_update_builder.par_build(old_split_at, new_split_at)?;
 

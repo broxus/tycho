@@ -631,7 +631,11 @@ fn prepare_block_proof(
         }
     }
 
-    let merkle_proof = MerkleProof::create(block_stuff.root_cell().as_ref(), usage_tree).build()?;
+    let merkle_proof = MerkleProof::create::<_, BuildTrustedCellHasher>(
+        block_stuff.root_cell().as_ref(),
+        usage_tree,
+    )
+    .build()?;
 
     let root = CellBuilder::build_from(merkle_proof)?;
 

@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::hash::BuildHasher;
+
 use tycho_types::cell::Lazy;
 use tycho_types::dict::{
     AugDictExtra, DictKey, PartialSplitDict, SetMode, aug_dict_insert, aug_dict_merge_siblings,
@@ -7,7 +10,6 @@ use tycho_types::dict::{
 use tycho_types::error::Error;
 use tycho_types::models::ShardIdent;
 use tycho_types::prelude::*;
-use tycho_util::FastHashMap;
 
 pub struct RelaxedAugDict<K, A, V> {
     dict_root: Option<Cell>,
@@ -203,27 +205,31 @@ where
     Ok(shards)
 }
 
-pub fn split_aug_dict_raw<K, A, V>(
+pub fn split_aug_dict_raw<K, A, V, S>(
     dict: AugDict<K, A, V>,
     depth: u8,
-) -> Result<FastHashMap<HashBytes, Cell>, Error>
+) -> Result<HashMap<HashBytesKey, Cell, S>, Error>
 where
     K: DictKey,
     A: Default,
+    S: BuildHasher + Default,
 {
-    fn split_dict_impl(
+    fn split_dict_impl<S>(
         dict: Option<Cell>,
         key_bit_len: u16,
         depth: u8,
-        shards: &mut FastHashMap<HashBytes, Cell>,
-    ) -> Result<(), Error> {
+        shards: &mut HashMap<HashBytesKey, Cell, S>,
+    ) -> Result<(), Error>
+    where
+        S: BuildHasher,
+    {
         if dict.is_none() {
             return Ok(());
         }
 
         let Some(depth) = depth.checked_sub(1) else {
             if let Some(cell) = dict {
-                shards.insert(*cell.repr_hash(), cell);
+                shards.insert(*cell.repr_hash().as_key(), cell);
             }
             return Ok(());
         };
@@ -239,7 +245,7 @@ where
     }
 
     let mut shards =
-        FastHashMap::with_capacity_and_hasher(2usize.pow(depth as _), Default::default());
+        HashMap::<_, _, S>::with_capacity_and_hasher(2usize.pow(depth as _), Default::default());
 
     let (dict_root, _) = dict.into_parts();
     split_dict_impl(dict_root.into_root(), K::BITS, depth, &mut shards)?;

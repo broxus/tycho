@@ -1,5 +1,5 @@
 use std::cell::UnsafeCell;
-use std::collections::hash_map;
+use std::collections::{HashMap, HashSet, hash_map};
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
@@ -12,13 +12,12 @@ use anyhow::{Context, Result};
 use bumpalo::Bump;
 use bumpalo_herd::{Herd, Member};
 use bytesize::ByteSize;
-use dashmap::Map;
+use dashmap::{DashMap, Map};
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
 use tycho_storage::kv::refcount;
 use tycho_types::cell::*;
 use tycho_util::metrics::{HistogramGuard, spawn_metrics_loop};
-use tycho_util::{FastDashMap, FastHashMap, FastHashSet, FastHasherState};
 use weedb::rocksdb::WriteBatch;
 use weedb::{BoundedCfHandle, rocksdb};
 
@@ -31,7 +30,7 @@ pub struct CellStorage {
     drop_interval: u32,
 }
 
-type CellsIndex = FastDashMap<HashBytes, CachedCell>;
+type CellsIndex = DashMap<HashBytesKey, CachedCell, BuildTrustedCellHasher>;
 
 struct CachedCell {
     epoch: u32,
@@ -108,7 +107,7 @@ impl CellStorage {
             cells_cf: BoundedCfHandle<'a>,
             cells_db: &'a CellsDb,
             buffer: Vec<u8>,
-            transaction: FastHashMap<HashBytes, TempCell>,
+            transaction: HashMap<HashBytesKey, TempCell, BuildTrustedCellHasher>,
             new_cells_batch: rocksdb::WriteBatch,
             new_cell_count: usize,
             raw_cache: &'a RawCellsCache,
@@ -161,7 +160,7 @@ impl CellStorage {
                 &mut self,
                 key: &HashBytes,
             ) -> Result<InsertedCell<'a>, CellStorageError> {
-                Ok(match self.transaction.entry(*key) {
+                Ok(match self.transaction.entry(*key.as_key()) {
                     hash_map::Entry::Occupied(mut entry) => {
                         entry.get_mut().additions += 1; // 1 new reference
                         InsertedCell::Existing
@@ -228,7 +227,7 @@ impl CellStorage {
                     if refs_diff > 0 {
                         self.buffer.clear();
                         refcount::add_positive_refount(refs_diff, None, &mut self.buffer);
-                        batch.merge_cf(&self.cells_cf, key, self.buffer.as_slice());
+                        batch.merge_cf(&self.cells_cf, key.0, self.buffer.as_slice());
                     }
 
                     let new_rc = item.old_rc + item.additions as i64;
@@ -274,7 +273,7 @@ impl CellStorage {
         &self,
         root: &DynCell,
         batch: &mut WriteBatch,
-        split_at: FastHashMap<HashBytes, Cell>,
+        split_at: HashMap<HashBytesKey, Cell, BuildTrustedCellHasher>,
         capacity: usize,
     ) -> Result<usize, CellStorageError> {
         type StoreResult = Result<(), CellStorageError>;
@@ -295,7 +294,7 @@ impl CellStorage {
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
-            split_at: FastHashMap<HashBytes, Cell>,
+            split_at: HashMap<HashBytesKey, Cell, BuildTrustedCellHasher>,
             // TODO: Use `&'a HashBytes` for key?
             // Pros:
             //   - Less `memcpy` calls;
@@ -305,9 +304,9 @@ impl CellStorage {
             //     key locations will be very random and iteration
             //     will be slower than it is with inplace keys.
             /// Transaction items.
-            transaction: FastDashMap<HashBytes, AddedCell<'a>>,
+            transaction: DashMap<HashBytesKey, AddedCell<'a>, BuildTrustedCellHasher>,
             /// References of detached subtrees.
-            delayed_additions: std::sync::Mutex<FastHashMap<HashBytes, u32>>,
+            delayed_additions: std::sync::Mutex<HashMap<HashBytesKey, u32, BuildTrustedCellHasher>>,
         }
 
         impl<'a> StoreContext<'a> {
@@ -315,7 +314,7 @@ impl CellStorage {
                 db: &'a CellsDb,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
-                split_accounts: FastHashMap<HashBytes, Cell>,
+                split_accounts: HashMap<HashBytesKey, Cell, BuildTrustedCellHasher>,
                 capacity: usize,
             ) -> Self {
                 Self {
@@ -323,7 +322,7 @@ impl CellStorage {
                     raw_cache,
                     herd,
                     split_at: split_accounts,
-                    transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
+                    transaction: DashMap::with_capacity_and_hasher_and_shard_amount(
                         capacity,
                         Default::default(),
                         512,
@@ -358,9 +357,9 @@ impl CellStorage {
                     for child in &mut *iter {
                         // Skip cell to store it later in parallel
                         let child_hash = child.repr_hash();
-                        if self.split_at.contains_key(child_hash) {
+                        if self.split_at.contains_key(child_hash.as_key()) {
                             let mut delayed_additions = self.delayed_additions.lock().unwrap();
-                            match delayed_additions.entry(*child_hash) {
+                            match delayed_additions.entry(*child_hash.as_key()) {
                                 hash_map::Entry::Vacant(entry) => {
                                     // This subtree will be added by another thread,
                                     // so no additions is needed on first occurence.
@@ -404,7 +403,7 @@ impl CellStorage {
                 let key = cell.repr_hash();
 
                 // Fast path: cell is already presented in this transaction, just bump refs.
-                if let Some(mut value) = self.transaction.get_mut(key) {
+                if let Some(mut value) = self.transaction.get_mut(key.as_key()) {
                     value.additions += 1;
                     return Ok(false);
                 }
@@ -414,7 +413,9 @@ impl CellStorage {
                 // threads can do this job without blocking each other on the
                 // same shard (going to rocksdb might be slow).
 
-                let old_rc = self.raw_cache.get_rc_for_insert(self.db, key, depth)?;
+                let old_rc = self
+                    .raw_cache
+                    .get_rc_for_insert(self.db, key.as_key(), depth)?;
 
                 // Prepare `alloc.buffer` if the cell is new (but not flush it to
                 // the bump allocator yet).
@@ -428,7 +429,7 @@ impl CellStorage {
                 }
 
                 // Try to insert once more.
-                Ok(match self.transaction.entry(*key) {
+                Ok(match self.transaction.entry(*key.as_key()) {
                     Entry::Occupied(mut value) => {
                         // Some other thread has already inserted this cell.
                         // In this case we discard buffer data and juse bump refs.
@@ -519,7 +520,7 @@ impl CellStorage {
 
                         buffer.clear();
                         refcount::add_positive_refount(item.additions, item.data, &mut buffer);
-                        batch.merge_cf(cells_cf, key.as_slice(), &buffer);
+                        batch.merge_cf(cells_cf, key.0.as_slice(), &buffer);
                     }
                     total
                 })
@@ -556,7 +557,7 @@ impl CellStorage {
             db: &'a CellsDb,
             raw_cells_cache: &'a RawCellsCache,
             alloc: &'a Bump,
-            transaction: FastHashMap<&'a HashBytes, AddedCell<'a>>,
+            transaction: HashMap<&'a HashBytesKey, AddedCell<'a>, BuildTrustedCellHasher>,
             buffer: Vec<u8>,
         }
 
@@ -566,7 +567,7 @@ impl CellStorage {
                 cell: &'a DynCell,
                 depth: usize,
             ) -> Result<bool, CellStorageError> {
-                let key = cell.repr_hash();
+                let key = cell.repr_hash().as_key();
                 Ok(match self.transaction.entry(key) {
                     hash_map::Entry::Occupied(mut value) => {
                         value.get_mut().additions += 1;
@@ -605,7 +606,7 @@ impl CellStorage {
                 for (key, item) in self.transaction {
                     self.buffer.clear();
                     refcount::add_positive_refount(item.additions, item.data, &mut self.buffer);
-                    batch.merge_cf(cells_cf, key.as_slice(), &self.buffer);
+                    batch.merge_cf(cells_cf, key.0.as_slice(), &self.buffer);
 
                     let new_rc = item.old_rc + item.additions as i64;
                     self.raw_cells_cache.on_insert_cell(key, new_rc, item.data);
@@ -622,7 +623,7 @@ impl CellStorage {
             db: &self.cells_db,
             raw_cells_cache: &self.raw_cells_cache,
             alloc: &alloc,
-            transaction: FastHashMap::with_capacity_and_hasher(
+            transaction: HashMap::with_capacity_and_hasher(
                 estimated_cell_count,
                 Default::default(),
             ),
@@ -666,14 +667,14 @@ impl CellStorage {
         #[cfg(feature = "cells-metrics")]
         let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
-        if let Some(cell) = self.cells_cache.get(hash)
+        if let Some(cell) = self.cells_cache.get(hash.as_key())
             && cell.epoch.saturating_add(self.drop_interval) >= epoch
             && let Some(cell) = cell.weak.upgrade()
         {
             return Ok(cell);
         }
 
-        let mut cell = match self.raw_cells_cache.get_raw(&self.cells_db, hash) {
+        let mut cell = match self.raw_cells_cache.get_raw(&self.cells_db, hash.as_key()) {
             Ok(Some(value)) => match StorageCell::deserialize(self.clone(), &value.slice, epoch) {
                 Some(cell) => Arc::new(cell),
                 None => return Err(CellStorageError::InvalidCell),
@@ -683,7 +684,7 @@ impl CellStorage {
         };
 
         let has_new;
-        match self.cells_cache.entry(*hash) {
+        match self.cells_cache.entry(*hash.as_key()) {
             dashmap::Entry::Vacant(entry) => {
                 has_new = true;
                 entry.insert(CachedCell {
@@ -719,7 +720,7 @@ impl CellStorage {
         &self,
         herd: &Herd,
         root: &HashBytes,
-        split_at: FastHashSet<HashBytes>,
+        split_at: HashSet<HashBytesKey, BuildTrustedCellHasher>,
     ) -> Result<(usize, WriteBatch), CellStorageError> {
         type RemoveResult = Result<(), CellStorageError>;
 
@@ -733,7 +734,7 @@ impl CellStorage {
             herd: &'a Herd,
             raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
-            split_at: FastHashSet<HashBytes>,
+            split_at: HashSet<HashBytesKey, BuildTrustedCellHasher>,
             // TODO: Use `&'a HashBytes` for key?
             // Pros:
             //   - Less `memcpy` calls;
@@ -743,9 +744,9 @@ impl CellStorage {
             //     key locations will be very random and iteration
             //     will be slower than it is with inplace keys.
             /// Transaction items.
-            transaction: FastDashMap<HashBytes, RemovedCell<'a>>,
+            transaction: DashMap<HashBytesKey, RemovedCell<'a>, BuildTrustedCellHasher>,
             /// References of detached subtrees.
-            delayed_removes: std::sync::Mutex<FastHashMap<HashBytes, u32>>,
+            delayed_removes: std::sync::Mutex<HashMap<HashBytesKey, u32, BuildTrustedCellHasher>>,
         }
 
         impl<'a> RemoveContext<'a> {
@@ -753,14 +754,14 @@ impl CellStorage {
                 db: &'a CellsDb,
                 herd: &'a Herd,
                 raw_cache: &'a RawCellsCache,
-                split_at: FastHashSet<HashBytes>,
+                split_at: HashSet<HashBytesKey, BuildTrustedCellHasher>,
             ) -> Self {
                 Self {
                     db,
                     raw_cache,
                     herd,
                     split_at,
-                    transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
+                    transaction: DashMap::with_capacity_and_hasher_and_shard_amount(
                         128,
                         Default::default(),
                         512,
@@ -794,9 +795,9 @@ impl CellStorage {
 
                     for child_hash in iter.by_ref() {
                         // Skip cell to remove it later in parallel
-                        if self.split_at.contains(child_hash) {
+                        if self.split_at.contains(child_hash.as_key()) {
                             let mut delayed_removes = self.delayed_removes.lock().unwrap();
-                            match delayed_removes.entry(*child_hash) {
+                            match delayed_removes.entry(*child_hash.as_key()) {
                                 hash_map::Entry::Vacant(entry) => {
                                     // This subtree will be removed by another thread,
                                     // so no removes is needed on first occurrence.
@@ -843,7 +844,7 @@ impl CellStorage {
                 use dashmap::mapref::entry::Entry;
 
                 // Fast path: cell is already presented in this transaction, just update refs.
-                if let Some(mut value) = self.transaction.get_mut(repr_hash) {
+                if let Some(mut value) = self.transaction.get_mut(repr_hash.as_key()) {
                     return value.remove();
                 }
 
@@ -853,13 +854,13 @@ impl CellStorage {
                 // same shard (going to rocksdb might be slow).
 
                 let buffer = &mut alloc.buffer;
-                let old_rc = self
-                    .raw_cache
-                    .get_rc_for_delete(self.db, repr_hash, buffer)?;
+                let old_rc =
+                    self.raw_cache
+                        .get_rc_for_delete(self.db, repr_hash.as_key(), buffer)?;
                 debug_assert!(old_rc > 0);
 
                 // Try to remove once more.
-                match self.transaction.entry(*repr_hash) {
+                match self.transaction.entry(*repr_hash.as_key()) {
                     // Some other thread has already removed this cell.
                     // In this case we just used the existing entry state.
                     Entry::Occupied(mut value) => value.get_mut().remove(),
@@ -940,7 +941,7 @@ impl CellStorage {
 
                         batch.merge_cf(
                             cells_cf,
-                            key.as_slice(),
+                            key.0.as_slice(),
                             refcount::encode_negative_refcount(item.removes),
                         );
                     }
@@ -970,8 +971,8 @@ impl CellStorage {
         let cells = &self.cells_db.cells;
         let cells_cf = &cells.cf();
 
-        let mut transaction: FastHashMap<&HashBytes, RemovedCell<'_>> =
-            FastHashMap::with_capacity_and_hasher(128, Default::default());
+        let mut transaction: HashMap<&HashBytesKey, RemovedCell<'_>, BuildTrustedCellHasher> =
+            HashMap::with_capacity_and_hasher(128, Default::default());
         let mut buffer = Vec::with_capacity(4);
 
         let mut stack = Vec::with_capacity(16);
@@ -985,12 +986,12 @@ impl CellStorage {
 
             for cell_id in iter.by_ref() {
                 // Process the current cell.
-                let refs = match transaction.entry(cell_id) {
+                let refs = match transaction.entry(cell_id.as_key()) {
                     hash_map::Entry::Occupied(mut v) => v.get_mut().remove()?,
                     hash_map::Entry::Vacant(v) => {
                         let old_rc = self.raw_cells_cache.get_rc_for_delete(
                             &self.cells_db,
-                            cell_id,
+                            cell_id.as_key(),
                             &mut buffer,
                         )?;
                         debug_assert!(old_rc > 0);
@@ -1029,7 +1030,7 @@ impl CellStorage {
         for (key, item) in transaction {
             batch.merge_cf(
                 cells_cf,
-                key.as_slice(),
+                key.0.as_slice(),
                 refcount::encode_negative_refcount(item.removes),
             );
 
@@ -1043,7 +1044,7 @@ impl CellStorage {
     pub fn drop_cell(&self, hash: &HashBytes) {
         if self
             .cells_cache
-            .remove_if(hash, |_, cell| cell.weak.strong_count() == 0)
+            .remove_if(hash.as_key(), |_, cell| cell.weak.strong_count() == 0)
             .is_some()
         {
             #[cfg(feature = "cells-metrics")]
@@ -1382,7 +1383,7 @@ pub union StorageCellReferenceData {
 }
 
 struct RawCellsCache {
-    inner: Cache<HashBytes, RawCellsCacheItem, CellSizeEstimator, FastHasherState>,
+    inner: Cache<HashBytesKey, RawCellsCacheItem, CellSizeEstimator, BuildTrustedCellHasher>,
     #[cfg(feature = "cells-metrics")]
     rocksdb_access_histogram: metrics::Histogram,
 }
@@ -1391,8 +1392,8 @@ type RawCellsCacheItem = ThinArc<AtomicI64, u8>;
 
 #[derive(Clone, Copy)]
 pub struct CellSizeEstimator;
-impl quick_cache::Weighter<HashBytes, RawCellsCacheItem> for CellSizeEstimator {
-    fn weight(&self, key: &HashBytes, val: &RawCellsCacheItem) -> u64 {
+impl quick_cache::Weighter<HashBytesKey, RawCellsCacheItem> for CellSizeEstimator {
+    fn weight(&self, key: &HashBytesKey, val: &RawCellsCacheItem) -> u64 {
         const STATIC_SIZE: usize = std::mem::size_of::<RawCellsCacheItem>()
             + std::mem::size_of::<i64>()
             + std::mem::size_of::<usize>() * 2; // ArcInner refs + HeaderWithLength length
@@ -1446,7 +1447,7 @@ impl RawCellsCache {
                 .build()
                 .unwrap(),
             CellSizeEstimator,
-            FastHasherState::default(),
+            Default::default(),
             DefaultLifecycle::default(),
         );
 
@@ -1462,7 +1463,7 @@ impl RawCellsCache {
     fn get_raw(
         &self,
         db: &CellsDb,
-        key: &HashBytes,
+        key: &HashBytesKey,
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
         use quick_cache::sync::GuardResult;
 
@@ -1475,7 +1476,7 @@ impl RawCellsCache {
                         self.rocksdb_access_histogram.record(started_at.elapsed());
                     });
 
-                    db.cells.get(key.as_slice())?
+                    db.cells.get(key.0.as_slice())?
                 };
 
                 Ok(if let Some(value) = value {
@@ -1499,7 +1500,7 @@ impl RawCellsCache {
     fn get_rc_for_insert(
         &self,
         db: &CellsDb,
-        key: &HashBytes,
+        key: &HashBytesKey,
         depth: usize,
     ) -> Result<i64, CellStorageError> {
         // A constant which tells since which depth we should start to use cache.
@@ -1520,7 +1521,7 @@ impl RawCellsCache {
             }
         }
 
-        match db.cells.get(key).map_err(CellStorageError::Internal)? {
+        match db.cells.get(key.0).map_err(CellStorageError::Internal)? {
             Some(value) => {
                 let (rc, value) = refcount::decode_value_with_rc(value.as_ref());
 
@@ -1537,7 +1538,7 @@ impl RawCellsCache {
     fn get_rc_for_delete(
         &self,
         db: &CellsDb,
-        key: &HashBytes,
+        key: &HashBytesKey,
         refs_buffer: &mut Vec<HashBytes>,
     ) -> Result<i64, CellStorageError> {
         refs_buffer.clear();
@@ -1554,7 +1555,7 @@ impl RawCellsCache {
             }
         }
 
-        match db.cells.get(key.as_slice()) {
+        match db.cells.get(key.0.as_slice()) {
             Ok(value) => {
                 if let Some(value) = value
                     && let (rc, Some(value)) = refcount::decode_value_with_rc(&value)
@@ -1570,7 +1571,7 @@ impl RawCellsCache {
         }
     }
 
-    fn on_insert_cell(&self, key: &HashBytes, rc: i64, data: Option<&[u8]>) {
+    fn on_insert_cell(&self, key: &HashBytesKey, rc: i64, data: Option<&[u8]>) {
         match data {
             None => {
                 // NOTE: `get` here is used to affect a "hotness" of the value
@@ -1585,7 +1586,7 @@ impl RawCellsCache {
         }
     }
 
-    fn on_remove_cell(&self, key: &HashBytes, rc: i64) {
+    fn on_remove_cell(&self, key: &HashBytesKey, rc: i64) {
         let v = if rc <= 0 {
             debug_assert_eq!(rc, 0, "too many removed cells");
 
