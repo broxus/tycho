@@ -3884,6 +3884,7 @@ dependencies = [
  "bytes",
  "bytesize",
  "criterion",
+ "dashmap",
  "futures-util",
  "humantime",
  "indexmap",

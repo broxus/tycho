@@ -354,17 +354,14 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         self.queue
             .load_diff_statistics(partition, &statistics_range, &mut statistics)?;
 
-        let queue_statistics = QueueStatistics::with_statistics(statistics.clone());
-
         let mut diff_statistics = FastHashMap::default();
-        diff_statistics.insert(partition, queue_statistics.statistics().clone());
+        diff_statistics.insert(partition, statistics);
 
         let diff_statistics = DiffStatistics::new(
             block_id_short.shard,
             diff_info.min_message,
             diff_info.max_message,
             diff_statistics,
-            queue_statistics.shard_messages_count(),
         );
 
         let elapsed = start_time.elapsed();
