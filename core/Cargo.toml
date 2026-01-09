@@ -28,6 +28,7 @@ required-features = ["test"]
 [dependencies]
 ahash = { workspace = true }
 anyhow = { workspace = true }
+atomic-cuckoo-filter = "0.2"
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 bitflags = { workspace = true }

@@ -1044,10 +1044,12 @@ def storage() -> RowPanel:
         create_gauge_panel(
             "tycho_storage_cells_next_idx",
             "Cells next idx",
+            UNITS.SHORT,
         ),
         create_gauge_panel(
             "tycho_storage_cells_free_idx_len",
             "Cells free list len",
+            UNITS.SHORT,
         ),
         create_heatmap_quantile_panel(
             "tycho_storage_store_block_data_size",
@@ -1058,6 +1060,19 @@ def storage() -> RowPanel:
         create_heatmap_quantile_panel(
             "tycho_storage_cell_count",
             "Number of new cells from merkle update",
+            UNITS.SHORT,
+            quantile="0.999",
+        ),
+        create_heatmap_quantile_panel(
+            "tycho_storage_cells_write_batch_puts",
+            "Cells write batch puts",
+            UNITS.SHORT,
+            quantile="0.999",
+        ),
+        create_heatmap_quantile_panel(
+            "tycho_storage_cells_write_batch_deletes",
+            "Cells write batch deletes",
+            UNITS.SHORT,
             quantile="0.999",
         ),
         create_heatmap_panel(
