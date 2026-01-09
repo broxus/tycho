@@ -2,8 +2,20 @@ use std::io::{BufReader, Read};
 
 use crc32c::crc32c_append;
 use tycho_types::boc::BocTag;
-use tycho_types::cell::CellDescriptor;
+use tycho_types::cell::{CellDescriptor, HashBytes};
 use tycho_util::io::ByteOrderRead;
+
+use super::writer::FLAG_HAS_PARTS;
+use crate::storage::ShardStatePartInfo;
+
+struct ReadHeaderResult {
+    total_size: u64,
+    index_included: bool,
+    has_root_index: bool,
+    has_crc: bool,
+    has_parts: bool,
+    ref_size: usize,
+}
 
 pub struct ShardStateReader<R> {
     header: BriefBocHeader,
@@ -11,7 +23,51 @@ pub struct ShardStateReader<R> {
 }
 
 impl<R: Read> ShardStateReader<R> {
-    pub fn begin(mut reader: R) -> std::io::Result<Self> {
+    pub fn read_split_depth_only(mut reader: R) -> std::io::Result<u8> {
+        // first read header
+        let header = Self::read_header(&mut reader)?;
+
+        if !header.has_parts {
+            return Ok(0);
+        }
+
+        // skip offset_size
+        reader.read_byte()?;
+
+        // then read split depth
+        Self::read_split_depth(&mut reader)
+    }
+
+    pub fn read_part_info_only(mut reader: R) -> std::io::Result<ShardStatePartInfo> {
+        // first skip header
+        Self::read_header(&mut reader)?;
+
+        // skip offset_size
+        reader.read_byte()?;
+
+        // then read prefix and hash
+        Self::read_part_info(&mut reader)
+    }
+
+    fn read_split_depth(reader: &mut R) -> std::io::Result<u8> {
+        let split_depth = reader.read_byte()?;
+
+        Ok(split_depth)
+    }
+
+    fn read_part_info(reader: &mut R) -> std::io::Result<ShardStatePartInfo> {
+        // read prefix
+        let prefix = reader.read_be_uint(std::mem::size_of::<u64>())?;
+
+        // then read hash
+        let mut hash_buffer = [0u8; 32];
+        reader.read_exact(&mut hash_buffer)?;
+        let hash = HashBytes::from_slice(&hash_buffer);
+
+        Ok(ShardStatePartInfo { hash, prefix })
+    }
+
+    fn read_header(reader: &mut R) -> std::io::Result<ReadHeaderResult> {
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;
         let mut total_size = 4u64;
@@ -22,6 +78,7 @@ impl<R: Read> ShardStateReader<R> {
         let index_included;
         let mut has_root_index = false;
         let mut has_crc = false;
+        let mut has_parts = false;
         let ref_size;
 
         match BocTag::from_bytes(magic) {
@@ -38,10 +95,35 @@ impl<R: Read> ShardStateReader<R> {
                 has_root_index = true;
                 index_included = first_byte & 0b1000_0000 != 0;
                 has_crc = first_byte & 0b0100_0000 != 0;
+                has_parts = first_byte & FLAG_HAS_PARTS != 0;
                 ref_size = (first_byte & 0b0000_0111) as usize;
             }
             _ => return Err(parser_error("unknown BOC tag")),
         }
+
+        if ref_size == 0 || ref_size > 4 {
+            return Err(parser_error("ref size must be in range [1;4]"));
+        }
+
+        Ok(ReadHeaderResult {
+            total_size,
+            index_included,
+            has_root_index,
+            has_crc,
+            has_parts,
+            ref_size,
+        })
+    }
+
+    pub fn begin(mut reader: R, is_part: bool) -> std::io::Result<Self> {
+        let ReadHeaderResult {
+            mut total_size,
+            index_included,
+            has_root_index,
+            has_crc,
+            has_parts,
+            ref_size,
+        } = Self::read_header(&mut reader)?;
 
         let mut reader = CrcOptReader {
             checksum: has_crc.then_some(0),
@@ -50,15 +132,29 @@ impl<R: Read> ShardStateReader<R> {
             inner: reader,
         };
 
-        if ref_size == 0 || ref_size > 4 {
-            return Err(parser_error("ref size must be in range [1;4]"));
-        }
-
         let offset_size = reader.read_byte()? as u64;
         total_size += 1;
         if offset_size == 0 || offset_size > 8 {
             return Err(parser_error("offset size must be in range [1;8]"));
         }
+
+        // read split depth when reading main file with parts
+        let split_depth = if has_parts {
+            let split_depth = ShardStateReader::read_split_depth(&mut reader)?;
+            total_size += 1;
+            split_depth
+        } else {
+            0
+        };
+
+        // read part prefix and root hash when reading part file
+        let part_info = if is_part {
+            let info = ShardStateReader::read_part_info(&mut reader)?;
+            total_size += 40;
+            Some(info)
+        } else {
+            None
+        };
 
         let cell_count = reader.read_be_uint(ref_size)?;
         total_size += ref_size as u64;
@@ -132,6 +228,8 @@ impl<R: Read> ShardStateReader<R> {
             offset_size,
             cell_count,
             total_size,
+            split_depth,
+            part_info,
         };
 
         Ok(Self { header, reader })
@@ -205,6 +303,8 @@ pub struct BriefBocHeader {
     pub offset_size: u64,
     pub cell_count: u64,
     pub total_size: u64,
+    pub split_depth: u8,
+    pub part_info: Option<ShardStatePartInfo>,
 }
 
 type BufReaderWithCrc<R> = BufReader<CrcOptReader<R>>;

@@ -183,6 +183,14 @@ where
             if prefix_len > 0 {
                 builder.store_uint(shard.prefix() >> (64 - prefix_len), prefix_len)?;
             }
+            tracing::debug!(
+                depth,
+                %shard,
+                hash = ?dict.dict().root().as_ref().map(|c| c.repr_hash()),
+                left_shard = %left_shard_ident,
+                right_shard = %right_shard_ident,
+                "split_aug_dict step",
+            );
             dict.split_by_prefix(&builder.as_data_slice())?
         };
 
@@ -211,6 +219,15 @@ where
     K: DictKey,
     A: Default,
 {
+    let (dict, _) = dict.into_parts();
+    split_dict_raw(dict.into_root(), K::BITS, depth)
+}
+
+pub fn split_dict_raw(
+    dict: Option<Cell>,
+    key_bit_len: u16,
+    depth: u8,
+) -> Result<FastHashMap<HashBytes, Cell>, Error> {
     fn split_dict_impl(
         dict: Option<Cell>,
         key_bit_len: u16,
@@ -241,8 +258,69 @@ where
     let mut shards =
         FastHashMap::with_capacity_and_hasher(2usize.pow(depth as _), Default::default());
 
+    split_dict_impl(dict, key_bit_len, depth, &mut shards)?;
+
+    Ok(shards)
+}
+
+pub fn split_aug_dict_raw_by_shards<K, A, V>(
+    workchain: i32,
+    dict: AugDict<K, A, V>,
+    depth: u8,
+) -> Result<Vec<(ShardIdent, Option<Cell>)>, Error>
+where
+    K: DictKey,
+    A: Default,
+{
+    fn split_dict_impl(
+        shard: &ShardIdent,
+        dict: Option<Cell>,
+        key_bit_len: u16,
+        depth: u8,
+        shards: &mut Vec<(ShardIdent, Option<Cell>)>,
+    ) -> Result<(), Error> {
+        if depth == 0 {
+            shards.push((*shard, dict));
+            return Ok(());
+        }
+
+        let Some((left_shard, right_shard)) = shard.split() else {
+            shards.push((*shard, dict));
+            return Ok(());
+        };
+
+        let PartialSplitDict {
+            remaining_bit_len,
+            left_branch,
+            right_branch,
+        } = dict_split_raw(dict.as_ref(), key_bit_len, Cell::empty_context())?;
+
+        split_dict_impl(
+            &left_shard,
+            left_branch,
+            remaining_bit_len,
+            depth - 1,
+            shards,
+        )?;
+        split_dict_impl(
+            &right_shard,
+            right_branch,
+            remaining_bit_len,
+            depth - 1,
+            shards,
+        )
+    }
+
+    let mut shards = Vec::with_capacity(2usize.pow(depth as _));
+
     let (dict_root, _) = dict.into_parts();
-    split_dict_impl(dict_root.into_root(), K::BITS, depth, &mut shards)?;
+    split_dict_impl(
+        &ShardIdent::new_full(workchain),
+        dict_root.into_root(),
+        K::BITS,
+        depth,
+        &mut shards,
+    )?;
 
     Ok(shards)
 }
