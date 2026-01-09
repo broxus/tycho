@@ -116,7 +116,7 @@ impl Default for StatesGcConfig {
     fn default() -> Self {
         Self {
             random_offset: true,
-            interval: Duration::from_secs(60),
+            interval: Duration::from_secs(1),
         }
     }
 }
