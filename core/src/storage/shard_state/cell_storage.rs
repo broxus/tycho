@@ -8,7 +8,9 @@ use std::time::Duration;
 #[cfg(feature = "cells-metrics")]
 use std::time::Instant;
 
+use ahash::AHasher;
 use anyhow::{Context, Result};
+use atomic_cuckoo_filter::{CuckooFilter, CuckooFilterBuilder};
 use bumpalo::Bump;
 use bumpalo_herd::{Herd, Member};
 use bytesize::ByteSize;
@@ -29,6 +31,7 @@ pub struct CellStorage {
     cells_db: CellsDb,
     cells_cache: Arc<CellsIndex>,
     raw_cells_cache: Arc<RawCellsCache>,
+    present_filter: CuckooFilter<AHasher>,
     drop_interval: u32,
     counters: Vec<AtomicU64>,
     free_idx: SegQueue<u32>,
@@ -39,7 +42,8 @@ pub struct CellStorage {
 type CellsIndex = FastDashMap<HashBytes, CachedCell>;
 
 const CELL_INDEX_BYTES: usize = 4;
-const MAX_CELLS: u32 = 1 << 30;
+const MAX_CELLS: u32 = u32::MAX; // god bless us
+
 const PERSIST_DELAY: u64 = 64;
 const WHEEL_SIZE: usize = PERSIST_DELAY as usize;
 
@@ -210,10 +214,15 @@ impl CellStorage {
         let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
         let mut counters = Vec::with_capacity(MAX_CELLS as usize);
         counters.resize_with(MAX_CELLS as usize, || AtomicU64::new(0));
+        let present_filter = CuckooFilterBuilder::<AHasher>::default()
+            .capacity(MAX_CELLS as usize)
+            .build()
+            .expect("present filter configuration should be valid");
         let cell_storage = Arc::new(Self {
             cells_db,
             cells_cache,
             raw_cells_cache: raw_cells_cache.clone(),
+            present_filter,
             drop_interval,
             counters,
             free_idx: SegQueue::new(),
@@ -250,6 +259,11 @@ impl CellStorage {
             return Ok(());
         }
 
+        let batch_puts = promoted.len();
+        let batch_deletes = batch.len().saturating_sub(batch_puts);
+        metrics::histogram!("tycho_storage_cells_write_batch_puts").record(batch_puts as f64);
+        metrics::histogram!("tycho_storage_cells_write_batch_deletes").record(batch_deletes as f64);
+
         self.cells_db
             .rocksdb()
             .write_opt(batch, self.cells_db.cells.write_config())?;
@@ -262,8 +276,7 @@ impl CellStorage {
         metrics::gauge!("tycho_storage_cells_next_idx")
             .set(self.next_idx.load(Ordering::Acquire) as f64);
         metrics::gauge!("tycho_storage_cells_free_idx_len").set(self.free_idx.len() as f64);
-        metrics::gauge!("tycho_storage_pending_cells_map_len")
-            .set(self.pending.map.len() as f64);
+        metrics::gauge!("tycho_storage_pending_cells_map_len").set(self.pending.map.len() as f64);
 
         let mut wheel_len_sum = 0usize;
         let mut wheel_len_max = 0usize;
@@ -272,10 +285,8 @@ impl CellStorage {
             wheel_len_sum += len;
             wheel_len_max = wheel_len_max.max(len);
         }
-        metrics::gauge!("tycho_storage_pending_cells_wheel_len_sum")
-            .set(wheel_len_sum as f64);
-        metrics::gauge!("tycho_storage_pending_cells_wheel_len_max")
-            .set(wheel_len_max as f64);
+        metrics::gauge!("tycho_storage_pending_cells_wheel_len_sum").set(wheel_len_sum as f64);
+        metrics::gauge!("tycho_storage_pending_cells_wheel_len_max").set(wheel_len_max as f64);
     }
 
     fn alloc_idx(&self) -> Result<u32, CellStorageError> {
@@ -294,6 +305,16 @@ impl CellStorage {
             .map_err(|_| CellStorageError::IndexOverflow)
     }
 
+    fn insert_present_filter(&self, key: &HashBytes) {
+        if let Err(err) = self.present_filter.insert(key.as_slice()) {
+            panic!("cell presence filter full: {err:?}");
+        }
+    }
+
+    fn remove_present_filter(&self, key: &HashBytes) {
+        self.present_filter.remove(key.as_slice());
+    }
+
     fn get_idx_for_insert_with_pending(
         &self,
         key: &HashBytes,
@@ -301,6 +322,10 @@ impl CellStorage {
     ) -> Result<Option<u32>, CellStorageError> {
         if let Some(entry) = self.pending.map.get(key) {
             return Ok(Some(entry.item.header.header.idx));
+        }
+
+        if !self.present_filter.contains(key.as_slice()) {
+            return Ok(None);
         }
 
         self.raw_cells_cache
@@ -452,7 +477,7 @@ impl CellStorage {
                     }
                     hash_map::Entry::Vacant(entry) => {
                         if let Some(idx) =
-                            self.raw_cache.get_idx_for_insert(self.cells_db, key, 0)?
+                            self.cell_storage.get_idx_for_insert_with_pending(key, 0)?
                         {
                             entry.insert(TempCell {
                                 idx,
@@ -488,6 +513,9 @@ impl CellStorage {
 
             fn flush_new_cells(&mut self) -> Result<(), rocksdb::Error> {
                 if self.new_cell_count > 0 {
+                    metrics::histogram!("tycho_storage_cells_write_batch_puts")
+                        .record(self.new_cell_count as f64);
+                    metrics::histogram!("tycho_storage_cells_write_batch_deletes").record(0f64);
                     self.cells_db
                         .rocksdb()
                         .write(std::mem::take(&mut self.new_cells_batch))?;
@@ -501,6 +529,7 @@ impl CellStorage {
                     if item.is_new {
                         self.cell_storage.counters[item.idx as usize]
                             .store(u64::from(item.additions), Ordering::Release);
+                        self.cell_storage.insert_present_filter(&key);
                     } else {
                         self.cell_storage.counters[item.idx as usize]
                             .fetch_add(u64::from(item.additions), Ordering::Release);
@@ -775,6 +804,7 @@ impl CellStorage {
 
                         let cache = self.raw_cache;
                         let counters = &self.cell_storage.counters;
+                        let cell_storage = self.cell_storage;
                         s.spawn(move || {
                             for shard in shards {
                                 // SAFETY: `RawIter` will not outlibe the `RawTable`.
@@ -785,6 +815,7 @@ impl CellStorage {
                                     if let Some(data) = item.data {
                                         counters[item.idx as usize]
                                             .store(u64::from(item.additions), Ordering::Release);
+                                        cell_storage.insert_present_filter(key);
                                         cache.on_insert_cell(key, item.idx, Some(data));
                                     } else {
                                         counters[item.idx as usize]
@@ -897,6 +928,7 @@ impl CellStorage {
                             .buffer_new(*key, item.idx, data, born_round);
                         self.cell_storage.counters[item.idx as usize]
                             .store(u64::from(item.additions), Ordering::Release);
+                        self.cell_storage.insert_present_filter(key);
                         self.raw_cells_cache
                             .on_insert_cell(key, item.idx, Some(data));
                     } else {
@@ -1221,6 +1253,7 @@ impl CellStorage {
                         let counters = &self.cell_storage.counters;
                         let free_idx = &self.cell_storage.free_idx;
                         let pending = &self.cell_storage.pending;
+                        let cell_storage = self.cell_storage;
                         s.spawn(move || {
                             for shard in shards {
                                 // SAFETY: `RawIter` will not outlibe the `RawTable`.
@@ -1232,6 +1265,7 @@ impl CellStorage {
                                     let new_rc = item.old_rc - u64::from(item.removes);
                                     counters[item.idx as usize].store(new_rc, Ordering::Release);
                                     if new_rc == 0 {
+                                        cell_storage.remove_present_filter(key);
                                         cache.remove(key);
                                         free_idx.push(item.idx);
                                         if !item.on_disk {
@@ -1279,7 +1313,6 @@ impl CellStorage {
         Ok((total, batch, promoted))
     }
 
-    #[allow(unused)]
     pub fn remove_cell(
         &self,
         alloc: &Bump,
@@ -1349,6 +1382,7 @@ impl CellStorage {
             let new_rc = item.old_rc - u64::from(item.removes);
             self.counters[item.idx as usize].store(new_rc, Ordering::Release);
             if new_rc == 0 {
+                self.remove_present_filter(key);
                 if item.on_disk {
                     batch.delete_cf(cells_cf, key.as_slice());
                 }

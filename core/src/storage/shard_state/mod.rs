@@ -151,6 +151,7 @@ impl ShardStateStorage {
 
             let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
             let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
+            let mut batch_puts = 0usize;
 
             let in_mem_store = HistogramGuard::begin("tycho_storage_cell_in_mem_store_time_high");
 
@@ -175,12 +176,16 @@ impl ShardStateStorage {
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
             batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
+            batch_puts += 1;
 
             let hist = HistogramGuard::begin("tycho_storage_state_update_time_high");
             metrics::histogram!("tycho_storage_state_update_size_bytes")
                 .record(batch.size_in_bytes() as f64);
             metrics::histogram!("tycho_storage_state_update_size_predicted_bytes")
                 .record(estimated_update_size_bytes as f64);
+            metrics::histogram!("tycho_storage_cells_write_batch_puts").record(batch_puts as f64);
+            metrics::histogram!("tycho_storage_cells_write_batch_deletes")
+                .record(batch.len().saturating_sub(batch_puts) as f64);
 
             raw_db.write(batch)?;
 
@@ -339,10 +344,13 @@ impl ShardStateStorage {
 
             alloc.reset();
 
+            let start = Instant::now();
+            tracing::info!(%block_id, "removing state");
             let guard = {
                 let _h = HistogramGuard::begin("tycho_storage_cell_gc_lock_remove_time_high");
                 self.gc_lock.clone().lock_owned().await
             };
+            tracing::info!(%block_id, elapsed_sec = ?start.elapsed().as_secs_f64(), "got gc lock");
 
             let db = self.cells_db.clone();
             let cell_storage = self.cell_storage.clone();
@@ -368,6 +376,12 @@ impl ShardStateStorage {
                 in_mem_remove.finish();
 
                 batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
+                let batch_puts = promoted.len();
+                let batch_deletes = batch.len().saturating_sub(batch_puts);
+                metrics::histogram!("tycho_storage_cells_write_batch_puts")
+                    .record(batch_puts as f64);
+                metrics::histogram!("tycho_storage_cells_write_batch_deletes")
+                    .record(batch_deletes as f64);
                 db.raw()
                     .rocksdb()
                     .write_opt(batch, db.cells.write_config())?;
