@@ -617,10 +617,12 @@ mod test {
             // check that state actually exists
             let cell = cell_storage.load_cell(&HashBytes::from_slice(value[..32].as_ref()), 0)?;
 
-            let (_, batch) = cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
+            let (_, batch, promoted) =
+                cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
             // execute batch
             db.rocksdb().write_opt(batch, db.cells.write_config())?;
+            cell_storage.commit_pending_promoted(&promoted);
 
             tracing::info!("State deleted. Progress: {}/{total_states}", deleted + 1);
         }
@@ -727,10 +729,11 @@ mod test {
 
             traverse_cell((cell as Arc<DynCell>).as_ref());
 
-            let (res, batch) = cell_storage.remove_cell(&bump, &key)?;
+            let (res, batch, promoted) = cell_storage.remove_cell(&bump, &key)?;
             cells_db
                 .rocksdb()
                 .write_opt(batch, cells_db.cells.write_config())?;
+            cell_storage.commit_pending_promoted(&promoted);
             tracing::info!("Gc {id} of {total} done. Traversed: {res}",);
             bump.reset();
         }

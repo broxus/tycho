@@ -352,7 +352,7 @@ impl ShardStateStorage {
                 let in_mem_remove =
                     HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
 
-                let (stats, mut batch) = if block_id.is_masterchain() {
+                let (stats, mut batch, promoted) = if block_id.is_masterchain() {
                     cell_storage.remove_cell(alloc.get().as_bump(), &root_hash)?
                 } else {
                     // NOTE: We use epoch `0` here so that cells of old states
@@ -371,6 +371,7 @@ impl ShardStateStorage {
                 db.raw()
                     .rocksdb()
                     .write_opt(batch, db.cells.write_config())?;
+                cell_storage.commit_pending_promoted(&promoted);
 
                 // NOTE: Ensure that guard is dropped only after writing the batch.
                 drop(guard);

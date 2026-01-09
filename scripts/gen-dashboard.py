@@ -1003,18 +1003,8 @@ def storage() -> RowPanel:
         create_heatmap_panel(
             "tycho_storage_load_cell_time", "Time to load cell from storage"
         ),
-        create_counter_panel(
-            expr_sum_rate("tycho_storage_load_cell_time_count"),
-            "Number of load_cell calls",
-            UNITS.OPS_PER_SEC,
-        ),
         create_heatmap_panel(
             "tycho_storage_get_cell_from_rocksdb_time", "Time to load cell from RocksDB"
-        ),
-        create_counter_panel(
-            expr_sum_rate("tycho_storage_get_cell_from_rocksdb_time_count"),
-            "Number of cache missed cell loads",
-            UNITS.OPS_PER_SEC,
         ),
         timeseries_panel(
             title="Storage Cache Hit Rate",
@@ -1035,6 +1025,21 @@ def storage() -> RowPanel:
             "tycho_storage_raw_cells_cache_size",
             "Raw cells cache size",
             UNITS.BYTES_IEC,
+        ),
+        create_gauge_panel(
+            "tycho_storage_pending_cells_map_len",
+            "Pending cells map len",
+            UNITS.SHORT,
+        ),
+        create_gauge_panel(
+            "tycho_storage_pending_cells_wheel_len_sum",
+            "Pending cells wheel len sum",
+            UNITS.SHORT,
+        ),
+        create_gauge_panel(
+            "tycho_storage_pending_cells_wheel_len_max",
+            "Pending cells wheel len max",
+            UNITS.SHORT,
         ),
         create_gauge_panel(
             "tycho_storage_cells_next_idx",
@@ -1140,18 +1145,6 @@ def storage() -> RowPanel:
         create_gauge_panel(
             "tycho_storage_cells_tree_cache_size", "Cells tree cache size"
         ),
-        create_counter_panel(
-            "tycho_compaction_keeps", "Number of not deleted cells during compaction"
-        ),
-        create_counter_panel(
-            "tycho_compaction_removes", "Number of deleted cells during compaction"
-        ),
-        create_counter_panel(
-            "tycho_storage_state_gc_count", "number of deleted states during gc"
-        ),
-        create_counter_panel(
-            "tycho_storage_state_gc_cells_count", "number of deleted cells during gc"
-        ),
         create_heatmap_panel(
             "tycho_storage_state_gc_time_high", "time spent to gc single root"
         ),
@@ -1166,10 +1159,6 @@ def storage() -> RowPanel:
         create_heatmap_panel(
             "tycho_storage_load_block_data_time", "Time to load block data"
         ),
-        create_counter_panel(
-            "tycho_storage_load_block_data_time_count",
-            "Number of load_block_data calls",
-        ),
         create_percent_panel(
             "tycho_storage_block_cache_hit_total",
             "tycho_storage_load_block_total",
@@ -1177,6 +1166,38 @@ def storage() -> RowPanel:
         ),
     ]
     return create_row("Storage", metrics)
+
+
+def storage_counters() -> RowPanel:
+    metrics = [
+        create_counter_panel(
+            expr_sum_rate("tycho_storage_load_cell_time_count"),
+            "Number of load_cell calls",
+            UNITS.OPS_PER_SEC,
+        ),
+        create_counter_panel(
+            expr_sum_rate("tycho_storage_get_cell_from_rocksdb_time_count"),
+            "Number of cache missed cell loads",
+            UNITS.OPS_PER_SEC,
+        ),
+        create_counter_panel(
+            "tycho_compaction_keeps", "Number of not deleted cells during compaction"
+        ),
+        create_counter_panel(
+            "tycho_compaction_removes", "Number of deleted cells during compaction"
+        ),
+        create_counter_panel(
+            "tycho_storage_state_gc_count", "number of deleted states during gc"
+        ),
+        create_counter_panel(
+            "tycho_storage_state_gc_cells_count", "number of deleted cells during gc"
+        ),
+        create_counter_panel(
+            "tycho_storage_load_block_data_time_count",
+            "Number of load_block_data calls",
+        ),
+    ]
+    return create_row("Storage: counters", metrics)
 
 
 def jrpc() -> RowPanel:
@@ -3494,6 +3515,7 @@ dashboard = Dashboard(
         core_blockchain_rpc_general(),
         core_blockchain_rpc_per_method_stats(),
         storage(),
+        storage_counters(),
         collator_params_metrics(),
         collation_metrics(),
         collator_execution_metrics(),

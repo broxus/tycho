@@ -391,6 +391,9 @@ impl PersistentStateStorage {
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
+            let cell_storage = this.shard_states.cell_storage().clone();
+            cell_storage.flush_pending_all()?;
+
             let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
             match cell_writer.write(&root_hash, Some(&cancelled)) {
                 Ok(_) => {

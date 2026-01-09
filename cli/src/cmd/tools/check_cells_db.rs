@@ -85,7 +85,7 @@ impl Cmd {
 
                 tracing::info!(%block_id, total_states, "removing state");
 
-                let (removed_cells, local_batch) = if block_id.is_masterchain() {
+                let (removed_cells, local_batch, promoted) = if block_id.is_masterchain() {
                     drop(cell);
                     cell_storage.remove_cell(herd.get().as_bump(), &root_hash)?
                 } else {
@@ -101,6 +101,7 @@ impl Cmd {
                 cells_db
                     .rocksdb()
                     .write_opt(local_batch, cells_db.cells.write_config())?;
+                cell_storage.commit_pending_promoted(&promoted);
 
                 tracing::info!(%block_id, total_states, removed_cells, "removed state");
                 herd.reset();
