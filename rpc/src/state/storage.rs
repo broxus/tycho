@@ -38,7 +38,7 @@ impl BlacklistedAccounts {
         self.inner.accounts.store(Arc::new(items));
     }
 
-    fn load(&self) -> Arc<FastHashSet<AddressKey>> {
+    pub fn load(&self) -> Arc<FastHashSet<AddressKey>> {
         self.inner.accounts.load_full()
     }
 }
@@ -1093,6 +1093,7 @@ impl RpcStorage {
         mc_block_id: &BlockId,
         block: BlockStuff,
         rpc_blacklist: Option<&BlacklistedAccounts>,
+        subscriptions: &super::subscriptions::RpcSubscriptions,
     ) -> Result<()> {
         let Ok(workchain) = i8::try_from(block.id().shard.workchain()) else {
             return Ok(());
@@ -1114,7 +1115,7 @@ impl RpcStorage {
         let rpc_blacklist = rpc_blacklist.map(|x| x.load());
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
-        let start_lt = tokio::task::spawn_blocking(move || {
+        let (start_lt, updates) = tokio::task::spawn_blocking(move || {
             let prepare_batch_histogram =
                 HistogramGuard::begin("tycho_storage_rpc_prepare_batch_time");
 
@@ -1122,6 +1123,8 @@ impl RpcStorage {
 
             let info = block.load_info()?;
             let extra = block.load_extra()?;
+
+            let mut updates = Some(FastHashMap::default());
 
             let account_blocks = extra.account_blocks.load()?;
 
@@ -1288,6 +1291,13 @@ impl RpcStorage {
                         continue;
                     }
 
+                    if let Some(ref mut map) = updates {
+                        let entry = map.entry(account).or_insert(tx.lt);
+                        if tx.lt > *entry {
+                            *entry = tx.lt;
+                        }
+                    }
+
                     let tx_hash = tx_cell.inner().repr_hash();
                     let (tx_mask, msg_hash) = match &tx.in_msg {
                         Some(in_msg) => {
@@ -1374,7 +1384,19 @@ impl RpcStorage {
             db.rocksdb()
                 .write_opt(write_batch, db.transactions.write_config())?;
 
-            Ok::<_, anyhow::Error>(info.start_lt)
+            let updates = updates
+                .map(|map| {
+                    map.into_iter()
+                        .map(|(address, max_lt)| super::subscriptions::AccountUpdate {
+                            address: StdAddr::new(workchain, address),
+                            max_lt,
+                            gen_utime: info.gen_utime,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            Ok::<_, anyhow::Error>((info.start_lt, updates))
         })
         .await??;
 
@@ -1395,6 +1417,10 @@ impl RpcStorage {
                 // Update the value in the database.
                 self.db.state.insert(TX_MIN_LT, start_lt.to_le_bytes())?;
             }
+        }
+
+        if !updates.is_empty() {
+            subscriptions.fanout_updates(updates).await;
         }
 
         Ok(())
