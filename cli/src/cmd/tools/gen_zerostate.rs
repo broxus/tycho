@@ -795,6 +795,7 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
         payload_batch_bytes: (768 * 1024).try_into().unwrap(),
         commit_history_rounds: 20.try_into().unwrap(),
         deduplicate_rounds: 140,
+        _unused: 0,
         max_consensus_lag_rounds: 210.try_into().unwrap(),
         payload_buffer_bytes: (50 * 1024 * 1024).try_into().unwrap(),
         broadcast_retry_millis: 150.try_into().unwrap(),
