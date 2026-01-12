@@ -203,7 +203,7 @@ where
 
         let apply_in_mem = HistogramGuard::begin("tycho_core_apply_block_in_mem_time_high");
 
-        let new_state = rayon_run(move || update.par_apply(&prev_root, &split_at))
+        let result = rayon_run(move || update.par_apply_with_stats(&prev_root, &split_at))
             .await
             .context("Failed to apply state update")?;
 
@@ -211,12 +211,13 @@ where
 
         let state_storage = self.inner.storage.shard_state_storage();
 
-        let new_state = ShardStateStuff::from_root(block.id(), new_state, ref_mc_state_handle)
+        let new_state = ShardStateStuff::from_root(block.id(), result.cell, ref_mc_state_handle)
             .context("Failed to create new state")?;
 
         state_storage
             .store_state(handle, &new_state, StoreStateHint {
-                block_data_size: Some(block.data_size()),
+                block_data_size: block.data_size(),
+                new_cell_count: result.stats.new_cells_count,
                 is_top_block: Some(is_top_block),
             })
             .await

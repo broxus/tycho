@@ -1042,7 +1042,8 @@ impl CollatorStdImpl {
             let new_state_root = finalized.new_state_root.clone();
 
             let hint = StoreStateHint {
-                block_data_size: Some(finalized.block_candidate.block.data_size()),
+                block_data_size: finalized.block_candidate.block.data_size(),
+                new_cell_count: finalized.merkle_build.stats.new_cells_count,
                 is_top_block: None,
             };
 
@@ -1100,7 +1101,7 @@ impl CollatorStdImpl {
                 block_id,
                 finalized.new_observable_state,
                 finalized.new_state_root,
-                finalized.state_update,
+                finalized.merkle_build.update,
                 store_new_state_task,
                 new_queue_diff_hash,
                 new_mc_data,

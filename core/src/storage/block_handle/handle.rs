@@ -112,6 +112,13 @@ impl BlockHandle {
         self.inner.meta.flags().contains(BlockFlags::HAS_STATE)
     }
 
+    pub fn has_accumulated(&self) -> bool {
+        self.inner
+            .meta
+            .flags()
+            .contains(BlockFlags::HAS_ACCUMULATED)
+    }
+
     pub fn has_persistent_shard_state(&self) -> bool {
         self.inner
             .meta

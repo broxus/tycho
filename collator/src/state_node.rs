@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -106,7 +105,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
 pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, Arc<BlockStuffForSync>>>,
-    shard_blocks: Arc<FastDashMap<ShardIdent, BTreeMap<u32, ShardBlockData>>>,
+    shard_blocks: FastDashMap<ShardIdent, BTreeMap<u32, ShardBlockData>>,
     storage: CoreStorage,
     broadcaster: broadcast::Sender<BlockId>,
 
@@ -125,13 +124,12 @@ impl StateNodeAdapterStdImpl {
     ) -> Self {
         let (sync_context_tx, mut sync_context_rx) = watch::channel(initial_sync_context);
         let (broadcaster, _) = broadcast::channel(10000);
-        let shard_blocks = Arc::new(FastDashMap::default());
 
         let adapter = Self {
             listener,
             storage,
             blocks: Default::default(),
-            shard_blocks: shard_blocks.clone(),
+            shard_blocks: Default::default(),
             broadcaster,
             sync_context_tx,
             delayed_state_notifier: DelayedStateNotifier::default(),
@@ -139,33 +137,6 @@ impl StateNodeAdapterStdImpl {
         };
 
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Start watching for sync context updates");
-
-        tokio::spawn(async move {
-            // TODO: move into config
-            const TAIL_LEN: u32 = 100;
-            const INTERVAL: Duration = Duration::from_secs(10);
-
-            let mut interval = tokio::time::interval(INTERVAL);
-            loop {
-                interval.tick().await;
-
-                for mut specific_shard in shard_blocks.iter_mut() {
-                    let seqno_to_split = specific_shard
-                        .value()
-                        .last_key_value()
-                        .and_then(|(k, _)| k.checked_sub(TAIL_LEN));
-
-                    if let Some(seqno) = seqno_to_split {
-                        let retained_blocks = specific_shard.split_off(&seqno);
-
-                        let to_drop = std::mem::replace(&mut *specific_shard, retained_blocks);
-
-                        // Don't wait for drop inside a tokio context.
-                        Reclaimer::instance().drop(to_drop);
-                    }
-                }
-            }
-        });
 
         tokio::spawn({
             let listener = adapter.listener.clone();
@@ -210,9 +181,6 @@ impl StateNodeAdapterStdImpl {
 
 #[async_trait]
 impl StateNodeAdapter for StateNodeAdapterStdImpl {
-    fn zerostate_id(&self) -> &ZerostateId {
-        &self.zerostate_id
-    }
     fn load_last_applied_mc_block_id(&self) -> Result<BlockId> {
         let las_applied_mc_block_id = self
             .storage
@@ -230,90 +198,23 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
     async fn load_state(
         &self,
-        mut ref_by_mc_seqno: u32,
+        ref_by_mc_seqno: u32,
         block_id: &BlockId,
     ) -> Result<ShardStateStuff> {
         let _histogram = HistogramGuard::begin("tycho_collator_state_load_state_time");
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
 
-        let state = if block_id.is_masterchain() {
-            // load stored state
-            self.storage
-                .shard_state_storage()
-                .direct_load_state(ref_by_mc_seqno, block_id)
-                .await?
-        } else {
-            let mut chain = Vec::new();
-            let mut current_block_id = *block_id;
-
-            let store_state_step = self.storage.shard_state_storage().store_shard_state_step();
-
-            while !current_block_id.seqno.is_multiple_of(store_state_step)
-                || !self
-                    .storage
-                    .shard_state_storage()
-                    .is_state_exist(&current_block_id)?
-            {
-                let block = self
-                    .shard_blocks
+        let state = self
+            .storage
+            .shard_state_storage()
+            .load_state_with_cache(ref_by_mc_seqno, block_id, |current_block_id| {
+                self.shard_blocks
                     .get(&current_block_id.shard)
-                    .and_then(|shard_blocks| shard_blocks.get(&current_block_id.seqno).cloned());
-
-                let block = match block {
-                    Some(block) => block,
-                    None => {
-                        // Load from storage if not found in cache (required during restart in general)
-                        let handle = self
-                            .storage
-                            .block_handle_storage()
-                            .load_handle(block_id)
-                            .ok_or_else(|| anyhow!("block not found in storage {}", block_id))?;
-
-                        let block = self
-                            .storage
-                            .block_storage()
-                            .load_block_data(&handle)
-                            .await?;
-
-                        let (prev_id, prev_id_alt) = block.construct_prev_id()?;
-
-                        ShardBlockData {
-                            prev_id,
-                            ref_by_mc_seqno: handle.ref_by_mc_seqno(),
-                            _prev_id_alt: prev_id_alt,
-                            state_update: block.block().load_state_update()?,
-                        }
-                    }
-                };
-
-                chain.push((current_block_id, block.state_update.clone()));
-
-                current_block_id = block.prev_id;
-                ref_by_mc_seqno = ref_by_mc_seqno.min(block.ref_by_mc_seqno);
-            }
-
-            // load stored state
-            let mut state = self
-                .storage
-                .shard_state_storage()
-                .direct_load_state(ref_by_mc_seqno, &current_block_id)
-                .await?;
-
-            // Apply state updates
-            while let Some((block_id, merkle_update)) = chain.pop() {
-                let prev_block_id = *state.block_id();
-                state = rayon_run({
-                    move || state.par_make_next_state(&block_id, &merkle_update, Some(5))
-                })
-                .await
-                .with_context(|| {
-                    format!("failed to apply merkle of block {block_id} to {prev_block_id}")
-                })?;
-            }
-
-            state
-        };
+                    .and_then(|shard_blocks| shard_blocks.get(&current_block_id.seqno).cloned())
+                    .map(|block| (block.prev_id, block.ref_by_mc_seqno, block.state_update))
+            })
+            .await?;
 
         Ok(state)
     }
@@ -494,9 +395,23 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         let mut to_drop = Vec::new();
         for (shard, seqno) in &to_split {
-            if let Some(mut shard_blocks) = self.blocks.get_mut(shard) {
-                let retained_blocks = shard_blocks.split_off(seqno);
-                to_drop.push(std::mem::replace(&mut *shard_blocks, retained_blocks));
+            if let Some(mut blocks) = self.blocks.get_mut(shard) {
+                let retained = blocks.split_off(seqno);
+                to_drop.push(std::mem::replace(&mut *blocks, retained));
+            }
+        }
+
+        // Don't wait for drop inside a tokio context.
+        Reclaimer::instance().drop(to_drop);
+
+        let mut to_drop = Vec::new();
+        for (shard, seqno) in &to_split {
+            const SHARD_BLOCKS_BUFFER: u32 = 16; // TODO: depends on store_shard_state_step (use store_shard_state_step * 2)
+            let safe_seqno = seqno.saturating_sub(SHARD_BLOCKS_BUFFER);
+
+            if let Some(mut shard_blocks) = self.shard_blocks.get_mut(shard) {
+                let retained = shard_blocks.split_off(&safe_seqno);
+                to_drop.push(std::mem::replace(&mut *shard_blocks, retained));
             }
         }
 
@@ -535,6 +450,10 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
     fn load_init_block_id(&self) -> Option<BlockId> {
         self.storage.node_state().load_init_mc_block_id()
+    }
+
+    fn zerostate_id(&self) -> &ZerostateId {
+        &self.zerostate_id
     }
 }
 
