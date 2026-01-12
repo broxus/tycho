@@ -26,8 +26,14 @@ pub struct CoreStorageConfig {
 
     /// Store every Nth shard state to storage
     ///
-    /// Default: 2.
-    pub store_shard_state_step: u32,
+    /// Default: 5
+    pub store_shard_state_step: usize,
+
+    /// Maximum number of accumulated new cells before forcing state storage.
+    /// Prevents large state diffs that take too long to save.
+    ///
+    /// Default: `150_000` cells
+    pub max_accumulated_cells_threshold: usize,
 
     /// Archives storage config.
     ///
@@ -80,7 +86,8 @@ impl Default for CoreStorageConfig {
             cells_cache_size: ByteSize::mb(256),
             drop_interval: 3,
             store_archives: true,
-            store_shard_state_step: 2,
+            store_shard_state_step: 5,
+            max_accumulated_cells_threshold: 150_000,
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),

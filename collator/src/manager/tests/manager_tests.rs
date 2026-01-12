@@ -4386,7 +4386,6 @@ impl StateNodeAdapter for TestStateNodeAdapter {
     fn set_sync_context(&self, _sync_context: CollatorSyncContext) {
         unreachable!()
     }
-
     fn zerostate_id(&self) -> &ZerostateId {
         &self.zerostate_id
     }

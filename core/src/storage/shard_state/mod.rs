@@ -6,12 +6,12 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use bytesize::ByteSize;
 use tycho_block_util::block::*;
 use tycho_block_util::dict::split_aug_dict_raw;
 use tycho_block_util::state::*;
 use tycho_storage::fs::TempFileStorage;
 use tycho_storage::kv::StoredValue;
+use tycho_types::merkle::MerkleUpdate;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::mem::Reclaimer;
@@ -22,7 +22,9 @@ use weedb::rocksdb;
 
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
-use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb};
+use super::{
+    BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb, CoreStorageConfig,
+};
 
 mod cell_storage;
 mod entries_buffer;
@@ -40,9 +42,11 @@ pub struct ShardStateStorage {
     min_ref_mc_state: MinRefMcStateTracker,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
+    accumulated_new_cells: AtomicUsize,
 
     accounts_split_depth: u8,
-    store_shard_state_step: u32,
+    store_shard_state_step: usize,
+    max_accumulated_cells_threshold: usize,
 }
 
 impl ShardStateStorage {
@@ -52,11 +56,13 @@ impl ShardStateStorage {
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
         temp_file_storage: TempFileStorage,
-        cache_size_bytes: ByteSize,
-        drop_interval: u32,
-        store_shard_state_step: u32,
+        config: &CoreStorageConfig,
     ) -> Result<Arc<Self>> {
-        let cell_storage = CellStorage::new(cells_db.clone(), cache_size_bytes, drop_interval);
+        let cell_storage = CellStorage::new(
+            cells_db.clone(),
+            config.cells_cache_size,
+            config.drop_interval,
+        );
 
         Ok(Arc::new(Self {
             cells_db,
@@ -64,11 +70,13 @@ impl ShardStateStorage {
             block_storage,
             temp_file_storage,
             cell_storage,
-            store_shard_state_step,
+            store_shard_state_step: config.store_shard_state_step,
+            max_accumulated_cells_threshold: config.max_accumulated_cells_threshold,
             gc_lock: Default::default(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
+            accumulated_new_cells: AtomicUsize::new(0),
             accounts_split_depth: 5,
         }))
     }
@@ -137,12 +145,41 @@ impl ShardStateStorage {
             return Ok(false);
         }
 
-        let should_store = handle.is_masterchain()  // Store all masterchain states
-            || handle.id().seqno.is_multiple_of(self.store_shard_state_step) // Regular checkpoint
-            || hint.is_top_block == Some(true); // Top block
+        // TODO: what if the first block is seqno % store_shard_state_step != 0 (case of hardforks)
+        let mut should_store = handle.is_masterchain()
+            || hint.is_top_block == Some(true)
+            || handle
+                .id()
+                .seqno
+                .is_multiple_of(self.store_shard_state_step as u32);
+
+        if !should_store && !handle.has_accumulated() {
+            // Mark this block as accumulated to prevent double counting
+            let updated = handle.meta().add_flags(BlockFlags::HAS_ACCUMULATED);
+            if updated {
+                self.block_handle_storage.store_handle(handle, false);
+            }
+
+            let accumulated = self
+                .accumulated_new_cells
+                .fetch_add(hint.new_cell_count, Ordering::Release);
+
+            let new_total = accumulated.saturating_add(hint.new_cell_count);
+
+            if new_total >= self.max_accumulated_cells_threshold {
+                // Accumulated too many changes - need to store state
+                should_store = true;
+            }
+        }
 
         if !should_store {
             return Ok(false);
+        }
+
+        // Reset accumulator after storing shardchain state
+        // Masterchain blocks don't accumulate so we only reset for shardchain
+        if !handle.is_masterchain() {
+            self.accumulated_new_cells.store(0, Ordering::Release);
         }
 
         let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
@@ -283,33 +320,54 @@ impl ShardStateStorage {
 
     pub async fn load_state(
         &self,
-        mut ref_by_mc_seqno: u32,
+        ref_by_mc_seqno: u32,
         block_id: &BlockId,
     ) -> Result<ShardStateStuff> {
+        self.load_state_with_cache(ref_by_mc_seqno, block_id, |_| None)
+            .await
+    }
+
+    /// Loads state for specified block using an optional cache lookup.
+    pub async fn load_state_with_cache<F>(
+        &self,
+        mut ref_by_mc_seqno: u32,
+        block_id: &BlockId,
+        get_cached: F,
+    ) -> Result<ShardStateStuff>
+    where
+        F: Fn(&BlockId) -> Option<(BlockId, u32, MerkleUpdate)>,
+    {
         // Collect chain of state updates for non-masterchain blocks
         let mut chain = Vec::new();
         let mut current_block_id = *block_id;
 
         if !block_id.is_masterchain() {
-            while !current_block_id
-                .seqno
-                .is_multiple_of(self.store_shard_state_step)
-                || !self.is_state_exist(&current_block_id)?
-            {
-                let handle = self
-                    .block_handle_storage
-                    .load_handle(&current_block_id)
-                    .ok_or(ShardStateStorageError::BlockHandleNotFound(
-                        block_id.as_short_id(),
-                    ))?;
+            while !self.is_state_exist(&current_block_id)? {
+                match get_cached(&current_block_id) {
+                    // Try to get from cache first
+                    Some((prev_id, cached_ref_by_mc_seqno, state_update)) => {
+                        ref_by_mc_seqno = ref_by_mc_seqno.min(cached_ref_by_mc_seqno);
+                        chain.push((current_block_id, state_update));
+                        current_block_id = prev_id;
+                    }
+                    None => {
+                        // Fallback to storage
+                        let handle = self
+                            .block_handle_storage
+                            .load_handle(&current_block_id)
+                            .ok_or(ShardStateStorageError::BlockHandleNotFound(
+                                block_id.as_short_id(),
+                            ))?;
 
-                ref_by_mc_seqno = ref_by_mc_seqno.min(handle.meta().ref_by_mc_seqno());
+                        ref_by_mc_seqno = ref_by_mc_seqno.min(handle.meta().ref_by_mc_seqno());
 
-                let block = self.block_storage.load_block_data(&handle).await?;
-                chain.push((current_block_id, block.block().state_update.load()?));
+                        let block = self.block_storage.load_block_data(&handle).await?;
+                        chain.push((current_block_id, block.block().state_update.load()?));
 
-                let (prev_id, _prev_id_alt) = block.construct_prev_id()?;
-                current_block_id = prev_id; // TODO: split/merge case
+                        let (prev_id, _prev_id_alt) = block.construct_prev_id()?;
+                        current_block_id = prev_id; // TODO: split/merge case
+                    }
+                }
             }
         }
 
@@ -561,27 +619,20 @@ impl ShardStateStorage {
 
         Ok(iter.key().map(BlockId::from_slice))
     }
-
-    pub fn store_shard_state_step(&self) -> u32 {
-        self.store_shard_state_step
-    }
 }
 
 #[derive(Default, Debug, Clone, Copy)]
 pub struct StoreStateHint {
-    pub block_data_size: Option<usize>,
+    pub block_data_size: usize,
+    pub new_cell_count: usize,
     pub is_top_block: Option<bool>,
 }
 
 impl StoreStateHint {
     fn estimate_cell_count(&self) -> usize {
-        const MIN_BLOCK_SIZE: usize = 4 << 10; // 4 KB
-
-        let block_data_size = self.block_data_size.unwrap_or(MIN_BLOCK_SIZE);
-
         // y = 3889.9821 + 14.7480 × √x
         // R-squared: 0.7035
-        ((3889.9821 + 14.7480 * (block_data_size as f64).sqrt()) as usize).next_power_of_two()
+        ((3889.9821 + 14.7480 * (self.block_data_size as f64).sqrt()) as usize).next_power_of_two()
     }
 }
 

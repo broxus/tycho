@@ -380,7 +380,7 @@ impl Phase<FinalizeState> {
 
         let new_state_root;
         let total_validator_fees;
-        let (state_update, new_observable_state) = {
+        let (merkle_build_result, new_observable_state) = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time_high",
                 labels,
@@ -548,7 +548,7 @@ impl Phase<FinalizeState> {
             total_validator_fees = new_observable_state.total_validator_fees.clone();
 
             // calc merkle update
-            let merkle_update = create_merkle_update(
+            let merkle_update_result = create_merkle_update(
                 &shard,
                 self.state.prev_shard_data.pure_state_root(),
                 &new_state_root,
@@ -558,7 +558,7 @@ impl Phase<FinalizeState> {
             )?;
 
             self.extra.finalize_metrics.build_state_update_elapsed = histogram.finish();
-            (merkle_update, new_observable_state)
+            (merkle_update_result, new_observable_state)
         };
 
         let (new_block, new_block_extra, new_mc_block_extra) = {
@@ -619,7 +619,7 @@ impl Phase<FinalizeState> {
                 global_id: self.state.mc_data.global_id,
                 info: Lazy::new(&new_block_info)?,
                 value_flow: Lazy::new(&value_flow)?,
-                state_update: Lazy::new(&state_update)?,
+                state_update: Lazy::new(&merkle_build_result.update)?,
                 // do not use out msgs queue updates
                 out_msg_queue_updates: OutMsgQueueUpdates {
                     diff_hash: *queue_diff.hash(),
@@ -684,7 +684,7 @@ impl Phase<FinalizeState> {
                 mc_top_shards: self.state.collation_data.shards(),
                 mc_state_extra: mc_state_extra.as_ref(),
                 merkle_update_hash: new_block.block().state_update.repr_hash(),
-                merkle_update: &state_update,
+                merkle_update: &merkle_build_result.update,
                 block_extra: &new_block_extra,
                 mc_block_extra: new_mc_block_extra.as_ref(),
             },
@@ -774,7 +774,7 @@ impl Phase<FinalizeState> {
                 collation_data: self.state.collation_data,
                 block_candidate,
                 mc_data: new_mc_data,
-                state_update,
+                merkle_build: merkle_build_result,
                 new_state_root,
                 new_observable_state,
                 finalize_wu: self.extra.finalize_wu,
@@ -1519,7 +1519,7 @@ fn create_merkle_update(
     usage_tree: UsageTree,
     old_split_at: ahash::HashSet<HashBytes>,
     new_split_at: ahash::HashSet<HashBytes>,
-) -> Result<MerkleUpdate> {
+) -> Result<MerkleBuildResult> {
     let labels = [("workchain", shard_id.workchain().to_string())];
     let histogram =
         HistogramGuard::begin_with_labels("tycho_collator_create_merkle_update_time_high", &labels);
@@ -1527,7 +1527,7 @@ fn create_merkle_update(
     let merkle_update_builder =
         MerkleUpdate::create(old_state_root.as_ref(), new_state_root.as_ref(), usage_tree);
 
-    let state_update = merkle_update_builder.par_build(old_split_at, new_split_at)?;
+    let state_update = merkle_update_builder.par_build_with_stats(old_split_at, new_split_at)?;
 
     let elapsed = histogram.finish();
 
