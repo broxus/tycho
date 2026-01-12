@@ -4217,7 +4217,7 @@ dependencies = [
 [[package]]
 name = "tycho-types"
 version = "0.3.1"
-source = "git+https://github.com/broxus/tycho-types.git?rev=9ab6af16b7e3597fa111a96a3c107018eab6856c#9ab6af16b7e3597fa111a96a3c107018eab6856c"
+source = "git+https://github.com/broxus/tycho-types.git?rev=863f612fc7f0ccd1fb2c2cd0a13747f92b3cadcc#863f612fc7f0ccd1fb2c2cd0a13747f92b3cadcc"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4248,7 +4248,7 @@ dependencies = [
 [[package]]
 name = "tycho-types-abi-proc"
 version = "0.3.0"
-source = "git+https://github.com/broxus/tycho-types.git?rev=9ab6af16b7e3597fa111a96a3c107018eab6856c#9ab6af16b7e3597fa111a96a3c107018eab6856c"
+source = "git+https://github.com/broxus/tycho-types.git?rev=863f612fc7f0ccd1fb2c2cd0a13747f92b3cadcc#863f612fc7f0ccd1fb2c2cd0a13747f92b3cadcc"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -4259,7 +4259,7 @@ dependencies = [
 [[package]]
 name = "tycho-types-proc"
 version = "0.3.0"
-source = "git+https://github.com/broxus/tycho-types.git?rev=9ab6af16b7e3597fa111a96a3c107018eab6856c#9ab6af16b7e3597fa111a96a3c107018eab6856c"
+source = "git+https://github.com/broxus/tycho-types.git?rev=863f612fc7f0ccd1fb2c2cd0a13747f92b3cadcc#863f612fc7f0ccd1fb2c2cd0a13747f92b3cadcc"
 dependencies = [
  "proc-macro2",
  "quote",
