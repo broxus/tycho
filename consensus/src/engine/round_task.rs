@@ -72,7 +72,7 @@ impl RoundTaskReady {
                 responder: net.responder.clone(),
                 downloader,
             },
-            collector: Collector::new(consensus_round.receiver()),
+            collector: Collector::new(consensus_round.receiver(), bind.top_known_anchor.receiver()),
             last_own_point: None,
             prev_broadcast: None,
         }

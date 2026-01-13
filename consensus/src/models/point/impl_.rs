@@ -196,11 +196,10 @@ impl Point {
 }
 
 #[cfg(test)]
-#[allow(dead_code, reason = "false positives")]
 pub mod test_point {
 
     use bytes::Bytes;
-    use rand::RngCore;
+    use rand::prelude::IndexedRandom;
     use tycho_crypto::ed25519::SecretKey;
     use tycho_util::FastHashMap;
 
@@ -212,9 +211,7 @@ pub mod test_point {
     pub const MSG_BYTES: usize = 64 * 1024;
 
     pub fn new_key_pair() -> KeyPair {
-        let mut secret_bytes: [u8; 32] = [0; 32];
-        rand::rng().fill_bytes(&mut secret_bytes);
-        KeyPair::from(&SecretKey::from_bytes(secret_bytes))
+        KeyPair::from(&SecretKey::from_bytes(rand::random()))
     }
 
     pub fn payload(conf: &MempoolConfig) -> Vec<Bytes> {
@@ -222,63 +219,66 @@ pub mod test_point {
         let mut payload = Vec::with_capacity(msg_count);
         let mut bytes = vec![0; MSG_BYTES];
         for _ in 0..msg_count {
-            rand::rng().fill_bytes(bytes.as_mut_slice());
+            bytes.fill_with(rand::random);
             payload.push(Bytes::copy_from_slice(&bytes));
         }
         payload
     }
 
     pub fn prev_point_data() -> (Digest, Vec<(PeerId, Signature)>) {
-        let mut buf = [0; Digest::MAX_TL_BYTES];
-        rand::rng().fill_bytes(&mut buf);
-        let digest = Digest::wrap(&buf);
+        let digest = Digest::random();
         let mut evidence = Vec::with_capacity(PEERS);
         for _ in 0..PEERS {
             let key_pair = new_key_pair();
-            let sig = Signature::new(&key_pair, digest);
+            let sig = Signature::new(&key_pair, &digest);
             let peer_id = PeerId::from(key_pair.public_key);
             evidence.push((peer_id, sig));
         }
-        (*digest, evidence)
+        (digest, evidence)
     }
 
     pub fn point(key_pair: &KeyPair, payload: &[Bytes], conf: &MempoolConfig) -> Point {
-        let prev_digest = Digest::new(&[42]);
-        let mut includes = FastHashMap::default();
-        includes.insert(PeerId::from(key_pair.public_key), prev_digest);
-        let mut evidence = FastHashMap::default();
-        let mut buf = [0; Digest::MAX_TL_BYTES];
-        for i in 0..PEERS {
-            let key_pair = new_key_pair();
-            let peer_id = PeerId::from(key_pair.public_key);
-            if i > 0 {
-                rand::rng().fill_bytes(&mut buf);
-                includes.insert(peer_id, *Digest::wrap(&buf));
-            }
-            evidence.insert(peer_id, Signature::new(&key_pair, &prev_digest));
-        }
         let author = PeerId::from(key_pair.public_key);
+        let peers: [KeyPair; PEERS - 1] = std::array::from_fn(|_| new_key_pair());
+
+        let one_of_peers = || PeerId::from(peers.choose(&mut rand::rng()).unwrap().public_key);
+
+        let mut includes = FastHashMap::default();
+        let mut evidence = FastHashMap::default();
+
+        let prev_digest = Digest::random();
+        includes.insert(author, prev_digest);
+
+        for peer_kp in &peers {
+            let peer_id = PeerId::from(peer_kp.public_key);
+            includes.insert(peer_id, Digest::random());
+            evidence.insert(peer_id, Signature::new(peer_kp, &prev_digest));
+        }
+
         let round = Round(rand::random_range(10..u32::MAX - 10));
         let anchor_time = UnixTime::now();
-        let data = PointData {
-            time: anchor_time.next(),
-            includes,
-            witness: FastHashMap::from_iter([
-                (PeerId([1; 32]), Digest::new(&[1])),
-                (PeerId([2; 32]), Digest::new(&[2])),
-            ]),
-            evidence,
-            anchor_trigger: Link::Direct(Through::Witness(PeerId([1; 32]))),
-            anchor_proof: Link::Indirect {
-                to: PointId {
-                    author: PeerId([122; 32]),
-                    round: round - 6_u32,
-                    digest: Digest::new(&[2]),
-                },
-                path: Through::Witness(PeerId([2; 32])),
+
+        let indirect_link = |round: Round| Link::Indirect {
+            to: PointId {
+                author: PeerId(rand::random()),
+                round,
+                digest: Digest::random(),
             },
+            path: Through::Includes(one_of_peers()),
+        };
+
+        let data = PointData {
+            includes,
+            witness: FastHashMap::from_iter(std::array::from_fn::<_, { PEERS / 3 }, _>(|_| {
+                (PeerId(rand::random()), Digest::random())
+            })),
+            evidence,
+            anchor_trigger: indirect_link(round - 7_u32),
+            anchor_proof: indirect_link(round - 6_u32),
+            time: anchor_time.next(),
             anchor_time,
         };
+
         Point::new(key_pair, author, round, payload, data, conf)
     }
 }

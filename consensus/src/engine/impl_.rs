@@ -87,7 +87,7 @@ impl Engine {
             &net.peer_schedule,
             &round_ctx,
         );
-        let committer_run = CommitterTask::new(committer, conf);
+        let committer_run = CommitterTask::new(committer, &bind.top_known_anchor, conf);
 
         let init_task = engine_ctx.task().spawn_blocking({
             let store = store.clone();
@@ -175,7 +175,7 @@ impl Engine {
                 &self.round_task.state.peer_schedule,
                 &round_ctx,
             );
-            _ = committer.drop_upto(
+            committer.drop_upto(
                 (top_known_anchor - conf.consensus.replay_anchor_rounds()).max(conf.genesis_round),
                 conf,
             );
@@ -261,12 +261,16 @@ impl Engine {
                 (last.info().round().next(), Some((last, prev)))
             }
         };
+
+        let committer = self.committer_run.ready_mut().await?.expect("ready");
         (self.dag).fill_to_top(
             new_top_round,
-            Some(self.committer_run.ready_mut().await?.expect("ready")),
+            Some(committer),
             &self.round_task.state.peer_schedule,
             &round_ctx,
         );
+        // don't notify collator of new bottom: it requests TKA or later, and we've handled genesis
+        committer.full_history_bottom_reset();
 
         self.round_task.state.consensus_round.set_max(new_top_round);
 
@@ -361,8 +365,6 @@ impl Engine {
         );
         let db_clean_task: Task<Never> = self.db_cleaner.run(&round_ctx);
 
-        // Boxed for just not to move a Copy to other thread by mistake
-        let mut full_history_bottom: Box<Option<Round>> = Box::new(None);
         let mut is_paused = true;
         loop {
             let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
@@ -411,11 +413,8 @@ impl Engine {
                     Ok(pause_at) => next_round.min(pause_at),
                     Err(collator_sync) => {
                         collator_sync.await?;
-                        let committer_update = self.committer_run.update_task(
-                            full_history_bottom.take(),
-                            self.anchors_tx.clone(),
-                            &round_ctx,
-                        );
+                        let committer_update =
+                            self.committer_run.update_task(&self.anchors_tx, &round_ctx);
                         committer_update.await?;
                         continue;
                     }
@@ -427,12 +426,12 @@ impl Engine {
 
                 round_ctx = RoundCtx::new(&self.ctx, dag_top_round.prev());
 
-                *full_history_bottom = full_history_bottom.or(self.dag.fill_to_top(
+                self.dag.fill_to_top(
                     dag_top_round,
                     self.committer_run.ready_mut().await?,
                     &self.round_task.state.peer_schedule,
                     &round_ctx,
-                ));
+                );
 
                 assert!(
                     dag_top_round <= next_round,
@@ -461,11 +460,7 @@ impl Engine {
             loop {
                 tokio::select! {
                     _ = self.committer_run.interval.tick() => {
-                        self.committer_run.update_task(
-                            full_history_bottom.take(),
-                            self.anchors_tx.clone(),
-                            &round_ctx,
-                        ).await?;
+                        self.committer_run.update_task(&self.anchors_tx, &round_ctx).await?;
                     },
                     round_task = &mut round_task_run => {
                         self.round_task = round_task?;
