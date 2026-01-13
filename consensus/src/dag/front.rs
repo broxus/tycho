@@ -66,7 +66,7 @@ impl DagFront {
         committer: Option<&mut Committer>,
         peer_schedule: &PeerSchedule,
         round_ctx: &RoundCtx,
-    ) -> Option<Round> {
+    ) {
         let _span = round_ctx.span().enter();
         let conf = round_ctx.conf();
 
@@ -97,27 +97,22 @@ impl DagFront {
             self.rounds.push(top.new_next(peer_schedule, conf));
         }
 
-        let mut new_full_history_bottom = None;
         if let Some(committer) = committer {
             if self.has_pending_back_reset {
                 self.has_pending_back_reset = false;
                 *committer = Committer::default();
-                let full_history_bottom =
-                    committer.init(self.rounds.first().expect("must be init"), conf);
+                committer.init(self.rounds.first().expect("must be init"), conf);
                 assert_eq!(
                     self.last_back_bottom,
                     committer.bottom_round(),
                     "committer botom after init does not match"
                 );
-                new_full_history_bottom = Some(full_history_bottom);
             }
             committer
                 .extend_from_ahead(&self.drain_upto(new_top - conf.consensus.min_front_rounds()));
             committer.extend_from_ahead(&self.rounds);
             EngineCtx::meter_dag_len(committer.dag_len());
         }
-
-        new_full_history_bottom
     }
 
     fn drain_upto(&mut self, new_bottom_round: Round) -> Vec<DagRound> {
