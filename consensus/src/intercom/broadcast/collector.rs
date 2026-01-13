@@ -7,7 +7,7 @@ use tokio::time::MissedTickBehavior;
 use crate::dag::{DagHead, DagRound};
 use crate::dyn_event;
 use crate::effects::{CollectCtx, Ctx, TaskResult};
-use crate::engine::round_watch::{Consensus, RoundWatcher};
+use crate::engine::round_watch::{Consensus, RoundWatcher, TopKnownAnchor};
 use crate::intercom::BroadcasterSignal;
 use crate::models::Round;
 
@@ -22,11 +22,18 @@ pub struct CollectorStatus {
 
 pub struct Collector {
     consensus_round: RoundWatcher<Consensus>,
+    top_known_anchor: RoundWatcher<TopKnownAnchor>,
 }
 
 impl Collector {
-    pub fn new(consensus_round: RoundWatcher<Consensus>) -> Self {
-        Self { consensus_round }
+    pub fn new(
+        consensus_round: RoundWatcher<Consensus>,
+        top_known_anchor: RoundWatcher<TopKnownAnchor>,
+    ) -> Self {
+        Self {
+            consensus_round,
+            top_known_anchor,
+        }
     }
 
     /// to run collector without broadcaster, send Ok to `bcaster_signal`
@@ -37,8 +44,8 @@ impl Collector {
         status: watch::Sender<CollectorStatus>,
         bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> TaskResult<Self> {
-        let mut task = CollectorTask {
-            consensus_round: self.consensus_round,
+        let task = CollectorTask {
+            parent: self,
             ctx,
             current_dag_round: head.current().clone(),
             next_round: head.next().round(),
@@ -47,17 +54,15 @@ impl Collector {
             is_bcaster_ready_ok: false,
         };
 
-        task.run(bcaster_signal).await?;
+        let this = task.run(bcaster_signal).await?;
 
         metrics::counter!("tycho_mempool_collected_broadcasts_count")
             .increment(head.current().threshold().count().total() as u64);
-        Ok(Self {
-            consensus_round: task.consensus_round,
-        })
+        Ok(this)
     }
 }
 struct CollectorTask {
-    consensus_round: RoundWatcher<Consensus>,
+    parent: Collector,
     // for node running @ r+0:
     ctx: CollectCtx,
 
@@ -74,9 +79,9 @@ impl CollectorTask {
     /// includes @ r+0 must include own point @ r+0 iff the one is produced
     /// returns includes for our point at the next round
     async fn run(
-        &mut self,
+        mut self,
         mut bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
-    ) -> TaskResult<()> {
+    ) -> TaskResult<Collector> {
         let mut retry_interval = tokio::time::interval(Duration::from_millis(
             self.ctx.conf().consensus.broadcast_retry_millis.get() as _,
         ));
@@ -120,15 +125,22 @@ impl CollectorTask {
                     }
                 },
                 // very frequent event that may seldom cause completion
-                consensus_round = self.consensus_round.next() => {
-                    if self.match_consensus(consensus_round?).is_err() {
+                consensus_round = self.parent.consensus_round.next() => {
+                    let tka = self.parent.top_known_anchor.get();
+                    if self.match_watched_rounds(consensus_round?, tka).is_err() {
+                        break;
+                    }
+                },
+                tka = self.parent.top_known_anchor.next() => {
+                    let consensus_round = self.parent.consensus_round.get();
+                    if self.match_watched_rounds(consensus_round, tka?).is_err() {
                         break;
                     }
                 },
                 else => unreachable!("unhandled match arm in Collector tokio::select"),
             }
         }
-        Ok(())
+        Ok(self.parent)
     }
 
     fn should_fail(&mut self, signal: BroadcasterSignal) -> bool {
@@ -161,7 +173,11 @@ impl CollectorTask {
         result
     }
 
-    fn match_consensus(&self, consensus_round: Round) -> Result<(), ()> {
+    fn match_watched_rounds(
+        &self,
+        consensus_round: Round,
+        top_known_anchor: Round,
+    ) -> Result<(), ()> {
         #[allow(clippy::match_same_arms, reason = "comments")]
         let should_fail = match consensus_round.cmp(&self.next_round) {
             // we're too late, consensus moved forward
@@ -171,6 +187,13 @@ impl CollectorTask {
             // we are among the fastest nodes of consensus
             cmp::Ordering::Less => false,
         };
+
+        let new_pause_at = {
+            let pause_at =
+                top_known_anchor + self.ctx.conf().consensus.max_consensus_lag_rounds.get();
+            (self.next_round < consensus_round.min(pause_at)).then_some(pause_at.0)
+        };
+
         let level = if should_fail {
             tracing::Level::INFO
         } else {
@@ -179,8 +202,11 @@ impl CollectorTask {
         dyn_event!(
             parent: self.ctx.span(),
             level,
-            round = consensus_round.0,
-            "from bcast filter",
+            consensus_round = consensus_round.0,
+            top_known_anchor = top_known_anchor.0,
+            new_pause_at,
+            %should_fail,
+            "collector match rounds",
         );
         if should_fail { Err(()) } else { Ok(()) }
     }

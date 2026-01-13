@@ -4,10 +4,12 @@ use std::time::Duration;
 use itertools::Itertools;
 use tokio::sync::mpsc;
 use tokio::time::Interval;
+use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{Committer, HistoryConflict};
 use crate::effects::{AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task};
 use crate::engine::lifecycle::EngineError;
+use crate::engine::round_watch::{RoundWatch, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, EngineResult, MempoolConfig, NodeConfig};
 use crate::models::{
     AnchorData, MempoolOutput, MempoolPeerStats, MempoolStatsMergeError, MempoolStatsOutput,
@@ -17,6 +19,7 @@ use crate::models::{
 pub struct CommitterTask {
     inner: Inner,
     pub interval: Interval,
+    top_known_anchor: RoundWatch<TopKnownAnchor>,
 }
 
 enum Inner {
@@ -26,7 +29,11 @@ enum Inner {
 }
 
 impl CommitterTask {
-    pub fn new(committer: Committer, conf: &MempoolConfig) -> Self {
+    pub fn new(
+        committer: Committer,
+        top_known_anchor: &RoundWatch<TopKnownAnchor>,
+        conf: &MempoolConfig,
+    ) -> Self {
         let mut interval = tokio::time::interval(Duration::from_millis(
             conf.consensus.broadcast_retry_millis.get() as _,
         ));
@@ -35,6 +42,7 @@ impl CommitterTask {
         Self {
             inner: Inner::Ready(Box::new(committer)),
             interval,
+            top_known_anchor: top_known_anchor.clone(),
         }
     }
 
@@ -50,14 +58,15 @@ impl CommitterTask {
 
     pub async fn update_task(
         &mut self,
-        full_history_bottom: Option<Round>,
-        anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
+        anchors_tx: &mpsc::UnboundedSender<MempoolOutput>,
         round_ctx: &RoundCtx,
     ) -> EngineResult<()> {
         let Some(committer) = self.inner.take_ready().await? else {
             return Ok(());
         };
-        self.inner = Inner::running(committer, full_history_bottom, anchors_tx, round_ctx);
+        let tka = self.top_known_anchor.get();
+        let anchors_tx = anchors_tx.clone();
+        self.inner = Inner::running(committer, tka, anchors_tx, round_ctx);
         Ok(())
     }
 }
@@ -80,7 +89,7 @@ impl Inner {
 
     fn running(
         mut committer: Box<Committer>,
-        mut full_history_bottom: Option<Round>,
+        top_known_anchor: Round,
         anchors_tx: mpsc::UnboundedSender<MempoolOutput>,
         round_ctx: &RoundCtx,
     ) -> Self {
@@ -88,21 +97,31 @@ impl Inner {
         let round_ctx = round_ctx.clone();
         let task = move || {
             // may run for long several times in a row and commit nothing, because of missed points
+            let _guard = HistogramGuard::begin("tycho_mempool_engine_commit_time");
             let _span = round_ctx.span().enter();
 
+            let top_round = committer.top_round();
             let start_bottom = committer.bottom_round().0;
             let start_dag_len = committer.dag_len();
+
+            let rounds_drop_allowed = |conflict_at: Round| {
+                // reset and replay offsets both include 2 additional rounds just to be dropped
+                let to_reset =
+                    (top_round - conflict_at.0).0 > round_ctx.conf().consensus.reset_rounds() - 2;
+                let min_dag_len =
+                    (top_round - conflict_at.0).0 > round_ctx.conf().consensus.min_front_rounds();
+                let replay_since =
+                    top_known_anchor - (round_ctx.conf().consensus.replay_anchor_rounds() - 2);
+                to_reset || (min_dag_len && conflict_at < replay_since)
+            };
 
             let mut attempt = 0;
             let committed = loop {
                 attempt += 1;
-                let is_dropping =
-                    committer.dag_len() > round_ctx.conf().consensus.min_front_rounds() as _;
-                match committer.commit(round_ctx.conf()) {
+                match committer.commit(round_ctx.conf())? {
                     Ok(data) => break Some(data),
-                    Err(HistoryConflict(round)) if is_dropping => {
-                        let result = committer.drop_upto(round.next(), round_ctx.conf());
-                        full_history_bottom = Some(result.unwrap_or_else(|x| x));
+                    Err(HistoryConflict(round)) if rounds_drop_allowed(round) => {
+                        let dropped_ok = committer.drop_upto(round.next(), round_ctx.conf());
                         tracing::info!(
                             start_bottom,
                             start_dag_len,
@@ -111,7 +130,7 @@ impl Inner {
                             attempt,
                             "comitter rounds were dropped as impossible to sync"
                         );
-                        if result.is_err() {
+                        if !dropped_ok {
                             break None; // dropped all except top round
                         } else if attempt > start_dag_len {
                             panic!(
@@ -137,7 +156,7 @@ impl Inner {
                 }
             };
 
-            if let Some(new_bottom) = full_history_bottom {
+            if let Some(new_bottom) = committer.full_history_bottom_reset() {
                 anchors_tx
                     .send(MempoolOutput::NewStartAfterGap(new_bottom))
                     .map_err(|_closed| Cancelled())?;
