@@ -15,8 +15,8 @@ use crate::effects::{Ctx, EngineCtx, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
 use crate::models::{
-    AnchorLink, AnchorStageRole, Cert, Digest, IndirectLink, PeerCount, Point, PointData, PointId,
-    Round, Signature, Through, UnixTime,
+    AnchorLink, AnchorStageRole, Cert, ChainedAnchorProof, Digest, IndirectLink, PeerCount, Point,
+    PointData, PointId, Round, Signature, Through, UnixTime,
 };
 use crate::storage::MempoolStore;
 
@@ -208,6 +208,15 @@ fn point<const PEER_COUNT: usize>(
         AnchorStageRole::Trigger,
     );
 
+    let chained_anchor_proof = if anchor_proof == AnchorLink::ToSelf {
+        ChainedAnchorProof::Chained(IndirectLink {
+            to: *last_proof,
+            path: Through::Includes(peers[idx].0),
+        })
+    } else {
+        ChainedAnchorProof::Inapplicable
+    };
+
     let anchor_time = if anchor_proof == AnchorLink::ToSelf {
         max_prev_time
     } else {
@@ -224,6 +233,7 @@ fn point<const PEER_COUNT: usize>(
             includes: includes.clone(),
             witness: Default::default(),
             evidence,
+            chained_anchor_proof,
             anchor_trigger,
             anchor_proof,
             anchor_time,

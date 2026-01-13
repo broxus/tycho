@@ -9,6 +9,7 @@ use tycho_network::PeerId;
 use tycho_types::models::ConsensusConfig;
 use tycho_util::metrics::HistogramGuard;
 
+use crate::dag::AnchorStage;
 use crate::engine::MempoolConfig;
 use crate::models::point::proto_utils::{PointBodyWrite, PointRawRead, PointRead, PointWrite};
 use crate::models::point::{Digest, PointData, Signature};
@@ -31,6 +32,8 @@ pub enum StructureIssue {
     AuthorInMap(PointMap),
     #[error("bad {0:?} link through {1:?} map")]
     Link(AnchorStageRole, PointMap),
+    #[error("bad chained proof through {0:?} map")]
+    ChainedProof(PointMap),
     #[error("Evidence map contains bad signature")]
     EvidenceSig,
 }
@@ -127,12 +130,23 @@ impl Point {
     }
 
     pub fn from_bytes(serialized: Vec<u8>) -> Result<Self, TlError> {
+        const ROUND_RANGE: std::ops::Range<Round> = {
+            let min = AnchorStage::align_genesis(0);
+            let max = Round(u32::MAX - min.0);
+            min..max
+        };
+
         let slice = &mut &serialized[..];
         let read = PointRead::read_from(slice)?;
 
-        let payload_len = u32::try_from(read.body.payload.len()).unwrap_or(u32::MAX);
+        if !ROUND_RANGE.contains(&read.body.round) {
+            return Err(TlError::InvalidData);
+        }
+
+        let payload_len = u32::try_from(read.body.payload.len()).or(Err(TlError::InvalidData))?;
+
         let payload_bytes = u32::try_from(read.body.payload.iter().fold(0, |acc, b| acc + b.len()))
-            .unwrap_or(u32::MAX);
+            .or(Err(TlError::InvalidData))?;
 
         let id = PointId {
             digest: read.digest,
@@ -205,7 +219,9 @@ pub mod test_point {
     use tycho_util::FastHashMap;
 
     use super::*;
-    use crate::models::{AnchorLink, IndirectLink, PointId, Round, Through, UnixTime};
+    use crate::models::{
+        AnchorLink, ChainedAnchorProof, IndirectLink, PointId, Round, Through, UnixTime,
+    };
 
     pub const PEERS: usize = 100;
 
@@ -274,6 +290,7 @@ pub mod test_point {
                 (PeerId(rand::random()), Digest::random())
             })),
             evidence,
+            chained_anchor_proof: ChainedAnchorProof::Chained(indirect_link(round - 8_u32)),
             anchor_trigger: AnchorLink::Indirect(indirect_link(round - 7_u32)),
             anchor_proof: AnchorLink::Indirect(indirect_link(round - 6_u32)),
             time: anchor_time.next(),
