@@ -7,6 +7,7 @@ consensus.pointData
     evidence:(vector consensus.peerSignaturePair)
     anchor_trigger:point.Link
     anchor_proof:point.Link
+    chained_anchor_proof:consensus.chainedAnchorProof
     time:int
     anchor_time:int
     = consensus.PointData;
@@ -74,6 +75,12 @@ consensus.indirectLink
     to:consensus.pointId
     path:link.through
     = consensus.IndirectLink;
+
+/**
+* Representation of Anchor Proof Chain
+*/
+point.chainedAnchorProof.inapplicable                               = point.ChainedAnchorProof;
+point.chainedAnchorProof.chained       x:consensus.indirectLink     = point.ChainedAnchorProof;
 
 /*
 * Representation of DownloadResponse
