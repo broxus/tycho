@@ -77,6 +77,9 @@ pub enum IllFormedReason {
     AnchorTime,
     #[error("anchor stage role {0:?}")]
     SelfAnchorStage(AnchorStageRole),
+    /// `false` for "must NOT have used chained proof"
+    #[error("must{} have used chained proof", .0.then_some("").unwrap_or(" not"))]
+    ChainedProofMustUse(bool),
     // Errors below are thrown from `validate()` because they require DagRound
     #[error("self link")]
     SelfLink,
@@ -109,6 +112,10 @@ pub enum InvalidReason {
     NewerAnchorInDependency((AnchorStageRole, PointId)),
     #[error("anchor {:?} link leads to other destination through {:?}", .0.0, .0.1.alt())]
     AnchorLinkBadPath((AnchorStageRole, PointId)),
+    #[error("chained proof link leads to other destination through {:?}", .0.alt())]
+    ChainedProofBadPath(PointId),
+    #[error("newer proof to chain in dependency {:?}", .0.alt())]
+    NewerProofToChainInDependency(PointId),
     #[error("dependency ill-formed {:?}: {}", .0.0.alt(), .0.1)]
     DepIllFormed((PointId, IllFormedReason)),
     #[error("dependency not found {:?}", .0.alt())]
@@ -399,7 +406,7 @@ impl Verifier {
         let anchor_proof_id = info.anchor_id(AnchorStageRole::Proof);
         let anchor_trigger_through = info.anchor_link_through(AnchorStageRole::Trigger);
         let anchor_proof_through = info.anchor_link_through(AnchorStageRole::Proof);
-
+        let chained_proof_to_through = info.chained_proof_to_through();
         let max_allowed_dep_time =
             info.time() + UnixTime::from_millis(conf.consensus.clock_skew_millis.get() as _);
 
@@ -496,6 +503,19 @@ impl Verifier {
                 if dep.anchor_time() != info.anchor_time() {
                     // anchor candidate's time is not inherited from its proof
                     invalid_reason = Some(InvalidReason::AnchorTimeNotInheritedFromProof(dep_id));
+                }
+            }
+
+            // "chained" and "proof through" branches are mutually exclusive
+            // because point struct allows "chained" value only if "proof through"==Link::ToSelf
+
+            if let Some((&to, through)) = chained_proof_to_through {
+                let dep_anchor_proof_id = dep.anchor_id(AnchorStageRole::Proof);
+                if dep_id == through && dep_anchor_proof_id != to {
+                    invalid_reason = Some(InvalidReason::ChainedProofBadPath(dep_id));
+                }
+                if dep_anchor_proof_id.round > to.round {
+                    invalid_reason = Some(InvalidReason::NewerProofToChainInDependency(dep_id));
                 }
             }
         }
@@ -742,6 +762,9 @@ impl Verifier {
             if info.anchor_trigger() != &Link::ToSelf {
                 return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Trigger));
             }
+            if info.chained_anchor_proof().is_some() {
+                return Some(IllFormedReason::ChainedProofMustUse(false));
+            }
             if info.time() != info.anchor_time() {
                 return Some(IllFormedReason::AnchorTime);
             }
@@ -758,6 +781,10 @@ impl Verifier {
                 if info.anchor_trigger() == &Link::ToSelf {
                     return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Trigger));
                 }
+            }
+            let must_use_chained_proof = info.anchor_proof() == &Link::ToSelf;
+            if info.chained_anchor_proof().is_some() != must_use_chained_proof {
+                return Some(IllFormedReason::ChainedProofMustUse(must_use_chained_proof));
             }
             if info.time() <= info.anchor_time() {
                 // point time must be greater than anchor time

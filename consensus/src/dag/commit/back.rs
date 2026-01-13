@@ -198,44 +198,13 @@ impl DagBack {
                 ),
             }
 
-            let proof = Self::ready_valid_point(
-                proof_dag_round,
-                &last_proof.author,
-                &last_proof.digest,
-                "anchor proof",
-            )?
-            .info()
-            .clone();
+            let proof =
+                Self::chained_proof(proof_dag_round, &last_proof.author, &last_proof.digest)?;
 
-            let Some(anchor_id) = proof.prev_id() else {
-                last_proof = proof.anchor_id(AnchorStageRole::Proof);
-                if last_proof.round <= bottom_round {
-                    return Ok(last_proof.round);
-                }
-                continue;
-            };
-
-            let Some((_, anchor_dag_round)) = rev_iter.next() else {
-                return Ok(proof.round());
-            };
-
-            assert_eq!(
-                anchor_dag_round.round(),
-                anchor_id.round,
-                "{} is not contiguous: iter skipped anchor round",
-                self.alt(),
-            );
-
-            let anchor = Self::ready_valid_point(
-                anchor_dag_round,
-                &anchor_id.author,
-                &anchor_id.digest,
-                "anchor candidate",
-            )?
-            .info()
-            .clone();
-
-            last_proof = anchor.anchor_id(AnchorStageRole::Proof);
+            last_proof = proof
+                .chained_anchor_proof()
+                .expect("verify() is broken: anchor proof doesn't have a chained one")
+                .to;
 
             if last_proof.round <= bottom_round {
                 return Ok(last_proof.round);
@@ -320,18 +289,20 @@ impl DagBack {
                     lookup_proof_id.alt()
                 ),
             }
-            let proof = Self::ready_valid_point(
+
+            let proof = Self::chained_proof(
                 proof_dag_round,
                 &lookup_proof_id.author,
                 &lookup_proof_id.digest,
-                "anchor proof",
-            )?
-            .info()
-            .clone();
+            )?;
+
+            lookup_proof_id = proof
+                .chained_anchor_proof()
+                .expect("verify() is broken: anchor proof doesn't have a chained one")
+                .to;
 
             let Some(anchor_id) = proof.prev_id() else {
-                lookup_proof_id = proof.anchor_id(AnchorStageRole::Proof);
-                continue;
+                panic!("validate() is broken: anchor proof doesn't have a prev point");
             };
 
             let Some((_, anchor_dag_round)) = rev_iter.next() else {
@@ -365,7 +336,6 @@ impl DagBack {
             {
                 direct_trigger = Some(trigger.clone());
             }
-            lookup_proof_id = anchor.anchor_id(AnchorStageRole::Proof);
 
             // iter is from newest to oldest, restore historical order
             result.push_front(EnqueuedAnchor {
@@ -500,7 +470,24 @@ impl DagBack {
             .unwrap_or(Err(SyncError::TryLater))
     }
 
-    // needed only in commit where all points are validated and stored in DAG
+    fn chained_proof(
+        dag_round: &DagRound,
+        author: &PeerId,
+        digest: &Digest,
+    ) -> Result<PointInfo, SyncError> {
+        let proof = Self::ready_valid_point(dag_round, author, digest, "chained anchor proof")?
+            .info()
+            .clone();
+
+        assert_eq!(
+            proof.anchor_proof(),
+            &Link::ToSelf,
+            "validate() is broken: skipped anchor proofs are not allowed in proof chain"
+        );
+
+        Ok(proof)
+    }
+
     /// returns only valid point (panics on invalid); `None` if not ready yet
     fn ready_valid_point(
         dag_round: &DagRound,

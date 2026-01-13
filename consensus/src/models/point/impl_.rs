@@ -31,6 +31,8 @@ pub enum StructureIssue {
     AuthorInMap(PointMap),
     #[error("bad {0:?} link through {1:?} map")]
     Link(AnchorStageRole, PointMap),
+    #[error("bad chained proof through {0:?} map")]
+    ChainedProof(PointMap),
     #[error("Evidence map contains bad signature")]
     EvidenceSig,
 }
@@ -205,7 +207,9 @@ pub mod test_point {
     use tycho_util::FastHashMap;
 
     use super::*;
-    use crate::models::{IndirectLink, Link, PointId, Round, Through, UnixTime};
+    use crate::models::{
+        ChainedAnchorProof, IndirectLink, Link, PointId, Round, Through, UnixTime,
+    };
 
     pub const PEERS: usize = 100;
 
@@ -274,6 +278,7 @@ pub mod test_point {
                 (PeerId(rand::random()), Digest::random())
             })),
             evidence,
+            chained_anchor_proof: ChainedAnchorProof::Chained(indirect_link(round - 8_u32)),
             anchor_trigger: Link::Indirect(indirect_link(round - 7_u32)),
             anchor_proof: Link::Indirect(indirect_link(round - 6_u32)),
             time: anchor_time.next(),
