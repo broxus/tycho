@@ -11,9 +11,9 @@ use rand::prelude::SliceRandom;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+use crate::dag::DagRound;
 use crate::dag::commit::SyncError;
 use crate::dag::commit::anchor_chain::EnqueuedAnchor;
-use crate::dag::{DagRound, HistoryConflict};
 use crate::effects::{AltFmt, AltFormat, Cancelled};
 use crate::engine::MempoolConfig;
 use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PointInfo, Round, ValidPoint};
@@ -133,7 +133,7 @@ impl DagBack {
     pub(super) fn triggers(
         &self,
         range: RangeInclusive<Round>,
-    ) -> Result<VecDeque<PointInfo>, HistoryConflict> {
+    ) -> Result<VecDeque<PointInfo>, SyncError> {
         let mut triggers = VecDeque::new();
 
         if range.is_empty() {
@@ -156,7 +156,7 @@ impl DagBack {
                     triggers.push_front(trigger.info().clone());
                 }
                 Err(SyncError::TryLater) => {} // skip
-                Err(SyncError::HistoryConflict(round)) => return Err(HistoryConflict(round)),
+                Err(immediate) => return Err(immediate),
             }
         }
         // tracing::warn!("dag length {} all_triggers: {string}", self.rounds.len());
@@ -493,16 +493,12 @@ impl DagBack {
                     .filter_map(|version| version.clone().now_or_never())
                     .map(|task_result| match task_result {
                         Ok(dag_point) => Ok(dag_point),
-                        Err(Cancelled()) => Err(SyncError::TryLater),
+                        Err(Cancelled()) => Err(SyncError::Cancelled),
                     })
                     // take any suitable
                     .filter_map_ok(move |dag_point| match dag_point {
                         DagPoint::Valid(valid) => {
-                            if valid.info().anchor_trigger() == &Link::ToSelf {
-                                Some(Ok(valid))
-                            } else {
-                                None
-                            }
+                            (valid.info().anchor_trigger() == &Link::ToSelf).then_some(Ok(valid))
                         }
                         not_valid if not_valid.is_certified() => {
                             Some(Err(SyncError::HistoryConflict(dag_round.round())))
@@ -512,7 +508,7 @@ impl DagBack {
                         }
                     })
                     .flatten()
-                    .find_or_first(|result| result.is_ok())
+                    .next()
             })
             .flatten()
             .unwrap_or(Err(SyncError::TryLater))
@@ -526,17 +522,12 @@ impl DagBack {
         digest: &Digest,
         point_kind: &'static str,
     ) -> Result<ValidPoint, SyncError> {
-        let Some(dag_point_result) = dag_round
+        let dag_point = dag_round
             .view(author, |loc| loc.versions.get(digest).cloned()) // not yet created
             .flatten()
             .and_then(|p| p.now_or_never())
-        else {
-            return Err(SyncError::TryLater);
-        }; // not yet resolved;
-        let dag_point = match dag_point_result {
-            Ok(dag_point) => dag_point,
-            Err(Cancelled()) => return Err(SyncError::TryLater),
-        };
+            .transpose()? // cancelled
+            .ok_or(SyncError::TryLater)?; // not yet resolved
         match dag_point {
             DagPoint::Valid(valid) => Ok(valid),
             not_valid if not_valid.is_certified() => {

@@ -36,13 +36,18 @@ impl Digest {
         Self(blake3::hash(bytes).into())
     }
 
-    pub fn wrap(bytes: &[u8; 32]) -> &Self {
-        // SAFETY: `[u8; 32]` has the same layout as `Digest`
-        unsafe { &*(bytes as *const [u8; 32]).cast::<Self>() }
+    #[cfg(any(test, feature = "test"))]
+    pub fn random() -> Self {
+        Self(rand::random())
     }
 
     pub fn inner(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    fn wrap(bytes: &[u8; 32]) -> &Self {
+        // SAFETY: `[u8; 32]` has the same layout as `Digest`
+        unsafe { &*(bytes as *const [u8; 32]).cast::<Self>() }
     }
 }
 
@@ -72,12 +77,12 @@ impl Signature {
 
     pub(super) const ZERO: Self = Self([0; 64]);
 
-    pub(super) fn inner(&self) -> &[u8; 64] {
-        &self.0
-    }
-
     pub fn new(local_keypair: &KeyPair, digest: &Digest) -> Self {
         Self(local_keypair.sign_raw(digest.0.as_slice()))
+    }
+
+    pub(super) fn inner(&self) -> &[u8; 64] {
+        &self.0
     }
 
     pub fn verifies(&self, signer: &PeerId, digest: &Digest) -> bool {
