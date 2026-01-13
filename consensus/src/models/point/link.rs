@@ -22,6 +22,19 @@ impl AnchorLink {
 }
 
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
+#[tl(boxed, scheme = "proto.tl")]
+pub enum ChainedAnchorProof {
+    #[tl(id = "consensus.chainedAnchorProof.inapplicable")]
+    Inapplicable,
+    #[tl(id = "consensus.chainedAnchorProof.chained")]
+    Chained(IndirectLink),
+}
+
+impl ChainedAnchorProof {
+    pub const MAX_TL_BYTES: usize = 4 + IndirectLink::MAX_TL_BYTES;
+}
+
+#[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
 #[tl(boxed, id = "consensus.link.indirect", scheme = "proto.tl")]
 pub struct IndirectLink {
     pub to: PointId,

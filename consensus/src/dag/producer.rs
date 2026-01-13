@@ -5,8 +5,8 @@ use crate::dag::{DagHead, DagRound};
 use crate::effects::{AltFormat, RoundCtx};
 use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
-    AnchorLink, AnchorStageRole, Digest, IndirectLink, PeerCount, Point, PointData, PointInfo,
-    Round, Signature, Through, UnixTime,
+    AnchorLink, AnchorStageRole, ChainedAnchorProof, Digest, IndirectLink, PeerCount, Point,
+    PointData, PointInfo, Round, Signature, Through, UnixTime,
 };
 
 pub struct LastOwnPoint {
@@ -86,6 +86,8 @@ impl Producer {
                 && last_own_point.is_some_and(|prev| prev.includes.contains_key(&local_id)),
             AnchorStageRole::Trigger,
         );
+        let chained_anchor_proof =
+            Self::chained_anchor_proof(current_round, &includes, &witness, &anchor_proof);
 
         let payload = input_buffer.fetch(last_own_point.as_ref().is_none_or(|last| {
             // it's not necessary to resend external messages from previous round
@@ -131,6 +133,7 @@ impl Producer {
                 includes,
                 witness,
                 evidence,
+                chained_anchor_proof,
                 anchor_trigger,
                 anchor_proof,
                 anchor_time,
@@ -240,6 +243,47 @@ impl Producer {
             to: wit_info.anchor_id(link_field),
             path: Through::Witness(*wit_info.author()),
         })
+    }
+
+    fn chained_anchor_proof(
+        current_round: &DagRound,
+        includes: &[PointInfo],
+        witness: &[PointInfo],
+        anchor_proof: &AnchorLink,
+    ) -> ChainedAnchorProof {
+        use AnchorStageRole::Proof;
+
+        if anchor_proof != &AnchorLink::ToSelf {
+            return ChainedAnchorProof::Inapplicable;
+        }
+
+        let incl_info = includes
+            .iter()
+            .max_by_key(|point| point.anchor_round(Proof))
+            .expect("non-empty list of includes for own point");
+
+        let newer_witness = witness
+            .iter()
+            .max_by_key(|wit_info| wit_info.anchor_round(Proof))
+            .filter(|wit_info| wit_info.anchor_round(Proof) > incl_info.anchor_round(Proof));
+
+        let indirect = match newer_witness {
+            None => IndirectLink {
+                to: incl_info.anchor_id(Proof),
+                path: Through::Includes(*incl_info.author()),
+            },
+            Some(wit_info) => IndirectLink {
+                to: wit_info.anchor_id(Proof),
+                path: Through::Witness(*wit_info.author()),
+            },
+        };
+
+        assert!(
+            indirect.to.round < current_round.round().prev().prev(),
+            "chained anchor proof cannot be a direct link"
+        );
+
+        ChainedAnchorProof::Chained(indirect)
     }
 
     fn get_time(

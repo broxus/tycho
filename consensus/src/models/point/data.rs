@@ -45,6 +45,8 @@ pub struct PointData {
     /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
     #[tl(with = "signatures_map")]
     pub evidence: FastHashMap<PeerId, Signature>,
+    /// every anchor proof has a link to previous anchor proof
+    pub chained_anchor_proof: ChainedAnchorProof,
     /// last included by author; defines author's last committed anchor
     pub anchor_trigger: AnchorLink,
     /// last included by author; maintains anchor chain linked without explicit DAG traverse
@@ -63,7 +65,10 @@ impl PointData {
                 + (PeerId::MAX_TL_BYTES + Signature::MAX_TL_BYTES)) // signatures map
             + 3 * proto_utils::MAP_LEN_BYTES; // maps lengths
 
-        4 + max_possible_maps + 2 * AnchorLink::MAX_TL_BYTES + 2 * UnixTime::MAX_TL_BYTES
+        4 + max_possible_maps
+            + ChainedAnchorProof::MAX_TL_BYTES
+            + 2 * AnchorLink::MAX_TL_BYTES
+            + 2 * UnixTime::MAX_TL_BYTES
     };
 
     /// counterpart of [`crate::dag::Verifier::verify`] that must be called earlier,
@@ -78,6 +83,7 @@ impl PointData {
         // also cannot witness own point
         .or((self.witness.contains_key(author)).then_some(PointMap::Witness))
         .map(StructureIssue::AuthorInMap)
+        .or(self.chained_proof_error(round))
         .map_or(Ok(()), Err)?;
         for role in [AnchorStageRole::Proof, AnchorStageRole::Trigger] {
             self.link_error(role, round)
@@ -85,6 +91,15 @@ impl PointData {
                 .map_or(Ok(()), Err)?;
         }
         Ok(())
+    }
+
+    fn chained_proof_error(&self, round: Round) -> Option<StructureIssue> {
+        match &self.chained_anchor_proof {
+            ChainedAnchorProof::Inapplicable => None,
+            ChainedAnchorProof::Chained(indirect) => {
+                (self.indirect_link_error(indirect, round)).map(StructureIssue::ChainedProof)
+            }
+        }
     }
 
     fn link_error(&self, link_field: AnchorStageRole, round: Round) -> Option<PointMap> {
@@ -157,7 +172,7 @@ impl PointData {
         Some(point_id)
     }
 
-    fn through_id(&self, through: &Through, round: Round) -> Option<PointId> {
+    pub(super) fn through_id(&self, through: &Through, round: Round) -> Option<PointId> {
         let (map, author, round) = match through {
             Through::Includes(peer) => (&self.includes, *peer, round.prev()),
             Through::Witness(peer) => (&self.witness, *peer, round.prev().prev()),
