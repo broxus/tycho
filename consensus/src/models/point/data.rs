@@ -1,7 +1,10 @@
+use std::fmt::{Display, Formatter};
+
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+use crate::effects::{AltFmt, AltFormat};
 use crate::models::point::proto_utils::{digests_map, signatures_map};
 use crate::models::point::{Digest, Round, UnixTime, proto_utils};
 use crate::models::{AnchorStageRole, PeerCount, PointKey, PointMap, Signature, StructureIssue};
@@ -185,5 +188,17 @@ impl PointData {
                 .get(&author)
                 .expect("Coding error: usage of ill-formed point"),
         })
+    }
+}
+
+impl AltFormat for Through {}
+impl Display for AltFmt<'_, Through> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let inner = AltFormat::unpack(self);
+        let (map, peer_id) = match inner {
+            Through::Witness(peer_id) => (PointMap::Witness, peer_id),
+            Through::Includes(peer_id) => (PointMap::Includes, peer_id),
+        };
+        write!(f, "through {map:?} {}", peer_id.alt())
     }
 }
