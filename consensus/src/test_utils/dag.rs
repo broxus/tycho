@@ -15,8 +15,8 @@ use crate::effects::{Ctx, EngineCtx, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
 use crate::models::{
-    AnchorStageRole, Cert, Digest, Link, PeerCount, Point, PointData, PointId, Round, Signature,
-    Through, UnixTime,
+    AnchorStageRole, Cert, Digest, IndirectLink, Link, PeerCount, Point, PointData, PointId, Round,
+    Signature, Through, UnixTime,
 };
 use crate::storage::MempoolStore;
 
@@ -245,10 +245,10 @@ fn point_anchor_link(
             if last_same_stage_point.round == round.prev() {
                 Link::Direct(Through::Includes(last_same_stage_point.author))
             } else {
-                Link::Indirect {
+                Link::Indirect(IndirectLink {
                     to: *last_same_stage_point,
                     path: Through::Includes(peer),
-                }
+                })
             }
         }
     }

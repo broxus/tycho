@@ -56,6 +56,17 @@ pub struct PointData {
 }
 
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
+#[tl(boxed, id = "consensus.indirectLink", scheme = "proto.tl")]
+pub struct IndirectLink {
+    pub to: PointId,
+    pub path: Through,
+}
+
+impl IndirectLink {
+    pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + Through::MAX_TL_BYTES;
+}
+
+#[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum Link {
     #[tl(id = "point.link.to_self")]
@@ -63,11 +74,11 @@ pub enum Link {
     #[tl(id = "point.link.direct")]
     Direct(Through),
     #[tl(id = "point.link.indirect")]
-    Indirect { to: PointId, path: Through },
+    Indirect(IndirectLink),
 }
 
 impl Link {
-    pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + 4 + PeerId::MAX_TL_BYTES;
+    pub const MAX_TL_BYTES: usize = 4 + IndirectLink::MAX_TL_BYTES;
 }
 
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
@@ -77,6 +88,9 @@ pub enum Through {
     Witness(PeerId),
     #[tl(id = "link.through.includes")]
     Includes(PeerId),
+}
+impl Through {
+    pub const MAX_TL_BYTES: usize = 4 + PeerId::MAX_TL_BYTES;
 }
 
 impl PointData {
@@ -120,15 +134,18 @@ impl PointData {
             Link::Direct(Through::Witness(peer)) => {
                 (!self.witness.contains_key(peer)).then_some(PointMap::Witness)
             }
-            Link::Indirect {
-                path: Through::Includes(peer),
-                to,
-            } => (!self.includes.contains_key(peer) || to.round.next() >= round)
+            Link::Indirect(indirect) => self.indirect_link_error(indirect, round),
+        }
+    }
+
+    fn indirect_link_error(&self, indirect: &IndirectLink, round: Round) -> Option<PointMap> {
+        let IndirectLink { to, path } = indirect;
+        match path {
+            Through::Includes(peer) => (!self.includes.contains_key(peer)
+                || to.round.next() >= round)
                 .then_some(PointMap::Includes),
-            Link::Indirect {
-                path: Through::Witness(peer),
-                to,
-            } => (!self.witness.contains_key(peer) || to.round.next().next() >= round)
+            Through::Witness(peer) => (!self.witness.contains_key(peer)
+                || to.round.next().next() >= round)
                 .then_some(PointMap::Witness),
         }
     }
@@ -148,7 +165,7 @@ impl PointData {
             Link::ToSelf => round,
             Link::Direct(Through::Includes(_)) => round.prev(),
             Link::Direct(Through::Witness(_)) => round.prev().prev(),
-            Link::Indirect { to, .. } => to.round,
+            Link::Indirect(IndirectLink { to, .. }) => to.round,
         }
     }
 
@@ -156,7 +173,7 @@ impl PointData {
     /// resulting None should be replaced with id of wrapping point
     pub(super) fn anchor_id(&self, link_field: AnchorStageRole, round: Round) -> Option<PointId> {
         match self.anchor_link(link_field) {
-            Link::Indirect { to, .. } => Some(*to),
+            Link::Indirect(IndirectLink { to, .. }) => Some(*to),
             _direct => self.anchor_link_id(link_field, round),
         }
     }
@@ -171,15 +188,15 @@ impl PointData {
         let (map, author, round) = match self.anchor_link(link_field) {
             Link::ToSelf => return None,
             Link::Direct(Through::Includes(peer))
-            | Link::Indirect {
+            | Link::Indirect(IndirectLink {
                 path: Through::Includes(peer),
                 ..
-            } => (&self.includes, *peer, round.prev()),
+            }) => (&self.includes, *peer, round.prev()),
             Link::Direct(Through::Witness(peer))
-            | Link::Indirect {
+            | Link::Indirect(IndirectLink {
                 path: Through::Witness(peer),
                 ..
-            } => (&self.witness, *peer, round.prev().prev()),
+            }) => (&self.witness, *peer, round.prev().prev()),
         };
         Some(PointId {
             author,
@@ -200,5 +217,49 @@ impl Display for AltFmt<'_, Through> {
             Through::Includes(peer_id) => (PointMap::Includes, peer_id),
         };
         write!(f, "through {map:?} {}", peer_id.alt())
+    }
+}
+
+#[cfg(any(test, feature = "test"))]
+impl PointId {
+    pub fn random() -> Self {
+        Self {
+            author: PeerId(rand::random()),
+            round: Round(rand::random()),
+            digest: Digest::random(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test"))]
+impl Link {
+    pub fn random() -> Self {
+        match rand::random_range(0..5) {
+            0 => Self::ToSelf,
+            1 | 2 => Self::Direct(Through::random()),
+            3 | 4 => Self::Indirect(IndirectLink::random()),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test"))]
+impl Through {
+    pub fn random() -> Self {
+        if rand::random_bool(0.5) {
+            Through::Includes(PeerId(rand::random()))
+        } else {
+            Through::Witness(PeerId(rand::random()))
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test"))]
+impl IndirectLink {
+    pub fn random() -> Self {
+        Self {
+            to: PointId::random(),
+            path: Through::random(),
+        }
     }
 }
