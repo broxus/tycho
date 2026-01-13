@@ -16,7 +16,7 @@ use crate::dag::commit::SyncError;
 use crate::dag::commit::anchor_chain::EnqueuedAnchor;
 use crate::effects::{AltFmt, AltFormat, Cancelled};
 use crate::engine::MempoolConfig;
-use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PointInfo, Round, ValidPoint};
+use crate::models::{AnchorLink, AnchorStageRole, DagPoint, Digest, PointInfo, Round, ValidPoint};
 
 #[derive(Default)]
 pub struct DagBack {
@@ -252,7 +252,7 @@ impl DagBack {
     ) -> Result<VecDeque<EnqueuedAnchor>, SyncError> {
         assert_eq!(
             trigger.anchor_link(AnchorStageRole::Trigger),
-            &Link::ToSelf,
+            &AnchorLink::ToSelf,
             "passed point is not a trigger: {:?}",
             trigger.id().alt()
         );
@@ -484,7 +484,8 @@ impl DagBack {
                     // take any suitable
                     .filter_map_ok(move |dag_point| match dag_point {
                         DagPoint::Valid(valid) => {
-                            (valid.info().anchor_trigger() == &Link::ToSelf).then_some(Ok(valid))
+                            { valid.info().anchor_trigger() == &AnchorLink::ToSelf }
+                                .then_some(Ok(valid))
                         }
                         not_valid if not_valid.is_certified() => {
                             Some(Err(SyncError::HistoryConflict(dag_round.round())))
