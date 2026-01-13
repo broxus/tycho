@@ -5,8 +5,8 @@ use crate::dag::{DagHead, DagRound};
 use crate::effects::{AltFormat, RoundCtx};
 use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
-    AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointInfo, Round, Signature,
-    Through, UnixTime,
+    AnchorStageRole, Digest, IndirectLink, Link, PeerCount, Point, PointData, PointInfo, Round,
+    Signature, Through, UnixTime,
 };
 
 pub struct LastOwnPoint {
@@ -67,33 +67,24 @@ impl Producer {
         };
         let local_id = PeerId::from(key_pair.public_key);
         let includes = Self::includes(finished_round);
-        let mut anchor_trigger = Self::link_from_includes(
+        let witness = Self::witness(finished_round, &local_id, last_own_point);
+
+        let anchor_proof = Self::link(
             &local_id,
             current_round,
             &includes,
-            proven_vertex.is_some()
-                && last_own_point.is_some_and(|prev| prev.includes.contains_key(&local_id)),
-            AnchorStageRole::Trigger,
-        );
-        let mut anchor_proof = Self::link_from_includes(
-            &local_id,
-            current_round,
-            &includes,
+            &witness,
             proven_vertex.is_some(),
             AnchorStageRole::Proof,
         );
-        let witness = Self::witness(finished_round, &local_id, last_own_point);
-        Self::update_link_from_witness(
-            &mut anchor_trigger,
-            current_round.round(),
+        let anchor_trigger = Self::link(
+            &local_id,
+            current_round,
+            &includes,
             &witness,
+            proven_vertex.is_some()
+                && last_own_point.is_some_and(|prev| prev.includes.contains_key(&local_id)),
             AnchorStageRole::Trigger,
-        );
-        Self::update_link_from_witness(
-            &mut anchor_proof,
-            current_round.round(),
-            &witness,
-            AnchorStageRole::Proof,
         );
 
         let payload = input_buffer.fetch(last_own_point.as_ref().is_none_or(|last| {
@@ -197,10 +188,11 @@ impl Producer {
             .collect::<Vec<_>>()
     }
 
-    fn link_from_includes(
+    fn link(
         local_id: &PeerId,
         current_round: &DagRound,
         includes: &[PointInfo],
+        witness: &[PointInfo],
         has_candidate: bool,
         link_field: AnchorStageRole,
     ) -> Link {
@@ -213,52 +205,41 @@ impl Producer {
             _ => {}
         }
 
-        let info = includes
+        let incl_info = includes
             .iter()
             .max_by_key(|point| point.anchor_round(link_field))
             .expect("non-empty list of includes for own point");
 
-        if info.round() == current_round.round().prev()
-            && info.anchor_link(link_field) == &Link::ToSelf
+        if incl_info.round() == current_round.round().prev()
+            && incl_info.anchor_link(link_field) == &Link::ToSelf
         {
-            Link::Direct(Through::Includes(*info.author()))
-        } else {
-            Link::Indirect {
-                to: info.anchor_id(link_field),
-                path: Through::Includes(*info.author()),
-            }
-        }
-    }
-
-    fn update_link_from_witness(
-        link: &mut Link,
-        current_round: Round,
-        witness: &[PointInfo],
-        link_field: AnchorStageRole,
-    ) {
-        let link_round = match link {
-            Link::ToSelf | Link::Direct(_) => return,
-            Link::Indirect { to, .. } => to.round,
+            return Link::Direct(Through::Includes(*incl_info.author()));
         };
 
-        let Some(info) = witness
+        let newer_witness = witness
             .iter()
-            .filter(|point| point.anchor_round(link_field) > link_round)
-            .max_by_key(|point| point.anchor_round(link_field))
-        else {
-            return;
+            .max_by_key(|wit_info| wit_info.anchor_round(link_field))
+            .filter(|wit_info| {
+                wit_info.anchor_round(link_field) > incl_info.anchor_round(link_field)
+            });
+
+        let Some(wit_info) = newer_witness else {
+            return Link::Indirect(IndirectLink {
+                to: incl_info.anchor_id(link_field),
+                path: Through::Includes(*incl_info.author()),
+            });
         };
 
-        if info.round() == current_round.prev().prev()
-            && info.anchor_link(link_field) == &Link::ToSelf
+        if wit_info.round() == current_round.round().prev().prev()
+            && wit_info.anchor_link(link_field) == &Link::ToSelf
         {
-            *link = Link::Direct(Through::Witness(*info.author()));
-        } else {
-            *link = Link::Indirect {
-                to: info.anchor_id(link_field),
-                path: Through::Witness(*info.author()),
-            };
+            return Link::Direct(Through::Witness(*wit_info.author()));
         }
+
+        Link::Indirect(IndirectLink {
+            to: wit_info.anchor_id(link_field),
+            path: Through::Witness(*wit_info.author()),
+        })
     }
 
     fn get_time(
@@ -273,7 +254,7 @@ impl Producer {
 
                 info.time()
             }
-            Link::Direct(through) | Link::Indirect { path: through, .. } => {
+            Link::Direct(through) | Link::Indirect(IndirectLink { path: through, .. }) => {
                 let (peer_id, through) = match through {
                     Through::Includes(peer_id) => (peer_id, &includes),
                     Through::Witness(peer_id) => (peer_id, &witness),

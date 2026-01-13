@@ -10,7 +10,7 @@ use tycho_crypto::ed25519;
 pub struct PeerId(pub [u8; 32]);
 
 impl PeerId {
-    pub const MAX_TL_BYTES: usize = 32;
+    pub const MAX_TL_BYTES: usize = 4 + 32;
 }
 
 impl PeerId {

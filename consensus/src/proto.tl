@@ -12,14 +12,14 @@ consensus.pointData
     = consensus.PointData;
 
 consensus.pointBody
-    author:int256
+    author:transport.PeerId
     round:int
     payload:(vector bytes)
     pointData:consensus.pointData
     = consensus.PointBody;
 
 consensus.pointId
-    author:int256
+    author:transport.PeerId
     round:int
     digest:int256
     = consensus.PointId;
@@ -44,7 +44,7 @@ consensus.pointInfo
 * Representation of BTreeMap<PeerId, Digest>
 */
 consensus.peerDigestPair
-    peer:int256
+    peer:transport.PeerId
     digest:int256
     = consensus.PeerDigestPair;
 
@@ -52,7 +52,7 @@ consensus.peerDigestPair
 * Representation of BTreeMap<PeerId, Signature>
 */
 consensus.peerSignaturePair
-    peer:int256
+    peer:transport.PeerId
     signature:bytes
     = consensus.PeerSignaturePair;
 
@@ -61,13 +61,21 @@ consensus.peerSignaturePair
 */
 point.link.to_self                                                  = point.Link;
 point.link.direct       x:link.through                              = point.Link;
-point.link.indirect     to:consensus.pointId path:link.through      = point.Link;
+point.link.indirect     x:consensus.indirectLink                    = point.Link;
 
 /**
 * Representation of Through enum
 */
-link.through.witness    x:int256 = link.Through;
-link.through.includes   x:int256 = link.Through;
+link.through.witness    x:transport.PeerId                          = link.Through;
+link.through.includes   x:transport.PeerId                          = link.Through;
+
+/**
+* Representation of Indirect Link
+*/
+consensus.indirectLink
+    to:consensus.pointId
+    path:link.through
+    = consensus.IndirectLink;
 
 /*
 * Representation of DownloadResponse
