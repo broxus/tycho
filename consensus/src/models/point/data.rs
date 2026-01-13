@@ -1,7 +1,10 @@
+use std::fmt::Debug;
+
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
+use super::link::*;
 use crate::models::point::proto_utils::{digests_map, signatures_map};
 use crate::models::point::{Digest, Round, UnixTime, proto_utils};
 use crate::models::{AnchorStageRole, PeerCount, PointKey, PointMap, Signature, StructureIssue};
@@ -9,9 +12,9 @@ use crate::models::{AnchorStageRole, PeerCount, PointKey, PointMap, Signature, S
 #[derive(Clone, Copy, Debug, PartialEq, TlRead, TlWrite)]
 #[tl(boxed, id = "consensus.pointId", scheme = "proto.tl")]
 pub struct PointId {
-    pub author: PeerId,
     pub round: Round,
     pub digest: Digest,
+    pub author: PeerId,
 }
 
 impl PointId {
@@ -43,37 +46,13 @@ pub struct PointData {
     #[tl(with = "signatures_map")]
     pub evidence: FastHashMap<PeerId, Signature>,
     /// last included by author; defines author's last committed anchor
-    pub anchor_trigger: Link,
+    pub anchor_trigger: AnchorLink,
     /// last included by author; maintains anchor chain linked without explicit DAG traverse
-    pub anchor_proof: Link,
+    pub anchor_proof: AnchorLink,
     /// local peer time at the moment of point creation, cannot be less than `anchor_time`
     pub time: UnixTime,
     /// time of previous anchor candidate, linked through its proof
     pub anchor_time: UnixTime,
-}
-
-#[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
-#[tl(boxed, scheme = "proto.tl")]
-pub enum Link {
-    #[tl(id = "point.link.to_self")]
-    ToSelf,
-    #[tl(id = "point.link.direct")]
-    Direct(Through),
-    #[tl(id = "point.link.indirect")]
-    Indirect { to: PointId, path: Through },
-}
-
-impl Link {
-    pub const MAX_TL_BYTES: usize = 4 + PointId::MAX_TL_BYTES + 4 + PeerId::MAX_TL_BYTES;
-}
-
-#[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
-#[tl(boxed, scheme = "proto.tl")]
-pub enum Through {
-    #[tl(id = "link.through.witness")]
-    Witness(PeerId),
-    #[tl(id = "link.through.includes")]
-    Includes(PeerId),
 }
 
 impl PointData {
@@ -84,7 +63,7 @@ impl PointData {
                 + (PeerId::MAX_TL_BYTES + Signature::MAX_TL_BYTES)) // signatures map
             + 3 * proto_utils::MAP_LEN_BYTES; // maps lengths
 
-        4 + max_possible_maps + 2 * Link::MAX_TL_BYTES + 2 * UnixTime::MAX_TL_BYTES
+        4 + max_possible_maps + 2 * AnchorLink::MAX_TL_BYTES + 2 * UnixTime::MAX_TL_BYTES
     };
 
     /// counterpart of [`crate::dag::Verifier::verify`] that must be called earlier,
@@ -110,28 +89,31 @@ impl PointData {
 
     fn link_error(&self, link_field: AnchorStageRole, round: Round) -> Option<PointMap> {
         match self.anchor_link(link_field) {
-            Link::ToSelf => None,
-            Link::Direct(Through::Includes(peer)) => {
+            AnchorLink::ToSelf => None,
+            AnchorLink::Direct(Through::Includes(peer)) => {
                 (!self.includes.contains_key(peer)).then_some(PointMap::Includes)
             }
-            Link::Direct(Through::Witness(peer)) => {
+            AnchorLink::Direct(Through::Witness(peer)) => {
                 (!self.witness.contains_key(peer)).then_some(PointMap::Witness)
             }
-            Link::Indirect {
-                path: Through::Includes(peer),
-                to,
-            } => (!self.includes.contains_key(peer) || to.round.next() >= round)
+            AnchorLink::Indirect(indirect) => self.indirect_link_error(indirect, round),
+        }
+    }
+
+    fn indirect_link_error(&self, indirect: &IndirectLink, round: Round) -> Option<PointMap> {
+        let IndirectLink { to, path } = indirect;
+        match path {
+            Through::Includes(peer) => (!self.includes.contains_key(peer)
+                || to.round.next() >= round)
                 .then_some(PointMap::Includes),
-            Link::Indirect {
-                path: Through::Witness(peer),
-                to,
-            } => (!self.witness.contains_key(peer) || to.round.next().next() >= round)
+            Through::Witness(peer) => (!self.witness.contains_key(peer)
+                || to.round.next().next() >= round)
                 .then_some(PointMap::Witness),
         }
     }
 
     /// should be disclosed by wrapping point
-    pub(super) fn anchor_link(&self, link_field: AnchorStageRole) -> &Link {
+    pub(super) fn anchor_link(&self, link_field: AnchorStageRole) -> &AnchorLink {
         match link_field {
             AnchorStageRole::Trigger => &self.anchor_trigger,
             AnchorStageRole::Proof => &self.anchor_proof,
@@ -142,10 +124,10 @@ impl PointData {
     /// resulting None should be replaced with id of wrapping point
     pub(super) fn anchor_round(&self, link_field: AnchorStageRole, round: Round) -> Round {
         match self.anchor_link(link_field) {
-            Link::ToSelf => round,
-            Link::Direct(Through::Includes(_)) => round.prev(),
-            Link::Direct(Through::Witness(_)) => round.prev().prev(),
-            Link::Indirect { to, .. } => to.round,
+            AnchorLink::ToSelf => round,
+            AnchorLink::Direct(Through::Includes(_)) => round.prev(),
+            AnchorLink::Direct(Through::Witness(_)) => round.prev().prev(),
+            AnchorLink::Indirect(IndirectLink { to, .. }) => to.round,
         }
     }
 
@@ -153,7 +135,7 @@ impl PointData {
     /// resulting None should be replaced with id of wrapping point
     pub(super) fn anchor_id(&self, link_field: AnchorStageRole, round: Round) -> Option<PointId> {
         match self.anchor_link(link_field) {
-            Link::Indirect { to, .. } => Some(*to),
+            AnchorLink::Indirect(IndirectLink { to, .. }) => Some(*to),
             _direct => self.anchor_link_id(link_field, round),
         }
     }
@@ -165,25 +147,36 @@ impl PointData {
         link_field: AnchorStageRole,
         round: Round,
     ) -> Option<PointId> {
-        let (map, author, round) = match self.anchor_link(link_field) {
-            Link::ToSelf => return None,
-            Link::Direct(Through::Includes(peer))
-            | Link::Indirect {
-                path: Through::Includes(peer),
-                ..
-            } => (&self.includes, *peer, round.prev()),
-            Link::Direct(Through::Witness(peer))
-            | Link::Indirect {
-                path: Through::Witness(peer),
-                ..
-            } => (&self.witness, *peer, round.prev().prev()),
+        let path = match self.anchor_link(link_field) {
+            AnchorLink::ToSelf => return None,
+            AnchorLink::Direct(path) | AnchorLink::Indirect(IndirectLink { path, .. }) => path,
+        };
+        let point_id = self
+            .through_id(path, round)
+            .expect("Coding error: usage of ill-formed point");
+        Some(point_id)
+    }
+
+    fn through_id(&self, through: &Through, round: Round) -> Option<PointId> {
+        let (map, author, round) = match through {
+            Through::Includes(peer) => (&self.includes, *peer, round.prev()),
+            Through::Witness(peer) => (&self.witness, *peer, round.prev().prev()),
         };
         Some(PointId {
             author,
             round,
-            digest: *map
-                .get(&author)
-                .expect("Coding error: usage of ill-formed point"),
+            digest: *map.get(&author)?,
         })
+    }
+}
+
+#[cfg(any(test, feature = "test"))]
+impl PointId {
+    pub fn random() -> Self {
+        Self {
+            author: PeerId(rand::random()),
+            round: Round(rand::random()),
+            digest: Digest::random(),
+        }
     }
 }

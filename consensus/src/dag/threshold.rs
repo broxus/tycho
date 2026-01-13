@@ -284,7 +284,7 @@ mod test {
     use super::*;
     use crate::dag::threshold::Threshold;
     use crate::models::{
-        Cert, DagPoint, Link, PeerCount, Point, PointData, PointStatusValidated, UnixTime,
+        AnchorLink, Cert, DagPoint, PeerCount, Point, PointData, PointStatusValidated, UnixTime,
     };
     use crate::test_utils::default_test_config;
 
@@ -404,8 +404,8 @@ mod test {
                 includes: Default::default(),
                 witness: Default::default(),
                 evidence: Default::default(),
-                anchor_trigger: Link::ToSelf,
-                anchor_proof: Link::ToSelf,
+                anchor_trigger: AnchorLink::ToSelf,
+                anchor_proof: AnchorLink::ToSelf,
                 time: now + delay,
                 anchor_time: UnixTime::now(),
             },
