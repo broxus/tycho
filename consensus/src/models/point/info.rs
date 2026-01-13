@@ -6,8 +6,8 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::models::{
-    AnchorLink, AnchorStageRole, Digest, PointData, PointId, PointKey, Round, Signature,
-    StructureIssue, UnixTime,
+    AnchorLink, AnchorStageRole, ChainedAnchorProof, Digest, IndirectLink, PointData, PointId,
+    PointKey, Round, Signature, StructureIssue, UnixTime,
 };
 
 #[derive(Clone, TlRead, TlWrite)]
@@ -150,6 +150,21 @@ impl PointInfo {
 
     pub fn anchor_round(&self, link_field: AnchorStageRole) -> Round {
         (self.0.data).anchor_round(link_field, self.round())
+    }
+
+    pub fn chained_anchor_proof(&self) -> Option<&IndirectLink> {
+        match &self.0.data.chained_anchor_proof {
+            ChainedAnchorProof::Inapplicable => None,
+            ChainedAnchorProof::Chained(link) => Some(link),
+        }
+    }
+
+    pub fn chained_proof_to_through(&self) -> Option<(PointId, PointId)> {
+        self.chained_anchor_proof().map(|link| {
+            let through = (self.0.data.through_id(&link.path, self.round()))
+                .expect("Coding error: usage of ill-formed point");
+            (link.to, through)
+        })
     }
 
     /// the final destination of an anchor link

@@ -284,7 +284,9 @@ mod test {
     use super::*;
     use crate::dag::threshold::Threshold;
     use crate::models::point_status::PointStatusValid;
-    use crate::models::{AnchorLink, Cert, DagPoint, PeerCount, Point, PointData, UnixTime};
+    use crate::models::{
+        AnchorLink, Cert, ChainedAnchorProof, DagPoint, PeerCount, Point, PointData, UnixTime,
+    };
     use crate::test_utils::default_test_config;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -400,6 +402,7 @@ mod test {
                 includes: Default::default(),
                 witness: Default::default(),
                 evidence: Default::default(),
+                chained_anchor_proof: ChainedAnchorProof::Inapplicable,
                 anchor_trigger: AnchorLink::ToSelf,
                 anchor_proof: AnchorLink::ToSelf,
                 time: now + delay,

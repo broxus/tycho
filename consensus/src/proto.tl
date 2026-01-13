@@ -5,6 +5,7 @@ consensus.pointData
     includes:(vector consensus.peerDigestPair)
     witness:(vector consensus.peerDigestPair)
     evidence:(vector consensus.peerSignaturePair)
+    chained_anchor_proof:consensus.chainedAnchorProof
     anchor_trigger:consensus.anchorLink
     anchor_proof:consensus.anchorLink
     time:int
@@ -60,6 +61,12 @@ consensus.peerSignaturePair
 consensus.anchorLink.to_self                                            = consensus.AnchorLink;
 consensus.anchorLink.direct       x:consensus.link.through              = consensus.AnchorLink;
 consensus.anchorLink.indirect     x:consensus.link.indirect             = consensus.AnchorLink;
+
+/**
+* Representation of Anchor Proof Chain
+*/
+consensus.chainedAnchorProof.inapplicable                               = consensus.ChainedAnchorProof;
+consensus.chainedAnchorProof.chained       x:consensus.link.indirect    = consensus.ChainedAnchorProof;
 
 /**
 * Representation of Indirect Link
