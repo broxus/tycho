@@ -11,18 +11,26 @@ use crate::dag::DagRound;
 use crate::dag::commit::anchor_chain::{AnchorChain, EnqueuedAnchor};
 use crate::dag::commit::back::DagBack;
 use crate::dag::commit::inspector::RoundInspector;
-use crate::effects::{AltFmt, AltFormat, TaskResult};
+use crate::effects::{AltFmt, AltFormat, Cancelled, TaskResult};
 use crate::engine::MempoolConfig;
 use crate::models::{AnchorData, AnchorStageRole, MempoolStatsOutput, Round};
 
 #[derive(thiserror::Error, Debug)]
 #[error("Committer encountered local history conflict at round {}", .0.0)]
 pub struct HistoryConflict(pub Round);
-type CommitterResult<T> = std::result::Result<T, HistoryConflict>;
+
 // private error type
+#[derive(Debug)]
 enum SyncError {
     TryLater,
     HistoryConflict(Round),
+    Cancelled,
+}
+
+impl From<Cancelled> for SyncError {
+    fn from(_: Cancelled) -> Self {
+        Self::Cancelled
+    }
 }
 
 pub struct Committer {
@@ -108,21 +116,29 @@ impl Committer {
         })
     }
 
-    pub fn commit(&mut self, conf: &MempoolConfig) -> CommitterResult<Vec<AnchorData>> {
+    pub fn commit(
+        &mut self,
+        conf: &MempoolConfig,
+    ) -> TaskResult<Result<Vec<AnchorData>, HistoryConflict>> {
         // may run for long several times in a row and commit nothing, because of missed points
         let _guard = HistogramGuard::begin("tycho_mempool_engine_commit_time");
 
         // Note that it's always engine round in production, but may differ in local tests
         let current_round = self.dag.top().round().prev();
 
-        self.commit_up_to(current_round, conf)
+        match self.commit_up_to(current_round, conf) {
+            Ok(data) => Ok(Ok(data)),
+            Err(SyncError::TryLater) => Ok(Ok(Vec::new())),
+            Err(SyncError::HistoryConflict(round)) => Ok(Err(HistoryConflict(round))),
+            Err(SyncError::Cancelled) => Err(Cancelled()),
+        }
     }
 
     fn commit_up_to(
         &mut self,
         current_round: Round,
         conf: &MempoolConfig,
-    ) -> CommitterResult<Vec<AnchorData>> {
+    ) -> Result<Vec<AnchorData>, SyncError> {
         // The call must not take long, better try later than wait now, slowing down whole Engine.
         // Try to collect longest anchor chain in historical order, until any unready point is met:
         // * take all ready and uncommitted triggers, skipping not ready ones
@@ -156,13 +172,13 @@ impl Committer {
             match self.dequeue_anchor(next, conf) {
                 Ok(data) => committed.push(data),
                 Err(SyncError::TryLater) => break,
-                Err(SyncError::HistoryConflict(round)) => return Err(HistoryConflict(round)),
+                Err(immediate) => return Err(immediate),
             }
         }
         Ok(committed)
     }
 
-    fn enqueue_new_anchors(&mut self, current_round: Round) -> CommitterResult<()> {
+    fn enqueue_new_anchors(&mut self, current_round: Round) -> Result<(), SyncError> {
         // some state may have restored from db or resolved from download
 
         // take all ready triggers, skipping not ready ones
@@ -189,13 +205,13 @@ impl Committer {
                     // init chain after each gap
                     Ok(last_unusable_proof_round) => last_unusable_proof_round,
                     Err(SyncError::TryLater) => return Ok(()), // cannot init
-                    Err(SyncError::HistoryConflict(round)) => return Err(HistoryConflict(round)),
+                    Err(immediate) => return Err(immediate),
                 },
             };
             let chain_part = match self.dag.anchor_chain(last_proof_round, &trigger) {
                 Ok(chain_part) => chain_part,
                 Err(SyncError::TryLater) => break, // some dag point future is not yet resolved
-                Err(SyncError::HistoryConflict(round)) => return Err(HistoryConflict(round)),
+                Err(immediate) => return Err(immediate),
             };
             for next in chain_part {
                 if let Some(back) = self.anchor_chain.top() {
@@ -494,7 +510,8 @@ mod test {
         } else {
             committer
                 .commit(conf)
-                .expect("no certified NotFound or Invalid points")
+                .expect("cannot be cancelled")
+                .expect("history conflict cannot happen")
         };
         for data in &committed {
             println!("anchor {:?}", data.anchor.id().alt());
