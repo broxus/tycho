@@ -5,6 +5,7 @@ use tycho_util::sync::CancellationFlag;
 use weedb::{MigrationError, Semver, VersionProvider, WeeDb};
 
 use super::tables;
+mod migrations;
 
 pub type CoreDb = WeeDb<CoreTables>;
 pub type CellsDb = WeeDb<CellsTables>;
@@ -114,7 +115,7 @@ impl NamedTables for CellsTables {
 }
 
 impl WithMigrations for CellsTables {
-    const VERSION: Semver = [0, 0, 1];
+    const VERSION: Semver = [0, 0, 2];
 
     type VersionProvider = StateVersionProvider<tables::State>;
 
@@ -123,9 +124,11 @@ impl WithMigrations for CellsTables {
     }
 
     fn register_migrations(
-        _migrations: &mut Migrations<Self::VersionProvider, Self>,
-        _cancelled: CancellationFlag,
+        migrations: &mut Migrations<Self::VersionProvider, Self>,
+        cancelled: CancellationFlag,
     ) -> Result<(), MigrationError> {
-        Ok(())
+        migrations.register([0, 0, 1], [0, 0, 2], move |db| {
+            migrations::cells_v1_to_v2(db, &cancelled)
+        })
     }
 }
