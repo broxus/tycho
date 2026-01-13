@@ -229,7 +229,7 @@ impl Committer {
             for next in chain_part {
                 if let Some(back) = self.anchor_chain.top() {
                     assert_eq!(
-                        next.anchor.anchor_round(AnchorStageRole::Proof),
+                        next.prev_proof_round,
                         back.proof.round(),
                         "chain part is not contiguous by rounds"
                     );
@@ -282,7 +282,7 @@ impl Committer {
             })
             .collect::<Vec<_>>();
         Ok(AnchorData {
-            prev_anchor: Some(next.anchor.anchor_round(AnchorStageRole::Proof))
+            prev_anchor: Some(next.prev_proof_round)
                 .filter(|r| *r > conf.genesis_round)
                 .map(|r| r.prev()),
             anchor: next.anchor,
@@ -392,10 +392,10 @@ mod test {
             .await;
 
             if round.0 == 33 {
-                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 7);
+                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 9);
             }
             if round.0 == 66 {
-                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 4);
+                assert_eq!(commit(&mut committer, Some(Round(48)), conf).len(), 5);
             }
         }
 
@@ -426,7 +426,7 @@ mod test {
             restore_point(&mut committer.dag, pack);
         }
 
-        assert_eq!(commit(&mut committer, None, conf).len(), 2);
+        assert_eq!(commit(&mut committer, None, conf).len(), 4);
 
         restore_point(&mut committer.dag, r_leader);
 
@@ -434,7 +434,7 @@ mod test {
 
         restore_round(&mut committer.dag, r_round);
 
-        assert_eq!(commit(&mut committer, None, conf).len(), 7);
+        assert_eq!(commit(&mut committer, None, conf).len(), 10);
 
         std::io::stderr().flush().ok();
         std::io::stdout().flush().ok();

@@ -7,6 +7,7 @@ use crate::models::{AnchorStageRole, PointInfo, Round};
 pub struct EnqueuedAnchor {
     pub anchor: PointInfo,
     pub proof: PointInfo,
+    pub prev_proof_round: Round,
     pub direct_trigger: Option<PointInfo>,
 }
 
