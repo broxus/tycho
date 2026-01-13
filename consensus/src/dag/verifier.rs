@@ -13,8 +13,8 @@ use crate::effects::{AltFormat, Ctx, TaskResult, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, Link, PeerCount, PointId, PointInfo,
-    PointMap, Round, StructureIssue, UnixTime,
+    AnchorLink, AnchorStageRole, Cert, CertDirectDeps, DagPoint, Digest, PeerCount, PointId,
+    PointInfo, PointMap, Round, StructureIssue, UnixTime,
 };
 use crate::storage::MempoolStore;
 // Note on equivocation.
@@ -278,15 +278,17 @@ impl Verifier {
                     || info.anchor_round(AnchorStageRole::Proof) == info.round().prev()
                 {
                     // must link to own point if it did not skip rounds
-                    info.prev_digest().is_some() == (info.anchor_link(stage.role) == &Link::ToSelf)
+                    info.prev_digest().is_some()
+                        == (info.anchor_link(stage.role) == &AnchorLink::ToSelf)
                 } else {
                     // skipped either candidate of Proof, but may have prev point
-                    info.anchor_link(stage.role) != &Link::ToSelf
+                    info.anchor_link(stage.role) != &AnchorLink::ToSelf
                 }
             }
             // others must not pretend to be leaders
             Some(_) | None => {
-                info.anchor_proof() != &Link::ToSelf && info.anchor_trigger() != &Link::ToSelf
+                info.anchor_proof() != &AnchorLink::ToSelf
+                    && info.anchor_trigger() != &AnchorLink::ToSelf
             }
         };
         if !is_self_link_ok {
@@ -711,10 +713,10 @@ impl Verifier {
                 return Some(IllFormedReason::TooLargePayload(info.payload_bytes()));
             }
             // evidence map is required to be empty during other peer sets checks
-            if info.anchor_proof() != &Link::ToSelf {
+            if info.anchor_proof() != &AnchorLink::ToSelf {
                 return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Proof));
             }
-            if info.anchor_trigger() != &Link::ToSelf {
+            if info.anchor_trigger() != &AnchorLink::ToSelf {
                 return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Trigger));
             }
             if info.time() != info.anchor_time() {
@@ -727,10 +729,10 @@ impl Verifier {
             // leader must maintain its chain of proofs,
             // while others must link to previous points (checked at the end of this method)
             if info.evidence().is_empty() {
-                if info.anchor_proof() == &Link::ToSelf {
+                if info.anchor_proof() == &AnchorLink::ToSelf {
                     return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Proof));
                 }
-                if info.anchor_trigger() == &Link::ToSelf {
+                if info.anchor_trigger() == &AnchorLink::ToSelf {
                     return Some(IllFormedReason::SelfAnchorStage(AnchorStageRole::Trigger));
                 }
             }
@@ -769,7 +771,7 @@ impl Verifier {
             // time must be increasing by the same author until it stops referencing previous points
             return Some(InvalidReason::TimeNotGreaterThanInPrevPoint(proven.id()));
         }
-        if info.anchor_proof() == &Link::ToSelf && info.anchor_time() != proven.time() {
+        if info.anchor_proof() == &AnchorLink::ToSelf && info.anchor_time() != proven.time() {
             // anchor proof must inherit its candidate's time
             return Some(InvalidReason::AnchorProofDoesntInheritAnchorTime(
                 proven.id(),

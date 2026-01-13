@@ -204,7 +204,7 @@ pub mod test_point {
     use tycho_util::FastHashMap;
 
     use super::*;
-    use crate::models::{Link, PointId, Round, Through, UnixTime};
+    use crate::models::{AnchorLink, IndirectLink, PointId, Round, Through, UnixTime};
 
     pub const PEERS: usize = 100;
 
@@ -258,7 +258,7 @@ pub mod test_point {
         let round = Round(rand::random_range(10..u32::MAX - 10));
         let anchor_time = UnixTime::now();
 
-        let indirect_link = |round: Round| Link::Indirect {
+        let indirect_link = |round: Round| IndirectLink {
             to: PointId {
                 author: PeerId(rand::random()),
                 round,
@@ -273,8 +273,8 @@ pub mod test_point {
                 (PeerId(rand::random()), Digest::random())
             })),
             evidence,
-            anchor_trigger: indirect_link(round - 7_u32),
-            anchor_proof: indirect_link(round - 6_u32),
+            anchor_trigger: AnchorLink::Indirect(indirect_link(round - 7_u32)),
+            anchor_proof: AnchorLink::Indirect(indirect_link(round - 6_u32)),
             time: anchor_time.next(),
             anchor_time,
         };

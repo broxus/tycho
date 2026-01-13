@@ -6,8 +6,8 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::models::{
-    AnchorStageRole, Digest, Link, PointData, PointId, PointKey, Round, Signature, StructureIssue,
-    UnixTime,
+    AnchorLink, AnchorStageRole, Digest, PointData, PointId, PointKey, Round, Signature,
+    StructureIssue, UnixTime,
 };
 
 #[derive(Clone, TlRead, TlWrite)]
@@ -116,11 +116,11 @@ impl PointInfo {
         &(self.0.data).evidence
     }
 
-    pub fn anchor_trigger(&self) -> &Link {
+    pub fn anchor_trigger(&self) -> &AnchorLink {
         &(self.0.data).anchor_trigger
     }
 
-    pub fn anchor_proof(&self) -> &Link {
+    pub fn anchor_proof(&self) -> &AnchorLink {
         &(self.0.data).anchor_proof
     }
 
@@ -166,7 +166,7 @@ impl PointInfo {
         PointKey::new(self.round(), *self.digest())
     }
 
-    pub fn anchor_link(&self, link_field: AnchorStageRole) -> &Link {
+    pub fn anchor_link(&self, link_field: AnchorStageRole) -> &AnchorLink {
         (self.0.data).anchor_link(link_field)
     }
 

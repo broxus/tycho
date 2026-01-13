@@ -15,8 +15,8 @@ use crate::effects::{Ctx, EngineCtx, RoundCtx, TaskTracker, ValidateCtx};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, InitPeers, PeerSchedule, Responder};
 use crate::models::{
-    AnchorStageRole, Cert, Digest, Link, PeerCount, Point, PointData, PointId, Round, Signature,
-    Through, UnixTime,
+    AnchorLink, AnchorStageRole, Cert, Digest, IndirectLink, PeerCount, Point, PointData, PointId,
+    Round, Signature, Through, UnixTime,
 };
 use crate::storage::MempoolStore;
 
@@ -208,7 +208,7 @@ fn point<const PEER_COUNT: usize>(
         AnchorStageRole::Trigger,
     );
 
-    let anchor_time = if anchor_proof == Link::ToSelf {
+    let anchor_time = if anchor_proof == AnchorLink::ToSelf {
         max_prev_time
     } else {
         max_anchor_time
@@ -238,17 +238,17 @@ fn point_anchor_link(
     anchor_stage: Option<&AnchorStage>,
     last_same_stage_point: &PointId,
     role: AnchorStageRole,
-) -> Link {
+) -> AnchorLink {
     match anchor_stage {
-        Some(stage) if stage.role == role && stage.leader == peer => Link::ToSelf,
+        Some(stage) if stage.role == role && stage.leader == peer => AnchorLink::ToSelf,
         _ => {
             if last_same_stage_point.round == round.prev() {
-                Link::Direct(Through::Includes(last_same_stage_point.author))
+                AnchorLink::Direct(Through::Includes(last_same_stage_point.author))
             } else {
-                Link::Indirect {
+                AnchorLink::Indirect(IndirectLink {
                     to: *last_same_stage_point,
                     path: Through::Includes(peer),
-                }
+                })
             }
         }
     }
