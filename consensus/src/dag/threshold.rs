@@ -283,9 +283,8 @@ mod test {
 
     use super::*;
     use crate::dag::threshold::Threshold;
-    use crate::models::{
-        AnchorLink, Cert, DagPoint, PeerCount, Point, PointData, PointStatusValidated, UnixTime,
-    };
+    use crate::models::point_status::PointStatusValidated;
+    use crate::models::{AnchorLink, Cert, DagPoint, PeerCount, Point, PointData, UnixTime};
     use crate::test_utils::default_test_config;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

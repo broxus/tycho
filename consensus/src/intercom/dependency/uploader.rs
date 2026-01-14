@@ -7,7 +7,8 @@ use crate::dag::DagHead;
 use crate::effects::{AltFormat, Cancelled, Ctx, RoundCtx, SpawnLimit};
 use crate::engine::NodeConfig;
 use crate::intercom::core::query::response::DownloadResponse;
-use crate::models::{PointId, PointStatusStored};
+use crate::models::PointId;
+use crate::models::point_status::StatusFlags;
 use crate::storage::MempoolStore;
 
 static LIMIT: LazyLock<SpawnLimit> =
@@ -23,7 +24,7 @@ impl Uploader {
         head: &DagHead,
         round_ctx: &RoundCtx,
     ) -> DownloadResponse<Bytes> {
-        let (status_opt, result) = if point_id.round > head.current().round() {
+        let (flags_opt, result) = if point_id.round > head.current().round() {
             // we surely return points that we used as an (in)direct  dependency,
             // so we have the opportunity not to search for points that we're unlikely to have
             (None, DownloadResponse::TryLater)
@@ -34,13 +35,9 @@ impl Uploader {
                 move || {
                     // we'll return any point that is signed by its author (we don't store others)
                     // despite its well-formedness or validation result (receiver decides on its own)
-                    let status_opt = store.get_status(&point_id.key());
-                    let result = match &status_opt {
-                        Some(
-                            PointStatusStored::Validated(_)
-                            | PointStatusStored::IllFormed(_)
-                            | PointStatusStored::Exists,
-                        ) => {
+                    let flags_opt = store.get_status_flags(&point_id.key());
+                    let result = match &flags_opt {
+                        Some(flags) if flags.contains(StatusFlags::Found) => {
                             match store.get_point_raw(&point_id.key()) {
                                 Some(slice) => DownloadResponse::Defined(slice),
                                 // though point and its status are saved in one batch,
@@ -48,9 +45,11 @@ impl Uploader {
                                 None => DownloadResponse::DefinedNone,
                             }
                         }
-                        // won't change even after history gets fixed, except for DB transplantation
-                        Some(PointStatusStored::NotFound(_)) => DownloadResponse::DefinedNone,
-                        None => {
+                        Some(flags) if flags.contains(StatusFlags::Resolved) => {
+                            // won't change even after history gets fixed, except for DB transplantation
+                            DownloadResponse::DefinedNone
+                        }
+                        Some(_) | None => {
                             if last_back_bottom <= point_id.round {
                                 // may be downloading, unknown or resolving - dag may be incomplete
                                 DownloadResponse::TryLater
@@ -60,7 +59,7 @@ impl Uploader {
                             }
                         }
                     };
-                    (status_opt, result)
+                    (flags_opt, result)
                 }
             });
             match task_opt {
@@ -73,8 +72,8 @@ impl Uploader {
         tracing::debug!(
             parent: round_ctx.span(),
             result = display(result.alt()),
-            not_found = status_opt.is_none().then_some(true),
-            found = status_opt.map(display),
+            unknown = flags_opt.is_none().then_some(true),
+            status = flags_opt.map(debug),
             peer = display(peer_id.alt()),
             author = display(point_id.author.alt()),
             round = point_id.round.0,
