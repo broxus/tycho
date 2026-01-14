@@ -11,19 +11,22 @@ use tycho_util::metrics::HistogramGuard;
 use weedb::rocksdb::{DBRawIterator, IteratorMode, ReadOptions, WriteBatch};
 
 use crate::effects::AltFormat;
-use crate::models::{
-    Point, PointInfo, PointKey, PointRestore, PointRestoreSelect, PointStatusStored,
-    PointStatusStoredRef, Round,
-};
-use crate::storage::{MempoolDb, StatusFlags};
+use crate::models::point_status::*;
+use crate::models::{Digest, Point, PointInfo, PointKey, PointRestore, Round};
+use crate::storage::MempoolDb;
 
 #[derive(Clone)]
 pub struct MempoolStore(Arc<dyn MempoolStoreImpl>);
 
 trait MempoolStoreImpl: Send + Sync {
-    fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()>;
+    fn insert_point(&self, point: &Point, status: &PointStatusStored) -> Result<()>;
 
-    fn set_status(&self, key: &PointKey, status: PointStatusStoredRef<'_>) -> Result<()>;
+    fn set_status(
+        &self,
+        key: &PointKey,
+        status: &PointStatusStored,
+        prev_digest: Option<&Digest>,
+    ) -> Result<()>;
 
     fn get_point(&self, key: &PointKey) -> Result<Option<Point>>;
 
@@ -33,13 +36,13 @@ trait MempoolStoreImpl: Send + Sync {
 
     fn get_info(&self, key: &PointKey) -> Result<Option<PointInfo>>;
 
-    fn get_status(&self, key: &PointKey) -> Result<Option<PointStatusStored>>;
+    fn get_status_flags(&self, key: &PointKey) -> Result<Option<StatusFlags>>;
 
     fn last_round(&self) -> Result<Option<Round>>;
 
     fn reset_statuses(&self, range: &RangeInclusive<Round>) -> Result<()>;
 
-    fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestoreSelect>>;
+    fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestore>>;
 
     fn init_storage(&self, overlay_id: &OverlayId) -> Result<()>;
 }
@@ -54,16 +57,21 @@ impl MempoolStore {
         Self(Arc::new(()))
     }
 
-    pub fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) {
+    pub fn insert_point(&self, point: &Point, status: &PointStatusStored) {
         self.0
             .insert_point(point, status)
             .with_context(|| format!("id {:?}", point.info().id().alt()))
             .expect("DB insert point full");
     }
 
-    pub fn set_status(&self, key: &PointKey, status: PointStatusStoredRef<'_>) {
+    pub fn set_status(
+        &self,
+        key: &PointKey,
+        status: &PointStatusStored,
+        prev_digest: Option<&Digest>,
+    ) {
         self.0
-            .set_status(key, status)
+            .set_status(key, status, prev_digest)
             .with_context(|| key.alt().to_string())
             .expect("DB set point status");
     }
@@ -82,6 +90,7 @@ impl MempoolStore {
             .expect("DB get point raw")
     }
 
+    #[allow(dead_code, reason = "idiomatic getter may come in useful")]
     pub fn multi_get_info(&self, keys: &[PointKey]) -> Vec<PointInfo> {
         self.0.multi_get_info(keys).expect("DB multi get points")
     }
@@ -94,9 +103,9 @@ impl MempoolStore {
             .expect("DB get point info")
     }
 
-    pub fn get_status(&self, key: &PointKey) -> Option<PointStatusStored> {
+    pub fn get_status_flags(&self, key: &PointKey) -> Option<StatusFlags> {
         self.0
-            .get_status(key)
+            .get_status_flags(key)
             .with_context(|| key.alt().to_string())
             .expect("DB get point status")
     }
@@ -112,7 +121,7 @@ impl MempoolStore {
             .expect("DB reset statuses");
     }
 
-    pub fn load_restore(&self, range: &RangeInclusive<Round>) -> Vec<PointRestoreSelect> {
+    pub fn load_restore(&self, range: &RangeInclusive<Round>) -> Vec<PointRestore> {
         self.0
             .load_restore(range)
             .with_context(|| format!("range [{}..={}]", range.start().0, range.end().0))
@@ -128,8 +137,13 @@ impl MempoolStore {
 }
 
 impl MempoolStoreImpl for MempoolDb {
-    fn insert_point(&self, point: &Point, status: PointStatusStoredRef<'_>) -> Result<()> {
+    fn insert_point(&self, point: &Point, status: &PointStatusStored) -> Result<()> {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_insert_point_time");
+
+        let prev_key = (point.info().prev_digest())
+            .filter(|_| status.can_certify())
+            .map(|digest| PointKey::new(point.info().round().prev(), *digest));
+
         let mut key_buf = [0; _];
         point.info().key().fill(&mut key_buf);
 
@@ -141,8 +155,17 @@ impl MempoolStoreImpl for MempoolDb {
         // transaction not needed as there is no concurrent puts for the same key,
         // as they occur inside DAG futures whose uniqueness is protected by dash map;
         // in contrast, status are written from random places, but only via `merge_cf()`
-        let mut batch =
-            WriteBatch::with_capacity_bytes(point.serialized().len() + PointInfo::MAX_BYTE_SIZE);
+        let mut batch = WriteBatch::with_capacity_bytes(
+            PointKey::MAX_TL_BYTES * 3
+                + point.serialized().len()
+                + PointInfo::MAX_BYTE_SIZE
+                + status.byte_size()
+                + if prev_key.is_some() {
+                    PointKey::MAX_TL_BYTES + PointStatusProven::BYTE_SIZE
+                } else {
+                    0
+                },
+        );
 
         let mut buffer = Vec::<u8>::with_capacity(PointInfo::MAX_BYTE_SIZE);
 
@@ -157,18 +180,89 @@ impl MempoolStoreImpl for MempoolDb {
 
         batch.merge_cf(&status_cf, &key_buf[..], &buffer);
 
+        if let Some(prev_key) = prev_key {
+            buffer.clear();
+            prev_key.fill(&mut key_buf);
+            PointStatusProven.write_to(&mut buffer);
+            batch.merge_cf(&status_cf, &key_buf[..], &buffer);
+        }
+
         Ok(db.write(batch)?)
     }
 
-    fn set_status(&self, key: &PointKey, status: PointStatusStoredRef<'_>) -> Result<()> {
+    fn set_status(
+        &self,
+        key: &PointKey,
+        status: &PointStatusStored,
+        prev_digest: Option<&Digest>,
+    ) -> Result<()> {
+        fn batch<const SIZE: usize, T: PointStatusStore>(
+            db: &MempoolDb,
+            key: &PointKey,
+            ps_store: &T,
+            prev_key: &Option<PointKey>,
+        ) -> Result<()> {
+            const {
+                assert!(SIZE == T::BYTE_SIZE, "wrong const generic param");
+                assert!(
+                    SIZE >= PointStatusProven::BYTE_SIZE,
+                    "`Proven` point status has the least size"
+                );
+            };
+
+            let mut key_buf = [0; _];
+            key.fill(&mut key_buf);
+
+            let mut status_buf = [0; SIZE];
+            ps_store.fill(&mut status_buf)?;
+
+            let cf = db.db.points_status.cf();
+
+            if let Some(prev_key) = prev_key {
+                let mut batch = WriteBatch::with_capacity_bytes(
+                    PointKey::MAX_TL_BYTES * 2 + SIZE + PointStatusProven::BYTE_SIZE,
+                );
+                batch.merge_cf(&cf, &key_buf[..], &status_buf[..]);
+
+                prev_key.fill(&mut key_buf);
+
+                let slice = &mut status_buf[..PointStatusProven::BYTE_SIZE];
+                PointStatusProven.fill(slice)?;
+
+                batch.merge_cf(&cf, &key_buf[..], slice);
+
+                Ok(db.db.rocksdb().write(batch)?)
+            } else {
+                Ok((db.db.rocksdb()).merge_cf(&cf, &key_buf[..], &status_buf[..])?)
+            }
+        }
+
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_set_status_time");
-        let mut key_buf = [0; _];
-        key.fill(&mut key_buf);
 
-        let db = self.db.rocksdb();
-        let status_cf = self.db.points_status.cf();
+        let prev_key = prev_digest
+            .filter(|_| status.can_certify())
+            .map(|digest| PointKey::new(key.round.prev(), *digest));
 
-        Ok(db.merge_cf(&status_cf, &key_buf[..], status.encode())?)
+        match status {
+            PointStatusStored::Validated(s) => {
+                batch::<{ PointStatusValidated::BYTE_SIZE }, _>(self, key, s, &prev_key)
+            }
+            PointStatusStored::IllFormed(s) => {
+                batch::<{ PointStatusIllFormed::BYTE_SIZE }, _>(self, key, s, &prev_key)
+            }
+            PointStatusStored::NotFound(s) => {
+                batch::<{ PointStatusNotFound::BYTE_SIZE }, _>(self, key, s, &prev_key)
+            }
+            PointStatusStored::Found(s) => {
+                batch::<{ PointStatusFound::BYTE_SIZE }, _>(self, key, s, &prev_key)
+            }
+            PointStatusStored::Committable(s) => {
+                batch::<{ PointStatusCommittable::BYTE_SIZE }, _>(self, key, s, &prev_key)
+            }
+            PointStatusStored::Proven(s) => {
+                batch::<{ PointStatusProven::BYTE_SIZE }, _>(self, key, s, &prev_key)
+            }
+        }
     }
 
     fn get_point(&self, key: &PointKey) -> Result<Option<Point>> {
@@ -239,7 +333,7 @@ impl MempoolStoreImpl for MempoolDb {
             .transpose()
     }
 
-    fn get_status(&self, key: &PointKey) -> Result<Option<PointStatusStored>> {
+    fn get_status_flags(&self, key: &PointKey) -> Result<Option<StatusFlags>> {
         metrics::counter!("tycho_mempool_store_get_status_count").increment(1);
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_status_time");
         let mut key_buf = [0; _];
@@ -250,7 +344,7 @@ impl MempoolStoreImpl for MempoolDb {
             .get(&key_buf[..])
             .context("db get point status")?
             .as_deref()
-            .map(PointStatusStored::decode)
+            .map(PointStatusStored::read_flags)
             .transpose()
     }
 
@@ -287,15 +381,21 @@ impl MempoolStoreImpl for MempoolDb {
 
         let mut batch = WriteBatch::default();
         batch.delete_range_cf(&status_t.cf(), start, end_excl);
+
+        let mut found_status_buf: [u8; PointStatusFound::BYTE_SIZE] = [0; _];
         for kv in iter {
             let (k, v) = kv.context("status iter next")?;
-            let parsed_flags =
-                StatusFlags::try_from_stored(&v).with_context(|| PointKey::format_loose(&k))?;
-            let new_v = match parsed_flags {
-                Some(flags) if !flags.contains(StatusFlags::Found) => &*v,
-                _ => &[],
+            let flags =
+                PointStatusStored::read_flags(&v).with_context(|| PointKey::format_loose(&k))?;
+            if flags.contains(StatusFlags::Found) {
+                let new_v = PointStatusFound {
+                    has_proof: flags.contains(StatusFlags::HasProof),
+                };
+                new_v.fill(&mut found_status_buf)?;
+                batch.put_cf(&status_t.cf(), k, &found_status_buf[..]);
+            } else {
+                batch.put_cf(&status_t.cf(), k, v);
             };
-            batch.put_cf(&status_t.cf(), k, new_v);
         }
 
         db.write(batch)?;
@@ -305,7 +405,7 @@ impl MempoolStoreImpl for MempoolDb {
         self.wait_for_compact()
     }
 
-    fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestoreSelect>> {
+    fn load_restore(&self, range: &RangeInclusive<Round>) -> Result<Vec<PointRestore>> {
         fn opts(range: &RangeInclusive<Round>) -> ReadOptions {
             let mut opts = ReadOptions::default();
             let mut key_buf = [0; _];
@@ -357,25 +457,25 @@ impl MempoolStoreImpl for MempoolDb {
                 .with_context(|| PointKey::format_loose(&key_bytes))?;
 
             match status {
-                PointStatusStored::Exists => {
-                    result.push(PointRestoreSelect::NeedsVerify(key));
-                }
-                PointStatusStored::NotFound(status) => {
-                    let ready = PointRestore::NotFound(key, status);
-                    result.push(PointRestoreSelect::Ready(ready));
-                }
                 PointStatusStored::Validated(status) => {
                     let info = get_value::<PointInfo>(&mut info_iter, &key_bytes)
                         .with_context(|| format!("table point info, status {status} {key:?}"))?;
-                    let ready = PointRestore::Validated(info, status);
-                    result.push(PointRestoreSelect::Ready(ready));
+                    result.push(PointRestore::Validated(info, status));
                 }
                 PointStatusStored::IllFormed(status) => {
                     let info = get_value::<PointInfo>(&mut info_iter, &key_bytes)
                         .with_context(|| format!("table point info, status {status} {key:?}"))?;
-                    let ready = PointRestore::IllFormed(*info.id(), status);
-                    result.push(PointRestoreSelect::Ready(ready));
+                    result.push(PointRestore::IllFormed(*info.id(), status));
                 }
+                PointStatusStored::NotFound(status) => {
+                    result.push(PointRestore::NotFound(key, status));
+                }
+                PointStatusStored::Found(status) => {
+                    let info = get_value::<PointInfo>(&mut info_iter, &key_bytes)
+                        .with_context(|| format!("table point info, status {status} {key:?}"))?;
+                    result.push(PointRestore::Found(info, status));
+                }
+                PointStatusStored::Committable(_) | PointStatusStored::Proven(_) => {}
             }
         }
 
@@ -400,11 +500,11 @@ impl MempoolStoreImpl for MempoolDb {
 
 #[cfg(any(feature = "test", test))]
 impl MempoolStoreImpl for () {
-    fn insert_point(&self, _: &Point, _: PointStatusStoredRef<'_>) -> Result<()> {
+    fn insert_point(&self, _: &Point, _: &PointStatusStored) -> Result<()> {
         Ok(())
     }
 
-    fn set_status(&self, _: &PointKey, _: PointStatusStoredRef<'_>) -> Result<()> {
+    fn set_status(&self, _: &PointKey, _: &PointStatusStored, _: Option<&Digest>) -> Result<()> {
         Ok(())
     }
 
@@ -424,7 +524,7 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn get_status(&self, _: &PointKey) -> Result<Option<PointStatusStored>> {
+    fn get_status_flags(&self, _: &PointKey) -> Result<Option<StatusFlags>> {
         anyhow::bail!("should not be used in tests")
     }
 
@@ -436,7 +536,7 @@ impl MempoolStoreImpl for () {
         anyhow::bail!("should not be used in tests")
     }
 
-    fn load_restore(&self, _: &RangeInclusive<Round>) -> Result<Vec<PointRestoreSelect>> {
+    fn load_restore(&self, _: &RangeInclusive<Round>) -> Result<Vec<PointRestore>> {
         anyhow::bail!("should not be used in tests")
     }
 
