@@ -11,12 +11,12 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb::{ReadOptions, WriteBatch};
 
-use super::{AnchorFlags, MempoolStore};
+use super::MempoolStore;
 use crate::effects::AltFormat;
-use crate::models::{
-    CommitHistoryPart, Point, PointInfo, PointKey, PointRestore, PointRestoreSelect, PointStatus,
-    PointStatusValidated, Round,
+use crate::models::point_status::{
+    AnchorFlags, CommitHistoryPart, PointStatusCommittable, PointStatusStore,
 };
+use crate::models::{Point, PointInfo, PointKey, PointRestore, Round};
 use crate::storage::MempoolDb;
 
 #[derive(Clone)]
@@ -158,31 +158,29 @@ impl MempoolAdapterStore {
         let db = self.0.db.rocksdb();
         let status_cf = self.0.db.points_status.cf();
         let mut batch = WriteBatch::with_capacity_bytes(
-            PointStatusValidated::size_hint() * (1 + history.len()),
+            (PointKey::MAX_TL_BYTES + PointStatusCommittable::BYTE_SIZE) * (1 + history.len()),
         );
 
-        let mut status = PointStatusValidated::default();
-        let mut status_encoded = Vec::with_capacity(PointStatusValidated::size_hint());
+        let mut status = PointStatusCommittable::default();
+        let mut status_encoded: [u8; PointStatusCommittable::BYTE_SIZE] = [0; _];
 
         status.anchor_flags = AnchorFlags::Used;
-        status.write_to(&mut status_encoded);
+        status.fill(&mut status_encoded)?;
 
         anchor.key().fill(&mut key_buf);
-        batch.merge_cf(&status_cf, &key_buf[..], &status_encoded);
-        status_encoded.clear();
+        batch.merge_cf(&status_cf, &key_buf[..], &status_encoded[..]);
 
-        status = PointStatusValidated::default();
+        status = PointStatusCommittable::default();
         for (index, info) in history.iter().enumerate() {
             status.committed = Some(CommitHistoryPart {
                 anchor_round,
                 seq_no: u32::try_from(index).context("anchor has insanely long history")?,
             });
 
-            status.write_to(&mut status_encoded);
+            status.fill(&mut status_encoded)?;
 
             info.key().fill(&mut key_buf);
-            batch.merge_cf(&status_cf, &key_buf[..], &status_encoded);
-            status_encoded.clear();
+            batch.merge_cf(&status_cf, &key_buf[..], &status_encoded[..]);
         }
 
         Ok(db.write(batch)?)
@@ -205,17 +203,14 @@ impl MempoolAdapterStore {
             .load_restore(&RangeInclusive::new(Round(bottom_round), last_db_round))
             .into_iter()
             .filter_map(|item| match item {
-                PointRestoreSelect::Ready(PointRestore::Validated(info, status)) => {
-                    Some((info, status))
+                PointRestore::Validated(info, status) => {
+                    if status.anchor_flags.contains(AnchorFlags::Used) {
+                        anchors.insert(info.round(), info.clone());
+                    }
+                    status.committed.map(|committed| (committed, info))
                 }
                 _ => None,
             })
-            .inspect(|(info, status)| {
-                if status.anchor_flags.contains(AnchorFlags::Used) {
-                    anchors.insert(info.round(), info.clone());
-                }
-            })
-            .filter_map(|(info, status)| status.committed.map(|committed| (committed, info)))
             .collect::<Vec<_>>();
 
         items.sort_unstable_by_key(|(committed, _)| (committed.anchor_round, committed.seq_no));

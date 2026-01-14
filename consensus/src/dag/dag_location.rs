@@ -10,9 +10,8 @@ use crate::dag::dag_point_future::DagPointFuture;
 use crate::dyn_event;
 use crate::effects::{AltFmt, AltFormat, ValidateCtx};
 use crate::engine::MempoolConfig;
-use crate::models::{
-    DagPoint, Digest, PointId, PointStatus, Round, Signature, UnixTime, ValidPoint,
-};
+use crate::models::point_status::PointStatus;
+use crate::models::{DagPoint, Digest, PointId, Round, Signature, UnixTime, ValidPoint};
 
 #[cfg_attr(any(feature = "test", test), derive(Clone))]
 pub struct DagLocation {

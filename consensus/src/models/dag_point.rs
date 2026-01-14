@@ -8,9 +8,10 @@ use crate::dag::{IllFormedReason, InvalidReason};
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::cert::Cert;
 use crate::models::point::{Digest, PointId};
-use crate::models::{
-    PointInfo, PointKey, PointStatusIllFormed, PointStatusNotFound, PointStatusValidated, Round,
+use crate::models::point_status::{
+    PointStatusIllFormed, PointStatusNotFound, PointStatusValidated,
 };
+use crate::models::{PointInfo, PointKey, Round};
 
 #[derive(Clone)]
 /// cases with point hash or signature mismatch are not represented in enum;
@@ -32,7 +33,7 @@ pub enum DagPoint {
 
 impl DagPoint {
     pub fn new_valid(info: PointInfo, cert: Cert, status: &PointStatusValidated) -> Self {
-        assert!(status.is_valid, "used as valid: {status:?}");
+        assert!(status.is_valid, "used as valid: {status}");
         DagPoint::Valid(ValidPoint(Arc::new(ValidPointInner {
             info,
             first_valid: status.is_first_valid,
@@ -48,7 +49,7 @@ impl DagPoint {
         status: &PointStatusValidated,
         reason: InvalidReason,
     ) -> Self {
-        assert!(!status.is_valid, "used as invalid: {status:?}");
+        assert!(!status.is_valid, "used as invalid: {status}");
         DagPoint::Invalid(InvalidPoint(Arc::new(InvalidPointInner {
             info,
             is_first_resolved: status.is_first_resolved,
@@ -121,6 +122,15 @@ impl DagPoint {
 
     pub fn key(&self) -> PointKey {
         self.id().key()
+    }
+
+    pub fn prev_digest(&self) -> Option<&Digest> {
+        let info = match self {
+            Self::Valid(valid) => valid.info(),
+            Self::Invalid(invalid) => invalid.info(),
+            Self::IllFormed(_) | Self::NotFound(_) => return None,
+        };
+        info.prev_digest()
     }
 
     pub fn is_first_resolved(&self) -> bool {

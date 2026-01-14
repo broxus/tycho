@@ -283,9 +283,9 @@ mod test {
 
     use super::*;
     use crate::dag::threshold::Threshold;
+    use crate::models::point_status::PointStatusValidated;
     use crate::models::{
-        Cert, ChainedAnchorProof, DagPoint, Link, PeerCount, Point, PointData,
-        PointStatusValidated, UnixTime,
+        Cert, ChainedAnchorProof, DagPoint, Link, PeerCount, Point, PointData, UnixTime,
     };
     use crate::test_utils::default_test_config;
 
