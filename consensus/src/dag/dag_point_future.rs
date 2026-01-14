@@ -324,7 +324,7 @@ impl DagPointFuture {
                 DownloadResult::NotFound => {
                     let mut status = PointStatusNotFound {
                         is_first_resolved: false,
-                        is_certified: false,
+                        has_proof: false,
                         author: point_id.author,
                     };
                     state.acquire(&point_id, &mut status);
@@ -389,7 +389,7 @@ impl DagPointFuture {
             }
             cert.set_deps(cert_deps);
         }
-        if point_restore.is_certified() {
+        if point_restore.has_proof() {
             cert.certify(round_ctx.conf());
         }
 
@@ -503,7 +503,7 @@ impl DagPointFuture {
             }
             ValidateResult::IllFormed(reason) => {
                 let mut status = PointStatusIllFormed {
-                    is_certified: cert.is_certified(),
+                    has_proof: cert.has_proof(),
                     ..Default::default()
                 };
                 state.acquire(&id, &mut status);
@@ -517,7 +517,7 @@ impl DagPointFuture {
 
     fn new_validated_status(role: Option<AnchorStageRole>, cert: &Cert) -> PointStatusValidated {
         PointStatusValidated {
-            is_certified: cert.is_certified(),
+            has_proof: cert.has_proof(),
             anchor_flags: match role {
                 None => AnchorFlags::empty(),
                 Some(AnchorStageRole::Proof) => AnchorFlags::Proof,

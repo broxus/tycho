@@ -68,12 +68,12 @@ impl PointRestore {
             digest: *self.digest(),
         }
     }
-    pub fn is_certified(&self) -> bool {
+    pub fn has_proof(&self) -> bool {
         match self {
             Self::Exists(_) => false,
-            Self::Validated(_, status) => status.is_certified,
-            Self::IllFormed(_, status) => status.is_certified,
-            Self::NotFound(_, status) => status.is_certified,
+            Self::Validated(_, status) => status.has_proof,
+            Self::IllFormed(_, status) => status.has_proof,
+            Self::NotFound(_, status) => status.has_proof,
         }
     }
 }
@@ -98,8 +98,8 @@ impl Debug for AltFmt<'_, PointRestore> {
                 if status.is_first_resolved {
                     tuple.field(&"first resolved");
                 }
-                if status.is_certified {
-                    tuple.field(&"certified");
+                if status.has_proof {
+                    tuple.field(&"has proof");
                 }
                 // author is shown in point id
                 tuple.finish()?;
@@ -167,7 +167,7 @@ pub struct PointStatusValidated {
     pub is_valid: bool,
     pub is_first_valid: bool,
     pub is_first_resolved: bool,
-    pub is_certified: bool,
+    pub has_proof: bool,
     pub no_dag_round: bool,
     pub anchor_flags: AnchorFlags,
     pub committed: Option<CommitHistoryPart>,
@@ -191,8 +191,8 @@ impl Display for PointStatusValidated {
         if self.is_first_resolved {
             tuple.field(&"first resolved");
         }
-        if self.is_certified {
-            tuple.field(&"certified");
+        if self.has_proof {
+            tuple.field(&"has proof");
         }
         tuple.finish_non_exhaustive()
     }
@@ -223,7 +223,7 @@ impl PointStatus for PointStatusValidated {
         flags.set(StatusFlags::Valid, self.is_valid);
         flags.set(StatusFlags::FirstValid, self.is_first_valid);
         flags.set(StatusFlags::FirstResolved, self.is_first_resolved);
-        flags.set(StatusFlags::Certified, self.is_certified);
+        flags.set(StatusFlags::HasProof, self.has_proof);
         flags.set(StatusFlags::RootCauseNoDagRound, self.no_dag_round);
 
         buffer.push(flags.bits());
@@ -236,7 +236,7 @@ impl PointStatus for PointStatusValidated {
 #[derive(Debug, Default)]
 pub struct PointStatusIllFormed {
     pub is_first_resolved: bool,
-    pub is_certified: bool,
+    pub has_proof: bool,
 }
 impl Display for PointStatusIllFormed {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -244,8 +244,8 @@ impl Display for PointStatusIllFormed {
         if self.is_first_resolved {
             tuple.field(&"first resolved");
         }
-        if self.is_certified {
-            tuple.field(&"certified");
+        if self.has_proof {
+            tuple.field(&"has proof");
         }
         tuple.finish()
     }
@@ -264,7 +264,7 @@ impl PointStatus for PointStatusIllFormed {
         let mut flags = StatusFlags::empty();
         flags.insert(StatusFlags::Found);
         flags.set(StatusFlags::FirstResolved, self.is_first_resolved);
-        flags.set(StatusFlags::Certified, self.is_certified);
+        flags.set(StatusFlags::HasProof, self.has_proof);
 
         buffer.push(flags.bits());
     }
@@ -274,7 +274,7 @@ impl PointStatus for PointStatusIllFormed {
 #[derive(Debug)]
 pub struct PointStatusNotFound {
     pub is_first_resolved: bool,
-    pub is_certified: bool,
+    pub has_proof: bool,
     pub author: PeerId,
 }
 impl Display for PointStatusNotFound {
@@ -283,8 +283,8 @@ impl Display for PointStatusNotFound {
         if self.is_first_resolved {
             tuple.field(&"first resolved");
         }
-        if self.is_certified {
-            tuple.field(&"certified");
+        if self.has_proof {
+            tuple.field(&"has proof");
         }
         tuple.field(&format!("author: {}", self.author.alt()));
         tuple.finish()
@@ -304,7 +304,7 @@ impl PointStatus for PointStatusNotFound {
     fn write_to(&self, buffer: &mut Vec<u8>) {
         let mut flags = StatusFlags::empty();
         flags.set(StatusFlags::FirstResolved, self.is_first_resolved);
-        flags.set(StatusFlags::Certified, self.is_certified);
+        flags.set(StatusFlags::HasProof, self.has_proof);
 
         buffer.push(flags.bits());
         buffer.extend_from_slice(&self.author.0);
@@ -350,7 +350,7 @@ impl PointStatusStored {
                     is_valid: flags.contains(StatusFlags::Valid),
                     is_first_valid: flags.contains(StatusFlags::FirstValid),
                     is_first_resolved: flags.contains(StatusFlags::FirstResolved),
-                    is_certified: flags.contains(StatusFlags::Certified),
+                    has_proof: flags.contains(StatusFlags::HasProof),
                     no_dag_round: flags.contains(StatusFlags::RootCauseNoDagRound),
                     anchor_flags: AnchorFlags::from_bits_retain(stored[1]),
                     committed: CommitHistoryPart::read(&stored[2..]),
@@ -358,7 +358,7 @@ impl PointStatusStored {
             } else {
                 Self::IllFormed(PointStatusIllFormed {
                     is_first_resolved: flags.contains(StatusFlags::FirstResolved),
-                    is_certified: flags.contains(StatusFlags::Certified),
+                    has_proof: flags.contains(StatusFlags::HasProof),
                 })
             }
         } else {
@@ -367,7 +367,7 @@ impl PointStatusStored {
             Self::NotFound(PointStatusNotFound {
                 author: PeerId(author),
                 is_first_resolved: flags.contains(StatusFlags::FirstResolved),
-                is_certified: flags.contains(StatusFlags::Certified),
+                has_proof: flags.contains(StatusFlags::HasProof),
             })
         };
         Ok(resolved)

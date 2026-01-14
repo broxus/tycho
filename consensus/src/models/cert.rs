@@ -19,7 +19,11 @@ thread_local! {
 
 impl Cert {
     pub fn is_certified(&self) -> bool {
-        self.0.is_certified()
+        self.0.certified().is_some()
+    }
+
+    pub fn has_proof(&self) -> bool {
+        self.0.certified().is_some_and(|directly| directly)
     }
 
     pub fn set_deps(&self, direct_deps: CertDirectDeps) {
@@ -32,7 +36,7 @@ impl Cert {
         // config value leaves enough room for +1 and other stuff (hidden flags)
         let max_depth = <u16 as From<u8>>::from(conf.consensus.commit_history_rounds.get());
         // current height == commit length + 1 round for current point (same as for anchor)
-        if let Some(direct_deps) = self.0.certify_deeper(max_depth + 1) {
+        if let Some(direct_deps) = self.0.certify_deeper(max_depth + 1, true) {
             direct_deps.traverse_certify(max_depth);
         };
     }
@@ -73,7 +77,7 @@ impl CertDirectRefs<'_> {
                 let Some(child) = weak.upgrade() else {
                     continue;
                 };
-                let Some(child_deps) = child.0.certify_deeper(current_deps_height) else {
+                let Some(child_deps) = child.0.certify_deeper(current_deps_height, false) else {
                     continue;
                 };
                 Self::extend_next(current, child_deps.includes);
@@ -93,7 +97,7 @@ impl CertDirectRefs<'_> {
                 }
                 let [current, includes, witness] = deps_queue;
                 for (_, child) in current.drain() {
-                    if let Some(child_deps) = child.0.certify_deeper(height) {
+                    if let Some(child_deps) = child.0.certify_deeper(height, false) {
                         Self::extend_next(includes, child_deps.includes);
                         if let Some(child_witness) = child_deps.witness {
                             Self::extend_next(witness, child_witness);
@@ -134,8 +138,10 @@ mod inner {
     use super::*;
 
     // NOTE: flag related stuff is private, height in super module always has upper bits unset
-    const INIT_STARTED: u16 = 0b_10 << 14;
-    const INIT_COMPLETED: u16 = 0b_11 << 14;
+    const TOP: u16 = 0b_100 << 13;
+    const INIT_STARTED: u16 = 0b_010 << 13;
+    const INIT_COMPLETED: u16 = INIT_STARTED | (0b_001 << 13);
+    const ALL_FLAGS: u16 = TOP | INIT_COMPLETED;
 
     pub struct CertInner {
         /// * `0`: current point is not certified (default)
@@ -160,8 +166,10 @@ mod inner {
     }
 
     impl CertInner {
-        pub fn is_certified(&self) -> bool {
-            self.height.load(atomic::Ordering::Relaxed) & !INIT_COMPLETED != 0
+        /// Option contains `true` in case was directly certified and `false` if transitively
+        pub fn certified(&self) -> Option<bool> {
+            let height = self.height.load(atomic::Ordering::Relaxed);
+            (height & !ALL_FLAGS != 0).then_some(height & TOP == TOP)
         }
 
         pub fn set_deps(&self, direct_deps: CertDirectDeps) -> Option<(CertDirectRefs<'_>, u16)> {
@@ -176,7 +184,7 @@ mod inner {
             };
 
             height = (self.height).fetch_or(INIT_COMPLETED, atomic::Ordering::Release);
-            height &= !INIT_STARTED; // unmask: no other thread can set COMPLETED bit
+            height &= !ALL_FLAGS; // unmask all because of max height bit
 
             if height > 1 {
                 let refs = CertDirectRefs {
@@ -189,9 +197,12 @@ mod inner {
             }
         }
 
-        /// `Some` if the new height is greater (new proof is closer), so must continue traverse
-        pub fn certify_deeper(&self, height: u16) -> Option<CertDirectRefs<'_>> {
-            if self.max_height_published(height) && height > 1 {
+        /// `top` is set for max possible height by config (point has direct proof by next one)
+        ///
+        /// returns `Some` if the new height is greater (new proof is closer), so must continue traverse
+        pub fn certify_deeper(&self, height: u16, is_top: bool) -> Option<CertDirectRefs<'_>> {
+            let top_mask = if is_top { TOP } else { 0 };
+            if self.max_height_published(height, top_mask) && height > 1 {
                 // SAFETY: INIT_COMPLETED is published after deps are init
                 let deps = unsafe { (&*self.direct_deps.get()).assume_init_ref() };
                 Some(CertDirectRefs {
@@ -203,14 +214,15 @@ mod inner {
             }
         }
 
-        fn max_height_published(&self, mut height: u16) -> bool {
+        fn max_height_published(&self, mut height: u16, top_mask: u16) -> bool {
             self.height
                 .fetch_update(
                     atomic::Ordering::Relaxed, // store: flags remain unchanged
                     atomic::Ordering::Acquire, // load: synchronizes-with `set_deps()`
                     |stored| {
-                        height |= stored & INIT_COMPLETED; // inherit flags
-                        (height > stored).then_some(height) // keep max
+                        height |= stored & ALL_FLAGS; // inherit flags
+                        // top bit is set only once, when height is greater than any other
+                        (height > stored).then_some(height | top_mask) // keep max
                     },
                 )
                 // is_ok: traverse only if current height is greater, don't repeat work already done
