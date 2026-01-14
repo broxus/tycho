@@ -86,8 +86,8 @@ pub enum IllFormedReason {
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum InvalidReason {
-    #[error("after load from DB{}", no_dag_round.then_some(" (no dag round)").unwrap_or(""))]
-    AfterLoadFromDb { no_dag_round: bool },
+    #[error("after load from DB ({} dag round)", if *has_dag_round { "has" } else { "no" })]
+    AfterLoadFromDb { has_dag_round: bool },
     #[error("cannot validate point, no {0:?} round in DAG")]
     NoRoundInDag(PointMap),
     #[error("cannot validate point, dependency was dropped with its round")]
@@ -118,16 +118,16 @@ pub enum InvalidReason {
 
 impl InvalidReason {
     /// root cause is because of no dag round: such points should not be a ban reason
-    pub fn no_dag_round(&self) -> bool {
+    pub fn has_dag_round(&self) -> bool {
         match self {
-            Self::AfterLoadFromDb { no_dag_round } => *no_dag_round,
-            Self::NoRoundInDag(_) | Self::DependencyRoundDropped => true,
+            Self::AfterLoadFromDb { has_dag_round } => *has_dag_round,
+            Self::NoRoundInDag(_) | Self::DependencyRoundDropped => false,
             InvalidReason::Dependency(inv_dep) => match &*inv_dep.reason {
-                Self::AfterLoadFromDb { no_dag_round } => *no_dag_round,
-                Self::NoRoundInDag(_) | Self::DependencyRoundDropped => true,
-                _ => false,
+                Self::AfterLoadFromDb { has_dag_round } => *has_dag_round,
+                Self::NoRoundInDag(_) | Self::DependencyRoundDropped => false,
+                _ => true,
             },
-            _ => false,
+            _ => true,
         }
     }
 }
@@ -531,12 +531,12 @@ impl Verifier {
             }
         };
 
-        // newer round takes priority; at equal rounds `no_dag_round` has less priority
+        // newer round takes priority; at equal rounds `has_dag_round` takes priority
         if (inv_dep.as_ref()).is_none_or(|old| {
             old.link.to.round < root_cause_id.round
                 || (old.link.to.round == root_cause_id.round
-                    && old.reason.no_dag_round()
-                    && !reason.no_dag_round())
+                    && !old.reason.has_dag_round()
+                    && reason.has_dag_round())
         }) {
             *inv_dep = Some(InvalidDependency {
                 reason: Box::new(reason.clone()),

@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{DagFront, DagRound, KeyGroup, Verifier};
+use crate::dag::{DagFront, DagRound, KeyGroup, Verifier, VerifyError};
 use crate::effects::{
     AltFormat, Cancelled, Ctx, EngineCtx, RoundCtx, Task, TaskResult, TaskTracker,
 };
@@ -21,9 +21,8 @@ use crate::engine::lifecycle::{EngineBinding, EngineError, EngineNetwork, FixHis
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::round_watch::{RoundWatch, RoundWatcher, TopKnownAnchor};
 use crate::engine::{ConsensusConfigExt, MempoolMergedConfig};
-use crate::models::{
-    DagPoint, MempoolOutput, Point, PointRestore, PointRestoreSelect, PointStatusStoredRef, Round,
-};
+use crate::models::point_status::PointStatusStored;
+use crate::models::{DagPoint, MempoolOutput, Point, PointRestore, Round};
 use crate::storage::{DbCleaner, MempoolStore};
 
 pub type EngineResult<T> = std::result::Result<T, EngineError>;
@@ -94,7 +93,7 @@ impl Engine {
             let overlay_id = merged_conf.overlay_id;
             move || {
                 store.init_storage(&overlay_id);
-                store.insert_point(&genesis, PointStatusStoredRef::Exists);
+                store.insert_point(&genesis, &PointStatusStored::Found(Default::default()));
                 fix_history // just pass further
             }
         });
@@ -288,6 +287,8 @@ impl Engine {
             let peer_schedule = self.round_task.state.peer_schedule.clone();
             let round_ctx = round_ctx.clone();
             move || {
+                use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+
                 let _guard = round_ctx.span().enter();
                 if fix_history.0 {
                     store.reset_statuses(&range);
@@ -295,30 +296,31 @@ impl Engine {
                 let restores = store.load_restore(&range);
                 let (need_verify, ready): (Vec<_>, Vec<_>) =
                     restores.into_iter().partition_map(|r| match r {
-                        PointRestoreSelect::NeedsVerify(key) => Either::Left(key),
-                        PointRestoreSelect::Ready(ready) => Either::Right(ready),
+                        PointRestore::Found(info, status) => Either::Left((info, status)),
+                        ready => Either::Right(ready),
                     });
                 let verified = need_verify
-                    .chunks(1000) // seems enough for any case
-                    .flat_map(|keys| {
-                        use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-                        store
-                            .multi_get_info(keys) // assume load result is sorted
-                            .into_par_iter()
-                            .map(|info| {
-                                if Verifier::verify(&info, &peer_schedule, round_ctx.conf()).is_ok()
-                                {
-                                    // return back as they were, now with prev_proof filled
-                                    PointRestore::Exists(info)
-                                } else {
-                                    PointRestore::IllFormed(*info.id(), Default::default())
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                    });
+                    .into_par_iter()
+                    .map(|(info, status)| {
+                        match Verifier::verify(&info, &peer_schedule, round_ctx.conf()) {
+                            Ok(()) => PointRestore::Found(info, status),
+                            Err(VerifyError::IllFormed(_)) => {
+                                PointRestore::IllFormed(*info.id(), Default::default())
+                            }
+                            Err(VerifyError::Fail(error)) => {
+                                tracing::debug!(
+                                    parent: round_ctx.span(),
+                                    %error,
+                                    "preload points verify failed"
+                                );
+                                PointRestore::IllFormed(*info.id(), Default::default())
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>();
 
                 let mut map = BTreeMap::<(Round, _), Vec<PointRestore>>::new();
-                for pre in verified.chain(ready) {
+                for pre in verified.into_iter().chain(ready) {
                     let entry = map.entry((pre.round(), pre.restore_order_asc()));
                     entry.or_default().push(pre);
                 }
