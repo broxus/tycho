@@ -1,10 +1,8 @@
 use tycho_storage::kv::{
     DEFAULT_MIN_BLOB_SIZE, NamedTables, TableContext, optimize_for_point_lookup,
 };
-use weedb::rocksdb::{DBCompressionType, Options};
+use weedb::rocksdb::{DBCompressionType, MergeOperands, Options};
 use weedb::{ColumnFamily, ColumnFamilyOptions};
-
-use super::status_flags;
 
 impl NamedTables for MempoolTables {
     const NAME: &'static str = "mempool";
@@ -61,8 +59,7 @@ impl ColumnFamilyOptions<TableContext> for PointsInfo {
 
 /// Stores mempool point flags
 /// - Key: [`crate::models::PointKey`]
-/// - Value: [`crate::models::PointStatusStored`]
-///   - also see  [`crate::models::point_status::StatusFlags::try_from_stored`]
+/// - Value: [`crate::models::point_status::PointStatusStored`]
 pub struct PointsStatus;
 
 impl ColumnFamily for PointsStatus {
@@ -74,6 +71,14 @@ impl ColumnFamilyOptions<TableContext> for PointsStatus {
         optimize_for_point_lookup(opts, ctx);
         opts.set_disable_auto_compactions(true);
 
-        opts.set_merge_operator_associative("points_status_merge", status_flags::merge);
+        opts.set_merge_operator_associative("points_status_merge", points_status_merge);
     }
+}
+
+fn points_status_merge(
+    key: &[u8],
+    stored: Option<&[u8]>,
+    new_status_queue: &MergeOperands,
+) -> Option<Vec<u8>> {
+    crate::models::point_status::merge_bytes(key, stored.into_iter().chain(new_status_queue))
 }

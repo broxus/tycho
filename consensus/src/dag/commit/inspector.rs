@@ -68,7 +68,7 @@ impl RoundInspector {
                     }
                     DagPoint::Invalid(invalid) => {
                         authored_versions += 1;
-                        if !invalid.is_certified() && !invalid.reason().no_dag_round() {
+                        if !invalid.is_certified() && invalid.reason().has_dag_round() {
                             author_counters.invalid_points += 1;
                         }
                     }
