@@ -1290,6 +1290,10 @@ impl StorageCell {
         (hash_index, max_level, is_pruned)
     }
 
+    fn allocated_len(&self) -> usize {
+        self.data_len as usize + (self.other_hash_count as usize) * Self::HASHES_ITEM_LEN
+    }
+
     fn initialize_inner(state: &AtomicU8, init: &mut impl FnMut() -> bool) {
         struct Guard<'a> {
             state: &'a AtomicU8,
@@ -1384,7 +1388,7 @@ impl CellImpl for StorageCell {
                 + (!is_pruned as usize)
                     * (self.data_len as usize + (hash_index as usize) * Self::HASHES_ITEM_LEN);
 
-            debug_assert!(offset + 32 <= self.data_len as usize);
+            debug_assert!(offset + 32 <= self.allocated_len());
             HashBytes::wrap(unsafe { &*self.data_ptr.add(offset).cast::<[u8; 32]>() })
         }
     }
@@ -1400,7 +1404,7 @@ impl CellImpl for StorageCell {
                 + (!is_pruned as usize)
                     * (self.data_len as usize + (hash_index as usize) * Self::HASHES_ITEM_LEN + 32);
 
-            debug_assert!(offset + 2 <= self.data_len as usize);
+            debug_assert!(offset + 2 <= self.allocated_len());
             u16::from_le_bytes(unsafe { *self.data_ptr.add(offset).cast::<[u8; 2]>() })
         }
     }
@@ -1408,13 +1412,10 @@ impl CellImpl for StorageCell {
 
 impl Drop for StorageCell {
     fn drop(&mut self) {
-        let allocated_len =
-            self.data_len as usize + (self.other_hash_count as usize) * Self::HASHES_ITEM_LEN;
-
         _ = unsafe {
             Box::from_raw(std::ptr::slice_from_raw_parts_mut(
                 self.data_ptr.cast_mut(),
-                allocated_len,
+                self.allocated_len(),
             ))
         };
 
@@ -1668,5 +1669,78 @@ impl RawCellsCache {
 
     fn refresh_metrics(&self) {
         metrics::gauge!("tycho_storage_raw_cells_cache_size").set(self.inner.weight() as f64);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tycho_storage::StorageContext;
+    use tycho_types::merkle::make_pruned_branch;
+
+    use super::*;
+    use crate::storage::{CoreStorage, CoreStorageConfig};
+
+    #[tokio::test]
+    async fn pruned_cells_have_proper_hashes() -> Result<()> {
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let config = CoreStorageConfig::new_potato();
+        let storage = CoreStorage::open(ctx, config).await?;
+
+        let original_cell = CellBuilder::build_from(0u32)?;
+        let pruned_level1 = make_pruned_branch(original_cell.as_ref(), 0, Cell::empty_context())?;
+        let pruned_level2 = make_pruned_branch(pruned_level1.as_ref(), 1, Cell::empty_context())?;
+        let pruned_level3 = make_pruned_branch(pruned_level2.as_ref(), 2, Cell::empty_context())?;
+        let multilevel_cell =
+            CellBuilder::build_from((original_cell.clone(), pruned_level2.clone()))?;
+
+        let cells = [
+            original_cell,
+            pruned_level1,
+            pruned_level2,
+            pruned_level3,
+            multilevel_cell,
+        ];
+
+        let cell_storage = &storage.shard_state_storage().cell_storage;
+
+        // Insert all cells.
+        for root in &cells {
+            let mut batch = rocksdb::WriteBatch::default();
+            cell_storage.store_cell(&mut batch, root.as_ref(), 1)?;
+            cell_storage
+                .cells_db
+                .rocksdb()
+                .write_opt(batch, cell_storage.cells_db.cells.write_config())?;
+        }
+
+        // Check hashes
+        for root in &cells {
+            let loaded = cell_storage.load_cell(root.repr_hash(), 0)?;
+            for level in 0..4 {
+                assert_eq!(loaded.hash(level), root.hash(level));
+                assert_eq!(loaded.depth(level), root.depth(level));
+            }
+        }
+
+        // Remove all cells.
+        let mut alloc = bumpalo::Bump::new();
+        for root in &cells {
+            let (_, batch) = cell_storage.remove_cell(&alloc, root.repr_hash())?;
+            cell_storage
+                .cells_db
+                .rocksdb()
+                .write_opt(batch, cell_storage.cells_db.cells.write_config())?;
+            alloc.reset();
+        }
+
+        // Check if empty
+        cell_storage.cells_db.trigger_compaction().await;
+        cell_storage.cells_db.trigger_compaction().await;
+
+        let mut iterator = cell_storage.cells_db.cells.raw_iterator();
+        iterator.seek_to_first();
+        assert!(iterator.item().is_none());
+
+        Ok(())
     }
 }
