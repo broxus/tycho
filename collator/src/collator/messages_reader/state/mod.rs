@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use anyhow::anyhow;
 use tycho_block_util::queue::QueueKey;
+use tycho_util_proc::Transactional;
 
+use crate::collator::ForceMasterCollation::No;
 use crate::collator::messages_reader::state::external::{
     ExternalsPartitionReaderState, ExternalsRangeReaderState, ExternalsReaderRange,
     ExternalsReaderState,
@@ -16,10 +18,16 @@ use crate::types::processed_upto::{
 pub mod external;
 pub mod internal;
 
-#[derive(Default)]
+#[derive(Transactional)]
 pub struct ReaderState {
+    #[tx(transactional)]
     pub externals: ExternalsReaderState,
+
+    #[tx(transactional)]
     pub internals: InternalsReaderState,
+
+    #[tx(state)]
+    tx: Option<ReaderStateTx>,
 }
 
 impl ReaderState {
@@ -47,16 +55,16 @@ impl ReaderState {
                     ));
             }
         }
+        let partitions = processed_upto
+            .partitions
+            .iter()
+            .map(|(k, v)| (*k, (&v.internals).into()))
+            .collect();
+
         Self {
-            internals: InternalsReaderState {
-                partitions: processed_upto
-                    .partitions
-                    .iter()
-                    .map(|(k, v)| (*k, (&v.internals).into()))
-                    .collect(),
-                cumulative_statistics: None,
-            },
+            internals: InternalsReaderState::new(partitions, None),
             externals: ext_reader_state,
+            tx: None,
         }
     }
 
