@@ -19,16 +19,19 @@ metrics = { workspace = true }
 parking_lot = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
+tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tycho-crypto = { workspace = true }
 tycho-types = { workspace = true, features = ["abi", "models"] }
+weedb = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }
 tycho-core = { workspace = true }
 tycho-slasher-traits = { workspace = true }
+tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 
 [lints]
