@@ -4051,6 +4051,7 @@ dependencies = [
  "tycho-storage",
  "tycho-types",
  "tycho-util",
+ "tycho-util-proc",
  "tycho-vm",
  "weedb",
 ]

@@ -153,16 +153,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
             }
 
             let state = InternalsRangeReaderState {
-                buffer: Default::default(),
-
                 // we do not use messages satistics when reading new messages
-                msgs_stats: None,
-                remaning_msgs_stats: None,
-                read_stats: Default::default(),
-
                 shards: new_shard_reader_states,
-                skip_offset: 0,
-                processed_offset: 0,
+                ..Default::default()
             };
 
             let reader = InternalsRangeReader {
