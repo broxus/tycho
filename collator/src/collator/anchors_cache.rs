@@ -216,7 +216,7 @@ impl<'a> AnchorsCacheTransaction<'a> {
         for info in &self.cache.imported_anchors_info_history {
             if info.ct < chain_time && remaining_len > 1 {
                 removed_infos.push(info.clone());
-                remaining_len -= 1; // ← ключевое исправление
+                remaining_len -= 1;
             } else {
                 break;
             }

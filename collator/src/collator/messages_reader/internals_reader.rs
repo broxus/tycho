@@ -508,15 +508,10 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
         }
 
         let mut state = InternalsRangeReaderState {
-            buffer: Default::default(),
-
-            msgs_stats: None,
-            remaning_msgs_stats: None,
-            read_stats: Default::default(),
-
             shards: shard_reader_states,
             skip_offset: self.reader_state.curr_processed_offset,
             processed_offset: self.reader_state.curr_processed_offset,
+            ..Default::default()
         };
 
         // get statistics for the range

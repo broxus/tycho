@@ -42,11 +42,7 @@ use crate::tracing_targets;
 use crate::types::processed_upto::{
     build_all_shards_processed_to_by_partitions, find_min_processed_to_by_shards,
 };
-use crate::types::{
-    BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
-    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort,
-    ShardDescriptionShortExt, ShardPair, TopBlockDescription, TopBlockId, TopShardBlockInfo,
-};
+use crate::types::{BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig, DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort, ShardDescriptionShortExt, ShardPair, TopBlockDescription, TopBlockId, TopShardBlockInfo, Transactional};
 
 #[cfg(test)]
 #[path = "../tests/do_collate_tests.rs"]
@@ -211,6 +207,8 @@ impl CollatorStdImpl {
                 let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut anchors_cache);
                 let _span = span.enter();
 
+                reader_state.begin();
+
                 let result = Self::run(
                     config,
                     mq_adapter,
@@ -225,7 +223,10 @@ impl CollatorStdImpl {
                 );
 
                 if result.is_ok() {
+                    reader_state.commit();
                     anchor_cache_tx.commit();
+                } else {
+                    reader_state.rollback();
                 }
 
                 drop(anchor_cache_tx);
@@ -389,7 +390,7 @@ impl CollatorStdImpl {
         collator_config: Arc<CollatorConfig>,
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         reader_state: &mut ReaderState,
-        anchors_cache: &mut AnchorsCacheTransaction,
+        anchors_cache: &mut AnchorsCacheTransaction<'_>,
         block_serializer_cache: BlockSerializerCache,
         state: Box<ActualState>,
         collation_session: Arc<CollationSessionInfo>,
@@ -420,8 +421,12 @@ impl CollatorStdImpl {
             .cloned()
             .unwrap_or_default();
 
-        let prepare_phase =
-            Phase::<PrepareState<'_>>::new(mq_adapter.clone(), reader_state, anchors_cache, state);
+        let prepare_phase = Phase::<PrepareState<'_, '_>>::new(
+            mq_adapter.clone(),
+            reader_state,
+            anchors_cache,
+            state,
+        );
 
         let mut execute_phase = prepare_phase.run()?;
 

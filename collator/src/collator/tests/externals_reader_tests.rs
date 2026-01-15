@@ -124,7 +124,7 @@ fn test_read_externals() {
         &mut reader_state.externals,
     );
 
-    let print_state = |externals_reader: &ExternalsReader<'_>| {
+    let print_state = |externals_reader: &ExternalsReader<'_, '_>| {
         println!(
             "externals_reader_state.by_partitions: {:?}",
             externals_reader.reader_state.by_partitions,

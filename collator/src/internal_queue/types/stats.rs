@@ -8,6 +8,7 @@ use tycho_util::FastHashMap;
 
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::InternalMessageValue;
+use crate::types::Transactional;
 
 pub type AccountStatistics = FastHashMap<IntAddr, u64>;
 pub type StatisticsByPartitions = FastHashMap<QueuePartitionIdx, AccountStatistics>;
@@ -44,104 +45,19 @@ impl VersionedValue {
 #[derive(Debug, Default, Clone)]
 pub struct QueueStatistics {
     statistics: FastHashMap<IntAddr, VersionedValue>,
+    in_transaction: bool,
 }
 
-impl QueueStatistics {
-    pub fn with_statistics(statistics: AccountStatistics) -> Self {
-        Self {
-            statistics: statistics
-                .into_iter()
-                .map(|(k, v)| (k, VersionedValue::committed(v)))
-                .collect(),
+impl Transactional for QueueStatistics {
+    fn begin(&mut self) {
+        self.in_transaction = true;
+    }
+
+    fn commit(&mut self) {
+        if !self.in_transaction {
+            return;
         }
-    }
-
-    pub fn statistics(&self) -> StatisticsView<'_> {
-        StatisticsView {
-            inner: &self.statistics,
-        }
-    }
-
-    pub fn increment_for_account(&mut self, account_addr: IntAddr, count: u64) {
-        self.statistics
-            .entry(account_addr)
-            .and_modify(|v| {
-                v.uncommitted = Some(v.current() + count);
-            })
-            .or_insert(VersionedValue {
-                committed: 0,
-                uncommitted: Some(count),
-            });
-    }
-
-    pub fn decrement_for_account(&mut self, account_addr: IntAddr, count: u64) {
-        if let Some(v) = self.statistics.get_mut(&account_addr) {
-            let current = v.current();
-            if current < count {
-                panic!(
-                    "attempted to decrement below zero: current={}, decrement={}",
-                    current, count
-                );
-            }
-            v.uncommitted = Some(current - count);
-        } else {
-            panic!("attempted to decrement non-existent account");
-        }
-    }
-
-    pub fn append(&mut self, other: &AccountStatistics) {
-        for (account_addr, &msgs_count) in other {
-            self.statistics
-                .entry(account_addr.clone())
-                .and_modify(|v| {
-                    v.uncommitted = Some(v.current() + msgs_count);
-                })
-                .or_insert(VersionedValue {
-                    committed: 0,
-                    uncommitted: Some(msgs_count),
-                });
-        }
-    }
-
-    pub fn append_committed(&mut self, other: &AccountStatistics) {
-        for (account_addr, &msgs_count) in other {
-            self.statistics
-                .entry(account_addr.clone())
-                .and_modify(|v| v.committed += msgs_count)
-                .or_insert(VersionedValue::committed(msgs_count));
-        }
-    }
-
-    // Transactions
-
-    pub fn commit(&mut self, affected: impl Iterator<Item = IntAddr>) {
-        for addr in affected {
-            if let hash_map::Entry::Occupied(mut entry) = self.statistics.entry(addr) {
-                let v = entry.get_mut();
-                if let Some(uncommitted) = v.uncommitted.take() {
-                    if uncommitted == 0 {
-                        entry.remove();
-                    } else {
-                        v.committed = uncommitted;
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn rollback(&mut self, affected: impl Iterator<Item = IntAddr>) {
-        for addr in affected {
-            if let hash_map::Entry::Occupied(mut entry) = self.statistics.entry(addr) {
-                let v = entry.get_mut();
-                v.uncommitted = None;
-                if v.committed == 0 {
-                    entry.remove();
-                }
-            }
-        }
-    }
-
-    pub fn commit_all(&mut self) {
+        self.in_transaction = false;
         self.statistics.retain(|_, v| {
             if let Some(uncommitted) = v.uncommitted.take() {
                 if uncommitted == 0 {
@@ -153,15 +69,142 @@ impl QueueStatistics {
         });
     }
 
-    pub fn rollback_all(&mut self) {
+    fn rollback(&mut self) {
+        if !self.in_transaction {
+            return;
+        }
+        self.in_transaction = false;
         self.statistics.retain(|_, v| {
             v.uncommitted = None;
             v.committed != 0
         });
     }
 
+    fn is_in_transaction(&self) -> bool {
+        self.in_transaction
+    }
+}
+
+impl QueueStatistics {
+    pub fn with_statistics(statistics: AccountStatistics) -> Self {
+        Self {
+            statistics: statistics
+                .into_iter()
+                .map(|(k, v)| (k, VersionedValue::committed(v)))
+                .collect(),
+            in_transaction: false,
+        }
+    }
+
+    pub fn statistics(&self) -> StatisticsView<'_> {
+        StatisticsView {
+            inner: &self.statistics,
+        }
+    }
+
+    pub fn increment_for_account(&mut self, account_addr: IntAddr, count: u64) {
+        if self.in_transaction {
+            self.statistics
+                .entry(account_addr)
+                .and_modify(|v| {
+                    v.uncommitted = Some(v.current() + count);
+                })
+                .or_insert(VersionedValue {
+                    committed: 0,
+                    uncommitted: Some(count),
+                });
+        } else {
+            self.statistics
+                .entry(account_addr)
+                .and_modify(|v| {
+                    v.committed += count;
+                })
+                .or_insert(VersionedValue::committed(count));
+        }
+    }
+
+    pub fn decrement_for_account(&mut self, account_addr: IntAddr, count: u64) {
+        if let Some(v) = self.statistics.get_mut(&account_addr) {
+            let current = v.current();
+            if current < count {
+                panic!(
+                    "attempted to decrement below zero: current={}, decrement={}",
+                    current, count
+                );
+            }
+            if self.in_transaction {
+                v.uncommitted = Some(current - count);
+            } else {
+                v.committed = current - count;
+            }
+        } else {
+            panic!("attempted to decrement non-existent account");
+        }
+    }
+
+    pub fn append(&mut self, other: &AccountStatistics) {
+        if self.in_transaction {
+            for (account_addr, &msgs_count) in other {
+                self.statistics
+                    .entry(account_addr.clone())
+                    .and_modify(|v| {
+                        v.uncommitted = Some(v.current() + msgs_count);
+                    })
+                    .or_insert(VersionedValue {
+                        committed: 0,
+                        uncommitted: Some(msgs_count),
+                    });
+            }
+        } else {
+            for (account_addr, &msgs_count) in other {
+                self.statistics
+                    .entry(account_addr.clone())
+                    .and_modify(|v| {
+                        v.committed += msgs_count;
+                    })
+                    .or_insert(VersionedValue::committed(msgs_count));
+            }
+        }
+    }
+
+    // Transactions
+    // pub fn commit(&mut self, affected: impl Iterator<Item = IntAddr>) {
+    //     for addr in affected {
+    //         if let hash_map::Entry::Occupied(mut entry) = self.statistics.entry(addr) {
+    //             let v = entry.get_mut();
+    //             if let Some(uncommitted) = v.uncommitted.take() {
+    //                 if uncommitted == 0 {
+    //                     entry.remove();
+    //                 } else {
+    //                     v.committed = uncommitted;
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
+    //
+    // pub fn rollback(&mut self, affected: impl Iterator<Item = IntAddr>) {
+    //     for addr in affected {
+    //         if let hash_map::Entry::Occupied(mut entry) = self.statistics.entry(addr) {
+    //             let v = entry.get_mut();
+    //             v.uncommitted = None;
+    //             if v.committed == 0 {
+    //                 entry.remove();
+    //             }
+    //         }
+    //     }
+    // }
+
     pub fn has_uncommitted(&self) -> bool {
         self.statistics.values().any(|v| v.is_dirty())
+    }
+
+    pub fn commit_all(&mut self) {
+        self.commit();
+    }
+
+    pub fn rollback_all(&mut self) {
+        self.rollback();
     }
 }
 
@@ -536,12 +579,12 @@ mod tests {
     }
 
     #[test]
-    fn test_append_committed_no_transaction() {
+    fn test_append_no_transaction_writes_committed() {
         let mut stats = QueueStatistics::default();
         let mut other = FastHashMap::default();
         other.insert(addr(1), 5);
 
-        stats.append_committed(&other);
+        stats.append(&other);
 
         assert!(!stats.has_uncommitted());
         assert_eq!(stats.statistics().get(&addr(1)), Some(5));

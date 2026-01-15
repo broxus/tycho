@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use dashmap::Entry as DashMapEntry;
 use dashmap::mapref::multiple::RefMulti;
@@ -50,6 +50,7 @@ pub struct ConcurrentQueueStatistics {
     track_shard: ShardIdent,
     tracked_total: Arc<AtomicU64>,
     tracked_total_snapshot: AtomicU64,
+    in_transaction: AtomicBool,
 }
 
 impl Clone for ConcurrentQueueStatistics {
@@ -59,6 +60,7 @@ impl Clone for ConcurrentQueueStatistics {
             track_shard: self.track_shard,
             tracked_total: Arc::clone(&self.tracked_total),
             tracked_total_snapshot: AtomicU64::new(self.tracked_total.load(Ordering::Relaxed)),
+            in_transaction: AtomicBool::new(self.in_transaction.load(Ordering::Relaxed)),
         }
     }
 }
@@ -70,6 +72,7 @@ impl ConcurrentQueueStatistics {
             track_shard,
             tracked_total: Arc::new(AtomicU64::new(0)),
             tracked_total_snapshot: AtomicU64::new(0),
+            in_transaction: AtomicBool::new(false),
         }
     }
 
@@ -100,15 +103,24 @@ impl ConcurrentQueueStatistics {
     pub fn increment_for_account(&self, account_addr: IntAddr, count: u64) {
         let is_tracked = self.track_shard.contains_address(&account_addr);
 
-        self.statistics
-            .entry(account_addr)
-            .and_modify(|v| {
-                v.uncommitted = Some(v.current() + count);
-            })
-            .or_insert(VersionedValue {
-                committed: 0,
-                uncommitted: Some(count),
-            });
+        if self.in_transaction.load(Ordering::Relaxed) {
+            self.statistics
+                .entry(account_addr)
+                .and_modify(|v| {
+                    v.uncommitted = Some(v.current() + count);
+                })
+                .or_insert(VersionedValue {
+                    committed: 0,
+                    uncommitted: Some(count),
+                });
+        } else {
+            self.statistics
+                .entry(account_addr)
+                .and_modify(|v| {
+                    v.committed += count;
+                })
+                .or_insert(VersionedValue::committed(count));
+        }
 
         if is_tracked {
             self.tracked_total.fetch_add(count, Ordering::Relaxed);
@@ -128,7 +140,11 @@ impl ConcurrentQueueStatistics {
                         current, count
                     );
                 }
-                v.uncommitted = Some(current - count);
+                if self.in_transaction.load(Ordering::Relaxed) {
+                    v.uncommitted = Some(current - count);
+                } else {
+                    v.committed = current - count;
+                }
             }
             DashMapEntry::Vacant(_) => {
                 panic!("attempted to decrement non-existent account");
@@ -143,47 +159,39 @@ impl ConcurrentQueueStatistics {
     pub fn append(&self, other: &AccountStatistics) {
         let mut delta_tracked: u64 = 0;
 
-        for (account_addr, &msgs_count) in other {
-            self.statistics
-                .entry(account_addr.clone())
-                .and_modify(|v| {
-                    v.uncommitted = Some(v.current() + msgs_count);
-                })
-                .or_insert(VersionedValue {
-                    committed: 0,
-                    uncommitted: Some(msgs_count),
-                });
+        if self.in_transaction.load(Ordering::Relaxed) {
+            for (account_addr, &msgs_count) in other {
+                self.statistics
+                    .entry(account_addr.clone())
+                    .and_modify(|v| {
+                        v.uncommitted = Some(v.current() + msgs_count);
+                    })
+                    .or_insert(VersionedValue {
+                        committed: 0,
+                        uncommitted: Some(msgs_count),
+                    });
 
-            if self.track_shard.contains_address(account_addr) {
-                delta_tracked += msgs_count;
+                if self.track_shard.contains_address(account_addr) {
+                    delta_tracked += msgs_count;
+                }
+            }
+        } else {
+            for (account_addr, &msgs_count) in other {
+                self.statistics
+                    .entry(account_addr.clone())
+                    .and_modify(|v| {
+                        v.committed += msgs_count;
+                    })
+                    .or_insert(VersionedValue::committed(msgs_count));
+
+                if self.track_shard.contains_address(account_addr) {
+                    delta_tracked += msgs_count;
+                }
             }
         }
 
         if delta_tracked != 0 {
             self.tracked_total
-                .fetch_add(delta_tracked, Ordering::Relaxed);
-        }
-    }
-
-    pub fn append_committed(&self, other: &AccountStatistics) {
-        let mut delta_tracked: u64 = 0;
-
-        for (account_addr, &msgs_count) in other {
-            self.statistics
-                .entry(account_addr.clone())
-                .and_modify(|v| v.committed += msgs_count)
-                .or_insert(VersionedValue::committed(msgs_count));
-
-            if self.track_shard.contains_address(account_addr) {
-                delta_tracked += msgs_count;
-            }
-        }
-
-        if delta_tracked != 0 {
-            self.tracked_total
-                .fetch_add(delta_tracked, Ordering::Relaxed);
-            // also update snapshot, as this is not part of a transaction
-            self.tracked_total_snapshot
                 .fetch_add(delta_tracked, Ordering::Relaxed);
         }
     }
@@ -196,31 +204,17 @@ impl ConcurrentQueueStatistics {
             "begin() called with uncommitted changes"
         );
 
-        let current = self.tracked_total.load(Ordering::Relaxed);
-        self.tracked_total_snapshot
-            .store(current, Ordering::Relaxed);
-    }
-
-    pub fn commit(&self, affected: impl Iterator<Item = IntAddr>) {
-        for addr in affected {
-            if let DashMapEntry::Occupied(mut entry) = self.statistics.entry(addr) {
-                let v = entry.get_mut();
-                if let Some(uncommitted) = v.uncommitted.take() {
-                    if uncommitted == 0 {
-                        entry.remove();
-                    } else {
-                        v.committed = uncommitted;
-                    }
-                }
-            }
-        }
-        // snapshot = current (transaction completed)
+        self.in_transaction.store(true, Ordering::Relaxed);
         let current = self.tracked_total.load(Ordering::Relaxed);
         self.tracked_total_snapshot
             .store(current, Ordering::Relaxed);
     }
 
     pub fn commit_all(&self) {
+        if !self.in_transaction.load(Ordering::Relaxed) {
+            return;
+        }
+        self.in_transaction.store(false, Ordering::Relaxed);
         self.statistics.retain(|_, v| {
             if let Some(uncommitted) = v.uncommitted.take() {
                 if uncommitted == 0 {
@@ -236,21 +230,11 @@ impl ConcurrentQueueStatistics {
             .store(current, Ordering::Relaxed);
     }
 
-    pub fn rollback(&self, affected: impl Iterator<Item = IntAddr>) {
-        for addr in affected {
-            if let DashMapEntry::Occupied(mut entry) = self.statistics.entry(addr) {
-                let v = entry.get_mut();
-                v.uncommitted = None;
-                if v.committed == 0 {
-                    entry.remove();
-                }
-            }
-        }
-        let snapshot = self.tracked_total_snapshot.load(Ordering::Relaxed);
-        self.tracked_total.store(snapshot, Ordering::Relaxed);
-    }
-
     pub fn rollback_all(&self) {
+        if !self.in_transaction.load(Ordering::Relaxed) {
+            return;
+        }
+        self.in_transaction.store(false, Ordering::Relaxed);
         self.statistics.retain(|_, v| {
             v.uncommitted = None;
             v.committed != 0
@@ -287,7 +271,7 @@ mod tests {
 
     fn stats_with_initial(initial: &AccountStatistics) -> ConcurrentQueueStatistics {
         let stats = ConcurrentQueueStatistics::new(track_all_shard());
-        stats.append_committed(initial);
+        stats.append(initial);
         stats
     }
 
@@ -486,12 +470,12 @@ mod tests {
     }
 
     #[test]
-    fn test_append_committed_no_transaction() {
+    fn test_append_no_transaction_writes_committed() {
         let stats = ConcurrentQueueStatistics::new(track_all_shard());
         let mut other = FastHashMap::default();
         other.insert(addr(1), 5);
 
-        stats.append_committed(&other);
+        stats.append(&other);
 
         assert!(!stats.has_uncommitted());
         assert_eq!(stats.get(&addr(1)), Some(5));
@@ -647,14 +631,14 @@ mod tests {
     }
 
     #[test]
-    fn test_append_committed_updates_both_total_and_snapshot() {
+    fn test_append_outside_transaction_not_rolled_back() {
         let stats = ConcurrentQueueStatistics::new(track_all_shard());
         let mut other = FastHashMap::default();
         other.insert(addr(1), 10);
 
-        stats.append_committed(&other);
+        stats.append(&other);
 
-        // After append_committed rollback should not rollback this data
+        // After append outside transaction, rollback should not rollback this data
         stats.begin();
         stats.increment_for_account(addr(2), 5);
         assert_eq!(stats.tracked_total(), 15);

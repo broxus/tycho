@@ -5,6 +5,7 @@ use anyhow::Context;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_types::models::{IntAddr, ShardIdent};
 use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util_proc::Transactional;
 
 use crate::collator::statistics::queue::{ConcurrentQueueStatistics, QueueStatisticsWithRemaning};
 use crate::internal_queue::types::message::InternalMessageValue;
@@ -14,8 +15,15 @@ use crate::internal_queue::types::stats::{
 };
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
-use crate::types::ProcessedToByPartitions;
 use crate::types::processed_upto::{Lt, find_min_processed_to_by_shards};
+use crate::types::{ProcessedToByPartitions, Transactional};
+
+struct CumulativeStatisticsTx {
+    staged_additions: Vec<(QueuePartitionIdx, ShardIdent, QueueKey, AccountStatistics)>,
+    new_partitions: FastHashSet<QueuePartitionIdx>,
+    processed_to_backup: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
+    processed_diff_shards: FastHashSet<(ShardIdent, QueuePartitionIdx, QueueKey, ShardIdent)>,
+}
 
 pub struct CumulativeStatistics {
     /// Cumulative statistics created for this shard. When reader reads messages, it decrements `remaining messages`
@@ -31,16 +39,124 @@ pub struct CumulativeStatistics {
     /// The final aggregated statistics (across all shards) by partitions.
     result: FastHashMap<QueuePartitionIdx, QueueStatisticsWithRemaning>,
 
-    /// Transactions
-    staged_additions: Vec<(QueuePartitionIdx, ShardIdent, QueueKey, AccountStatistics)>,
-    new_partitions: FastHashSet<QueuePartitionIdx>,
+    tx: Option<CumulativeStatisticsTx>,
+}
 
-    /// Backup of processed_to for rollback (copied at the start of transaction)
-    processed_to_backup: Option<FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>>,
+impl Transactional for CumulativeStatistics {
+    fn begin(&mut self) {
+        assert!(self.tx.is_none(), "transaction already in progress");
 
-    /// Marks which (src_shard, partition, diff_key, dst_shard) are processed
-    /// Instead of retain() — on commit we actually remove accounts
-    processed_diff_shards: FastHashSet<(ShardIdent, QueuePartitionIdx, QueueKey, ShardIdent)>,
+        self.tx = Some(CumulativeStatisticsTx {
+            staged_additions: Vec::new(),
+            new_partitions: FastHashSet::default(),
+            processed_to_backup: self.all_shards_processed_to_by_partitions.clone(),
+            processed_diff_shards: FastHashSet::default(),
+        });
+
+        for stats in self.result.values() {
+            stats.remaning_stats.begin();
+        }
+    }
+
+    fn commit(&mut self) {
+        let Some(tx) = self.tx.take() else { return };
+
+        for stats in self.result.values_mut() {
+            stats.initial_stats.commit_all();
+            stats.remaning_stats.commit_all();
+        }
+
+        for (partition, diff_shard, diff_max_message, diff_partition_stats) in tx.staged_additions {
+            self.shards_stats_by_partitions
+                .entry(diff_shard)
+                .or_default()
+                .entry(partition)
+                .or_default()
+                .insert(diff_max_message, diff_partition_stats);
+        }
+
+        for (src_shard, partition, diff_max_message, dst_shard) in tx.processed_diff_shards {
+            if let Some(shard_stats) = self.shards_stats_by_partitions.get_mut(&src_shard) {
+                if let Some(partition_stats) = shard_stats.get_mut(&partition) {
+                    if let Some(diff_stats) = partition_stats.get_mut(&diff_max_message) {
+                        diff_stats.retain(|acc, _| !dst_shard.contains_address(acc));
+                        if diff_stats.is_empty() {
+                            partition_stats.remove(&diff_max_message);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.shards_stats_by_partitions.retain(|_, by_partitions| {
+            by_partitions.retain(|_, diffs| !diffs.is_empty());
+            !by_partitions.is_empty()
+        });
+    }
+
+    // pub fn commit_affected(&mut self, affected: impl Iterator<Item = IntAddr>) {
+    //     let affected: Vec<_> = affected.into_iter().collect();
+    //
+    //     for stats in self.result.values_mut() {
+    //         stats.initial_stats.commit(affected.iter().cloned());
+    //         stats.remaning_stats.commit(affected.iter().cloned());
+    //     }
+    //
+    //     for (partition, diff_shard, diff_max_message, diff_partition_stats) in
+    //         self.staged_additions.drain(..)
+    //     {
+    //         self.shards_stats_by_partitions
+    //             .entry(diff_shard)
+    //             .or_default()
+    //             .entry(partition)
+    //             .or_default()
+    //             .insert(diff_max_message, diff_partition_stats);
+    //     }
+    //
+    //     for (src_shard, partition, diff_max_message, dst_shard) in
+    //         self.processed_diff_shards.drain()
+    //     {
+    //         if let Some(shard_stats) = self.shards_stats_by_partitions.get_mut(&src_shard) {
+    //             if let Some(partition_stats) = shard_stats.get_mut(&partition) {
+    //                 if let Some(diff_stats) = partition_stats.get_mut(&diff_max_message) {
+    //                     diff_stats.retain(|acc, _| !dst_shard.contains_address(acc));
+    //                     if diff_stats.is_empty() {
+    //                         partition_stats.remove(&diff_max_message);
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    //
+    //     self.shards_stats_by_partitions.retain(|_, by_partitions| {
+    //         by_partitions.retain(|_, diffs| !diffs.is_empty());
+    //         !by_partitions.is_empty()
+    //     });
+    //
+    //     self.processed_to_backup = None;
+    //     self.new_partitions.clear();
+    // }
+    //
+
+    fn rollback(&mut self) {
+        let Some(tx) = self.tx.take() else { return };
+
+        for stats in self.result.values_mut() {
+            // TODO rollback should use only affected accounts
+            stats.initial_stats.rollback_all();
+            stats.remaning_stats.rollback_all();
+        }
+
+        for partition in tx.new_partitions {
+            self.result.remove(&partition);
+        }
+
+        self.all_shards_processed_to_by_partitions = tx.processed_to_backup;
+    }
+
+    fn is_in_transaction(&self) -> bool {
+        self.tx.is_some()
+    }
 }
 
 impl CumulativeStatistics {
@@ -56,10 +172,7 @@ impl CumulativeStatistics {
             all_shards_processed_to_by_partitions,
             shards_stats_by_partitions: Default::default(),
             result: Default::default(),
-            staged_additions: vec![],
-            new_partitions: Default::default(),
-            processed_to_backup: None,
-            processed_diff_shards: Default::default(),
+            tx: None,
         }
     }
 
@@ -93,7 +206,7 @@ impl CumulativeStatistics {
 
             for (partition, partition_stats) in stats_by_partitions {
                 for (diff_max_message, diff_partition_stats) in partition_stats {
-                    self.apply_immediate(
+                    self.apply(
                         partition,
                         range.shard_ident,
                         diff_max_message,
@@ -198,46 +311,6 @@ impl CumulativeStatistics {
         ranges
     }
 
-    fn apply_immediate(
-        &mut self,
-        partition: QueuePartitionIdx,
-        diff_shard: ShardIdent,
-        diff_max_message: QueueKey,
-        mut diff_partition_stats: AccountStatistics,
-    ) {
-        for (dst_shard, (_, shard_processed_to_by_partitions)) in
-            &self.all_shards_processed_to_by_partitions
-        {
-            if let Some(partition_processed_to) = shard_processed_to_by_partitions.get(&partition) {
-                if let Some(to_key) = partition_processed_to.get(&diff_shard) {
-                    if diff_max_message <= *to_key {
-                        diff_partition_stats
-                            .retain(|dst_acc, _| !dst_shard.contains_address(dst_acc));
-                    }
-                }
-            }
-        }
-
-        let entry = self
-            .result
-            .entry(partition)
-            .or_insert_with(|| QueueStatisticsWithRemaning {
-                initial_stats: QueueStatistics::default(),
-                remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
-            });
-
-        entry.initial_stats.append_committed(&diff_partition_stats);
-        entry.remaning_stats.append_committed(&diff_partition_stats);
-
-        self.shards_stats_by_partitions
-            .entry(diff_shard)
-            .or_default()
-            .entry(partition)
-            .or_default()
-            .insert(diff_max_message, diff_partition_stats);
-    }
-
-    /// Staged application — with transaction support
     fn apply(
         &mut self,
         partition: QueuePartitionIdx,
@@ -258,26 +331,44 @@ impl CumulativeStatistics {
             }
         }
 
-        let entry = match self.result.entry(partition) {
-            Entry::Vacant(e) => {
-                self.new_partitions.insert(partition);
-                e.insert(QueueStatisticsWithRemaning {
+        let entry = if let Some(tx) = &mut self.tx {
+            match self.result.entry(partition) {
+                Entry::Vacant(e) => {
+                    tx.new_partitions.insert(partition);
+                    e.insert(QueueStatisticsWithRemaning {
+                        initial_stats: QueueStatistics::default(),
+                        remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
+                    })
+                }
+                Entry::Occupied(e) => e.into_mut(),
+            }
+        } else {
+            self.result
+                .entry(partition)
+                .or_insert_with(|| QueueStatisticsWithRemaning {
                     initial_stats: QueueStatistics::default(),
                     remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
                 })
-            }
-            Entry::Occupied(e) => e.into_mut(),
         };
 
         entry.initial_stats.append(&diff_partition_stats);
         entry.remaning_stats.append(&diff_partition_stats);
 
-        self.staged_additions.push((
-            partition,
-            diff_shard,
-            diff_max_message,
-            diff_partition_stats,
-        ));
+        if let Some(tx) = &mut self.tx {
+            tx.staged_additions.push((
+                partition,
+                diff_shard,
+                diff_max_message,
+                diff_partition_stats,
+            ));
+        } else {
+            self.shards_stats_by_partitions
+                .entry(diff_shard)
+                .or_default()
+                .entry(partition)
+                .or_default()
+                .insert(diff_max_message, diff_partition_stats);
+        }
     }
 
     pub fn add_diff_stats(
@@ -286,10 +377,12 @@ impl CumulativeStatistics {
         diff_max_message: QueueKey,
         diff_stats: DiffStatistics,
     ) {
+        let tx = self.tx.as_mut().expect("transaction required");
+
         for (&partition, diff_partition_stats) in diff_stats.iter() {
             let entry = match self.result.entry(partition) {
                 Entry::Vacant(e) => {
-                    self.new_partitions.insert(partition);
+                    tx.new_partitions.insert(partition);
                     e.insert(QueueStatisticsWithRemaning {
                         initial_stats: QueueStatistics::default(),
                         remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
@@ -301,7 +394,7 @@ impl CumulativeStatistics {
             entry.initial_stats.append(diff_partition_stats);
             entry.remaning_stats.append(diff_partition_stats);
 
-            self.staged_additions.push((
+            tx.staged_additions.push((
                 partition,
                 diff_shard,
                 diff_max_message,
@@ -315,6 +408,8 @@ impl CumulativeStatistics {
         dst_shard: ShardIdent,
         shard_processed_to_by_partitions: ProcessedToByPartitions,
     ) {
+        let tx = self.tx.as_mut().expect("transaction required");
+
         for (src_shard, shard_stats_by_partitions) in self.shards_stats_by_partitions.iter() {
             for (partition, diffs) in shard_stats_by_partitions.iter() {
                 if let Some(partition_processed_to) =
@@ -327,7 +422,7 @@ impl CumulativeStatistics {
                             }
 
                             let combo = (*src_shard, *partition, *diff_max_message, dst_shard);
-                            if self.processed_diff_shards.contains(&combo) {
+                            if tx.processed_diff_shards.contains(&combo) {
                                 continue;
                             }
 
@@ -345,7 +440,7 @@ impl CumulativeStatistics {
                                 }
                             }
 
-                            self.processed_diff_shards.insert(combo);
+                            tx.processed_diff_shards.insert(combo);
                         }
                     }
                 }
@@ -381,82 +476,6 @@ impl CumulativeStatistics {
             .values()
             .map(|stats| stats.remaning_stats.tracked_total())
             .sum()
-    }
-
-    // Transactions
-
-    pub fn begin_transaction(&mut self) {
-        self.processed_to_backup = Some(self.all_shards_processed_to_by_partitions.clone());
-        self.staged_additions.clear();
-        self.processed_diff_shards.clear();
-        self.new_partitions.clear();
-
-        for stats in self.result.values() {
-            stats.remaning_stats.begin();
-        }
-    }
-
-    pub fn commit(&mut self, affected: impl Iterator<Item = IntAddr>) {
-        let affected: Vec<_> = affected.into_iter().collect();
-
-        for stats in self.result.values_mut() {
-            stats.initial_stats.commit(affected.iter().cloned());
-            stats.remaning_stats.commit(affected.iter().cloned());
-        }
-
-        for (partition, diff_shard, diff_max_message, diff_partition_stats) in
-            self.staged_additions.drain(..)
-        {
-            self.shards_stats_by_partitions
-                .entry(diff_shard)
-                .or_default()
-                .entry(partition)
-                .or_default()
-                .insert(diff_max_message, diff_partition_stats);
-        }
-
-        for (src_shard, partition, diff_max_message, dst_shard) in
-            self.processed_diff_shards.drain()
-        {
-            if let Some(shard_stats) = self.shards_stats_by_partitions.get_mut(&src_shard) {
-                if let Some(partition_stats) = shard_stats.get_mut(&partition) {
-                    if let Some(diff_stats) = partition_stats.get_mut(&diff_max_message) {
-                        diff_stats.retain(|acc, _| !dst_shard.contains_address(acc));
-                        if diff_stats.is_empty() {
-                            partition_stats.remove(&diff_max_message);
-                        }
-                    }
-                }
-            }
-        }
-
-        self.shards_stats_by_partitions.retain(|_, by_partitions| {
-            by_partitions.retain(|_, diffs| !diffs.is_empty());
-            !by_partitions.is_empty()
-        });
-
-        self.processed_to_backup = None;
-        self.new_partitions.clear();
-    }
-
-    pub fn rollback(&mut self) {
-        for stats in self.result.values_mut() {
-            // TODO rollback should use olny affected accounts
-            stats.initial_stats.rollback_all();
-            stats.remaning_stats.rollback_all();
-        }
-
-        self.staged_additions.clear();
-
-        self.processed_diff_shards.clear();
-
-        for partition in self.new_partitions.drain() {
-            self.result.remove(&partition);
-        }
-
-        if let Some(backup) = self.processed_to_backup.take() {
-            self.all_shards_processed_to_by_partitions = backup;
-        }
     }
 }
 
