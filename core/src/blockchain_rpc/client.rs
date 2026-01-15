@@ -325,6 +325,14 @@ impl BlockchainRpcClient {
         Ok(data)
     }
 
+    pub async fn get_zerostate_proof(&self) -> Result<QueryResponse<ZerostateProof>, Error> {
+        let client = &self.inner.overlay_client;
+        let data = client
+            .query::<_, ZerostateProof>(&rpc::GetZerostateProof)
+            .await?;
+        Ok(data)
+    }
+
     pub async fn get_persistent_state_info(
         &self,
         block_id: &BlockId,

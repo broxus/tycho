@@ -52,6 +52,15 @@ pub enum KeyBlockProof {
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
+pub enum ZerostateProof {
+    #[tl(id = "blockchain.zerostateProof.found")]
+    Found { proof: Bytes },
+    #[tl(id = "blockchain.zerostateProof.notFound")]
+    NotFound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
+#[tl(boxed, scheme = "proto.tl")]
 pub enum PersistentStateInfo {
     #[tl(id = "blockchain.persistentStateInfo.found")]
     Found {
@@ -131,6 +140,10 @@ pub mod rpc {
         #[tl(with = "tl_block_id")]
         pub block_id: tycho_types::models::BlockId,
     }
+
+    #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(boxed, id = "blockchain.getZerostateProof", scheme = "proto.tl")]
+    pub struct GetZerostateProof;
 
     #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(
