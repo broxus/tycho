@@ -197,11 +197,11 @@ impl Drop for BlockValidationScope {
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]
-pub struct ReceivedSignature(u8);
+pub struct ReceivedSignature(pub u8);
 
 impl ReceivedSignature {
-    const VALID_SIGNATURE_BIT: u8 = 0b01;
-    const INVALID_SIGNATURE_BIT: u8 = 0b10;
+    pub const VALID_SIGNATURE_BIT: u8 = 0b01;
+    pub const INVALID_SIGNATURE_BIT: u8 = 0b10;
 
     pub fn has_valid_signature(&self) -> bool {
         self.0 & Self::VALID_SIGNATURE_BIT != 0
