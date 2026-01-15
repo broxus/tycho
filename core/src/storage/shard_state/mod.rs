@@ -173,6 +173,7 @@ impl ShardStateStorage {
         }
 
         if !should_store {
+            metrics::counter!("tycho_storage_shard_state_skipped").increment(1);
             return Ok(false);
         }
 
@@ -180,6 +181,7 @@ impl ShardStateStorage {
         // Masterchain blocks don't accumulate so we only reset for shardchain
         if !handle.is_masterchain() {
             self.accumulated_new_cells.store(0, Ordering::Release);
+            metrics::counter!("tycho_storage_shard_state_stored").increment(1);
         }
 
         let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
