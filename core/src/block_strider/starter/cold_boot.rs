@@ -6,13 +6,12 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures_util::StreamExt;
+use scopeguard::ScopeGuard;
 use tokio::sync::mpsc;
 use tycho_block_util::archive::{ArchiveData, WithArchiveData};
-use tycho_block_util::block::{
-    BlockProofStuff, BlockProofStuffAug, BlockStuff, prepare_master_state_proof,
-};
+use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::state::{ShardStateStuff, check_zerostate_proof, prepare_master_state_proof};
 use tycho_storage::fs::FileBuilder;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -25,7 +24,7 @@ use super::{ColdBootType, StarterInner, ZerostateProvider};
 use crate::block_strider::{CheckProof, ProofChecker};
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::overlay_client::PunishReason;
-use crate::proto::blockchain::KeyBlockProof;
+use crate::proto::blockchain::{KeyBlockProof, ZerostateProof};
 use crate::storage::{
     BlockHandle, CoreStorage, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta,
     PersistentStateKind,
@@ -850,6 +849,27 @@ impl StarterInner {
         }
 
         anyhow::bail!("ran out of attempts")
+    }
+
+    #[allow(dead_code)]
+    async fn download_zerostate_proof(&self) -> Result<Cell> {
+        let response = self.blockchain_rpc_client.get_zerostate_proof().await?;
+
+        let guard = scopeguard::guard(response, |r| {
+            r.reject();
+        });
+
+        let ZerostateProof::Found { proof } = guard.data() else {
+            anyhow::bail!("zerostate proof not found");
+        };
+
+        let proof_cell = Boc::decode(proof).context("failed to decode zerostate proof")?;
+        check_zerostate_proof(self.zerostate.root_hash, &proof_cell)
+            .context("failed to check zerostate proof")?;
+
+        ScopeGuard::into_inner(guard).accept();
+
+        Ok(proof_cell)
     }
 
     #[tracing::instrument(skip_all, fields(block_id = %block_handle.id()))]

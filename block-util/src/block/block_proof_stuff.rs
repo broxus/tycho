@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tycho_types::merkle::*;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -486,31 +486,6 @@ pub fn check_with_master_state(
 
     let subset = proof.process_given_state(master_state, virt_block_info)?;
     proof.check_signatures(&subset)
-}
-
-pub fn prepare_master_state_proof(root: &Cell) -> Result<Cell> {
-    let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
-    let tracked_cell = usage_tree.track(root);
-
-    let state = tracked_cell.parse::<ShardStateUnsplit>()?;
-    let extra = state.custom.context("McStateExtra not found in state")?;
-    // Visit `McStateExtra` root data.
-    let extra = extra.load()?;
-    // NOTE: When we add cells to `extra.consensus_info` we must also visit them here.
-
-    // Visit all cells in config.
-    if let Some(root) = extra.config.params.as_dict().root() {
-        root.touch_recursive();
-    }
-
-    // Visit shard hashes.
-    if let Some(root) = extra.shards.as_dict().root() {
-        root.touch_recursive();
-    }
-
-    // Build merkle proof.
-    let merkle_proof = MerkleProof::create(root.as_ref(), usage_tree).build()?;
-    Ok(merkle_proof.cell)
 }
 
 #[expect(

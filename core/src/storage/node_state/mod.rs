@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
+use bytes::Bytes;
 use tycho_storage::kv::InstanceId;
 use tycho_types::models::*;
 use tycho_types::prelude::*;
@@ -18,6 +19,7 @@ pub struct NodeStateStorage {
     init_mc_block_id: BlockIdCache,
     zerostate_id: ArcSwapOption<ZerostateId>,
     zerostate_proof: ArcSwapOption<Cell>,
+    zerostate_proof_bytes: ArcSwapOption<Bytes>,
 }
 
 pub enum NodeSyncState {
@@ -33,6 +35,7 @@ impl NodeStateStorage {
             init_mc_block_id: (Default::default(), INIT_MC_BLOCK_ID),
             zerostate_id: Default::default(),
             zerostate_proof: Default::default(),
+            zerostate_proof_bytes: Default::default(),
         };
 
         let state = &this.db.state;
@@ -133,10 +136,25 @@ impl NodeStateStorage {
             return Some(cached.as_ref().clone());
         }
 
+        let bytes = self.load_zerostate_proof_bytes()?;
+        let cell = Boc::decode(&bytes).unwrap();
+
+        self.zerostate_proof.store(Some(Arc::new(cell.clone())));
+        Some(cell)
+    }
+
+    pub fn load_zerostate_proof_bytes(&self) -> Option<Bytes> {
+        if let Some(cached) = &*self.zerostate_proof_bytes.load() {
+            return Some(cached.as_ref().clone());
+        }
+
         let value = self.db.state.get(ZEROSTATE_PROOF).unwrap()?;
-        let value = Boc::decode(value).unwrap();
-        self.zerostate_proof.store(Some(Arc::new(value.clone())));
-        Some(value)
+        let bytes = Bytes::copy_from_slice(value.as_ref());
+
+        self.zerostate_proof_bytes
+            .store(Some(Arc::new(bytes.clone())));
+
+        Some(bytes)
     }
 
     #[inline(always)]

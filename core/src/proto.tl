@@ -13,7 +13,7 @@ overlay.pong = overlay.Pong;
 */
 overlay.response.ok value:T = overlay.Response T;
 /**
-* An unsuccessul response for the overlay query
+* An unsuccessful response for the overlay query
 */
 overlay.response.err code:int = overlay.Response T;
 
@@ -50,7 +50,7 @@ blockchain.blockId
 * A response for the `getNextKeyBlockIds` query
 *
 * @param block_ids      list of key block ids
-* @param incomplete     flag points to finishinig query
+* @param incomplete     flag points to finishing query
 */
 blockchain.keyBlockIds block_ids:(vector blockchain.blockId) incomplete:Bool = blockchain.KeyBlockIds;
 
@@ -93,13 +93,27 @@ blockchain.blockFull.notFound = blockchain.BlockFull;
 * @param proof          block proof data
 */
 blockchain.keyBlockProof.found proof:bytes = blockchain.KeyBlockProof;
+
+
+/**
+* A response for getting a zerostate proof
+*
+* @param proof          zerostate proof data
+*/
+blockchain.zerostateProof.found proof:bytes = blockchain.ZerostateProof;
+
+/**
+* Zerostate not found
+*/
+blockchain.zerostateProof.notFound = blockchain.ZerostateProof;
+
 /**
 * Key block proof not found
 */
 blockchain.keyBlockProof.notFound = blockchain.KeyBlockProof;
 
 /**
-* A successul response for the 'getArchiveInfo' query
+* A successful response for the 'getArchiveInfo' query
 *
 * @param id             archive id
 * @param size           archive size in bytes
@@ -112,13 +126,13 @@ blockchain.archiveInfo.found
     = blockchain.ArchiveInfo;
 
 /**
-* A successul response for the 'getArchiveInfo' query
+* A successful response for the 'getArchiveInfo' query
 * says that requested block hasn't commited in archive yet
 */
 blockchain.archiveInfo.tooNew = blockchain.ArchiveInfo;
 
 /**
-* An unsuccessul response for the 'getArchiveInfo' query
+* An unsuccessful response for the 'getArchiveInfo' query
 */
 blockchain.archiveInfo.notFound = blockchain.ArchiveInfo;
 
@@ -134,7 +148,7 @@ blockchain.persistentStateInfo.found
     = blockchain.PersistentStateInfo;
 
 /**
-* An unsuccessul response for the 'getPersistentStateInfo' query
+* An unsuccessful response for the 'getPersistentStateInfo' query
 */
 blockchain.persistentStateInfo.notFound = blockchain.PersistentStateInfo;
 
@@ -200,6 +214,11 @@ blockchain.getBlockDataChunk
 blockchain.getKeyBlockProof
     block_id:blockchain.blockId
     = overlay.Response blockchain.KeyBlockProof;
+
+/**
+* Get zerostate proof
+*/
+blockchain.getZerostateProof = blockchain.GetZerostateProof;
 
 /**
 * Get archive info

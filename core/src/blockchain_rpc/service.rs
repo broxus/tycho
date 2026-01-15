@@ -250,6 +250,9 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
             #[meta("getKeyBlockProof", block_id = %req.block_id)]
             rpc::GetKeyBlockProof as req => inner.handle_get_key_block_proof(&req).await,
 
+            #[meta("getZerostateProof")]
+            rpc::GetZerostateProof as _ => inner.handle_get_zerostate_proof().await,
+
             #[meta("getPersistentShardStateInfo", block_id = %req.block_id)]
             rpc::GetPersistentShardStateInfo as req => inner.handle_get_persistent_state_info(&req),
 
@@ -499,6 +502,17 @@ impl<B> Inner<B> {
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
             }
         }
+    }
+
+    async fn handle_get_zerostate_proof(&self) -> overlay::Response<ZerostateProof> {
+        let storage = self.storage().node_state();
+        let proof_opt = storage.load_zerostate_proof_bytes();
+        let result = match proof_opt {
+            Some(proof) => ZerostateProof::Found { proof },
+            None => ZerostateProof::NotFound,
+        };
+
+        overlay::Response::Ok(result)
     }
 
     async fn handle_get_archive_info(
