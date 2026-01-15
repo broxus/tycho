@@ -7,7 +7,7 @@ use tycho_types::models::{ExtInMsgInfo, IntMsgInfo, MsgInfo};
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::types::ParsedMessage;
-use crate::types::{DebugIter, DisplayIter, SaturatingAddAssign};
+use crate::types::{DebugIter, DisplayIter, SaturatingAddAssign, Transactional};
 
 #[cfg(test)]
 #[path = "tests/messages_buffer_tests.rs"]
@@ -44,9 +44,8 @@ pub struct MessagesBuffer {
     tx: BufferTransaction,
 }
 
-// Transactional operations
-impl MessagesBuffer {
-    pub fn begin(&mut self) {
+impl Transactional for MessagesBuffer {
+    fn begin(&mut self) {
         self.tx = BufferTransaction {
             account_snapshots: FastHashMap::default(),
             snapshot_int_count: self.int_count,
@@ -56,11 +55,11 @@ impl MessagesBuffer {
         };
     }
 
-    pub fn commit(&mut self) {
+    fn commit(&mut self) {
         self.tx = BufferTransaction::default();
     }
 
-    pub fn rollback(&mut self) {
+    fn rollback(&mut self) {
         let tx = std::mem::take(&mut self.tx);
 
         for (account_id, msgs) in tx.account_snapshots {
@@ -75,6 +74,10 @@ impl MessagesBuffer {
         self.ext_count = tx.snapshot_ext_count;
         self.min_ext_chain_time = tx.snapshot_min_ext_chain_time;
         self.sorted_index = tx.snapshot_sorted_index;
+    }
+
+    fn is_in_transaction(&self) -> bool {
+        !self.tx.account_snapshots.is_empty()
     }
 }
 
@@ -136,6 +139,8 @@ impl MessagesBuffer {
             }
         };
         let account_id = dst.as_std().map(|a| a.address).unwrap_or_default();
+
+        self.backup_account(&account_id);
 
         // insert message to buffer
         let prev_msgs_count = match self.msgs.entry(account_id) {

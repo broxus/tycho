@@ -66,13 +66,13 @@ enum MessagesReaderStage {
     ExternalsAndNew,
 }
 
-pub(super) struct MessagesReader<'a, V: InternalMessageValue> {
+pub(super) struct MessagesReader<'a, 'b, V: InternalMessageValue> {
     for_shard_id: ShardIdent,
     msgs_exec_params: MsgsExecutionParamsStuff,
     /// Collect separate metrics by partitions
     metrics_by_partitions: MessagesReaderMetricsByPartitions,
     new_messages: NewMessagesState<V>,
-    externals_reader: ExternalsReader<'a>,
+    externals_reader: ExternalsReader<'a, 'b>,
     internals_partition_readers: BTreeMap<QueuePartitionIdx, InternalsPartitionReader<'a, V>>,
     /// Cumulative queue stats
     internal_queue_statistics: Option<&'a mut CumulativeStatistics>,
@@ -85,7 +85,7 @@ pub struct CumulativeStatsCalcParams {
         FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
 }
 
-pub(super) struct MessagesReaderContext<'a> {
+pub(super) struct MessagesReaderContext<'a, 'b> {
     pub for_shard_id: ShardIdent,
     pub block_seqno: BlockSeqno,
     pub next_chain_time: u64,
@@ -94,7 +94,7 @@ pub(super) struct MessagesReaderContext<'a> {
     pub prev_state_gen_lt: Lt,
     pub mc_top_shards_end_lts: Vec<(ShardIdent, Lt)>,
     pub reader_state: &'a mut ReaderState,
-    pub anchors_cache: &'a mut AnchorsCacheTransaction<'a>,
+    pub anchors_cache: &'a mut AnchorsCacheTransaction<'b>,
     pub is_first_block_after_prev_master: bool,
     pub cumulative_stats_calc_params: Option<CumulativeStatsCalcParams>,
     pub part_stat_ranges: Option<Vec<QueueShardBoundedRange>>,
@@ -103,9 +103,9 @@ pub(super) struct MessagesReaderContext<'a> {
 const MAIN_PARTITION_ID: QueuePartitionIdx = QueuePartitionIdx::ZERO;
 const LP_PARTITION_ID: QueuePartitionIdx = QueuePartitionIdx(1);
 
-impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
+impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
     pub fn new(
-        cx: MessagesReaderContext<'a>,
+        cx: MessagesReaderContext<'a, 'b>,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
     ) -> Result<Self> {
         let current_msgs_exec_params = cx.msgs_exec_params.current();
@@ -125,11 +125,13 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         let ReaderState {
             externals: externals_reader_state,
             internals: internals_reader_state,
+            ..
         } = cx.reader_state;
 
         let InternalsReaderState {
             partitions: partition_reader_states,
             cumulative_statistics,
+            ..
         } = internals_reader_state;
 
         if let Some(params) = cx.cumulative_stats_calc_params {
@@ -1286,7 +1288,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
         read_mode: GetNextMessageGroupMode,
         par_reader_stage: &mut MessagesReaderStage,
         par_reader: &mut InternalsPartitionReader<'_, V>,
-        externals_reader: &mut ExternalsReader<'_>,
+        externals_reader: &mut ExternalsReader<'_, '_>,
         has_pending_new_messages_for_partition: bool,
         prev_partitions_readers: &BTreeMap<QueuePartitionIdx, InternalsPartitionReader<'_, V>>,
         prev_msg_groups: &BTreeMap<QueuePartitionIdx, MessageGroup>,
@@ -1540,7 +1542,7 @@ impl<'a, V: InternalMessageValue> MessagesReader<'a, V> {
 #[allow(dead_code)]
 fn try_sync_processing_offsets<V: InternalMessageValue>(
     par_reader: &mut InternalsPartitionReader<'_, V>,
-    externals_reader: &mut ExternalsReader<'_>,
+    externals_reader: &mut ExternalsReader<'_, '_>,
 ) -> Result<()> {
     let last_int_range_reader = match par_reader.get_last_range_reader() {
         Ok(reader) => reader,
