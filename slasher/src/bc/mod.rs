@@ -7,12 +7,12 @@ use tycho_crypto::ed25519;
 use tycho_slasher_traits::{ReceivedSignature, ValidationSessionId};
 use tycho_types::cell::{HashBytes, Lazy};
 use tycho_types::models::{
-    AccountBlock, AccountState, BlockchainConfigParams, OwnedMessage, StdAddr,
+    AutoSignatureContext, BlockchainConfigParams, OwnedMessage, StdAddr, Transaction,
 };
 use tycho_util::FastDashMap;
 
 pub use self::stub_contract::StubSlasherContract;
-use crate::util::AtomicBitSet;
+use crate::util::BitSet;
 
 mod stub_contract;
 
@@ -22,21 +22,30 @@ pub struct EncodeBlocksBatchMessage<'a> {
     pub session_id: ValidationSessionId,
     pub batch: &'a BlocksBatch,
     pub validator_idx: u16,
+    pub signature_context: AutoSignatureContext,
     pub keypair: &'a ed25519::KeyPair,
     pub ttl: Duration,
 }
 
 pub trait SlasherContract: Send + Sync + 'static {
-    fn find_account_address(&self, config: &BlockchainConfigParams) -> Result<Option<StdAddr>>;
-
     fn default_batch_size(&self) -> NonZeroU32;
 
-    fn get_batch_size(&self, state: &AccountState) -> Result<NonZeroU32>;
+    fn find_params(&self, config: &BlockchainConfigParams) -> Result<Option<SlasherParams>>;
 
     fn encode_blocks_batch_message(
         &self,
         params: &EncodeBlocksBatchMessage<'_>,
     ) -> Result<SignedMessage>;
+
+    fn decode_event(&self, tx: &Transaction) -> Result<Option<SlasherContractEvent>>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlasherParams {
+    /// Address in masterchain.
+    pub address: HashBytes,
+    /// Blocks batch size.
+    pub blocks_batch_size: NonZeroU32,
 }
 
 pub struct SignedMessage {
@@ -78,26 +87,18 @@ impl ContractSubscription {
         }
     }
 
-    pub fn handle_account_transactions(&self, account_block: &AccountBlock) -> Result<()> {
-        for entry in account_block.transactions.iter() {
-            let (_, _, tx) = entry?;
-            let tx_hash = tx.repr_hash();
-            let tx = tx.load()?;
+    pub fn handle_account_transaction(&self, tx_hash: &HashBytes, tx: &Transaction) -> Result<()> {
+        let Some(in_msg) = &tx.in_msg else {
+            return Ok(());
+        };
+        let msg_hash = in_msg.repr_hash();
 
-            let Some(in_msg) = tx.in_msg else {
-                continue;
-            };
-            let msg_hash = in_msg.repr_hash();
-            tracing::debug!(%tx_hash, %msg_hash, "found slasher transaction");
-
-            if let Some((_, pending)) = self.pending_messages.remove(msg_hash) {
-                pending
-                    .tx
-                    .send(MessageDeliveryStatus::Sent { tx_hash: *tx_hash })
-                    .ok();
-            }
+        if let Some((_, pending)) = self.pending_messages.remove(msg_hash) {
+            pending
+                .tx
+                .send(MessageDeliveryStatus::Sent { tx_hash: *tx_hash })
+                .ok();
         }
-
         Ok(())
     }
 
@@ -125,9 +126,23 @@ pub enum MessageDeliveryStatus {
     Expired,
 }
 
+// TODO: Add mempool batches or votes here
+#[derive(Debug, PartialEq, Eq)]
+pub enum SlasherContractEvent {
+    SubmitBlocksBatch(SubmitBlocksBatch),
+}
+
+// TODO: Propagate session id?
+#[derive(Debug, PartialEq, Eq)]
+pub struct SubmitBlocksBatch {
+    pub validator_idx: u16,
+    pub blocks_batch: BlocksBatch,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct BlocksBatch {
     pub start_seqno: u32,
-    pub committed_blocks: AtomicBitSet,
+    pub committed_blocks: BitSet,
     pub signatures_history: Box<[SignatureHistory]>,
 }
 
@@ -137,12 +152,12 @@ impl BlocksBatch {
 
         Self {
             start_seqno,
-            committed_blocks: AtomicBitSet::with_capacity(len),
+            committed_blocks: BitSet::with_capacity(len),
             signatures_history: map_ids
                 .iter()
                 .map(|validator_idx| SignatureHistory {
                     validator_idx: *validator_idx,
-                    bits: AtomicBitSet::with_capacity(len * 2),
+                    bits: BitSet::with_capacity(len * 2),
                 })
                 .collect::<Box<[_]>>(),
         }
@@ -165,7 +180,7 @@ impl BlocksBatch {
         (self.start_seqno..self.seqno_after()).contains(&seqno)
     }
 
-    pub fn commit_signatures(&self, mut seqno: u32, signatures: &[ReceivedSignature]) -> bool {
+    pub fn commit_signatures(&mut self, mut seqno: u32, signatures: &[ReceivedSignature]) -> bool {
         if !self.contains_seqno(seqno) || signatures.len() != self.signatures_history.len() {
             return false;
         }
@@ -173,7 +188,7 @@ impl BlocksBatch {
         seqno -= self.start_seqno;
 
         self.committed_blocks.set(seqno as usize, true);
-        for (history, received) in std::iter::zip(&self.signatures_history, signatures) {
+        for (history, received) in std::iter::zip(&mut self.signatures_history, signatures) {
             let idx = (seqno as usize) * 2;
             history.bits.set(idx, received.has_invalid_signature());
             history.bits.set(idx + 1, received.has_valid_signature());
@@ -183,7 +198,8 @@ impl BlocksBatch {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct SignatureHistory {
     pub validator_idx: u16,
-    pub bits: AtomicBitSet,
+    pub bits: BitSet,
 }

@@ -1,9 +1,8 @@
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -13,7 +12,9 @@ use tycho_core::block_strider::{StateSubscriber, StateSubscriberContext};
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_crypto::ed25519;
 use tycho_slasher_traits::{ValidationSessionId, ValidatorEventsListener};
+use tycho_storage::StorageContext;
 use tycho_types::boc::Boc;
+use tycho_types::models::{AutoSignatureContext, StdAddr};
 use tycho_util::config::PartialConfig;
 use tycho_util::futures::JoinTask;
 use tycho_util::serde_helpers;
@@ -23,6 +24,8 @@ pub use self::bc::{
     SignatureHistory, SignedMessage, SlasherContract, StubSlasherContract,
 };
 use self::collector::{ValidatorEventsCollector, ValidatorSessionInfo};
+use self::storage::SlasherStorage;
+use self::util::AtomicValidationSessionId;
 
 pub mod collector {
     pub use self::validator_events::*;
@@ -32,6 +35,8 @@ pub mod collector {
 }
 
 mod bc;
+#[expect(unused)]
+mod storage;
 mod util;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
@@ -75,11 +80,15 @@ impl Slasher {
         node_keys: Arc<ed25519::KeyPair>,
         contract: C,
         blockchain_rpc_client: BlockchainRpcClient,
+        storage_context: &StorageContext,
         config: SlasherConfig,
-    ) -> Self {
+    ) -> Result<Self> {
+        let storage =
+            SlasherStorage::open(storage_context).context("failed to open slasher storage")?;
+
         let collector = Arc::new(ValidatorEventsCollector::new(contract.default_batch_size()));
 
-        Self {
+        Ok(Self {
             validator_events_collector: collector,
             shared: Arc::new(SlasherSharedState {
                 config,
@@ -87,9 +96,18 @@ impl Slasher {
                 contract: Box::new(contract),
                 subscription: ArcSwapOption::empty(),
                 blockchain_rpc_client,
+                storage,
+                known_session_id: AtomicValidationSessionId::new(ValidationSessionId {
+                    seqno: 0,
+                    short_hash: 0,
+                }),
+                signature_context: ArcSwap::new(Arc::new(AutoSignatureContext {
+                    global_id: 0,
+                    capabilities: Default::default(),
+                })),
             }),
             cancellation_token: Default::default(),
-        }
+        })
     }
 
     pub fn validator_events_listener(&self) -> Arc<dyn ValidatorEventsListener> {
@@ -103,23 +121,52 @@ impl Slasher {
         let mc_seqno = cx.block.id().seqno;
 
         let this = self.shared.as_ref();
+        let state_extra = cx.state.state_extra()?;
 
-        // Check config updates
-        let config_params = cx.state.config_params()?;
-        let Some(slasher_address) = this
+        // Sync signature context (TODO: do it only when config changes)
+        let global = state_extra.config.get_global_version()?;
+        self.shared
+            .signature_context
+            .store(Arc::new(AutoSignatureContext {
+                global_id: cx.block.as_ref().global_id,
+                capabilities: global.capabilities,
+            }));
+
+        // Check config updates (TODO: do it only when config changes)
+        let Some(slasher_params) = this
             .contract
-            .find_account_address(config_params)
-            .context("failed to find contract address")?
-            .filter(|addr| addr.is_masterchain())
+            .find_params(&state_extra.config)
+            .context("failed to find slasher params")?
         else {
             return Ok(());
         };
+        self.validator_events_collector
+            .set_default_batch_size(slasher_params.blocks_batch_size);
+        let slasher_address = StdAddr::new_masterchain(slasher_params.address);
 
-        tracing::trace!(%slasher_address);
+        let session_id_from_block = ValidationSessionId {
+            seqno: state_extra.validator_info.catchain_seqno,
+            short_hash: state_extra.validator_info.validator_list_hash_short,
+        };
+        tracing::trace!(?slasher_params, ?session_id_from_block);
 
+        // Clear old sessions if needed
+        // TODO: Add metrics.
+        if session_id_from_block != this.known_session_id.load() {
+            let span = tracing::Span::current();
+            let storage = this.storage.clone();
+            tokio::task::spawn_blocking(move || {
+                let _span = span.enter();
+                storage.remove_outdated_batches(session_id_from_block)
+            })
+            .await??;
+
+            this.known_session_id.set(session_id_from_block);
+        }
+
+        // Handle subscription
         let subscription = match this.subscription.load_full() {
             Some(s) if s.address() == &slasher_address => s,
-            // TODO: Use `ArcSwap::compare_and_swap`?
             _ => {
                 tracing::info!(%slasher_address, "slasher address changed");
                 let s = Arc::new(ContractSubscription::new(&slasher_address));
@@ -130,11 +177,36 @@ impl Slasher {
 
         let extra = cx.block.load_extra()?.account_blocks.load()?;
         if let Some((_, account_block)) = extra.get(slasher_address.address)? {
-            subscription.handle_account_transactions(&account_block)?;
-        }
+            for entry in account_block.transactions.iter() {
+                let (_, _, tx) = entry?;
+                let tx_hash = tx.repr_hash();
+                let tx = tx.load()?;
 
-        // TODO: Get or update batch size from the contract
-        let batch_size = NonZeroU32::new(10).unwrap();
+                tracing::debug!(
+                    %tx_hash,
+                    msg_hash = ?tx.in_msg.as_ref().map(|msg| msg.repr_hash()),
+                    "found slasher transaction",
+                );
+
+                subscription.handle_account_transaction(tx_hash, &tx)?;
+
+                match self.shared.contract.decode_event(&tx) {
+                    Ok(Some(event)) => match event {
+                        bc::SlasherContractEvent::SubmitBlocksBatch(submitted) => {
+                            // TODO: Move into blocking.
+                            this.storage.store_blocks_batch(
+                                session_id_from_block,
+                                submitted.validator_idx,
+                                &submitted.blocks_batch,
+                            )?;
+                            tokio::task::yield_now().await;
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(%tx_hash, "failed to parse slasher event: {e:?}"),
+                }
+            }
+        }
 
         while let Some(session_info) = self
             .validator_events_collector
@@ -148,10 +220,11 @@ impl Slasher {
             }
 
             let (tx, rx) = mpsc::unbounded_channel::<BlocksBatch>();
-            if !self
-                .validator_events_collector
-                .init_session(session_id, batch_size, tx)
-            {
+            if !self.validator_events_collector.init_session(
+                session_id,
+                slasher_params.blocks_batch_size,
+                tx,
+            ) {
                 tracing::warn!(?session_id, "session removed before init");
                 continue;
             }
@@ -188,6 +261,9 @@ struct SlasherSharedState {
     contract: Box<dyn SlasherContract>,
     subscription: ArcSwapOption<ContractSubscription>,
     blockchain_rpc_client: BlockchainRpcClient,
+    storage: SlasherStorage,
+    known_session_id: AtomicValidationSessionId,
+    signature_context: ArcSwap<AutoSignatureContext>,
 }
 
 impl SlasherSharedState {
@@ -235,6 +311,7 @@ impl SlasherSharedState {
                 session_id,
                 batch: &batch,
                 validator_idx,
+                signature_context: **self.signature_context.load(),
                 keypair: &self.node_keys,
                 ttl: self.config.message_ttl,
             };
