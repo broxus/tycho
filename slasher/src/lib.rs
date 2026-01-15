@@ -32,6 +32,8 @@ pub mod collector {
 }
 
 mod bc;
+#[expect(unused)]
+mod storage;
 mod util;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
@@ -130,7 +132,27 @@ impl Slasher {
 
         let extra = cx.block.load_extra()?.account_blocks.load()?;
         if let Some((_, account_block)) = extra.get(slasher_address.address)? {
-            subscription.handle_account_transactions(&account_block)?;
+            for entry in account_block.transactions.iter() {
+                let (_, _, tx) = entry?;
+                let tx_hash = tx.repr_hash();
+                let tx = tx.load()?;
+
+                tracing::debug!(
+                    %tx_hash,
+                    msg_hash = ?tx.in_msg.as_ref().map(|msg| msg.repr_hash()),
+                    "found slasher transaction",
+                );
+
+                subscription.handle_account_transaction(tx_hash, &tx)?;
+
+                match self.shared.contract.decode_event(&tx) {
+                    Ok(Some(_event)) => {
+                        // TODO: Store event.
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(%tx_hash, "failed to parse slasher event: {e:?}"),
+                }
+            }
         }
 
         // TODO: Get or update batch size from the contract

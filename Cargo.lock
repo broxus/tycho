@@ -4306,6 +4306,7 @@ dependencies = [
  "parking_lot",
  "scopeguard",
  "serde",
+ "tl-proto",
  "tokio",
  "tokio-util",
  "tracing",
@@ -4313,8 +4314,10 @@ dependencies = [
  "tycho-core",
  "tycho-crypto",
  "tycho-slasher-traits",
+ "tycho-storage",
  "tycho-types",
  "tycho-util",
+ "weedb",
 ]
 
 [[package]]
