@@ -5,6 +5,7 @@ use tycho_block_util::queue::{QueuePartitionIdx, get_short_hash_string};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{IntAddr, MsgInfo, ShardIdent};
 use tycho_util::FastHashSet;
+use tycho_util_proc::Transactional;
 
 use super::{
     GetNextMessageGroupMode, InternalsPartitionReader, MessagesReaderMetrics,
@@ -39,72 +40,26 @@ pub(super) mod tests;
 //=========
 // EXTERNALS READER
 //=========
-pub(super) struct ExternalsReader<'a> {
+pub(super) struct ExternalsReader<'a, 'b> {
     for_shard_id: ShardIdent,
     block_seqno: BlockSeqno,
     next_chain_time: u64,
     msgs_exec_params: MsgsExecutionParamsStuff,
     /// Target limits for filling message group from the buffer
     buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
-    anchors_cache: &'a mut AnchorsCacheTransaction<'a>,
+    anchors_cache: &'a mut AnchorsCacheTransaction<'b>,
     reader_state: &'a mut ExternalsReaderState,
     all_ranges_fully_read: bool,
-    tx: Option<ExternalsReaderTransaction>,
 }
 
-struct ExternalsReaderTransaction {
-    snapshot_next_chain_time: u64,
-    snapshot_msgs_exec_params: MsgsExecutionParamsStuff,
-    snapshot_buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
-    snapshot_all_ranges_fully_read: bool,
-}
-
-impl<'a> ExternalsReader<'a> {
-    pub fn begin(&mut self) {
-        assert!(self.tx.is_none(), "transaction already in progress");
-
-        self.reader_state.begin();
-
-        self.init_reader_state();
-
-        self.tx = Some(ExternalsReaderTransaction {
-            snapshot_next_chain_time: self.next_chain_time,
-            snapshot_msgs_exec_params: self.msgs_exec_params.clone(),
-            snapshot_buffer_limits_by_partitions: self.buffer_limits_by_partitions.clone(),
-            snapshot_all_ranges_fully_read: self.all_ranges_fully_read,
-        });
-    }
-
-    pub fn commit(&mut self) {
-        assert!(self.tx.is_some(), "no active transaction");
-
-        self.reader_state.commit();
-        self.anchors_cache.commit();
-
-        self.tx = None;
-    }
-
-    pub fn rollback(&mut self) {
-        let tx = self.tx.take().expect("no active transaction");
-
-        self.reader_state.rollback();
-        self.anchors_cache.rollback();
-
-        self.next_chain_time = tx.snapshot_next_chain_time;
-        self.msgs_exec_params = tx.snapshot_msgs_exec_params;
-        self.buffer_limits_by_partitions = tx.snapshot_buffer_limits_by_partitions;
-        self.all_ranges_fully_read = tx.snapshot_all_ranges_fully_read;
-    }
-}
-
-impl<'a> ExternalsReader<'a> {
+impl<'a, 'b> ExternalsReader<'a, 'b> {
     pub fn new(
         for_shard_id: ShardIdent,
         block_seqno: BlockSeqno,
         next_chain_time: u64,
         msgs_exec_params: MsgsExecutionParamsStuff,
         buffer_limits_by_partitions: BTreeMap<QueuePartitionIdx, MessagesBufferLimits>,
-        anchors_cache: &'a mut AnchorsCacheTransaction<'a>,
+        anchors_cache: &'a mut AnchorsCacheTransaction<'b>,
         reader_state: &'a mut ExternalsReaderState,
     ) -> Self {
         Self {
@@ -116,7 +71,6 @@ impl<'a> ExternalsReader<'a> {
             anchors_cache,
             reader_state,
             all_ranges_fully_read: false,
-            tx: None,
         }
     }
 

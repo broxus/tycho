@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::Context;
 use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_util::FastHashSet;
+use tycho_util_proc::Transactional;
 
 use crate::collator::messages_buffer::{
     BufferFillStateByCount, BufferFillStateBySlots, MessagesBuffer, MessagesBufferLimits,
@@ -12,7 +13,7 @@ use crate::mempool::MempoolAnchorId;
 use crate::types::DebugIter;
 use crate::types::processed_upto::{BlockSeqno, ExternalsRangeInfo};
 
-#[derive(Default)]
+#[derive(Default, Transactional)]
 pub struct ExternalsReaderState {
     /// We fully read each externals range
     /// because we unable to get remaning messages info
@@ -22,6 +23,7 @@ pub struct ExternalsReaderState {
     ///
     /// Ranges will be extracted during collation process.
     /// Should access them only before collation and after reader finalization.
+    #[tx(collection)]
     pub ranges: BTreeMap<BlockSeqno, ExternalsRangeReaderState>,
 
     /// Partition related externals reader state
@@ -29,58 +31,9 @@ pub struct ExternalsReaderState {
 
     /// last read to anchor chain time
     pub last_read_to_anchor_chain_time: Option<u64>,
-    tx: Option<ExternalsReaderStateTransaction>,
-}
 
-struct ExternalsReaderStateTransaction {
-    snapshot_by_partitions: BTreeMap<QueuePartitionIdx, ExternalsPartitionReaderState>,
-    snapshot_last_read_to_anchor_chain_time: Option<u64>,
-
-    snapshot_range_keys: FastHashSet<BlockSeqno>,
-    removed_ranges: BTreeMap<BlockSeqno, ExternalsRangeReaderState>,
-}
-
-// Transactional operations
-impl ExternalsReaderState {
-    pub fn begin(&mut self) {
-        assert!(self.tx.is_none(), "transaction already in progress");
-
-        self.tx = Some(ExternalsReaderStateTransaction {
-            snapshot_by_partitions: self.by_partitions.clone(),
-            snapshot_last_read_to_anchor_chain_time: self.last_read_to_anchor_chain_time,
-            snapshot_range_keys: self.ranges.keys().copied().collect(),
-            removed_ranges: BTreeMap::new(),
-        });
-
-        for r in self.ranges.values_mut() {
-            r.begin();
-        }
-    }
-
-    pub fn commit(&mut self) {
-        assert!(self.tx.is_some(), "no active transaction");
-
-        for r in self.ranges.values_mut() {
-            r.commit();
-        }
-
-        self.tx = None;
-    }
-
-    pub fn rollback(&mut self) {
-        let tx = self.tx.take().expect("no active transaction");
-
-        self.by_partitions = tx.snapshot_by_partitions;
-        self.last_read_to_anchor_chain_time = tx.snapshot_last_read_to_anchor_chain_time;
-
-        self.ranges
-            .retain(|k, _| tx.snapshot_range_keys.contains(k));
-        self.ranges.extend(tx.removed_ranges);
-
-        for r in self.ranges.values_mut() {
-            r.rollback();
-        }
-    }
+    #[tx(state)]
+    tx: Option<ExternalsReaderStateTx>,
 }
 
 impl ExternalsReaderState {
@@ -97,29 +50,10 @@ impl ExternalsReaderState {
     pub fn insert_range(
         &mut self,
         seqno: BlockSeqno,
-        mut state: ExternalsRangeReaderState,
+        state: ExternalsRangeReaderState,
     ) -> Option<ExternalsRangeReaderState> {
-        if self.tx.is_some() {
-            state.begin();
-        }
-
-        if let Some(tx) = &mut self.tx {
-            tx.removed_ranges.remove(&seqno);
-        }
-
-        self.ranges.insert(seqno, state)
-    }
-
-    pub fn remove_range(&mut self, seqno: BlockSeqno) {
-        let Some(removed) = self.ranges.remove(&seqno) else {
-            return;
-        };
-
-        if let Some(tx) = &mut self.tx {
-            if tx.snapshot_range_keys.contains(&seqno) {
-                tx.removed_ranges.insert(seqno, removed);
-            }
-        }
+        self.tx_insert_ranges(seqno, state);
+        None
     }
 
     pub fn ranges(&self) -> &BTreeMap<BlockSeqno, ExternalsRangeReaderState> {
@@ -148,16 +82,10 @@ impl ExternalsReaderState {
         }
 
         for k in to_remove {
-            let removed = self
-                .ranges
-                .remove(&k)
-                .expect("key collected for removal must exist");
-
-            if let Some(tx) = &mut self.tx {
-                if tx.snapshot_range_keys.contains(&k) {
-                    tx.removed_ranges.insert(k, removed);
-                }
-            }
+            assert!(
+                self.tx_remove_ranges(&k),
+                "range {k} should exist for removal"
+            );
         }
     }
 }
@@ -173,20 +101,20 @@ pub struct ExternalsPartitionReaderState {
     pub curr_processed_offset: u32,
 }
 
-struct RangeReaderStateTransaction {
-    snapshot_range: ExternalsReaderRange,
-    snapshot_fully_read: bool,
-    snapshot_partition_keys: FastHashSet<QueuePartitionIdx>,
-    removed_partitions: BTreeMap<QueuePartitionIdx, ExternalsPartitionRangeReaderState>,
-}
-
+#[derive(Transactional)]
 pub struct ExternalsRangeReaderState {
     /// Range info
+    #[tx(skip)]
     pub range: ExternalsReaderRange,
     /// Partition related externals range reader state
+    #[tx(collection)]
     by_partitions: BTreeMap<QueuePartitionIdx, ExternalsPartitionRangeReaderState>,
+
+    #[tx(skip)]
     pub fully_read: bool,
-    tx: Option<RangeReaderStateTransaction>,
+
+    #[tx(state)]
+    tx: Option<ExternalsRangeReaderStateTx>,
 }
 
 impl ExternalsRangeReaderState {
@@ -199,45 +127,6 @@ impl ExternalsRangeReaderState {
             by_partitions,
             fully_read: false,
             tx: None,
-        }
-    }
-
-    pub fn begin(&mut self) {
-        assert!(self.tx.is_none(), "transaction already in progress");
-
-        self.tx = Some(RangeReaderStateTransaction {
-            snapshot_range: self.range.clone(),
-            snapshot_fully_read: self.fully_read,
-            snapshot_partition_keys: self.by_partitions.keys().copied().collect(),
-            removed_partitions: BTreeMap::new(),
-        });
-
-        for state in self.by_partitions.values_mut() {
-            state.begin();
-        }
-    }
-
-    pub fn commit(&mut self) {
-        assert!(self.tx.is_some(), "no active transaction");
-
-        for state in self.by_partitions.values_mut() {
-            state.commit();
-        }
-        self.tx = None;
-    }
-
-    pub fn rollback(&mut self) {
-        let tx = self.tx.take().expect("no active transaction");
-
-        self.range = tx.snapshot_range;
-        self.fully_read = tx.snapshot_fully_read;
-        self.by_partitions
-            .retain(|k, _| tx.snapshot_partition_keys.contains(k));
-
-        self.by_partitions.extend(tx.removed_partitions);
-
-        for state in self.by_partitions.values_mut() {
-            state.rollback();
         }
     }
 
@@ -276,22 +165,11 @@ impl ExternalsRangeReaderState {
         par_id: QueuePartitionIdx,
         state: ExternalsPartitionRangeReaderState,
     ) {
-        if let Some(tx) = &mut self.tx {
-            tx.removed_partitions.remove(&par_id);
-        }
-        self.by_partitions.insert(par_id, state);
+        self.tx_insert_by_partitions(par_id, state);
     }
 
     pub fn remove_partition(&mut self, par_id: QueuePartitionIdx) {
-        let Some(removed) = self.by_partitions.remove(&par_id) else {
-            return;
-        };
-
-        if let Some(tx) = &mut self.tx {
-            if tx.snapshot_partition_keys.contains(&par_id) {
-                tx.removed_partitions.insert(par_id, removed);
-            }
-        }
+        self.tx_remove_by_partitions(&par_id);
     }
 }
 
@@ -326,16 +204,11 @@ impl ExternalsReaderRange {
     }
 }
 
-#[derive(Default)]
-struct ReaderStateTransaction {
-    snapshot_skip_offset: u32,
-    snapshot_processed_offset: u32,
-    snapshot_last_expire_check_on_ct: Option<u64>,
-}
-
+#[derive(Transactional)]
 pub struct ExternalsPartitionRangeReaderState {
     /// Buffer to store external messages
     /// before collect them to the next execution group
+    #[tx(transactional)]
     pub buffer: MessagesBuffer,
     /// Skip offset before collecting messages from this range.
     /// Because we should collect from others.
@@ -348,37 +221,9 @@ pub struct ExternalsPartitionRangeReaderState {
     /// If `next_chain_time` was not changed on collect,
     /// we can omit the expire check.
     pub last_expire_check_on_ct: Option<u64>,
-    tx: Option<ReaderStateTransaction>,
-}
 
-impl ExternalsPartitionRangeReaderState {
-    pub fn begin(&mut self) {
-        assert!(self.tx.is_none(), "transaction already in progress");
-
-        self.tx = Some(ReaderStateTransaction {
-            snapshot_skip_offset: self.skip_offset,
-            snapshot_processed_offset: self.processed_offset,
-            snapshot_last_expire_check_on_ct: self.last_expire_check_on_ct,
-        });
-        self.buffer.begin();
-    }
-
-    pub fn commit(&mut self) {
-        assert!(self.tx.is_some(), "no active transaction");
-
-        self.tx = None;
-        self.buffer.commit();
-    }
-
-    pub fn rollback(&mut self) {
-        let tx = self.tx.take().expect("no active transaction");
-
-        self.skip_offset = tx.snapshot_skip_offset;
-        self.processed_offset = tx.snapshot_processed_offset;
-        self.last_expire_check_on_ct = tx.snapshot_last_expire_check_on_ct;
-
-        self.buffer.rollback();
-    }
+    #[tx(state)]
+    tx: Option<ExternalsPartitionRangeReaderStateTx>,
 }
 
 impl ExternalsPartitionRangeReaderState {
