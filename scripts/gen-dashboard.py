@@ -1085,6 +1085,11 @@ def storage() -> RowPanel:
         create_heatmap_panel(
             "tycho_storage_state_store_time", "Time to store state with cell traversal"
         ),
+        create_percent_panel(
+            "tycho_storage_shard_state_skipped",
+            "tycho_storage_shard_state_skipped + tycho_storage_shard_state_stored",
+            "Shard states skip ratio",
+        ),
         create_heatmap_panel("tycho_gc_states_time", "Time to garbage collect state"),
         timeseries_panel(
             targets=[
