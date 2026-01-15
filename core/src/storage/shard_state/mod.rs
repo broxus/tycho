@@ -195,7 +195,7 @@ impl ShardStateStorage {
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
             let root_hash = *root_cell.repr_hash();
-            let estimated_merkle_update_size = hint.estimate_cell_count();
+            let estimated_merkle_update_size = hint.new_cell_count;
 
             let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
             let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
@@ -629,6 +629,7 @@ pub struct StoreStateHint {
 }
 
 impl StoreStateHint {
+    #[allow(dead_code)]
     fn estimate_cell_count(&self) -> usize {
         // y = 3889.9821 + 14.7480 × √x
         // R-squared: 0.7035
