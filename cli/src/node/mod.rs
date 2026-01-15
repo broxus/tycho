@@ -213,8 +213,10 @@ impl Node {
             base.keypair.clone(),
             tycho_slasher::StubSlasherContract,
             base.blockchain_rpc_client.clone(),
+            &base.storage_context,
             self.slasher_config,
-        );
+        )
+        .context("failed to create slasher")?;
 
         let validator = ValidatorStdImpl::new(
             ValidatorNetworkContext {
