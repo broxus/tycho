@@ -178,7 +178,7 @@ impl DagRound {
                 .or_insert_with(|| {
                     let role = self.leader_role(point.info().author());
                     DagPointFuture::new_local_valid(
-                        point, role, &loc.state, store, key_pair, round_ctx,
+                        self, point, role, &loc.state, store, key_pair, round_ctx,
                     )
                 })
                 .clone()

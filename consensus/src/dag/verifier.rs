@@ -1,11 +1,9 @@
 use std::cmp;
 
-use ahash::HashMapExt;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use tracing::Instrument;
 use tycho_network::PeerId;
-use tycho_util::FastHashMap;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::dag_location::DagLocation;
@@ -222,15 +220,13 @@ impl Verifier {
         };
         let r_2_opt = r_1.prev().upgrade();
 
-        let (mut deps_and_prev, cert_deps) =
+        let (mut deps_and_prev, cert_deps, prev_point_cert) =
             Self::spawn_direct_deps(&info, &r_1, r_2_opt.as_ref(), &downloader, &store, &ctx);
 
-        if let Some(prev_digest) = info.prev_digest() {
+        // move strong cert: don't hold it across await
+        if let Some(prev_point_cert) = prev_point_cert {
             // point well-formedness is enough to act as a carrier for the majority of signatures
-            let weak_cert =
-                (cert_deps.includes.get(prev_digest)).expect("prev cert must be included");
-            let cert = weak_cert.upgrade().expect("we hold a strong ref to round");
-            cert.certify();
+            prev_point_cert.certify(ctx.conf());
         }
         cert.set_deps(cert_deps);
 
@@ -345,36 +341,51 @@ impl Verifier {
         downloader: &Downloader,
         store: &MempoolStore,
         ctx: &ValidateCtx,
-    ) -> (FuturesUnordered<WeakDagPointFuture>, CertDirectDeps) {
+    ) -> (
+        FuturesUnordered<WeakDagPointFuture>,
+        CertDirectDeps,
+        Option<Cert>,
+    ) {
         let direct_deps = FuturesUnordered::new();
+
+        let mut prev_point_cert = None;
 
         // allocate a bit more so it's unlikely to grow during certify procedure
         let mut cert_deps = CertDirectDeps {
-            includes: FastHashMap::with_capacity(r_1.peer_count().full()),
-            witness: FastHashMap::with_capacity(r_1.peer_count().full()),
+            includes: Vec::with_capacity(info.includes().len()),
+            witness: Vec::with_capacity(info.witness().len()),
         };
 
+        let point_author = info.author();
+
+        // populate witness before includes: their round is less
+        if let Some(r_2) = r_2_opt {
+            for (author, digest) in info.witness() {
+                let (dep, cert) =
+                    r_2.add_dependency(author, digest, point_author, downloader, store, ctx);
+
+                cert_deps.witness.push((*digest, cert));
+                direct_deps.push(dep);
+            }
+        }
+
         // integrity check passed, so includes contain author's prev point proof
-        let includes = (info.includes().iter()).map(|(author, digest)| (r_1, true, author, digest));
-
-        let witness = r_2_opt.into_iter().flat_map(|r_2| {
-            (info.witness().iter()).map(move |(author, digest)| (r_2, false, author, digest))
-        });
-
-        for (dag_round, is_includes, author, digest) in includes.chain(witness) {
+        for (author, digest) in info.includes() {
             let (dep, cert) =
-                dag_round.add_dependency(author, digest, info.author(), downloader, store, ctx);
+                r_1.add_dependency(author, digest, point_author, downloader, store, ctx);
 
-            if is_includes {
-                cert_deps.includes.insert(*digest, cert);
-            } else {
-                cert_deps.witness.insert(*digest, cert);
+            if author == point_author
+                && let Some(prev_digest) = info.prev_digest()
+                && digest == prev_digest
+            {
+                prev_point_cert = cert.upgrade();
             }
 
+            cert_deps.includes.push((*digest, cert));
             direct_deps.push(dep);
         }
 
-        (direct_deps, cert_deps)
+        (direct_deps, cert_deps, prev_point_cert)
     }
 
     /// check only direct dependencies and location for previous point (let it jump over round)
