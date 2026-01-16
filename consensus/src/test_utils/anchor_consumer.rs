@@ -70,6 +70,7 @@ impl AnchorConsumer {
             MempoolOutput::NextAnchor(anchor_data) => {
                 let round = anchor_data.anchor.round();
                 tracing::info!("committed anchor {}", round.0);
+                tycho_util::mem::Reclaimer::instance().drop(anchor_data);
                 round
             }
             MempoolOutput::CommitFinished(round) => {
@@ -180,6 +181,8 @@ impl AnchorConsumer {
                 self.history.insert(anchor_round, point_refs);
             }
         }
+
+        tycho_util::mem::Reclaimer::instance().drop((anchor, history));
 
         let mut common_anchors = vec![];
         let mut common_history = vec![];

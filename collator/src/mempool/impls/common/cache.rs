@@ -244,16 +244,11 @@ impl Cache {
     pub fn clear(&self, before_anchor_id: MempoolAnchorId) {
         let mut data = self.data.write();
 
-        let mut anchors_to_clean = Vec::new();
-        data.anchors.retain(|anchor_id, anchor| {
-            let retain = anchor_id >= &before_anchor_id;
-            if !retain {
-                // NOTE: Save `Arc` to drop it later when it (might) become a
-                // uniquely owned because we can't drop it in `retain`.
-                anchors_to_clean.push(anchor.clone());
-            }
-            retain
-        });
+        let pos = (data.anchors)
+            .binary_search_keys(&before_anchor_id)
+            .unwrap_or_else(std::convert::identity);
+
+        let anchors_to_clean = (data.anchors).drain(..pos).collect::<Vec<_>>();
 
         data.shrink();
 

@@ -102,28 +102,14 @@ impl DagBack {
         );
     }
 
-    pub fn drop_upto(&mut self, new_bottom_round: Round) {
-        // TODO use `std::cmp::Reverse` for keys + `BTreeMap::split_off()`; this will also make
-        //   order of rounds in DagBack same as in DagFront: newer in back and older in front
-        while let Some(entry) = self.rounds.first_entry() {
-            if *entry.key() < new_bottom_round {
-                entry.remove();
-            } else {
-                break;
-            }
-        }
-    }
-
+    // TODO: use `std::cmp::Reverse` for keys + `BTreeMap::split_off()`; this will also make
+    //   order of rounds in DagBack same as in DagFront: newer in back and older in front
     pub fn drain_upto(&mut self, new_bottom_round: Round) -> Vec<DagRound> {
         let to_drain = (new_bottom_round - self.bottom_round().0).0 as usize;
-        let mut drained = Vec::with_capacity(to_drain);
-        while let Some(entry) = self.rounds.first_entry() {
-            if *entry.key() < new_bottom_round {
-                drained.push(entry.remove());
-            } else {
-                break;
-            }
-        }
+        let drained = (self.rounds)
+            .extract_if(..new_bottom_round, |_, _| true)
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
         assert_eq!(to_drain, drained.len(), "drained not contiguous dag part");
         drained
     }
