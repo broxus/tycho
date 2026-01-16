@@ -2,13 +2,11 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
 
-use ahash::HashMapExt;
 use futures_util::future::{BoxFuture, Either};
 use futures_util::{FutureExt, future};
 use tokio::sync::{mpsc, oneshot};
 use tycho_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
-use tycho_util::FastHashMap;
 use tycho_util::futures::{Shared, WeakShared};
 use tycho_util::sync::OnceTake;
 
@@ -372,8 +370,8 @@ impl DagPointFuture {
             | PointRestore::Exists(_) | PointRestore::NotFound(_, _) => None,
         } {
             let mut cert_deps = CertDirectDeps {
-                includes: FastHashMap::with_capacity(point_dag_round.peer_count().full()),
-                witness: FastHashMap::with_capacity(point_dag_round.peer_count().full()),
+                includes: Vec::with_capacity(includes.len()),
+                witness: Vec::with_capacity(witness.len()),
             };
             if let Some(r_1) = point_dag_round.prev().upgrade() {
                 cert_deps.includes.extend(r_1.select(|(peer, loc)| {
@@ -391,13 +389,8 @@ impl DagPointFuture {
             }
             cert.set_deps(cert_deps);
         }
-        if match &point_restore {
-            PointRestore::Exists(_) => false,
-            PointRestore::Validated(_, status) => status.is_certified,
-            PointRestore::IllFormed(_, status) => status.is_certified,
-            PointRestore::NotFound(_, status) => status.is_certified,
-        } {
-            cert.certify();
+        if point_restore.is_certified() {
+            cert.certify(round_ctx.conf());
         }
 
         // keep this section sync so that call site may not wait for each result to resolve
