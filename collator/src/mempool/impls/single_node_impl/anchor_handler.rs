@@ -50,7 +50,7 @@ impl SingleNodeAnchorHandler {
             let ParserOutput {
                 unique_messages,
                 unique_payload_bytes,
-            } = (self.parser).parse_unique(anchor_id, payloads);
+            } = self.parser.parse_unique(anchor_id, payloads);
 
             let unique_messages_len = unique_messages.len();
 
@@ -61,9 +61,6 @@ impl SingleNodeAnchorHandler {
                 author: self.peer_id,
                 externals: unique_messages,
             }));
-
-            self.prev_anchor_id = Some(anchor_id);
-            self.parser.clean(anchor_id);
 
             metrics::counter!("tycho_mempool_msgs_unique_count")
                 .increment(unique_messages_len as _);
@@ -87,6 +84,10 @@ impl SingleNodeAnchorHandler {
                 externals_skipped = total_messages - unique_messages_len,
                 "new anchor"
             );
+
+            self.prev_anchor_id = Some(anchor_id);
+
+            self.parser.clean(anchor_id);
 
             self
         });

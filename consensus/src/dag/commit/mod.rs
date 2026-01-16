@@ -89,7 +89,7 @@ impl Committer {
     ) -> Result<Round, Round> {
         // cannot leave dag empty
         let actual_bottom = new_bottom_round.min(self.dag.top().round());
-        self.dag.drop_upto(actual_bottom);
+        tycho_util::mem::Reclaimer::instance().drop(self.dag.drain_upto(actual_bottom));
         self.anchor_chain.drop_upto(actual_bottom);
         self.full_history_bottom = actual_bottom + conf.consensus.commit_history_rounds.get();
         if actual_bottom == new_bottom_round {
@@ -105,11 +105,14 @@ impl Committer {
         conf: &MempoolConfig,
     ) -> TaskResult<MempoolStatsOutput> {
         // in case previous anchor was triggered directly - rounds are already dropped
-        for r_0 in (self.dag).drain_upto(last_anchor - conf.consensus.commit_history_rounds.get()) {
+        let drained =
+            (self.dag).drain_upto(last_anchor - conf.consensus.commit_history_rounds.get());
+        for r_0 in &drained {
             if r_0.round() > conf.genesis_round {
-                self.inspector.inspect(&r_0)?;
+                self.inspector.inspect(r_0)?;
             }
         }
+        tycho_util::mem::Reclaimer::instance().drop(drained);
         Ok(MempoolStatsOutput {
             anchor_round: last_anchor,
             data: self.inspector.take_stats(),
