@@ -68,6 +68,14 @@ impl PointRestore {
             digest: *self.digest(),
         }
     }
+    pub fn is_certified(&self) -> bool {
+        match self {
+            Self::Exists(_) => false,
+            Self::Validated(_, status) => status.is_certified,
+            Self::IllFormed(_, status) => status.is_certified,
+            Self::NotFound(_, status) => status.is_certified,
+        }
+    }
 }
 
 impl AltFormat for PointRestore {}
