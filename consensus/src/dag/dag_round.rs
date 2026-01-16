@@ -27,7 +27,8 @@ pub struct WeakDagRound(Weak<DagRoundInner>);
 /// (in case congested tokio runtime reorders futures), use [`WeakDagRound`] for that
 pub struct DagRound(Arc<DagRoundInner>);
 
-struct DagRoundInner {
+/// made public only to support drop via Reclaimer
+pub struct DagRoundInner {
     round: Round,
     peer_count: PeerCount,
     anchor_stage: Option<AnchorStage>,
@@ -149,6 +150,10 @@ impl DagRound {
 
     pub fn downgrade(&self) -> WeakDagRound {
         WeakDagRound(Arc::downgrade(&self.0))
+    }
+
+    pub fn into_inner(self) -> Option<DagRoundInner> {
+        Arc::into_inner(self.0)
     }
 
     /// for locally produced points

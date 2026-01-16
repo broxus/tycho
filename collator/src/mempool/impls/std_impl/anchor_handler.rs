@@ -127,8 +127,6 @@ impl Shuttle {
                 unique_payload_bytes,
             } = self.parser.parse_unique(anchor_id, payloads);
 
-            drop(bump);
-
             let unique_messages_len = unique_messages.len();
 
             if is_executable {
@@ -140,8 +138,6 @@ impl Shuttle {
                     externals: unique_messages,
                 }));
             }
-
-            self.parser.clean(anchor_id);
 
             metrics::counter!("tycho_mempool_msgs_unique_count")
                 .increment(unique_messages_len as _);
@@ -166,6 +162,10 @@ impl Shuttle {
                 externals_skipped = total_messages - unique_messages_len,
                 "new anchor"
             );
+
+            tycho_util::mem::Reclaimer::instance().drop((committed, bump));
+
+            self.parser.clean(anchor_id);
 
             self
         });
