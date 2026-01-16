@@ -275,6 +275,9 @@ pub struct UnnamedFileBuilder {
 }
 
 impl UnnamedFileBuilder {
+    /// File is immediately unlinked after creation.
+    /// Fs will reclaim the space when fd is closed.
+    /// (File handle is dropped)
     pub fn open(self) -> Result<File> {
         let file = tempfile::tempfile_in(&self.base_dir)?;
         if let Some(prealloc) = self.prealloc {
