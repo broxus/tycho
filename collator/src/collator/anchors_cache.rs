@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tycho_network::PeerId;
 
-use crate::collator::messages_reader::state::external::ExternalKey;
+use crate::collator::messages_reader::state::ext::ExternalKey;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 
 #[derive(Debug, Clone)]
