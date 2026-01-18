@@ -1,21 +1,20 @@
 use std::collections::BTreeMap;
 
 use anyhow::anyhow;
+use ext::ExternalsReaderRange;
+use ext::partition_reader::ExternalsPartitionReaderState;
+use ext::range_reader::ExternalsRangeReaderState;
+use ext::reader::ExternalsReaderState;
 use tycho_block_util::queue::QueueKey;
 use tycho_util_proc::Transactional;
 
-use crate::collator::ForceMasterCollation::No;
-use crate::collator::messages_reader::state::external::{
-    ExternalsPartitionReaderState, ExternalsRangeReaderState, ExternalsReaderRange,
-    ExternalsReaderState,
-};
 use crate::collator::messages_reader::state::internal::InternalsReaderState;
 use crate::types::processed_upto::{
     ExternalsProcessedUptoStuff, Lt, ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
     ShardRangeInfo,
 };
-
-pub mod external;
+pub mod ext;
+pub mod int;
 pub mod internal;
 
 #[derive(Transactional)]
