@@ -27,11 +27,10 @@ pub struct MessagesBufferLimits {
 
 #[derive(Default)]
 pub struct BufferTransaction {
-    account_snapshots: FastHashMap<HashBytes, VecDeque<ParsedMessage>>,
+    account_snapshots: FastHashMap<HashBytes, Option<(usize, VecDeque<ParsedMessage>)>>,
     snapshot_int_count: usize,
     snapshot_ext_count: usize,
     snapshot_min_ext_chain_time: Option<u64>,
-    snapshot_sorted_index: BTreeMap<usize, FastHashSet<HashBytes>>,
 }
 
 #[derive(Default)]
@@ -39,54 +38,78 @@ pub struct MessagesBuffer {
     msgs: FastIndexMap<HashBytes, VecDeque<ParsedMessage>>,
     int_count: usize,
     ext_count: usize,
-    sorted_index: BTreeMap<usize, FastHashSet<HashBytes>>,
     min_ext_chain_time: Option<u64>,
-    tx: BufferTransaction,
+    tx: Option<BufferTransaction>,
 }
 
 impl Transactional for MessagesBuffer {
     fn begin(&mut self) {
-        self.tx = BufferTransaction {
+        self.tx = Some(BufferTransaction {
             account_snapshots: FastHashMap::default(),
             snapshot_int_count: self.int_count,
             snapshot_ext_count: self.ext_count,
             snapshot_min_ext_chain_time: self.min_ext_chain_time,
-            snapshot_sorted_index: self.sorted_index.clone(),
-        };
+        });
     }
 
     fn commit(&mut self) {
-        self.tx = BufferTransaction::default();
+        self.tx = None;
     }
 
     fn rollback(&mut self) {
-        let tx = std::mem::take(&mut self.tx);
+        let Some(tx) = self.tx.take() else {
+            return;
+        };
 
-        for (account_id, msgs) in tx.account_snapshots {
-            if msgs.is_empty() {
-                self.msgs.swap_remove(&account_id);
-            } else {
-                self.msgs.insert(account_id, msgs);
+        let mut existing: Vec<_> = tx
+            .account_snapshots
+            .iter()
+            .filter_map(|(id, snapshot)| snapshot.as_ref().map(|(idx, _)| (*id, *idx)))
+            .collect();
+        existing.sort_by_key(|(_, index)| *index);
+
+        for (account_id, snapshot) in &tx.account_snapshots {
+            if snapshot.is_none() {
+                self.msgs.shift_remove(account_id);
+            }
+        }
+
+        for (account_id, original_index) in existing {
+            if let Some(Some((_, msgs))) = tx.account_snapshots.get(&account_id) {
+                self.msgs.shift_remove(&account_id);
+                self.msgs
+                    .shift_insert(original_index, account_id, msgs.clone());
             }
         }
 
         self.int_count = tx.snapshot_int_count;
         self.ext_count = tx.snapshot_ext_count;
         self.min_ext_chain_time = tx.snapshot_min_ext_chain_time;
-        self.sorted_index = tx.snapshot_sorted_index;
     }
-
     fn is_in_transaction(&self) -> bool {
-        !self.tx.account_snapshots.is_empty()
+        self.tx.is_some()
     }
 }
 
 impl MessagesBuffer {
+    // fn backup_account(&mut self, account_id: &HashBytes) {
+    //     if let Some(tx) = &mut self.tx {
+    //         tx.account_snapshots.entry(*account_id).or_insert_with(|| {
+    //         self.msgs
+    //             .get_full(account_id)
+    //             .map(|(index, _, msgs)| (index, msgs.clone()))
+    //     });
+    // }
+    // }
+
     fn backup_account(&mut self, account_id: &HashBytes) {
-        self.tx
-            .account_snapshots
-            .entry(*account_id)
-            .or_insert_with(|| self.msgs.get(account_id).cloned().unwrap_or_default());
+        if self.is_in_transaction() {
+            if let Some(entry) = self.msgs.get_mut(account_id) {
+                if entry.old_val.is_none() {
+                    entry.old_val = entry.new_val.clone();
+                }
+            }
+        }
     }
 
     pub fn account_messages_count(&self, account_id: &HashBytes) -> usize {
@@ -114,7 +137,9 @@ impl MessagesBuffer {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&HashBytes, &VecDeque<ParsedMessage>)> {
-        self.msgs.iter()
+        self.msgs
+            .iter()
+            .filter_map(|(k, entry)| entry.current().map(|v| (k, v)))
     }
 
     pub fn add_message(&mut self, msg: ParsedMessage) {
@@ -143,46 +168,45 @@ impl MessagesBuffer {
         self.backup_account(&account_id);
 
         // insert message to buffer
-        let prev_msgs_count = match self.msgs.entry(account_id) {
+        match self.msgs.entry(account_id) {
             indexmap::map::Entry::Vacant(vacant) => {
                 vacant.insert([msg].into());
-                0
             }
             indexmap::map::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
-                let prev_count = entry.len();
                 entry.push_back(msg);
-                prev_count
             }
         };
-
-        // update sorted by count index
-        // remove account_id from previous count bracket
-        if prev_msgs_count > 0 {
-            let accounts = self.sorted_index.get_mut(&prev_msgs_count).unwrap();
-            accounts.remove(&account_id);
-        }
-        // add account_id to the next count bracket
-        match self.sorted_index.entry(prev_msgs_count + 1) {
-            btree_map::Entry::Vacant(vacant) => {
-                vacant.insert([account_id].into_iter().collect());
-            }
-            btree_map::Entry::Occupied(mut occupied) => {
-                occupied.get_mut().insert(account_id);
-            }
-        }
     }
 
     pub fn remove_messages_by_accounts(&mut self, addresses_to_remove: &FastHashSet<HashBytes>) {
-        self.msgs.retain(|k, v| {
-            if addresses_to_remove.contains(k) {
-                self.int_count -= v.len();
-                false
-            } else {
-                true
+        for addr in addresses_to_remove {
+            if let Some(entry) = self.msgs.get_mut(addr) {
+                if let Some(msgs) = entry.current() {
+                    self.backup_account(addr);
+                    self.int_count -= msgs.len();
+                    entry.new_val = None;
+                }
             }
-        });
+        }
     }
+
+    // pub fn remove_messages_by_accounts(&mut self, addresses_to_remove: &FastHashSet<HashBytes>) {
+    //     for addr in addresses_to_remove {
+    //         if self.msgs.contains_key(addr) {
+    //             self.backup_account(addr);
+    //         }
+    //     }
+    //
+    //     self.msgs.retain(|k, v| {
+    //         if addresses_to_remove.contains(k) {
+    //             self.int_count -= v.len();
+    //             false
+    //         } else {
+    //             true
+    //         }
+    //     });
+    // }
 
     /// Returns queue keys of collected internal queue messages.
     pub fn fill_message_group<FA, FM>(
@@ -263,6 +287,11 @@ impl MessagesBuffer {
                 while let Some((&account_id, _)) = self.msgs.get_index(buf_account_idx) {
                     buf_account_idx += 1;
 
+                    let Some(account_msgs) = entry.current() else {
+                        continue;
+                    };
+
+                    // !!! ???
                     if msg_group.msgs.contains_key(&account_id) {
                         // try skip messages from skipped account: maybe they expired
                         self.try_skip_account_msgs(&account_id, &mut msg_filter);
@@ -386,6 +415,10 @@ impl MessagesBuffer {
                 while let Some((&account_id, _)) = self.msgs.get_index(buf_account_idx) {
                     buf_account_idx += 1;
 
+                    let Some(account_msgs) = entry.current() else {
+                        continue; // пропускаем удалённые
+                    };
+
                     if msg_group.msgs.contains_key(&account_id) {
                         // try skip messages from skipped account: maybe they expired
                         self.try_skip_account_msgs(&account_id, &mut msg_filter);
@@ -423,6 +456,11 @@ impl MessagesBuffer {
         if msg_filter.can_skip() {
             while let Some((&account_id, _)) = self.msgs.get_index(buf_account_idx) {
                 buf_account_idx += 1;
+
+                let Some(account_msgs) = entry.current() else {
+                    continue;
+                };
+
                 self.try_skip_account_msgs(&account_id, &mut msg_filter);
             }
         }

@@ -1,5 +1,5 @@
 use crate::collator::messages_reader::state::ShardReaderState;
-use crate::collator::messages_reader::state::external::ExternalsPartitionRangeReaderState;
+use crate::collator::messages_reader::state::ext::partition_range_reader::ExternalsPartitionRangeReaderState;
 use crate::types::processed_upto::ShardRangeInfo;
 
 pub struct DisplayRangeReaderStateByPartition<'a>(pub &'a ExternalsPartitionRangeReaderState);

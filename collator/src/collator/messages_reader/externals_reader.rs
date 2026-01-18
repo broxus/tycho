@@ -17,11 +17,13 @@ use crate::collator::messages_buffer::{
     MessageGroup, MessagesBufferLimits, MsgFilter, SkipExpiredExternals,
 };
 use crate::collator::messages_reader::internals_range_reader::InternalsRangeReaderKind;
-use crate::collator::messages_reader::state::external::{
-    DebugExternalsRangeReaderState, ExternalKey, ExternalsPartitionRangeReaderState,
-    ExternalsPartitionReaderState, ExternalsRangeReaderState, ExternalsReaderRange,
-    ExternalsReaderState,
+use crate::collator::messages_reader::state::ext::partition_range_reader::ExternalsPartitionRangeReaderState;
+use crate::collator::messages_reader::state::ext::partition_reader::ExternalsPartitionReaderState;
+use crate::collator::messages_reader::state::ext::range_reader::{
+    DebugExternalsRangeReaderState, ExternalsRangeReaderState,
 };
+use crate::collator::messages_reader::state::ext::reader::ExternalsReaderState;
+use crate::collator::messages_reader::state::ext::{ExternalKey, ExternalsReaderRange};
 use crate::collator::messages_reader::state::internal::DebugInternalsRangeReaderState;
 use crate::collator::messages_reader::state::with_prev_map_and_current;
 use crate::collator::types::{
