@@ -683,65 +683,98 @@ impl CollatorStdImpl {
                         )
                         .await?;
                     } else {
+                        // Slow path: last task is not finished yet so we
+                        // need to build state by applying merkle updates chain.
+                        //
+                        // Each task has:
+                        //   - block_id: the block being saved
+                        //   - prev_block_id: the block BEFORE it (always already saved for shard blocks from previous master)
+                        //   - state_update: merkle diff between two states
+                        //
+                        // Cases handled:
+                        // 1. Multiple tasks and found a finished one in the middle:
+                        //    - Load state from finished task's block_id
+                        //    - Apply merkle updates from chain of collected unfinished tasks
+                        //
+                        // 2. Only one unfinished task (store_new_state_tasks is empty after pop):
+                        //    - Load state of previous shard block for previous master block (always already saved)
+                        //    - Apply merkle update from last_task
+                        //
+                        // 3. All tasks unfinished but hit merkle_chain_limit or reached last task:
+                        //    - Wait for that task, load its state
+                        //    - Apply merkle updates from collected unfinished tasks
+
+                        // save previous block id for case when there's only one unfinished task
+                        let prev_block_id = last_task.prev_block_id;
+
                         let mut unfinished_tasks = vec![last_task];
 
-                        // Process previous tasks until finding the finished one
-                        while let Some(task) = self.store_new_state_tasks.pop() {
-                            let is_last = self.store_new_state_tasks.is_empty();
+                        // find prev state: either from finished task or from prev_shard_data
+                        let mut prev_state = 'find_state: {
+                            while let Some(task) = self.store_new_state_tasks.pop() {
+                                let is_last = self.store_new_state_tasks.is_empty();
 
-                            // collect all unfinished tasks
-                            if !task.store_new_state_task.is_finished()
-                                && unfinished_tasks.len() < self.config.merkle_chain_limit
-                                && !is_last
-                            {
-                                unfinished_tasks.push(task);
-                                continue;
+                                // collect all unfinished tasks
+                                if !task.store_new_state_task.is_finished()
+                                    && unfinished_tasks.len() < self.config.merkle_chain_limit
+                                    && !is_last
+                                {
+                                    unfinished_tasks.push(task);
+                                    continue;
+                                }
+
+                                task.store_new_state_task.await?;
+
+                                // load stored state
+                                let prev_state = self
+                                    .state_node_adapter
+                                    .load_state(prev_mc_seqno, &task.block_id)
+                                    .await
+                                    .context("failed to load prev shard state")?;
+
+                                break 'find_state prev_state;
                             }
 
-                            task.store_new_state_task.await?;
-
-                            let _histogram_apply_merkles = HistogramGuard::begin_with_labels(
-                                "tycho_collator_resume_collation_apply_merkles_time_high",
-                                &labels,
-                            );
-
-                            // load stored state
-                            let mut prev_state = self
-                                .state_node_adapter
-                                .load_state(prev_mc_seqno, &task.block_id)
+                            // handle specific case when there's only one unfinished task
+                            self.state_node_adapter
+                                .load_state(prev_mc_seqno, &prev_block_id)
                                 .await
-                                .context("failed to load prev shard state")?;
+                                .context("failed to load prev shard state")?
+                        };
 
-                            while let Some(task) = unfinished_tasks.pop() {
-                                let prev_block_id = *prev_state.block_id();
-                                prev_state = rayon_run({
-                                    let block_id = task.block_id;
-                                    let merkle_update = task.state_update.clone();
-                                    move || {
-                                        prev_state.par_make_next_state(
-                                            &block_id,
-                                            &merkle_update,
-                                            Some(5),
-                                        )
-                                    }
-                                })
-                                .await
-                                .with_context(|| {
-                                    format!(
-                                        "failed to apply merkle of block {} to {prev_block_id}",
-                                        task.block_id
+                        let _histogram_apply_merkles = HistogramGuard::begin_with_labels(
+                            "tycho_collator_resume_collation_apply_merkles_time_high",
+                            &labels,
+                        );
+
+                        // apply merkle updates
+                        while let Some(task) = unfinished_tasks.pop() {
+                            let prev_block_id = *prev_state.block_id();
+                            prev_state = rayon_run({
+                                let block_id = task.block_id;
+                                let merkle_update = task.state_update.clone();
+                                move || {
+                                    prev_state.par_make_next_state(
+                                        &block_id,
+                                        &merkle_update,
+                                        Some(5),
                                     )
-                                })?;
+                                }
+                            })
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "failed to apply merkle of block {} to {prev_block_id}",
+                                    task.block_id
+                                )
+                            })?;
 
-                                // finalize last store task in background
-                                self.background_store_new_state_tx.send(task)?;
-                            }
-
-                            // and update pure prev state in working state
-                            Self::update_prev_data(&mut working_state, prev_state).await?;
-
-                            break;
+                            // finalize store task in background
+                            self.background_store_new_state_tx.send(task)?;
                         }
+
+                        // update prev state in working state
+                        Self::update_prev_data(&mut working_state, prev_state).await?;
                     }
                 }
             }
@@ -989,6 +1022,7 @@ impl CollatorStdImpl {
     fn prepare_working_state_update(
         &mut self,
         block_id: BlockId,
+        prev_block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
         new_observable_state_root: Cell,
         state_update: MerkleUpdate,
@@ -1016,6 +1050,7 @@ impl CollatorStdImpl {
             // append new store task
             self.store_new_state_tasks.push(StateUpdateContext {
                 block_id,
+                prev_block_id,
                 store_new_state_task,
                 state_update,
             });
@@ -2372,6 +2407,7 @@ impl DelayedWorkingState {
 
 struct StateUpdateContext {
     block_id: BlockId,
+    prev_block_id: BlockId,
     store_new_state_task: JoinTask<Result<bool>>,
     state_update: MerkleUpdate,
 }
