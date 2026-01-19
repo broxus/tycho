@@ -130,7 +130,6 @@ bitflags::bitflags! {
         const IS_COMMITTED = 1 << 10;
         const IS_KEY_BLOCK = 1 << 11;
         const IS_PERSISTENT = 1 << 12;
-        const HAS_ACCUMULATED = 1 << 13;
 
         const IS_REMOVED = 1 << 15;
         const IS_ZEROSTATE = 1 << 16;

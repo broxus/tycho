@@ -1,3 +1,4 @@
+use std::num::NonZeroU8;
 use std::time::Duration;
 
 use bytesize::ByteSize;
@@ -24,16 +25,21 @@ pub struct CoreStorageConfig {
     /// Default: `true`.
     pub store_archives: bool,
 
+    /// Number of virtual shards.
+    ///
+    /// Default: `5` (= 32 virtual shards).
+    pub shard_split_depth: u8,
+
     /// Store every Nth shard state to storage
     ///
-    /// Default: 5
-    pub store_shard_state_step: usize,
+    /// Default: 1
+    pub store_shard_state_step: NonZeroU8,
 
     /// Maximum number of accumulated new cells before forcing state storage.
     /// Prevents large state diffs that take too long to save.
     ///
-    /// Default: `150_000` cells
-    pub max_accumulated_cells_threshold: usize,
+    /// Default: `50_000` cells
+    pub max_new_cells_threshold: usize,
 
     /// Archives storage config.
     ///
@@ -86,8 +92,9 @@ impl Default for CoreStorageConfig {
             cells_cache_size: ByteSize::mb(256),
             drop_interval: 3,
             store_archives: true,
-            store_shard_state_step: 5,
-            max_accumulated_cells_threshold: 150_000,
+            shard_split_depth: 5,
+            store_shard_state_step: NonZeroU8::new(1).unwrap(),
+            max_new_cells_threshold: 50_000,
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),
             blocks_gc: Some(BlocksGcConfig::default()),
