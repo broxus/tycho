@@ -1031,6 +1031,7 @@ impl CollatorStdImpl {
         } = ctx;
 
         let block_id = *finalized.block_candidate.block.id();
+        let prev_block_id = finalized.block_candidate.prev_blocks_ids[0]; // TODO: consider split/merge
         let is_key_block = finalized.block_candidate.is_key_block;
         let store_new_state_task = JoinTask::new({
             let meta = NewBlockMeta {
@@ -1090,6 +1091,7 @@ impl CollatorStdImpl {
             // spawn update PrevData and working state
             self.prepare_working_state_update(
                 block_id,
+                prev_block_id,
                 finalized.new_observable_state,
                 finalized.new_state_root,
                 finalized.state_update,
