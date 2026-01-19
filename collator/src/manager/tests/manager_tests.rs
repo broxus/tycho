@@ -4389,6 +4389,9 @@ impl StateNodeAdapter for TestStateNodeAdapter {
     fn zerostate_id(&self) -> &ZerostateId {
         &self.zerostate_id
     }
+    fn shard_split_depth(&self) -> u8 {
+        5
+    }
 }
 
 fn build_out_msg_description<V: InternalMessageValue>(

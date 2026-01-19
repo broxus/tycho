@@ -44,9 +44,9 @@ pub struct ShardStateStorage {
     max_new_sc_cell_count: AtomicUsize,
     accumulated_new_cells: AtomicUsize,
 
-    accounts_split_depth: u8,
-    store_shard_state_step: usize,
-    max_accumulated_cells_threshold: usize,
+    shard_split_depth: u8,
+    new_cells_threshold: usize,
+    store_shard_state_step: u8,
 }
 
 impl ShardStateStorage {
@@ -70,14 +70,14 @@ impl ShardStateStorage {
             block_storage,
             temp_file_storage,
             cell_storage,
+            shard_split_depth: config.shard_split_depth,
+            new_cells_threshold: config.max_new_cells_threshold,
             store_shard_state_step: config.store_shard_state_step,
-            max_accumulated_cells_threshold: config.max_accumulated_cells_threshold,
             gc_lock: Default::default(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
             accumulated_new_cells: AtomicUsize::new(0),
-            accounts_split_depth: 5,
         }))
     }
 
@@ -145,7 +145,7 @@ impl ShardStateStorage {
             return Ok(false);
         }
 
-        // TODO: what if the first block is seqno % store_shard_state_step != 0 (case of hardforks)
+        // TODO: what if the first block is (seqno % store_shard_state_step != 0) - case of hardforks
         let mut should_store = handle.is_masterchain()
             || hint.is_top_block == Some(true)
             || handle
@@ -153,9 +153,9 @@ impl ShardStateStorage {
                 .seqno
                 .is_multiple_of(self.store_shard_state_step as u32);
 
-        if !should_store && !handle.has_accumulated() {
+        if !should_store && !handle.is_accumulated() {
             // Mark this block as accumulated to prevent double counting
-            let updated = handle.meta().add_flags(BlockFlags::HAS_ACCUMULATED);
+            let updated = handle.meta().add_flags(BlockFlags::IS_ACCUMULATED);
             if updated {
                 self.block_handle_storage.store_handle(handle, false);
             }
@@ -166,7 +166,7 @@ impl ShardStateStorage {
 
             let new_total = accumulated.saturating_add(hint.new_cell_count);
 
-            if new_total >= self.max_accumulated_cells_threshold {
+            if new_total >= self.new_cells_threshold {
                 // Accumulated too many changes - need to store state
                 should_store = true;
             }
@@ -192,7 +192,7 @@ impl ShardStateStorage {
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
-        let accounts_split_depth = self.accounts_split_depth;
+        let shard_split_depth = self.shard_split_depth;
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
@@ -211,7 +211,7 @@ impl ShardStateStorage {
                     estimated_merkle_update_size,
                 )?
             } else {
-                let split_at = split_shard_accounts(&root_cell, accounts_split_depth)?;
+                let split_at = split_shard_accounts(&root_cell, shard_split_depth)?;
 
                 cell_storage.store_cell_mt(
                     root_cell.as_ref(),
@@ -367,7 +367,7 @@ impl ShardStateStorage {
                         chain.push((current_block_id, block.block().state_update.load()?));
 
                         let (prev_id, _prev_id_alt) = block.construct_prev_id()?;
-                        current_block_id = prev_id; // TODO: split/merge case
+                        current_block_id = prev_id;
                     }
                 }
             }
@@ -380,8 +380,9 @@ impl ShardStateStorage {
         // Apply state updates
         while let Some((block_id, merkle_update)) = chain.pop() {
             let prev_block_id = *state.block_id();
+            let split_at_depth = self.shard_split_depth;
             state = rayon_run({
-                move || state.par_make_next_state(&block_id, &merkle_update, Some(5))
+                move || state.par_make_next_state(&block_id, &merkle_update, Some(split_at_depth))
             })
             .await
             .with_context(|| {
@@ -474,7 +475,7 @@ impl ShardStateStorage {
             let db = self.cells_db.clone();
             let cell_storage = self.cell_storage.clone();
             let key = key.to_vec();
-            let accounts_split_depth = self.accounts_split_depth;
+            let shard_split_depth = self.shard_split_depth;
             let (total, inner_alloc) = tokio::task::spawn_blocking(move || {
                 let in_mem_remove =
                     HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
@@ -486,7 +487,7 @@ impl ShardStateStorage {
                     // will not be used by recent loads.
                     let root_cell = Cell::from(cell_storage.load_cell(&root_hash, 0)? as Arc<_>);
 
-                    let split_at = split_shard_accounts(&root_cell, accounts_split_depth)?
+                    let split_at = split_shard_accounts(&root_cell, shard_split_depth)?
                         .into_keys()
                         .collect::<FastHashSet<HashBytes>>();
                     cell_storage.remove_cell_mt(&alloc, &root_hash, split_at)?

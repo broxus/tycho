@@ -100,6 +100,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     fn set_sync_context(&self, sync_context: CollatorSyncContext);
     fn load_init_block_id(&self) -> Option<BlockId>;
     fn zerostate_id(&self) -> &ZerostateId;
+    fn shard_split_depth(&self) -> u8;
 }
 
 pub struct StateNodeAdapterStdImpl {
@@ -406,8 +407,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         let mut to_drop = Vec::new();
         for (shard, seqno) in &to_split {
-            const SHARD_BLOCKS_BUFFER: u32 = 16; // TODO: depends on store_shard_state_step (use store_shard_state_step * 2)
-            let safe_seqno = seqno.saturating_sub(SHARD_BLOCKS_BUFFER);
+            let buffer_len = self.storage.config().store_shard_state_step * 2; // must be more than `store_shard_state_step`
+            let safe_seqno = seqno.saturating_sub(buffer_len as u32);
 
             if let Some(mut shard_blocks) = self.shard_blocks.get_mut(shard) {
                 let retained = shard_blocks.split_off(&safe_seqno);
@@ -454,6 +455,10 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
     fn zerostate_id(&self) -> &ZerostateId {
         &self.zerostate_id
+    }
+
+    fn shard_split_depth(&self) -> u8 {
+        self.storage.config().shard_split_depth
     }
 }
 
@@ -562,8 +567,8 @@ impl StateNodeAdapterStdImpl {
 struct ShardBlockData {
     prev_id: BlockId,
     ref_by_mc_seqno: u32,
-    _prev_id_alt: Option<BlockId>,
     state_update: MerkleUpdate,
+    _prev_id_alt: Option<BlockId>, // TODO: consider split/merge
 }
 
 #[derive(Clone)]

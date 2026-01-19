@@ -746,11 +746,12 @@ impl CollatorStdImpl {
                             prev_state = rayon_run({
                                 let block_id = task.block_id;
                                 let merkle_update = task.state_update.clone();
+                                let split_at_depth = self.state_node_adapter.shard_split_depth();
                                 move || {
                                     prev_state.par_make_next_state(
                                         &block_id,
                                         &merkle_update,
-                                        Some(5),
+                                        Some(split_at_depth),
                                     )
                                 }
                             })
