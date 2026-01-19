@@ -1405,7 +1405,15 @@ impl CellImpl for StorageCell {
                     * (self.data_len as usize + (hash_index as usize) * Self::HASHES_ITEM_LEN + 32);
 
             debug_assert!(offset + 2 <= self.allocated_len());
-            u16::from_le_bytes(unsafe { *self.data_ptr.add(offset).cast::<[u8; 2]>() })
+            let bytes = unsafe { *self.data_ptr.add(offset).cast::<[u8; 2]>() };
+            if is_pruned {
+                // NOTE: Pruned branches store embedded depths in big-endian (cell format),
+                // while `StorageCell` stores depths in little-endian.
+                // https://github.com/broxus/tycho-types/blob/863f612fc7f0ccd1fb2c2cd0a13747f92b3cadcc/src/cell/builder.rs#L760
+                u16::from_be_bytes(bytes)
+            } else {
+                u16::from_le_bytes(bytes)
+            }
         }
     }
 }
@@ -1686,7 +1694,7 @@ mod tests {
         let config = CoreStorageConfig::new_potato();
         let storage = CoreStorage::open(ctx, config).await?;
 
-        let original_cell = CellBuilder::build_from(0u32)?;
+        let original_cell = CellBuilder::build_from(CellBuilder::build_from(0u32)?)?;
         let pruned_level1 = make_pruned_branch(original_cell.as_ref(), 0, Cell::empty_context())?;
         let pruned_level2 = make_pruned_branch(pruned_level1.as_ref(), 1, Cell::empty_context())?;
         let pruned_level3 = make_pruned_branch(pruned_level2.as_ref(), 2, Cell::empty_context())?;
