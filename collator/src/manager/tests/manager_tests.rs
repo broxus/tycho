@@ -11,7 +11,7 @@ use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey, QueuePartitionIdx};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::global_config::ZerostateId;
-use tycho_core::storage::{BlockHandle, NewBlockMeta, StoreStateHint};
+use tycho_core::storage::{BlockHandle, NewBlockMeta, StoreStateHint, StoreStateStatus};
 use tycho_types::boc::Boc;
 use tycho_types::cell::{Cell, CellBuilder, CellFamily, HashBytes, Lazy};
 use tycho_types::merkle::MerkleUpdate;
@@ -4359,7 +4359,7 @@ impl StateNodeAdapter for TestStateNodeAdapter {
         _meta: NewBlockMeta,
         _state_root: Cell,
         _hint: StoreStateHint,
-    ) -> Result<bool> {
+    ) -> Result<StoreStateStatus> {
         unreachable!()
     }
     async fn load_block_by_handle(&self, _handle: &BlockHandle) -> Result<Option<BlockStuff>> {
@@ -4371,7 +4371,7 @@ impl StateNodeAdapter for TestStateNodeAdapter {
     fn accept_block(&self, _block: Arc<BlockStuffForSync>) -> Result<()> {
         unreachable!()
     }
-    fn accept_shard_block(&self, _ref_by_mc_seqno: u32, _block: BlockStuff) -> Result<()> {
+    fn fill_shard_blocks_cache(&self, _ref_by_mc_seqno: u32, _block: BlockStuff) -> Result<()> {
         unreachable!()
     }
     async fn wait_for_block(&self, _block_id: &BlockId) -> Option<Result<BlockStuffAug>> {
@@ -4388,6 +4388,9 @@ impl StateNodeAdapter for TestStateNodeAdapter {
     }
     fn zerostate_id(&self) -> &ZerostateId {
         &self.zerostate_id
+    }
+    fn shard_split_depth(&self) -> u8 {
+        5
     }
 }
 

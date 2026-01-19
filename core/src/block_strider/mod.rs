@@ -201,7 +201,7 @@ where
                 mc_block_id,
                 mc_is_key_block: is_key_block,
                 is_key_block,
-                is_top_block: false,
+                is_top_block: true,
                 block: block.clone(),
                 archive_data,
                 delayed,
