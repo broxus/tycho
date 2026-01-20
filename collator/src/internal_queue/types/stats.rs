@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, hash_map};
 use std::sync::Arc;
 
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
-use tycho_network::quinn::rustls::pki_types::PrivateKeyDer::Sec1;
 use tycho_types::models::{IntAddr, ShardIdent};
 use tycho_util::FastHashMap;
 
@@ -32,14 +31,6 @@ impl VersionedValue {
     pub fn current(&self) -> u64 {
         self.uncommitted.unwrap_or(self.committed)
     }
-
-    pub fn committed_value(&self) -> u64 {
-        self.committed
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        self.uncommitted.is_some()
-    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -50,14 +41,15 @@ pub struct QueueStatistics {
 
 impl Transactional for QueueStatistics {
     fn begin(&mut self) {
+        assert!(!self.in_transaction, "nested transactions not supported");
         self.in_transaction = true;
     }
 
     fn commit(&mut self) {
-        if !self.in_transaction {
-            return;
-        }
+        assert!(self.in_transaction, "no active transaction to commit");
+
         self.in_transaction = false;
+
         self.statistics.retain(|_, v| {
             if let Some(uncommitted) = v.uncommitted.take() {
                 if uncommitted == 0 {
@@ -70,9 +62,7 @@ impl Transactional for QueueStatistics {
     }
 
     fn rollback(&mut self) {
-        if !self.in_transaction {
-            return;
-        }
+        assert!(self.in_transaction, "no active transaction to rollback");
         self.in_transaction = false;
         self.statistics.retain(|_, v| {
             v.uncommitted = None;
@@ -102,109 +92,78 @@ impl QueueStatistics {
         }
     }
 
-    pub fn increment_for_account(&mut self, account_addr: IntAddr, count: u64) {
+    pub fn iter(&self) -> impl Iterator<Item = (&IntAddr, u64)> {
+        self.statistics.iter().filter_map(|(k, v)| {
+            let c = v.current();
+            if c > 0 { Some((k, c)) } else { None }
+        })
+    }
+
+    pub fn decrement_for_account(&mut self, account_addr: IntAddr, count: u64) {
+        let Some(v) = self.statistics.get_mut(&account_addr) else {
+            panic!("attempted to decrement non-existent account");
+        };
+
+        let current = v.current();
+        if current < count {
+            panic!(
+                "attempted to decrement below zero: current={}, decrement={}",
+                current, count
+            );
+        }
+
+        let new_value = current - count;
         if self.in_transaction {
-            self.statistics
+            v.uncommitted = Some(new_value);
+        } else {
+            v.committed = new_value;
+        }
+
+        if !self.in_transaction && new_value == 0 {
+            self.statistics.remove(&account_addr);
+        }
+    }
+
+    pub fn increment_for_account(&mut self, account_addr: IntAddr, count: u64) {
+        Self::add_count(
+            &mut self.statistics,
+            self.in_transaction,
+            account_addr,
+            count,
+        );
+    }
+
+    pub fn append(&mut self, other: &AccountStatistics) {
+        for (account_addr, &msgs_count) in other {
+            Self::add_count(
+                &mut self.statistics,
+                self.in_transaction,
+                account_addr.clone(),
+                msgs_count,
+            );
+        }
+    }
+
+    fn add_count(
+        statistics: &mut FastHashMap<IntAddr, VersionedValue>,
+        in_transaction: bool,
+        account_addr: IntAddr,
+        count: u64,
+    ) {
+        if in_transaction {
+            statistics
                 .entry(account_addr)
-                .and_modify(|v| {
-                    v.uncommitted = Some(v.current() + count);
-                })
+                .and_modify(|v| v.uncommitted = Some(v.current() + count))
                 .or_insert(VersionedValue {
                     committed: 0,
                     uncommitted: Some(count),
                 });
         } else {
-            self.statistics
+            statistics
                 .entry(account_addr)
-                .and_modify(|v| {
-                    v.committed += count;
-                })
+                .and_modify(|v| v.committed += count)
                 .or_insert(VersionedValue::committed(count));
         }
-    }
-
-    pub fn decrement_for_account(&mut self, account_addr: IntAddr, count: u64) {
-        if let Some(v) = self.statistics.get_mut(&account_addr) {
-            let current = v.current();
-            if current < count {
-                panic!(
-                    "attempted to decrement below zero: current={}, decrement={}",
-                    current, count
-                );
-            }
-            if self.in_transaction {
-                v.uncommitted = Some(current - count);
-            } else {
-                v.committed = current - count;
-            }
-        } else {
-            panic!("attempted to decrement non-existent account");
-        }
-    }
-
-    pub fn append(&mut self, other: &AccountStatistics) {
-        if self.in_transaction {
-            for (account_addr, &msgs_count) in other {
-                self.statistics
-                    .entry(account_addr.clone())
-                    .and_modify(|v| {
-                        v.uncommitted = Some(v.current() + msgs_count);
-                    })
-                    .or_insert(VersionedValue {
-                        committed: 0,
-                        uncommitted: Some(msgs_count),
-                    });
-            }
-        } else {
-            for (account_addr, &msgs_count) in other {
-                self.statistics
-                    .entry(account_addr.clone())
-                    .and_modify(|v| {
-                        v.committed += msgs_count;
-                    })
-                    .or_insert(VersionedValue::committed(msgs_count));
-            }
-        }
-    }
-
-    // Transactions
-    // pub fn commit(&mut self, affected: impl Iterator<Item = IntAddr>) {
-    //     for addr in affected {
-    //         if let hash_map::Entry::Occupied(mut entry) = self.statistics.entry(addr) {
-    //             let v = entry.get_mut();
-    //             if let Some(uncommitted) = v.uncommitted.take() {
-    //                 if uncommitted == 0 {
-    //                     entry.remove();
-    //                 } else {
-    //                     v.committed = uncommitted;
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
-    //
-    // pub fn rollback(&mut self, affected: impl Iterator<Item = IntAddr>) {
-    //     for addr in affected {
-    //         if let hash_map::Entry::Occupied(mut entry) = self.statistics.entry(addr) {
-    //             let v = entry.get_mut();
-    //             v.uncommitted = None;
-    //             if v.committed == 0 {
-    //                 entry.remove();
-    //             }
-    //         }
-    //     }
-    // }
-
-    pub fn has_uncommitted(&self) -> bool {
-        self.statistics.values().any(|v| v.is_dirty())
-    }
-
-    pub fn commit_all(&mut self) {
-        self.commit();
-    }
-
-    pub fn rollback_all(&mut self) {
-        self.rollback();
     }
 }
 
@@ -409,163 +368,52 @@ struct DiffStatisticsInner {
 
 #[cfg(test)]
 mod tests {
+    use tycho_util::FastHashMap;
+
     use super::*;
 
     fn addr(id: u8) -> IntAddr {
         IntAddr::Std(tycho_types::models::StdAddr::new(0, [id; 32].into()))
     }
 
-    #[test]
-    fn test_increment_creates_uncommitted() {
-        let mut stats = QueueStatistics::default();
+    fn track_all_shard() -> ShardIdent {
+        ShardIdent::new_full(0)
+    }
 
+    fn track_none_shard() -> ShardIdent {
+        ShardIdent::new_full(1)
+    }
+
+    // === Basic operations ===
+
+    #[test]
+    fn increment_outside_transaction() {
+        let mut stats = QueueStatistics::default();
         stats.increment_for_account(addr(1), 5);
 
-        assert!(stats.has_uncommitted());
         assert_eq!(stats.statistics().get(&addr(1)), Some(5));
     }
 
     #[test]
-    fn test_decrement_creates_uncommitted() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 10);
-        let mut stats = QueueStatistics::with_statistics(initial);
-
+    fn decrement_outside_transaction() {
+        let mut stats = QueueStatistics::default();
+        stats.increment_for_account(addr(1), 10);
         stats.decrement_for_account(addr(1), 3);
 
-        assert!(stats.has_uncommitted());
         assert_eq!(stats.statistics().get(&addr(1)), Some(7));
     }
 
     #[test]
-    #[should_panic(expected = "decrement below zero")]
-    fn test_decrement_below_zero_panics() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 5);
-        let mut stats = QueueStatistics::with_statistics(initial);
-
-        stats.decrement_for_account(addr(1), 10);
-    }
-
-    #[test]
-    #[should_panic(expected = "non-existent account")]
-    fn test_decrement_nonexistent_panics() {
+    fn decrement_to_zero_removes_entry() {
         let mut stats = QueueStatistics::default();
-        stats.decrement_for_account(addr(1), 5);
-    }
-
-    #[test]
-    fn test_commit_applies_changes() {
-        let mut stats = QueueStatistics::default();
-
         stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(2), 10);
-        stats.commit(vec![addr(1), addr(2)].into_iter());
-
-        assert!(!stats.has_uncommitted());
-        assert_eq!(stats.statistics().get(&addr(1)), Some(5));
-        assert_eq!(stats.statistics().get(&addr(2)), Some(10));
-    }
-
-    #[test]
-    fn test_commit_partial() {
-        let mut stats = QueueStatistics::default();
-
-        stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(2), 10);
-        stats.commit(vec![addr(1)].into_iter());
-
-        assert!(stats.has_uncommitted()); // addr(2) still uncommitted
-        assert_eq!(stats.statistics().get(&addr(1)), Some(5));
-        assert_eq!(stats.statistics().get(&addr(2)), Some(10));
-    }
-
-    #[test]
-    fn test_commit_removes_zero_entries() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 5);
-        let mut stats = QueueStatistics::with_statistics(initial);
-
         stats.decrement_for_account(addr(1), 5);
-        assert_eq!(stats.statistics().get(&addr(1)), None); // current = 0, filtered by view
 
-        stats.commit(vec![addr(1)].into_iter());
-
-        assert!(!stats.has_uncommitted());
         assert_eq!(stats.statistics().get(&addr(1)), None);
-        assert!(stats.statistics().is_empty());
     }
 
     #[test]
-    fn test_commit_all() {
-        let mut stats = QueueStatistics::default();
-
-        stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(2), 10);
-        stats.increment_for_account(addr(3), 15);
-        stats.commit_all();
-
-        assert!(!stats.has_uncommitted());
-        assert_eq!(stats.statistics().get(&addr(1)), Some(5));
-        assert_eq!(stats.statistics().get(&addr(2)), Some(10));
-        assert_eq!(stats.statistics().get(&addr(3)), Some(15));
-    }
-
-    #[test]
-    fn test_rollback_discards_changes() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 5);
-        let mut stats = QueueStatistics::with_statistics(initial);
-
-        stats.increment_for_account(addr(1), 10);
-        assert_eq!(stats.statistics().get(&addr(1)), Some(15));
-
-        stats.rollback(vec![addr(1)].into_iter());
-
-        assert!(!stats.has_uncommitted());
-        assert_eq!(stats.statistics().get(&addr(1)), Some(5)); // back to committed
-    }
-
-    #[test]
-    fn test_rollback_partial() {
-        let mut stats = QueueStatistics::default();
-
-        stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(2), 10);
-        stats.rollback(vec![addr(1)].into_iter());
-
-        assert!(stats.has_uncommitted()); // addr(2) still uncommitted
-        assert_eq!(stats.statistics().get(&addr(1)), None); // rolled back, was new
-        assert_eq!(stats.statistics().get(&addr(2)), Some(10));
-    }
-
-    #[test]
-    fn test_rollback_removes_entries_with_zero_committed() {
-        let mut stats = QueueStatistics::default();
-
-        stats.increment_for_account(addr(1), 5);
-        stats.rollback(vec![addr(1)].into_iter());
-
-        assert!(stats.statistics().is_empty());
-    }
-
-    #[test]
-    fn test_rollback_all() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 5);
-        let mut stats = QueueStatistics::with_statistics(initial);
-
-        stats.increment_for_account(addr(1), 10);
-        stats.increment_for_account(addr(2), 20);
-        stats.rollback_all();
-
-        assert!(!stats.has_uncommitted());
-        assert_eq!(stats.statistics().get(&addr(1)), Some(5)); // back to committed
-        assert_eq!(stats.statistics().get(&addr(2)), None); // was new, removed
-    }
-
-    #[test]
-    fn test_append_creates_uncommitted() {
+    fn append_multiple() {
         let mut stats = QueueStatistics::default();
         let mut other = FastHashMap::default();
         other.insert(addr(1), 5);
@@ -573,59 +421,173 @@ mod tests {
 
         stats.append(&other);
 
-        assert!(stats.has_uncommitted());
         assert_eq!(stats.statistics().get(&addr(1)), Some(5));
         assert_eq!(stats.statistics().get(&addr(2)), Some(10));
     }
 
     #[test]
-    fn test_append_no_transaction_writes_committed() {
+    fn with_statistics_constructor() {
+        let mut initial = FastHashMap::default();
+        initial.insert(addr(1), 5);
+
+        let stats = QueueStatistics::with_statistics(initial);
+
+        assert_eq!(stats.statistics().get(&addr(1)), Some(5));
+    }
+
+    // === Transaction: commit ===
+
+    #[test]
+    fn transaction_increment_commit() {
         let mut stats = QueueStatistics::default();
-        let mut other = FastHashMap::default();
-        other.insert(addr(1), 5);
 
-        stats.append(&other);
+        stats.begin();
+        stats.increment_for_account(addr(1), 5);
+        assert_eq!(stats.statistics().get(&addr(1)), Some(5));
 
-        assert!(!stats.has_uncommitted());
+        stats.commit();
         assert_eq!(stats.statistics().get(&addr(1)), Some(5));
     }
 
     #[test]
-    fn test_multiple_increments_before_commit() {
+    fn transaction_decrement_commit() {
         let mut stats = QueueStatistics::default();
+        stats.increment_for_account(addr(1), 10);
+
+        stats.begin();
+        stats.decrement_for_account(addr(1), 3);
+        stats.commit();
+
+        assert_eq!(stats.statistics().get(&addr(1)), Some(7));
+    }
+
+    #[test]
+    fn transaction_commit_removes_zero_entries() {
+        let mut stats = QueueStatistics::default();
+        stats.increment_for_account(addr(1), 5);
+
+        stats.begin();
+        stats.decrement_for_account(addr(1), 5);
+        stats.commit();
+
+        assert!(!stats.statistics().contains_key(&addr(1)));
+    }
+
+    // === Transaction: rollback ===
+
+    #[test]
+    fn transaction_increment_rollback() {
+        let mut stats = QueueStatistics::default();
+        stats.increment_for_account(addr(1), 5);
+
+        stats.begin();
+        stats.increment_for_account(addr(1), 10);
+        stats.increment_for_account(addr(2), 20);
+        stats.rollback();
+
+        assert_eq!(stats.statistics().get(&addr(1)), Some(5));
+        assert_eq!(stats.statistics().get(&addr(2)), None);
+    }
+
+    #[test]
+    fn transaction_decrement_rollback() {
+        let mut stats = QueueStatistics::default();
+        stats.increment_for_account(addr(1), 10);
+
+        stats.begin();
+        stats.decrement_for_account(addr(1), 7);
+        stats.rollback();
+
+        assert_eq!(stats.statistics().get(&addr(1)), Some(10));
+    }
+
+    // === Transaction: edge cases ===
+
+    #[test]
+    #[should_panic(expected = "nested transactions")]
+    fn nested_begin_panics() {
+        let mut stats = QueueStatistics::default();
+        stats.begin();
+        stats.begin();
+    }
+
+    #[test]
+    #[should_panic(expected = "no active transaction to commit")]
+    fn commit_outside_transaction_panics() {
+        let mut stats = QueueStatistics::default();
+        stats.commit();
+    }
+
+    #[test]
+    #[should_panic(expected = "no active transaction to rollback")]
+    fn rollback_outside_transaction_panics() {
+        let mut stats = QueueStatistics::default();
+        stats.rollback();
+    }
+
+    #[test]
+    fn multiple_transactions() {
+        let mut stats = QueueStatistics::default();
+
+        stats.begin();
+        stats.increment_for_account(addr(1), 5);
+        stats.commit();
+
+        stats.begin();
+        stats.increment_for_account(addr(1), 10);
+        stats.rollback();
+
+        stats.begin();
+        stats.increment_for_account(addr(2), 20);
+        stats.commit();
+
+        assert_eq!(stats.statistics().get(&addr(1)), Some(5));
+        assert_eq!(stats.statistics().get(&addr(2)), Some(20));
+    }
+
+    // === Panics ===
+
+    #[test]
+    #[should_panic(expected = "non-existent account")]
+    fn decrement_nonexistent_panics() {
+        let mut stats = QueueStatistics::default();
+        stats.decrement_for_account(addr(1), 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "below zero")]
+    fn decrement_below_zero_panics() {
+        let mut stats = QueueStatistics::default();
+        stats.increment_for_account(addr(1), 5);
+        stats.decrement_for_account(addr(1), 10);
+    }
+
+    // === View ===
+
+    #[test]
+    fn statistics_view_len_and_empty() {
+        let mut stats = QueueStatistics::default();
+
+        assert!(stats.statistics().is_empty());
+        assert_eq!(stats.statistics().len(), 0);
 
         stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(1), 3);
-        stats.increment_for_account(addr(1), 2);
 
-        assert_eq!(stats.statistics().get(&addr(1)), Some(10));
-
-        stats.commit_all();
-        assert_eq!(stats.statistics().get(&addr(1)), Some(10));
+        assert!(!stats.statistics().is_empty());
+        assert_eq!(stats.statistics().len(), 1);
     }
 
     #[test]
-    fn test_increment_then_decrement_before_commit() {
-        let mut stats = QueueStatistics::default();
-
-        stats.increment_for_account(addr(1), 10);
-        stats.decrement_for_account(addr(1), 3);
-
-        assert_eq!(stats.statistics().get(&addr(1)), Some(7));
-
-        stats.commit_all();
-        assert_eq!(stats.statistics().get(&addr(1)), Some(7));
-    }
-
-    #[test]
-    fn test_view_iterator() {
+    fn statistics_view_iter() {
         let mut stats = QueueStatistics::default();
         stats.increment_for_account(addr(1), 5);
         stats.increment_for_account(addr(2), 10);
-        stats.commit_all();
 
-        let view = stats.statistics();
-        let collected: FastHashMap<_, _> = view.into_iter().map(|(k, v)| (k.clone(), v)).collect();
+        let collected: FastHashMap<_, _> = stats
+            .statistics()
+            .iter()
+            .map(|(k, v)| (k.clone(), v))
+            .collect();
 
         assert_eq!(collected.len(), 2);
         assert_eq!(collected.get(&addr(1)), Some(&5));
@@ -633,38 +595,12 @@ mod tests {
     }
 
     #[test]
-    fn test_view_filters_zero_values() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 5);
-        initial.insert(addr(2), 10);
-        let mut stats = QueueStatistics::with_statistics(initial);
-
-        stats.decrement_for_account(addr(1), 5); // becomes 0
-
-        let view = stats.statistics();
-        assert_eq!(view.len(), 1);
-        assert_eq!(view.get(&addr(1)), None);
-        assert_eq!(view.get(&addr(2)), Some(10));
-    }
-
-    #[test]
-    fn test_commit_nonexistent_addr_is_noop() {
+    fn iter_method() {
         let mut stats = QueueStatistics::default();
         stats.increment_for_account(addr(1), 5);
 
-        stats.commit(vec![addr(99)].into_iter()); // addr(99) doesn't exist
+        let collected: Vec<_> = stats.iter().collect();
 
-        assert!(stats.has_uncommitted()); // addr(1) still uncommitted
-    }
-
-    #[test]
-    fn test_rollback_nonexistent_addr_is_noop() {
-        let mut stats = QueueStatistics::default();
-        stats.increment_for_account(addr(1), 5);
-
-        stats.rollback(vec![addr(99)].into_iter());
-
-        assert!(stats.has_uncommitted());
-        assert_eq!(stats.statistics().get(&addr(1)), Some(5));
+        assert_eq!(collected.len(), 1);
     }
 }
