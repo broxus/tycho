@@ -25,7 +25,7 @@ use crate::collator::messages_reader::state::internal::{
     DebugInternalsRangeReaderState, InternalsReaderState,
 };
 use crate::collator::statistics::cumulative::CumulativeStatistics;
-use crate::collator::statistics::queue::ConcurrentQueueStatistics;
+use crate::collator::statistics::queue::TrackedQueueStatistics;
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::InternalMessageValue;
 use crate::internal_queue::types::ranges::QueueShardBoundedRange;
@@ -237,7 +237,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
                     .result()
                     .get(&MAIN_PARTITION_ID)
                     .map(|par| par.remaning_stats.clone())
-                    .unwrap_or(ConcurrentQueueStatistics::new(cx.for_shard_id)),
+                    .unwrap_or(TrackedQueueStatistics::new(cx.for_shard_id)),
                 stats_just_loaded: cumulative_stats_just_loaded,
             });
         }
@@ -274,7 +274,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
                     .result()
                     .get(&LP_PARTITION_ID)
                     .map(|par| par.remaning_stats.clone())
-                    .unwrap_or(ConcurrentQueueStatistics::new(cx.for_shard_id)),
+                    .unwrap_or(TrackedQueueStatistics::new(cx.for_shard_id)),
                 stats_just_loaded: cumulative_stats_just_loaded,
             });
         }
@@ -488,7 +488,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
                 let state = internals_reader.get_state_by_seqno_mut(seqno)?;
                 state
                     .buffer
-                    .remove_messages_by_accounts(&moved_from_par_0_accounts);
+                    .remove_int_messages_by_accounts(&moved_from_par_0_accounts);
             }
         }
 
