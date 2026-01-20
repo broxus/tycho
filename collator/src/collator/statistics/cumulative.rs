@@ -7,7 +7,7 @@ use tycho_types::models::{IntAddr, ShardIdent};
 use tycho_util::{FastHashMap, FastHashSet};
 use tycho_util_proc::Transactional;
 
-use crate::collator::statistics::queue::{ConcurrentQueueStatistics, QueueStatisticsWithRemaning};
+use crate::collator::statistics::queue::TrackedQueueStatistics;
 use crate::internal_queue::types::message::InternalMessageValue;
 use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
 use crate::internal_queue::types::stats::{
@@ -53,7 +53,7 @@ impl Transactional for CumulativeStatistics {
             processed_diff_shards: FastHashSet::default(),
         });
 
-        for stats in self.result.values() {
+        for stats in self.result.values_mut() {
             stats.remaning_stats.begin();
         }
     }
@@ -62,8 +62,8 @@ impl Transactional for CumulativeStatistics {
         let Some(tx) = self.tx.take() else { return };
 
         for stats in self.result.values_mut() {
-            stats.initial_stats.commit_all();
-            stats.remaning_stats.commit_all();
+            stats.initial_stats.commit();
+            stats.remaning_stats.commit();
         }
 
         for (partition, diff_shard, diff_max_message, diff_partition_stats) in tx.staged_additions {
@@ -143,8 +143,8 @@ impl Transactional for CumulativeStatistics {
 
         for stats in self.result.values_mut() {
             // TODO rollback should use only affected accounts
-            stats.initial_stats.rollback_all();
-            stats.remaning_stats.rollback_all();
+            stats.initial_stats.rollback();
+            stats.remaning_stats.rollback();
         }
 
         for partition in tx.new_partitions {
@@ -337,7 +337,7 @@ impl CumulativeStatistics {
                     tx.new_partitions.insert(partition);
                     e.insert(QueueStatisticsWithRemaning {
                         initial_stats: QueueStatistics::default(),
-                        remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
+                        remaning_stats: TrackedQueueStatistics::new(self.for_shard),
                     })
                 }
                 Entry::Occupied(e) => e.into_mut(),
@@ -347,7 +347,7 @@ impl CumulativeStatistics {
                 .entry(partition)
                 .or_insert_with(|| QueueStatisticsWithRemaning {
                     initial_stats: QueueStatistics::default(),
-                    remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
+                    remaning_stats: TrackedQueueStatistics::new(self.for_shard),
                 })
         };
 
@@ -385,7 +385,7 @@ impl CumulativeStatistics {
                     tx.new_partitions.insert(partition);
                     e.insert(QueueStatisticsWithRemaning {
                         initial_stats: QueueStatistics::default(),
-                        remaning_stats: ConcurrentQueueStatistics::new(self.for_shard),
+                        remaning_stats: TrackedQueueStatistics::new(self.for_shard),
                     })
                 }
                 Entry::Occupied(e) => e.into_mut(),
@@ -681,4 +681,11 @@ mod tests {
         assert_eq!(diff_stats.get(&addr_dst), None);
         assert_eq!(diff_stats.get(&addr_keep), Some(&7));
     }
+}
+
+//
+#[derive(Debug)]
+pub struct QueueStatisticsWithRemaning {
+    pub initial_stats: QueueStatistics,
+    pub remaning_stats: TrackedQueueStatistics,
 }

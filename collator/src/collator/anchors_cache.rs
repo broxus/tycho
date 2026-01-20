@@ -674,7 +674,7 @@ mod tests {
         cache.add(make_anchor(1, 100), 5);
 
         {
-            let tx = AnchorsCacheTransaction::new(&mut cache);
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
             tx.commit();
         }
 
@@ -802,7 +802,7 @@ mod tests {
         cache.add(make_anchor(2, 200), 3);
 
         {
-            let tx = AnchorsCacheTransaction::new(&mut cache);
+            let mut tx = AnchorsCacheTransaction::new(&mut cache);
             let ids: Vec<_> = tx.iter().map(|(id, _)| *id).collect();
             assert_eq!(ids, vec![1, 2]);
             tx.commit();

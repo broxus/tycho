@@ -1,251 +1,115 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use dashmap::Entry as DashMapEntry;
-use dashmap::mapref::multiple::RefMulti;
+use parking_lot::{Mutex, MutexGuard};
 use tycho_types::models::{IntAddr, ShardIdent};
-use tycho_util::FastDashMap;
 
 use crate::internal_queue::types::stats::{AccountStatistics, QueueStatistics};
+use crate::types::Transactional;
 
-#[derive(Debug)]
-pub struct QueueStatisticsWithRemaning {
-    /// Statistics shows all messages count
-    pub initial_stats: QueueStatistics,
-    /// Statistics shows remaining not read messages.
-    /// We reduce initial statistics by the number of messages that were read.
-    pub remaning_stats: ConcurrentQueueStatistics,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct VersionedValue {
-    committed: u64,
-    uncommitted: Option<u64>,
-}
-
-impl VersionedValue {
-    pub fn committed(value: u64) -> Self {
-        Self {
-            committed: value,
-            uncommitted: None,
-        }
-    }
-
-    pub fn current(&self) -> u64 {
-        self.uncommitted.unwrap_or(self.committed)
-    }
-
-    pub fn committed_value(&self) -> u64 {
-        self.committed
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        self.uncommitted.is_some()
-    }
-}
-
-#[derive(Debug)]
-pub struct ConcurrentQueueStatistics {
-    statistics: Arc<FastDashMap<IntAddr, VersionedValue>>,
+#[derive(Debug, Clone)]
+pub struct TrackedQueueStatistics {
+    inner: Arc<Mutex<TrackedQueueStatisticsInner>>,
     track_shard: ShardIdent,
-    tracked_total: Arc<AtomicU64>,
-    tracked_total_snapshot: AtomicU64,
-    in_transaction: AtomicBool,
 }
 
-impl Clone for ConcurrentQueueStatistics {
-    fn clone(&self) -> Self {
-        Self {
-            statistics: Arc::clone(&self.statistics),
-            track_shard: self.track_shard,
-            tracked_total: Arc::clone(&self.tracked_total),
-            tracked_total_snapshot: AtomicU64::new(self.tracked_total.load(Ordering::Relaxed)),
-            in_transaction: AtomicBool::new(self.in_transaction.load(Ordering::Relaxed)),
-        }
-    }
+#[derive(Debug, Default)]
+struct TrackedQueueStatisticsInner {
+    statistics: QueueStatistics,
+    tracked_total: u64,
+    tracked_total_snapshot: u64,
 }
 
-impl ConcurrentQueueStatistics {
+impl TrackedQueueStatistics {
     pub fn new(track_shard: ShardIdent) -> Self {
         Self {
-            statistics: Arc::new(Default::default()),
+            inner: Arc::new(Mutex::new(TrackedQueueStatisticsInner::default())),
             track_shard,
-            tracked_total: Arc::new(AtomicU64::new(0)),
-            tracked_total_snapshot: AtomicU64::new(0),
-            in_transaction: AtomicBool::new(false),
         }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = RefMulti<'_, IntAddr, VersionedValue>> + '_ {
-        self.statistics
-            .iter()
-            .filter(|entry| entry.value().current() > 0)
     }
 
     pub fn tracked_total(&self) -> u64 {
-        self.tracked_total.load(Ordering::Relaxed)
+        self.inner.lock().tracked_total
     }
 
     pub fn get(&self, account_addr: &IntAddr) -> Option<u64> {
-        self.statistics
-            .get(account_addr)
-            .map(|v| v.current())
-            .filter(|&v| v > 0)
+        self.inner.lock().statistics.statistics().get(account_addr)
     }
 
     pub fn contains(&self, account_addr: &IntAddr) -> bool {
-        self.statistics
-            .get(account_addr)
-            .map(|v| v.current() > 0)
-            .unwrap_or(false)
+        self.inner
+            .lock()
+            .statistics
+            .statistics()
+            .contains_key(account_addr)
+    }
+
+    pub fn statistics(&self) -> TrackedQueueStatisticsView<'_> {
+        TrackedQueueStatisticsView {
+            guard: self.inner.lock(),
+        }
     }
 
     pub fn increment_for_account(&self, account_addr: IntAddr, count: u64) {
         let is_tracked = self.track_shard.contains_address(&account_addr);
+        let mut guard = self.inner.lock();
 
-        if self.in_transaction.load(Ordering::Relaxed) {
-            self.statistics
-                .entry(account_addr)
-                .and_modify(|v| {
-                    v.uncommitted = Some(v.current() + count);
-                })
-                .or_insert(VersionedValue {
-                    committed: 0,
-                    uncommitted: Some(count),
-                });
-        } else {
-            self.statistics
-                .entry(account_addr)
-                .and_modify(|v| {
-                    v.committed += count;
-                })
-                .or_insert(VersionedValue::committed(count));
-        }
-
+        guard.statistics.increment_for_account(account_addr, count);
         if is_tracked {
-            self.tracked_total.fetch_add(count, Ordering::Relaxed);
+            guard.tracked_total += count;
         }
     }
 
     pub fn decrement_for_account(&self, account_addr: IntAddr, count: u64) {
         let is_tracked = self.track_shard.contains_address(&account_addr);
+        let mut guard = self.inner.lock();
 
-        match self.statistics.entry(account_addr) {
-            DashMapEntry::Occupied(mut occupied) => {
-                let v = occupied.get_mut();
-                let current = v.current();
-                if current < count {
-                    panic!(
-                        "attempted to decrement below zero: current={}, decrement={}",
-                        current, count
-                    );
-                }
-                if self.in_transaction.load(Ordering::Relaxed) {
-                    v.uncommitted = Some(current - count);
-                } else {
-                    v.committed = current - count;
-                }
-            }
-            DashMapEntry::Vacant(_) => {
-                panic!("attempted to decrement non-existent account");
-            }
-        }
-
+        guard.statistics.decrement_for_account(account_addr, count);
         if is_tracked {
-            self.tracked_total.fetch_sub(count, Ordering::Relaxed);
+            guard.tracked_total -= count;
         }
     }
 
     pub fn append(&self, other: &AccountStatistics) {
-        let mut delta_tracked: u64 = 0;
+        let mut guard = self.inner.lock();
 
-        if self.in_transaction.load(Ordering::Relaxed) {
-            for (account_addr, &msgs_count) in other {
-                self.statistics
-                    .entry(account_addr.clone())
-                    .and_modify(|v| {
-                        v.uncommitted = Some(v.current() + msgs_count);
-                    })
-                    .or_insert(VersionedValue {
-                        committed: 0,
-                        uncommitted: Some(msgs_count),
-                    });
-
-                if self.track_shard.contains_address(account_addr) {
-                    delta_tracked += msgs_count;
-                }
-            }
-        } else {
-            for (account_addr, &msgs_count) in other {
-                self.statistics
-                    .entry(account_addr.clone())
-                    .and_modify(|v| {
-                        v.committed += msgs_count;
-                    })
-                    .or_insert(VersionedValue::committed(msgs_count));
-
-                if self.track_shard.contains_address(account_addr) {
-                    delta_tracked += msgs_count;
-                }
+        for (account_addr, &msgs_count) in other {
+            if self.track_shard.contains_address(account_addr) {
+                guard.tracked_total += msgs_count;
             }
         }
+        guard.statistics.append(other);
+    }
+}
 
-        if delta_tracked != 0 {
-            self.tracked_total
-                .fetch_add(delta_tracked, Ordering::Relaxed);
-        }
+impl Transactional for TrackedQueueStatistics {
+    fn begin(&mut self) {
+        let mut guard = self.inner.lock();
+        guard.statistics.begin();
+        guard.tracked_total_snapshot = guard.tracked_total;
     }
 
-    // Transactions
-
-    pub fn begin(&self) {
-        debug_assert!(
-            !self.has_uncommitted(),
-            "begin() called with uncommitted changes"
-        );
-
-        self.in_transaction.store(true, Ordering::Relaxed);
-        let current = self.tracked_total.load(Ordering::Relaxed);
-        self.tracked_total_snapshot
-            .store(current, Ordering::Relaxed);
+    fn commit(&mut self) {
+        self.inner.lock().statistics.commit();
     }
 
-    pub fn commit_all(&self) {
-        if !self.in_transaction.load(Ordering::Relaxed) {
-            return;
-        }
-        self.in_transaction.store(false, Ordering::Relaxed);
-        self.statistics.retain(|_, v| {
-            if let Some(uncommitted) = v.uncommitted.take() {
-                if uncommitted == 0 {
-                    return false;
-                }
-                v.committed = uncommitted;
-            }
-            true
-        });
-
-        let current = self.tracked_total.load(Ordering::Relaxed);
-        self.tracked_total_snapshot
-            .store(current, Ordering::Relaxed);
+    fn rollback(&mut self) {
+        let mut guard = self.inner.lock();
+        guard.statistics.rollback();
+        guard.tracked_total = guard.tracked_total_snapshot;
     }
 
-    pub fn rollback_all(&self) {
-        if !self.in_transaction.load(Ordering::Relaxed) {
-            return;
-        }
-        self.in_transaction.store(false, Ordering::Relaxed);
-        self.statistics.retain(|_, v| {
-            v.uncommitted = None;
-            v.committed != 0
-        });
-
-        let snapshot = self.tracked_total_snapshot.load(Ordering::Relaxed);
-        self.tracked_total.store(snapshot, Ordering::Relaxed);
+    fn is_in_transaction(&self) -> bool {
+        self.inner.lock().statistics.is_in_transaction()
     }
+}
 
-    pub fn has_uncommitted(&self) -> bool {
-        self.statistics.iter().any(|entry| entry.value().is_dirty())
+pub struct TrackedQueueStatisticsView<'a> {
+    guard: MutexGuard<'a, TrackedQueueStatisticsInner>,
+}
+
+impl<'a> TrackedQueueStatisticsView<'a> {
+    pub fn iter(&self) -> impl Iterator<Item = (&IntAddr, u64)> {
+        self.guard.statistics.iter()
     }
 }
 
@@ -259,534 +123,225 @@ mod tests {
         IntAddr::Std(tycho_types::models::StdAddr::new(0, [id; 32].into()))
     }
 
-    // Shard that contains all addresses with workchain 0
     fn track_all_shard() -> ShardIdent {
         ShardIdent::new_full(0)
     }
 
-    // Shard that does not contain our test addresses
     fn track_none_shard() -> ShardIdent {
-        ShardIdent::new_full(1) // workchain 1, our addresses are in workchain 0
+        ShardIdent::new_full(1)
     }
 
-    fn stats_with_initial(initial: &AccountStatistics) -> ConcurrentQueueStatistics {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-        stats.append(initial);
-        stats
-    }
-
-    // ==================== Basic Operations ====================
+    // === Basic operations ===
 
     #[test]
-    fn test_increment_creates_uncommitted() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-
+    fn increment_outside_transaction() {
+        let stats = TrackedQueueStatistics::new(track_all_shard());
         stats.increment_for_account(addr(1), 5);
 
-        assert!(stats.has_uncommitted());
         assert_eq!(stats.get(&addr(1)), Some(5));
+        assert_eq!(stats.tracked_total(), 5);
     }
 
     #[test]
-    fn test_decrement_creates_uncommitted() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 10);
-        let stats = stats_with_initial(&initial);
-
+    fn decrement_outside_transaction() {
+        let stats = TrackedQueueStatistics::new(track_all_shard());
+        stats.increment_for_account(addr(1), 10);
         stats.decrement_for_account(addr(1), 3);
 
-        assert!(stats.has_uncommitted());
         assert_eq!(stats.get(&addr(1)), Some(7));
+        assert_eq!(stats.tracked_total(), 7);
     }
 
     #[test]
-    #[should_panic(expected = "decrement below zero")]
-    fn test_decrement_below_zero_panics() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 5);
-        let stats = stats_with_initial(&initial);
-
-        stats.decrement_for_account(addr(1), 10);
-    }
-
-    #[test]
-    #[should_panic(expected = "non-existent account")]
-    fn test_decrement_nonexistent_panics() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-        stats.decrement_for_account(addr(1), 5);
-    }
-
-    // ==================== Commit ====================
-
-    #[test]
-    fn test_commit_applies_changes() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-
-        stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(2), 10);
-        stats.commit(vec![addr(1), addr(2)].into_iter());
-
-        assert!(!stats.has_uncommitted());
-        assert_eq!(stats.get(&addr(1)), Some(5));
-        assert_eq!(stats.get(&addr(2)), Some(10));
-    }
-
-    #[test]
-    fn test_commit_partial() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-
-        stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(2), 10);
-        stats.commit(vec![addr(1)].into_iter());
-
-        assert!(stats.has_uncommitted()); // addr(2) still uncommitted
-        assert_eq!(stats.get(&addr(1)), Some(5));
-        assert_eq!(stats.get(&addr(2)), Some(10));
-    }
-
-    #[test]
-    fn test_commit_removes_zero_entries() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 5);
-        let stats = stats_with_initial(&initial);
-
-        stats.decrement_for_account(addr(1), 5);
-        assert_eq!(stats.get(&addr(1)), None); // current = 0, filtered
-
-        stats.commit(vec![addr(1)].into_iter());
-
-        assert!(!stats.has_uncommitted());
-        assert_eq!(stats.get(&addr(1)), None);
-        assert_eq!(stats.iter().count(), 0);
-    }
-
-    #[test]
-    fn test_commit_all() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-
-        stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(2), 10);
-        stats.increment_for_account(addr(3), 15);
-        stats.commit_all();
-
-        assert!(!stats.has_uncommitted());
-        assert_eq!(stats.get(&addr(1)), Some(5));
-        assert_eq!(stats.get(&addr(2)), Some(10));
-        assert_eq!(stats.get(&addr(3)), Some(15));
-    }
-
-    #[test]
-    fn test_commit_nonexistent_addr_is_noop() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
+    fn contains() {
+        let stats = TrackedQueueStatistics::new(track_all_shard());
         stats.increment_for_account(addr(1), 5);
 
-        stats.commit(vec![addr(99)].into_iter());
-
-        assert!(stats.has_uncommitted());
-    }
-
-    // ==================== Rollback ====================
-
-    #[test]
-    fn test_rollback_discards_changes() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 5);
-        let stats = stats_with_initial(&initial);
-
-        stats.begin();
-        stats.increment_for_account(addr(1), 10);
-        assert_eq!(stats.get(&addr(1)), Some(15));
-
-        stats.rollback(vec![addr(1)].into_iter());
-
-        assert!(!stats.has_uncommitted());
-        assert_eq!(stats.get(&addr(1)), Some(5)); // back to committed
+        assert!(stats.contains(&addr(1)));
+        assert!(!stats.contains(&addr(2)));
     }
 
     #[test]
-    fn test_rollback_partial() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-
-        stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(2), 10);
-        stats.rollback(vec![addr(1)].into_iter());
-
-        assert!(stats.has_uncommitted()); // addr(2) still uncommitted
-        assert_eq!(stats.get(&addr(1)), None); // rolled back, was new
-        assert_eq!(stats.get(&addr(2)), Some(10));
-    }
-
-    #[test]
-    fn test_rollback_removes_entries_with_zero_committed() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-
-        stats.increment_for_account(addr(1), 5);
-        stats.rollback(vec![addr(1)].into_iter());
-
-        assert_eq!(stats.iter().count(), 0);
-    }
-
-    #[test]
-    fn test_rollback_all() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 5);
-        let stats = stats_with_initial(&initial);
-
-        stats.begin();
-        stats.increment_for_account(addr(1), 10);
-        stats.increment_for_account(addr(2), 20);
-        stats.rollback_all();
-
-        assert!(!stats.has_uncommitted());
-        assert_eq!(stats.get(&addr(1)), Some(5)); // back to committed
-        assert_eq!(stats.get(&addr(2)), None); // was new, removed
-    }
-
-    #[test]
-    fn test_rollback_nonexistent_addr_is_noop() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-        stats.increment_for_account(addr(1), 5);
-
-        stats.rollback(vec![addr(99)].into_iter());
-
-        assert!(stats.has_uncommitted());
-        assert_eq!(stats.get(&addr(1)), Some(5));
-    }
-
-    // ==================== Append ====================
-
-    #[test]
-    fn test_append_creates_uncommitted() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
+    fn append_multiple() {
+        let stats = TrackedQueueStatistics::new(track_all_shard());
         let mut other = FastHashMap::default();
         other.insert(addr(1), 5);
         other.insert(addr(2), 10);
 
         stats.append(&other);
 
-        assert!(stats.has_uncommitted());
         assert_eq!(stats.get(&addr(1)), Some(5));
         assert_eq!(stats.get(&addr(2)), Some(10));
-    }
-
-    #[test]
-    fn test_append_no_transaction_writes_committed() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-        let mut other = FastHashMap::default();
-        other.insert(addr(1), 5);
-
-        stats.append(&other);
-
-        assert!(!stats.has_uncommitted());
-        assert_eq!(stats.get(&addr(1)), Some(5));
-    }
-
-    // ==================== Complex Scenarios ====================
-
-    #[test]
-    fn test_multiple_increments_before_commit() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-
-        stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(1), 3);
-        stats.increment_for_account(addr(1), 2);
-
-        assert_eq!(stats.get(&addr(1)), Some(10));
-
-        stats.commit_all();
-        assert_eq!(stats.get(&addr(1)), Some(10));
-    }
-
-    #[test]
-    fn test_increment_then_decrement_before_commit() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-
-        stats.increment_for_account(addr(1), 10);
-        stats.decrement_for_account(addr(1), 3);
-
-        assert_eq!(stats.get(&addr(1)), Some(7));
-
-        stats.commit_all();
-        assert_eq!(stats.get(&addr(1)), Some(7));
-    }
-
-    // ==================== Iterator ====================
-
-    #[test]
-    fn test_iter() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-        stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(2), 10);
-        stats.commit_all();
-
-        let collected: FastHashMap<_, _> = stats
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().current()))
-            .collect();
-
-        assert_eq!(collected.len(), 2);
-        assert_eq!(collected.get(&addr(1)), Some(&5));
-        assert_eq!(collected.get(&addr(2)), Some(&10));
-    }
-
-    #[test]
-    fn test_iter_filters_zero_values() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 5);
-        initial.insert(addr(2), 10);
-        let stats = stats_with_initial(&initial);
-
-        stats.decrement_for_account(addr(1), 5); // becomes 0
-
-        assert_eq!(stats.iter().count(), 1);
-        assert_eq!(stats.get(&addr(1)), None);
-        assert_eq!(stats.get(&addr(2)), Some(10));
-    }
-
-    #[test]
-    fn test_contains() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-        stats.increment_for_account(addr(1), 5);
-        stats.commit_all();
-
-        assert!(stats.contains(&addr(1)));
-        assert!(!stats.contains(&addr(2)));
-    }
-
-    // ==================== Tracked Total ====================
-
-    #[test]
-    fn test_tracked_total_increments() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-
-        stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(2), 10);
-
         assert_eq!(stats.tracked_total(), 15);
     }
 
+    // === Tracked total ===
+
     #[test]
-    fn test_tracked_total_decrements() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 10);
-        let stats = stats_with_initial(&initial);
+    fn tracked_total_untracked_shard() {
+        let stats = TrackedQueueStatistics::new(track_none_shard());
+        stats.increment_for_account(addr(1), 5);
 
-        assert_eq!(stats.tracked_total(), 10);
+        assert_eq!(stats.tracked_total(), 0);
+        assert_eq!(stats.get(&addr(1)), Some(5));
+    }
 
+    #[test]
+    fn tracked_total_decrement() {
+        let stats = TrackedQueueStatistics::new(track_all_shard());
+        stats.increment_for_account(addr(1), 10);
         stats.decrement_for_account(addr(1), 3);
+
         assert_eq!(stats.tracked_total(), 7);
     }
 
+    // === Transaction: commit ===
+
     #[test]
-    fn test_tracked_total_untracked_shard() {
-        let stats = ConcurrentQueueStatistics::new(track_none_shard());
+    fn transaction_increment_commit() {
+        let mut stats = TrackedQueueStatistics::new(track_all_shard());
 
+        stats.begin();
         stats.increment_for_account(addr(1), 5);
-        stats.increment_for_account(addr(2), 10);
-
-        // Addresses not in tracked shard, total doesn't change
-        assert_eq!(stats.tracked_total(), 0);
-        // But data exists
         assert_eq!(stats.get(&addr(1)), Some(5));
-        assert_eq!(stats.get(&addr(2)), Some(10));
+
+        stats.commit();
+        assert_eq!(stats.get(&addr(1)), Some(5));
+        assert_eq!(stats.tracked_total(), 5);
     }
 
     #[test]
-    fn test_tracked_total_rollback() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 10);
-        let stats = stats_with_initial(&initial);
+    fn transaction_decrement_commit() {
+        let mut stats = TrackedQueueStatistics::new(track_all_shard());
+        stats.increment_for_account(addr(1), 10);
+
+        stats.begin();
+        stats.decrement_for_account(addr(1), 3);
+        stats.commit();
+
+        assert_eq!(stats.get(&addr(1)), Some(7));
+        assert_eq!(stats.tracked_total(), 7);
+    }
+
+    // === Transaction: rollback ===
+
+    #[test]
+    fn transaction_increment_rollback() {
+        let mut stats = TrackedQueueStatistics::new(track_all_shard());
+        stats.increment_for_account(addr(1), 5);
+
+        stats.begin();
+        stats.increment_for_account(addr(1), 10);
+        stats.increment_for_account(addr(2), 20);
+        stats.rollback();
+
+        assert_eq!(stats.get(&addr(1)), Some(5));
+        assert_eq!(stats.get(&addr(2)), None);
+    }
+
+    #[test]
+    fn transaction_tracked_total_rollback() {
+        let mut stats = TrackedQueueStatistics::new(track_all_shard());
+        stats.increment_for_account(addr(1), 10);
 
         stats.begin();
         stats.increment_for_account(addr(1), 5);
         stats.increment_for_account(addr(2), 20);
         assert_eq!(stats.tracked_total(), 35);
 
-        stats.rollback_all();
-        assert_eq!(stats.tracked_total(), 10); // restored from snapshot
-    }
-
-    #[test]
-    fn test_tracked_total_commit() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-
-        stats.begin();
-        stats.increment_for_account(addr(1), 5);
-        assert_eq!(stats.tracked_total(), 5);
-
-        stats.commit_all();
-        assert_eq!(stats.tracked_total(), 5); // stays the same after commit
-    }
-
-    #[test]
-    fn test_append_updates_tracked_total() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-        let mut other = FastHashMap::default();
-        other.insert(addr(1), 5);
-        other.insert(addr(2), 10);
-
-        stats.append(&other);
-
-        assert_eq!(stats.tracked_total(), 15);
-    }
-
-    #[test]
-    fn test_append_outside_transaction_not_rolled_back() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
-        let mut other = FastHashMap::default();
-        other.insert(addr(1), 10);
-
-        stats.append(&other);
-
-        // After append outside transaction, rollback should not rollback this data
-        stats.begin();
-        stats.increment_for_account(addr(2), 5);
-        assert_eq!(stats.tracked_total(), 15);
-
-        stats.rollback_all();
-        assert_eq!(stats.tracked_total(), 10); // only committed part
-    }
-
-    // ==================== Begin/Transaction ====================
-
-    #[test]
-    fn test_begin_saves_snapshot() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 10);
-        let stats = stats_with_initial(&initial);
-
-        stats.begin();
-        stats.increment_for_account(addr(1), 100);
-        stats.increment_for_account(addr(2), 200);
-
-        // Rollback should return to state at begin()
-        stats.rollback_all();
-
+        stats.rollback();
         assert_eq!(stats.tracked_total(), 10);
-        assert_eq!(stats.get(&addr(1)), Some(10));
-        assert_eq!(stats.get(&addr(2)), None);
     }
 
-    // ==================== Clone Semantics ====================
+    // === Transaction: edge cases ===
 
     #[test]
-    fn test_clone_shares_statistics() {
-        let stats1 = ConcurrentQueueStatistics::new(track_all_shard());
-        stats1.increment_for_account(addr(1), 5);
-        stats1.commit_all();
-
-        let stats2 = stats1.clone();
-
-        // Changes through stats1 are visible in stats2
-        stats1.increment_for_account(addr(2), 10);
-        stats1.commit_all();
-
-        assert_eq!(stats2.get(&addr(2)), Some(10));
+    #[should_panic(expected = "nested transactions")]
+    fn nested_begin_panics() {
+        let mut stats = TrackedQueueStatistics::new(track_all_shard());
+        stats.begin();
+        stats.begin();
     }
 
     #[test]
-    fn test_clone_shares_tracked_total() {
-        let stats1 = ConcurrentQueueStatistics::new(track_all_shard());
-        let stats2 = stats1.clone();
-
-        stats1.increment_for_account(addr(1), 5);
-
-        // tracked_total shared
-        assert_eq!(stats1.tracked_total(), 5);
-        assert_eq!(stats2.tracked_total(), 5);
+    #[should_panic(expected = "no active transaction to commit")]
+    fn commit_outside_transaction_panics() {
+        let mut stats = TrackedQueueStatistics::new(track_all_shard());
+        stats.commit();
     }
 
     #[test]
-    fn test_clone_has_independent_snapshot() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 10);
-        let stats1 = stats_with_initial(&initial);
-
-        stats1.begin(); // snapshot = 10
-
-        stats1.increment_for_account(addr(1), 5);
-        // stats1: total = 15, snapshot = 10
-
-        let stats2 = stats1.clone();
-        // stats2: total = 15 (shared), snapshot = 15 (copy of current total)
-
-        stats1.increment_for_account(addr(2), 100);
-        // total = 115
-
-        // Rollback stats1 - rollback to its snapshot (10)
-        stats1.rollback_all();
-        assert_eq!(stats1.tracked_total(), 10);
-
-        // stats2 sees the same total (they are shared)
-        assert_eq!(stats2.tracked_total(), 10);
-    }
-
-    // ==================== Edge Cases ====================
-
-    #[test]
-    fn test_decrement_to_zero_then_increment() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 5);
-        let stats = stats_with_initial(&initial);
-
-        stats.decrement_for_account(addr(1), 5);
-        assert_eq!(stats.get(&addr(1)), None); // filtered as zero
-
-        stats.increment_for_account(addr(1), 3);
-        assert_eq!(stats.get(&addr(1)), Some(3));
+    #[should_panic(expected = "no active transaction to rollback")]
+    fn rollback_outside_transaction_panics() {
+        let mut stats = TrackedQueueStatistics::new(track_all_shard());
+        stats.rollback();
     }
 
     #[test]
-    fn test_commit_then_new_transaction() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
+    fn multiple_transactions() {
+        let mut stats = TrackedQueueStatistics::new(track_all_shard());
 
-        // First transaction
         stats.begin();
         stats.increment_for_account(addr(1), 5);
-        stats.commit_all();
+        stats.commit();
 
-        // Second transaction
         stats.begin();
         stats.increment_for_account(addr(1), 10);
-        stats.rollback_all();
+        stats.rollback();
 
-        // Should be at state after first commit
+        stats.begin();
+        stats.increment_for_account(addr(2), 20);
+        stats.commit();
+
         assert_eq!(stats.get(&addr(1)), Some(5));
-        assert_eq!(stats.tracked_total(), 5);
+        assert_eq!(stats.get(&addr(2)), Some(20));
+        assert_eq!(stats.tracked_total(), 25);
+    }
+
+    // === Panics ===
+
+    #[test]
+    #[should_panic(expected = "non-existent account")]
+    fn decrement_nonexistent_panics() {
+        let stats = TrackedQueueStatistics::new(track_all_shard());
+        stats.decrement_for_account(addr(1), 5);
     }
 
     #[test]
-    fn test_multiple_rollbacks() {
-        let mut initial = FastHashMap::default();
-        initial.insert(addr(1), 10);
-        let stats = stats_with_initial(&initial);
-
-        stats.begin();
+    #[should_panic(expected = "below zero")]
+    fn decrement_below_zero_panics() {
+        let stats = TrackedQueueStatistics::new(track_all_shard());
         stats.increment_for_account(addr(1), 5);
-        stats.rollback_all();
-
-        // Repeated rollback without changes — should be safe
-        stats.rollback_all();
-
-        assert_eq!(stats.get(&addr(1)), Some(10));
-        assert_eq!(stats.tracked_total(), 10);
+        stats.decrement_for_account(addr(1), 10);
     }
 
+    // === Clone ===
+
     #[test]
-    fn test_empty_commit_and_rollback() {
-        let stats = ConcurrentQueueStatistics::new(track_all_shard());
+    fn clone_shares_data() {
+        let stats1 = TrackedQueueStatistics::new(track_all_shard());
+        stats1.increment_for_account(addr(1), 5);
 
-        stats.begin();
-        // Do nothing
-        stats.commit_all();
+        let stats2 = stats1.clone();
+        stats1.increment_for_account(addr(2), 10);
 
-        assert!(!stats.has_uncommitted());
-        assert_eq!(stats.tracked_total(), 0);
+        assert_eq!(stats2.get(&addr(2)), Some(10));
+        assert_eq!(stats2.tracked_total(), 15);
+    }
 
-        stats.begin();
-        stats.rollback_all();
+    // === View ===
 
-        assert!(!stats.has_uncommitted());
-        assert_eq!(stats.tracked_total(), 0);
+    #[test]
+    fn statistics_view_iter() {
+        let stats = TrackedQueueStatistics::new(track_all_shard());
+        stats.increment_for_account(addr(1), 5);
+        stats.increment_for_account(addr(2), 10);
+
+        let view = stats.statistics();
+        let collected: FastHashMap<_, _> = view.iter().map(|(k, v)| (k.clone(), v)).collect();
+
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected.get(&addr(1)), Some(&5));
+        assert_eq!(collected.get(&addr(2)), Some(&10));
     }
 }

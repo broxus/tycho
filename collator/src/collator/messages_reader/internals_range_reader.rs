@@ -209,8 +209,7 @@ pub fn partitions_have_intersecting_accounts<V: InternalMessageValue>(
     }
 
     // Check next_stats
-    for entry in next_stats.iter() {
-        let addr = entry.key();
+    for (addr, _) in next_stats.statistics().iter() {
         if current_stats.contains(addr) {
             return Ok(Some(addr.clone()));
         }
