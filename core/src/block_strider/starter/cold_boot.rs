@@ -31,6 +31,13 @@ use crate::storage::{
 };
 
 impl StarterInner {
+    /// |cold_boot_type | keyblock | hardfork | ignore_states | download_zerostate
+    /// |---------------|----------|----------|---------------|-----------
+    /// | *             | *        | *        | true          | proof only
+    /// | *             | *        | false    | false         | full state
+    /// | genesis       | *        | true     | false         | full state
+    /// | latest        | none     | true     | false         | full state
+    /// | latest        | recent   | true     | false         | proof only
     #[tracing::instrument(skip_all)]
     pub async fn cold_boot<P>(
         &self,
@@ -45,7 +52,7 @@ impl StarterInner {
         let last_mc_block_id = match boot_type {
             ColdBootType::Genesis => {
                 // Either import or download a zerostate.
-                let init_block = self.prepare_init_block(zerostates).await?;
+                let init_block = self.prepare_init_block(zerostates, true).await?;
 
                 // Always use zerostate id as an initial block id when doing sync from genesis.
                 *init_block.handle().id()
@@ -53,7 +60,7 @@ impl StarterInner {
             ColdBootType::LatestPersistent => {
                 // Find the last known key block (or zerostate)
                 // from which we can start downloading other key blocks
-                let init_block = self.prepare_init_block(zerostates).await?;
+                let init_block = self.prepare_init_block(zerostates, false).await?;
 
                 // Ensure that all key blocks until now (with some offset) are downloaded
                 self.download_key_blocks(init_block).await?;
@@ -66,6 +73,11 @@ impl StarterInner {
                     // with their states from shards for that
                     self.download_start_blocks_and_states(last_key_block.id())
                         .await?;
+                } else if !self.ignore_states {
+                    // Otherwise we need to ensure that all full zerostates are downloaded.
+                    self.download_zerostates()
+                        .await
+                        .context("failed to download zerostates for zerostate key block")?;
                 }
 
                 *last_key_block.id()
@@ -87,10 +99,25 @@ impl StarterInner {
     // === Sync steps ===
 
     /// Prepare the initial block to start syncing.
-    async fn prepare_init_block<P>(&self, zerostates: Option<P>) -> Result<InitBlock>
+    async fn prepare_init_block<P>(
+        &self,
+        zerostates: Option<P>,
+        from_genesis: bool,
+    ) -> Result<InitBlock>
     where
         P: ZerostateProvider,
     {
+        enum ZerostateBootType {
+            Full {
+                handle: BlockHandle,
+                state: ShardStateStuff,
+            },
+            ProofOnly {
+                handle: BlockHandle,
+                proof: Cell,
+            },
+        }
+
         let node_state = self.storage.node_state();
         let block_id = node_state
             .load_init_mc_block_id()
@@ -109,24 +136,42 @@ impl StarterInner {
         }
 
         tracing::info!(init_block_id = %block_id, "preparing init block");
+
         let prev_key_block = if block_id.seqno == self.zerostate.seqno {
             tracing::info!(%block_id, "using zero state");
 
-            let (handle, state) = match zerostates {
-                Some(zerostates) => self.import_zerostates(zerostates).await?,
-                // TODO: Add special case to import only zerostate proof,
-                // but we need to check for some key blocks first.
-                None => self.download_zerostates().await?,
+            let imported = if let Some(provider) = zerostates {
+                let (handle, state) = self.import_zerostates(provider).await?;
+                ZerostateBootType::Full { handle, state }
+            } else if self.zerostate.seqno == 0 || from_genesis && !self.ignore_states {
+                let (handle, state) = self.download_zerostates().await?;
+                ZerostateBootType::Full { handle, state }
+            } else {
+                tracing::info!(%block_id, "using zerostate proof to sync node");
+                let proof = self.download_zerostate_proof().await?;
+                let handle = self.store_zerostate_block_handles(&block_id, &proof)?;
+                ZerostateBootType::ProofOnly { handle, proof }
             };
 
-            node_state.store_zerostate_info(
-                &self.zerostate,
-                &prepare_master_state_proof(state.root_cell())
-                    .context("failed to build zerostate proof")?,
-            );
+            let (handle, proof) = match imported {
+                // Zerostate proof must always be present for imported states.
+                ZerostateBootType::Full { handle, state } => {
+                    let proof = prepare_master_state_proof(state.root_cell())
+                        .context("failed to build zerostate proof")?;
+                    node_state.store_zerostate_info(&self.zerostate, &proof);
 
-            // NOTE: Reload zerostate proof here to get rid of `StorageCell`.
-            let state = node_state.load_zerostate_proof().expect("we just saved it");
+                    // NOTE: We cannot reuse the prepared proof as is because it is
+                    // pollutted with StorageCells. We need to reload it using
+                    // the "runtime" cells.
+                    let proof = node_state.load_zerostate_proof().expect("just stored");
+
+                    (handle, proof)
+                }
+                ZerostateBootType::ProofOnly { handle, proof } => {
+                    node_state.store_zerostate_info(&self.zerostate, &proof);
+                    (handle, proof)
+                }
+            };
 
             let untracked = self
                 .storage
@@ -134,7 +179,7 @@ impl StarterInner {
                 .min_ref_mc_state()
                 .insert_untracked();
 
-            let state = ShardStateStuff::from_root(handle.id(), Cell::virtualize(state), untracked)
+            let state = ShardStateStuff::from_root(handle.id(), Cell::virtualize(proof), untracked)
                 .context("failed to parse zerostate proof")?;
 
             // NOTE: Ensure that init block id is always present
@@ -170,6 +215,7 @@ impl StarterInner {
 
     /// Download all key blocks since the initial block.
     async fn download_key_blocks(&self, mut prev_key_block: InitBlock) -> Result<()> {
+        tracing::debug!("downloading key blocks");
         const BLOCKS_PER_BATCH: u32 = 10;
         const PARALLEL_REQUESTS: usize = 10;
 
@@ -344,6 +390,10 @@ impl StarterInner {
 
         // Iterate all key blocks in reverse order (from the latest to the oldest)
         while let Some(handle) = key_blocks.next().transpose()? {
+            tracing::debug!(
+                seq_no = handle.id().seqno,
+                "checking next key block to match persistent key block"
+            );
             let handle_utime = handle.gen_utime();
             let prev_utime = match key_blocks.peek() {
                 Some(Ok(prev_block)) => prev_block.gen_utime(),
@@ -552,16 +602,22 @@ impl StarterInner {
         let zerostate_id = self.zerostate.as_block_id();
         tracing::info!(zerostate_id = %zerostate_id, "download zerostates");
 
+        let handle_storage = self.storage.block_handle_storage();
+
         let (handle, state) = self
             .download_shard_state(&zerostate_id, &zerostate_id, true)
             .await?;
 
         for item in state.shards()?.latest_blocks() {
             let block_id = item?;
-            let _state = self
+            let (handle, _) = self
                 .download_shard_state(&zerostate_id, &block_id, true)
                 .await?;
+
+            handle_storage.set_block_committed(&handle);
         }
+
+        handle_storage.set_block_committed(&handle);
 
         Ok((handle, state))
     }
@@ -851,25 +907,90 @@ impl StarterInner {
         anyhow::bail!("ran out of attempts")
     }
 
-    #[allow(dead_code)]
     async fn download_zerostate_proof(&self) -> Result<Cell> {
-        let response = self.blockchain_rpc_client.get_zerostate_proof().await?;
+        const INTERVAL: Duration = Duration::from_secs(1);
 
-        let guard = scopeguard::guard(response, |r| {
-            r.reject();
-        });
+        tracing::info!(zerostate = ?self.zerostate, "downloading zerostate proof");
 
-        let ZerostateProof::Found { proof } = guard.data() else {
-            anyhow::bail!("zerostate proof not found");
+        let try_download = async || {
+            let res = self.blockchain_rpc_client.get_zerostate_proof().await?;
+            let guard = scopeguard::guard(res, |r| {
+                r.reject();
+            });
+
+            let ZerostateProof::Found { proof } = guard.data() else {
+                anyhow::bail!("zerostate proof not found");
+            };
+
+            let proof_cell = Boc::decode(proof).context("failed to decode zerostate proof")?;
+            check_zerostate_proof(self.zerostate.root_hash, &proof_cell)
+                .context("failed to check zerostate proof")?;
+
+            ScopeGuard::into_inner(guard).accept();
+
+            Ok(proof_cell)
         };
 
-        let proof_cell = Boc::decode(proof).context("failed to decode zerostate proof")?;
-        check_zerostate_proof(self.zerostate.root_hash, &proof_cell)
-            .context("failed to check zerostate proof")?;
+        for attempt in 0..MAX_ZEROSTATE_PROOF_RETRIES {
+            match try_download().await {
+                Ok(proof_cell) => {
+                    tracing::info!("zerostate proof downloaded successfully");
+                    return Ok(proof_cell);
+                }
+                Err(e) => {
+                    tracing::error!(attempt, "failed to download zerostate proof: {e:?}");
+                    if attempt < MAX_ZEROSTATE_PROOF_RETRIES {
+                        tokio::time::sleep(INTERVAL).await;
+                    }
+                }
+            }
+        }
 
-        ScopeGuard::into_inner(guard).accept();
+        anyhow::bail!("ran out of zerostate proof download attempts")
+    }
 
-        Ok(proof_cell)
+    fn store_zerostate_block_handles(
+        &self,
+        mc_block_id: &BlockId,
+        zerostate_proof: &Cell,
+    ) -> Result<BlockHandle> {
+        let handle_storage = self.storage.block_handle_storage();
+        let state = zerostate_proof.virtualize().parse::<ShardStateUnsplit>()?;
+        let Some(extra) = state.load_custom()? else {
+            anyhow::bail!("invalid zerostate proof");
+        };
+        anyhow::ensure!(
+            state.shard_ident == mc_block_id.shard && state.seqno == mc_block_id.seqno,
+            "unexpected zerostate proof seqno: expected={}, got={}",
+            mc_block_id.as_short_id(),
+            BlockIdShort {
+                shard: state.shard_ident,
+                seqno: state.seqno
+            }
+        );
+
+        for entry in extra.shards.latest_blocks() {
+            let block_id = entry?;
+
+            let (handle, _) = handle_storage.create_or_load_handle(&block_id, NewBlockMeta {
+                is_key_block: false,
+                gen_utime: state.gen_utime,
+                ref_by_mc_seqno: mc_block_id.seqno,
+            });
+            handle_storage.set_is_zerostate(&handle);
+            handle_storage.set_block_committed(&handle);
+        }
+
+        let (handle, _) = handle_storage.create_or_load_handle(mc_block_id, NewBlockMeta {
+            is_key_block: true,
+            gen_utime: state.gen_utime,
+            ref_by_mc_seqno: state.seqno,
+        });
+
+        handle_storage.set_is_zerostate(&handle);
+        handle_storage.set_block_committed(&handle);
+
+        Ok(handle)
     }
 
     #[tracing::instrument(skip_all, fields(block_id = %block_handle.id()))]
@@ -1095,3 +1216,4 @@ impl InitBlock {
 
 const MAX_EMPTY_PROOF_RETRIES: usize = 10;
 const MAX_PERSISTENT_STATE_RETRIES: usize = 10;
+const MAX_ZEROSTATE_PROOF_RETRIES: usize = 10;
