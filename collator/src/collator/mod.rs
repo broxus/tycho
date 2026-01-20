@@ -672,7 +672,9 @@ impl CollatorStdImpl {
                     let last_task = self.store_new_state_tasks.pop().expect("shouldn't happen");
 
                     // if it is finished, then we can just reload prev state
-                    if last_task.store_new_state_task.is_finished() {
+                    if last_task.store_new_state_task.is_finished()
+                        || self.store_new_state_tasks.is_empty()
+                    {
                         last_task.store_new_state_task.await?;
 
                         // and reload pure prev state in the working state
