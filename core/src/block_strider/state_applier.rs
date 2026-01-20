@@ -354,6 +354,7 @@ impl<S> Inner<S> {
             .await?;
 
         metrics::counter!("tycho_core_ps_subscriber_saved_persistent_states_count").increment(1);
+        tracing::debug!("saved persistent state for {}", mc_block_handle.id());
 
         Ok(())
     }
