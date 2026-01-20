@@ -22,7 +22,7 @@ use crate::collator::messages_reader::state::{ShardReaderState, with_prev_list_a
 use crate::collator::messages_reader::{
     GetNextMessageGroupMode, MessagesReaderMetrics, MessagesReaderStage, internals_range_reader,
 };
-use crate::collator::statistics::queue::ConcurrentQueueStatistics;
+use crate::collator::statistics::queue::TrackedQueueStatistics;
 use crate::collator::types::{
     MsgsExecutionParamsExtension, MsgsExecutionParamsStuff, ParsedMessage,
 };
@@ -56,7 +56,7 @@ pub(super) struct InternalsPartitionReader<'a, V: InternalMessageValue> {
     reader_state: &'a mut InternalsPartitionReaderState,
     pub range_readers: BTreeMap<BlockSeqno, InternalsRangeReader<V>>,
     pub all_ranges_fully_read: bool,
-    pub remaning_msgs_stats: Option<ConcurrentQueueStatistics>,
+    pub remaning_msgs_stats: Option<TrackedQueueStatistics>,
 }
 
 pub(super) struct InternalsPartitionReaderContext<'a> {
@@ -74,7 +74,7 @@ pub(super) struct InternalsPartitionReaderContext<'a> {
 }
 
 pub struct InternalsPartitionReaderRemainingStats {
-    pub msgs_stats: ConcurrentQueueStatistics,
+    pub msgs_stats: TrackedQueueStatistics,
     pub stats_just_loaded: bool,
 }
 
@@ -1044,7 +1044,7 @@ fn create_existing_range_reader<V: InternalMessageValue>(
     reader_state_processed_to: &BTreeMap<ShardIdent, QueueKey>,
     seqno: BlockSeqno,
     reduce_cumulative_remaning_stats: bool,
-    remaining_msgs_stats: &mut Option<ConcurrentQueueStatistics>,
+    remaining_msgs_stats: &mut Option<TrackedQueueStatistics>,
     buffer_limits: &MessagesBufferLimits,
 ) -> Result<InternalsRangeReader<V>> {
     // get statistics for the range if it was not loaded before
