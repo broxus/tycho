@@ -1047,7 +1047,7 @@ impl CollatorStdImpl {
                 is_top_block: None,
             };
 
-            adapter.accept_shard_block(
+            adapter.fill_shard_blocks_cache(
                 finalized.block_candidate.ref_by_mc_seqno,
                 finalized.block_candidate.block.data.clone(),
             )?;

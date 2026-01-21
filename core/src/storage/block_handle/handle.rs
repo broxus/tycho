@@ -80,10 +80,6 @@ impl BlockHandle {
         self.inner.meta.flags().contains(BlockFlags::IS_ZEROSTATE) || self.inner.id.seqno == 0
     }
 
-    pub fn is_accumulated(&self) -> bool {
-        self.inner.meta.flags().contains(BlockFlags::IS_ACCUMULATED)
-    }
-
     pub fn has_data(&self) -> bool {
         const MASK: u32 = BlockFlags::HAS_DATA.bits() | BlockFlags::IS_REMOVED.bits();
         let flags = self.inner.meta.flags();

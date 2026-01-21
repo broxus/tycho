@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::Cursor;
+use std::num::NonZeroU8;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -42,11 +43,12 @@ pub struct ShardStateStorage {
     min_ref_mc_state: MinRefMcStateTracker,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
-    accumulated_new_cells: AtomicUsize,
+
+    accumulated_per_shard: tokio::sync::Mutex<FastHashMap<ShardIdent, ShardAccumulator>>,
 
     shard_split_depth: u8,
     new_cells_threshold: usize,
-    store_shard_state_step: u8,
+    store_shard_state_step: NonZeroU8,
 }
 
 impl ShardStateStorage {
@@ -72,12 +74,12 @@ impl ShardStateStorage {
             cell_storage,
             shard_split_depth: config.shard_split_depth,
             new_cells_threshold: config.max_new_cells_threshold,
-            store_shard_state_step: config.store_shard_state_step,
+            store_shard_state_step: NonZeroU8::new(config.store_shard_state_step).unwrap(),
             gc_lock: Default::default(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
-            accumulated_new_cells: AtomicUsize::new(0),
+            accumulated_per_shard: tokio::sync::Mutex::new(FastHashMap::default()),
         }))
     }
 
@@ -112,7 +114,7 @@ impl ShardStateStorage {
         handle: &BlockHandle,
         state: &ShardStateStuff,
         hint: StoreStateHint,
-    ) -> Result<bool> {
+    ) -> Result<StoreStateStatus> {
         anyhow::ensure!(
             handle.id() == state.block_id(),
             ShardStateStorageError::BlockHandleIdMismatch {
@@ -130,9 +132,9 @@ impl ShardStateStorage {
         handle: &BlockHandle,
         root_cell: Cell,
         hint: StoreStateHint,
-    ) -> Result<bool> {
+    ) -> Result<StoreStateStatus> {
         if handle.has_state() {
-            return Ok(false);
+            return Ok(StoreStateStatus::Exist);
         }
 
         let gc_lock = {
@@ -142,31 +144,28 @@ impl ShardStateStorage {
 
         // Double check if the state is already stored
         if handle.has_state() {
-            return Ok(false);
+            return Ok(StoreStateStatus::Exist);
         }
 
         // TODO: what if the first block is (seqno % store_shard_state_step != 0) - case of hardforks
+        // TODO: Move node_state to ShardStateStorage and check handle.ref_by_mc_seqno() == node_state.load_zerostate_id().seqno ???
         let mut should_store = handle.is_masterchain()
             || hint.is_top_block == Some(true)
             || handle
                 .id()
                 .seqno
-                .is_multiple_of(self.store_shard_state_step as u32);
+                .is_multiple_of(self.store_shard_state_step.get() as u32);
 
-        if !should_store && !handle.is_accumulated() {
-            // Mark this block as accumulated to prevent double counting
-            let updated = handle.meta().add_flags(BlockFlags::IS_ACCUMULATED);
-            if updated {
-                self.block_handle_storage.store_handle(handle, false);
+        if !should_store {
+            let mut guard = self.accumulated_per_shard.lock().await;
+            let acc = guard.entry(handle.id().shard).or_default();
+
+            // prevents double counting
+            if acc.blocks.insert(handle.id().seqno) {
+                acc.new_cells += hint.new_cell_count;
             }
 
-            let accumulated = self
-                .accumulated_new_cells
-                .fetch_add(hint.new_cell_count, Ordering::Release);
-
-            let new_total = accumulated.saturating_add(hint.new_cell_count);
-
-            if new_total >= self.new_cells_threshold {
+            if acc.new_cells >= self.new_cells_threshold {
                 // Accumulated too many changes - need to store state
                 should_store = true;
             }
@@ -174,13 +173,16 @@ impl ShardStateStorage {
 
         if !should_store {
             metrics::counter!("tycho_storage_shard_state_skipped").increment(1);
-            return Ok(false);
+            return Ok(StoreStateStatus::Skipped);
         }
 
         // Reset accumulator after storing shardchain state
         // Masterchain blocks don't accumulate so we only reset for shardchain
         if !handle.is_masterchain() {
-            self.accumulated_new_cells.store(0, Ordering::Release);
+            self.accumulated_per_shard
+                .lock()
+                .await
+                .remove(&handle.id().shard);
             metrics::counter!("tycho_storage_shard_state_stored").increment(1);
         }
 
@@ -195,7 +197,7 @@ impl ShardStateStorage {
         let shard_split_depth = self.shard_split_depth;
 
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
-        let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
+        let (new_cell_count, status) = tokio::task::spawn_blocking(move || {
             let root_hash = *root_cell.repr_hash();
             let estimated_merkle_update_size = hint.new_cell_count;
 
@@ -239,14 +241,18 @@ impl ShardStateStorage {
             hist.finish();
 
             let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
-            if updated {
+
+            let status = if updated {
                 block_handle_storage.store_handle(&handle, false);
-            }
+                StoreStateStatus::Stored
+            } else {
+                StoreStateStatus::Exist
+            };
 
             // NOTE: Ensure that GC lock is dropped only after storing the state.
             drop(gc_lock);
 
-            Ok::<_, anyhow::Error>((new_cell_count, updated))
+            Ok::<_, anyhow::Error>((new_cell_count, status))
         })
         .await??;
 
@@ -258,7 +264,7 @@ impl ShardStateStorage {
 
         count.fetch_max(new_cell_count, Ordering::Release);
 
-        Ok(updated)
+        Ok(status)
     }
 
     async fn store_state_inner<R>(&self, block_id: &BlockId, boc: R) -> Result<HashBytes>
@@ -673,4 +679,22 @@ pub fn split_shard_accounts(
         .context("failed to load shard accounts")?;
 
     split_aug_dict_raw(shard_accounts, split_depth).context("failed to split shard accounts")
+}
+
+pub enum StoreStateStatus {
+    Stored,
+    Skipped,
+    Exist,
+}
+
+impl StoreStateStatus {
+    pub fn is_stored(&self) -> bool {
+        matches!(self, Self::Stored)
+    }
+}
+
+#[derive(Default)]
+struct ShardAccumulator {
+    new_cells: usize,
+    blocks: FastHashSet<u32>,
 }

@@ -29,7 +29,7 @@ pub use self::persistent_state::{
 };
 pub use self::shard_state::{
     ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics, StoreStateHint,
-    split_shard_accounts,
+    StoreStateStatus, split_shard_accounts,
 };
 
 pub mod tables;

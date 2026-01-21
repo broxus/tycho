@@ -92,7 +92,7 @@ impl Default for CoreStorageConfig {
             drop_interval: 3,
             store_archives: true,
             shard_split_depth: 5,
-            store_shard_state_step: 5,
+            store_shard_state_step: 1,
             max_new_cells_threshold: 150_000,
             archives_gc: Some(ArchivesGcConfig::default()),
             states_gc: Some(StatesGcConfig::default()),

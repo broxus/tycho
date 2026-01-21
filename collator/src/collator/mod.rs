@@ -14,6 +14,7 @@ use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::{MempoolGlobalConfig, ZerostateId};
+use tycho_core::storage::StoreStateStatus;
 use tycho_network::PeerId;
 use tycho_types::cell::{Cell, HashBytes};
 use tycho_types::merkle::MerkleUpdate;
@@ -1019,7 +1020,7 @@ impl CollatorStdImpl {
         new_observable_state: Box<ShardStateUnsplit>,
         new_observable_state_root: Cell,
         state_update: MerkleUpdate,
-        store_new_state_task: JoinTask<Result<bool>>,
+        store_new_state_task: JoinTask<Result<StoreStateStatus>>,
         new_queue_diff_hash: HashBytes,
         new_mc_data: Arc<McData>,
         collation_config: Arc<CollationConfig>,
@@ -1029,7 +1030,7 @@ impl CollatorStdImpl {
         resume_collation_elapsed: Duration,
     ) -> Result<()> {
         enum GetNewShardStateStuff {
-            ReloadFromStorage(JoinTask<Result<bool>>),
+            ReloadFromStorage(JoinTask<Result<StoreStateStatus>>),
             BuildFromNewObservable {
                 block_id: BlockId,
                 new_observable_state: Box<ShardStateUnsplit>,
@@ -2399,7 +2400,7 @@ impl DelayedWorkingState {
 
 struct StateUpdateContext {
     block_id: BlockId,
-    store_new_state_task: JoinTask<Result<bool>>,
+    store_new_state_task: JoinTask<Result<StoreStateStatus>>,
     state_update: MerkleUpdate,
 }
 
