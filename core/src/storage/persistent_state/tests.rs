@@ -455,8 +455,15 @@ async fn test_preload_persistent_states() -> Result<()> {
 
     let tests_data_path = open_tests_data_path();
 
-    let without_parts_src_dir = tests_data_path.join("persistent_states/38-without-parts");
-    let with_parts_src_dir = tests_data_path.join("persistent_states/40-with-parts");
+    let without_parts_seqno = 47;
+    let with_parts_seqno = 50;
+
+    let without_parts_src_dir = tests_data_path.join(format!(
+        "persistent_states/{}-without-parts",
+        without_parts_seqno
+    ));
+    let with_parts_src_dir =
+        tests_data_path.join(format!("persistent_states/{}-with-parts", with_parts_seqno));
 
     let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
     let storage_dir = ctx.files_dir().create_subdir("states")?;
@@ -470,18 +477,24 @@ async fn test_preload_persistent_states() -> Result<()> {
     let storage = CoreStorage::open(ctx, config).await?;
     let persistent_states = storage.persistent_state_storage();
 
-    copy_dir_contents(&without_parts_src_dir, &storage_dir.path().join("38"))?;
-    copy_dir_contents(&with_parts_src_dir, &storage_dir.path().join("40"))?;
+    copy_dir_contents(
+        &without_parts_src_dir,
+        &storage_dir.path().join(without_parts_seqno.to_string()),
+    )?;
+    copy_dir_contents(
+        &with_parts_src_dir,
+        &storage_dir.path().join(with_parts_seqno.to_string()),
+    )?;
 
     persistent_states.preload_states().await?;
 
-    let mc38_block_ids = collect_block_ids(&without_parts_src_dir)?;
-    tracing::debug!(?mc38_block_ids);
+    let without_parts_block_ids = collect_block_ids(&without_parts_src_dir)?;
+    tracing::debug!(?without_parts_block_ids);
 
-    let mc40_block_ids = collect_block_ids(&with_parts_src_dir)?;
-    tracing::debug!(?mc40_block_ids);
+    let with_parts_block_ids = collect_block_ids(&with_parts_src_dir)?;
+    tracing::debug!(?with_parts_block_ids);
 
-    for block_id in &mc38_block_ids {
+    for block_id in &without_parts_block_ids {
         assert!(persistent_states.state_exists(block_id, PersistentStateKind::Shard));
 
         if !block_id.is_masterchain() {
@@ -493,7 +506,7 @@ async fn test_preload_persistent_states() -> Result<()> {
         }
     }
 
-    for block_id in &mc40_block_ids {
+    for block_id in &with_parts_block_ids {
         assert!(persistent_states.state_exists(block_id, PersistentStateKind::Shard));
 
         if !block_id.is_masterchain() {
@@ -523,8 +536,14 @@ async fn test_preload_persistent_states() -> Result<()> {
         .descriptor_cache
         .mc_seqno_to_block_ids()
         .lock();
-    assert_eq!(block_ids_index.get(&38), Some(&mc38_block_ids));
-    assert_eq!(block_ids_index.get(&40), Some(&mc40_block_ids));
+    assert_eq!(
+        block_ids_index.get(&without_parts_seqno),
+        Some(&without_parts_block_ids)
+    );
+    assert_eq!(
+        block_ids_index.get(&with_parts_seqno),
+        Some(&with_parts_block_ids)
+    );
 
     Ok(())
 }
@@ -569,8 +588,15 @@ async fn test_store_shard_state_from_file() -> Result<()> {
 
     let tests_data_path = open_tests_data_path();
 
-    let without_parts_src_dir = tests_data_path.join("persistent_states/38-without-parts");
-    let with_parts_src_dir = tests_data_path.join("persistent_states/40-with-parts");
+    let without_parts_seqno = 47;
+    let with_parts_seqno = 50;
+
+    let without_parts_src_dir = tests_data_path.join(format!(
+        "persistent_states/{}-without-parts",
+        without_parts_seqno
+    ));
+    let with_parts_src_dir =
+        tests_data_path.join(format!("persistent_states/{}-with-parts", with_parts_seqno));
 
     let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
     let storage_dir = ctx.files_dir().create_subdir("states")?;
@@ -583,17 +609,21 @@ async fn test_store_shard_state_from_file() -> Result<()> {
 
     let storage = CoreStorage::open(ctx, config).await?;
 
-    let mc_seqno = 38;
-    let (_tmp_dir_without_parts, mc38_downloaded_persistent_states) =
+    let mc_seqno = without_parts_seqno;
+    let (_tmp_dir_without_parts, without_parts_downloaded_persistent_states) =
         decompress_persistent_states(&without_parts_src_dir)?;
-    store_and_check_persistent_states(&storage, mc_seqno, mc38_downloaded_persistent_states)
-        .await?;
+    store_and_check_persistent_states(
+        &storage,
+        mc_seqno,
+        without_parts_downloaded_persistent_states,
+    )
+    .await?;
     check_persistent_state_files_stored(&without_parts_src_dir, &storage_dir, mc_seqno)?;
 
-    let mc_seqno = 40;
-    let (_tmp_dir_with_parts, mc40_downloaded_persistent_states) =
+    let mc_seqno = with_parts_seqno;
+    let (_tmp_dir_with_parts, with_parts_downloaded_persistent_states) =
         decompress_persistent_states(&with_parts_src_dir)?;
-    store_and_check_persistent_states(&storage, mc_seqno, mc40_downloaded_persistent_states)
+    store_and_check_persistent_states(&storage, mc_seqno, with_parts_downloaded_persistent_states)
         .await?;
     check_persistent_state_files_stored(&with_parts_src_dir, &storage_dir, mc_seqno)?;
 
@@ -765,6 +795,18 @@ fn decompress_persistent_states(
         let Some((block_id, kind, shard_prefix)) =
             PersistentStateStorage::parse_persistent_state_file_name(&path)
         else {
+            let is_metadata = path
+                .file_name()
+                .and_then(|fname| fname.to_str())
+                .map(|fname_str| fname_str.ends_with(".meta.json"))
+                .unwrap_or_default();
+
+            // copy metadata file
+            if is_metadata {
+                let filename = path.file_name().unwrap_or_default();
+                let dst_path = download_dir.path().join(filename);
+                std::fs::copy(path, dst_path)?;
+            }
             continue;
         };
 
@@ -793,10 +835,11 @@ fn decompress_persistent_states(
     }
 
     for (block_id, main_file_builder) in main_files_builders {
-        let part_split_depth =
-            PersistentStateStorage::read_persistent_metadata(&block_id, &main_file_builder)?
-                .map(|m| m.part_split_depth)
-                .unwrap_or_default();
+        let persistent_metadata =
+            PersistentStateStorage::read_persistent_metadata(&block_id, &main_file_builder)?;
+        let part_split_depth = persistent_metadata
+            .map(|m| m.part_split_depth)
+            .unwrap_or_default();
         let part_files_builders = PersistentStateStorage::read_persistent_shard_part_files(
             &block_id,
             &main_file_builder,
