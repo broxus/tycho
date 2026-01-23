@@ -87,7 +87,8 @@ impl MempoolConfigBuilder {
 
     pub fn set_consensus_config(&mut self, consensus_config: &ConsensusConfig) -> Result<()> {
         ensure!(
-            consensus_config.max_consensus_lag_rounds >= consensus_config.commit_history_rounds,
+            consensus_config.max_consensus_lag_rounds.get()
+                >= consensus_config.commit_history_rounds.get() as u16,
             "max consensus lag must be greater than commit depth"
         );
 

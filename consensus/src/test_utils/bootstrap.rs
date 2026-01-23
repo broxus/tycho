@@ -14,6 +14,7 @@ pub fn default_test_config() -> MempoolMergedConfig {
     let consensus_config = ConsensusConfig {
         clock_skew_millis: (5 * 1000).try_into().unwrap(),
         payload_batch_bytes: (768 * 1024).try_into().unwrap(),
+        _unused: 0,
         commit_history_rounds: 20.try_into().unwrap(),
         deduplicate_rounds: 20,
         max_consensus_lag_rounds: 20.try_into().unwrap(),

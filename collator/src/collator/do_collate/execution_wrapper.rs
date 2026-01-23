@@ -134,7 +134,7 @@ impl ExecutorWrapper {
                 src: IntAddr::from((MASTERCHAIN, HashBytes::ZERO)),
                 dst: IntAddr::from((MASTERCHAIN, *account_id)),
                 value: amount,
-                ihr_fee: Default::default(),
+                extra_flags: Default::default(),
                 fwd_fee: Default::default(),
                 created_lt: collation_data.start_lt,
                 created_at: collation_data.gen_utime,
