@@ -671,8 +671,13 @@ impl CollatorStdImpl {
                     // get last store task
                     let last_task = self.store_new_state_tasks.pop().expect("shouldn't happen");
 
-                    // if it is finished, then we can just reload prev state
-                    if last_task.store_new_state_task.is_finished() {
+                    // If it is finished or there's only one task, just await and reload.
+                    // NOTE: when there's only one task, we can't apply merkle chain because the previous block's
+                    // state might not be in storage yet — StoreTask just send to background_store_new_state_tx without
+                    // awaiting completion.
+                    if last_task.store_new_state_task.is_finished()
+                        || self.store_new_state_tasks.is_empty()
+                    {
                         last_task.store_new_state_task.await?;
 
                         // and reload pure prev state in the working state
@@ -688,28 +693,19 @@ impl CollatorStdImpl {
                         //
                         // Each task has:
                         //   - block_id: the block being saved
-                        //   - prev_block_id: the block BEFORE it (always already saved for shard blocks from previous master)
                         //   - state_update: merkle diff between two states
                         //
                         // Cases handled:
-                        // 1. Multiple tasks and found a finished one in the middle:
+                        // 1. Found a finished task in the middle:
                         //    - Load state from finished task's block_id
                         //    - Apply merkle updates from chain of collected unfinished tasks
                         //
-                        // 2. Only one unfinished task (store_new_state_tasks is empty after pop):
-                        //    - Load state of previous shard block for previous master block (always already saved)
-                        //    - Apply merkle update from last_task
-                        //
-                        // 3. All tasks unfinished but hit merkle_chain_limit or reached last task:
+                        // 2. All tasks unfinished but hit merkle_chain_limit or reached last task:
                         //    - Wait for that task, load its state
                         //    - Apply merkle updates from collected unfinished tasks
 
-                        // save previous block id for case when there's only one unfinished task
-                        let prev_block_id = last_task.prev_block_id;
-
                         let mut unfinished_tasks = vec![last_task];
 
-                        // find prev state: either from finished task or from prev_shard_data
                         let mut prev_state = 'find_state: {
                             while let Some(task) = self.store_new_state_tasks.pop() {
                                 let is_last = self.store_new_state_tasks.is_empty();
@@ -735,11 +731,7 @@ impl CollatorStdImpl {
                                 break 'find_state prev_state;
                             }
 
-                            // handle specific case when there's only one unfinished task
-                            self.state_node_adapter
-                                .load_state(prev_mc_seqno, &prev_block_id)
-                                .await
-                                .context("failed to load prev shard state")?
+                            unreachable!("single task case is handled above")
                         };
 
                         let _histogram_apply_merkles = HistogramGuard::begin_with_labels(
@@ -1022,7 +1014,6 @@ impl CollatorStdImpl {
     fn prepare_working_state_update(
         &mut self,
         block_id: BlockId,
-        prev_block_id: BlockId,
         new_observable_state: Box<ShardStateUnsplit>,
         new_observable_state_root: Cell,
         state_update: MerkleUpdate,
@@ -1050,7 +1041,6 @@ impl CollatorStdImpl {
             // append new store task
             self.store_new_state_tasks.push(StateUpdateContext {
                 block_id,
-                prev_block_id,
                 store_new_state_task,
                 state_update,
             });
@@ -2407,7 +2397,6 @@ impl DelayedWorkingState {
 
 struct StateUpdateContext {
     block_id: BlockId,
-    prev_block_id: BlockId,
     store_new_state_task: JoinTask<Result<bool>>,
     state_update: MerkleUpdate,
 }
