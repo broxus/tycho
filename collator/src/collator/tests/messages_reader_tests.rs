@@ -21,6 +21,7 @@ use super::{
     MessagesReaderContext,
 };
 use crate::collator::MsgsExecutionParamsStuff;
+use crate::collator::anchors_cache::AnchorsCacheTransaction;
 use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::messages_reader::log_remaining_msgs_stats;
 use crate::collator::messages_reader::state::ReaderState;
@@ -28,7 +29,9 @@ use crate::collator::statistics::cumulative::CumulativeStatistics;
 use crate::collator::types::{AnchorsCache, ParsedMessage};
 use crate::internal_queue::types::diff::DiffZone;
 use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValue};
-use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
+use crate::internal_queue::types::ranges::{
+    Bound, QueueShardBoundedRange, compute_cumulative_stats_ranges,
+};
 use crate::internal_queue::types::stats::DiffStatistics;
 use crate::mempool::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -872,7 +875,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
             mc_top_end_lts.insert(*shard_ident, *lt);
         }
 
-        let ranges = CumulativeStatistics::compute_cumulative_stats_ranges(
+        let ranges = compute_cumulative_stats_ranges(
             &self.shard_id,
             &cumulative_stats_calc_params
                 .clone()
@@ -908,6 +911,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
         };
 
         // create primary reader
+        let mut anchors_cache_tx = AnchorsCacheTransaction::new(&mut anchors_cache);
         let mut primary_messages_reader = self.create_primary_reader(
             MessagesReaderContext {
                 for_shard_id: self.shard_id,
@@ -918,7 +922,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 prev_state_gen_lt: self.last_block_gen_lt,
                 mc_top_shards_end_lts: mc_top_shards_end_lts.clone(),
                 reader_state: &mut reader_state,
-                anchors_cache: &mut anchors_cache,
+                anchors_cache: &mut anchors_cache_tx,
                 is_first_block_after_prev_master,
                 cumulative_stats_calc_params: cumulative_stats_calc_params.clone(),
                 part_stat_ranges,
@@ -930,6 +934,8 @@ impl<V: InternalMessageValue> TestCollator<V> {
         let mut secondary_reader_state = ReaderState::new(&processed_upto);
         let mut secondary_anchors_cache =
             msgs_factory.init_anchors_cache(&self.shard_id, &processed_upto);
+        let mut secondary_anchors_cache_tx =
+            AnchorsCacheTransaction::new(&mut secondary_anchors_cache);
         let mut secondary_messages_reader = self.create_secondary_reader(
             MessagesReaderContext {
                 for_shard_id: self.shard_id,
@@ -943,7 +949,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
                 prev_state_gen_lt: self.last_block_gen_lt,
                 mc_top_shards_end_lts,
                 reader_state: &mut secondary_reader_state,
-                anchors_cache: &mut secondary_anchors_cache,
+                anchors_cache: &mut secondary_anchors_cache_tx,
                 cumulative_stats_calc_params,
                 is_first_block_after_prev_master: true,
                 part_stat_ranges: None,
@@ -1087,6 +1093,12 @@ impl<V: InternalMessageValue> TestCollator<V> {
             current_msgs_exec_params,
         } = primary_messages_reader.finalize(curr_lt, &other_shards_top_block_diffs)?;
 
+        anchors_cache_tx.commit();
+        secondary_anchors_cache_tx.commit();
+
+        drop(anchors_cache_tx);
+        drop(secondary_anchors_cache_tx);
+
         let mut processed_upto = reader_state.get_updated_processed_upto();
         processed_upto.msgs_exec_params = Some(current_msgs_exec_params);
 
@@ -1169,11 +1181,11 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[allow(clippy::unused_self)]
     #[tracing::instrument(skip_all)]
-    fn create_primary_reader<'a>(
+    fn create_primary_reader<'a, 'b>(
         &self,
-        cx: MessagesReaderContext<'a>,
+        cx: MessagesReaderContext<'a, 'b>,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-    ) -> Result<MessagesReader<'a, V>> {
+    ) -> Result<MessagesReader<'a, 'b, V>> {
         tracing::trace!(
             for_shard_id = %cx.for_shard_id,
             block_seqno = cx.block_seqno,
@@ -1187,11 +1199,11 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[allow(clippy::unused_self)]
     #[tracing::instrument(skip_all)]
-    fn create_secondary_reader<'a>(
+    fn create_secondary_reader<'a, 'b>(
         &self,
-        cx: MessagesReaderContext<'a>,
+        cx: MessagesReaderContext<'a, 'b>,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-    ) -> Result<MessagesReader<'a, V>> {
+    ) -> Result<MessagesReader<'a, 'b, V>> {
         tracing::trace!(
             for_shard_id = %cx.for_shard_id,
             block_seqno = cx.block_seqno,
@@ -1204,7 +1216,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
     }
 
     #[tracing::instrument(skip_all)]
-    fn refill_secondary(secondary_messages_reader: &mut MessagesReader<'_, V>) -> Result<()> {
+    fn refill_secondary(secondary_messages_reader: &mut MessagesReader<'_, '_, V>) -> Result<()> {
         if secondary_messages_reader.check_need_refill() {
             secondary_messages_reader.refill_buffers_upto_offsets(|| false)?;
         }
@@ -1213,7 +1225,7 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[tracing::instrument(skip_all)]
     fn collect_primary(
-        messages_reader: &mut MessagesReader<'_, V>,
+        messages_reader: &mut MessagesReader<'_, '_, V>,
         curr_lt: Lt,
     ) -> Result<Option<MessageGroup>> {
         Self::collect_message_group(messages_reader, curr_lt)
@@ -1221,14 +1233,14 @@ impl<V: InternalMessageValue> TestCollator<V> {
 
     #[tracing::instrument(skip_all)]
     fn collect_secondary(
-        messages_reader: &mut MessagesReader<'_, V>,
+        messages_reader: &mut MessagesReader<'_, '_, V>,
         curr_lt: Lt,
     ) -> Result<Option<MessageGroup>> {
         Self::collect_message_group(messages_reader, curr_lt)
     }
 
     fn collect_message_group(
-        messages_reader: &mut MessagesReader<'_, V>,
+        messages_reader: &mut MessagesReader<'_, '_, V>,
         curr_lt: Lt,
     ) -> Result<Option<MessageGroup>> {
         let msg_group_opt =

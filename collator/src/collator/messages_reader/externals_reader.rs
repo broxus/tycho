@@ -64,6 +64,14 @@ impl<'a, 'b> ExternalsReader<'a, 'b> {
         anchors_cache: &'a mut AnchorsCacheTransaction<'b>,
         reader_state: &'a mut ExternalsReaderState,
     ) -> Self {
+        for par_id in buffer_limits_by_partitions.keys() {
+            reader_state.by_partitions.entry(*par_id).or_default();
+        }
+
+        for range_state in reader_state.ranges_mut().values_mut() {
+            range_state.fully_read = range_state.range.current_position == range_state.range.to;
+        }
+
         Self {
             for_shard_id,
             block_seqno,
@@ -442,53 +450,59 @@ impl<'a, 'b> ExternalsReader<'a, 'b> {
         'main_loop: loop {
             let mut all_ranges_fully_read = true;
             while let Some(seqno) = ranges_seqno.pop_front() {
-                let reader_state = self.reader_state.ranges.get_mut(&seqno).unwrap_or_else(||
-                    panic!(
-                        "externals range reader state should exists (for_shard_id: {}, seqno: {}, block_seqno: {})",
-                        self.for_shard_id, seqno, self.block_seqno,
-                    )
-                );
-
-                tracing::trace!(target: tracing_targets::COLLATOR,
-                    seqno,
-                    fully_read = reader_state.fully_read,
-                    range_reader_state = ?DebugExternalsRangeReaderState(reader_state),
-                    "externals reader: try to read externals from range,"
-                );
-
-                // remember last existing range
-                last_seqno = seqno;
-
-                // skip fully read ranges
-                if reader_state.fully_read {
-                    continue;
-                }
-
-                // on refill skip last range reader created in this block
-                if read_mode == GetNextMessageGroupMode::Refill && seqno == self.block_seqno {
-                    all_ranges_fully_read = false;
-                    continue;
-                }
-
-                // Do not read range until skip offset reached. In any partition.
-                // Current offset is updated after reading and before importing,
-                // so if current offset == skip offset here, it will be greater on importing,
-                // and in this case we need to read messages
-                if self.reader_state.by_partitions.iter().all(|(par_id, s)| {
-                    s.curr_processed_offset
-                        < reader_state
-                            .partitions()
-                            .get(par_id)
-                            .map(|s| s.skip_offset)
-                            .unwrap_or_default()
-                }) {
-                    tracing::trace!(target: tracing_targets::COLLATOR,
-                        externals_reader_state = ?DebugIter(self.reader_state.by_partitions.iter()),
-                        "externals reader: skip offset not reached in all partitions",
+                // First, read-only access for checks
+                {
+                    let reader_state = self.reader_state.ranges().get(&seqno).unwrap_or_else(||
+                        panic!(
+                            "externals range reader state should exists (for_shard_id: {}, seqno: {}, block_seqno: {})",
+                            self.for_shard_id, seqno, self.block_seqno,
+                        )
                     );
-                    all_ranges_fully_read = false;
-                    continue;
+
+                    tracing::trace!(target: tracing_targets::COLLATOR,
+                        seqno,
+                        fully_read = reader_state.fully_read,
+                        range_reader_state = ?DebugExternalsRangeReaderState(reader_state),
+                        "externals reader: try to read externals from range,"
+                    );
+
+                    // remember last existing range
+                    last_seqno = seqno;
+
+                    // skip fully read ranges
+                    if reader_state.fully_read {
+                        continue;
+                    }
+
+                    // on refill skip last range reader created in this block
+                    if read_mode == GetNextMessageGroupMode::Refill && seqno == self.block_seqno {
+                        all_ranges_fully_read = false;
+                        continue;
+                    }
+
+                    // Do not read range until skip offset reached. In any partition.
+                    // Current offset is updated after reading and before importing,
+                    // so if current offset == skip offset here, it will be greater on importing,
+                    // and in this case we need to read messages
+                    if self.reader_state.by_partitions.iter().all(|(par_id, s)| {
+                        s.curr_processed_offset
+                            < reader_state
+                                .partitions()
+                                .get(par_id)
+                                .map(|s| s.skip_offset)
+                                .unwrap_or_default()
+                    }) {
+                        tracing::trace!(target: tracing_targets::COLLATOR,
+                            externals_reader_state = ?DebugIter(self.reader_state.by_partitions.iter()),
+                            "externals reader: skip offset not reached in all partitions",
+                        );
+                        all_ranges_fully_read = false;
+                        continue;
+                    }
                 }
+
+                // Now get mutable access for actual work
+                let reader_state = self.reader_state.ranges_mut().get_mut(&seqno).unwrap();
 
                 // read externals, on refill only up to previous read_to
                 let read_mode =
@@ -745,7 +759,7 @@ impl<'a, 'b> ExternalsReader<'a, 'b> {
         self.reader_state
             .by_partitions
             .get_mut(&par_id)
-            .with_context(|| format!("externals reader state not exists for partition {par_id}"))
+            .with_context(|| format!("externals reader state not exists for partition2 {par_id}"))
     }
 
     pub fn get_state_by_partition<T: Into<QueuePartitionIdx>>(
@@ -756,7 +770,7 @@ impl<'a, 'b> ExternalsReader<'a, 'b> {
         self.reader_state
             .by_partitions
             .get(&par_id)
-            .with_context(|| format!("externals reader state not exists for partition {par_id}"))
+            .with_context(|| format!("externals reader state not exists for partition3 {par_id}"))
     }
 }
 

@@ -1,44 +1,67 @@
 use std::collections::hash_map::Entry;
-use std::sync::Arc;
 
 use anyhow::Context;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
-use tycho_types::models::{IntAddr, ShardIdent};
+use tycho_types::models::ShardIdent;
 use tycho_util::{FastHashMap, FastHashSet};
-use tycho_util_proc::Transactional;
 
 use crate::collator::statistics::queue::TrackedQueueStatistics;
 use crate::internal_queue::types::message::InternalMessageValue;
-use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
+use crate::internal_queue::types::ranges::QueueShardBoundedRange;
 use crate::internal_queue::types::stats::{
     AccountStatistics, DiffStatistics, QueueStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::queue_adapter::MessageQueueAdapter;
-use crate::tracing_targets;
-use crate::types::processed_upto::{Lt, find_min_processed_to_by_shards};
 use crate::types::{ProcessedToByPartitions, Transactional};
 
+#[derive(Clone, Copy)]
+enum ProcessMode {
+    /// Call inside transaction — we do decrement, but retain is delayed
+    Staged,
+    /// Call outside transaction — do both decrement and retain
+    Immediate,
+    /// Call on commit — only retain, decrement was already done
+    CommitRetainOnly,
+}
+
+#[derive(Debug)]
+pub struct QueueStatisticsWithRemaning {
+    pub initial_stats: QueueStatistics,
+    pub remaning_stats: TrackedQueueStatistics,
+}
+
+#[derive(Default)]
 struct CumulativeStatisticsTx {
-    staged_additions: Vec<(QueuePartitionIdx, ShardIdent, QueueKey, AccountStatistics)>,
+    /// Stores added diffs during the transaction
+    added_diffs: Vec<(ShardIdent, QueuePartitionIdx, QueueKey)>,
+
+    /// Stores newly added partitions during the transaction
     new_partitions: FastHashSet<QueuePartitionIdx>,
-    processed_to_backup: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
-    processed_diff_shards: FastHashSet<(ShardIdent, QueuePartitionIdx, QueueKey, ShardIdent)>,
+
+    /// Snapshot of `all_shards_processed_to_by_partitions` at the start of the transaction
+    all_shards_processed_to_by_partitions: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
+
+    /// Stores processed_to updates during the transaction
+    processed_updates: FastHashMap<ShardIdent, ProcessedToByPartitions>,
 }
 
 pub struct CumulativeStatistics {
     /// Cumulative statistics created for this shard. When reader reads messages, it decrements `remaining messages`
     /// Another shard stats can be decremented only by calling `update_processed_to_by_partitions`
     for_shard: ShardIdent,
+
     /// Actual processed to info for master and all shards
     all_shards_processed_to_by_partitions: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
 
     /// Stores per-shard statistics, keyed by `ShardIdent`.
+    /// ShardIdent is the source shard of the diff statistics
     /// Each shard has a `FastHashMap<QueuePartitionIdx, BTreeMap<QueueKey, AccountStatistics>>`
     shards_stats_by_partitions: FastHashMap<ShardIdent, SeparatedStatisticsByPartitions>,
 
     /// The final aggregated statistics (across all shards) by partitions.
     result: FastHashMap<QueuePartitionIdx, QueueStatisticsWithRemaning>,
 
+    /// Transactional state
     tx: Option<CumulativeStatisticsTx>,
 }
 
@@ -47,43 +70,60 @@ impl Transactional for CumulativeStatistics {
         assert!(self.tx.is_none(), "transaction already in progress");
 
         self.tx = Some(CumulativeStatisticsTx {
-            staged_additions: Vec::new(),
-            new_partitions: FastHashSet::default(),
-            processed_to_backup: self.all_shards_processed_to_by_partitions.clone(),
-            processed_diff_shards: FastHashSet::default(),
+            all_shards_processed_to_by_partitions: self
+                .all_shards_processed_to_by_partitions
+                .clone(),
+            ..Default::default()
         });
 
         for stats in self.result.values_mut() {
+            stats.initial_stats.begin();
             stats.remaning_stats.begin();
         }
     }
 
     fn commit(&mut self) {
-        let Some(tx) = self.tx.take() else { return };
+        let Some(tx) = self.tx.take() else {
+            panic!("no transaction in progress")
+        };
 
+        // Commit stats changes
         for stats in self.result.values_mut() {
             stats.initial_stats.commit();
             stats.remaning_stats.commit();
         }
 
-        for (partition, diff_shard, diff_max_message, diff_partition_stats) in tx.staged_additions {
-            self.shards_stats_by_partitions
-                .entry(diff_shard)
-                .or_default()
-                .entry(partition)
-                .or_default()
-                .insert(diff_max_message, diff_partition_stats);
+        for (dst_shard, processed_to) in &tx.processed_updates {
+            Self::process_processed_to_update(
+                &mut self.result,
+                &mut self.shards_stats_by_partitions,
+                &self.for_shard,
+                dst_shard,
+                processed_to,
+                ProcessMode::CommitRetainOnly,
+            )
+        }
+    }
+
+    fn rollback(&mut self) {
+        let Some(tx) = self.tx.take() else { return };
+
+        // Rollback result
+        for stats in self.result.values_mut() {
+            stats.initial_stats.rollback();
+            stats.remaning_stats.rollback();
         }
 
-        for (src_shard, partition, diff_max_message, dst_shard) in tx.processed_diff_shards {
-            if let Some(shard_stats) = self.shards_stats_by_partitions.get_mut(&src_shard) {
+        // Remove added partitions
+        for partition in tx.new_partitions {
+            self.result.remove(&partition);
+        }
+
+        // Remove added diffs
+        for (diff_shard, partition, diff_max_message) in tx.added_diffs {
+            if let Some(shard_stats) = self.shards_stats_by_partitions.get_mut(&diff_shard) {
                 if let Some(partition_stats) = shard_stats.get_mut(&partition) {
-                    if let Some(diff_stats) = partition_stats.get_mut(&diff_max_message) {
-                        diff_stats.retain(|acc, _| !dst_shard.contains_address(acc));
-                        if diff_stats.is_empty() {
-                            partition_stats.remove(&diff_max_message);
-                        }
-                    }
+                    partition_stats.remove(&diff_max_message);
                 }
             }
         }
@@ -92,66 +132,9 @@ impl Transactional for CumulativeStatistics {
             by_partitions.retain(|_, diffs| !diffs.is_empty());
             !by_partitions.is_empty()
         });
-    }
 
-    // pub fn commit_affected(&mut self, affected: impl Iterator<Item = IntAddr>) {
-    //     let affected: Vec<_> = affected.into_iter().collect();
-    //
-    //     for stats in self.result.values_mut() {
-    //         stats.initial_stats.commit(affected.iter().cloned());
-    //         stats.remaning_stats.commit(affected.iter().cloned());
-    //     }
-    //
-    //     for (partition, diff_shard, diff_max_message, diff_partition_stats) in
-    //         self.staged_additions.drain(..)
-    //     {
-    //         self.shards_stats_by_partitions
-    //             .entry(diff_shard)
-    //             .or_default()
-    //             .entry(partition)
-    //             .or_default()
-    //             .insert(diff_max_message, diff_partition_stats);
-    //     }
-    //
-    //     for (src_shard, partition, diff_max_message, dst_shard) in
-    //         self.processed_diff_shards.drain()
-    //     {
-    //         if let Some(shard_stats) = self.shards_stats_by_partitions.get_mut(&src_shard) {
-    //             if let Some(partition_stats) = shard_stats.get_mut(&partition) {
-    //                 if let Some(diff_stats) = partition_stats.get_mut(&diff_max_message) {
-    //                     diff_stats.retain(|acc, _| !dst_shard.contains_address(acc));
-    //                     if diff_stats.is_empty() {
-    //                         partition_stats.remove(&diff_max_message);
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-    //
-    //     self.shards_stats_by_partitions.retain(|_, by_partitions| {
-    //         by_partitions.retain(|_, diffs| !diffs.is_empty());
-    //         !by_partitions.is_empty()
-    //     });
-    //
-    //     self.processed_to_backup = None;
-    //     self.new_partitions.clear();
-    // }
-    //
-
-    fn rollback(&mut self) {
-        let Some(tx) = self.tx.take() else { return };
-
-        for stats in self.result.values_mut() {
-            // TODO rollback should use only affected accounts
-            stats.initial_stats.rollback();
-            stats.remaning_stats.rollback();
-        }
-
-        for partition in tx.new_partitions {
-            self.result.remove(&partition);
-        }
-
-        self.all_shards_processed_to_by_partitions = tx.processed_to_backup;
+        // Restore processed_to info
+        self.all_shards_processed_to_by_partitions = tx.all_shards_processed_to_by_partitions;
     }
 
     fn is_in_transaction(&self) -> bool {
@@ -176,37 +159,21 @@ impl CumulativeStatistics {
         }
     }
 
-    /// Create range and full load statistics and store it
-    pub fn load<V: InternalMessageValue>(
+    /// Load diff statistics for the specified ranges and partitions
+    pub fn load_ranges<V: InternalMessageValue>(
         &mut self,
-        mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
+        mq_adapter: &dyn MessageQueueAdapter<V>,
         partitions: &FastHashSet<QueuePartitionIdx>,
-        prev_state_gen_lt: Lt,
-        mc_state_gen_lt: Lt,
-        mc_top_shards_end_lts: &FastHashMap<ShardIdent, Lt>,
+        ranges: &[QueueShardBoundedRange],
     ) -> anyhow::Result<()> {
-        let ranges = Self::compute_cumulative_stats_ranges(
-            &self.for_shard,
-            &self.all_shards_processed_to_by_partitions,
-            prev_state_gen_lt,
-            mc_state_gen_lt,
-            mc_top_shards_end_lts,
-        );
-
-        tracing::trace!(
-            target: tracing_targets::COLLATOR,
-            "cumulative_stats_ranges: {:?}",
-            ranges
-        );
-
         for range in ranges {
             let stats_by_partitions = mq_adapter
-                .load_separated_diff_statistics(partitions, &range)
+                .load_separated_diff_statistics(partitions, range)
                 .with_context(|| format!("partitions: {partitions:?}; range: {range:?}"))?;
 
             for (partition, partition_stats) in stats_by_partitions {
                 for (diff_max_message, diff_partition_stats) in partition_stats {
-                    self.apply(
+                    self.apply_diff(
                         partition,
                         range.shard_ident,
                         diff_max_message,
@@ -215,41 +182,6 @@ impl CumulativeStatistics {
                 }
             }
         }
-
-        Ok(())
-    }
-
-    /// Partially loads diff statistics for the given ranges.
-    /// Automatically applies `processed_to` filtering and updates internal state.
-    pub fn load_partial<V: InternalMessageValue>(
-        &mut self,
-        mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-        partitions: &FastHashSet<QueuePartitionIdx>,
-        ranges: Vec<QueueShardBoundedRange>,
-    ) -> anyhow::Result<()> {
-        tracing::trace!(
-            target: tracing_targets::COLLATOR,
-            "cumulative_stats_partial_ranges: {:?}",
-            ranges
-        );
-
-        for range in ranges {
-            let stats_by_partitions = mq_adapter
-                .load_separated_diff_statistics(partitions, &range)
-                .with_context(|| format!("partitions: {partitions:?}; range: {range:?}"))?;
-
-            for (partition, partition_stats) in stats_by_partitions {
-                for (diff_max_message, diff_partition_stats) in partition_stats {
-                    self.apply(
-                        partition,
-                        range.shard_ident,
-                        diff_max_message,
-                        diff_partition_stats,
-                    );
-                }
-            }
-        }
-
         Ok(())
     }
 
@@ -257,198 +189,71 @@ impl CumulativeStatistics {
     /// processed data
     pub fn update_processed_to_by_partitions(
         &mut self,
-        new_pt: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
+        new_processed_to_by_shards: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
     ) {
-        if self.all_shards_processed_to_by_partitions == new_pt {
+        if self.all_shards_processed_to_by_partitions == new_processed_to_by_shards {
             return;
         }
-        for (&dst_shard, (_, processed_to)) in &new_pt {
+
+        for (dst_shard, (_, new_processed_to)) in &new_processed_to_by_shards {
             let changed = match self.all_shards_processed_to_by_partitions.get(&dst_shard) {
-                Some((_, old_pt)) => old_pt != processed_to,
+                Some((_, old_processed_to)) => old_processed_to != new_processed_to,
                 None => true,
             };
 
             if changed {
-                self.handle_processed_to_update(dst_shard, processed_to.clone());
+                self.handle_processed_to_update(dst_shard, new_processed_to);
             }
         }
 
-        self.all_shards_processed_to_by_partitions = new_pt;
+        self.all_shards_processed_to_by_partitions = new_processed_to_by_shards;
     }
 
-    pub(crate) fn compute_cumulative_stats_ranges(
-        current_shard: &ShardIdent,
-        all_shards_processed_to_by_partitions: &FastHashMap<
-            ShardIdent,
-            (bool, ProcessedToByPartitions),
-        >,
-        prev_state_gen_lt: Lt,
-        mc_state_gen_lt: Lt,
-        mc_top_shards_end_lts: &FastHashMap<ShardIdent, Lt>,
-    ) -> Vec<QueueShardBoundedRange> {
-        let mut ranges = vec![];
-
-        let from_ranges = find_min_processed_to_by_shards(all_shards_processed_to_by_partitions);
-
-        for (shard_ident, from) in from_ranges {
-            let to_lt = if shard_ident.is_masterchain() {
-                mc_state_gen_lt
-            } else if shard_ident == *current_shard {
-                prev_state_gen_lt
-            } else {
-                *mc_top_shards_end_lts.get(&shard_ident).unwrap()
-            };
-
-            let to = Bound::Included(QueueKey::max_for_lt(to_lt));
-
-            ranges.push(QueueShardBoundedRange {
-                shard_ident,
-                from: Bound::Excluded(from),
-                to,
-            });
-        }
-
-        ranges
-    }
-
-    fn apply(
+    /// Handle processed to update for a specific shard.
+    pub fn handle_processed_to_update(
         &mut self,
-        partition: QueuePartitionIdx,
-        diff_shard: ShardIdent,
-        diff_max_message: QueueKey,
-        mut diff_partition_stats: AccountStatistics,
+        dst_shard: &ShardIdent,
+        processed_to: &ProcessedToByPartitions,
     ) {
-        for (dst_shard, (_, shard_processed_to_by_partitions)) in
-            &self.all_shards_processed_to_by_partitions
-        {
-            if let Some(partition_processed_to) = shard_processed_to_by_partitions.get(&partition) {
-                if let Some(to_key) = partition_processed_to.get(&diff_shard) {
-                    if diff_max_message <= *to_key {
-                        diff_partition_stats
-                            .retain(|dst_acc, _| !dst_shard.contains_address(dst_acc));
-                    }
-                }
-            }
-        }
+        let in_tx = self.is_in_transaction();
 
-        let entry = if let Some(tx) = &mut self.tx {
-            match self.result.entry(partition) {
-                Entry::Vacant(e) => {
-                    tx.new_partitions.insert(partition);
-                    e.insert(QueueStatisticsWithRemaning {
-                        initial_stats: QueueStatistics::default(),
-                        remaning_stats: TrackedQueueStatistics::new(self.for_shard),
-                    })
-                }
-                Entry::Occupied(e) => e.into_mut(),
-            }
-        } else {
-            self.result
-                .entry(partition)
-                .or_insert_with(|| QueueStatisticsWithRemaning {
-                    initial_stats: QueueStatistics::default(),
-                    remaning_stats: TrackedQueueStatistics::new(self.for_shard),
-                })
-        };
-
-        entry.initial_stats.append(&diff_partition_stats);
-        entry.remaning_stats.append(&diff_partition_stats);
+        Self::process_processed_to_update(
+            &mut self.result,
+            &mut self.shards_stats_by_partitions,
+            &self.for_shard,
+            dst_shard,
+            processed_to,
+            if in_tx {
+                ProcessMode::Staged
+            } else {
+                ProcessMode::Immediate
+            },
+        );
 
         if let Some(tx) = &mut self.tx {
-            tx.staged_additions.push((
-                partition,
-                diff_shard,
-                diff_max_message,
-                diff_partition_stats,
-            ));
-        } else {
-            self.shards_stats_by_partitions
-                .entry(diff_shard)
-                .or_default()
-                .entry(partition)
-                .or_default()
-                .insert(diff_max_message, diff_partition_stats);
+            tx.processed_updates
+                .insert(*dst_shard, processed_to.clone());
         }
+
+        self.all_shards_processed_to_by_partitions
+            .insert(*dst_shard, (true, processed_to.clone()));
     }
 
-    pub fn add_diff_stats(
+    /// Apply diff statistics to cumulative stats.
+    pub fn apply_diff_stats(
         &mut self,
         diff_shard: ShardIdent,
         diff_max_message: QueueKey,
         diff_stats: DiffStatistics,
     ) {
-        let tx = self.tx.as_mut().expect("transaction required");
-
         for (&partition, diff_partition_stats) in diff_stats.iter() {
-            let entry = match self.result.entry(partition) {
-                Entry::Vacant(e) => {
-                    tx.new_partitions.insert(partition);
-                    e.insert(QueueStatisticsWithRemaning {
-                        initial_stats: QueueStatistics::default(),
-                        remaning_stats: TrackedQueueStatistics::new(self.for_shard),
-                    })
-                }
-                Entry::Occupied(e) => e.into_mut(),
-            };
-
-            entry.initial_stats.append(diff_partition_stats);
-            entry.remaning_stats.append(diff_partition_stats);
-
-            tx.staged_additions.push((
+            self.apply_diff(
                 partition,
                 diff_shard,
                 diff_max_message,
                 diff_partition_stats.clone(),
-            ));
+            );
         }
-    }
-
-    pub fn handle_processed_to_update(
-        &mut self,
-        dst_shard: ShardIdent,
-        shard_processed_to_by_partitions: ProcessedToByPartitions,
-    ) {
-        let tx = self.tx.as_mut().expect("transaction required");
-
-        for (src_shard, shard_stats_by_partitions) in self.shards_stats_by_partitions.iter() {
-            for (partition, diffs) in shard_stats_by_partitions.iter() {
-                if let Some(partition_processed_to) =
-                    shard_processed_to_by_partitions.get(partition)
-                {
-                    if let Some(to_key) = partition_processed_to.get(src_shard) {
-                        for (diff_max_message, diff_stats) in diffs.iter() {
-                            if diff_max_message > to_key {
-                                break;
-                            }
-
-                            let combo = (*src_shard, *partition, *diff_max_message, dst_shard);
-                            if tx.processed_diff_shards.contains(&combo) {
-                                continue;
-                            }
-
-                            let cumulative_stats = self.result.get_mut(partition).unwrap();
-                            for (dst_acc, count) in diff_stats.iter() {
-                                if dst_shard.contains_address(dst_acc) {
-                                    cumulative_stats
-                                        .initial_stats
-                                        .decrement_for_account(dst_acc.clone(), *count);
-                                    if self.for_shard != dst_shard {
-                                        cumulative_stats
-                                            .remaning_stats
-                                            .decrement_for_account(dst_acc.clone(), *count);
-                                    }
-                                }
-                            }
-
-                            tx.processed_diff_shards.insert(combo);
-                        }
-                    }
-                }
-            }
-        }
-
-        self.all_shards_processed_to_by_partitions
-            .insert(dst_shard, (true, shard_processed_to_by_partitions));
     }
 
     /// Returns a reference to the aggregated stats by partitions.
@@ -477,215 +282,471 @@ impl CumulativeStatistics {
             .map(|stats| stats.remaning_stats.tracked_total())
             .sum()
     }
+
+    // Private methods
+    fn apply_diff(
+        &mut self,
+        partition: QueuePartitionIdx,
+        diff_shard: ShardIdent,
+        diff_max_message: QueueKey,
+        mut diff_partition_stats: AccountStatistics,
+    ) {
+        let mut tx = self.tx.as_mut();
+
+        for (dst_shard, (_, shard_processed_to_by_partitions)) in
+            &self.all_shards_processed_to_by_partitions
+        {
+            if let Some(partition_processed_to) = shard_processed_to_by_partitions.get(&partition) {
+                if let Some(to_key) = partition_processed_to.get(&diff_shard) {
+                    if diff_max_message <= *to_key {
+                        diff_partition_stats
+                            .retain(|dst_acc, _| !dst_shard.contains_address(dst_acc));
+                    }
+                }
+            }
+        }
+
+        let entry = match self.result.entry(partition) {
+            Entry::Vacant(e) => {
+                if let Some(tx) = &mut tx {
+                    tx.new_partitions.insert(partition);
+                }
+                e.insert(QueueStatisticsWithRemaning {
+                    initial_stats: QueueStatistics::default(),
+                    remaning_stats: TrackedQueueStatistics::new(self.for_shard),
+                })
+            }
+            Entry::Occupied(e) => e.into_mut(),
+        };
+
+        entry.initial_stats.append(&diff_partition_stats);
+        entry.remaning_stats.append(&diff_partition_stats);
+
+        self.shards_stats_by_partitions
+            .entry(diff_shard)
+            .or_default()
+            .entry(partition)
+            .or_default()
+            .insert(diff_max_message, diff_partition_stats);
+
+        if let Some(tx) = tx {
+            tx.added_diffs
+                .push((diff_shard, partition, diff_max_message));
+        }
+    }
+
+    fn process_processed_to_update(
+        result: &mut FastHashMap<QueuePartitionIdx, QueueStatisticsWithRemaning>,
+        shards_stats: &mut FastHashMap<ShardIdent, SeparatedStatisticsByPartitions>,
+        for_shard: &ShardIdent,
+        dst_shard: &ShardIdent,
+        processed_to: &ProcessedToByPartitions,
+        mode: ProcessMode,
+    ) {
+        let do_decrement = matches!(mode, ProcessMode::Staged | ProcessMode::Immediate);
+        let do_retain = matches!(mode, ProcessMode::Immediate | ProcessMode::CommitRetainOnly);
+
+        for (src_shard, shard_stats) in shards_stats.iter_mut() {
+            for (partition, diffs) in shard_stats.iter_mut() {
+                let Some(partition_pt) = processed_to.get(partition) else {
+                    continue;
+                };
+                let Some(to_key) = partition_pt.get(src_shard) else {
+                    continue;
+                };
+
+                for (_, diff_stats) in diffs.range_mut(..=to_key) {
+                    if do_decrement {
+                        let cumulative_stats = result.entry(*partition).or_insert_with(|| {
+                            QueueStatisticsWithRemaning {
+                                initial_stats: QueueStatistics::default(),
+                                remaning_stats: TrackedQueueStatistics::new(*for_shard),
+                            }
+                        });
+
+                        for (dest_addr, count) in diff_stats.iter() {
+                            if dst_shard.contains_address(dest_addr) {
+                                cumulative_stats
+                                    .initial_stats
+                                    .decrement_for_account(dest_addr.clone(), *count);
+                                if for_shard != dst_shard {
+                                    cumulative_stats
+                                        .remaning_stats
+                                        .decrement_for_account(dest_addr.clone(), *count);
+                                }
+                            }
+                        }
+                    }
+                    if do_retain {
+                        diff_stats.retain(|acc, _| !dst_shard.contains_address(acc));
+                    }
+                }
+
+                if do_retain {
+                    diffs.retain(|_, stats| !stats.is_empty());
+                }
+            }
+        }
+
+        if do_retain {
+            shards_stats.retain(|_, by_partitions| {
+                by_partitions.retain(|_, diffs| !diffs.is_empty());
+                !by_partitions.is_empty()
+            });
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use tycho_types::cell::HashBytes;
+    use tycho_types::models::{IntAddr, ShardIdent, StdAddr};
+
     use super::*;
-    use crate::types::ProcessedTo;
 
-    fn addr(workchain: i8, id: u8) -> IntAddr {
-        IntAddr::Std(tycho_types::models::StdAddr::new(
-            workchain,
-            [id; 32].into(),
-        ))
+    // Helper to create a dummy shard
+    fn mock_shard(id: i32) -> ShardIdent {
+        ShardIdent::new_full(id)
     }
 
-    fn diff_statistics(
-        shard: ShardIdent,
-        min_lt: u64,
-        max_lt: u64,
-        parts: Vec<(QueuePartitionIdx, Vec<(IntAddr, u64)>)>,
-    ) -> DiffStatistics {
-        let mut stats: FastHashMap<QueuePartitionIdx, AccountStatistics> = Default::default();
-        for (partition, entries) in parts {
-            let mut partition_stats = AccountStatistics::default();
-            for (address, count) in entries {
-                partition_stats.insert(address, count);
-            }
-            stats.insert(partition, partition_stats);
-        }
-
-        DiffStatistics::new(
-            shard,
-            QueueKey::min_for_lt(min_lt),
-            QueueKey::min_for_lt(max_lt),
-            stats,
-        )
-    }
-
-    fn processed_to_by_partitions(
-        parts: Vec<(QueuePartitionIdx, Vec<(ShardIdent, QueueKey)>)>,
-    ) -> ProcessedToByPartitions {
-        let mut res = ProcessedToByPartitions::default();
-        for (partition, entries) in parts {
-            let mut processed_to = ProcessedTo::default();
-            for (shard, key) in entries {
-                processed_to.insert(shard, key);
-            }
-            res.insert(partition, processed_to);
-        }
-        res
+    fn mock_addr(id: i8) -> IntAddr {
+        IntAddr::Std(StdAddr::new(id, HashBytes::default()))
     }
 
     #[test]
-    fn test_compute_cumulative_stats_ranges_uses_min_processed_to_and_lts() {
-        let current_shard = ShardIdent::new_full(0);
-        let other_shard = ShardIdent::new_full(1);
-        let partition0 = QueuePartitionIdx(0);
-        let partition1 = QueuePartitionIdx(1);
+    fn test_apply_diff_and_result_consistency() {
+        // GIVEN: A CumulativeStatistics instance
+        let current_shard = mock_shard(1);
+        let mut cs = CumulativeStatistics::new(current_shard, Default::default());
 
-        let by_partitions = processed_to_by_partitions(vec![
-            (partition0, vec![
-                (ShardIdent::MASTERCHAIN, QueueKey::min_for_lt(5)),
-                (current_shard, QueueKey::min_for_lt(11)),
-                (other_shard, QueueKey::min_for_lt(21)),
-            ]),
-            (partition1, vec![
-                (ShardIdent::MASTERCHAIN, QueueKey::min_for_lt(7)),
-                (current_shard, QueueKey::min_for_lt(9)),
-                (other_shard, QueueKey::min_for_lt(25)),
-            ]),
-        ]);
-
-        let mut all_shards = FastHashMap::default();
-        all_shards.insert(current_shard, (true, by_partitions.clone()));
-        all_shards.insert(ShardIdent::MASTERCHAIN, (true, by_partitions));
-
-        let mut mc_top_shards_end_lts = FastHashMap::default();
-        mc_top_shards_end_lts.insert(other_shard, 150);
-
-        let ranges = CumulativeStatistics::compute_cumulative_stats_ranges(
-            &current_shard,
-            &all_shards,
-            100,
-            200,
-            &mc_top_shards_end_lts,
-        );
-
-        assert_eq!(ranges.len(), 3);
-
-        let mc_range = ranges
-            .iter()
-            .find(|range| range.shard_ident == ShardIdent::MASTERCHAIN)
-            .unwrap();
-        assert_eq!(mc_range.from, Bound::Excluded(QueueKey::min_for_lt(5)));
-        assert_eq!(mc_range.to, Bound::Included(QueueKey::max_for_lt(200)));
-
-        let current_range = ranges
-            .iter()
-            .find(|range| range.shard_ident == current_shard)
-            .unwrap();
-        assert_eq!(current_range.from, Bound::Excluded(QueueKey::min_for_lt(9)));
-        assert_eq!(current_range.to, Bound::Included(QueueKey::max_for_lt(100)));
-
-        let other_range = ranges
-            .iter()
-            .find(|range| range.shard_ident == other_shard)
-            .unwrap();
-        assert_eq!(other_range.from, Bound::Excluded(QueueKey::min_for_lt(21)));
-        assert_eq!(other_range.to, Bound::Included(QueueKey::max_for_lt(150)));
-    }
-
-    #[test]
-    fn test_begin_transaction_add_diff_stats_and_rollback() {
-        let for_shard = ShardIdent::new_full(0);
-        let diff_shard = ShardIdent::new_full(1);
-        let partition_a = QueuePartitionIdx(1);
-        let partition_b = QueuePartitionIdx(2);
-        let addr_a = addr(0, 1);
-        let addr_b = addr(1, 2);
-        let addr_c = addr(0, 3);
-
-        let diff_stats = diff_statistics(diff_shard, 1, 2, vec![
-            (partition_a, vec![(addr_a.clone(), 2), (addr_b.clone(), 3)]),
-            (partition_b, vec![(addr_c.clone(), 4)]),
-        ]);
-
-        let mut stats = CumulativeStatistics::new(for_shard, FastHashMap::default());
-        stats.begin_transaction();
-        stats.add_diff_stats(diff_shard, QueueKey::min_for_lt(2), diff_stats);
-
-        let aggregated = stats.get_aggregated_result();
-        assert_eq!(aggregated.statistics().get(&addr_a), Some(2));
-        assert_eq!(aggregated.statistics().get(&addr_b), Some(3));
-        assert_eq!(aggregated.statistics().get(&addr_c), Some(4));
-        assert_eq!(stats.remaining_total_for_own_shard(), 6);
-        assert_eq!(stats.result().len(), 2);
-
-        stats.rollback();
-
-        assert!(stats.result().is_empty());
-        assert_eq!(stats.remaining_total_for_own_shard(), 0);
-        assert!(stats.get_aggregated_result().statistics().is_empty());
-    }
-
-    #[test]
-    fn test_handle_processed_to_update_decrements_and_cleans_stats_on_commit() {
-        let for_shard = ShardIdent::new_full(1);
-        let dst_shard = ShardIdent::new_full(0);
-        let diff_shard = ShardIdent::new_full(2);
         let partition = QueuePartitionIdx(0);
-        let diff_max_message = QueueKey::min_for_lt(10);
-        let addr_dst = addr(0, 1);
-        let addr_keep = addr(1, 2);
+        let from_shard = mock_shard(2);
+        let key = QueueKey::default();
 
-        let diff_stats = diff_statistics(diff_shard, 9, 10, vec![(partition, vec![
-            (addr_dst.clone(), 5),
-            (addr_keep.clone(), 7),
-        ])]);
+        let mut stats = AccountStatistics::default();
+        let addr = IntAddr::default();
+        stats.insert(addr.clone(), 10);
 
-        let mut stats = CumulativeStatistics::new(for_shard, FastHashMap::default());
-        stats.begin_transaction();
-        stats.add_diff_stats(diff_shard, diff_max_message, diff_stats);
-        stats.commit(vec![addr_dst.clone(), addr_keep.clone()].into_iter());
+        // WHEN: Applying a new diff
+        cs.apply_diff(partition, from_shard, key, stats);
 
-        stats.begin_transaction();
-        let mut processed_to = ProcessedToByPartitions::default();
-        let mut per_partition = ProcessedTo::default();
-        per_partition.insert(diff_shard, diff_max_message);
-        processed_to.insert(partition, per_partition);
-
-        stats.handle_processed_to_update(dst_shard, processed_to.clone());
-        stats.handle_processed_to_update(dst_shard, processed_to);
-
-        let partition_stats = stats.result().get(&partition).unwrap();
-        assert_eq!(
-            partition_stats.initial_stats.statistics().get(&addr_dst),
-            None
-        );
-        assert_eq!(
-            partition_stats.initial_stats.statistics().get(&addr_keep),
-            Some(7)
-        );
-        assert_eq!(partition_stats.remaning_stats.get(&addr_dst), None);
-        assert_eq!(partition_stats.remaning_stats.get(&addr_keep), Some(7));
-
-        stats.commit(vec![addr_dst.clone(), addr_keep.clone()].into_iter());
-
-        let partition_stats = stats.result().get(&partition).unwrap();
-        assert_eq!(
-            partition_stats.initial_stats.statistics().get(&addr_dst),
-            None
-        );
-        assert_eq!(
-            partition_stats.initial_stats.statistics().get(&addr_keep),
-            Some(7)
-        );
-        assert_eq!(partition_stats.remaning_stats.get(&addr_dst), None);
-        assert_eq!(partition_stats.remaning_stats.get(&addr_keep), Some(7));
-
-        let shard_stats = stats.shards_stats_by_partitions.get(&diff_shard).unwrap();
-        let partition_stats = shard_stats.get(&partition).unwrap();
-        let diff_stats = partition_stats.get(&diff_max_message).unwrap();
-        assert_eq!(diff_stats.get(&addr_dst), None);
-        assert_eq!(diff_stats.get(&addr_keep), Some(&7));
+        // THEN: Result should reflect the added statistics
+        let res = cs.result().get(&partition).unwrap();
+        assert_eq!(res.initial_stats.total_count(), 10);
+        assert!(cs.shards_stats_by_partitions.contains_key(&from_shard));
     }
-}
 
-//
-#[derive(Debug)]
-pub struct QueueStatisticsWithRemaning {
-    pub initial_stats: QueueStatistics,
-    pub remaning_stats: TrackedQueueStatistics,
+    #[test]
+    fn test_transactional_commit_flow() {
+        // GIVEN: Added data and a started transaction
+        let for_shard = mock_shard(1);
+        let mut cs = CumulativeStatistics::new(for_shard, Default::default());
+
+        let partition = 0.into();
+        let from_shard = mock_shard(2);
+
+        let mut stats = AccountStatistics::default();
+
+        // messages to shard wc1
+        stats.insert(mock_addr(1), 5);
+        // diff created from shard wc2 with messages to wc1
+        cs.apply_diff(partition, from_shard, QueueKey::max_for_lt(10), stats);
+        assert_eq!(
+            cs.result()
+                .get(&partition)
+                .unwrap()
+                .initial_stats
+                .total_count(),
+            5
+        );
+        assert!(
+            !cs.shards_stats_by_partitions
+                .get(&from_shard)
+                .unwrap()
+                .get(&partition)
+                .unwrap()
+                .is_empty()
+        );
+
+        cs.begin();
+
+        // WHEN: Updating processed_to during transaction (Staged mode)
+        let mut pt_map = ProcessedToByPartitions::default();
+        let mut inner = BTreeMap::default();
+        // messages in shard wc2 up to key 10 are processed
+        inner.insert(from_shard, QueueKey::max_for_lt(10));
+        pt_map.insert(partition, inner);
+
+        cs.handle_processed_to_update(&for_shard, &pt_map);
+
+        // THEN: Statistics are decremented, but data is NOT yet removed (no retain)
+        assert_eq!(
+            cs.result()
+                .get(&partition)
+                .unwrap()
+                .initial_stats
+                .total_count(),
+            0
+        );
+        assert!(
+            !cs.shards_stats_by_partitions
+                .get(&from_shard)
+                .unwrap()
+                .get(&partition)
+                .unwrap()
+                .is_empty()
+        );
+
+        // WHEN: Commit is called
+        cs.commit();
+
+        // THEN: Data is physically removed from internal storage via retain
+        assert!(cs.shards_stats_by_partitions.is_empty());
+    }
+
+    #[test]
+    fn test_transactional_rollback_flow() {
+        // GIVEN: Initial state and some changes in transaction
+        let for_shard = mock_shard(1);
+        let from_shard = mock_shard(2);
+        let mut cs = CumulativeStatistics::new(for_shard, Default::default());
+        let partition = 0.into();
+
+        let mut stats = AccountStatistics::default();
+        stats.insert(mock_addr(1), 100);
+        cs.apply_diff(partition, from_shard, QueueKey::max_for_lt(10), stats);
+
+        cs.begin();
+
+        let mut stats = AccountStatistics::default();
+        stats.insert(mock_addr(1), 10);
+        cs.apply_diff(partition, from_shard, QueueKey::max_for_lt(20), stats);
+
+        let mut pt_map = ProcessedToByPartitions::default();
+        let mut inner = BTreeMap::default();
+        inner.insert(from_shard, QueueKey::max_for_lt(10));
+        pt_map.insert(partition, inner);
+
+        assert_eq!(
+            cs.result()
+                .get(&partition)
+                .unwrap()
+                .initial_stats
+                .total_count(),
+            110
+        );
+
+        cs.handle_processed_to_update(&for_shard, &pt_map);
+        assert_eq!(
+            cs.result()
+                .get(&partition)
+                .unwrap()
+                .initial_stats
+                .total_count(),
+            10
+        );
+
+        // WHEN: Rollback is called
+        cs.rollback();
+
+        // THEN: Everything must be restored to pre-transaction state
+        assert_eq!(
+            cs.result()
+                .get(&partition)
+                .unwrap()
+                .initial_stats
+                .total_count(),
+            100
+        );
+        assert!(!cs.shards_stats_by_partitions.is_empty());
+    }
+
+    #[test]
+    fn test_immediate_mode_without_tx() {
+        // GIVEN: No active transaction
+        let for_shard = mock_shard(1);
+        let from_shard = mock_shard(2);
+
+        let mut cs = CumulativeStatistics::new(for_shard, Default::default());
+        let partition = 0.into();
+
+        let dest_addr = mock_addr(1);
+
+        let mut stats = AccountStatistics::default();
+        // send messages to shard wc2
+        stats.insert(dest_addr, 50);
+
+        cs.apply_diff(partition, from_shard, QueueKey::max_for_lt(5), stats);
+
+        assert_eq!(
+            cs.result()
+                .get(&partition)
+                .unwrap()
+                .initial_stats
+                .total_count(),
+            50
+        );
+
+        // WHEN: Updating processed_to (Immediate mode)
+        let mut pt_map = ProcessedToByPartitions::default();
+        let mut inner = BTreeMap::default();
+        inner.insert(from_shard, QueueKey::max_for_lt(5));
+        pt_map.insert(partition, inner);
+
+        cs.handle_processed_to_update(&for_shard, &pt_map);
+
+        // THEN: Both decrement and retain happen immediately
+        assert_eq!(
+            cs.result()
+                .get(&partition)
+                .unwrap()
+                .initial_stats
+                .total_count(),
+            0
+        );
+        assert!(cs.shards_stats_by_partitions.is_empty());
+    }
+
+    #[test]
+    fn test_cascading_retain_logic() {
+        // GIVEN: Multiple nested entries
+        let shard = mock_shard(1);
+        let mut cs = CumulativeStatistics::new(shard, Default::default());
+
+        let mut stats = AccountStatistics::default();
+        stats.insert(mock_addr(1), 1);
+
+        cs.apply_diff(0.into(), shard, QueueKey::max_for_lt(1), stats);
+
+        // WHEN: Setting processed_to to cover the diff
+        let mut pt_map = ProcessedToByPartitions::default();
+        let mut inner = BTreeMap::default();
+        inner.insert(shard, QueueKey::max_for_lt(1));
+        pt_map.insert(0.into(), inner);
+
+        // Immediate update to trigger retain
+        cs.handle_processed_to_update(&shard, &pt_map);
+
+        // THEN: Empty DiffStatistics -> Empty Partition Map -> Empty Shard Map
+        // All levels should be cleaned up by nested retain calls
+        assert!(
+            cs.shards_stats_by_partitions.is_empty(),
+            "Should clean up empty shards"
+        );
+    }
+
+    #[test]
+    fn test_remaning_stats_tracking_and_filters() {
+        // GIVEN: Cumulative stats for Shard 1
+        let for_shard = mock_shard(1);
+        let other_shard = mock_shard(2);
+        let mut cs = CumulativeStatistics::new(for_shard, Default::default());
+        let partition = 0.into();
+
+        let mut stats = AccountStatistics::default();
+        // 10 messages for OUR shard (1)
+        stats.insert(mock_addr(1), 10);
+        // 5 messages for OTHER shard (2)
+        stats.insert(mock_addr(2), 5);
+
+        // WHEN: Applying diff
+        cs.apply_diff(partition, other_shard, QueueKey::max_for_lt(100), stats);
+
+        // THEN:
+        // initial_stats tracks everything (10 + 5 = 15)
+        // remaning_stats.tracked_total only tracks messages for shard 1 (10)
+        let res = cs.result().get(&partition).unwrap();
+        assert_eq!(res.initial_stats.total_count(), 15);
+        assert_eq!(res.remaning_stats.tracked_total(), 10);
+        assert_eq!(cs.remaining_total_for_own_shard(), 10);
+    }
+
+    #[test]
+    fn test_remaning_stats_decrement_logic_for_different_shards() {
+        let for_shard = mock_shard(1);
+        let other_shard = mock_shard(2);
+        let mut cs = CumulativeStatistics::new(for_shard, Default::default());
+        let partition = 0.into();
+
+        let mut stats = AccountStatistics::default();
+        stats.insert(mock_addr(2), 5); // 5 messages for shard 2
+        cs.apply_diff(partition, other_shard, QueueKey::max_for_lt(10), stats);
+
+        // WHEN: Other shard (2) updates its processed_to
+        let mut pt_map = ProcessedToByPartitions::default();
+        let mut inner = BTreeMap::default();
+        inner.insert(other_shard, QueueKey::max_for_lt(10));
+        pt_map.insert(partition, inner);
+
+        cs.handle_processed_to_update(&other_shard, &pt_map);
+
+        // THEN:
+        // 1. initial_stats must be 0 (messages processed)
+        // 2. remaning_stats must ALSO be decremented because for_shard != dst_shard
+        let res = cs.result().get(&partition).unwrap();
+        assert_eq!(res.initial_stats.total_count(), 0);
+
+        // Check that remaning_stats for shard 2's account is also 0
+        assert_eq!(res.remaning_stats.get(&mock_addr(2)), None);
+    }
+
+    #[test]
+    fn test_remaning_stats_no_decrement_for_own_shard() {
+        let for_shard = mock_shard(1);
+        let mut cs = CumulativeStatistics::new(for_shard, Default::default());
+        let partition = 0.into();
+
+        let mut stats = AccountStatistics::default();
+        stats.insert(mock_addr(1), 10); // 10 messages for OUR shard
+        cs.apply_diff(partition, for_shard, QueueKey::max_for_lt(10), stats);
+
+        // WHEN: OUR shard (1) updates its processed_to
+        let mut pt_map = ProcessedToByPartitions::default();
+        let mut inner = BTreeMap::default();
+        inner.insert(for_shard, QueueKey::max_for_lt(10));
+        pt_map.insert(partition, inner);
+
+        cs.handle_processed_to_update(&for_shard, &pt_map);
+
+        // THEN:
+        // 1. initial_stats IS decremented (global watermark moved)
+        // 2. remaning_stats IS NOT decremented (as per `if for_shard != dst_shard` logic)
+        let res = cs.result().get(&partition).unwrap();
+        assert_eq!(res.initial_stats.total_count(), 0);
+        assert_eq!(
+            res.remaning_stats.tracked_total(),
+            10,
+            "Should NOT decrement remaning_stats for own shard"
+        );
+    }
+
+    #[test]
+    fn test_transactional_remaning_stats_rollback() {
+        // GIVEN: initial state
+        let for_shard = mock_shard(1);
+        let mut cs = CumulativeStatistics::new(for_shard, Default::default());
+        let partition = 0.into();
+
+        let mut stats = AccountStatistics::default();
+        stats.insert(mock_addr(1), 50);
+        cs.apply_diff(partition, for_shard, QueueKey::max_for_lt(10), stats);
+
+        assert_eq!(cs.remaining_total_for_own_shard(), 50);
+
+        // WHEN: In transaction we add more and then rollback
+        cs.begin();
+
+        let mut stats_tx = AccountStatistics::default();
+        stats_tx.insert(mock_addr(1), 30);
+        cs.apply_diff(partition, for_shard, QueueKey::max_for_lt(20), stats_tx);
+
+        assert_eq!(cs.remaining_total_for_own_shard(), 80);
+
+        cs.rollback();
+
+        // THEN: remaning_stats should be back to 50
+        assert_eq!(cs.remaining_total_for_own_shard(), 50);
+    }
 }

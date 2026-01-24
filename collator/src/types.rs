@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use anyhow::Result;
-use processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
+pub(crate) use processed_upto::{ProcessedUptoInfoExtension, ProcessedUptoInfoStuff};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::queue::{QueueDiffStuffAug, QueueKey, QueuePartitionIdx};
