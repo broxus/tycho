@@ -9,12 +9,6 @@ rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
 
-[[bench]]
-name = "messages_buffer"
-harness = false
-#path = "benches/messages_buffer.rs"
-required-features = ["bench-helpers"]
-
 [[test]]
 name = "adapter_tests"
 required-features = ["test"]
@@ -76,7 +70,6 @@ tycho-core = { workspace = true, features = ["test"] }
 tycho-network = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
-criterion = { workspace = true }
 
 [features]
 default = []

@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_types::models::{BlockIdShort, IntAddr, MsgsExecutionParams, ShardIdent};
+use tycho_util::transactional_types::Transactional;
 
+use crate::collator::MsgsExecutionParamsStuff;
 use crate::collator::anchors_cache::AnchorsCacheTransaction;
 use crate::collator::messages_buffer::{MessageGroup, MessagesBufferLimits};
 use crate::collator::messages_reader::state::ReaderState;
@@ -15,7 +17,6 @@ use crate::collator::messages_reader::{
     InternalsPartitionReader,
 };
 use crate::collator::types::AnchorsCache;
-use crate::collator::{MsgsExecutionParamsStuff, Transactional};
 use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::internal_queue::types::router::PartitionRouter;
 use crate::mempool::make_stub_anchor;
@@ -103,11 +104,11 @@ fn test_read_externals() {
     });
 
     let mut reader_state = ReaderState::new(&ProcessedUptoInfoStuff::default());
-    reader_state.internals.partitions.insert(
+    reader_state.internals.tx_partitions_mut().insert(
         QueuePartitionIdx(0),
         InternalsPartitionReaderState::default(),
     );
-    reader_state.internals.partitions.insert(
+    reader_state.internals.tx_partitions_mut().insert(
         QueuePartitionIdx(1),
         InternalsPartitionReaderState::default(),
     );
@@ -793,7 +794,7 @@ fn test_read_externals() {
 
     assert!(!externals_reader.reader_state.ranges().contains_key(&1));
 
-    let mut range_state = externals_reader
+    let range_state = externals_reader
         .reader_state
         .ranges_mut()
         .get_mut(&2)

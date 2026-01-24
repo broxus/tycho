@@ -4,10 +4,11 @@ use rayon::iter::IntoParallelIterator;
 use tycho_block_util::queue::QueueKey;
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{ExtInMsgInfo, IntMsgInfo, MsgInfo};
+use tycho_util::transactional_types::Transactional;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use super::types::ParsedMessage;
-use crate::types::{DebugIter, DisplayIter, SaturatingAddAssign, Transactional};
+use crate::types::{DebugIter, DisplayIter, SaturatingAddAssign};
 
 #[cfg(test)]
 #[path = "tests/messages_buffer_tests.rs"]
@@ -68,6 +69,7 @@ impl Transactional for MessagesBuffer {
     }
 
     fn commit(&mut self) {
+        assert!(self.tx.is_some(), "no active transaction to commit");
         self.tx = None;
         self.msgs.retain(|_, entry| {
             entry.old_val = None;
@@ -78,7 +80,7 @@ impl Transactional for MessagesBuffer {
 
     fn rollback(&mut self) {
         let Some(snapshot) = self.tx.take() else {
-            return;
+            panic!("no active transaction to rollback")
         };
 
         self.msgs.retain(|_, entry| {
@@ -1356,17 +1358,17 @@ mod transaction_tests {
     // ==================== EDGE CASES ====================
 
     #[test]
-    fn test_rollback_without_begin_is_noop() {
+    #[should_panic(expected = "no active transaction to rollback")]
+    fn test_rollback_without_begin_panics() {
         let mut buffer = MessagesBuffer::default();
-        let acc = account(1);
-
-        buffer.add_message(make_test_int_message(acc, 100));
-
-        // Rollback without begin should do nothing
         buffer.rollback();
+    }
 
-        assert_eq!(buffer.int_count, 1);
-        assert_eq!(buffer.account_messages_count(&acc), 1);
+    #[test]
+    #[should_panic(expected = "no active transaction to commit")]
+    fn test_commit_without_begin_panics() {
+        let mut buffer = MessagesBuffer::default();
+        buffer.commit();
     }
 
     #[test]
