@@ -19,7 +19,7 @@ pub struct ExternalsReaderState {
     /// Ranges will be extracted during collation process.
     /// Should access them only before collation and after reader finalization.
     #[tx(collection)]
-    pub ranges: BTreeMap<BlockSeqno, ExternalsRangeReaderState>,
+    ranges: BTreeMap<BlockSeqno, ExternalsRangeReaderState>,
 
     /// Partition related externals reader state
     pub by_partitions: BTreeMap<QueuePartitionIdx, ExternalsPartitionReaderState>,
