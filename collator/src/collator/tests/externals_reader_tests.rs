@@ -11,7 +11,7 @@ use crate::collator::messages_buffer::{MessageGroup, MessagesBufferLimits};
 use crate::collator::messages_reader::state::ReaderState;
 use crate::collator::messages_reader::state::ext::ExternalKey;
 use crate::collator::messages_reader::state::ext::partition_reader::ExternalsPartitionReaderState;
-use crate::collator::messages_reader::state::internal::InternalsPartitionReaderState;
+use crate::collator::messages_reader::state::int::partition_reader::InternalsPartitionReaderState;
 use crate::collator::messages_reader::{
     CollectExternalsResult, DisplayMessageGroup, ExternalsReader, GetNextMessageGroupMode,
     InternalsPartitionReader,
