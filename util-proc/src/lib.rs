@@ -3,6 +3,7 @@ use quote::quote;
 
 mod derive_partial_config;
 mod derive_transactional;
+
 mod internals {
     pub mod ast;
     pub mod attr;

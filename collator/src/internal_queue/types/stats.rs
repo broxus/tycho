@@ -4,10 +4,10 @@ use std::sync::Arc;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_types::models::{IntAddr, ShardIdent};
 use tycho_util::FastHashMap;
+use tycho_util::transactional_types::Transactional;
 
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::InternalMessageValue;
-use crate::types::Transactional;
 
 pub type AccountStatistics = FastHashMap<IntAddr, u64>;
 pub type StatisticsByPartitions = FastHashMap<QueuePartitionIdx, AccountStatistics>;
@@ -368,15 +368,15 @@ struct DiffStatisticsInner {
 
 #[cfg(test)]
 mod tests {
+    use tycho_util::FastHashMap;
+
+    use super::*;
+
     impl QueueStatistics {
         pub fn total_count(&self) -> u64 {
             self.statistics.values().map(|v| v.current()).sum()
         }
     }
-
-    use tycho_util::FastHashMap;
-
-    use super::*;
 
     fn addr(id: u8) -> IntAddr {
         IntAddr::Std(tycho_types::models::StdAddr::new(0, [id; 32].into()))

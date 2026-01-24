@@ -23,8 +23,6 @@ use crate::validator::ValidationSessionId;
 
 pub mod processed_upto;
 
-pub use crate::collator::{Transactional, TransactionalCollection};
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialConfig)]
 #[serde(default)]
 pub struct CollatorConfig {

@@ -20,6 +20,7 @@ use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::CancellationFlag;
 use tycho_util::time::now_millis;
+use tycho_util::transactional_types::Transactional;
 
 use super::types::{
     AnchorInfo, AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
@@ -42,7 +43,7 @@ use crate::tracing_targets;
 use crate::types::processed_upto::{
     build_all_shards_processed_to_by_partitions, find_min_processed_to_by_shards,
 };
-use crate::types::{BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig, DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort, ShardDescriptionShortExt, ShardPair, TopBlockDescription, TopBlockId, TopShardBlockInfo, Transactional};
+use crate::types::{BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig, DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort, ShardDescriptionShortExt, ShardPair, TopBlockDescription, TopBlockId, TopShardBlockInfo};
 
 #[cfg(test)]
 #[path = "../tests/do_collate_tests.rs"]
@@ -280,7 +281,7 @@ impl CollatorStdImpl {
 
         let int_queue_len = reader_state
             .internals
-            .cumulative_statistics
+            .cumulative_statistics()
             .as_ref()
             .map(|cumulative_stats| cumulative_stats.remaining_total_for_own_shard());
 

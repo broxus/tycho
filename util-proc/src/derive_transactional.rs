@@ -80,16 +80,18 @@ pub fn impl_transactional(input: DeriveInput) -> Result<TokenStream, syn::Error>
             });
 
             begin_calls.push(quote! {
-                crate::types::TransactionalCollection::begin_all(&mut self.#field_name);
+                tycho_util::transactional_types::TransactionalCollection::begin_all(&mut self.#field_name);
             });
 
             commit_calls.push(quote! {
-                crate::types::TransactionalCollection::commit_all(&mut self.#field_name);
+                tycho_util::transactional_types::TransactionalCollection::commit_all(&mut self.#field_name);
             });
 
             rollback_calls.push(quote! {
                 for (_, value) in self.#field_name.iter_mut() {
-                    crate::types::Transactional::rollback(value);
+                    if tycho_util::transactional_types::Transactional::is_in_transaction(value) {
+                        tycho_util::transactional_types::Transactional::rollback(value);
+                    }
                 }
                 for key in tx.#added_name {
                     self.#field_name.remove(&key);
@@ -136,27 +138,55 @@ pub fn impl_transactional(input: DeriveInput) -> Result<TokenStream, syn::Error>
             });
         } else if is_transactional {
             if is_option_type(field_type) {
-                let was_some_name = format_ident!("was_some_{}", field_name);
-                tx_fields.push(quote! { #was_some_name: bool });
-                begin_init.push(quote! { #was_some_name: self.#field_name.is_some() });
-                begin_calls
-                    .push(quote! { crate::types::Transactional::begin(&mut self.#field_name); });
-                commit_calls
-                    .push(quote! { crate::types::Transactional::commit(&mut self.#field_name); });
+                let snapshot_name = format_ident!("snapshot_{}", field_name);
+                let set_method = format_ident!("tx_set_{}", field_name);
+
+                // Option<Option<T>> (outer: snapshot taken; inner: original value)
+                tx_fields.push(quote! { #snapshot_name: Option<#field_type> });
+                begin_init.push(quote! { #snapshot_name: None });
+
+                // begin(): only affects existing Some(T); if None, it's a no-op
+                begin_calls.push(quote! {
+                    tycho_util::transactional_types::Transactional::begin(&mut self.#field_name);
+                });
+
+                commit_calls.push(quote! {
+                    if let Some(tx) = &self.#tx_field_name {
+                        if tx.#snapshot_name.is_none() {
+                            tycho_util::transactional_types::Transactional::commit(&mut self.#field_name);
+                        }
+                    }
+                });
+
                 rollback_calls.push(quote! {
-                    if !tx.#was_some_name {
-                        self.#field_name = None;
+                    if let Some(snapshot) = tx.#snapshot_name {
+                        self.#field_name = snapshot;
+                        // clear possible tx-state if restored value is Some(T) and had begun
+                        if tycho_util::transactional_types::Transactional::is_in_transaction(&self.#field_name) {
+                            tycho_util::transactional_types::Transactional::rollback(&mut self.#field_name);
+                        }
                     } else {
-                        crate::types::Transactional::rollback(&mut self.#field_name);
+                        tycho_util::transactional_types::Transactional::rollback(&mut self.#field_name);
+                    }
+                });
+
+                helper_methods.push(quote! {
+                    pub fn #set_method(&mut self, new: #field_type) {
+                        if let Some(tx) = &mut self.#tx_field_name {
+                            if tx.#snapshot_name.is_none() {
+                                tx.#snapshot_name = Some(self.#field_name.take());
+                            }
+                        }
+                        self.#field_name = new;
                     }
                 });
             } else {
                 begin_calls
-                    .push(quote! { crate::types::Transactional::begin(&mut self.#field_name); });
+                    .push(quote! { tycho_util::transactional_types::Transactional::begin(&mut self.#field_name); });
                 commit_calls
-                    .push(quote! { crate::types::Transactional::commit(&mut self.#field_name); });
+                    .push(quote! { tycho_util::transactional_types::Transactional::commit(&mut self.#field_name); });
                 rollback_calls
-                    .push(quote! { crate::types::Transactional::rollback(&mut self.#field_name); });
+                    .push(quote! { tycho_util::transactional_types::Transactional::rollback(&mut self.#field_name); });
             }
         } else {
             let snapshot_name = format_ident!("snapshot_{}", field_name);
@@ -181,7 +211,7 @@ pub fn impl_transactional(input: DeriveInput) -> Result<TokenStream, syn::Error>
     Ok(quote! {
         #tx_struct
 
-        impl #impl_generics crate::types::Transactional for #name #ty_generics #where_clause {
+        impl #impl_generics tycho_util::transactional_types::Transactional for #name #ty_generics #where_clause {
             fn begin(&mut self) {
                 assert!(self.#tx_field_name.is_none(), "transaction already in progress");
                 self.#tx_field_name = Some(#tx_init);
@@ -189,13 +219,15 @@ pub fn impl_transactional(input: DeriveInput) -> Result<TokenStream, syn::Error>
             }
 
             fn commit(&mut self) {
-                if self.#tx_field_name.is_none() { return; }
+                assert!(self.#tx_field_name.is_some(), "no active transaction to commit");
                 #(#commit_calls)*
                 self.#tx_field_name = None;
             }
 
             fn rollback(&mut self) {
-                let Some(tx) = self.#tx_field_name.take() else { return };
+                let Some(tx) = self.#tx_field_name.take() else {
+                    panic!("no active transaction to rollback")
+                };
                 #(#rollback_calls)*
                 #(#rollback_restore)*
             }

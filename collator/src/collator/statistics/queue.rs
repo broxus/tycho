@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, MutexGuard};
 use tycho_types::models::{IntAddr, ShardIdent};
+use tycho_util::transactional_types::Transactional;
 
 use crate::internal_queue::types::stats::{AccountStatistics, QueueStatistics};
-use crate::types::Transactional;
 
 #[derive(Debug, Clone)]
 pub struct TrackedQueueStatistics {
