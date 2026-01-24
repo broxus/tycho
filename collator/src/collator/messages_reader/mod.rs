@@ -28,7 +28,9 @@ use crate::collator::statistics::cumulative::CumulativeStatistics;
 use crate::collator::statistics::queue::TrackedQueueStatistics;
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::InternalMessageValue;
-use crate::internal_queue::types::ranges::QueueShardBoundedRange;
+use crate::internal_queue::types::ranges::{
+    QueueShardBoundedRange, compute_cumulative_stats_ranges,
+};
 use crate::internal_queue::types::router::PartitionRouter;
 use crate::internal_queue::types::stats::{DiffStatistics, QueueStatistics};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -155,22 +157,26 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
                         );
 
                         // partial load statistics and enrich current value
-                        prev.load_partial(mq_adapter.clone(), &partitions, part_stat_ranges)?;
+                        prev.load_ranges(mq_adapter.as_ref(), &partitions, &part_stat_ranges)?;
                     }
                     _ => {
                         cumulative_stats_just_loaded = true;
 
-                        let mut stat = CumulativeStatistics::new(
-                            cx.for_shard_id,
-                            params.all_shards_processed_to_by_partitions.clone(),
-                        );
-                        stat.load(
-                            mq_adapter.clone(),
-                            &partitions,
+                        // load full cumulative statistics
+                        let ranges = compute_cumulative_stats_ranges(
+                            &cx.for_shard_id,
+                            &params.all_shards_processed_to_by_partitions,
                             cx.prev_state_gen_lt,
                             cx.mc_state_gen_lt,
                             &cx.mc_top_shards_end_lts.iter().copied().collect(),
-                        )?;
+                        );
+
+                        let mut stat = CumulativeStatistics::new(
+                            cx.for_shard_id,
+                            params.all_shards_processed_to_by_partitions,
+                        );
+
+                        stat.load_ranges(mq_adapter.as_ref(), &partitions, &ranges)?;
 
                         *cumulative_statistics = Some(stat);
                     }
@@ -433,7 +439,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
 
             // reduce stats of processed diffs
             internal_queue_statistics
-                .handle_processed_to_update(self.for_shard_id, shard_processed_to_by_partitions);
+                .handle_processed_to_update(&self.for_shard_id, &shard_processed_to_by_partitions);
 
             log_cumulative_remaining_msgs_stats(
                 internal_queue_statistics,
@@ -514,7 +520,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
             );
 
             // add new diff stats to cumulative stats
-            internal_queue_statistics.add_diff_stats(
+            internal_queue_statistics.apply_diff_stats(
                 self.for_shard_id,
                 *queue_diff_msgs_stats.max_message(),
                 queue_diff_msgs_stats,

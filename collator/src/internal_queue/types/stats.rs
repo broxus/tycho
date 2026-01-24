@@ -368,6 +368,12 @@ struct DiffStatisticsInner {
 
 #[cfg(test)]
 mod tests {
+    impl QueueStatistics {
+        pub fn total_count(&self) -> u64 {
+            self.statistics.values().map(|v| v.current()).sum()
+        }
+    }
+
     use tycho_util::FastHashMap;
 
     use super::*;
