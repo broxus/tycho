@@ -662,6 +662,7 @@ impl MessagesBuffer {
         if !filter.can_skip() {
             return;
         }
+
         self.backup_account(account_id);
 
         if let Some(entry) = self.msgs.get_mut(account_id) {
@@ -1127,6 +1128,7 @@ impl std::fmt::Debug for DebugMessagesBuffer<'_> {
 #[cfg(test)]
 mod transaction_tests {
     use tycho_types::cell::{Cell, HashBytes};
+    use tycho_types::models::{IntAddr, StdAddr};
 
     use super::*;
 
@@ -1139,8 +1141,11 @@ mod transaction_tests {
 
     // Helper to create a test internal message
     fn make_test_int_message(account_id: HashBytes, lt: u64) -> ParsedMessage {
+        let mut msg = IntMsgInfo::default();
+        msg.created_lt = lt;
+        msg.dst = IntAddr::Std(StdAddr::new(0, account_id));
         ParsedMessage::new(
-            MsgInfo::Int(IntMsgInfo::default()),
+            MsgInfo::Int(msg),
             false,
             Cell::default(),
             None,
@@ -1152,14 +1157,16 @@ mod transaction_tests {
 
     // Helper to create a test external message
     fn make_test_ext_message(account_id: HashBytes, chain_time: u64) -> ParsedMessage {
+        let mut msg = ExtInMsgInfo::default();
+        msg.dst = IntAddr::Std(StdAddr::new(0, account_id));
         ParsedMessage::new(
-            MsgInfo::ExtIn(ExtInMsgInfo::default()),
+            MsgInfo::ExtIn(msg),
             false,
             Cell::default(),
             None,
             None,
             None,
-            None,
+            Some(chain_time),
         )
     }
 
@@ -1331,6 +1338,8 @@ mod transaction_tests {
         // Add external message outside transaction
         buffer.add_message(make_test_ext_message(acc, 1000));
         let initial_min_time = buffer.min_ext_chain_time();
+
+        assert_eq!(initial_min_time, 1000);
 
         buffer.begin();
 
@@ -1549,6 +1558,8 @@ mod transaction_tests {
 
         let initial_ext_count = buffer.ext_count;
 
+        assert_eq!(initial_ext_count, 3);
+
         buffer.begin();
 
         // Skip messages with chain_time < 250
@@ -1559,6 +1570,7 @@ mod transaction_tests {
         };
         buffer.try_skip_account_msgs(&acc, filter);
 
+        assert_eq!(buffer.ext_count, 1);
         // Some messages should be skipped
         assert!(buffer.ext_count < initial_ext_count);
 
@@ -1614,5 +1626,41 @@ mod transaction_tests {
 
         buffer.rollback();
         assert_eq!(buffer.msgs_count(), buffer.int_count + buffer.ext_count);
+    }
+
+    #[test]
+    fn test_rollback_removes_completely_new_account_from_map() {
+        let mut buffer = MessagesBuffer::default();
+        let acc_pre = account(1);
+        let acc_new = account(2);
+
+        // 1. Setup: add one account before the transaction starts
+        buffer.add_message(make_test_int_message(acc_pre, 100));
+        assert_eq!(buffer.msgs.len(), 1);
+
+        buffer.begin();
+
+        // 2. Action: add a message for a completely new account during the transaction
+        // This will set the `is_new` flag to true in the AccountEntry
+        buffer.add_message(make_test_int_message(acc_new, 200));
+
+        // Verify intermediate state: map should now have two accounts
+        assert_eq!(buffer.msgs.len(), 2);
+        assert!(buffer.msgs.contains_key(&acc_new));
+
+        // 3. Perform Rollback
+        buffer.rollback();
+
+        // 4. Verification: acc_new must be completely removed from the underlying IndexMap
+        // The retain logic in rollback() uses the is_new flag to drop such entries
+        assert_eq!(buffer.msgs.len(), 1, "The map should return to a size of 1");
+        assert!(
+            !buffer.msgs.contains_key(&acc_new),
+            "The account created during the transaction should be gone"
+        );
+        assert!(
+            buffer.msgs.contains_key(&acc_pre),
+            "The original account should still exist"
+        );
     }
 }

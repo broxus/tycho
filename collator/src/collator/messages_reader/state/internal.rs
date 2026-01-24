@@ -13,7 +13,7 @@ use crate::internal_queue::types::stats::QueueStatistics;
 use crate::types::processed_upto::{BlockSeqno, InternalsProcessedUptoStuff, InternalsRangeStuff};
 use crate::types::{DebugIter, ProcessedTo};
 
-#[derive(Transactional)]
+#[derive(Transactional, Default)]
 pub struct InternalsReaderState {
     #[tx(collection)]
     pub partitions: FastHashMap<QueuePartitionIdx, InternalsPartitionReaderState>,
