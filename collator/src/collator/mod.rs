@@ -63,9 +63,7 @@ pub mod bench_export {
 pub use do_collate::{is_first_block_after_prev_master, work_units};
 pub use error::CollationCancelReason;
 use messages_reader::state::ReaderState;
-pub use types::{
-    ForceMasterCollation, ShardDescriptionExt, Transactional, TransactionalCollection,
-};
+pub use types::{ForceMasterCollation, ShardDescriptionExt};
 
 mod state;
 mod statistics;
