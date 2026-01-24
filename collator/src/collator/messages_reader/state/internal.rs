@@ -111,7 +111,7 @@ pub struct InternalsPartitionReaderState {
     /// Ranges will be extracted during collation process.
     /// Should access them only before collation and after reader finalization.
     #[tx(collection)]
-    pub ranges: BTreeMap<BlockSeqno, InternalsRangeReaderState>,
+    ranges: BTreeMap<BlockSeqno, InternalsRangeReaderState>,
 
     pub processed_to: ProcessedTo,
 
@@ -122,6 +122,56 @@ pub struct InternalsPartitionReaderState {
 
     #[tx(state)]
     tx: Option<InternalsPartitionReaderStateTx>,
+}
+
+impl InternalsPartitionReaderState {
+    pub fn ranges(&self) -> &BTreeMap<BlockSeqno, InternalsRangeReaderState> {
+        &self.ranges
+    }
+
+    pub fn get_range_mut(
+        &mut self,
+        seqno: &BlockSeqno,
+    ) -> Option<&mut InternalsRangeReaderState> {
+        self.ranges.get_mut(seqno)
+    }
+
+    pub fn tx_insert_range(&mut self, seqno: BlockSeqno, state: InternalsRangeReaderState) {
+        self.tx_insert_ranges(seqno, state);
+    }
+
+    pub fn tx_remove_range(&mut self, seqno: &BlockSeqno) -> bool {
+        self.tx_remove_ranges(seqno)
+    }
+
+    pub fn tx_retain_ranges<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&BlockSeqno, &mut InternalsRangeReaderState) -> bool,
+    {
+        let mut to_remove: Vec<BlockSeqno> = Vec::new();
+
+        for (k, v) in self.ranges.iter_mut() {
+            if !f(k, v) {
+                to_remove.push(*k);
+            }
+        }
+
+        for k in to_remove {
+            self.tx_remove_ranges(&k);
+        }
+    }
+
+    pub fn with_prev_and_current<F, R>(
+        &mut self,
+        key: BlockSeqno,
+        prev_keys: &[BlockSeqno],
+        f: F,
+    ) -> anyhow::Result<R>
+    where
+        F: for<'s> FnOnce(Vec<&'s InternalsRangeReaderState>, &'s mut InternalsRangeReaderState) -> anyhow::Result<R>,
+    {
+        super::with_prev_list_and_current(&mut self.ranges, key, prev_keys, f)
+    }
 }
 
 impl From<&InternalsProcessedUptoStuff> for InternalsPartitionReaderState {

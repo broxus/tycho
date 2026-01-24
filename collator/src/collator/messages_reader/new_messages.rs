@@ -13,9 +13,8 @@ use crate::collator::messages_reader::internals_range_reader::{
     InternalsRangeReader, InternalsRangeReaderKind,
 };
 use crate::collator::messages_reader::state::ShardReaderState;
-use crate::collator::messages_reader::state::internal::{
-    DebugInternalsRangeReaderState, InternalsRangeReaderState,
-};
+use crate::collator::messages_reader::state::int::DebugInternalsRangeReaderState;
+use crate::collator::messages_reader::state::int::range_reader::InternalsRangeReaderState;
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::state::state_iterator::MessageExt;
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
