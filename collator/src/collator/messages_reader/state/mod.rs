@@ -69,7 +69,7 @@ impl ReaderState {
 
     pub fn get_updated_processed_upto(&self) -> ProcessedUptoInfoStuff {
         let mut processed_upto = ProcessedUptoInfoStuff::default();
-        for (par_id, par) in &self.internals.partitions {
+        for (par_id, par) in self.internals.partitions() {
             let ext_reader_state_by_partition =
                 self.externals.get_state_by_partition(*par_id).unwrap();
             processed_upto
@@ -97,7 +97,7 @@ impl ReaderState {
     pub fn check_has_non_zero_processed_offset(&self) -> bool {
         let check_internals = self
             .internals
-            .partitions
+            .partitions()
             .values()
             .any(|par| par.ranges.values().any(|r| r.processed_offset > 0));
         if check_internals {
@@ -116,7 +116,7 @@ impl ReaderState {
 
     pub fn has_internals_in_buffers(&self) -> bool {
         self.internals
-            .partitions
+            .partitions()
             .values()
             .any(|par| par.ranges.values().any(|r| r.buffer.msgs_count() > 0))
     }
