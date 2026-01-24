@@ -3,6 +3,7 @@ use std::collections::hash_map::Entry;
 use anyhow::Context;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
 use tycho_types::models::ShardIdent;
+use tycho_util::transactional_types::Transactional;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::collator::statistics::queue::TrackedQueueStatistics;
@@ -12,7 +13,7 @@ use crate::internal_queue::types::stats::{
     AccountStatistics, DiffStatistics, QueueStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::queue_adapter::MessageQueueAdapter;
-use crate::types::{ProcessedToByPartitions, Transactional};
+use crate::types::ProcessedToByPartitions;
 
 #[derive(Clone, Copy)]
 enum ProcessMode {
@@ -106,7 +107,9 @@ impl Transactional for CumulativeStatistics {
     }
 
     fn rollback(&mut self) {
-        let Some(tx) = self.tx.take() else { return };
+        let Some(tx) = self.tx.take() else {
+            panic!("no transaction in progress")
+        };
 
         // Rollback result
         for stats in self.result.values_mut() {
