@@ -24,7 +24,7 @@ use crate::collator::messages_reader::state::ext::range_reader::{
 };
 use crate::collator::messages_reader::state::ext::reader::ExternalsReaderState;
 use crate::collator::messages_reader::state::ext::{ExternalKey, ExternalsReaderRange};
-use crate::collator::messages_reader::state::internal::DebugInternalsRangeReaderState;
+use crate::collator::messages_reader::state::int::DebugInternalsRangeReaderState;
 use crate::collator::messages_reader::state::with_prev_map_and_current;
 use crate::collator::types::{
     AnchorsCache, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff, ParsedMessage,
@@ -838,7 +838,7 @@ fn should_skip_external_account<V: InternalMessageValue>(
     //      always a from previous blocks so we cannot wrongly read in advance
     for prev_par_reader in prev_partitions_readers.values() {
         // check buffers in previous partition
-        for prev_par_reader_state in prev_par_reader.reader_state().ranges.values() {
+        for prev_par_reader_state in prev_par_reader.reader_state().ranges().values() {
             if prev_par_reader_state.buffer.msgs_count() > 0 {
                 check_ops_count.saturating_add_assign(1);
                 if prev_par_reader_state
@@ -902,7 +902,7 @@ fn should_skip_external_account<V: InternalMessageValue>(
 
             let state = curr_partition_reader
                 .reader_state()
-                .ranges
+                .ranges()
                 .get(&curr_par_range_reader.seqno)
                 .unwrap();
 

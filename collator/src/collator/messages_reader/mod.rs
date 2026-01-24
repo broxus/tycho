@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use state::ReaderState;
+use state::int::DebugInternalsRangeReaderState;
+use state::int::reader::InternalsReaderState;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, get_short_addr_string};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{MsgsExecutionParams, ShardIdent};
@@ -20,9 +22,6 @@ use crate::collator::anchors_cache::AnchorsCacheTransaction;
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::collator::messages_reader::internals_range_reader::{
     InternalsRangeReader, InternalsRangeReaderKind,
-};
-use crate::collator::messages_reader::state::internal::{
-    DebugInternalsRangeReaderState, InternalsReaderState,
 };
 use crate::collator::statistics::cumulative::CumulativeStatistics;
 use crate::collator::statistics::queue::TrackedQueueStatistics;

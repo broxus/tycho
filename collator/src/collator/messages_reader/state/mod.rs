@@ -5,17 +5,16 @@ use ext::ExternalsReaderRange;
 use ext::partition_reader::ExternalsPartitionReaderState;
 use ext::range_reader::ExternalsRangeReaderState;
 use ext::reader::ExternalsReaderState;
+use int::reader::InternalsReaderState;
 use tycho_block_util::queue::QueueKey;
 use tycho_util_proc::Transactional;
 
-use crate::collator::messages_reader::state::internal::InternalsReaderState;
 use crate::types::processed_upto::{
     ExternalsProcessedUptoStuff, Lt, ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
     ShardRangeInfo,
 };
 pub mod ext;
 pub mod int;
-pub mod internal;
 
 #[derive(Transactional)]
 pub struct ReaderState {
@@ -99,7 +98,7 @@ impl ReaderState {
             .internals
             .partitions()
             .values()
-            .any(|par| par.ranges.values().any(|r| r.processed_offset > 0));
+            .any(|par| par.ranges().values().any(|r| r.processed_offset > 0));
         if check_internals {
             return check_internals;
         }
@@ -118,7 +117,7 @@ impl ReaderState {
         self.internals
             .partitions()
             .values()
-            .any(|par| par.ranges.values().any(|r| r.buffer.msgs_count() > 0))
+            .any(|par| par.ranges().values().any(|r| r.buffer.msgs_count() > 0))
     }
 
     pub fn has_externals_in_buffers(&self) -> bool {
