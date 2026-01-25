@@ -158,16 +158,16 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
         // update new messages "to" boundary on current block next lt
         self.update_new_messages_reader_to_boundary(current_next_lt)?;
 
-        if let Some(remaning_msgs_stats) = &self.remaning_msgs_stats {
-            // !!! tracing::trace!(target: tracing_targets::COLLATOR,
-            //     partition_id = %self.partition_id,
-            //     remaning_msgs_stats = ?DebugIter(remaning_msgs_stats.iter().map(|item| {
-            //         let (addr, count) = item.pair();
-            //         (get_short_addr_string(addr), *count)
-            //     })),
-            //     "internals partition reader remaning_msgs_stats on finalize",
-            // );
-        }
+        // if let Some(remaning_msgs_stats) = &self.remaning_msgs_stats {
+        // !!! tracing::trace!(target: tracing_targets::COLLATOR,
+        //     partition_id = %self.partition_id,
+        //     remaning_msgs_stats = ?DebugIter(remaning_msgs_stats.iter().map(|item| {
+        //         let (addr, count) = item.pair();
+        //         (get_short_addr_string(addr), *count)
+        //     })),
+        //     "internals partition reader remaning_msgs_stats on finalize",
+        // );
+        // }
 
         self.cleanup_redundant_range_readers();
 

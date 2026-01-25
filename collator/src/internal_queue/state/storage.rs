@@ -129,13 +129,26 @@ pub trait QueueState<V: InternalMessageValue>: Send + Sync {
     /// Get commit pointers
     fn get_commit_pointers(&self) -> Result<FastHashMap<ShardIdent, CommitPointerValue>>;
 
+    /// Prepare diff for writing to storage. Returns transaction that should be committed later.
+    fn prepare_diff(
+        &self,
+        block_id_short: &BlockIdShort,
+        statistics: &DiffStatistics,
+        hash: HashBytes,
+        diff: QueueDiffWithMessages<V>,
+    ) -> Result<InternalQueueTransaction>;
+
+    /// Write diff to storage immediately.
     fn write_diff(
         &self,
         block_id_short: &BlockIdShort,
         statistics: &DiffStatistics,
         hash: HashBytes,
         diff: QueueDiffWithMessages<V>,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        self.prepare_diff(block_id_short, statistics, hash, diff)?
+            .write()
+    }
 
     fn clear_uncommitted(
         &self,
@@ -312,13 +325,13 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         self.storage.make_snapshot().read_commit_pointers()
     }
 
-    fn write_diff(
+    fn prepare_diff(
         &self,
         block_id_short: &BlockIdShort,
         statistics: &DiffStatistics,
         hash: HashBytes,
         diff: QueueDiffWithMessages<V>,
-    ) -> Result<()> {
+    ) -> Result<InternalQueueTransaction> {
         let mut tx = self.storage.begin_transaction();
 
         Self::add_messages(
@@ -343,8 +356,6 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
             dst_router_partition,
         );
 
-        let _histogram = HistogramGuard::begin("tycho_internal_queue_write_diff_time");
-
         let labels = [("workchain", block_id_short.shard.workchain().to_string())];
 
         let (batch_len, batch_size) = tx.size();
@@ -355,9 +366,7 @@ impl<V: InternalMessageValue> QueueState<V> for QueueStateStdImpl {
         metrics::gauge!("tycho_internal_queue_write_diff_messages_count", &labels)
             .set(diff.messages.len() as f64);
 
-        tx.write()?;
-
-        Ok(())
+        Ok(tx)
     }
 
     fn clear_uncommitted(

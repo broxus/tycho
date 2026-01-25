@@ -39,6 +39,7 @@ use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
 use crate::internal_queue::types::stats::DiffStatistics;
 use crate::queue_adapter::MessageQueueAdapter;
+use crate::storage::transaction::InternalQueueTransaction;
 use crate::tracing_targets;
 use crate::types::processed_upto::{
     build_all_shards_processed_to_by_partitions, find_min_processed_to_by_shards,
@@ -203,14 +204,16 @@ impl CollatorStdImpl {
             let collation_session = self.collation_session.clone();
             let config = self.config.clone();
             let mq_adapter = self.mq_adapter.clone();
+            let shard_id = self.shard_id;
             let span = tracing::Span::current();
             move || {
+                let labels = [("workchain", shard_id.workchain().to_string())];
                 let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut anchors_cache);
                 let _span = span.enter();
 
                 reader_state.begin();
 
-                let result = Self::run(
+                let run_result = Self::run(
                     config,
                     mq_adapter,
                     &mut reader_state,
@@ -223,12 +226,56 @@ impl CollatorStdImpl {
                     zerostate_id,
                 );
 
-                if result.is_ok() {
+                // Helper to rollback all transactional states
+                let do_rollback = |reader_state: &mut ReaderState, labels: &[_; 1]| {
+                    let _histogram = HistogramGuard::begin_with_labels(
+                        "tycho_do_collate_reader_state_rollback_time",
+                        labels,
+                    );
+                    reader_state.rollback();
+                };
+
+                // Helper to commit all transactional states
+                let do_commit = |reader_state: &mut ReaderState,
+                                 anchor_cache_tx: &mut AnchorsCacheTransaction,
+                                 labels: &[_; 1]| {
+                    let _histogram = HistogramGuard::begin_with_labels(
+                        "tycho_do_collate_reader_state_commit_time",
+                        labels,
+                    );
                     reader_state.commit();
                     anchor_cache_tx.commit();
-                } else {
-                    reader_state.rollback();
-                }
+                };
+
+                let result = match run_result {
+                    Ok((collation_result, pending_queue_diff_tx)) => {
+                        // Commit queue diff transaction first
+                        let queue_commit_result = if let Some(tx) = pending_queue_diff_tx {
+                            let _histogram = HistogramGuard::begin_with_labels(
+                                "tycho_do_collate_queue_diff_commit_time",
+                                &labels,
+                            );
+                            tx.write()
+                        } else {
+                            Ok(())
+                        };
+
+                        match queue_commit_result {
+                            Ok(()) => {
+                                do_commit(&mut reader_state, &mut anchor_cache_tx, &labels);
+                                Ok(collation_result)
+                            }
+                            Err(e) => {
+                                do_rollback(&mut reader_state, &labels);
+                                Err(CollatorError::Anyhow(e))
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        do_rollback(&mut reader_state, &labels);
+                        Err(e)
+                    }
+                };
 
                 drop(anchor_cache_tx);
 
@@ -386,6 +433,8 @@ impl CollatorStdImpl {
         Ok(())
     }
 
+    /// Run collation phase. Returns CollationResult and pending queue diff transaction.
+    /// The transaction should be committed only after successful collation.
     #[allow(clippy::too_many_arguments)]
     fn run(
         collator_config: Arc<CollatorConfig>,
@@ -398,7 +447,7 @@ impl CollatorStdImpl {
         wu_used_from_last_anchor: u64,
         usage_tree: UsageTree,
         zerostate_id: ZerostateId,
-    ) -> Result<CollationResult, CollatorError> {
+    ) -> Result<(CollationResult, Option<InternalQueueTransaction>), CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
         let mc_data = state.mc_data.clone();
@@ -490,7 +539,7 @@ impl CollatorStdImpl {
 
         histogram_create_queue_diff.finish();
 
-        let update_queue_task = create_apply_diff_task(
+        let prepare_queue_task = create_prepare_diff_task(
             &mq_adapter,
             queue_diff_with_msgs,
             &block_id_short,
@@ -544,7 +593,7 @@ impl CollatorStdImpl {
 
         // finalize block
         let span = tracing::Span::current();
-        let (finalize_phase_result, update_queue_task_result) = rayon::join(
+        let (finalize_phase_result, prepare_queue_result) = rayon::join(
             || {
                 let _span = span.enter();
 
@@ -560,14 +609,14 @@ impl CollatorStdImpl {
                     zerostate_id,
                 })
             },
-            // run update queue task and wait before returning collation result
-            // to be sure that queue was updated before block commit and next block collation
-            update_queue_task,
+            // prepare queue diff task (do not write yet, will be committed later)
+            prepare_queue_task,
         );
         let (mut finalized, execute_result) = finalize_phase_result?;
+        let prepared_queue_diff = prepare_queue_result?;
 
         // update finalize metrics and wu
-        finalized.finalize_metrics.apply_queue_diff_elapsed = update_queue_task_result?;
+        finalized.finalize_metrics.apply_queue_diff_elapsed = prepared_queue_diff.elapsed;
         finalized.finalize_metrics.total_timer.stop();
         finalized
             .finalize_wu
@@ -586,11 +635,14 @@ impl CollatorStdImpl {
             has_unprocessed_messages,
         };
 
-        Ok(CollationResult {
-            finalized,
-            execute_result,
-            final_result,
-        })
+        Ok((
+            CollationResult {
+                finalized,
+                execute_result,
+                final_result,
+            },
+            prepared_queue_diff.tx,
+        ))
     }
 
     /// Get max LT from masterchain (and shardchain) then calc start LT
@@ -1472,16 +1524,22 @@ fn serialize_diff(
         .serialize()
 }
 
-fn create_apply_diff_task(
+/// Returned type from prepare_queue_diff_task
+struct PreparedQueueDiff {
+    elapsed: Duration,
+    tx: Option<InternalQueueTransaction>,
+}
+
+fn create_prepare_diff_task(
     mq_adapter: &Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     queue_diff_with_msgs: QueueDiffWithMessages<EnqueuedMessage>,
     block_id_short: &BlockIdShort,
     min_message: QueueKey,
     max_message: QueueKey,
     diff_hash: HashBytes,
-) -> Result<impl FnOnce() -> Result<Duration>> {
-    // create update queue task but do not run it
-    let update_queue_task = {
+) -> Result<impl FnOnce() -> Result<PreparedQueueDiff>> {
+    // create prepare queue diff task but do not run it
+    let prepare_queue_task = {
         let labels = [("workchain", block_id_short.shard.workchain().to_string())];
         let span = tracing::Span::current();
         move || {
@@ -1501,28 +1559,28 @@ fn create_apply_diff_task(
 
             histogram.finish();
 
-            // apply queue diff
+            // prepare queue diff (do not write yet)
             let histogram = HistogramGuard::begin_with_labels(
-                "tycho_do_collate_apply_queue_diff_time_high",
+                "tycho_do_collate_prepare_queue_diff_time_high",
                 &labels,
             );
 
             // check only uncommitted diffs because the last committed diff
             // may not be sequential after sync on a block ahead
-            mq_adapter
-                .apply_diff(
+            let tx = mq_adapter
+                .prepare_diff(
                     queue_diff_with_msgs,
                     *block_id_short,
                     &diff_hash,
                     statistics,
                     Some(DiffZone::Uncommitted),
                 )
-                .context("finalize")?;
-            let apply_queue_diff_elapsed = histogram.finish();
+                .context("prepare_diff")?;
+            let elapsed = histogram.finish();
 
-            Ok(apply_queue_diff_elapsed)
+            Ok(PreparedQueueDiff { elapsed, tx })
         }
     };
 
-    Ok(update_queue_task)
+    Ok(prepare_queue_task)
 }

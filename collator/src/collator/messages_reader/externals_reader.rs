@@ -932,23 +932,22 @@ fn should_skip_external_account<V: InternalMessageValue>(
 
             // check in remaning stats
             check_ops_count.saturating_add_assign(1);
-            // !!!
-            // if state.contains_account_addr_in_remaning_msgs_stats(&dst_addr) {
-            //     tracing::trace!(target: tracing_targets::COLLATOR,
-            //         partition_id = %par_id,
-            //         account_id = %get_short_hash_string(account_id),
-            //         rr_seqno = curr_par_range_reader.seqno,
-            //         rr_kind = ?curr_par_range_reader.kind,
-            //         reader_state = ?DebugInternalsRangeReaderState(state),
-            //         remaming_msgs_stats = ?state
-            //             .remaning_msgs_stats.as_ref()
-            //             .map(|stats| DebugIter(stats.statistics().iter().map(|(addr, count)|
-            //                 (get_short_addr_string(addr), count)
-            //             ))),
-            //         "external messages skipped for account - current partition range reader remaning stats",
-            //     );
-            //     return (true, check_ops_count);
-            // }
+            if state.contains_account_addr_in_remaning_msgs_stats(&dst_addr) {
+                // !!! tracing::trace!(target: tracing_targets::COLLATOR,
+                //     partition_id = %par_id,
+                //     account_id = %get_short_hash_string(account_id),
+                //     rr_seqno = curr_par_range_reader.seqno,
+                //     rr_kind = ?curr_par_range_reader.kind,
+                //     reader_state = ?DebugInternalsRangeReaderState(state),
+                //     remaming_msgs_stats = ?state
+                //         .remaning_msgs_stats.as_ref()
+                //         .map(|stats| DebugIter(stats.statistics().iter().map(|(addr, count)|
+                //             (get_short_addr_string(addr), count)
+                //         ))),
+                //     "external messages skipped for account - current partition range reader remaning stats",
+                // );
+                return (true, check_ops_count);
+            }
         }
     }
 

@@ -19,6 +19,7 @@ use crate::internal_queue::types::stats::{
 };
 use crate::storage::models::DiffInfo;
 use crate::storage::snapshot::AccountStatistics;
+use crate::storage::transaction::InternalQueueTransaction;
 use crate::tracing_targets;
 use crate::types::{DebugDisplayOpt, DebugIter, TopBlockIdUpdated};
 
@@ -45,6 +46,17 @@ where
         partitions: &FastHashSet<QueuePartitionIdx>,
         ranges: &[QueueShardBoundedRange],
     ) -> Result<QueueStatistics>;
+
+    /// Prepare diff for applying to queue. Returns transaction that should be committed later.
+    /// Returns None if diff is already applied (duplicate).
+    fn prepare_diff(
+        &self,
+        diff: QueueDiffWithMessages<V>,
+        block_id_short: BlockIdShort,
+        diff_hash: &HashBytes,
+        statistics: DiffStatistics,
+        check_sequence: Option<DiffZone>,
+    ) -> Result<Option<InternalQueueTransaction>>;
 
     /// Apply diff by storing it to the queue uncommitted zone (waiting for the operation to complete)
     fn apply_diff(
@@ -163,6 +175,42 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         );
 
         Ok(stats)
+    }
+
+    #[instrument(skip_all, fields(%block_id_short, %diff_hash, ?check_sequence))]
+    fn prepare_diff(
+        &self,
+        diff: QueueDiffWithMessages<V>,
+        block_id_short: BlockIdShort,
+        diff_hash: &HashBytes,
+        statistics: DiffStatistics,
+        check_sequence: Option<DiffZone>,
+    ) -> Result<Option<InternalQueueTransaction>> {
+        let start_time = std::time::Instant::now();
+
+        tracing::debug!(target: tracing_targets::MQ_ADAPTER,
+            "prepare_diff started"
+        );
+
+        let new_messages_len = diff.messages.len();
+        let min_message = diff.min_message().copied();
+        let max_message = diff.max_message().copied();
+        let processed_to = diff.processed_to.clone();
+
+        let tx =
+            self.queue
+                .prepare_diff(diff, block_id_short, diff_hash, statistics, check_sequence)?;
+
+        let elapsed = start_time.elapsed();
+        tracing::info!(target: tracing_targets::MQ_ADAPTER,
+            new_messages_len,
+            ?min_message, ?max_message,
+            ?processed_to,
+            elapsed = %humantime::format_duration(elapsed),
+            "prepare_diff completed"
+        );
+
+        Ok(tx)
     }
 
     #[instrument(skip_all, fields(%block_id_short, %diff_hash, ?check_sequence))]

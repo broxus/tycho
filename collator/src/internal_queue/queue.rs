@@ -25,6 +25,7 @@ use crate::internal_queue::types::stats::{
 };
 use crate::storage::models::DiffInfo;
 use crate::types::TopBlockIdUpdated;
+use crate::storage::transaction::InternalQueueTransaction;
 use crate::{internal_queue, tracing_targets};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,7 +81,18 @@ where
         for_shard_id: ShardIdent,
     ) -> Result<Box<dyn StateIterator<V>>>;
 
-    /// Add messages to state from `diff.messages` and store diff info
+    /// Prepare diff for applying to state. Returns transaction that should be committed later.
+    /// Returns None if diff is already applied (duplicate).
+    fn prepare_diff(
+        &self,
+        diff: QueueDiffWithMessages<V>,
+        block_id_short: BlockIdShort,
+        hash: &HashBytes,
+        statistics: DiffStatistics,
+        check_sequence: Option<DiffZone>,
+    ) -> Result<Option<InternalQueueTransaction>>;
+
+    /// Add messages to state from `diff.messages` and store diff info (writes immediately)
     fn apply_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
@@ -192,14 +204,18 @@ where
         Ok(state_iterator)
     }
 
-    fn apply_diff(
+    fn prepare_diff(
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
         hash: &HashBytes,
         statistics: DiffStatistics,
         check_sequence: Option<DiffZone>,
-    ) -> Result<()> {
+    ) -> Result<Option<InternalQueueTransaction>> {
+        // NOTE: This method does not hold locks until write() is called.
+        // This is safe in collation context where only one collator works on a shard
+        // and manager waits for collation result.
+
         // Take global lock. Lock commit and clear uncommitted state for execution
         let _global_read_guard = self.global_lock.read().unwrap_or_else(|e| e.into_inner());
 
@@ -227,7 +243,7 @@ where
                     hash,
                 )
             }
-            return Ok(());
+            return Ok(None);
         }
 
         if let Some(zone) = check_sequence {
@@ -244,7 +260,7 @@ where
                 if let Some(last_applied_diff) = last_applied_diff_opt {
                     // Check if the diff is already applied
                     if block_id_short.seqno <= last_applied_diff.seqno {
-                        return Ok(());
+                        return Ok(None);
                     }
 
                     // Check if the diff is sequential
@@ -273,9 +289,27 @@ where
             );
         }
 
-        self.state
-            .write_diff(&block_id_short, &statistics, *hash, diff)?;
+        let tx = self
+            .state
+            .prepare_diff(&block_id_short, &statistics, *hash, diff)?;
 
+        Ok(Some(tx))
+    }
+
+    fn apply_diff(
+        &self,
+        diff: QueueDiffWithMessages<V>,
+        block_id_short: BlockIdShort,
+        hash: &HashBytes,
+        statistics: DiffStatistics,
+        check_sequence: Option<DiffZone>,
+    ) -> Result<()> {
+        if let Some(tx) =
+            self.prepare_diff(diff, block_id_short, hash, statistics, check_sequence)?
+        {
+            let _histogram = HistogramGuard::begin("tycho_internal_queue_write_diff_time");
+            tx.write()?;
+        }
         Ok(())
     }
 
