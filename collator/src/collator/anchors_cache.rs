@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use tycho_network::PeerId;
+use tycho_util::metrics::HistogramGuard;
 
 use crate::collator::messages_reader::state::ext::ExternalKey;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
@@ -233,10 +234,12 @@ impl<'a> AnchorsCacheTransaction<'a> {
     }
 
     pub fn commit(&mut self) {
+        let _histogram = HistogramGuard::begin("tycho_do_collate_anchors_cache_commit_time");
         self.committed = true;
     }
 
     pub fn rollback(&mut self) {
+        let _histogram = HistogramGuard::begin("tycho_do_collate_anchors_cache_rollback_time");
         while let Some(op) = self.undo_log.pop() {
             match op {
                 UndoOp::Add {
