@@ -98,6 +98,14 @@ impl CmdRun {
             init_metrics(metrics_config)?;
         }
 
+        // log environment configuration and special args
+        tracing::info!(
+            tycho_unstable = cfg!(tycho_unstable),
+            HACK_EACH_KEY_BLOCK_IS_PERSISTENT =
+                std::env::var("HACK_EACH_KEY_BLOCK_IS_PERSISTENT").unwrap_or_default(),
+            "environment config",
+        );
+
         if self.single_node {
             let too_new_archive_threshold =
                 &mut node_config.blockchain_rpc_client.too_new_archive_threshold;
