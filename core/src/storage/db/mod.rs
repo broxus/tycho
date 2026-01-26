@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tycho_storage::kv::{
-    Migrations, NamedTables, StateVersionProvider, StoredValue, TableContext, WithMigrations,
+    Migrations, NamedTables, StateVersionProvider, TableContext, WithMigrations,
 };
 use tycho_util::sync::CancellationFlag;
 use weedb::{MigrationError, Semver, Table, VersionProvider, WeeDb, rocksdb};
@@ -91,89 +91,7 @@ impl WithMigrations for CoreTables {
     ) -> Result<(), MigrationError> {
         let cancelled = cancelled.clone();
         migrations.register([0, 0, 4], [0, 0, 5], move |db| {
-            const BATCH_LIMIT: usize = 1000;
-
-            let mut batch = rocksdb::WriteBatch::default();
-            let mut pending = 0;
-            let mut updated = 0;
-
-            let mut iter = db.block_handles.raw_iterator();
-            iter.seek_to_first();
-            iter.status().map_err(MigrationError::DbError)?;
-            let mut started = false;
-            while {
-                if started {
-                    iter.next();
-                }
-                iter.valid()
-            } {
-                started = true;
-
-                if cancelled.check() {
-                    return Err(MigrationError::Custom(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "migration cancelled",
-                    ))));
-                }
-
-                let key = match iter.key() {
-                    Some(key) => key,
-                    None => break,
-                };
-                let value = match iter.value() {
-                    Some(value) => value,
-                    None => continue,
-                };
-
-                let meta = BlockMeta::from_slice(value);
-
-                let mut flags_updated = false;
-                // add HAS_STATE_PARTS flag
-                if meta.flags().contains(BlockFlags::HAS_STATE_MAIN)
-                    && meta.add_flags(BlockFlags::HAS_STATE_PARTS)
-                {
-                    flags_updated = true;
-                };
-                // add HAS_PERSISTENT_SHARD_STATE_PARTS flag
-                if meta
-                    .flags()
-                    .contains(BlockFlags::HAS_PERSISTENT_SHARD_STATE_MAIN)
-                    && meta.add_flags(BlockFlags::HAS_PERSISTENT_SHARD_STATE_PARTS)
-                {
-                    flags_updated = true;
-                }
-                if !flags_updated {
-                    continue;
-                }
-
-                batch.merge_cf(&db.block_handles.cf(), key, meta.to_vec());
-
-                // write batch when limit reached
-                pending += 1;
-                updated += 1;
-                if pending >= BATCH_LIMIT {
-                    db.rocksdb()
-                        .write_opt(batch, db.block_handles.write_config())
-                        .map_err(MigrationError::DbError)?;
-                    batch = rocksdb::WriteBatch::default();
-                    pending = 0;
-                }
-            }
-
-            // write last batch
-            if pending > 0 {
-                db.rocksdb()
-                    .write_opt(batch, db.block_handles.write_config())
-                    .map_err(MigrationError::DbError)?;
-            }
-
-            tracing::info!(
-                updated,
-                "migration: added HAS_STATE_PARTS and HAS_PERSISTENT_SHARD_STATE_PARTS \
-                flags to existing block handles"
-            );
-
-            Ok(())
+            migrations::core_v4_to_v5(db, &cancelled)
         })?;
 
         Ok(())
