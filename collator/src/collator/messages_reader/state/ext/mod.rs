@@ -2,10 +2,13 @@
 //!
 //! # State hierarchy for externals
 //!
+//! ```text
 //! ExternalsReaderState
+//!
 //! ├── ranges: BTreeMap<BlockSeqno, ExternalsRangeReaderState>
 //! │   └── by_partitions: BTreeMap<QueuePartitionIdx, ExternalsPartitionRangeReaderState>
 //! └── by_partitions: BTreeMap<QueuePartitionIdx, ExternalsPartitionReaderState>
+//! ```
 //!
 //! - `ExternalsReaderState` - top-level state, tracks all external message ranges and per-partition progress
 //! - `ExternalsRangeReaderState` - state for a block range (anchor interval), tracks partition states within range

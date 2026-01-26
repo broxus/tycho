@@ -5,10 +5,10 @@ use ext::ExternalsReaderRange;
 use ext::partition_reader::ExternalsPartitionReaderState;
 use ext::range_reader::ExternalsRangeReaderState;
 use ext::reader::ExternalsReaderState;
-use int::reader::InternalsReaderState;
 use tycho_block_util::queue::QueueKey;
 use tycho_util_proc::Transactional;
 
+use crate::collator::messages_reader::state::int::reader::InternalsReaderState;
 use crate::types::processed_upto::{
     ExternalsProcessedUptoStuff, Lt, ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
     ShardRangeInfo,
@@ -44,7 +44,7 @@ impl ReaderState {
                     .ranges_mut()
                     .entry(*seqno)
                     .and_modify(|r| {
-                        r.insert_partition(*par_id, range_info.into());
+                        r.partitions_mut().insert(*par_id, range_info.into());
                     })
                     // TODO transitions neccessary?
                     .or_insert(ExternalsRangeReaderState::new(
