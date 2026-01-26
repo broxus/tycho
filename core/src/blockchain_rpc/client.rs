@@ -12,6 +12,7 @@ use scopeguard::ScopeGuard;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tycho_block_util::archive::ArchiveVerifier;
+use tycho_block_util::block::ShardPrefix;
 use tycho_network::{PublicOverlay, Request};
 use tycho_types::models::BlockId;
 use tycho_util::compression::ZstdDecompressStream;
@@ -351,15 +352,24 @@ impl BlockchainRpcClient {
         neighbour: &Neighbour,
         block_id: &BlockId,
         offset: u64,
+        part_shard_prefix: Option<ShardPrefix>,
     ) -> Result<QueryResponse<Data>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
             .query_raw::<Data>(
                 neighbour.clone(),
-                Request::from_tl(rpc::GetPersistentShardStateChunk {
-                    block_id: *block_id,
-                    offset,
-                }),
+                if let Some(part_shard_prefix) = part_shard_prefix {
+                    Request::from_tl(rpc::GetPersistentShardStatePartChunk {
+                        block_id: *block_id,
+                        offset,
+                        part_shard_prefix,
+                    })
+                } else {
+                    Request::from_tl(rpc::GetPersistentShardStateChunk {
+                        block_id: *block_id,
+                        offset,
+                    })
+                },
             )
             .await?;
         Ok(data)
@@ -405,26 +415,39 @@ impl BlockchainRpcClient {
                 }
             };
 
-            match info {
+            let info_match = match info {
                 PersistentStateInfo::Found { size, chunk_size } => {
-                    let neighbour = handle.accept();
-                    tracing::debug!(
-                        peer_id = %neighbour.peer_id(),
-                        state_size = size.get(),
-                        state_chunk_size = chunk_size.get(),
-                        ?kind,
-                        "found persistent state",
-                    );
-
-                    return Ok(PendingPersistentState {
-                        block_id: *block_id,
-                        kind,
-                        size,
-                        chunk_size,
-                        neighbour,
-                    });
+                    Some((size, chunk_size, 0, vec![]))
                 }
-                PersistentStateInfo::NotFound => {}
+                PersistentStateInfo::FoundWithParts {
+                    size,
+                    chunk_size,
+                    split_depth,
+                    parts,
+                } => Some((size, chunk_size, split_depth as u8, parts)),
+                PersistentStateInfo::NotFound => None,
+            };
+
+            if let Some((size, chunk_size, part_split_depth, parts)) = info_match {
+                let neighbour = handle.accept();
+                tracing::debug!(
+                    peer_id = %neighbour.peer_id(),
+                    state_size = size.get(),
+                    state_chunk_size = chunk_size.get(),
+                    parts_count = parts.len(),
+                    ?kind,
+                    "found persistent state",
+                );
+
+                return Ok(PendingPersistentState {
+                    block_id: *block_id,
+                    kind,
+                    size,
+                    chunk_size,
+                    neighbour,
+                    part_split_depth,
+                    parts: parts.into_iter().map(Into::into).collect(),
+                });
             }
         }
 
@@ -442,6 +465,7 @@ impl BlockchainRpcClient {
     pub async fn download_persistent_state<W>(
         &self,
         state: PendingPersistentState,
+        part_shard_prefix: Option<ShardPrefix>,
         output: W,
     ) -> Result<W, Error>
     where
@@ -455,8 +479,16 @@ impl BlockchainRpcClient {
         let block_id = state.block_id;
         let max_retries = self.inner.config.download_retries;
 
+        let size = match part_shard_prefix {
+            Some(prefix) => state
+                .part(prefix)
+                .map(|part| part.size)
+                .ok_or(Error::NotFound)?,
+            None => state.size,
+        };
+
         download_and_decompress(
-            state.size,
+            size,
             state.chunk_size,
             PARALLEL_REQUESTS,
             output,
@@ -465,7 +497,15 @@ impl BlockchainRpcClient {
 
                 let req = match state.kind {
                     PersistentStateKind::Shard => {
-                        Request::from_tl(rpc::GetPersistentShardStateChunk { block_id, offset })
+                        if let Some(part_shard_prefix) = part_shard_prefix {
+                            Request::from_tl(rpc::GetPersistentShardStatePartChunk {
+                                block_id,
+                                offset,
+                                part_shard_prefix,
+                            })
+                        } else {
+                            Request::from_tl(rpc::GetPersistentShardStateChunk { block_id, offset })
+                        }
                     }
                     PersistentStateKind::Queue => {
                         Request::from_tl(rpc::GetPersistentQueueStateChunk { block_id, offset })
@@ -658,6 +698,29 @@ pub struct PendingPersistentState {
     pub size: NonZeroU64,
     pub chunk_size: NonZeroU32,
     pub neighbour: Neighbour,
+    pub part_split_depth: u8,
+    pub parts: Vec<PendingPersistentStatePart>,
+}
+
+impl PendingPersistentState {
+    pub fn part(&self, prefix: ShardPrefix) -> Option<&PendingPersistentStatePart> {
+        self.parts.iter().find(|part| part.prefix == prefix)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingPersistentStatePart {
+    pub prefix: ShardPrefix,
+    pub size: NonZeroU64,
+}
+
+impl From<PersistentStatePartInfo> for PendingPersistentStatePart {
+    fn from(value: PersistentStatePartInfo) -> Self {
+        Self {
+            prefix: value.prefix,
+            size: value.size,
+        }
+    }
 }
 
 pub struct BlockDataFull {

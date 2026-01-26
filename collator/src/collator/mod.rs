@@ -671,12 +671,15 @@ impl CollatorStdImpl {
                     // get last store task
                     let last_task = self.store_new_state_tasks.pop().expect("shouldn't happen");
 
-                    // If it is finished or there's only one task, just await and reload.
+                    // If it is finished or there's only one task, or merkle chain limit is 0, just await and reload.
                     // NOTE: when there's only one task, we can't apply merkle chain because the previous block's
                     // state might not be in storage yet — StoreTask just send to background_store_new_state_tx without
                     // awaiting completion.
                     if last_task.store_new_state_task.is_finished()
+                        // or this task is the last in queue
                         || self.store_new_state_tasks.is_empty()
+                        // or when unfinished tasks limit is 0
+                        || self.config.merkle_chain_limit == 0
                     {
                         last_task.store_new_state_task.await?;
 
@@ -712,7 +715,9 @@ impl CollatorStdImpl {
 
                                 // collect all unfinished tasks
                                 if !task.store_new_state_task.is_finished()
+                                    // until the limit reached
                                     && unfinished_tasks.len() < self.config.merkle_chain_limit
+                                    // or until we reached the last task
                                     && !is_last
                                 {
                                     unfinished_tasks.push(task);
@@ -1046,7 +1051,7 @@ impl CollatorStdImpl {
             });
 
             // Keep only the last `merkle_chain_limit` states alive
-            if self.store_state_refs.len() == self.config.merkle_chain_limit
+            if self.store_state_refs.len() >= self.config.merkle_chain_limit
                 && let Some(old_ref) = self.store_state_refs.pop_front()
             {
                 // NOTE: State update can be quite huge so drop it outside of tokio.

@@ -32,12 +32,21 @@ impl BlockStuff {
         if hack_enabled {
             true
         } else {
+            // NOTE: it means every 36.4 hours
+            //      so current key block is persistent if the previous one key block
+            //      was in the previous 36.4 time window
             block_utime >> 17 != prev_utime >> 17
         }
     }
 
     pub fn can_use_for_boot(block_utime: u32, now_utime: u32) -> bool {
-        now_utime.saturating_sub(block_utime) as u64 >= Self::BOOT_OFFSET.as_secs()
+        let hack_enabled = cfg!(tycho_unstable)
+            && std::env::var("HACK_EACH_KEY_BLOCK_IS_PERSISTENT").unwrap_or_default() == "1";
+        if hack_enabled {
+            true
+        } else {
+            now_utime.saturating_sub(block_utime) as u64 >= Self::BOOT_OFFSET.as_secs()
+        }
     }
 
     pub fn time_until_can_use_for_boot(block_utime: u32, now_utime: u32) -> Duration {
