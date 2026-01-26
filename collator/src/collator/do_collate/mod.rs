@@ -226,53 +226,35 @@ impl CollatorStdImpl {
                     zerostate_id,
                 );
 
-                // Helper to rollback all transactional states
-                let do_rollback = |reader_state: &mut ReaderState, labels: &[_; 1]| {
-                    let _histogram = HistogramGuard::begin_with_labels(
-                        "tycho_do_collate_reader_state_rollback_time",
-                        labels,
-                    );
-                    reader_state.rollback();
-                };
-
-                // Helper to commit all transactional states
-                let do_commit = |reader_state: &mut ReaderState,
-                                 anchor_cache_tx: &mut AnchorsCacheTransaction,
-                                 labels: &[_; 1]| {
-                    let _histogram = HistogramGuard::begin_with_labels(
-                        "tycho_do_collate_reader_state_commit_time",
-                        labels,
-                    );
-                    reader_state.commit();
-                    anchor_cache_tx.commit();
-                };
-
                 let result = match run_result {
                     Ok((collation_result, pending_queue_diff_tx)) => {
                         // Commit queue diff transaction first
-                        let queue_commit_result = if let Some(tx) = pending_queue_diff_tx {
+                        if let Some(tx) = pending_queue_diff_tx {
                             let _histogram = HistogramGuard::begin_with_labels(
                                 "tycho_do_collate_queue_diff_commit_time",
                                 &labels,
                             );
-                            tx.write()
-                        } else {
-                            Ok(())
-                        };
-
-                        match queue_commit_result {
-                            Ok(()) => {
-                                do_commit(&mut reader_state, &mut anchor_cache_tx, &labels);
-                                Ok(collation_result)
-                            }
-                            Err(e) => {
-                                do_rollback(&mut reader_state, &labels);
-                                Err(CollatorError::Anyhow(e))
-                            }
+                            tx.write().expect("queue diff commit must not fail");
                         }
+
+                        {
+                            let histogram = HistogramGuard::begin_with_labels(
+                                "tycho_do_collate_reader_state_commit_time",
+                                &labels,
+                            );
+
+                            reader_state.commit();
+                        }
+                        anchor_cache_tx.commit();
+
+                        Ok(collation_result)
                     }
                     Err(e) => {
-                        do_rollback(&mut reader_state, &labels);
+                        let _histogram = HistogramGuard::begin_with_labels(
+                            "tycho_do_collate_reader_state_rollback_time",
+                            &labels,
+                        );
+                        reader_state.rollback();
                         Err(e)
                     }
                 };
