@@ -92,11 +92,10 @@ impl QueueStatistics {
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&IntAddr, u64)> {
-        self.statistics.iter().filter_map(|(k, v)| {
-            let c = v.current();
-            if c > 0 { Some((k, c)) } else { None }
-        })
+    pub fn iter(&self) -> StatisticsViewIter<'_> {
+        StatisticsViewIter {
+            inner: self.statistics.iter(),
+        }
     }
 
     pub fn decrement_for_account(&mut self, account_addr: IntAddr, count: u64) {
@@ -195,6 +194,7 @@ impl<'a> StatisticsView<'a> {
     }
 }
 
+#[derive(Clone)]
 pub struct StatisticsViewIter<'a> {
     inner: hash_map::Iter<'a, IntAddr, VersionedValue>,
 }

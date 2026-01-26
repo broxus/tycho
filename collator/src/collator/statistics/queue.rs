@@ -4,7 +4,7 @@ use parking_lot::{Mutex, MutexGuard};
 use tycho_types::models::{IntAddr, ShardIdent};
 use tycho_util::transactional_types::Transactional;
 
-use crate::internal_queue::types::stats::{AccountStatistics, QueueStatistics};
+use crate::internal_queue::types::stats::{AccountStatistics, QueueStatistics, StatisticsViewIter};
 
 #[derive(Debug, Clone)]
 pub struct TrackedQueueStatistics {
@@ -108,7 +108,7 @@ pub struct TrackedQueueStatisticsView<'a> {
 }
 
 impl<'a> TrackedQueueStatisticsView<'a> {
-    pub fn iter(&self) -> impl Iterator<Item = (&IntAddr, u64)> {
+    pub fn iter(&self) -> StatisticsViewIter<'_> {
         self.guard.statistics.iter()
     }
 }

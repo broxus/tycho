@@ -44,7 +44,11 @@ use crate::tracing_targets;
 use crate::types::processed_upto::{
     build_all_shards_processed_to_by_partitions, find_min_processed_to_by_shards,
 };
-use crate::types::{BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig, DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort, ShardDescriptionShortExt, ShardPair, TopBlockDescription, TopBlockId, TopShardBlockInfo};
+use crate::types::{
+    BlockCollationResult, BlockIdExt, CollationSessionInfo, CollatorConfig,
+    DisplayBlockIdsIntoIter, DisplayBlockIdsIter, McData, ProcessedTo, ShardDescriptionShort,
+    ShardDescriptionShortExt, ShardPair, TopBlockDescription, TopBlockId, TopShardBlockInfo,
+};
 
 #[cfg(test)]
 #[path = "../tests/do_collate_tests.rs"]
@@ -121,36 +125,17 @@ impl CollatorStdImpl {
             )),
         );
 
-        // We should remove all previously imported anchors above next chain time.
-        // We have cases when some shard can force master block collation (e.g. no pending messages after sc block)
-        // but it is not clear how many anchors were already imported by master. So we take next chain time
-        // from shard and should use anchors only up to chosen next chain time.
-        let Some(AnchorInfo {
-            ct: last_imported_chain_time,
-            author,
-            ..
-        }) = self
+        // Get created_by using read-only lookup (actual removal happens inside run() transactionally)
+        let Some(created_by) = self
             .anchors_cache
-            .remove_last_imported_above(next_chain_time)
+            .last_imported_anchor_info_at_ct(next_chain_time)
+            .map(|info| info.author.to_bytes().into())
         else {
             bail!(
                 "last_imported_anchor should exist when we collating block \
                     even after removing anchors above the next chain time"
             )
         };
-
-        // TODO: needs to update metrics
-        // metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels).decrement(our_exts_count as f64);
-
-        assert!(
-            *last_imported_chain_time >= next_chain_time,
-            "all anchors upto next chain time {} should be imported before collation, \
-            but last imported chain time is {}",
-            next_chain_time,
-            last_imported_chain_time,
-        );
-
-        let created_by = author.to_bytes().into();
 
         let is_first_block_after_prev_master = is_first_block_after_prev_master(
             prev_shard_data.blocks_ids()[0], // TODO: consider split/merge
@@ -179,7 +164,6 @@ impl CollatorStdImpl {
             top_shard_blocks_info,
         )?;
 
-        let mut anchors_cache = std::mem::take(&mut self.anchors_cache);
         let block_serializer_cache = self.block_serializer_cache.clone();
 
         let state = Box::new(ActualState {
@@ -196,9 +180,10 @@ impl CollatorStdImpl {
                 ..Default::default()
             },
         });
+
         let collation_is_cancelled = state.collation_is_cancelled.clone();
 
-        let zerostate_id = self.zerostate_id;
+        let mut anchors_cache = std::mem::take(&mut self.anchors_cache);
 
         let do_collate_fut = tycho_util::sync::rayon_run_fifo({
             let collation_session = self.collation_session.clone();
@@ -206,10 +191,12 @@ impl CollatorStdImpl {
             let mq_adapter = self.mq_adapter.clone();
             let shard_id = self.shard_id;
             let span = tracing::Span::current();
+            let zerostate_id = self.zerostate_id;
+
             move || {
                 let labels = [("workchain", shard_id.workchain().to_string())];
-                let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut anchors_cache);
                 let _span = span.enter();
+                let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut anchors_cache);
 
                 reader_state.begin();
 
@@ -224,6 +211,7 @@ impl CollatorStdImpl {
                     wu_used_from_last_anchor,
                     usage_tree,
                     zerostate_id,
+                    next_chain_time,
                 );
 
                 let result = match run_result {
@@ -238,7 +226,7 @@ impl CollatorStdImpl {
                         }
 
                         {
-                            let histogram = HistogramGuard::begin_with_labels(
+                            let _histogram = HistogramGuard::begin_with_labels(
                                 "tycho_do_collate_reader_state_commit_time",
                                 &labels,
                             );
@@ -307,6 +295,12 @@ impl CollatorStdImpl {
             }
             res => res?,
         };
+
+        // Increment shard blocks counter for metrics (only for non-masterchain)
+        if !self.shard_id.is_masterchain() {
+            self.shard_blocks_count_from_last_anchor =
+                self.shard_blocks_count_from_last_anchor.saturating_add(1);
+        }
 
         let int_queue_len = reader_state
             .internals
@@ -429,12 +423,41 @@ impl CollatorStdImpl {
         wu_used_from_last_anchor: u64,
         usage_tree: UsageTree,
         zerostate_id: ZerostateId,
+        next_chain_time: u64,
     ) -> Result<(CollationResult, Option<InternalQueueTransaction>), CollatorError> {
         let shard_id = state.shard_id;
         let labels = [("workchain", shard_id.workchain().to_string())];
         let mc_data = state.mc_data.clone();
 
         let collation_is_cancelled = state.collation_is_cancelled.clone();
+
+        // Remove previously imported anchors above next chain time (transactionally).
+        // We have cases when some shard can force master block collation (e.g. no pending messages after sc block)
+        // but it is not clear how many anchors were already imported by master. So we take next chain time
+        // from shard and should use anchors only up to chosen next chain time.
+        anchors_cache.remove_last_imported_above(next_chain_time);
+
+        // Verify that anchor author matches created_by set before collation
+        let Some(anchor_info) = anchors_cache.last_imported_anchor_info() else {
+            return Err(CollatorError::Anyhow(anyhow::anyhow!(
+                "last_imported_anchor should exist when collating block \
+                    even after removing anchors above the next chain time"
+            )));
+        };
+
+        assert!(
+            anchor_info.ct >= next_chain_time,
+            "all anchors upto next chain time {} should be imported before collation, \
+            but last imported chain time is {}",
+            next_chain_time,
+            anchor_info.ct,
+        );
+
+        let expected_created_by: HashBytes = anchor_info.author.to_bytes().into();
+        assert_eq!(
+            state.collation_data.created_by, expected_created_by,
+            "created_by mismatch: expected author from anchor after removal"
+        );
 
         // prepare execution
         let histogram_prepare =
@@ -973,7 +996,7 @@ impl CollatorStdImpl {
     }
 
     fn create_collation_data(
-        &mut self,
+        &self,
         next_block_id_short: BlockIdShort,
         next_chain_time: u64,
         created_by: HashBytes,
@@ -991,11 +1014,6 @@ impl CollatorStdImpl {
         tracing::trace!(target: tracing_targets::COLLATOR, "rand_seed from chain time: {}", rand_seed);
 
         let is_masterchain = self.shard_id.is_masterchain();
-
-        if !is_masterchain {
-            self.shard_blocks_count_from_last_anchor =
-                self.shard_blocks_count_from_last_anchor.saturating_add(1);
-        }
 
         // prepare block collation data
         let block_limits = mc_data.config.get_block_limits(is_masterchain)?;
