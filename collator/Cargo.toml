@@ -9,6 +9,12 @@ rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
 
+[[bench]]
+name = "messages_buffer"
+harness = false
+#path = "benches/messages_buffer.rs"
+required-features = ["bench-helpers"]
+
 [[test]]
 name = "adapter_tests"
 required-features = ["test"]
