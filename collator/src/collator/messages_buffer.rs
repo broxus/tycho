@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque, btree_map};
+use std::collections::{BTreeMap, VecDeque};
 
 use rayon::iter::IntoParallelIterator;
 use tycho_block_util::queue::QueueKey;
@@ -105,12 +105,11 @@ impl Transactional for MessagesBuffer {
 
 impl MessagesBuffer {
     fn backup_account(&mut self, account_id: &HashBytes) {
-        if self.is_in_transaction() {
-            if let Some(entry) = self.msgs.get_mut(account_id) {
-                if entry.old_val.is_none() {
-                    entry.old_val = entry.new_val.clone();
-                }
-            }
+        if self.is_in_transaction()
+            && let Some(entry) = self.msgs.get_mut(account_id)
+            && entry.old_val.is_none()
+        {
+            entry.old_val = entry.new_val.clone();
         }
     }
 
@@ -478,7 +477,7 @@ impl MessagesBuffer {
 
         if !self.is_in_transaction() {
             self.msgs
-                .retain(|_, entry| entry.current().map(|v| !v.is_empty()).unwrap_or(false));
+                .retain(|_, entry| entry.current().is_some_and(|v| !v.is_empty()));
         }
 
         // drop min externals chain time if buffer was drained
@@ -667,18 +666,18 @@ impl MessagesBuffer {
 
         self.backup_account(account_id);
 
-        if let Some(entry) = self.msgs.get_mut(account_id) {
-            if let Some(account_msgs) = entry.current_mut() {
-                account_msgs.retain(|msg| {
-                    let skip = filter.should_skip(msg);
-                    debug_assert!(
-                        !skip || msg.info().is_external_in(),
-                        "we should only skip external messages"
-                    );
-                    self.ext_count -= skip as usize;
-                    !skip
-                });
-            }
+        if let Some(entry) = self.msgs.get_mut(account_id)
+            && let Some(account_msgs) = entry.current_mut()
+        {
+            account_msgs.retain(|msg| {
+                let skip = filter.should_skip(msg);
+                debug_assert!(
+                    !skip || msg.info().is_external_in(),
+                    "we should only skip external messages"
+                );
+                self.ext_count -= skip as usize;
+                !skip
+            });
         }
     }
 }
@@ -1143,9 +1142,11 @@ mod transaction_tests {
 
     // Helper to create a test internal message
     fn make_test_int_message(account_id: HashBytes, lt: u64) -> ParsedMessage {
-        let mut msg = IntMsgInfo::default();
-        msg.created_lt = lt;
-        msg.dst = IntAddr::Std(StdAddr::new(0, account_id));
+        let msg = IntMsgInfo {
+            created_lt: lt,
+            dst: IntAddr::Std(StdAddr::new(0, account_id)),
+            ..Default::default()
+        };
         ParsedMessage::new(
             MsgInfo::Int(msg),
             false,
@@ -1159,8 +1160,10 @@ mod transaction_tests {
 
     // Helper to create a test external message
     fn make_test_ext_message(account_id: HashBytes, chain_time: u64) -> ParsedMessage {
-        let mut msg = ExtInMsgInfo::default();
-        msg.dst = IntAddr::Std(StdAddr::new(0, account_id));
+        let msg = ExtInMsgInfo {
+            dst: IntAddr::Std(StdAddr::new(0, account_id)),
+            ..Default::default()
+        };
         ParsedMessage::new(
             MsgInfo::ExtIn(msg),
             false,

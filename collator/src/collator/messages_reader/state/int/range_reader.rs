@@ -19,6 +19,7 @@ pub struct InternalsRangeReaderState {
     pub buffer: MessagesBuffer,
 
     /// Statistics shows all messages in current range
+    #[tx(skip)]
     pub msgs_stats: Option<Arc<QueueStatistics>>,
     /// Statistics shows remaining not read messages from current range.
     /// We reduce initial statistics by the number of messages that were read.
@@ -28,6 +29,7 @@ pub struct InternalsRangeReaderState {
     #[tx(transactional)]
     pub read_stats: QueueStatistics,
 
+    #[tx(skip)]
     pub shards: BTreeMap<ShardIdent, ShardReaderState>,
 
     /// Skip offset before collecting messages from this range.
