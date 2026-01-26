@@ -24,8 +24,8 @@ use crate::internal_queue::types::stats::{
     AccountStatistics, DiffStatistics, SeparatedStatisticsByPartitions,
 };
 use crate::storage::models::DiffInfo;
-use crate::types::TopBlockIdUpdated;
 use crate::storage::transaction::InternalQueueTransaction;
+use crate::types::TopBlockIdUpdated;
 use crate::{internal_queue, tracing_targets};
 
 #[derive(Debug, Serialize, Deserialize)]
