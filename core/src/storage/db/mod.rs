@@ -126,7 +126,23 @@ impl WithMigrations for CoreTables {
                 };
 
                 let meta = BlockMeta::from_slice(value);
-                if !meta.add_flags(BlockFlags::HAS_STATE_PARTS) {
+
+                let mut flags_updated = false;
+                // add HAS_STATE_PARTS flag
+                if meta.flags().contains(BlockFlags::HAS_STATE_MAIN)
+                    && meta.add_flags(BlockFlags::HAS_STATE_PARTS)
+                {
+                    flags_updated = true;
+                };
+                // add HAS_PERSISTENT_SHARD_STATE_PARTS flag
+                if meta
+                    .flags()
+                    .contains(BlockFlags::HAS_PERSISTENT_SHARD_STATE_MAIN)
+                    && meta.add_flags(BlockFlags::HAS_PERSISTENT_SHARD_STATE_PARTS)
+                {
+                    flags_updated = true;
+                }
+                if !flags_updated {
                     continue;
                 }
 
@@ -153,7 +169,8 @@ impl WithMigrations for CoreTables {
 
             tracing::info!(
                 updated,
-                "migration: added HAS_STATE_PARTS flag to existing block handles"
+                "migration: added HAS_STATE_PARTS and HAS_PERSISTENT_SHARD_STATE_PARTS \
+                flags to existing block handles"
             );
 
             Ok(())
