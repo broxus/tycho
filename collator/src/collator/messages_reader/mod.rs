@@ -1570,17 +1570,15 @@ fn try_sync_processing_offsets<V: InternalMessageValue>(
 }
 
 fn log_cumulative_remaining_msgs_stats(stats: &CumulativeStatistics, msg: &str) {
-
-    // !!! for (par_id, par_stats) in stats.result() {
-    //     tracing::trace!(target: tracing_targets::COLLATOR,
-    //         partition_id = %par_id,
-    //         remaning_msgs_stats = ?DebugIter(par_stats.remaning_stats.iter().map(|item| {
-    //             let (addr, count) = item.pair();
-    //             (get_short_addr_string(addr), *count)
-    //         })),
-    //         "{}", msg,
-    //     );
-    // }
+    for (par_id, par_stats) in stats.result() {
+        tracing::trace!(target: tracing_targets::COLLATOR,
+            partition_id = %par_id,
+            remaning_msgs_stats = ?DebugIter(par_stats.remaning_stats.statistics().iter().map(|(addr, count)| {
+                (get_short_addr_string(addr), count)
+            })),
+            "{}", msg,
+        );
+    }
 }
 
 pub(crate) struct DebugDiffStatistics<'a>(pub &'a DiffStatistics);
