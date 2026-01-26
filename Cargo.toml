@@ -82,10 +82,7 @@ proc-macro2 = "1.0"
 prost = "0.14.1"
 prost-build = "0.14.1"
 quick_cache = "0.6.0"
-quinn = { version = "0.11.9", default-features = false, features = [
-    "runtime-tokio",
-    "rustls",
-] }
+quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls"] }
 quote = "1.0"
 object_store = "0.12"
 rand = "0.9"
@@ -128,9 +125,7 @@ tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"] }
 tl-proto = "0.5.1"
 tokio = { version = "1", default-features = false }
 tokio-stream = "0.1.15"
-tokio-util = { version = "0.7.10", default-features = false, features = [
-    "codec",
-] }
+tokio-util = { version = "0.7.10", default-features = false, features = ["codec"] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
@@ -140,9 +135,9 @@ tracing-stackdriver = "0.10.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 triomphe = "0.1.11"
 tycho-crypto = { version = "0.4", features = ["tl-proto", "serde", "rand9"] }
-tycho-executor = "0.3.1"
-tycho-types = { version = "0.3.1", features = ["tycho", "stats"] }
-tycho-vm = "0.3.1"
+tycho-executor = "0.3.2"
+tycho-types = { version = "0.3.2", features = ["tycho", "stats"] }
+tycho-vm = "0.3.2"
 uuid = "1.18.1"
 walkdir = "2.5.0"
 weedb = "0.6.0"
@@ -167,7 +162,6 @@ tycho-wu-tuner = { path = "./wu-tuner", version = "0.3.5" }
 
 [patch.crates-io]
 # patches here
-tycho-types = { git = "https://github.com/broxus/tycho-types.git", rev = "863f612fc7f0ccd1fb2c2cd0a13747f92b3cadcc" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
@@ -184,7 +178,7 @@ dbg_macro = "warn"
 debug_assert_with_mut_call = "warn"
 disallowed_methods = "warn"
 doc_markdown = "warn"
-empty_enum = "warn"
+empty_enums = "warn"
 enum_glob_use = "warn"
 exit = "warn"
 expl_impl_clone_on_copy = "warn"
