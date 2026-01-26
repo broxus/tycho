@@ -26,7 +26,7 @@ pub struct InternalsRangeReaderState {
     pub remaning_msgs_stats: Option<QueueStatistics>,
     /// Statistics shows read messages in current range
     #[tx(transactional)]
-    pub read_stats: QueueStatistics,
+    pub read_stats: Option<QueueStatistics>,
 
     pub shards: BTreeMap<ShardIdent, ShardReaderState>,
 

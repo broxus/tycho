@@ -31,10 +31,6 @@ impl TrackedQueueStatistics {
         self.inner.lock().tracked_total
     }
 
-    pub fn get(&self, account_addr: &IntAddr) -> Option<u64> {
-        self.inner.lock().statistics.statistics().get(account_addr)
-    }
-
     pub fn contains(&self, account_addr: &IntAddr) -> bool {
         self.inner
             .lock()
@@ -46,16 +42,6 @@ impl TrackedQueueStatistics {
     pub fn statistics(&self) -> TrackedQueueStatisticsView<'_> {
         TrackedQueueStatisticsView {
             guard: self.inner.lock(),
-        }
-    }
-
-    pub fn increment_for_account(&self, account_addr: IntAddr, count: u64) {
-        let is_tracked = self.track_shard.contains_address(&account_addr);
-        let mut guard = self.inner.lock();
-
-        guard.statistics.increment_for_account(account_addr, count);
-        if is_tracked {
-            guard.tracked_total += count;
         }
     }
 
@@ -110,6 +96,23 @@ pub struct TrackedQueueStatisticsView<'a> {
 impl<'a> TrackedQueueStatisticsView<'a> {
     pub fn iter(&self) -> StatisticsViewIter<'_> {
         self.guard.statistics.iter()
+    }
+}
+
+#[cfg(test)]
+impl TrackedQueueStatistics {
+    pub fn get(&self, account_addr: &IntAddr) -> Option<u64> {
+        self.inner.lock().statistics.statistics().get(account_addr)
+    }
+
+    pub fn increment_for_account(&self, account_addr: IntAddr, count: u64) {
+        let is_tracked = self.track_shard.contains_address(&account_addr);
+        let mut guard = self.inner.lock();
+
+        guard.statistics.increment_for_account(account_addr, count);
+        if is_tracked {
+            guard.tracked_total += count;
+        }
     }
 }
 

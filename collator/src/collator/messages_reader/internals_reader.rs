@@ -199,7 +199,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
             // and this will guarantee an equal order on continue and after refill
             if kind == InternalsRangeReaderKind::NewMessages {
                 reader_state.buffer = Default::default();
-                reader_state.read_stats = Default::default();
+                reader_state.tx_set_read_stats(None);
                 let shard_reader_state = reader_state.shards.get_mut(&self.for_shard_id).unwrap();
                 shard_reader_state.current_position = QueueKey::max_for_lt(shard_reader_state.from);
             }
@@ -570,7 +570,6 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                         self.for_shard_id, seqno, self.block_seqno,
                     )
                 );
-
                 // remember last existing range
                 last_seqno = seqno;
 
@@ -608,7 +607,13 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                     )));
                 };
 
-                let reader_state = self.reader_state.get_range_mut(&seqno).unwrap();
+                // get reader state read stats (it should be already loaded on range reader creation)
+                let read_stats = reader_state.read_stats.as_mut().unwrap_or_else(||
+                    panic!(
+                        "internals range reader state read stats should exist (for_shard_id: {}, seqno: {}, block_seqno: {})",
+                        self.for_shard_id, seqno, self.block_seqno,
+                    )
+                );
 
                 'read_range: loop {
                     // stop reading if buffer is full
@@ -677,7 +682,7 @@ impl<'a, V: InternalMessageValue> InternalsPartitionReader<'a, V> {
                             metrics.read_existing_msgs_count += 1;
 
                             // update read messages statistics in range reader
-                            reader_state.read_stats.increment_for_account(
+                            read_stats.increment_for_account(
                                 int_msg.item.message.destination().clone(),
                                 1,
                             );
@@ -1096,11 +1101,13 @@ fn create_existing_range_reader<V: InternalMessageValue>(
             tracing::trace!(target: tracing_targets::COLLATOR,
                 partition_id = %partition_id,
                 seqno,
-                read_stats = ?DebugIter(range_reader_state.read_stats.statistics().iter().map(|(addr, count)| (addr.to_string(), count))),
+                read_stats = ?DebugIter(range_reader_state.read_stats.as_ref().unwrap().statistics().iter().map(|(addr, count)| (addr.to_string(), count))),
                 "reduce cumulative remaning_msgs_stats by read_stats from range reader",
             );
 
-            for (account_addr, count) in range_reader_state.read_stats.statistics() {
+            for (account_addr, count) in
+                range_reader_state.read_stats.as_mut().unwrap().statistics()
+            {
                 remaining_msgs_stats.decrement_for_account(account_addr.clone(), count);
             }
         }
@@ -1136,14 +1143,18 @@ fn load_msg_stats<V: InternalMessageValue>(
     let msgs_stats =
         mq_adapter.get_statistics(&vec![partition_id].into_iter().collect(), ranges)?;
 
+    // stats should not be already loaded
+    ensure!(range_reader_state.msgs_stats.is_none());
+    ensure!(range_reader_state.read_stats.is_none());
+    ensure!(range_reader_state.remaning_msgs_stats.is_none());
+
     if range_reader_state.is_fully_read() {
-        range_reader_state.remaning_msgs_stats = Some(Default::default());
-        range_reader_state.read_stats = msgs_stats.clone();
+        range_reader_state.tx_set_remaning_msgs_stats(Some(Default::default()));
+        range_reader_state.tx_set_read_stats(Some(msgs_stats.clone()));
     } else {
         ensure!(range_reader_state.buffer.msgs_count() == 0);
-
-        range_reader_state.remaning_msgs_stats = Some(msgs_stats.clone());
-        range_reader_state.read_stats = Default::default();
+        range_reader_state.tx_set_remaning_msgs_stats(Some(msgs_stats.clone()));
+        range_reader_state.tx_set_read_stats(Some(Default::default()));
     }
 
     range_reader_state.msgs_stats = Some(Arc::new(msgs_stats));
