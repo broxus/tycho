@@ -1,16 +1,14 @@
 use std::collections::BTreeMap;
-use std::fmt;
 use std::hash::Hash;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use ahash::HashMapExt;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use parking_lot::lock_api::RwLockReadGuard;
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock};
 use tl_proto::TlWrite;
-use tycho_block_util::queue::{QueueKey, QueuePartitionIdx};
+use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::MempoolGlobalConfig;
 use tycho_executor::{AccountMeta, PublicLibraryChange, TransactionMeta};
@@ -21,13 +19,13 @@ use tycho_types::merkle::MerkleBuildResult;
 use tycho_types::models::{
     AccountBlocks, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
     BlockRef, BlockchainConfig, CollationConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg,
-    InMsgDescr, IntAddr, IntMsgInfo, LibDescr, MsgInfo, MsgsExecutionParams, OptionalAccount,
-    OutMsg, OutMsgDescr, OwnedMessage, PrevBlockRef, ShardAccount, ShardAccounts, ShardDescription,
+    InMsgDescr, IntMsgInfo, LibDescr, MsgInfo, MsgsExecutionParams, OptionalAccount, OutMsg,
+    OutMsgDescr, OwnedMessage, PrevBlockRef, ShardAccount, ShardAccounts, ShardDescription,
     ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, ShardStateUnsplit, SpecialFlags,
     StateInit, StdAddr, Transaction, ValueFlow,
 };
 use tycho_types::num::Tokens;
-use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
+use tycho_util::{FastHashMap, FastHashSet};
 
 use super::do_collate::work_units::PrepareMsgGroupsWu;
 use super::messages_reader::MessagesReaderMetrics;
@@ -35,16 +33,9 @@ use crate::collator::do_collate::work_units::{DoCollateWu, ExecuteWu, FinalizeWu
 use crate::collator::messages_reader::MetricsTimer;
 use crate::collator::messages_reader::state::ReaderState;
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
-use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValue};
-use crate::internal_queue::types::ranges::{Bound, QueueShardBoundedRange};
-use crate::internal_queue::types::stats::{
-    AccountStatistics, DiffStatistics, QueueStatistics, SeparatedStatisticsByPartitions,
-};
-use crate::queue_adapter::MessageQueueAdapter;
+use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::tracing_targets;
-use crate::types::processed_upto::{
-    BlockSeqno, Lt, ProcessedUptoInfoStuff, find_min_processed_to_by_shards,
-};
+use crate::types::processed_upto::{BlockSeqno, ProcessedUptoInfoStuff};
 use crate::types::{BlockCandidate, McData, ProcessedToByPartitions, TopShardBlockInfo};
 
 pub(super) struct WorkingState {

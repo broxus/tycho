@@ -44,9 +44,7 @@ impl<T: Transactional> Transactional for Option<T> {
     }
 
     fn is_in_transaction(&self) -> bool {
-        self.as_ref()
-            .map(|t| t.is_in_transaction())
-            .unwrap_or(false)
+        self.as_ref().is_some_and(|t| t.is_in_transaction())
     }
 }
 
