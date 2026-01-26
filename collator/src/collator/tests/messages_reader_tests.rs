@@ -25,7 +25,6 @@ use crate::collator::anchors_cache::AnchorsCacheTransaction;
 use crate::collator::messages_buffer::MessageGroup;
 use crate::collator::messages_reader::log_remaining_msgs_stats;
 use crate::collator::messages_reader::state::ReaderState;
-use crate::collator::statistics::cumulative::CumulativeStatistics;
 use crate::collator::types::{AnchorsCache, ParsedMessage};
 use crate::internal_queue::types::diff::DiffZone;
 use crate::internal_queue::types::message::{EnqueuedMessage, InternalMessageValue};

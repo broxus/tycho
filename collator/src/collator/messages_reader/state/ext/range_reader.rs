@@ -67,18 +67,6 @@ impl ExternalsRangeReaderState {
     ) -> &mut BTreeMap<QueuePartitionIdx, ExternalsPartitionRangeReaderState> {
         &mut self.by_partitions
     }
-
-    pub fn insert_partition(
-        &mut self,
-        par_id: QueuePartitionIdx,
-        state: ExternalsPartitionRangeReaderState,
-    ) {
-        self.tx_insert_by_partitions(par_id, state);
-    }
-
-    pub fn remove_partition(&mut self, par_id: QueuePartitionIdx) {
-        self.tx_remove_by_partitions(&par_id);
-    }
 }
 
 pub struct DebugExternalsRangeReaderState<'a>(pub &'a ExternalsRangeReaderState);

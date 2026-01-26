@@ -382,14 +382,6 @@ mod tests {
         IntAddr::Std(tycho_types::models::StdAddr::new(0, [id; 32].into()))
     }
 
-    fn track_all_shard() -> ShardIdent {
-        ShardIdent::new_full(0)
-    }
-
-    fn track_none_shard() -> ShardIdent {
-        ShardIdent::new_full(1)
-    }
-
     // === Basic operations ===
 
     #[test]

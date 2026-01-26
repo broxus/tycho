@@ -1,4 +1,3 @@
-use anyhow::Context;
 use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_util::FastHashMap;
 use tycho_util_proc::Transactional;
@@ -44,23 +43,6 @@ impl InternalsReaderState {
         shards_processed_to
     }
 
-    pub fn insert_partition(
-        &mut self,
-        par_id: QueuePartitionIdx,
-        state: InternalsPartitionReaderState,
-    ) {
-        self.tx_insert_partitions(par_id, state);
-    }
-
-    pub fn get_partition(
-        &self,
-        par_id: &QueuePartitionIdx,
-    ) -> anyhow::Result<&InternalsPartitionReaderState> {
-        self.partitions
-            .get(par_id)
-            .with_context(|| format!("internals reader state not exists for partition {par_id}"))
-    }
-
     pub fn partitions(&self) -> &FastHashMap<QueuePartitionIdx, InternalsPartitionReaderState> {
         &self.partitions
     }
@@ -77,6 +59,7 @@ impl InternalsReaderState {
         &mut self.cumulative_statistics
     }
 
+    #[cfg(test)]
     pub fn tx_partitions_mut(
         &mut self,
     ) -> &mut FastHashMap<QueuePartitionIdx, InternalsPartitionReaderState> {

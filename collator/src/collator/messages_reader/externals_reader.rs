@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::{Context, Result};
-use tycho_block_util::queue::{QueuePartitionIdx, get_short_addr_string, get_short_hash_string};
+use tycho_block_util::queue::{QueuePartitionIdx, get_short_hash_string};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{IntAddr, MsgInfo, ShardIdent};
 use tycho_util::FastHashSet;
-use tycho_util_proc::Transactional;
 
 use super::{
     GetNextMessageGroupMode, InternalsPartitionReader, MessagesReaderMetrics,
@@ -27,7 +26,7 @@ use crate::collator::messages_reader::state::ext::{ExternalKey, ExternalsReaderR
 use crate::collator::messages_reader::state::int::DebugInternalsRangeReaderState;
 use crate::collator::messages_reader::state::with_prev_map_and_current;
 use crate::collator::types::{
-    AnchorsCache, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff, ParsedMessage,
+    MsgsExecutionParamsExtension, MsgsExecutionParamsStuff, ParsedMessage,
 };
 use crate::internal_queue::types::message::InternalMessageValue;
 use crate::internal_queue::types::router::PartitionRouter;
@@ -81,17 +80,6 @@ impl<'a, 'b> ExternalsReader<'a, 'b> {
             anchors_cache,
             reader_state,
             all_ranges_fully_read: false,
-        }
-    }
-
-    fn init_reader_state(&mut self) {
-        // init minimal partitions count in the state if not exist
-        for par_id in self.buffer_limits_by_partitions.keys() {
-            self.reader_state.by_partitions.entry(*par_id).or_default();
-        }
-
-        for range_state in self.reader_state.ranges_mut().values_mut() {
-            range_state.fully_read = range_state.range.current_position == range_state.range.to;
         }
     }
 
@@ -662,7 +650,7 @@ impl<'a, 'b> ExternalsReader<'a, 'b> {
 
         for &seqno in &seqnos {
             let should_break = with_prev_map_and_current(
-                &mut self.reader_state.ranges_mut(),
+                self.reader_state.ranges_mut(),
                 seqno,
                 |prev_map, current_state| {
                     let range_state_by_partition =
@@ -932,22 +920,23 @@ fn should_skip_external_account<V: InternalMessageValue>(
 
             // check in remaning stats
             check_ops_count.saturating_add_assign(1);
-            if state.contains_account_addr_in_remaning_msgs_stats(&dst_addr) {
-                tracing::trace!(target: tracing_targets::COLLATOR,
-                    partition_id = %par_id,
-                    account_id = %get_short_hash_string(account_id),
-                    rr_seqno = curr_par_range_reader.seqno,
-                    rr_kind = ?curr_par_range_reader.kind,
-                    reader_state = ?DebugInternalsRangeReaderState(state),
-                    remaming_msgs_stats = ?state
-                        .remaning_msgs_stats.as_ref()
-                        .map(|stats| DebugIter(stats.statistics().iter().map(|(addr, count)|
-                            (get_short_addr_string(addr), count)
-                        ))),
-                    "external messages skipped for account - current partition range reader remaning stats",
-                );
-                return (true, check_ops_count);
-            }
+            // !!!
+            // if state.contains_account_addr_in_remaning_msgs_stats(&dst_addr) {
+            //     tracing::trace!(target: tracing_targets::COLLATOR,
+            //         partition_id = %par_id,
+            //         account_id = %get_short_hash_string(account_id),
+            //         rr_seqno = curr_par_range_reader.seqno,
+            //         rr_kind = ?curr_par_range_reader.kind,
+            //         reader_state = ?DebugInternalsRangeReaderState(state),
+            //         remaming_msgs_stats = ?state
+            //             .remaning_msgs_stats.as_ref()
+            //             .map(|stats| DebugIter(stats.statistics().iter().map(|(addr, count)|
+            //                 (get_short_addr_string(addr), count)
+            //             ))),
+            //         "external messages skipped for account - current partition range reader remaning stats",
+            //     );
+            //     return (true, check_ops_count);
+            // }
         }
     }
 

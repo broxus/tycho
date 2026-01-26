@@ -175,10 +175,6 @@ impl AnchorsCache {
 
 #[derive(Clone)]
 enum UndoOp {
-    Add {
-        anchor_id: MempoolAnchorId,
-        added_to_cache: bool,
-    },
     PopFront {
         anchor_id: MempoolAnchorId,
         cached_anchor: CachedAnchor,
@@ -205,18 +201,6 @@ impl<'a> AnchorsCacheTransaction<'a> {
             undo_log: Vec::new(),
             committed: false,
         }
-    }
-
-    pub fn add(&mut self, anchor: Arc<MempoolAnchor>, our_exts_count: usize) {
-        let anchor_id = anchor.id;
-        let added_to_cache = our_exts_count > 0;
-
-        self.undo_log.push(UndoOp::Add {
-            anchor_id,
-            added_to_cache,
-        });
-
-        self.cache.add(anchor, our_exts_count);
     }
 
     pub fn pop_front(&mut self) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
@@ -293,17 +277,6 @@ impl<'a> AnchorsCacheTransaction<'a> {
         let _histogram = HistogramGuard::begin("tycho_do_collate_anchors_cache_rollback_time");
         while let Some(op) = self.undo_log.pop() {
             match op {
-                UndoOp::Add {
-                    anchor_id: _,
-                    added_to_cache,
-                } => {
-                    self.cache.imported_anchors_info_history.pop_back();
-
-                    if added_to_cache {
-                        self.cache.cache.pop_back();
-                        self.cache.has_pending_externals = !self.cache.cache.is_empty();
-                    }
-                }
                 UndoOp::PopFront {
                     anchor_id,
                     cached_anchor,
@@ -341,20 +314,8 @@ impl<'a> AnchorsCacheTransaction<'a> {
         self.cache.last_imported_anchor_info()
     }
 
-    pub fn last_imported_anchor_info_at_ct(&self, ct: u64) -> Option<&AnchorInfo> {
-        self.cache.last_imported_anchor_info_at_ct(ct)
-    }
-
-    pub fn get_last_imported_anchor_id_and_ct(&self) -> Option<(u32, u64)> {
-        self.cache.get_last_imported_anchor_id_and_ct()
-    }
-
     pub fn get(&self, index: usize) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
         self.cache.get(index)
-    }
-
-    pub fn iter(&self) -> std::collections::vec_deque::Iter<'_, (MempoolAnchorId, CachedAnchor)> {
-        self.cache.iter()
     }
 
     pub fn has_pending_externals(&self) -> bool {
@@ -386,86 +347,6 @@ mod tests {
             author: PeerId([0; 32]),
             externals: Default::default(),
         })
-    }
-
-    // ==================== BASIC TESTS ====================
-
-    #[test]
-    fn test_transaction_commit() {
-        let mut cache = AnchorsCache::default();
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.add(make_anchor(1, 100), 5);
-            tx.add(make_anchor(2, 200), 3);
-            tx.commit();
-        }
-
-        assert_eq!(cache.len(), 2);
-        assert!(cache.has_pending_externals());
-        assert_eq!(cache.imported_anchors_info_history.len(), 2);
-    }
-
-    #[test]
-    fn test_transaction_rollback_on_drop() {
-        let mut cache = AnchorsCache::default();
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.add(make_anchor(1, 100), 5);
-            tx.add(make_anchor(2, 200), 3);
-            // no commit
-        }
-
-        assert_eq!(cache.len(), 0);
-        assert!(!cache.has_pending_externals());
-        assert_eq!(cache.imported_anchors_info_history.len(), 0);
-    }
-
-    // ==================== ADD WITH ZERO EXTERNALS ====================
-
-    #[test]
-    fn test_add_zero_externals_commit() {
-        let mut cache = AnchorsCache::default();
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.add(make_anchor(1, 100), 0);
-            tx.commit();
-        }
-
-        assert_eq!(cache.len(), 0); // not added to cache
-        assert!(!cache.has_pending_externals());
-        assert_eq!(cache.imported_anchors_info_history.len(), 1); // but added to history
-    }
-
-    #[test]
-    fn test_add_zero_externals_rollback() {
-        let mut cache = AnchorsCache::default();
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.add(make_anchor(1, 100), 0);
-        }
-
-        assert_eq!(cache.len(), 0);
-        assert!(cache.imported_anchors_info_history.is_empty());
-    }
-
-    #[test]
-    fn test_add_mixed_externals_rollback() {
-        let mut cache = AnchorsCache::default();
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.add(make_anchor(1, 100), 5); // will be added to cache
-            tx.add(make_anchor(2, 200), 0); // won't be added to cache
-            tx.add(make_anchor(3, 300), 3); // will be added to cache
-        }
-
-        assert_eq!(cache.len(), 0);
-        assert!(cache.imported_anchors_info_history.is_empty());
-        assert!(!cache.has_pending_externals());
     }
 
     // ==================== POP_FRONT ====================
@@ -655,57 +536,6 @@ mod tests {
         assert_eq!(cache.imported_anchors_info_history.len(), 1);
     }
 
-    // ==================== MIXED OPERATIONS ====================
-
-    #[test]
-    fn test_mixed_operations_commit() {
-        let mut cache = AnchorsCache::default();
-        cache.add(make_anchor(1, 100), 5);
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.pop_front();
-            tx.add(make_anchor(2, 200), 3);
-            tx.add(make_anchor(3, 300), 2);
-            tx.commit();
-        }
-
-        assert_eq!(cache.len(), 2);
-        assert_eq!(cache.get(0).unwrap().0, 2);
-        assert_eq!(cache.get(1).unwrap().0, 3);
-    }
-
-    #[test]
-    fn test_mixed_operations_rollback() {
-        let mut cache = AnchorsCache::default();
-        cache.add(make_anchor(1, 100), 5);
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.pop_front();
-            tx.add(make_anchor(2, 200), 3);
-            tx.add(make_anchor(3, 300), 2);
-        }
-
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.get(0).unwrap().0, 1);
-    }
-
-    #[test]
-    fn test_add_pop_add_rollback() {
-        let mut cache = AnchorsCache::default();
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.add(make_anchor(1, 100), 5);
-            tx.pop_front();
-            tx.add(make_anchor(2, 200), 3);
-        }
-
-        assert_eq!(cache.len(), 0);
-        assert!(cache.imported_anchors_info_history.is_empty());
-    }
-
     // ==================== HAS_PENDING_EXTERNALS ====================
 
     #[test]
@@ -766,25 +596,6 @@ mod tests {
         assert_eq!(cache.len(), 1);
     }
 
-    #[test]
-    fn test_pop_until_empty_then_add() {
-        let mut cache = AnchorsCache::default();
-        cache.add(make_anchor(1, 100), 5);
-        cache.add(make_anchor(2, 200), 3);
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.pop_front();
-            tx.pop_front();
-            assert!(tx.pop_front().is_none());
-            tx.add(make_anchor(3, 300), 2);
-            tx.commit();
-        }
-
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.get(0).unwrap().0, 3);
-    }
-
     // ==================== CHECKING CORRECTNESS OF remaining_len LOGIC ====================
 
     #[test]
@@ -836,50 +647,6 @@ mod tests {
             .map(|i| i.ct)
             .collect();
         assert_eq!(cts, vec![50, 80, 100]);
-    }
-
-    // ==================== ACCESSOR METHODS IN TRANSACTION ====================
-
-    #[test]
-    fn test_transaction_accessors() {
-        let mut cache = AnchorsCache::default();
-        cache.add(make_anchor(1, 100), 5);
-        cache.add(make_anchor(2, 200), 3);
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-
-            assert_eq!(tx.get(0).unwrap().0, 1);
-            assert_eq!(tx.get(1).unwrap().0, 2);
-            assert!(tx.get(2).is_none());
-
-            assert!(tx.has_pending_externals());
-
-            let (id, ct) = tx.get_last_imported_anchor_id_and_ct().unwrap();
-            assert_eq!(id, 2);
-            assert_eq!(ct, 200);
-
-            tx.pop_front();
-
-            assert_eq!(tx.get(0).unwrap().0, 2);
-            assert!(tx.get(1).is_none());
-
-            tx.commit();
-        }
-    }
-
-    #[test]
-    fn test_transaction_iter() {
-        let mut cache = AnchorsCache::default();
-        cache.add(make_anchor(1, 100), 5);
-        cache.add(make_anchor(2, 200), 3);
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            let ids: Vec<_> = tx.iter().map(|(id, _)| *id).collect();
-            assert_eq!(ids, vec![1, 2]);
-            tx.commit();
-        }
     }
 
     // ==================== REMOVE_LAST_IMPORTED_ABOVE ====================
@@ -1043,40 +810,6 @@ mod tests {
     // ==================== MIXED OPERATIONS WITH REMOVE_LAST_IMPORTED_ABOVE ====================
 
     #[test]
-    fn test_add_then_remove_last_imported_above_commit() {
-        let mut cache = AnchorsCache::default();
-        cache.add(make_anchor(1, 100), 5);
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.add(make_anchor(2, 200), 3);
-            tx.add(make_anchor(3, 300), 2);
-            tx.remove_last_imported_above(150);
-            tx.commit();
-        }
-
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.get(0).unwrap().0, 1);
-    }
-
-    #[test]
-    fn test_add_then_remove_last_imported_above_rollback() {
-        let mut cache = AnchorsCache::default();
-        cache.add(make_anchor(1, 100), 5);
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.add(make_anchor(2, 200), 3);
-            tx.add(make_anchor(3, 300), 2);
-            tx.remove_last_imported_above(150);
-            // no commit
-        }
-
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.get(0).unwrap().0, 1);
-    }
-
-    #[test]
     fn test_pop_front_then_remove_last_imported_above_commit() {
         let mut cache = AnchorsCache::default();
         cache.add(make_anchor(1, 100), 5);
@@ -1118,45 +851,6 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_last_imported_above_then_add_commit() {
-        let mut cache = AnchorsCache::default();
-        cache.add(make_anchor(1, 100), 5);
-        cache.add(make_anchor(2, 200), 3);
-        cache.add(make_anchor(3, 300), 2);
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.remove_last_imported_above(150); // removes 2, 3
-            tx.add(make_anchor(4, 250), 4);
-            tx.commit();
-        }
-
-        assert_eq!(cache.len(), 2);
-        assert_eq!(cache.get(0).unwrap().0, 1);
-        assert_eq!(cache.get(1).unwrap().0, 4);
-    }
-
-    #[test]
-    fn test_remove_last_imported_above_then_add_rollback() {
-        let mut cache = AnchorsCache::default();
-        cache.add(make_anchor(1, 100), 5);
-        cache.add(make_anchor(2, 200), 3);
-        cache.add(make_anchor(3, 300), 2);
-
-        {
-            let mut tx = AnchorsCacheTransaction::new(&mut cache);
-            tx.remove_last_imported_above(150);
-            tx.add(make_anchor(4, 250), 4);
-            // no commit
-        }
-
-        assert_eq!(cache.len(), 3);
-        assert_eq!(cache.get(0).unwrap().0, 1);
-        assert_eq!(cache.get(1).unwrap().0, 2);
-        assert_eq!(cache.get(2).unwrap().0, 3);
-    }
-
-    #[test]
     fn test_multiple_remove_last_imported_above_rollback() {
         let mut cache = AnchorsCache::default();
         cache.add(make_anchor(1, 100), 5);
@@ -1175,34 +869,5 @@ mod tests {
         assert_eq!(cache.len(), 5);
         let ids: Vec<_> = cache.iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, vec![1, 2, 3, 4, 5]);
-    }
-
-    // ==================== LAST_IMPORTED_ANCHOR_INFO_AT_CT ====================
-
-    #[test]
-    fn test_last_imported_anchor_info_at_ct_in_transaction() {
-        let mut cache = AnchorsCache::default();
-        cache.add(make_anchor(1, 100), 5);
-        cache.add(make_anchor(2, 200), 3);
-        cache.add(make_anchor(3, 300), 2);
-
-        {
-            let tx = AnchorsCacheTransaction::new(&mut cache);
-
-            // ct=250 -> should return anchor 2 (ct=200)
-            let info = tx.last_imported_anchor_info_at_ct(250).unwrap();
-            assert_eq!(info.id, 2);
-            assert_eq!(info.ct, 200);
-
-            // ct=100 -> should return anchor 1 (ct=100)
-            let info = tx.last_imported_anchor_info_at_ct(100).unwrap();
-            assert_eq!(info.id, 1);
-            assert_eq!(info.ct, 100);
-
-            // ct=50 -> should return first anchor (ct=100) as fallback
-            let info = tx.last_imported_anchor_info_at_ct(50).unwrap();
-            assert_eq!(info.id, 1);
-            assert_eq!(info.ct, 100);
-        }
     }
 }

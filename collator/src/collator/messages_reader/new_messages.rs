@@ -20,7 +20,7 @@ use crate::internal_queue::state::state_iterator::MessageExt;
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::InternalMessageValue;
 use crate::internal_queue::types::router::PartitionRouter;
-use crate::internal_queue::types::stats::{StatisticsView, StatisticsViewIter};
+use crate::internal_queue::types::stats::StatisticsViewIter;
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
 use crate::types::{ProcessedTo, SaturatingAddAssign};

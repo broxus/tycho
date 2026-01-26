@@ -6,7 +6,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use state::ReaderState;
 use state::int::DebugInternalsRangeReaderState;
-use state::int::reader::InternalsReaderState;
 use tycho_block_util::queue::{QueueKey, QueuePartitionIdx, get_short_addr_string};
 use tycho_types::cell::HashBytes;
 use tycho_types::models::{MsgsExecutionParams, ShardIdent};
@@ -17,7 +16,7 @@ use self::internals_reader::*;
 use self::new_messages::*;
 use super::error::CollatorError;
 use super::messages_buffer::{DisplayMessageGroup, MessageGroup, MessagesBufferLimits};
-use super::types::{AnchorsCache, MsgsExecutionParamsExtension, MsgsExecutionParamsStuff};
+use super::types::{MsgsExecutionParamsExtension, MsgsExecutionParamsStuff};
 use crate::collator::anchors_cache::AnchorsCacheTransaction;
 use crate::collator::messages_buffer::DebugMessageGroup;
 use crate::collator::messages_reader::internals_range_reader::{
@@ -622,7 +621,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
                                 dest_int_address, remote_shard_partition, remote_shard_partition,
                             );
                             partition_router
-                                .insert_dst(&dest_int_address, remote_shard_partition)?;
+                                .insert_dst(dest_int_address, remote_shard_partition)?;
                             continue;
                         }
 
@@ -641,7 +640,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
                                     "use partition 0 stats for address {} from remote shard top diff",
                                     dest_int_address,
                                 );
-                                partition.get(&dest_int_address).copied().unwrap_or(0)
+                                partition.get(dest_int_address).copied().unwrap_or(0)
                             }
                         };
 
@@ -658,7 +657,7 @@ impl<'a, 'b, V: InternalMessageValue> MessagesReader<'a, 'b, V> {
                         "move address {} to partition 1 because it has {} messages",
                         dest_int_address, total_msgs,
                     );
-                    partition_router.insert_dst(&dest_int_address, LP_PARTITION_ID)?;
+                    partition_router.insert_dst(dest_int_address, LP_PARTITION_ID)?;
                     moved_from_par_0_accounts.insert(dest_int_address.get_address());
                 }
             }

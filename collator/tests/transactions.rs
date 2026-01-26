@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use tycho_collator::collator::ForceMasterCollation::No;
 use tycho_util::transactional_types::{Transactional, TransactionalCollection};
 use tycho_util::{FastHashMap, FastHashSet};
 use tycho_util_proc::Transactional;
@@ -662,6 +661,7 @@ fn complex_option_none_to_some_commit() {
     assert_eq!(obj.maybe.as_ref().unwrap().value, 50);
 }
 
+#[test]
 fn direct_set_option_some() {
     let mut test_value = TestValue {
         value: 42,
@@ -676,6 +676,7 @@ fn direct_set_option_some() {
     assert_eq!(test_value.optional_value, Some(100));
 }
 
+#[test]
 fn direct_set_option_node() {
     let mut test_value = TestValue {
         value: 42,

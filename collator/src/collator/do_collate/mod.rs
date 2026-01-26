@@ -23,7 +23,7 @@ use tycho_util::time::now_millis;
 use tycho_util::transactional_types::Transactional;
 
 use super::types::{
-    AnchorInfo, AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
+    AnchorsCache, BlockCollationData, BlockCollationDataBuilder, BlockSerializerCache,
     CollationResult, ExecuteResult, FinalResult, FinalizeBlockResult, FinalizeCollationResult,
     FinalizeMessagesReaderResult, PrevData, WorkingState,
 };
@@ -409,7 +409,7 @@ impl CollatorStdImpl {
         Ok(())
     }
 
-    /// Run collation phase. Returns CollationResult and pending queue diff transaction.
+    /// Run collation phase. Returns `CollationResult` and pending queue diff transaction.
     /// The transaction should be committed only after successful collation.
     #[allow(clippy::too_many_arguments)]
     fn run(
@@ -1524,7 +1524,7 @@ fn serialize_diff(
         .serialize()
 }
 
-/// Returned type from prepare_queue_diff_task
+/// Returned type from `prepare_queue_diff_task`
 struct PreparedQueueDiff {
     elapsed: Duration,
     tx: Option<InternalQueueTransaction>,

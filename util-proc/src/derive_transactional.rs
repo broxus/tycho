@@ -57,8 +57,8 @@ pub fn impl_transactional(input: DeriveInput) -> Result<TokenStream, syn::Error>
             let get_mut_method = format_ident!("tx_get_mut_{}", field_name);
 
             let removed_type = match map_kind {
-                MapKind::BTreeMap => quote! { std::collections::BTreeMap<#key_type, #value_type> },
-                MapKind::HashMap | MapKind::FastHashMap => {
+                MapKind::BTree => quote! { std::collections::BTreeMap<#key_type, #value_type> },
+                MapKind::Hash | MapKind::FastHash => {
                     quote! { tycho_util::FastHashMap<#key_type, #value_type> }
                 }
             };
@@ -69,8 +69,8 @@ pub fn impl_transactional(input: DeriveInput) -> Result<TokenStream, syn::Error>
             });
 
             let removed_init = match map_kind {
-                MapKind::BTreeMap => quote! { std::collections::BTreeMap::new() },
-                MapKind::HashMap | MapKind::FastHashMap => {
+                MapKind::BTree => quote! { std::collections::BTreeMap::new() },
+                MapKind::Hash | MapKind::FastHash => {
                     quote! { tycho_util::FastHashMap::default() }
                 }
             };
@@ -255,45 +255,47 @@ fn has_attr(field: &Field, name: &str, value: &str) -> bool {
 }
 
 enum MapKind {
-    BTreeMap,
-    HashMap,
-    FastHashMap,
+    BTree,
+    Hash,
+    FastHash,
 }
 
 fn is_option_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(seg) = type_path.path.segments.last() {
-            return seg.ident == "Option";
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(seg) = type_path.path.segments.last()
+    {
+        seg.ident == "Option"
+    } else {
+        false
     }
-    false
 }
 
 fn extract_map_types(ty: &Type) -> Result<(MapKind, &Type, &Type), syn::Error> {
-    if let Type::Path(type_path) = ty {
-        if let Some(seg) = type_path.path.segments.last() {
-            let kind = if seg.ident == "BTreeMap" {
-                Some(MapKind::BTreeMap)
-            } else if seg.ident == "HashMap" {
-                Some(MapKind::HashMap)
-            } else if seg.ident == "FastHashMap" {
-                Some(MapKind::FastHashMap)
-            } else {
-                None
-            };
+    if let Type::Path(type_path) = ty
+        && let Some(seg) = type_path.path.segments.last()
+    {
+        let kind = if seg.ident == "BTreeMap" {
+            Some(MapKind::BTree)
+        } else if seg.ident == "HashMap" {
+            Some(MapKind::Hash)
+        } else if seg.ident == "FastHashMap" {
+            Some(MapKind::FastHash)
+        } else {
+            None
+        };
 
-            if let Some(kind) = kind {
-                if let PathArguments::AngleBracketed(args) = &seg.arguments {
-                    let mut iter = args.args.iter();
-                    if let (Some(GenericArgument::Type(k)), Some(GenericArgument::Type(v))) =
-                        (iter.next(), iter.next())
-                    {
-                        return Ok((kind, k, v));
-                    }
-                }
+        if let Some(kind) = kind
+            && let PathArguments::AngleBracketed(args) = &seg.arguments
+        {
+            let mut iter = args.args.iter();
+            if let (Some(GenericArgument::Type(k)), Some(GenericArgument::Type(v))) =
+                (iter.next(), iter.next())
+            {
+                return Ok((kind, k, v));
             }
         }
     }
+
     Err(syn::Error::new_spanned(
         ty,
         "expected BTreeMap<K, V>, HashMap<K, V> or FastHashMap<K, V>",

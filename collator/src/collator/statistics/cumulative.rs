@@ -42,7 +42,7 @@ struct CumulativeStatisticsTx {
     /// Snapshot of `all_shards_processed_to_by_partitions` at the start of the transaction
     all_shards_processed_to_by_partitions: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
 
-    /// Stores processed_to updates during the transaction
+    /// Stores `processed_to` updates during the transaction
     processed_updates: FastHashMap<ShardIdent, ProcessedToByPartitions>,
 }
 
@@ -55,7 +55,7 @@ pub struct CumulativeStatistics {
     all_shards_processed_to_by_partitions: FastHashMap<ShardIdent, (bool, ProcessedToByPartitions)>,
 
     /// Stores per-shard statistics, keyed by `ShardIdent`.
-    /// ShardIdent is the source shard of the diff statistics
+    /// `ShardIdent` is the source shard of the diff statistics
     /// Each shard has a `FastHashMap<QueuePartitionIdx, BTreeMap<QueueKey, AccountStatistics>>`
     shards_stats_by_partitions: FastHashMap<ShardIdent, SeparatedStatisticsByPartitions>,
 
@@ -88,10 +88,14 @@ impl Transactional for CumulativeStatistics {
             panic!("no transaction in progress")
         };
 
-        // Commit stats changes
+        // Commit stats changes (skip newly added entries without active transaction)
         for stats in self.result.values_mut() {
-            stats.initial_stats.commit();
-            stats.remaning_stats.commit();
+            if stats.initial_stats.is_in_transaction() {
+                stats.initial_stats.commit();
+            }
+            if stats.remaning_stats.is_in_transaction() {
+                stats.remaning_stats.commit();
+            }
         }
 
         for (dst_shard, processed_to) in &tx.processed_updates {
@@ -102,7 +106,7 @@ impl Transactional for CumulativeStatistics {
                 dst_shard,
                 processed_to,
                 ProcessMode::CommitRetainOnly,
-            )
+            );
         }
     }
 
@@ -111,10 +115,14 @@ impl Transactional for CumulativeStatistics {
             panic!("no transaction in progress")
         };
 
-        // Rollback result
+        // Rollback result (skip newly added entries without active transaction)
         for stats in self.result.values_mut() {
-            stats.initial_stats.rollback();
-            stats.remaning_stats.rollback();
+            if stats.initial_stats.is_in_transaction() {
+                stats.initial_stats.rollback();
+            }
+            if stats.remaning_stats.is_in_transaction() {
+                stats.remaning_stats.rollback();
+            }
         }
 
         // Remove added partitions
@@ -124,10 +132,10 @@ impl Transactional for CumulativeStatistics {
 
         // Remove added diffs
         for (diff_shard, partition, diff_max_message) in tx.added_diffs {
-            if let Some(shard_stats) = self.shards_stats_by_partitions.get_mut(&diff_shard) {
-                if let Some(partition_stats) = shard_stats.get_mut(&partition) {
-                    partition_stats.remove(&diff_max_message);
-                }
+            if let Some(shard_stats) = self.shards_stats_by_partitions.get_mut(&diff_shard)
+                && let Some(partition_stats) = shard_stats.get_mut(&partition)
+            {
+                partition_stats.remove(&diff_max_message);
             }
         }
 
@@ -199,7 +207,7 @@ impl CumulativeStatistics {
         }
 
         for (dst_shard, (_, new_processed_to)) in &new_processed_to_by_shards {
-            let changed = match self.all_shards_processed_to_by_partitions.get(&dst_shard) {
+            let changed = match self.all_shards_processed_to_by_partitions.get(dst_shard) {
                 Some((_, old_processed_to)) => old_processed_to != new_processed_to,
                 None => true,
             };
@@ -299,13 +307,11 @@ impl CumulativeStatistics {
         for (dst_shard, (_, shard_processed_to_by_partitions)) in
             &self.all_shards_processed_to_by_partitions
         {
-            if let Some(partition_processed_to) = shard_processed_to_by_partitions.get(&partition) {
-                if let Some(to_key) = partition_processed_to.get(&diff_shard) {
-                    if diff_max_message <= *to_key {
-                        diff_partition_stats
-                            .retain(|dst_acc, _| !dst_shard.contains_address(dst_acc));
-                    }
-                }
+            if let Some(partition_processed_to) = shard_processed_to_by_partitions.get(&partition)
+                && let Some(to_key) = partition_processed_to.get(&diff_shard)
+                && diff_max_message <= *to_key
+            {
+                diff_partition_stats.retain(|dst_acc, _| !dst_shard.contains_address(dst_acc));
             }
         }
 
