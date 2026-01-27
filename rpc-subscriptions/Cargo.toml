@@ -1,24 +1,28 @@
 [package]
 name = "tycho-rpc-subscriptions"
-edition = "2024"
+description = "Tycho RPC account subscriptions."
+include = ["src/**/*.rs", "src/**/*.tl", "./LICENSE-*", "./README.md"]
 version.workspace = true
 authors.workspace = true
+edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
 
 [dependencies]
-dashmap = { workspace = true }
-smallvec = { workspace = true }
-tycho-types = { workspace = true }
-tycho-util = { workspace = true }
-uuid = { workspace = true }
-parking_lot = { workspace = true }
-tracing = { workspace = true }
-
-crossbeam-queue = { workspace = true }
+# crates.io deps
 bytesize = { workspace = true }
+crossbeam-queue = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+smallvec = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+tycho-types = { workspace = true }
+uuid = { workspace = true }
+
+# local deps
+tycho-util = { workspace = true }
 
 [dev-dependencies]
 alloc-metrics = { workspace = true }
