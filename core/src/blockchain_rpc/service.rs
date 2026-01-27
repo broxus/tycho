@@ -1,4 +1,4 @@
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -11,12 +11,11 @@ use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::blockchain_rpc::broadcast_listener::{BroadcastListener, NoopBroadcastListener};
+use crate::blockchain_rpc::providers::{ArchiveProvider, IntoArchiveProvider};
 use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
-use crate::storage::{
-    ArchiveId, BlockConnection, BlockStorage, CoreStorage, KeyBlocksDirection, PersistentStateKind,
-};
+use crate::storage::{BlockConnection, CoreStorage, KeyBlocksDirection, PersistentStateKind};
 
 const RPC_METHOD_TIMINGS_METRIC: &str = "tycho_blockchain_rpc_method_time";
 
@@ -38,6 +37,12 @@ pub struct BlockchainRpcServiceConfig {
     ///
     /// Default: yes.
     pub serve_persistent_states: bool,
+
+    /// Enable proxying requests to S3 when data is not available in storage (GC passed).
+    /// Requires the `s3` feature and S3 client configuration.
+    ///
+    /// Default: true.
+    pub proxy_to_s3: bool,
 }
 
 impl Default for BlockchainRpcServiceConfig {
@@ -45,6 +50,7 @@ impl Default for BlockchainRpcServiceConfig {
         Self {
             max_key_blocks_list_len: 8,
             serve_persistent_states: true,
+            proxy_to_s3: true,
         }
     }
 }
@@ -54,16 +60,17 @@ pub struct BlockchainRpcServiceBuilder<MandatoryFields> {
     mandatory_fields: MandatoryFields,
 }
 
-impl<B> BlockchainRpcServiceBuilder<(B, CoreStorage)>
+impl<B> BlockchainRpcServiceBuilder<(B, CoreStorage, Arc<dyn ArchiveProvider>)>
 where
     B: BroadcastListener,
 {
     pub fn build(self) -> BlockchainRpcService<B> {
-        let (broadcast_listener, storage) = self.mandatory_fields;
+        let (broadcast_listener, storage, archive_provider) = self.mandatory_fields;
 
         BlockchainRpcService {
             inner: Arc::new(Inner {
                 storage,
+                archive_provider,
                 config: self.config,
                 broadcast_listener,
             }),
@@ -71,49 +78,85 @@ where
     }
 }
 
-impl<T1> BlockchainRpcServiceBuilder<(T1, ())> {
-    pub fn with_storage(
-        self,
-        storage: CoreStorage,
-    ) -> BlockchainRpcServiceBuilder<(T1, CoreStorage)> {
-        let (broadcast_listener, _) = self.mandatory_fields;
+impl<B> BlockchainRpcServiceBuilder<(B, CoreStorage, ())>
+where
+    B: BroadcastListener,
+{
+    pub fn build(self) -> BlockchainRpcService<B> {
+        let (broadcast_listener, storage, _) = self.mandatory_fields;
+        let archive_provider = storage
+            .clone()
+            .into_archive_provider(self.config.proxy_to_s3);
 
-        BlockchainRpcServiceBuilder {
-            config: self.config,
-            mandatory_fields: (broadcast_listener, storage),
+        BlockchainRpcService {
+            inner: Arc::new(Inner {
+                storage,
+                archive_provider,
+                config: self.config,
+                broadcast_listener,
+            }),
         }
     }
 }
 
-impl<T2> BlockchainRpcServiceBuilder<((), T2)> {
-    pub fn with_broadcast_listener<T1>(
+impl<T1, T3> BlockchainRpcServiceBuilder<(T1, (), T3)> {
+    pub fn with_storage(
         self,
-        broadcast_listener: T1,
-    ) -> BlockchainRpcServiceBuilder<(T1, T2)>
-    where
-        T1: BroadcastListener,
-    {
-        let (_, storage) = self.mandatory_fields;
+        storage: CoreStorage,
+    ) -> BlockchainRpcServiceBuilder<(T1, CoreStorage, T3)> {
+        let (broadcast_listener, _, archive_provider) = self.mandatory_fields;
 
         BlockchainRpcServiceBuilder {
             config: self.config,
-            mandatory_fields: (broadcast_listener, storage),
+            mandatory_fields: (broadcast_listener, storage, archive_provider),
+        }
+    }
+}
+
+impl<T2, T3> BlockchainRpcServiceBuilder<((), T2, T3)> {
+    pub fn with_broadcast_listener<T1>(
+        self,
+        broadcast_listener: T1,
+    ) -> BlockchainRpcServiceBuilder<(T1, T2, T3)>
+    where
+        T1: BroadcastListener,
+    {
+        let (_, storage, archive_provider) = self.mandatory_fields;
+
+        BlockchainRpcServiceBuilder {
+            config: self.config,
+            mandatory_fields: (broadcast_listener, storage, archive_provider),
         }
     }
 
     pub fn without_broadcast_listener(
         self,
-    ) -> BlockchainRpcServiceBuilder<(NoopBroadcastListener, T2)> {
-        let (_, storage) = self.mandatory_fields;
+    ) -> BlockchainRpcServiceBuilder<(NoopBroadcastListener, T2, T3)> {
+        let (_, storage, archive_provider) = self.mandatory_fields;
 
         BlockchainRpcServiceBuilder {
             config: self.config,
-            mandatory_fields: (NoopBroadcastListener, storage),
+            mandatory_fields: (NoopBroadcastListener, storage, archive_provider),
         }
     }
 }
 
-impl<T1, T2> BlockchainRpcServiceBuilder<(T1, T2)> {
+impl<T1, T2> BlockchainRpcServiceBuilder<(T1, T2, ())> {
+    pub fn with_archive_provider<AP: IntoArchiveProvider>(
+        self,
+        archive_provider: AP,
+    ) -> BlockchainRpcServiceBuilder<(T1, T2, Arc<dyn ArchiveProvider>)> {
+        let (broadcast_listener, storage, _) = self.mandatory_fields;
+        let archive_provider = archive_provider.into_archive_provider(self.config.proxy_to_s3);
+
+        BlockchainRpcServiceBuilder {
+            config: self.config,
+            mandatory_fields: (broadcast_listener, storage, archive_provider),
+        }
+    }
+}
+
+impl<T1, T2, T3> BlockchainRpcServiceBuilder<(T1, T2, T3)> {
     pub fn with_config(self, config: BlockchainRpcServiceConfig) -> Self {
         Self { config, ..self }
     }
@@ -134,10 +177,10 @@ impl<B> Clone for BlockchainRpcService<B> {
 }
 
 impl BlockchainRpcService<()> {
-    pub fn builder() -> BlockchainRpcServiceBuilder<((), ())> {
+    pub fn builder() -> BlockchainRpcServiceBuilder<((), (), ())> {
         BlockchainRpcServiceBuilder {
             config: Default::default(),
-            mandatory_fields: ((), ()),
+            mandatory_fields: ((), (), ()),
         }
     }
 }
@@ -354,6 +397,7 @@ struct Inner<B> {
     storage: CoreStorage,
     config: BlockchainRpcServiceConfig,
     broadcast_listener: B,
+    archive_provider: Arc<dyn ArchiveProvider>,
 }
 
 impl<B> Inner<B> {
@@ -519,35 +563,10 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetArchiveInfo,
     ) -> overlay::Response<ArchiveInfo> {
-        let mc_seqno = req.mc_seqno;
-        let node_state = self.storage.node_state();
-
-        match node_state.load_last_mc_block_id() {
-            Some(last_applied_mc_block) => {
-                if mc_seqno > last_applied_mc_block.seqno {
-                    return overlay::Response::Ok(ArchiveInfo::TooNew);
-                }
-
-                let block_storage = self.storage().block_storage();
-
-                let id = block_storage.get_archive_id(mc_seqno);
-                let size_res = match id {
-                    ArchiveId::Found(id) => block_storage.get_archive_size(id),
-                    ArchiveId::TooNew | ArchiveId::NotFound => Ok(None),
-                };
-
-                overlay::Response::Ok(match (id, size_res) {
-                    (ArchiveId::Found(id), Ok(Some(size))) if size > 0 => ArchiveInfo::Found {
-                        id: id as u64,
-                        size: NonZeroU64::new(size as _).unwrap(),
-                        chunk_size: BlockStorage::DEFAULT_BLOB_CHUNK_SIZE,
-                    },
-                    (ArchiveId::Found(_) | ArchiveId::TooNew, Ok(None)) => ArchiveInfo::TooNew,
-                    _ => ArchiveInfo::NotFound,
-                })
-            }
-            None => {
-                tracing::warn!("get_archive_id failed: no blocks applied");
+        match self.archive_provider.get_archive_info(req.mc_seqno).await {
+            Ok(info) => overlay::Response::Ok(info),
+            Err(e) => {
+                tracing::warn!(mc_seqno = req.mc_seqno, "get_archive_info failed: {e:?}");
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
             }
         }
@@ -557,19 +576,18 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetArchiveChunk,
     ) -> overlay::Response<Data> {
-        let block_storage = self.storage.block_storage();
-
-        let get_archive_chunk = || async {
-            let archive_slice = block_storage
-                .get_archive_chunk(req.archive_id as u32, req.offset)
-                .await?;
-            Ok::<_, anyhow::Error>(archive_slice)
-        };
-
-        match get_archive_chunk().await {
+        match self
+            .archive_provider
+            .get_archive_chunk(req.archive_id as u32, req.offset)
+            .await
+        {
             Ok(data) => overlay::Response::Ok(Data { data }),
             Err(e) => {
-                tracing::warn!("get_archive_chunk failed: {e:?}");
+                tracing::warn!(
+                    archive_id = req.archive_id,
+                    offset = req.offset,
+                    "get_archive_chunk failed: {e:?}"
+                );
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
             }
         }
