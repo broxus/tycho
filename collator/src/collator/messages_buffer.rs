@@ -74,7 +74,7 @@ impl Transactional for MessagesBuffer {
         self.msgs.retain(|_, entry| {
             entry.old_val = None;
             entry.is_new = false;
-            entry.new_val.is_some()
+            entry.new_val.as_ref().is_some_and(|v| !v.is_empty())
         });
     }
 
