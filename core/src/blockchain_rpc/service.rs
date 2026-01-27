@@ -11,7 +11,7 @@ use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::blockchain_rpc::broadcast_listener::{BroadcastListener, NoopBroadcastListener};
-use crate::blockchain_rpc::providers::{ArchiveProvider, IntoArchiveProvider};
+use crate::blockchain_rpc::providers::{IntoRpcProvider, RpcProvider};
 use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
@@ -60,17 +60,17 @@ pub struct BlockchainRpcServiceBuilder<MandatoryFields> {
     mandatory_fields: MandatoryFields,
 }
 
-impl<B> BlockchainRpcServiceBuilder<(B, CoreStorage, Arc<dyn ArchiveProvider>)>
+impl<B> BlockchainRpcServiceBuilder<(B, CoreStorage, Arc<dyn RpcProvider>)>
 where
     B: BroadcastListener,
 {
     pub fn build(self) -> BlockchainRpcService<B> {
-        let (broadcast_listener, storage, archive_provider) = self.mandatory_fields;
+        let (broadcast_listener, storage, rpc_provider) = self.mandatory_fields;
 
         BlockchainRpcService {
             inner: Arc::new(Inner {
                 storage,
-                archive_provider,
+                rpc_provider,
                 config: self.config,
                 broadcast_listener,
             }),
@@ -84,14 +84,12 @@ where
 {
     pub fn build(self) -> BlockchainRpcService<B> {
         let (broadcast_listener, storage, _) = self.mandatory_fields;
-        let archive_provider = storage
-            .clone()
-            .into_archive_provider(self.config.proxy_to_s3);
+        let rpc_provider = storage.clone().into_rpc_provider(self.config.proxy_to_s3);
 
         BlockchainRpcService {
             inner: Arc::new(Inner {
                 storage,
-                archive_provider,
+                rpc_provider,
                 config: self.config,
                 broadcast_listener,
             }),
@@ -142,16 +140,16 @@ impl<T2, T3> BlockchainRpcServiceBuilder<((), T2, T3)> {
 }
 
 impl<T1, T2> BlockchainRpcServiceBuilder<(T1, T2, ())> {
-    pub fn with_archive_provider<AP: IntoArchiveProvider>(
+    pub fn with_rpc_provider<RP: IntoRpcProvider>(
         self,
-        archive_provider: AP,
-    ) -> BlockchainRpcServiceBuilder<(T1, T2, Arc<dyn ArchiveProvider>)> {
+        provider: RP,
+    ) -> BlockchainRpcServiceBuilder<(T1, T2, Arc<dyn RpcProvider>)> {
         let (broadcast_listener, storage, _) = self.mandatory_fields;
-        let archive_provider = archive_provider.into_archive_provider(self.config.proxy_to_s3);
+        let rpc_provider = provider.into_rpc_provider(self.config.proxy_to_s3);
 
         BlockchainRpcServiceBuilder {
             config: self.config,
-            mandatory_fields: (broadcast_listener, storage, archive_provider),
+            mandatory_fields: (broadcast_listener, storage, rpc_provider),
         }
     }
 }
@@ -297,10 +295,10 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
             rpc::GetZerostateProof as _ => inner.handle_get_zerostate_proof().await,
 
             #[meta("getPersistentShardStateInfo", block_id = %req.block_id)]
-            rpc::GetPersistentShardStateInfo as req => inner.handle_get_persistent_state_info(&req),
+            rpc::GetPersistentShardStateInfo as req => inner.handle_get_persistent_state_info(&req).await,
 
             #[meta("getPersistentQueueStateInfo", block_id = %req.block_id)]
-            rpc::GetPersistentQueueStateInfo as req => inner.handle_get_queue_persistent_state_info(&req),
+            rpc::GetPersistentQueueStateInfo as req => inner.handle_get_queue_persistent_state_info(&req).await,
 
             #[meta(
                 "getPersistentShardStateChunk",
@@ -397,7 +395,7 @@ struct Inner<B> {
     storage: CoreStorage,
     config: BlockchainRpcServiceConfig,
     broadcast_listener: B,
-    archive_provider: Arc<dyn ArchiveProvider>,
+    rpc_provider: Arc<dyn RpcProvider>,
 }
 
 impl<B> Inner<B> {
@@ -563,7 +561,7 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetArchiveInfo,
     ) -> overlay::Response<ArchiveInfo> {
-        match self.archive_provider.get_archive_info(req.mc_seqno).await {
+        match self.rpc_provider.get_archive_info(req.mc_seqno).await {
             Ok(info) => overlay::Response::Ok(info),
             Err(e) => {
                 tracing::warn!(mc_seqno = req.mc_seqno, "get_archive_info failed: {e:?}");
@@ -577,7 +575,7 @@ impl<B> Inner<B> {
         req: &rpc::GetArchiveChunk,
     ) -> overlay::Response<Data> {
         match self
-            .archive_provider
+            .rpc_provider
             .get_archive_chunk(req.archive_id as u32, req.offset)
             .await
         {
@@ -593,22 +591,44 @@ impl<B> Inner<B> {
         }
     }
 
-    fn handle_get_persistent_state_info(
+    async fn handle_get_persistent_state_info(
         &self,
         req: &rpc::GetPersistentShardStateInfo,
     ) -> overlay::Response<PersistentStateInfo> {
         let label = [("method", "getPersistentShardStateInfo")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
-        let res = self.read_persistent_state_info(&req.block_id, PersistentStateKind::Shard);
-        overlay::Response::Ok(res)
+        match self
+            .read_persistent_state_info(&req.block_id, PersistentStateKind::Shard)
+            .await
+        {
+            Ok(info) => overlay::Response::Ok(info),
+            Err(e) => {
+                tracing::warn!(
+                    block_id = ?req.block_id,
+                    "get_persistent_state_info failed: {e:?}"
+                );
+                overlay::Response::Err(INTERNAL_ERROR_CODE)
+            }
+        }
     }
 
-    fn handle_get_queue_persistent_state_info(
+    async fn handle_get_queue_persistent_state_info(
         &self,
         req: &rpc::GetPersistentQueueStateInfo,
     ) -> overlay::Response<PersistentStateInfo> {
-        let res = self.read_persistent_state_info(&req.block_id, PersistentStateKind::Queue);
-        overlay::Response::Ok(res)
+        match self
+            .read_persistent_state_info(&req.block_id, PersistentStateKind::Queue)
+            .await
+        {
+            Ok(info) => overlay::Response::Ok(info),
+            Err(e) => {
+                tracing::warn!(
+                    block_id = ?req.block_id,
+                    "get_persistent_state_info failed: {e:?}"
+                );
+                overlay::Response::Err(INTERNAL_ERROR_CODE)
+            }
+        }
     }
 
     async fn handle_get_persistent_shard_state_chunk(
@@ -677,21 +697,24 @@ impl<B> Inner<B> {
         })
     }
 
-    fn read_persistent_state_info(
+    async fn read_persistent_state_info(
         &self,
         block_id: &BlockId,
         state_kind: PersistentStateKind,
-    ) -> PersistentStateInfo {
-        let persistent_state_storage = self.storage().persistent_state_storage();
+    ) -> anyhow::Result<PersistentStateInfo> {
         if self.config.serve_persistent_states
-            && let Some(info) = persistent_state_storage.get_state_info(block_id, state_kind)
+            && let Some(info) = self
+                .rpc_provider
+                .get_persistent_state_info(block_id, state_kind)
+                .await?
         {
-            return PersistentStateInfo::Found {
+            return Ok(PersistentStateInfo::Found {
                 size: info.size,
                 chunk_size: info.chunk_size,
-            };
+            });
         }
-        PersistentStateInfo::NotFound
+
+        Ok(PersistentStateInfo::NotFound)
     }
 
     async fn read_persistent_state_chunk(
@@ -700,8 +723,6 @@ impl<B> Inner<B> {
         offset: u64,
         state_kind: PersistentStateKind,
     ) -> overlay::Response<Data> {
-        let persistent_state_storage = self.storage().persistent_state_storage();
-
         let persistent_state_request_validation = || {
             anyhow::ensure!(
                 self.config.serve_persistent_states,
@@ -715,14 +736,21 @@ impl<B> Inner<B> {
             return overlay::Response::Err(BAD_REQUEST_ERROR_CODE);
         }
 
-        match persistent_state_storage
-            .read_state_part(block_id, offset, state_kind)
+        match self
+            .rpc_provider
+            .get_persistent_state_chunk(block_id, offset, state_kind)
             .await
         {
-            Some(data) => overlay::Response::Ok(Data { data: data.into() }),
-            None => {
-                tracing::debug!("failed to read persistent state part");
-                overlay::Response::Err(NOT_FOUND_ERROR_CODE)
+            Ok(Some(data)) => overlay::Response::Ok(Data { data }),
+            Ok(None) => overlay::Response::Err(NOT_FOUND_ERROR_CODE),
+            Err(e) => {
+                tracing::warn!(
+                    ?block_id,
+                    offset,
+                    ?state_kind,
+                    "get_persistent_state_chunk failed: {e:?}"
+                );
+                overlay::Response::Err(INTERNAL_ERROR_CODE)
             }
         }
     }

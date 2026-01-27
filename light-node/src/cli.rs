@@ -8,8 +8,10 @@ use tycho_core::block_strider::{
     BlockProvider, BlockStrider, BlockSubscriber, ColdBootType, FileZerostateProvider,
     MetricsSubscriber, PersistentBlockStriderState, Starter, StarterConfig,
 };
+#[cfg(feature = "s3")]
+use tycho_core::blockchain_rpc::S3RpcProvider;
 use tycho_core::blockchain_rpc::{
-    BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener, StorageArchiveProvider,
+    BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener, StorageRpcProvider,
 };
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::node::NodeBootArgs;
@@ -197,12 +199,12 @@ impl<C> Node<C> {
             .with_config(node_config.blockchain_rpc_service.clone())
             .with_storage(storage.clone())
             .with_broadcast_listener(NoopBroadcastListener)
-            .with_archive_provider((
-                StorageArchiveProvider::new(storage.clone()),
+            .with_rpc_provider((
+                StorageRpcProvider::new(storage.clone()),
                 #[cfg(feature = "s3")]
                 s3_client
                     .clone()
-                    .map(|s3_client| S3ArchiveProvider::new(s3_client.clone(), storage.clone())),
+                    .map(|s3_client| S3RpcProvider::new(s3_client.clone(), storage.clone())),
             ))
             .build();
 
