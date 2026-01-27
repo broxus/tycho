@@ -391,10 +391,10 @@ impl PersistentStateStorage {
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
-            let cell_storage = this.shard_states.cell_storage().clone();
-            cell_storage.flush_pending_all()?;
+            let cells = this.shard_states.cell_storage().clone();
+            cells.flush_pending_all()?;
 
-            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
+            let cell_writer = ShardStateWriter::new(cells.as_ref(), &states_dir, handle.id());
             match cell_writer.write(&root_hash, Some(&cancelled)) {
                 Ok(_) => {
                     this.block_handles.set_has_persistent_shard_state(&handle);
@@ -450,7 +450,8 @@ impl PersistentStateStorage {
 
             let states_dir = this.prepare_persistent_states_dir(mc_seqno)?;
 
-            let cell_writer = ShardStateWriter::new(&this.cells_db, &states_dir, handle.id());
+            let cells = this.shard_states.cell_storage().clone();
+            let cell_writer = ShardStateWriter::new(cells.as_ref(), &states_dir, handle.id());
             cell_writer.write_file(file, Some(&cancelled))?;
             this.block_handles.set_has_persistent_shard_state(&handle);
             let state = this.cache_state(mc_seqno, handle.id(), PersistentStateKind::Shard)?;

@@ -14,10 +14,10 @@ use tycho_util::compression::ZstdCompressedFile;
 use tycho_util::progress_bar::ProgressBar;
 use tycho_util::sync::CancellationFlag;
 
-use crate::storage::CellsDb;
+use crate::storage::shard_state::CellStorage;
 
 pub struct ShardStateWriter<'a> {
-    db: &'a CellsDb,
+    cells: &'a CellStorage,
     states_dir: &'a Dir,
     block_id: &'a BlockId,
 }
@@ -44,9 +44,9 @@ impl<'a> ShardStateWriter<'a> {
         PathBuf::from(name.to_string()).with_extension(Self::FILE_EXTENSION_TEMP)
     }
 
-    pub fn new(db: &'a CellsDb, states_dir: &'a Dir, block_id: &'a BlockId) -> Self {
+    pub fn new(cells: &'a CellStorage, states_dir: &'a Dir, block_id: &'a BlockId) -> Self {
         Self {
-            db,
+            cells,
             states_dir,
             block_id,
         }
@@ -275,10 +275,6 @@ impl<'a> ShardStateWriter<'a> {
 
         let mut file = self.states_dir.unnamed_file().open()?;
 
-        let raw = self.db.rocksdb().as_ref();
-        let read_options = self.db.cells.read_config();
-        let cf = self.db.cells.cf();
-
         let mut references_buffer = SmallVec::<[[u8; 32]; 4]>::with_capacity(4);
 
         let mut indices = FastHashMap::default();
@@ -305,11 +301,12 @@ impl<'a> ShardStateWriter<'a> {
 
             match data {
                 StackItem::New(hash) => {
-                    let value = raw
-                        .get_pinned_cf_opt(&cf, hash, read_options)?
+                    let value = self
+                        .cells
+                        .read_cell_value(&HashBytes(hash))?
                         .ok_or(CellWriterError::CellNotFound)?;
 
-                    let value = match strip_cell_idx(value.as_ref()) {
+                    let value = match strip_cell_idx(value.as_slice()) {
                         Some(bytes) => bytes,
                         None => {
                             return Err(CellWriterError::CellNotFound.into());

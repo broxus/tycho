@@ -1,12 +1,10 @@
-use std::cell::UnsafeCell;
-use std::collections::hash_map;
+use std::cell::{RefCell, UnsafeCell};
+use std::collections::{HashMap, hash_map};
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread::Scope;
-use std::time::Duration;
-#[cfg(feature = "cells-metrics")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ahash::AHasher;
 use anyhow::{Context, Result};
@@ -16,24 +14,74 @@ use bumpalo_herd::{Herd, Member};
 use bytesize::ByteSize;
 use crossbeam_queue::SegQueue;
 use dashmap::Map;
-use quick_cache::sync::{Cache, DefaultLifecycle};
+use faster_rs::{FasterError, FasterKv, FasterKvBuilder, status as faster_status};
 use triomphe::ThinArc;
 use tycho_storage::fs::Dir;
 use tycho_types::cell::*;
 use tycho_util::metrics::{HistogramGuard, spawn_metrics_loop};
-use tycho_util::{FastDashMap, FastHashMap, FastHashSet, FastHasherState};
-use weedb::rocksdb::WriteBatch;
-use weedb::{BoundedCfHandle, rocksdb};
+use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
+use weedb::rocksdb;
 
 use crate::storage::CellsDb;
 
+thread_local! {
+    static STORE_SESSIONS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+}
+
+struct StoreSessionGuard<'a> {
+    store: &'a FasterKv,
+    key: usize,
+}
+
+impl<'a> StoreSessionGuard<'a> {
+    fn enter(store: &'a FasterKv) -> Self {
+        let key = store as *const FasterKv as usize;
+        STORE_SESSIONS.with(|sessions| {
+            let mut sessions = sessions.borrow_mut();
+            let depth = sessions.entry(key).or_insert(0);
+            if *depth == 0 {
+                // FASTER sessions are thread-affine; tasks can hop threads, so we open
+                // a session per-thread and manage nesting for scoped calls.
+                let _ = store.start_session();
+            }
+            *depth += 1;
+        });
+        Self { store, key }
+    }
+}
+
+impl Drop for StoreSessionGuard<'_> {
+    fn drop(&mut self) {
+        let stop = STORE_SESSIONS.with(|sessions| {
+            let mut sessions = sessions.borrow_mut();
+            let Some(depth) = sessions.get_mut(&self.key) else {
+                return false;
+            };
+            if *depth == 0 {
+                return false;
+            }
+            *depth -= 1;
+            if *depth == 0 {
+                sessions.remove(&self.key);
+                return true;
+            }
+            false
+        });
+        if stop {
+            self.store.stop_session();
+        }
+    }
+}
+
 pub struct CellStorage {
     cells_db: CellsDb,
+    cells_store: Arc<FasterKv>,
+    faster_serial: AtomicU64,
     cells_cache: Arc<CellsIndex>,
-    raw_cells_cache: Arc<RawCellsCache>,
     present_filter: CuckooFilter<AHasher>,
     drop_interval: u32,
     counters: Vec<AtomicU64>,
+    insert_cells_ns: AtomicU64,
     free_idx: SegQueue<u32>,
     pending: PendingPuts,
     next_idx: AtomicU32,
@@ -46,6 +94,12 @@ const MAX_CELLS: u32 = u32::MAX; // god bless us
 
 const PERSIST_DELAY: u64 = 64;
 const WHEEL_SIZE: usize = PERSIST_DELAY as usize;
+const FASTER_DIR_NAME: &str = "cells.faster";
+const FASTER_TABLE_SIZE: u64 = 1 << 26;
+const FASTER_LOG_SIZE_BYTES: u64 = 17_179_869_184;
+const FASTER_LOG_MUTABLE_FRACTION: f64 = 0.9;
+const FASTER_PREALLOCATE_LOG: bool = true;
+const PERSISTED_VALUE_MAX_BYTES: usize = 512;
 
 struct CachedCell {
     epoch: u32,
@@ -78,6 +132,43 @@ fn decode_cell_value(value: &[u8]) -> Option<(u32, &[u8])> {
         return None;
     }
     Some((idx, &value[CELL_INDEX_BYTES..]))
+}
+
+fn insert_cells_value(
+    cells_store: &FasterKv,
+    serial: &AtomicU64,
+    key: &HashBytes,
+    value: &Vec<u8>,
+) -> Result<(), CellStorageError> {
+    let key = key.0;
+    let monotonic_serial_number = serial.fetch_add(1, Ordering::Relaxed);
+    let status = cells_store.upsert::<[u8; 32], Vec<u8>>(&key, value, monotonic_serial_number);
+    match status {
+        faster_status::OK => Ok(()),
+        faster_status::PENDING => {
+            cells_store.complete_pending(true);
+            Ok(())
+        }
+        faster_status::OUT_OF_MEMORY => {
+            if !cells_store.grow_index() {
+                std::thread::yield_now();
+            }
+
+            let monotonic_serial_number = serial.fetch_add(1, Ordering::Relaxed);
+            let status =
+                cells_store.upsert::<[u8; 32], Vec<u8>>(&key, value, monotonic_serial_number);
+            match status {
+                faster_status::OK => Ok(()),
+                faster_status::PENDING => {
+                    cells_store.complete_pending(true);
+                    Ok(())
+                }
+                faster_status::OUT_OF_MEMORY => Err(CellStorageError::FasterGrowIndexFailed),
+                _ => Err(CellStorageError::FasterStatus(status)),
+            }
+        }
+        _ => Err(CellStorageError::FasterStatus(status)),
+    }
 }
 
 impl PendingPuts {
@@ -122,12 +213,18 @@ impl PendingPuts {
         &self,
         now_round: u64,
         counters: &[AtomicU64],
-        cells_cf: &BoundedCfHandle<'_>,
-        batch: &mut WriteBatch,
+        cells_store: &FasterKv,
+        serial: &AtomicU64,
+        insert_cells_ns: &AtomicU64,
         promoted: &mut Vec<HashBytes>,
-    ) {
+    ) -> Result<(), CellStorageError> {
+        let _session = StoreSessionGuard::enter(cells_store);
+        let start = Instant::now();
+        let mut did_work = false;
         let slot = (now_round % WHEEL_SIZE as u64) as usize;
         let mut buffer = Vec::with_capacity(512);
+        let mut drop_keys = Vec::new();
+        let mut to_insert = Vec::new();
 
         while let Some(key) = self.wheel[slot].pop() {
             let Some(entry) = self.map.get(&key) else {
@@ -149,26 +246,46 @@ impl PendingPuts {
             let idx = item.header.header.idx;
             let rc = counters[idx as usize].load(Ordering::Acquire);
             if rc == 0 {
-                self.map.remove(&key);
+                drop_keys.push(key);
                 continue;
             }
 
+            to_insert.push((key, item));
+        }
+
+        for (key, item) in to_insert {
+            let idx = item.header.header.idx;
             buffer.clear();
             encode_cell_value(idx, &item.slice, &mut buffer);
-            batch.put_cf(cells_cf, key.as_slice(), &buffer);
+            insert_cells_value(cells_store, serial, &key, &buffer)?;
             promoted.push(key);
+            did_work = true;
         }
+
+        for key in drop_keys {
+            self.map.remove(&key);
+        }
+        if did_work {
+            let elapsed = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            insert_cells_ns.fetch_add(elapsed, Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     fn flush_all(
         &self,
         counters: &[AtomicU64],
-        cells_cf: &BoundedCfHandle<'_>,
-        batch: &mut WriteBatch,
+        cells_store: &FasterKv,
+        serial: &AtomicU64,
+        insert_cells_ns: &AtomicU64,
         promoted: &mut Vec<HashBytes>,
-    ) {
+    ) -> Result<(), CellStorageError> {
+        let _session = StoreSessionGuard::enter(cells_store);
+        let start = Instant::now();
+        let mut did_work = false;
         let mut buffer = Vec::with_capacity(512);
         let mut drop_keys = Vec::new();
+        let mut to_insert = Vec::new();
 
         for entry in self.map.iter() {
             let key = *entry.key();
@@ -181,15 +298,26 @@ impl PendingPuts {
                 continue;
             }
 
+            to_insert.push((key, item));
+        }
+
+        for (key, item) in to_insert {
+            let idx = item.header.header.idx;
             buffer.clear();
             encode_cell_value(idx, &item.slice, &mut buffer);
-            batch.put_cf(cells_cf, key.as_slice(), &buffer);
+            insert_cells_value(cells_store, serial, &key, &buffer)?;
             promoted.push(key);
+            did_work = true;
         }
 
         for key in drop_keys {
             self.map.remove(&key);
         }
+        if did_work {
+            let elapsed = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            insert_cells_ns.fetch_add(elapsed, Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     fn commit_promoted(&self, promoted: &[HashBytes]) {
@@ -206,25 +334,36 @@ impl PendingPuts {
 impl CellStorage {
     pub fn new(
         cells_db: CellsDb,
-        _files_dir: &Dir,
-        cache_size_bytes: ByteSize,
+        files_dir: &Dir,
+        _cache_size_bytes: ByteSize,
         drop_interval: u32,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>> {
         let cells_cache = Default::default();
-        let raw_cells_cache = Arc::new(RawCellsCache::new(cache_size_bytes.as_u64()));
         let mut counters = Vec::with_capacity(MAX_CELLS as usize);
         counters.resize_with(MAX_CELLS as usize, || AtomicU64::new(0));
         let present_filter = CuckooFilterBuilder::<AHasher>::default()
             .capacity(MAX_CELLS as usize)
             .build()
             .expect("present filter configuration should be valid");
+        let cells_dir = files_dir.create_subdir(FASTER_DIR_NAME)?;
+        let Some(path) = cells_dir.path().to_str() else {
+            return Err(anyhow::anyhow!(CellStorageError::FasterPathNotUtf8));
+        };
+        let mut builder = FasterKvBuilder::new(FASTER_TABLE_SIZE, FASTER_LOG_SIZE_BYTES);
+        builder
+            .with_disk(path)
+            .with_log_mutable_fraction(FASTER_LOG_MUTABLE_FRACTION)
+            .set_pre_allocate_log(FASTER_PREALLOCATE_LOG);
+        let cells_store = Arc::new(builder.build().map_err(CellStorageError::FasterInit)?);
         let cell_storage = Arc::new(Self {
             cells_db,
+            cells_store,
+            faster_serial: AtomicU64::new(1),
             cells_cache,
-            raw_cells_cache: raw_cells_cache.clone(),
             present_filter,
             drop_interval,
             counters,
+            insert_cells_ns: AtomicU64::new(0),
             free_idx: SegQueue::new(),
             pending: PendingPuts::new(),
             next_idx: AtomicU32::new(0),
@@ -236,43 +375,67 @@ impl CellStorage {
             |storage| async move { storage.refresh_metrics() },
         );
 
-        cell_storage
+        Ok(cell_storage)
     }
 
     pub fn db(&self) -> &CellsDb {
         &self.cells_db
     }
 
+    pub fn take_insert_cells_ns(&self) -> u64 {
+        self.insert_cells_ns.swap(0, Ordering::AcqRel)
+    }
+
     pub fn commit_pending_promoted(&self, promoted: &[HashBytes]) {
         self.pending.commit_promoted(promoted);
     }
 
-    /// Flushes pending puts to RocksDB and commits promoted keys.
-    pub fn flush_pending_all(&self) -> Result<(), rocksdb::Error> {
-        let cells_cf = self.cells_db.cells.cf();
-        let mut batch = WriteBatch::default();
+    /// Flushes pending puts to bf-tree and commits promoted keys.
+    pub fn flush_pending_all(&self) -> Result<(), CellStorageError> {
         let mut promoted = Vec::new();
-        self.pending
-            .flush_all(&self.counters, &cells_cf, &mut batch, &mut promoted);
+        self.pending.flush_all(
+            &self.counters,
+            &self.cells_store,
+            &self.faster_serial,
+            &self.insert_cells_ns,
+            &mut promoted,
+        )?;
 
         if promoted.is_empty() {
             return Ok(());
         }
 
         let batch_puts = promoted.len();
-        let batch_deletes = batch.len().saturating_sub(batch_puts);
         metrics::histogram!("tycho_storage_cells_write_batch_puts").record(batch_puts as f64);
-        metrics::histogram!("tycho_storage_cells_write_batch_deletes").record(batch_deletes as f64);
+        metrics::histogram!("tycho_storage_cells_write_batch_deletes").record(0f64);
 
-        self.cells_db
-            .rocksdb()
-            .write_opt(batch, self.cells_db.cells.write_config())?;
         self.pending.commit_promoted(&promoted);
         Ok(())
     }
 
+    /// Reads encoded cell value (index + payload) for persistent state writes.
+    pub(crate) fn read_cell_value(
+        &self,
+        key: &HashBytes,
+    ) -> Result<Option<Vec<u8>>, CellStorageError> {
+        if let Some(entry) = self.pending.map.get(key) {
+            let mut buffer = Vec::with_capacity(CELL_INDEX_BYTES + entry.item.slice.len());
+            encode_cell_value(entry.item.header.header.idx, &entry.item.slice, &mut buffer);
+            return Ok(Some(buffer));
+        }
+
+        let mut buffer = vec![0u8; PERSISTED_VALUE_MAX_BYTES];
+        let Some(value) = self.read_cells_value(key, &mut buffer)? else {
+            return Ok(None);
+        };
+        Ok(Some(value.to_vec()))
+    }
+
+    pub fn count_cells(&self) -> Result<usize, CellStorageError> {
+        Ok(self.present_filter.len())
+    }
+
     fn refresh_metrics(&self) {
-        self.raw_cells_cache.refresh_metrics();
         metrics::gauge!("tycho_storage_cells_next_idx")
             .set(self.next_idx.load(Ordering::Acquire) as f64);
         metrics::gauge!("tycho_storage_cells_free_idx_len").set(self.free_idx.len() as f64);
@@ -315,10 +478,149 @@ impl CellStorage {
         self.present_filter.remove(key.as_slice());
     }
 
+    fn read_cells_value<'a>(
+        &self,
+        key: &HashBytes,
+        buffer: &'a mut [u8],
+    ) -> Result<Option<&'a [u8]>, CellStorageError> {
+        let _session = StoreSessionGuard::enter(self.cells_store.as_ref());
+        #[cfg(feature = "cells-metrics")]
+        let _timer = scopeguard::guard(Instant::now(), |started_at| {
+            metrics::histogram!("tycho_storage_get_cell_from_bf_tree_time")
+                .record(started_at.elapsed());
+        });
+
+        let key = key.0;
+        let monotonic_serial_number = self.faster_serial.fetch_add(1, Ordering::Relaxed);
+        let (status, receiver) = self
+            .cells_store
+            .read::<[u8; 32], Vec<u8>>(&key, monotonic_serial_number);
+        let value = match status {
+            faster_status::OK => receiver
+                .recv()
+                .map_err(|_| CellStorageError::FasterReadEmpty)?,
+            faster_status::NOT_FOUND => return Ok(None),
+            faster_status::PENDING => {
+                self.cells_store.complete_pending(true);
+                match receiver.recv() {
+                    Ok(value) => value,
+                    Err(_) => return Ok(None),
+                }
+            }
+            faster_status::OUT_OF_MEMORY => {
+                if !self.cells_store.grow_index() {
+                    std::thread::yield_now();
+                }
+                let monotonic_serial_number = self.faster_serial.fetch_add(1, Ordering::Relaxed);
+                let (status, receiver) = self
+                    .cells_store
+                    .read::<[u8; 32], Vec<u8>>(&key, monotonic_serial_number);
+                match status {
+                    faster_status::OK => receiver
+                        .recv()
+                        .map_err(|_| CellStorageError::FasterReadEmpty)?,
+                    faster_status::NOT_FOUND => return Ok(None),
+                    faster_status::PENDING => {
+                        self.cells_store.complete_pending(true);
+                        match receiver.recv() {
+                            Ok(value) => value,
+                            Err(_) => return Ok(None),
+                        }
+                    }
+                    faster_status::OUT_OF_MEMORY => {
+                        return Err(CellStorageError::FasterGrowIndexFailed);
+                    }
+                    _ => return Err(CellStorageError::FasterStatus(status)),
+                }
+            }
+            _ => return Err(CellStorageError::FasterStatus(status)),
+        };
+        if value.len() > buffer.len() {
+            return Err(CellStorageError::InvalidCell);
+        }
+        buffer[..value.len()].copy_from_slice(&value);
+        Ok(Some(&buffer[..value.len()]))
+    }
+
+    fn delete_cell_value(&self, key: &HashBytes) -> Result<(), CellStorageError> {
+        let _session = StoreSessionGuard::enter(self.cells_store.as_ref());
+        let key = key.0;
+        let monotonic_serial_number = self.faster_serial.fetch_add(1, Ordering::Relaxed);
+        let status = self.cells_store.delete(&key, monotonic_serial_number);
+        match status {
+            faster_status::OK | faster_status::NOT_FOUND => Ok(()),
+            faster_status::PENDING => {
+                self.cells_store.complete_pending(true);
+                Ok(())
+            }
+            faster_status::OUT_OF_MEMORY => {
+                if !self.cells_store.grow_index() {
+                    std::thread::yield_now();
+                }
+                let monotonic_serial_number = self.faster_serial.fetch_add(1, Ordering::Relaxed);
+                let status = self.cells_store.delete(&key, monotonic_serial_number);
+                match status {
+                    faster_status::OK | faster_status::NOT_FOUND => Ok(()),
+                    faster_status::PENDING => {
+                        self.cells_store.complete_pending(true);
+                        Ok(())
+                    }
+                    faster_status::OUT_OF_MEMORY => Err(CellStorageError::FasterGrowIndexFailed),
+                    _ => Err(CellStorageError::FasterStatus(status)),
+                }
+            }
+            _ => Err(CellStorageError::FasterStatus(status)),
+        }
+    }
+
+    fn get_raw_from_tree(
+        &self,
+        key: &HashBytes,
+    ) -> Result<Option<RawCellsCacheItem>, CellStorageError> {
+        let mut buffer = [0u8; PERSISTED_VALUE_MAX_BYTES];
+        let Some(value) = self.read_cells_value(key, &mut buffer)? else {
+            return Ok(None);
+        };
+        let (idx, data) = decode_cell_value(value).ok_or(CellStorageError::InvalidCell)?;
+        Ok(Some(RawCellsCacheItem::from_header_and_slice(
+            RawCellHeader { idx },
+            data,
+        )))
+    }
+
+    fn get_idx_for_insert_from_tree(
+        &self,
+        key: &HashBytes,
+    ) -> Result<Option<u32>, CellStorageError> {
+        let mut buffer = [0u8; PERSISTED_VALUE_MAX_BYTES];
+        let Some(value) = self.read_cells_value(key, &mut buffer)? else {
+            return Ok(None);
+        };
+        let (idx, data) = decode_cell_value(value).ok_or(CellStorageError::InvalidCell)?;
+        _ = data;
+        Ok(Some(idx))
+    }
+
+    fn get_for_delete_from_tree(
+        &self,
+        key: &HashBytes,
+        refs_buffer: &mut Vec<HashBytes>,
+    ) -> Result<u32, CellStorageError> {
+        let mut buffer = [0u8; PERSISTED_VALUE_MAX_BYTES];
+        let Some(value) = self.read_cells_value(key, &mut buffer)? else {
+            return Err(CellStorageError::CellNotFound);
+        };
+        let (idx, data) = decode_cell_value(value).ok_or(CellStorageError::InvalidCell)?;
+        refs_buffer.clear();
+        StorageCell::deserialize_references(data, refs_buffer)
+            .then_some(idx)
+            .ok_or(CellStorageError::InvalidCell)
+    }
+
     fn get_idx_for_insert_with_pending(
         &self,
         key: &HashBytes,
-        depth: usize,
+        _depth: usize,
     ) -> Result<Option<u32>, CellStorageError> {
         if let Some(entry) = self.pending.map.get(key) {
             return Ok(Some(entry.item.header.header.idx));
@@ -328,8 +630,7 @@ impl CellStorage {
             return Ok(None);
         }
 
-        self.raw_cells_cache
-            .get_idx_for_insert(&self.cells_db, key, depth)
+        self.get_idx_for_insert_from_tree(key)
     }
 
     fn get_raw_with_pending(
@@ -340,7 +641,7 @@ impl CellStorage {
             return Ok(Some(entry.item.clone()));
         }
 
-        self.raw_cells_cache.get_raw(&self.cells_db, key)
+        self.get_raw_from_tree(key)
     }
 
     fn get_for_delete_with_pending(
@@ -357,15 +658,11 @@ impl CellStorage {
             return Ok((entry.item.header.header.idx, false));
         }
 
-        let idx = self
-            .raw_cells_cache
-            .get_for_delete(&self.cells_db, key, refs_buffer)?;
+        let idx = self.get_for_delete_from_tree(key, refs_buffer)?;
         Ok((idx, true))
     }
 
     pub fn apply_temp_cell(&self, root: &HashBytes) -> Result<()> {
-        const MAX_NEW_CELLS_BATCH_SIZE: usize = 10000;
-
         struct TempCell {
             idx: u32,
             additions: u32,
@@ -409,30 +706,20 @@ impl CellStorage {
 
         struct Context<'a> {
             cell_storage: &'a CellStorage,
-            cells_cf: BoundedCfHandle<'a>,
             cells_db: &'a CellsDb,
             buffer: Vec<u8>,
             transaction: FastHashMap<HashBytes, TempCell>,
-            new_cells_batch: rocksdb::WriteBatch,
             new_cell_count: usize,
-            raw_cache: &'a RawCellsCache,
         }
 
         impl<'a> Context<'a> {
-            fn new(
-                cell_storage: &'a CellStorage,
-                cells_db: &'a CellsDb,
-                raw_cache: &'a RawCellsCache,
-            ) -> Self {
+            fn new(cell_storage: &'a CellStorage, cells_db: &'a CellsDb) -> Self {
                 Self {
                     cell_storage,
-                    cells_cf: cells_db.cells.cf(),
                     cells_db,
                     buffer: Vec::with_capacity(512),
                     transaction: Default::default(),
-                    new_cells_batch: rocksdb::WriteBatch::default(),
                     new_cell_count: 0,
-                    raw_cache,
                 }
             }
 
@@ -497,34 +784,28 @@ impl CellStorage {
 
                         self.buffer.clear();
                         encode_cell_value(idx, iter.data.as_ref(), &mut self.buffer);
-
-                        self.new_cells_batch
-                            .put_cf(&self.cells_cf, key, self.buffer.as_slice());
-
+                        let _session =
+                            StoreSessionGuard::enter(self.cell_storage.cells_store.as_ref());
+                        let start = Instant::now();
+                        let result = insert_cells_value(
+                            self.cell_storage.cells_store.as_ref(),
+                            &self.cell_storage.faster_serial,
+                            key,
+                            &self.buffer,
+                        );
+                        let elapsed = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                        self.cell_storage
+                            .insert_cells_ns
+                            .fetch_add(elapsed, Ordering::Relaxed);
+                        result?;
                         self.new_cell_count += 1;
-                        if self.new_cell_count >= MAX_NEW_CELLS_BATCH_SIZE {
-                            self.flush_new_cells()?;
-                        }
 
                         InsertedCell::New(iter)
                     }
                 })
             }
 
-            fn flush_new_cells(&mut self) -> Result<(), rocksdb::Error> {
-                if self.new_cell_count > 0 {
-                    metrics::histogram!("tycho_storage_cells_write_batch_puts")
-                        .record(self.new_cell_count as f64);
-                    metrics::histogram!("tycho_storage_cells_write_batch_deletes").record(0f64);
-                    self.cells_db
-                        .rocksdb()
-                        .write(std::mem::take(&mut self.new_cells_batch))?;
-                    self.new_cell_count = 0;
-                }
-                Ok(())
-            }
-
-            fn flush_existing_cells(self) -> Result<(), rocksdb::Error> {
+            fn flush_existing_cells(self) -> Result<(), CellStorageError> {
                 for (key, item) in self.transaction {
                     if item.is_new {
                         self.cell_storage.counters[item.idx as usize]
@@ -534,15 +815,13 @@ impl CellStorage {
                         self.cell_storage.counters[item.idx as usize]
                             .fetch_add(u64::from(item.additions), Ordering::Release);
                     }
-
-                    self.raw_cache.on_insert_cell(&key, item.idx, None);
                 }
 
                 Ok(())
             }
         }
 
-        let mut ctx = Context::new(self, &self.cells_db, &self.raw_cells_cache);
+        let mut ctx = Context::new(self, &self.cells_db);
 
         let mut stack = Vec::with_capacity(16);
         if let InsertedCell::New(iter) = ctx.insert_cell(root)? {
@@ -567,7 +846,11 @@ impl CellStorage {
         // Clear big chunks of data before finalization
         drop(stack);
 
-        ctx.flush_new_cells()?;
+        if ctx.new_cell_count > 0 {
+            metrics::histogram!("tycho_storage_cells_write_batch_puts")
+                .record(ctx.new_cell_count as f64);
+            metrics::histogram!("tycho_storage_cells_write_batch_deletes").record(0f64);
+        }
         ctx.flush_existing_cells()?;
 
         Ok(())
@@ -576,7 +859,6 @@ impl CellStorage {
     pub fn store_cell_mt(
         &self,
         root: &DynCell,
-        batch: &mut WriteBatch,
         split_at: FastHashMap<HashBytes, Cell>,
         capacity: usize,
     ) -> Result<usize, CellStorageError> {
@@ -596,7 +878,6 @@ impl CellStorage {
         struct StoreContext<'a> {
             cell_storage: &'a CellStorage,
             herd: &'a Herd,
-            raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
             split_at: FastHashMap<HashBytes, Cell>,
             // TODO: Use `&'a HashBytes` for key?
@@ -617,13 +898,11 @@ impl CellStorage {
             fn new(
                 cell_storage: &'a CellStorage,
                 herd: &'a Herd,
-                raw_cache: &'a RawCellsCache,
                 split_accounts: FastHashMap<HashBytes, Cell>,
                 capacity: usize,
             ) -> Self {
                 Self {
                     cell_storage,
-                    raw_cache,
                     herd,
                     split_at: split_accounts,
                     transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
@@ -763,7 +1042,7 @@ impl CellStorage {
                 })
             }
 
-            fn finalize(self, _batch: &mut WriteBatch) -> usize {
+            fn finalize(self) -> usize {
                 std::thread::scope(|s| {
                     // Apply delayed additions before finalizing the transaction.
                     for (hash, additions) in self.delayed_additions.into_inner().unwrap() {
@@ -802,7 +1081,6 @@ impl CellStorage {
                         };
                         range_start = range_end;
 
-                        let cache = self.raw_cache;
                         let counters = &self.cell_storage.counters;
                         let cell_storage = self.cell_storage;
                         s.spawn(move || {
@@ -812,15 +1090,13 @@ impl CellStorage {
                                     // SAFETY: `Bucket` is a valid item, received from a valid iterator.
                                     let (key, value) = unsafe { value.as_ref() };
                                     let item = value.get();
-                                    if let Some(data) = item.data {
+                                    if item.data.is_some() {
                                         counters[item.idx as usize]
                                             .store(u64::from(item.additions), Ordering::Release);
                                         cell_storage.insert_present_filter(key);
-                                        cache.on_insert_cell(key, item.idx, Some(data));
                                     } else {
                                         counters[item.idx as usize]
                                             .fetch_add(u64::from(item.additions), Ordering::AcqRel);
-                                        cache.on_insert_cell(key, item.idx, None);
                                     }
                                 }
                             }
@@ -847,16 +1123,15 @@ impl CellStorage {
         }
 
         let herd = Herd::new();
-        let ctx = StoreContext::new(self, &herd, &self.raw_cells_cache, split_at, capacity);
+        let ctx = StoreContext::new(self, &herd, split_at, capacity);
 
         std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
 
-        Ok(ctx.finalize(batch))
+        Ok(ctx.finalize())
     }
 
     pub fn store_cell(
         &self,
-        batch: &mut WriteBatch,
         root: &DynCell,
         estimated_cell_count: usize,
     ) -> Result<usize, CellStorageError> {
@@ -868,7 +1143,6 @@ impl CellStorage {
 
         struct Context<'a> {
             cell_storage: &'a CellStorage,
-            raw_cells_cache: &'a RawCellsCache,
             alloc: &'a Bump,
             transaction: FastHashMap<&'a HashBytes, AddedCell<'a>>,
             buffer: Vec<u8>,
@@ -916,7 +1190,7 @@ impl CellStorage {
                 })
             }
 
-            fn finalize(self, _batch: &mut rocksdb::WriteBatch) -> usize {
+            fn finalize(self) -> usize {
                 let total = self.transaction.len();
                 let born_round = self.cell_storage.pending.current_round();
 
@@ -929,13 +1203,10 @@ impl CellStorage {
                         self.cell_storage.counters[item.idx as usize]
                             .store(u64::from(item.additions), Ordering::Release);
                         self.cell_storage.insert_present_filter(key);
-                        self.raw_cells_cache
-                            .on_insert_cell(key, item.idx, Some(data));
                     } else {
                         // only rc bump
                         self.cell_storage.counters[item.idx as usize]
                             .fetch_add(u64::from(item.additions), Ordering::AcqRel);
-                        self.raw_cells_cache.on_insert_cell(key, item.idx, None);
                     }
                 }
 
@@ -948,7 +1219,6 @@ impl CellStorage {
         // Prepare context and handles
         let mut ctx = Context {
             cell_storage: self,
-            raw_cells_cache: &self.raw_cells_cache,
             alloc: &alloc,
             transaction: FastHashMap::with_capacity_and_hasher(
                 estimated_cell_count,
@@ -983,7 +1253,7 @@ impl CellStorage {
             }
         }
 
-        Ok(ctx.finalize(batch))
+        Ok(ctx.finalize())
     }
 
     pub fn load_cell(
@@ -1002,10 +1272,12 @@ impl CellStorage {
         }
 
         let mut cell = match self.get_raw_with_pending(hash)? {
-            Some(value) => match StorageCell::deserialize(self.clone(), hash, &value.slice, epoch) {
-                Some(cell) => Arc::new(cell),
-                None => return Err(CellStorageError::InvalidCell),
-            },
+            Some(value) => {
+                match StorageCell::deserialize(self.clone(), hash, &value.slice, epoch) {
+                    Some(cell) => Arc::new(cell),
+                    None => return Err(CellStorageError::InvalidCell),
+                }
+            }
             None => return Err(CellStorageError::CellNotFound),
         };
 
@@ -1047,7 +1319,7 @@ impl CellStorage {
         herd: &Herd,
         root: &HashBytes,
         split_at: FastHashSet<HashBytes>,
-    ) -> Result<(usize, WriteBatch, Vec<HashBytes>), CellStorageError> {
+    ) -> Result<usize, CellStorageError> {
         type RemoveResult = Result<(), CellStorageError>;
 
         struct Alloc<'a> {
@@ -1057,9 +1329,7 @@ impl CellStorage {
 
         struct RemoveContext<'a> {
             cell_storage: &'a CellStorage,
-            db: &'a CellsDb,
             herd: &'a Herd,
-            raw_cache: &'a RawCellsCache,
             /// Subtrees to process in parallel.
             split_at: FastHashSet<HashBytes>,
             // TODO: Use `&'a HashBytes` for key?
@@ -1079,15 +1349,11 @@ impl CellStorage {
         impl<'a> RemoveContext<'a> {
             fn new(
                 cell_storage: &'a CellStorage,
-                db: &'a CellsDb,
                 herd: &'a Herd,
-                raw_cache: &'a RawCellsCache,
                 split_at: FastHashSet<HashBytes>,
             ) -> Self {
                 Self {
                     cell_storage,
-                    db,
-                    raw_cache,
                     herd,
                     split_at,
                     transaction: FastDashMap::with_capacity_and_hasher_and_shard_amount(
@@ -1208,10 +1474,9 @@ impl CellStorage {
                 }
             }
 
-            fn finalize(self, batch: &mut WriteBatch) -> usize {
+            fn finalize(self) -> Result<(usize, usize), CellStorageError> {
                 let _hist = HistogramGuard::begin("tycho_storage_batch_write_parallel_time_high");
 
-                // Write transaction to the `WriteBatch`
                 std::thread::scope(|s| {
                     // Apply delayed removes before finalizing the transaction.
                     for (hash, removes) in self.delayed_removes.into_inner().unwrap() {
@@ -1249,7 +1514,6 @@ impl CellStorage {
                         };
                         range_start = range_end;
 
-                        let cache = self.raw_cache;
                         let counters = &self.cell_storage.counters;
                         let free_idx = &self.cell_storage.free_idx;
                         let pending = &self.cell_storage.pending;
@@ -1266,7 +1530,6 @@ impl CellStorage {
                                     counters[item.idx as usize].store(new_rc, Ordering::Release);
                                     if new_rc == 0 {
                                         cell_storage.remove_present_filter(key);
-                                        cache.remove(key);
                                         free_idx.push(item.idx);
                                         if !item.on_disk {
                                             pending.remove_if_present(key);
@@ -1277,50 +1540,57 @@ impl CellStorage {
                         });
                     }
                     assert_eq!(range_start, num_shards);
+                });
 
-                    // Merge transaction items into the final batch.
-                    let total = self.transaction.len();
-                    let cells_cf = &self.db.cells.cf();
-                    for kv in self.transaction.iter() {
-                        let key = kv.key();
-                        let item = kv.value();
+                let total = self.transaction.len();
+                let mut delete_candidates = Vec::new();
+                for kv in self.transaction.iter() {
+                    let key = kv.key();
+                    let item = kv.value();
 
-                        if item.old_rc == u64::from(item.removes) && item.on_disk {
-                            batch.delete_cf(cells_cf, key.as_slice());
-                        }
+                    if item.old_rc == u64::from(item.removes) && item.on_disk {
+                        delete_candidates.push(*key);
                     }
-                    total
-                })
+                }
+
+                let mut delete_count = 0usize;
+                for key in delete_candidates {
+                    self.cell_storage.delete_cell_value(&key)?;
+                    delete_count += 1;
+                }
+
+                Ok((total, delete_count))
             }
         }
 
-        let ctx = RemoveContext::new(self, &self.cells_db, herd, &self.raw_cells_cache, split_at);
+        let ctx = RemoveContext::new(self, herd, split_at);
 
         std::thread::scope(|scope| ctx.traverse_cell(root, scope))?;
 
-        // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
-        //       and a bit more just in case.
-        let total = ctx.transaction.len();
-        let mut batch = WriteBatch::with_capacity_bytes(total * (32 + 8 + 8));
-
-        let total = ctx.finalize(&mut batch);
+        let (total, delete_count) = ctx.finalize()?;
         let round = self.pending.increment_round();
         let mut promoted = Vec::new();
-        let cells_cf = self.cells_db.cells.cf();
-        self.pending
-            .flush_due(round, &self.counters, &cells_cf, &mut batch, &mut promoted);
+        self.pending.flush_due(
+            round,
+            &self.counters,
+            &self.cells_store,
+            &self.faster_serial,
+            &self.insert_cells_ns,
+            &mut promoted,
+        )?;
 
-        Ok((total, batch, promoted))
+        let puts = promoted.len();
+        if puts > 0 || delete_count > 0 {
+            metrics::histogram!("tycho_storage_cells_write_batch_puts").record(puts as f64);
+            metrics::histogram!("tycho_storage_cells_write_batch_deletes")
+                .record(delete_count as f64);
+        }
+
+        self.pending.commit_promoted(&promoted);
+        Ok(total)
     }
 
-    pub fn remove_cell(
-        &self,
-        alloc: &Bump,
-        hash: &HashBytes,
-    ) -> Result<(usize, WriteBatch, Vec<HashBytes>), CellStorageError> {
-        let cells = &self.cells_db.cells;
-        let cells_cf = &cells.cf();
-
+    pub fn remove_cell(&self, alloc: &Bump, hash: &HashBytes) -> Result<usize, CellStorageError> {
         let mut transaction: FastHashMap<&HashBytes, RemovedCell<'_>> =
             FastHashMap::with_capacity_and_hasher(128, Default::default());
         let mut buffer = Vec::with_capacity(4);
@@ -1370,13 +1640,9 @@ impl CellStorage {
         // Clear big chunks of data before finalization
         drop(stack);
 
-        // Write transaction to the `WriteBatch`
         let _hist = HistogramGuard::begin("tycho_storage_batch_write_time_high");
         let total = transaction.len();
-
-        // NOTE: For each cell we have 32 bytes for key and 8 bytes for RC,
-        //       and a bit more just in case.
-        let mut batch = WriteBatch::with_capacity_bytes(total * (32 + 8 + 8));
+        let mut delete_candidates = Vec::new();
 
         for (key, item) in transaction {
             let new_rc = item.old_rc - u64::from(item.removes);
@@ -1384,22 +1650,40 @@ impl CellStorage {
             if new_rc == 0 {
                 self.remove_present_filter(key);
                 if item.on_disk {
-                    batch.delete_cf(cells_cf, key.as_slice());
-                }
-                self.raw_cells_cache.remove(key);
-                self.free_idx.push(item.idx);
-                if !item.on_disk {
+                    delete_candidates.push(*key);
+                } else {
                     self.pending.remove_if_present(key);
                 }
+                self.free_idx.push(item.idx);
             }
+        }
+
+        let mut delete_count = 0usize;
+        for key in delete_candidates {
+            self.delete_cell_value(&key)?;
+            delete_count += 1;
         }
 
         let round = self.pending.increment_round();
         let mut promoted = Vec::new();
-        self.pending
-            .flush_due(round, &self.counters, cells_cf, &mut batch, &mut promoted);
+        self.pending.flush_due(
+            round,
+            &self.counters,
+            &self.cells_store,
+            &self.faster_serial,
+            &self.insert_cells_ns,
+            &mut promoted,
+        )?;
 
-        Ok((total, batch, promoted))
+        let puts = promoted.len();
+        if puts > 0 || delete_count > 0 {
+            metrics::histogram!("tycho_storage_cells_write_batch_puts").record(puts as f64);
+            metrics::histogram!("tycho_storage_cells_write_batch_deletes")
+                .record(delete_count as f64);
+        }
+
+        self.pending.commit_promoted(&promoted);
+        Ok(total)
     }
 
     pub fn drop_cell(&self, hash: &HashBytes) {
@@ -1454,6 +1738,16 @@ pub enum CellStorageError {
     CounterMismatch { expected: u64, actual: u32 },
     #[error("Cell index overflow")]
     IndexOverflow,
+    #[error("FASTER init failed: {0:?}")]
+    FasterInit(FasterError<'static>),
+    #[error("FASTER index growth failed")]
+    FasterGrowIndexFailed,
+    #[error("FASTER status: {0}")]
+    FasterStatus(u8),
+    #[error("FASTER read returned empty value")]
+    FasterReadEmpty,
+    #[error("FASTER storage path is not valid UTF-8")]
+    FasterPathNotUtf8,
     #[error("Internal rocksdb error")]
     Internal(#[from] rocksdb::Error),
 }
@@ -1816,212 +2110,12 @@ pub union StorageCellReferenceData {
     storage_cell: ManuallyDrop<Arc<StorageCell>>,
 }
 
-struct RawCellsCache {
-    inner: Cache<HashBytes, RawCellsCacheItem, CellSizeEstimator, FastHasherState>,
-    #[cfg(feature = "cells-metrics")]
-    rocksdb_access_histogram: metrics::Histogram,
-}
-
 #[derive(Clone, Copy)]
 struct RawCellHeader {
     idx: u32,
 }
 
 type RawCellsCacheItem = ThinArc<RawCellHeader, u8>;
-
-#[derive(Clone, Copy)]
-pub struct CellSizeEstimator;
-impl quick_cache::Weighter<HashBytes, RawCellsCacheItem> for CellSizeEstimator {
-    fn weight(&self, key: &HashBytes, val: &RawCellsCacheItem) -> u64 {
-        const STATIC_SIZE: usize =
-            size_of::<RawCellsCacheItem>() + size_of::<RawCellHeader>() + size_of::<usize>() * 2; // ArcInner refs + HeaderWithLength length
-
-        let len = key.0.len() + val.slice.len() + STATIC_SIZE;
-        len as u64
-    }
-}
-
-impl RawCellsCache {
-    fn new(size_in_bytes: u64) -> Self {
-        // Percentile 0.1%    from 96 to 127  => 1725119 count
-        // Percentile 10%     from 128 to 191  => 82838849 count
-        // Percentile 25%     from 128 to 191  => 82838849 count
-        // Percentile 50%     from 128 to 191  => 82838849 count
-        // Percentile 75%     from 128 to 191  => 82838849 count
-        // Percentile 90%     from 192 to 255  => 22775080 count
-        // Percentile 95%     from 192 to 255  => 22775080 count
-        // Percentile 99%     from 192 to 255  => 22775080 count
-        // Percentile 99.9%   from 256 to 383  => 484002 count
-        // Percentile 99.99%  from 256 to 383  => 484002 count
-        // Percentile 99.999% from 256 to 383  => 484002 count
-
-        // from 64  to 95  - 15_267
-        // from 96  to 127 - 1_725_119
-        // from 128 to 191 - 82_838_849
-        // from 192 to 255 - 22_775_080
-        // from 256 to 383 - 484_002
-
-        // we assume that 75% of cells are in range 128..191
-        // so we can use use 192 as size for value in cache
-
-        const MAX_CELL_SIZE: u64 = 192;
-        const KEY_SIZE: u64 = 32;
-        const SHARDS: usize = 512;
-
-        let estimated_cell_cache_capacity = size_in_bytes / (KEY_SIZE + MAX_CELL_SIZE);
-        tracing::info!(
-            estimated_cell_cache_capacity,
-            max_cell_cache_size = %bytesize::ByteSize(size_in_bytes),
-        );
-
-        let inner = Cache::with_options(
-            quick_cache::OptionsBuilder::new()
-                .shards(SHARDS)
-                .estimated_items_capacity(estimated_cell_cache_capacity as usize)
-                .weight_capacity(size_in_bytes)
-                .hot_allocation(0.8)
-                .build()
-                .unwrap(),
-            CellSizeEstimator,
-            FastHasherState::default(),
-            DefaultLifecycle::default(),
-        );
-
-        Self {
-            inner,
-            #[cfg(feature = "cells-metrics")]
-            rocksdb_access_histogram: metrics::histogram!(
-                "tycho_storage_get_cell_from_rocksdb_time"
-            ),
-        }
-    }
-
-    fn get_raw(
-        &self,
-        db: &CellsDb,
-        key: &HashBytes,
-    ) -> Result<Option<RawCellsCacheItem>, CellStorageError> {
-        use quick_cache::sync::GuardResult;
-
-        match self.inner.get_value_or_guard(key, None) {
-            GuardResult::Value(value) => Ok(Some(value)),
-            GuardResult::Guard(g) => {
-                let value = {
-                    #[cfg(feature = "cells-metrics")]
-                    let _timer = scopeguard::guard(Instant::now(), |started_at| {
-                        self.rocksdb_access_histogram.record(started_at.elapsed());
-                    });
-
-                    db.cells
-                        .get(key.as_slice())
-                        .map_err(CellStorageError::Internal)?
-                };
-
-                match value {
-                    Some(value) => {
-                        let (idx, data) = decode_cell_value(value.as_ref())
-                            .ok_or(CellStorageError::InvalidCell)?;
-                        let value =
-                            RawCellsCacheItem::from_header_and_slice(RawCellHeader { idx }, data);
-                        _ = g.insert(value.clone());
-                        Ok(Some(value))
-                    }
-                    None => Ok(None),
-                }
-            }
-            GuardResult::Timeout => unreachable!(),
-        }
-    }
-
-    fn get_idx_for_insert(
-        &self,
-        db: &CellsDb,
-        key: &HashBytes,
-        depth: usize,
-    ) -> Result<Option<u32>, CellStorageError> {
-        // A constant which tells since which depth we should start to use cache.
-        // This method is used mostly for inserting new states, so we can assume
-        // that first N levels will mostly be new.
-        //
-        // This value was chosen empirically.
-        const NEW_CELLS_DEPTH_THRESHOLD: usize = 4;
-
-        if depth >= NEW_CELLS_DEPTH_THRESHOLD {
-            // NOTE: `get` here is used to affect a "hotness" of the value, because
-            // there is a big chance that we will need it soon during state processing
-            if let Some(entry) = self.inner.get(key) {
-                return Ok(Some(entry.header.header.idx));
-            }
-        }
-
-        match db.cells.get(key).map_err(CellStorageError::Internal)? {
-            Some(value) => {
-                let (idx, data) =
-                    decode_cell_value(value.as_ref()).ok_or(CellStorageError::InvalidCell)?;
-                self.inner.insert(
-                    *key,
-                    RawCellsCacheItem::from_header_and_slice(RawCellHeader { idx }, data),
-                );
-                Ok(Some(idx))
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn get_for_delete(
-        &self,
-        db: &CellsDb,
-        key: &HashBytes,
-        refs_buffer: &mut Vec<HashBytes>,
-    ) -> Result<u32, CellStorageError> {
-        refs_buffer.clear();
-
-        // NOTE: `peek` here is used to avoid affecting a "hotness" of the value
-        if let Some(value) = self.inner.peek(key) {
-            return StorageCell::deserialize_references(&value.slice, refs_buffer)
-                .then_some(value.header.header.idx)
-                .ok_or(CellStorageError::InvalidCell);
-        }
-
-        match db
-            .cells
-            .get(key.as_slice())
-            .map_err(CellStorageError::Internal)?
-        {
-            Some(value) => {
-                let (idx, value) =
-                    decode_cell_value(value.as_ref()).ok_or(CellStorageError::InvalidCell)?;
-                StorageCell::deserialize_references(value, refs_buffer)
-                    .then_some(idx)
-                    .ok_or(CellStorageError::InvalidCell)
-            }
-            None => Err(CellStorageError::CellNotFound),
-        }
-    }
-
-    fn on_insert_cell(&self, key: &HashBytes, idx: u32, data: Option<&[u8]>) {
-        match data {
-            None => {
-                // NOTE: `get` here is used to affect a "hotness" of the value
-                if let Some(v) = self.inner.get(key) {
-                    debug_assert_eq!(v.header.header.idx, idx);
-                }
-            }
-            Some(data) => self.inner.insert(
-                *key,
-                RawCellsCacheItem::from_header_and_slice(RawCellHeader { idx }, data),
-            ),
-        }
-    }
-
-    fn remove(&self, key: &HashBytes) {
-        _ = self.inner.remove(key);
-    }
-
-    fn refresh_metrics(&self) {
-        metrics::gauge!("tycho_storage_raw_cells_cache_size").set(self.inner.weight() as f64);
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2056,13 +2150,9 @@ mod tests {
 
         // Insert all cells.
         for root in &cells {
-            let mut batch = rocksdb::WriteBatch::default();
-            cell_storage.store_cell(&mut batch, root.as_ref(), 1)?;
-            cell_storage
-                .cells_db
-                .rocksdb()
-                .write_opt(batch, cell_storage.cells_db.cells.write_config())?;
+            cell_storage.store_cell(root.as_ref(), 1)?;
         }
+        cell_storage.flush_pending_all()?;
 
         // Check hashes
         for root in &cells {
@@ -2076,21 +2166,40 @@ mod tests {
         // Remove all cells.
         let mut alloc = bumpalo::Bump::new();
         for root in &cells {
-            let (_, batch) = cell_storage.remove_cell(&alloc, root.repr_hash())?;
-            cell_storage
-                .cells_db
-                .rocksdb()
-                .write_opt(batch, cell_storage.cells_db.cells.write_config())?;
+            let _ = cell_storage.remove_cell(&alloc, root.repr_hash())?;
             alloc.reset();
         }
 
-        // Check if empty
-        cell_storage.cells_db.trigger_compaction().await;
-        cell_storage.cells_db.trigger_compaction().await;
+        cell_storage.flush_pending_all()?;
+        let cells_left = cell_storage.count_cells()?;
+        assert_eq!(cells_left, 0);
 
-        let mut iterator = cell_storage.cells_db.cells.raw_iterator();
-        iterator.seek_to_first();
-        assert!(iterator.item().is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_cell_mt_with_persisted_cells_does_not_corrupt_refs() -> Result<()> {
+        let (ctx, _tmp_dir) = StorageContext::new_temp().await?;
+        let storage = CoreStorage::open(ctx, CoreStorageConfig::new_potato()).await?;
+
+        let cell_storage = &storage.shard_state_storage().cell_storage;
+
+        let child = CellBuilder::build_from(0u32)?;
+
+        let mut root_builder = CellBuilder::new();
+        root_builder.store_u32(1)?;
+        root_builder.store_reference(child.clone())?;
+        let root = root_builder.build()?;
+
+        cell_storage.store_cell(root.as_ref(), 2)?;
+        cell_storage.flush_pending_all()?;
+
+        let herd = Herd::new();
+        let _ = cell_storage.remove_cell_mt(&herd, root.repr_hash(), Default::default())?;
+
+        cell_storage.flush_pending_all()?;
+        let cells_left = cell_storage.count_cells()?;
+        assert_eq!(cells_left, 0);
 
         Ok(())
     }
