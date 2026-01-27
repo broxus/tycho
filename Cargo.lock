@@ -3882,7 +3882,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tycho-block-util"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3902,14 +3902,14 @@ dependencies = [
 
 [[package]]
 name = "tycho-build-info"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "tycho-cli"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3960,7 +3960,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-collator"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4006,7 +4006,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-consensus"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4048,7 +4048,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-control"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4072,7 +4072,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-core"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4151,7 +4151,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-gen-protos"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "prost-build",
@@ -4159,7 +4159,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-light-node"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -4178,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-network"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4222,7 +4222,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-rpc"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4261,7 +4261,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-rpc-subscriptions"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "alloc-metrics",
  "bytesize",
@@ -4281,7 +4281,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-simulator"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4294,7 +4294,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4316,7 +4316,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage-traits"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "bytes",
  "smallvec",
@@ -4380,7 +4380,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-util"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4422,7 +4422,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-util-proc"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4465,7 +4465,7 @@ dependencies = [
 
 [[package]]
 name = "tycho-wu-tuner"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "metrics",

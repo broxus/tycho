@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 authors = ["Broxus Team"]
 rust-version = "1.89.0"
@@ -145,20 +145,20 @@ zstd-safe = "7.2"
 zstd-sys = "2.0"
 
 # local deps
-tycho-block-util = { path = "./block-util", version = "0.3.5" }
-tycho-build-info = { path = "./tycho-build-info", version = "0.3.5" }
-tycho-collator = { path = "./collator", version = "0.3.5" }
-tycho-consensus = { path = "./consensus", version = "0.3.5" }
-tycho-control = { path = "./control", version = "0.3.5" }
-tycho-core = { path = "./core", version = "0.3.5" }
-tycho-network = { path = "./network", version = "0.3.5" }
-tycho-rpc-subscriptions = { path = "./rpc-subscriptions", version = "0.3.5" }
-tycho-rpc = { path = "./rpc", version = "0.3.5" }
-tycho-storage = { path = "./storage", version = "0.3.5" }
-tycho-storage-traits = { path = "./storage-traits", version = "0.3.5" }
-tycho-util = { path = "./util", version = "0.3.5" }
-tycho-util-proc = { path = "./util-proc", version = "0.3.5" }
-tycho-wu-tuner = { path = "./wu-tuner", version = "0.3.5" }
+tycho-block-util = { path = "./block-util", version = "0.3.6" }
+tycho-build-info = { path = "./tycho-build-info", version = "0.3.6" }
+tycho-collator = { path = "./collator", version = "0.3.6" }
+tycho-consensus = { path = "./consensus", version = "0.3.6" }
+tycho-control = { path = "./control", version = "0.3.6" }
+tycho-core = { path = "./core", version = "0.3.6" }
+tycho-network = { path = "./network", version = "0.3.6" }
+tycho-rpc-subscriptions = { path = "./rpc-subscriptions", version = "0.3.6" }
+tycho-rpc = { path = "./rpc", version = "0.3.6" }
+tycho-storage = { path = "./storage", version = "0.3.6" }
+tycho-storage-traits = { path = "./storage-traits", version = "0.3.6" }
+tycho-util = { path = "./util", version = "0.3.6" }
+tycho-util-proc = { path = "./util-proc", version = "0.3.6" }
+tycho-wu-tuner = { path = "./wu-tuner", version = "0.3.6" }
 
 [patch.crates-io]
 # patches here
