@@ -9,7 +9,7 @@ use tycho_core::block_strider::{
     MetricsSubscriber, PersistentBlockStriderState, Starter, StarterConfig,
 };
 use tycho_core::blockchain_rpc::{
-    BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener,
+    BlockchainRpcClient, BlockchainRpcService, NoopBroadcastListener, StorageArchiveProvider,
 };
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::node::NodeBootArgs;
@@ -181,13 +181,29 @@ impl<C> Node<C> {
             "initialized storage"
         );
 
+        // Setup S3 client
+        #[cfg(feature = "s3")]
+        let s3_client = node_config
+            .s3_client
+            .as_ref()
+            .map(S3Client::new)
+            .transpose()
+            .context("failed to create S3 client")?;
+
         // Setup blockchain rpc
         let zerostate = global_config.zerostate;
 
         let blockchain_rpc_service = BlockchainRpcService::builder()
-            .with_config(node_config.blockchain_rpc_service)
+            .with_config(node_config.blockchain_rpc_service.clone())
             .with_storage(storage.clone())
             .with_broadcast_listener(NoopBroadcastListener)
+            .with_archive_provider((
+                StorageArchiveProvider::new(storage.clone()),
+                #[cfg(feature = "s3")]
+                s3_client
+                    .clone()
+                    .map(|s3_client| S3ArchiveProvider::new(s3_client.clone(), storage.clone())),
+            ))
             .build();
 
         let public_overlay = PublicOverlay::builder(zerostate.compute_public_overlay_id())
@@ -224,12 +240,7 @@ impl<C> Node<C> {
             run_handle: None,
 
             #[cfg(feature = "s3")]
-            s3_client: node_config
-                .s3_client
-                .as_ref()
-                .map(S3Client::new)
-                .transpose()
-                .context("failed to create S3 client")?,
+            s3_client,
         })
     }
 

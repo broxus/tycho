@@ -19,8 +19,11 @@ use crate::block_strider::{
     ColdBootType, FileZerostateProvider, PersistentBlockStriderState, QueueStateHandler, Starter,
     StorageBlockProvider,
 };
+#[cfg(feature = "s3")]
+use crate::blockchain_rpc::S3ArchiveProvider;
 use crate::blockchain_rpc::{
-    BlockchainRpcClient, BlockchainRpcService, BroadcastListener, SelfBroadcastListener,
+    BlockchainRpcClient, BlockchainRpcService, BroadcastListener, IntoArchiveProvider,
+    SelfBroadcastListener, StorageArchiveProvider,
 };
 use crate::global_config::{GlobalConfig, ZerostateId};
 use crate::overlay_client::{PublicOverlayClient, ValidatorsResolver};
@@ -318,9 +321,26 @@ impl<'a> NodeBaseBuilder<'a, init::Step1> {
         RL: BroadcastListener,
         SL: SelfBroadcastListener,
     {
+        #[cfg(feature = "s3")]
+        let s3_client = self
+            .common
+            .base_config
+            .s3_client
+            .as_ref()
+            .map(S3Client::new)
+            .transpose()
+            .context("failed to create S3 client")?;
+
         let (_, blockchain_rpc_client) = self.step.prev_step.net.add_blockchain_rpc(
             &self.common.global_config.zerostate,
             self.step.store.core_storage.clone(),
+            (
+                StorageArchiveProvider::new(self.step.store.core_storage.clone()),
+                #[cfg(feature = "s3")]
+                s3_client.clone().map(|s3_client| {
+                    S3ArchiveProvider::new(s3_client.clone(), self.step.store.core_storage.clone())
+                }),
+            ),
             remote_broadcast_listener,
             self_broadcast_listener,
             self.common.base_config,
@@ -331,6 +351,8 @@ impl<'a> NodeBaseBuilder<'a, init::Step1> {
             step: init::Step2 {
                 prev_step: self.step,
                 blockchain_rpc_client,
+                #[cfg(feature = "s3")]
+                s3_client,
             },
         })
     }
@@ -341,6 +363,8 @@ impl<'a> NodeBaseBuilder<'a, init::Final> {
         let net = self.step.prev_step.prev_step.net;
         let store = self.step.prev_step.store;
         let blockchain_rpc_client = self.step.blockchain_rpc_client;
+        #[cfg(feature = "s3")]
+        let s3_client = self.step.s3_client;
 
         Ok(NodeBase {
             base_config: self.common.base_config.clone(),
@@ -355,14 +379,7 @@ impl<'a> NodeBaseBuilder<'a, init::Final> {
             core_storage: store.core_storage,
             blockchain_rpc_client,
             #[cfg(feature = "s3")]
-            s3_client: self
-                .common
-                .base_config
-                .s3_client
-                .as_ref()
-                .map(S3Client::new)
-                .transpose()
-                .context("failed to create S3 client")?,
+            s3_client,
         })
     }
 }
@@ -471,6 +488,8 @@ pub mod init {
     pub struct Step2 {
         pub(super) prev_step: Step1,
         pub(super) blockchain_rpc_client: BlockchainRpcClient,
+        #[cfg(feature = "s3")]
+        pub(super) s3_client: Option<S3Client>,
     }
 
     impl AsRef<Step0> for Step2 {
@@ -563,21 +582,24 @@ impl ConfiguredNetwork {
         })
     }
 
-    pub fn add_blockchain_rpc<BL, SL>(
+    pub fn add_blockchain_rpc<AP, BL, SL>(
         &self,
         zerostate: &ZerostateId,
         storage: CoreStorage,
+        archive_provider: AP,
         remote_broadcast_listener: BL,
         self_broadcast_listener: SL,
         base_config: &NodeBaseConfig,
     ) -> (BlockchainRpcService<BL>, BlockchainRpcClient)
     where
+        AP: IntoArchiveProvider,
         BL: BroadcastListener,
         SL: SelfBroadcastListener,
     {
         let blockchain_rpc_service = BlockchainRpcService::builder()
             .with_config(base_config.blockchain_rpc_service.clone())
             .with_storage(storage)
+            .with_archive_provider(archive_provider)
             .with_broadcast_listener(remote_broadcast_listener)
             .build();
 
