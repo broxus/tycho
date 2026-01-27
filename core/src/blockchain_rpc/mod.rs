@@ -6,12 +6,16 @@ pub use self::client::{
     BlockchainRpcClientConfig, DataRequirement, PendingArchive, PendingArchiveResponse,
     PendingPersistentState, SelfBroadcastListener,
 };
+#[cfg(feature = "s3")]
+pub use self::providers::S3ArchiveProvider;
+pub use self::providers::{IntoArchiveProvider, StorageArchiveProvider};
 pub use self::service::{
     BlockchainRpcService, BlockchainRpcServiceBuilder, BlockchainRpcServiceConfig,
 };
 
 mod broadcast_listener;
 mod client;
+mod providers;
 mod service;
 
 pub const BAD_REQUEST_ERROR_CODE: u32 = 1;
