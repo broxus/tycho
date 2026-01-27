@@ -68,6 +68,7 @@ tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-vm = { workspace = true }
+criterion = "0.7.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
