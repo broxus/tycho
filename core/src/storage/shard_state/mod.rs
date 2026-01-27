@@ -19,11 +19,11 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
-use self::cell_storage::*;
 use self::store_state_raw::StoreStateContext;
 use super::{BlockFlags, BlockHandle, BlockHandleStorage, BlockStorage, CellsDb};
 
 mod cell_storage;
+pub(crate) use self::cell_storage::CellStorage;
 mod entries_buffer;
 mod store_state_raw;
 
@@ -55,7 +55,7 @@ impl ShardStateStorage {
         drop_interval: u32,
     ) -> Result<Arc<Self>> {
         let cell_storage =
-            CellStorage::new(cells_db.clone(), files_dir, cache_size_bytes, drop_interval);
+            CellStorage::new(cells_db.clone(), files_dir, cache_size_bytes, drop_interval)?;
 
         Ok(Arc::new(Self {
             cells_db,
@@ -157,7 +157,6 @@ impl ShardStateStorage {
 
             let new_cell_count = if block_id.is_masterchain() {
                 cell_storage.store_cell(
-                    &mut batch,
                     root_cell.as_ref(),
                     estimated_merkle_update_size,
                 )?
@@ -166,7 +165,6 @@ impl ShardStateStorage {
 
                 cell_storage.store_cell_mt(
                     root_cell.as_ref(),
-                    &mut batch,
                     split_at,
                     estimated_merkle_update_size,
                 )?
@@ -360,7 +358,7 @@ impl ShardStateStorage {
                 let in_mem_remove =
                     HistogramGuard::begin("tycho_storage_cell_in_mem_remove_time_high");
 
-                let (stats, mut batch, promoted) = if block_id.is_masterchain() {
+                let stats = if block_id.is_masterchain() {
                     cell_storage.remove_cell(alloc.get().as_bump(), &root_hash)?
                 } else {
                     // NOTE: We use epoch `0` here so that cells of old states
@@ -375,17 +373,11 @@ impl ShardStateStorage {
 
                 in_mem_remove.finish();
 
+                let mut batch = rocksdb::WriteBatch::default();
                 batch.delete_cf(&db.shard_states.get_unbounded_cf().bound(), key);
-                let batch_puts = promoted.len();
-                let batch_deletes = batch.len().saturating_sub(batch_puts);
-                metrics::histogram!("tycho_storage_cells_write_batch_puts")
-                    .record(batch_puts as f64);
-                metrics::histogram!("tycho_storage_cells_write_batch_deletes")
-                    .record(batch_deletes as f64);
                 db.raw()
                     .rocksdb()
                     .write_opt(batch, db.cells.write_config())?;
-                cell_storage.commit_pending_promoted(&promoted);
 
                 // NOTE: Ensure that guard is dropped only after writing the batch.
                 drop(guard);

@@ -91,7 +91,6 @@ impl CoreStorage {
             config.drop_interval,
         )?;
         let persistent_state_storage = PersistentStateStorage::new(
-            cells_db.clone(),
             ctx.files_dir(),
             node_state_storage.clone(),
             block_handle_storage.clone(),

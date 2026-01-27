@@ -16,6 +16,8 @@ use tycho_types::prelude::*;
 use tycho_util::cli::signal;
 use weedb::rocksdb::IteratorMode;
 
+const FILES_SUBDIR: &str = "files";
+
 /// Check that the cells database is consistent.
 #[derive(Parser)]
 pub struct Cmd {
@@ -49,9 +51,11 @@ impl Cmd {
                 self.db_root.display()
             );
 
-            let temp_dir = copy_db_partial(&self.db_root, self.temp_dir.as_deref(), &[
-                tycho_core::storage::CELLS_DB_SUBDIR,
-            ])?;
+            let temp_dir = copy_db_partial(
+                &self.db_root,
+                self.temp_dir.as_deref(),
+                &[tycho_core::storage::CELLS_DB_SUBDIR, FILES_SUBDIR],
+            )?;
 
             tracing::info!("checking cells database consistency");
 
@@ -85,7 +89,7 @@ impl Cmd {
 
                 tracing::info!(%block_id, total_states, "removing state");
 
-                let (removed_cells, local_batch, promoted) = if block_id.is_masterchain() {
+                let removed_cells = if block_id.is_masterchain() {
                     drop(cell);
                     cell_storage.remove_cell(herd.get().as_bump(), &root_hash)?
                 } else {
@@ -98,11 +102,6 @@ impl Cmd {
                 };
                 total_cells += removed_cells;
 
-                cells_db
-                    .rocksdb()
-                    .write_opt(local_batch, cells_db.cells.write_config())?;
-                cell_storage.commit_pending_promoted(&promoted);
-
                 tracing::info!(%block_id, total_states, removed_cells, "removed state");
                 herd.reset();
             }
@@ -110,7 +109,7 @@ impl Cmd {
             cells_db.trigger_compaction().await;
             cells_db.trigger_compaction().await;
 
-            let cells_left = cells_db.cells.iterator(IteratorMode::Start).count();
+            let cells_left = cell_storage.count_cells()?;
             tracing::info!(total_states, total_cells, cells_left, "done");
 
             anyhow::ensure!(

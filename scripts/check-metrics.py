@@ -165,6 +165,25 @@ if __name__ == "__main__":
         if err.stderr:
             print(err.stderr)
         exit(2)
+    try:
+        res = subprocess.run(
+            [sys.executable, f"{root_directory}/scripts/gen-faster-dashboard.py"],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+        dashboard_data += res.stdout
+    except subprocess.TimeoutExpired:
+        print("failed to build faster dashboard: timeout")
+        exit(2)
+    except subprocess.CalledProcessError as err:
+        print("failed to build faster dashboard")
+        if err.stdout:
+            print(err.stdout)
+        if err.stderr:
+            print(err.stderr)
+        exit(2)
     exit_code = 0
     for metric in sorted(metrics):
         if metric in ignore_missing:

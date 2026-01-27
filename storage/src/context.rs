@@ -240,7 +240,7 @@ impl StorageContext {
         // logging
         opts.set_log_level(rocksdb::LogLevel::Info);
         opts.set_keep_log_file_num(2);
-        opts.set_recycle_log_file_num(2);
+        opts.set_recycle_log_file_num(0);
         opts.set_max_log_file_size(ByteSize::gib(1).as_u64() as usize);
 
         // cf

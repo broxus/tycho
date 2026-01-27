@@ -537,7 +537,7 @@ mod test {
     use tycho_types::models::ShardIdent;
     use tycho_types::prelude::Dict;
     use tycho_util::project_root;
-    use weedb::rocksdb::{IteratorMode, WriteBatch};
+    use weedb::rocksdb::IteratorMode;
 
     use super::*;
     use crate::storage::{CoreStorage, CoreStorageConfig};
@@ -617,12 +617,7 @@ mod test {
             // check that state actually exists
             let cell = cell_storage.load_cell(&HashBytes::from_slice(value[..32].as_ref()), 0)?;
 
-            let (_, batch, promoted) =
-                cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
-
-            // execute batch
-            db.rocksdb().write_opt(batch, db.cells.write_config())?;
-            cell_storage.commit_pending_promoted(&promoted);
+            let _ = cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
             tracing::info!("State deleted. Progress: {}/{total_states}", deleted + 1);
         }
@@ -631,7 +626,7 @@ mod test {
         db.trigger_compaction().await;
         db.trigger_compaction().await;
 
-        let cells_left = db.cells.iterator(IteratorMode::Start).count();
+        let cells_left = cell_storage.count_cells()?;
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
 
@@ -702,20 +697,13 @@ mod test {
             let new_dict_cell = CellBuilder::build_from(dict.clone())?;
 
             let cell_hash = new_dict_cell.repr_hash();
-            let mut batch = WriteBatch::new();
-
             let traversed = cell_storage.store_cell_mt(
                 new_dict_cell.as_ref(),
-                &mut batch,
                 Default::default(),
                 MODIFY_COUNT * 3,
             )?;
 
             cell_keys.push(*cell_hash);
-
-            cells_db
-                .rocksdb()
-                .write_opt(batch, cells_db.cells.write_config())?;
 
             tracing::info!("Iteration {i} Finished. traversed: {traversed}",);
         }
@@ -729,11 +717,7 @@ mod test {
 
             traverse_cell((cell as Arc<DynCell>).as_ref());
 
-            let (res, batch, promoted) = cell_storage.remove_cell(&bump, &key)?;
-            cells_db
-                .rocksdb()
-                .write_opt(batch, cells_db.cells.write_config())?;
-            cell_storage.commit_pending_promoted(&promoted);
+            let res = cell_storage.remove_cell(&bump, &key)?;
             tracing::info!("Gc {id} of {total} done. Traversed: {res}",);
             bump.reset();
         }
@@ -742,7 +726,7 @@ mod test {
         cells_db.trigger_compaction().await;
         cells_db.trigger_compaction().await;
 
-        let cells_left = cells_db.cells.iterator(IteratorMode::Start).count();
+        let cells_left = cell_storage.count_cells()?;
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
         Ok(())

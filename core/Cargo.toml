@@ -28,7 +28,6 @@ required-features = ["test"]
 [dependencies]
 ahash = { workspace = true }
 anyhow = { workspace = true }
-atomic-cuckoo-filter = "0.2"
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 bitflags = { workspace = true }
@@ -50,7 +49,6 @@ object_store = { workspace = true, optional = true }
 parking_lot = { workspace = true }
 parking_lot_core = { workspace = true }
 pin-project-lite = { workspace = true }
-quick_cache = { workspace = true }
 rand = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
@@ -72,6 +70,9 @@ tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true, features = ["fs"] }
 crossbeam-queue = "0.3.12"
+# faster-rs = { version = "0.11.0", path = "../../../oss/faster-rs" }
+faster-rs = { version = "0.11.0", git = "https://github.com/0xdeafbeef/faster-rs",branch = "bench-upstream" }
+crossbeam-channel = "0.5.15"
 
 [dev-dependencies]
 tempfile = { workspace = true }

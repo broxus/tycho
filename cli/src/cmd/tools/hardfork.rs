@@ -259,7 +259,7 @@ impl ShardStateHandler {
         let output = self.output_path.clone();
         tokio::task::spawn_blocking(move || {
             let writer = ShardStateWriter::new(
-                storage.shard_state_storage().cell_storage().db(),
+                storage.shard_state_storage().cell_storage().as_ref(),
                 &output,
                 handle.id(),
             );

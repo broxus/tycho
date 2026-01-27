@@ -213,7 +213,7 @@ impl Dumper {
     ) -> Result<ShardStateStuff> {
         let dir = Dir::new(self.output_dir.path().join("persistents"))?;
         let writer = ShardStateWriter::new(
-            self.storage.shard_state_storage().cell_storage().db(),
+            self.storage.shard_state_storage().cell_storage().as_ref(),
             &dir,
             block_id,
         );
