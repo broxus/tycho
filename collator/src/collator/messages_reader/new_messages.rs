@@ -13,15 +13,14 @@ use crate::collator::messages_reader::internals_range_reader::{
     InternalsRangeReader, InternalsRangeReaderKind,
 };
 use crate::collator::messages_reader::state::ShardReaderState;
-use crate::collator::messages_reader::state::internal::{
-    DebugInternalsRangeReaderState, InternalsRangeReaderState,
-};
+use crate::collator::messages_reader::state::int::DebugInternalsRangeReaderState;
+use crate::collator::messages_reader::state::int::range_reader::InternalsRangeReaderState;
 use crate::collator::types::ParsedMessage;
 use crate::internal_queue::state::state_iterator::MessageExt;
 use crate::internal_queue::types::diff::QueueDiffWithMessages;
 use crate::internal_queue::types::message::InternalMessageValue;
 use crate::internal_queue::types::router::PartitionRouter;
-use crate::internal_queue::types::stats::AccountStatistics;
+use crate::internal_queue::types::stats::StatisticsViewIter;
 use crate::tracing_targets;
 use crate::types::processed_upto::BlockSeqno;
 use crate::types::{ProcessedTo, SaturatingAddAssign};
@@ -52,9 +51,9 @@ impl<V: InternalMessageValue> NewMessagesState<V> {
     pub fn init_partition_router(
         &mut self,
         partition_id: QueuePartitionIdx,
-        cumulative_partition_stats: &AccountStatistics,
+        cumulative_partition_stats: StatisticsViewIter<'_>,
     ) {
-        for account_addr in cumulative_partition_stats.keys() {
+        for (account_addr, _) in cumulative_partition_stats {
             self.partition_router
                 .insert_dst(account_addr, partition_id)
                 .unwrap();
@@ -153,16 +152,9 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
             }
 
             let state = InternalsRangeReaderState {
-                buffer: Default::default(),
-
                 // we do not use messages satistics when reading new messages
-                msgs_stats: None,
-                remaning_msgs_stats: None,
-                read_stats: Default::default(),
-
                 shards: new_shard_reader_states,
-                skip_offset: 0,
-                processed_offset: 0,
+                ..Default::default()
             };
 
             let reader = InternalsRangeReader {
@@ -305,15 +297,15 @@ impl<V: InternalMessageValue> InternalsPartitionReader<'_, V> {
 
                     // add message to buffer
                     res.metrics.add_to_message_groups_timer.start();
-                    state.buffer.add_message(Box::new(ParsedMessage {
-                        info: MsgInfo::Int(msg.message.info().clone()),
-                        dst_in_current_shard: true,
-                        cell: msg.message.cell().clone(),
-                        special_origin: None,
-                        block_seqno: Some(block_seqno),
-                        from_same_shard: Some(msg.source == for_shard_id),
-                        ext_msg_chain_time: None,
-                    }));
+                    state.buffer.add_message(ParsedMessage::new(
+                        MsgInfo::Int(msg.message.info().clone()),
+                        true,
+                        msg.message.cell().clone(),
+                        None,
+                        Some(block_seqno),
+                        Some(msg.source == for_shard_id),
+                        None,
+                    ));
                     res.metrics
                         .add_to_msgs_groups_ops_count
                         .saturating_add_assign(1);

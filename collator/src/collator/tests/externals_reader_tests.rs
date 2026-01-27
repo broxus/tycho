@@ -5,10 +5,11 @@ use tycho_block_util::queue::QueuePartitionIdx;
 use tycho_types::models::{BlockIdShort, IntAddr, MsgsExecutionParams, ShardIdent};
 
 use crate::collator::MsgsExecutionParamsStuff;
+use crate::collator::anchors_cache::AnchorsCacheTransaction;
 use crate::collator::messages_buffer::{MessageGroup, MessagesBufferLimits};
 use crate::collator::messages_reader::state::ReaderState;
-use crate::collator::messages_reader::state::external::ExternalKey;
-use crate::collator::messages_reader::state::internal::InternalsPartitionReaderState;
+use crate::collator::messages_reader::state::ext::ExternalKey;
+use crate::collator::messages_reader::state::int::partition_reader::InternalsPartitionReaderState;
 use crate::collator::messages_reader::{
     CollectExternalsResult, DisplayMessageGroup, ExternalsReader, GetNextMessageGroupMode,
     InternalsPartitionReader,
@@ -18,7 +19,7 @@ use crate::internal_queue::types::message::EnqueuedMessage;
 use crate::internal_queue::types::router::PartitionRouter;
 use crate::mempool::make_stub_anchor;
 use crate::test_utils::try_init_test_tracing;
-use crate::types::DisplayIter;
+use crate::types::{DisplayIter, ProcessedUptoInfoStuff};
 
 pub(crate) fn fill_test_anchors_cache(
     anchors_cache: &mut AnchorsCache,
@@ -100,12 +101,12 @@ fn test_read_externals() {
         slot_vert_size: 4,
     });
 
-    let mut reader_state = ReaderState::default();
-    reader_state.internals.partitions.insert(
+    let mut reader_state = ReaderState::new(&ProcessedUptoInfoStuff::default());
+    reader_state.internals.tx_partitions_mut().insert(
         QueuePartitionIdx(0),
         InternalsPartitionReaderState::default(),
     );
-    reader_state.internals.partitions.insert(
+    reader_state.internals.tx_partitions_mut().insert(
         QueuePartitionIdx(1),
         InternalsPartitionReaderState::default(),
     );
@@ -114,17 +115,18 @@ fn test_read_externals() {
     let next_chain_time = anchor_44.chain_time;
 
     let mut cloned_anchor_cache = anchors_cache.clone();
+    let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut cloned_anchor_cache);
     let mut externals_reader = ExternalsReader::new(
         next_block_id_short.shard,
         next_block_id_short.seqno,
         next_chain_time,
         msgs_exec_params_stuff.clone(),
         buffer_limits_by_partitions.clone(),
-        &mut cloned_anchor_cache,
+        &mut anchor_cache_tx,
         &mut reader_state.externals,
     );
 
-    let print_state = |externals_reader: &ExternalsReader<'_>| {
+    let print_state = |externals_reader: &ExternalsReader<'_, '_>| {
         println!(
             "externals_reader_state.by_partitions: {:?}",
             externals_reader.reader_state.by_partitions,
@@ -144,7 +146,7 @@ fn test_read_externals() {
 
     assert_eq!(metrics.read_ext_msgs_count, 17);
 
-    let state = externals_reader.reader_state.ranges.get(&1).unwrap();
+    let state = externals_reader.reader_state.ranges().get(&1).unwrap();
     assert!(!state.fully_read);
     assert_eq!(state.range.from, ExternalKey::from((0, 0)));
     assert_eq!(state.range.to, ExternalKey::from((24, 1)));
@@ -203,7 +205,7 @@ fn test_read_externals() {
     assert_eq!(by_par.processed_to, ExternalKey::from((0, 0)));
     assert_eq!(by_par.curr_processed_offset, 1);
 
-    let range_state = externals_reader.reader_state.ranges.get(&1).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&1).unwrap();
     let by_par = range_state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.buffer.msgs_count(), 1);
     assert_eq!(by_par.skip_offset, 0);
@@ -219,7 +221,7 @@ fn test_read_externals() {
 
     let processed_upto = reader_state.get_updated_processed_upto();
 
-    let range_reader_state = reader_state.externals.ranges.get(&1).unwrap();
+    let range_reader_state = reader_state.externals.ranges().get(&1).unwrap();
     let by_par = range_reader_state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.buffer.msgs_count(), 1);
     assert_eq!(by_par.skip_offset, 0);
@@ -246,6 +248,7 @@ fn test_read_externals() {
         .unwrap_or_default();
 
     let mut cloned_anchor_cache = anchors_cache.clone();
+    let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut cloned_anchor_cache);
     // create new reader
     let mut externals_reader = ExternalsReader::new(
         next_block_id_short.shard,
@@ -253,7 +256,7 @@ fn test_read_externals() {
         next_chain_time,
         msgs_exec_params_stuff.clone(),
         buffer_limits_by_partitions.clone(),
-        &mut cloned_anchor_cache,
+        &mut anchor_cache_tx,
         &mut reader_state.externals,
     );
 
@@ -270,7 +273,7 @@ fn test_read_externals() {
     // the read result should be the same as at the last loop in previous block
     assert_eq!(metrics.read_ext_msgs_count, 17);
 
-    let range_state = externals_reader.reader_state.ranges.get(&1).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&1).unwrap();
     assert!(range_state.fully_read);
     assert_eq!(range_state.range.from, ExternalKey::from((0, 0)));
     assert_eq!(range_state.range.to, ExternalKey::from((24, 1)));
@@ -340,7 +343,7 @@ fn test_read_externals() {
     assert_eq!(by_par.processed_to, ExternalKey::from((0, 0)));
     assert_eq!(by_par.curr_processed_offset, 1);
 
-    let range_state = externals_reader.reader_state.ranges.get(&1).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&1).unwrap();
     assert!(range_state.fully_read);
     assert_eq!(range_state.range.from, ExternalKey::from((0, 0)));
     assert_eq!(range_state.range.to, ExternalKey::from((24, 1)));
@@ -355,7 +358,7 @@ fn test_read_externals() {
     assert_eq!(by_par.skip_offset, 0);
     assert_eq!(by_par.processed_offset, 1);
 
-    let range_state = externals_reader.reader_state.ranges.get(&2).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&2).unwrap();
     assert!(!range_state.fully_read);
     assert_eq!(range_state.range.from, ExternalKey::from((24, 1)));
     assert_eq!(range_state.range.to, ExternalKey::from((44, 3)));
@@ -415,7 +418,7 @@ fn test_read_externals() {
     assert_eq!(by_par.processed_to, ExternalKey::from((0, 0)));
     assert_eq!(by_par.curr_processed_offset, 2);
 
-    let range_state = externals_reader.reader_state.ranges.get(&1).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&1).unwrap();
     let by_par = range_state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.buffer.msgs_count(), 0);
     assert_eq!(by_par.skip_offset, 0);
@@ -426,7 +429,7 @@ fn test_read_externals() {
     assert_eq!(by_par.skip_offset, 0);
     assert_eq!(by_par.processed_offset, 1);
 
-    let range_reader = externals_reader.reader_state.ranges.get(&2).unwrap();
+    let range_reader = externals_reader.reader_state.ranges().get(&2).unwrap();
     let by_par = range_reader.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.buffer.msgs_count(), 1);
     assert_eq!(by_par.skip_offset, 1);
@@ -484,7 +487,7 @@ fn test_read_externals() {
     assert_eq!(by_par.processed_to, ExternalKey::from((0, 0)));
     assert_eq!(by_par.curr_processed_offset, 3);
 
-    let range_state = externals_reader.reader_state.ranges.get(&1).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&1).unwrap();
     let by_par = range_state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.buffer.msgs_count(), 0);
     assert_eq!(by_par.skip_offset, 0);
@@ -495,7 +498,7 @@ fn test_read_externals() {
     assert_eq!(by_par.skip_offset, 0);
     assert_eq!(by_par.processed_offset, 1);
 
-    let range_state = externals_reader.reader_state.ranges.get(&2).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&2).unwrap();
     let by_par = range_state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.buffer.msgs_count(), 0);
     assert_eq!(by_par.skip_offset, 1);
@@ -506,7 +509,7 @@ fn test_read_externals() {
     assert_eq!(by_par.skip_offset, 1);
     assert_eq!(by_par.processed_offset, 1);
 
-    assert!(!externals_reader.reader_state.ranges.contains_key(&3));
+    assert!(!externals_reader.reader_state.ranges().contains_key(&3));
 
     println!("finalize reader state after all read messages collected");
     externals_reader.retain_only_last_range_state().unwrap();
@@ -536,9 +539,9 @@ fn test_read_externals() {
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 3);
 
-    assert!(!externals_reader.reader_state.ranges.contains_key(&1));
+    assert!(!externals_reader.reader_state.ranges().contains_key(&1));
 
-    let range_state = externals_reader.reader_state.ranges.get(&2).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&2).unwrap();
     assert_eq!(range_state.range.from, range_state.range.current_position);
 
     let by_par = range_state.get_state_by_partition(0).unwrap();
@@ -551,7 +554,7 @@ fn test_read_externals() {
     assert_eq!(by_par.skip_offset, 3);
     assert_eq!(by_par.processed_offset, 3);
 
-    for (seqno, state) in &externals_reader.reader_state.ranges {
+    for (seqno, state) in externals_reader.reader_state.ranges() {
         println!(
             "range in finalized reader_state: {seqno} {:?}",
             state.fully_read
@@ -569,13 +572,14 @@ fn test_read_externals() {
 
     // create new reader
     let mut cloned_anchor_cache = anchors_cache.clone();
+    let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut cloned_anchor_cache);
     let mut externals_reader = ExternalsReader::new(
         next_block_id_short.shard,
         next_block_id_short.seqno,
         next_chain_time,
         msgs_exec_params_stuff.clone(),
         buffer_limits_by_partitions.clone(),
-        &mut cloned_anchor_cache,
+        &mut anchor_cache_tx,
         &mut reader_state.externals,
     );
 
@@ -593,9 +597,9 @@ fn test_read_externals() {
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 3);
 
-    assert!(!externals_reader.reader_state.ranges.contains_key(&1));
+    assert!(!externals_reader.reader_state.ranges().contains_key(&1));
 
-    let range_state = externals_reader.reader_state.ranges.get(&2).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&2).unwrap();
     assert_eq!(range_state.range.from, ExternalKey::from((44, 3)));
     assert_eq!(range_state.range.to, ExternalKey::from((44, 3)));
     assert_eq!(range_state.range.current_position, range_state.range.to,);
@@ -634,8 +638,8 @@ fn test_read_externals() {
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 3);
 
-    assert!(!externals_reader.reader_state.ranges.contains_key(&1));
-    let range_state = externals_reader.reader_state.ranges.get(&2).unwrap();
+    assert!(!externals_reader.reader_state.ranges().contains_key(&1));
+    let range_state = externals_reader.reader_state.ranges().get(&2).unwrap();
     assert!(range_state.fully_read);
     assert_eq!(range_state.range.from, ExternalKey::from((44, 3)));
     assert_eq!(range_state.range.to, ExternalKey::from((44, 3)));
@@ -650,7 +654,7 @@ fn test_read_externals() {
     assert_eq!(by_par.skip_offset, 3);
     assert_eq!(by_par.processed_offset, 3);
 
-    let range_state = externals_reader.reader_state.ranges.get(&3).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&3).unwrap();
     assert!(!range_state.fully_read);
     assert_eq!(range_state.range.from, ExternalKey::from((44, 3)));
     assert_eq!(range_state.range.to, ExternalKey::from((68, 1)));
@@ -710,9 +714,9 @@ fn test_read_externals() {
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 4);
 
-    assert!(!externals_reader.reader_state.ranges.contains_key(&1));
+    assert!(!externals_reader.reader_state.ranges().contains_key(&1));
 
-    let range_state = externals_reader.reader_state.ranges.get(&2).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&2).unwrap();
     let by_par = range_state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.buffer.msgs_count(), 0);
     assert_eq!(by_par.skip_offset, 3);
@@ -723,7 +727,7 @@ fn test_read_externals() {
     assert_eq!(by_par.skip_offset, 3);
     assert_eq!(by_par.processed_offset, 3);
 
-    let range_state = externals_reader.reader_state.ranges.get(&3).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&3).unwrap();
     let by_par = range_state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.buffer.msgs_count(), 1);
     assert_eq!(by_par.skip_offset, 3);
@@ -739,7 +743,7 @@ fn test_read_externals() {
 
     let processed_upto = reader_state.get_updated_processed_upto();
 
-    let range_reader_state = reader_state.externals.ranges.get(&3).unwrap();
+    let range_reader_state = reader_state.externals.ranges().get(&3).unwrap();
     let by_par = range_reader_state.get_state_by_partition(0).unwrap();
     assert_eq!(by_par.buffer.msgs_count(), 1);
     assert_eq!(by_par.skip_offset, 3);
@@ -762,13 +766,14 @@ fn test_read_externals() {
 
     // create new reader
     let mut cloned_anchor_cache = anchors_cache.clone();
+    let mut anchor_cache_tx = AnchorsCacheTransaction::new(&mut cloned_anchor_cache);
     let mut externals_reader = ExternalsReader::new(
         next_block_id_short.shard,
         next_block_id_short.seqno,
         next_chain_time,
         msgs_exec_params_stuff.clone(),
         buffer_limits_by_partitions.clone(),
-        &mut cloned_anchor_cache,
+        &mut anchor_cache_tx,
         &mut reader_state.externals,
     );
 
@@ -785,9 +790,13 @@ fn test_read_externals() {
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 0);
 
-    assert!(!externals_reader.reader_state.ranges.contains_key(&1));
+    assert!(!externals_reader.reader_state.ranges().contains_key(&1));
 
-    let range_state = externals_reader.reader_state.ranges.get(&2).unwrap();
+    let range_state = externals_reader
+        .reader_state
+        .ranges_mut()
+        .get_mut(&2)
+        .unwrap();
     assert_eq!(range_state.range.from, ExternalKey::from((44, 3)));
     assert_eq!(range_state.range.to, ExternalKey::from((44, 3)));
     assert_eq!(range_state.range.current_position, range_state.range.to,);
@@ -803,7 +812,7 @@ fn test_read_externals() {
     assert_eq!(by_par.skip_offset, 3);
     assert_eq!(by_par.processed_offset, 3);
 
-    let range_state = externals_reader.reader_state.ranges.get(&3).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&3).unwrap();
     assert!(!range_state.fully_read);
     assert_eq!(range_state.range.from, ExternalKey::from((44, 3)));
     assert_eq!(range_state.range.to, ExternalKey::from((68, 1)));
@@ -872,9 +881,9 @@ fn test_read_externals() {
     assert_eq!(by_par.processed_to, ExternalKey::from((44, 3)));
     assert_eq!(by_par.curr_processed_offset, 4);
 
-    assert!(!externals_reader.reader_state.ranges.contains_key(&1));
+    assert!(!externals_reader.reader_state.ranges().contains_key(&1));
 
-    let range_state = externals_reader.reader_state.ranges.get(&2).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&2).unwrap();
     assert!(range_state.fully_read);
     assert_eq!(range_state.range.from, ExternalKey::from((44, 3)));
     assert_eq!(range_state.range.to, ExternalKey::from((44, 3)));
@@ -889,7 +898,7 @@ fn test_read_externals() {
     assert_eq!(by_par.skip_offset, 3);
     assert_eq!(by_par.processed_offset, 3);
 
-    let range_state = externals_reader.reader_state.ranges.get(&3).unwrap();
+    let range_state = externals_reader.reader_state.ranges().get(&3).unwrap();
     assert!(range_state.fully_read);
     assert_eq!(range_state.range.from, ExternalKey::from((44, 3)));
     assert_eq!(range_state.range.to, ExternalKey::from((68, 1)));

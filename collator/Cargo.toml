@@ -34,6 +34,7 @@ blake3 = { workspace = true }
 bumpalo = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
+dashmap = { workspace = true }
 futures-util = { workspace = true }
 humantime = { workspace = true }
 indexmap = { workspace = true }
@@ -55,6 +56,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tycho-crypto = { workspace = true }
 tycho-types = { workspace = true, features = ["rand9", "blake3", "rayon"] }
+tycho-util-proc = { workspace = true}
 weedb = { workspace = true }
 
 # local deps
@@ -66,6 +68,7 @@ tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-vm = { workspace = true }
+criterion = "0.7.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
@@ -74,7 +77,6 @@ tycho-core = { workspace = true, features = ["test"] }
 tycho-network = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
-criterion = { workspace = true }
 
 [features]
 default = []

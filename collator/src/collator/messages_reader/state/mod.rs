@@ -1,25 +1,31 @@
 use std::collections::BTreeMap;
 
 use anyhow::anyhow;
+use ext::ExternalsReaderRange;
+use ext::partition_reader::ExternalsPartitionReaderState;
+use ext::range_reader::ExternalsRangeReaderState;
+use ext::reader::ExternalsReaderState;
 use tycho_block_util::queue::QueueKey;
+use tycho_util_proc::Transactional;
 
-use crate::collator::messages_reader::state::external::{
-    ExternalsPartitionReaderState, ExternalsRangeReaderState, ExternalsReaderRange,
-    ExternalsReaderState,
-};
-use crate::collator::messages_reader::state::internal::InternalsReaderState;
+use crate::collator::messages_reader::state::int::reader::InternalsReaderState;
 use crate::types::processed_upto::{
     ExternalsProcessedUptoStuff, Lt, ProcessedUptoInfoStuff, ProcessedUptoPartitionStuff,
     ShardRangeInfo,
 };
+pub mod ext;
+pub mod int;
 
-pub mod external;
-pub mod internal;
-
-#[derive(Default)]
+#[derive(Transactional)]
 pub struct ReaderState {
+    #[tx(transactional)]
     pub externals: ExternalsReaderState,
+
+    #[tx(transactional)]
     pub internals: InternalsReaderState,
+
+    #[tx(state)]
+    tx: Option<ReaderStateTx>,
 }
 
 impl ReaderState {
@@ -35,34 +41,34 @@ impl ReaderState {
                 });
             for (seqno, range_info) in &par.externals.ranges {
                 ext_reader_state
-                    .ranges
+                    .ranges_mut()
                     .entry(*seqno)
                     .and_modify(|r| {
-                        r.by_partitions.insert(*par_id, range_info.into());
+                        r.partitions_mut().insert(*par_id, range_info.into());
                     })
-                    .or_insert(ExternalsRangeReaderState {
-                        range: ExternalsReaderRange::from_range_info(range_info, processed_to),
-                        by_partitions: [(*par_id, range_info.into())].into(),
-                        fully_read: false,
-                    });
+                    // TODO transitions neccessary?
+                    .or_insert(ExternalsRangeReaderState::new(
+                        ExternalsReaderRange::from_range_info(range_info, processed_to),
+                        [(*par_id, range_info.into())].into(),
+                    ));
             }
         }
+        let partitions = processed_upto
+            .partitions
+            .iter()
+            .map(|(k, v)| (*k, (&v.internals).into()))
+            .collect();
+
         Self {
-            internals: InternalsReaderState {
-                partitions: processed_upto
-                    .partitions
-                    .iter()
-                    .map(|(k, v)| (*k, (&v.internals).into()))
-                    .collect(),
-                cumulative_statistics: None,
-            },
+            internals: InternalsReaderState::new(partitions, None),
             externals: ext_reader_state,
+            tx: None,
         }
     }
 
     pub fn get_updated_processed_upto(&self) -> ProcessedUptoInfoStuff {
         let mut processed_upto = ProcessedUptoInfoStuff::default();
-        for (par_id, par) in &self.internals.partitions {
+        for (par_id, par) in self.internals.partitions() {
             let ext_reader_state_by_partition =
                 self.externals.get_state_by_partition(*par_id).unwrap();
             processed_upto
@@ -72,7 +78,7 @@ impl ReaderState {
                         processed_to: ext_reader_state_by_partition.processed_to.into(),
                         ranges: self
                             .externals
-                            .ranges
+                            .ranges()
                             .iter()
                             .map(|(k, v)| {
                                 let ext_range_reader_state_by_partition =
@@ -90,17 +96,17 @@ impl ReaderState {
     pub fn check_has_non_zero_processed_offset(&self) -> bool {
         let check_internals = self
             .internals
-            .partitions
+            .partitions()
             .values()
-            .any(|par| par.ranges.values().any(|r| r.processed_offset > 0));
+            .any(|par| par.ranges().values().any(|r| r.processed_offset > 0));
         if check_internals {
             return check_internals;
         }
 
         self.externals
-            .ranges
+            .ranges()
             .values()
-            .any(|r| r.by_partitions.values().any(|par| par.processed_offset > 0))
+            .any(|r| r.partitions().values().any(|par| par.processed_offset > 0))
     }
 
     pub fn has_messages_in_buffers(&self) -> bool {
@@ -109,14 +115,14 @@ impl ReaderState {
 
     pub fn has_internals_in_buffers(&self) -> bool {
         self.internals
-            .partitions
+            .partitions()
             .values()
-            .any(|par| par.ranges.values().any(|r| r.buffer.msgs_count() > 0))
+            .any(|par| par.ranges().values().any(|r| r.buffer.msgs_count() > 0))
     }
 
     pub fn has_externals_in_buffers(&self) -> bool {
-        self.externals.ranges.values().any(|r| {
-            r.by_partitions
+        self.externals.ranges().values().any(|r| {
+            r.partitions()
                 .values()
                 .any(|par| par.buffer.msgs_count() > 0)
         })
