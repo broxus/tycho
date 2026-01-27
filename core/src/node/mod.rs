@@ -20,10 +20,10 @@ use crate::block_strider::{
     StorageBlockProvider,
 };
 #[cfg(feature = "s3")]
-use crate::blockchain_rpc::S3ArchiveProvider;
+use crate::blockchain_rpc::S3RpcProvider;
 use crate::blockchain_rpc::{
-    BlockchainRpcClient, BlockchainRpcService, BroadcastListener, IntoArchiveProvider,
-    SelfBroadcastListener, StorageArchiveProvider,
+    BlockchainRpcClient, BlockchainRpcService, BroadcastListener, IntoRpcProvider,
+    SelfBroadcastListener, StorageRpcProvider,
 };
 use crate::global_config::{GlobalConfig, ZerostateId};
 use crate::overlay_client::{PublicOverlayClient, ValidatorsResolver};
@@ -335,10 +335,10 @@ impl<'a> NodeBaseBuilder<'a, init::Step1> {
             &self.common.global_config.zerostate,
             self.step.store.core_storage.clone(),
             (
-                StorageArchiveProvider::new(self.step.store.core_storage.clone()),
+                StorageRpcProvider::new(self.step.store.core_storage.clone()),
                 #[cfg(feature = "s3")]
                 s3_client.clone().map(|s3_client| {
-                    S3ArchiveProvider::new(s3_client.clone(), self.step.store.core_storage.clone())
+                    S3RpcProvider::new(s3_client.clone(), self.step.store.core_storage.clone())
                 }),
             ),
             remote_broadcast_listener,
@@ -582,24 +582,24 @@ impl ConfiguredNetwork {
         })
     }
 
-    pub fn add_blockchain_rpc<AP, BL, SL>(
+    pub fn add_blockchain_rpc<BL, SL, RP>(
         &self,
         zerostate: &ZerostateId,
         storage: CoreStorage,
-        archive_provider: AP,
+        rpc_provider: RP,
         remote_broadcast_listener: BL,
         self_broadcast_listener: SL,
         base_config: &NodeBaseConfig,
     ) -> (BlockchainRpcService<BL>, BlockchainRpcClient)
     where
-        AP: IntoArchiveProvider,
         BL: BroadcastListener,
         SL: SelfBroadcastListener,
+        RP: IntoRpcProvider,
     {
         let blockchain_rpc_service = BlockchainRpcService::builder()
             .with_config(base_config.blockchain_rpc_service.clone())
             .with_storage(storage)
-            .with_archive_provider(archive_provider)
+            .with_rpc_provider(rpc_provider)
             .with_broadcast_listener(remote_broadcast_listener)
             .build();
 

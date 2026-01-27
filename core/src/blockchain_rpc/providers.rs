@@ -4,13 +4,16 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
+use tycho_types::models::BlockId;
 
 use crate::proto::blockchain::ArchiveInfo;
-use crate::storage::{ArchiveId, BlockStorage, CoreStorage};
+use crate::storage::{
+    ArchiveId, BlockStorage, CoreStorage, PersistentStateInfo, PersistentStateKind,
+};
 
-/// Abstraction for archive providers (storage, S3, etc.)
+/// Abstraction for rpc data providers (storage, S3, etc.)
 #[async_trait]
-pub trait ArchiveProvider: Send + Sync + 'static {
+pub trait RpcProvider: Send + Sync + 'static {
     /// Get archive info for the given masterchain seqno.
     ///
     /// Returns:
@@ -21,22 +24,37 @@ pub trait ArchiveProvider: Send + Sync + 'static {
 
     /// Get a chunk of archive data at the given offset.
     async fn get_archive_chunk(&self, archive_id: u32, offset: u64) -> Result<Bytes>;
+
+    /// Get persistent state info for the given block.
+    async fn get_persistent_state_info(
+        &self,
+        block_id: &BlockId,
+        kind: PersistentStateKind,
+    ) -> Result<Option<PersistentStateInfo>>;
+
+    /// Get a chunk of persistent state data at the given offset.
+    async fn get_persistent_state_chunk(
+        &self,
+        block_id: &BlockId,
+        offset: u64,
+        kind: PersistentStateKind,
+    ) -> Result<Option<Bytes>>;
 }
 
 // === Storage Implementation ===
 
-pub struct StorageArchiveProvider {
+pub struct StorageRpcProvider {
     storage: CoreStorage,
 }
 
-impl StorageArchiveProvider {
+impl StorageRpcProvider {
     pub fn new(storage: CoreStorage) -> Self {
         Self { storage }
     }
 }
 
 #[async_trait]
-impl ArchiveProvider for StorageArchiveProvider {
+impl RpcProvider for StorageRpcProvider {
     async fn get_archive_info(&self, mc_seqno: u32) -> Result<ArchiveInfo> {
         let node_state = self.storage.node_state();
 
@@ -76,12 +94,34 @@ impl ArchiveProvider for StorageArchiveProvider {
             .get_archive_chunk(archive_id, offset)
             .await
     }
+
+    async fn get_persistent_state_info(
+        &self,
+        block_id: &BlockId,
+        kind: PersistentStateKind,
+    ) -> Result<Option<PersistentStateInfo>> {
+        let persistent_state_storage = self.storage.persistent_state_storage();
+        Ok(persistent_state_storage.get_state_info(block_id, kind))
+    }
+
+    async fn get_persistent_state_chunk(
+        &self,
+        block_id: &BlockId,
+        offset: u64,
+        kind: PersistentStateKind,
+    ) -> Result<Option<Bytes>> {
+        let persistent_state_storage = self.storage.persistent_state_storage();
+        Ok(persistent_state_storage
+            .read_state_part(block_id, offset, kind)
+            .await
+            .map(Bytes::from))
+    }
 }
 
 // === S3 Implementation ===
 
 #[cfg(feature = "s3")]
-pub use s3_impl::S3ArchiveProvider;
+pub use s3_impl::S3RpcProvider;
 
 #[cfg(feature = "s3")]
 mod s3_impl {
@@ -90,13 +130,13 @@ mod s3_impl {
     use super::*;
     use crate::s3::S3Client;
 
-    pub struct S3ArchiveProvider {
+    pub struct S3RpcProvider {
         client: S3Client,
         storage: CoreStorage,
         chunk_size: NonZeroU32,
     }
 
-    impl S3ArchiveProvider {
+    impl S3RpcProvider {
         pub fn new(client: S3Client, storage: CoreStorage) -> Self {
             let chunk_size = NonZeroU32::new(client.chunk_size() as u32).unwrap();
             Self {
@@ -108,7 +148,7 @@ mod s3_impl {
     }
 
     #[async_trait]
-    impl ArchiveProvider for S3ArchiveProvider {
+    impl RpcProvider for S3RpcProvider {
         async fn get_archive_info(&self, mc_seqno: u32) -> Result<ArchiveInfo> {
             let archive_id = self.storage.block_storage().estimate_archive_id(mc_seqno);
 
@@ -138,27 +178,69 @@ mod s3_impl {
 
             client.get_range(&path, range).await.map_err(Into::into)
         }
+
+        async fn get_persistent_state_info(
+            &self,
+            block_id: &BlockId,
+            kind: PersistentStateKind,
+        ) -> Result<Option<PersistentStateInfo>> {
+            Ok(self
+                .client
+                .get_persistent_state_info(block_id, kind)
+                .await?
+                .map(|info| PersistentStateInfo {
+                    size: info.size,
+                    chunk_size: self.chunk_size,
+                }))
+        }
+
+        async fn get_persistent_state_chunk(
+            &self,
+            block_id: &BlockId,
+            offset: u64,
+            kind: PersistentStateKind,
+        ) -> Result<Option<Bytes>> {
+            let chunk_size = self.chunk_size.get() as u64;
+
+            if !offset.is_multiple_of(chunk_size) {
+                return Ok(None);
+            }
+
+            let path = self.client.make_state_key(block_id, kind);
+            let client = self.client.client();
+
+            let range = std::ops::Range {
+                start: offset,
+                end: offset + chunk_size,
+            };
+
+            match client.get_range(&path, range).await {
+                Ok(data) => Ok(Some(data)),
+                Err(object_store::Error::NotFound { .. }) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        }
     }
 }
 
 // === Hybrid Implementation ===
 
-pub struct HybridArchiveProvider<T1, T2> {
+pub struct HybridRpcProvider<T1, T2> {
     primary: T1,
     fallback: T2,
 }
 
-impl<T1, T2> HybridArchiveProvider<T1, T2> {
+impl<T1, T2> HybridRpcProvider<T1, T2> {
     pub fn new(primary: T1, fallback: T2) -> Self {
         Self { primary, fallback }
     }
 }
 
 #[async_trait]
-impl<T1, T2> ArchiveProvider for HybridArchiveProvider<T1, T2>
+impl<T1, T2> RpcProvider for HybridRpcProvider<T1, T2>
 where
-    T1: ArchiveProvider,
-    T2: ArchiveProvider,
+    T1: RpcProvider,
+    T2: RpcProvider,
 {
     async fn get_archive_info(&self, mc_seqno: u32) -> Result<ArchiveInfo> {
         // Try primary first
@@ -189,34 +271,84 @@ where
         // Fallback
         self.fallback.get_archive_chunk(archive_id, offset).await
     }
+
+    async fn get_persistent_state_info(
+        &self,
+        block_id: &BlockId,
+        kind: PersistentStateKind,
+    ) -> Result<Option<PersistentStateInfo>> {
+        // Try primary first
+        match self.primary.get_persistent_state_info(block_id, kind).await {
+            Ok(Some(info)) => return Ok(Some(info)),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(?block_id, ?kind, "primary state provider error: {e:?}");
+            }
+        }
+
+        // Fallback
+        self.fallback
+            .get_persistent_state_info(block_id, kind)
+            .await
+    }
+
+    async fn get_persistent_state_chunk(
+        &self,
+        block_id: &BlockId,
+        offset: u64,
+        kind: PersistentStateKind,
+    ) -> Result<Option<Bytes>> {
+        // Try primary first
+        match self
+            .primary
+            .get_persistent_state_chunk(block_id, offset, kind)
+            .await
+        {
+            Ok(Some(chunk)) => return Ok(Some(chunk)),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    ?block_id,
+                    offset,
+                    ?kind,
+                    "primary state provider error: {e:?}"
+                );
+            }
+        }
+
+        // Fallback
+        self.fallback
+            .get_persistent_state_chunk(block_id, offset, kind)
+            .await
+    }
 }
 
-// === IntoArchiveProvider trait ===
+// === IntoRpcProvider trait ===
 
-pub trait IntoArchiveProvider {
-    fn into_archive_provider(self, proxy_to_s3: bool) -> Arc<dyn ArchiveProvider>;
+pub trait IntoRpcProvider {
+    fn into_rpc_provider(self, proxy_to_s3: bool) -> Arc<dyn RpcProvider>;
 }
 
-impl<T: ArchiveProvider> IntoArchiveProvider for (T,) {
+impl<T: RpcProvider> IntoRpcProvider for (T,) {
     #[inline]
-    fn into_archive_provider(self, _proxy_to_s3: bool) -> Arc<dyn ArchiveProvider> {
+    fn into_rpc_provider(self, _proxy_to_s3: bool) -> Arc<dyn RpcProvider> {
         Arc::new(self.0)
     }
 }
 
-impl<T1: ArchiveProvider, T2: ArchiveProvider> IntoArchiveProvider for (T1, Option<T2>) {
-    fn into_archive_provider(self, _proxy_to_s3: bool) -> Arc<dyn ArchiveProvider> {
+impl<T1: RpcProvider, T2: RpcProvider> IntoRpcProvider for (T1, Option<T2>) {
+    fn into_rpc_provider(self, proxy_to_s3: bool) -> Arc<dyn RpcProvider> {
         let (primary, fallback) = self;
-        match fallback {
+        match fallback.filter(|_| proxy_to_s3) {
             None => Arc::new(primary),
-            Some(fallback) => Arc::new(HybridArchiveProvider::new(primary, fallback)),
+            Some(fallback) => Arc::new(HybridRpcProvider::new(primary, fallback)),
         }
     }
 }
 
-impl IntoArchiveProvider for CoreStorage {
+impl IntoRpcProvider for CoreStorage {
     #[inline]
-    fn into_archive_provider(self, _proxy_to_s3: bool) -> Arc<dyn ArchiveProvider> {
-        Arc::new(StorageArchiveProvider::new(self))
+    fn into_rpc_provider(self, _proxy_to_s3: bool) -> Arc<dyn RpcProvider> {
+        Arc::new(StorageRpcProvider::new(self))
     }
 }
