@@ -91,15 +91,13 @@ impl<'a> Display for AltFmt<'a, PointKey> {
 
 #[cfg(test)]
 mod test {
-    use std::array;
-
     use anyhow::{Context, Result};
 
     use super::*;
 
     #[test]
     fn test() -> Result<()> {
-        let key = PointKey::new(Round(1), *Digest::wrap(&array::from_fn(|i| i as u8)));
+        let key = PointKey::new(Round(1), Digest::new_random());
         let kvec = tl_proto::serialize(key);
 
         let key_2 = PointKey::read_from(&mut &kvec[..])?;

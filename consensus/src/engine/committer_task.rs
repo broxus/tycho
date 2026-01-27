@@ -98,7 +98,7 @@ impl Inner {
                 attempt += 1;
                 let is_dropping =
                     committer.dag_len() > round_ctx.conf().consensus.min_front_rounds() as _;
-                match committer.commit(round_ctx.conf()) {
+                match committer.commit(round_ctx.conf())? {
                     Ok(data) => break Some(data),
                     Err(HistoryConflict(round)) if is_dropping => {
                         let result = committer.drop_upto(round.next(), round_ctx.conf());
