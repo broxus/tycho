@@ -7,8 +7,10 @@ pub use self::client::{
     PendingPersistentState, SelfBroadcastListener,
 };
 #[cfg(feature = "s3")]
-pub use self::providers::S3RpcProvider;
-pub use self::providers::{IntoRpcProvider, StorageRpcProvider};
+pub use self::providers::S3RpcDataProvider;
+pub use self::providers::{IntoRpcDataProvider, StorageRpcDataProvider};
+#[cfg(feature = "s3")]
+pub use self::service::S3ProxyConfig;
 pub use self::service::{
     BlockchainRpcService, BlockchainRpcServiceBuilder, BlockchainRpcServiceConfig,
 };

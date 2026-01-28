@@ -13,7 +13,7 @@ use crate::storage::{
 
 /// Abstraction for rpc data providers (storage, S3, etc.)
 #[async_trait]
-pub trait RpcProvider: Send + Sync + 'static {
+pub trait RpcDataProvider: Send + Sync + 'static {
     /// Get archive info for the given masterchain seqno.
     ///
     /// Returns:
@@ -43,18 +43,18 @@ pub trait RpcProvider: Send + Sync + 'static {
 
 // === Storage Implementation ===
 
-pub struct StorageRpcProvider {
+pub struct StorageRpcDataProvider {
     storage: CoreStorage,
 }
 
-impl StorageRpcProvider {
+impl StorageRpcDataProvider {
     pub fn new(storage: CoreStorage) -> Self {
         Self { storage }
     }
 }
 
 #[async_trait]
-impl RpcProvider for StorageRpcProvider {
+impl RpcDataProvider for StorageRpcDataProvider {
     async fn get_archive_info(&self, mc_seqno: u32) -> Result<ArchiveInfo> {
         let node_state = self.storage.node_state();
 
@@ -121,35 +121,59 @@ impl RpcProvider for StorageRpcProvider {
 // === S3 Implementation ===
 
 #[cfg(feature = "s3")]
-pub use s3_impl::S3RpcProvider;
+pub use s3_impl::S3RpcDataProvider;
 
 #[cfg(feature = "s3")]
 mod s3_impl {
     use std::num::NonZeroU32;
 
+    use governor::clock::DefaultClock;
+    use governor::state::{InMemoryState, NotKeyed};
+    use governor::{Quota, RateLimiter};
+
     use super::*;
+    use crate::blockchain_rpc::S3ProxyConfig;
     use crate::s3::S3Client;
 
-    pub struct S3RpcProvider {
+    type S3RateLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
+
+    pub struct S3RpcDataProvider {
         client: S3Client,
         storage: CoreStorage,
         chunk_size: NonZeroU32,
+        rate_limiter: S3RateLimiter,
+        bandwidth_limiter: Option<S3RateLimiter>,
     }
 
-    impl S3RpcProvider {
-        pub fn new(client: S3Client, storage: CoreStorage) -> Self {
-            let chunk_size = NonZeroU32::new(client.chunk_size() as u32).unwrap();
+    impl S3RpcDataProvider {
+        pub fn new(client: S3Client, storage: CoreStorage, config: &S3ProxyConfig) -> Self {
+            let chunk_size = client.chunk_size();
+            let rate_limiter = RateLimiter::direct(Quota::per_second(config.rate_limit));
+
+            let bandwidth_limiter =
+                NonZeroU32::new(config.bandwidth_limit.as_u64() as u32).map(|bytes_per_sec| {
+                    let burst = bytes_per_sec.get().max(chunk_size.get());
+                    RateLimiter::direct(
+                        Quota::per_second(bytes_per_sec)
+                            .allow_burst(NonZeroU32::new(burst).unwrap()),
+                    )
+                });
+
             Self {
                 client,
                 storage,
                 chunk_size,
+                rate_limiter,
+                bandwidth_limiter,
             }
         }
     }
 
     #[async_trait]
-    impl RpcProvider for S3RpcProvider {
+    impl RpcDataProvider for S3RpcDataProvider {
         async fn get_archive_info(&self, mc_seqno: u32) -> Result<ArchiveInfo> {
+            self.check_rate_limit()?;
+
             let archive_id = self.storage.block_storage().estimate_archive_id(mc_seqno);
 
             match self.client.get_archive_info(archive_id).await {
@@ -167,9 +191,18 @@ mod s3_impl {
         }
 
         async fn get_archive_chunk(&self, archive_id: u32, offset: u64) -> Result<Bytes> {
+            let chunk_size = self.chunk_size.get() as u64;
+
+            anyhow::ensure!(
+                offset.is_multiple_of(chunk_size),
+                "unaligned archive chunk offset"
+            );
+
+            self.check_rate_limit()?;
+            self.check_bandwidth_limit()?;
+
             let path = self.client.make_archive_key(archive_id);
             let client = self.client.client();
-            let chunk_size = self.chunk_size.get() as u64;
 
             let range = std::ops::Range {
                 start: offset,
@@ -184,6 +217,8 @@ mod s3_impl {
             block_id: &BlockId,
             kind: PersistentStateKind,
         ) -> Result<Option<PersistentStateInfo>> {
+            self.check_rate_limit()?;
+
             Ok(self
                 .client
                 .get_persistent_state_info(block_id, kind)
@@ -200,6 +235,9 @@ mod s3_impl {
             offset: u64,
             kind: PersistentStateKind,
         ) -> Result<Option<Bytes>> {
+            self.check_rate_limit()?;
+            self.check_bandwidth_limit()?;
+
             let chunk_size = self.chunk_size.get() as u64;
 
             if !offset.is_multiple_of(chunk_size) {
@@ -221,6 +259,24 @@ mod s3_impl {
             }
         }
     }
+
+    impl S3RpcDataProvider {
+        fn check_rate_limit(&self) -> Result<()> {
+            self.rate_limiter
+                .check()
+                .map_err(|_err| anyhow::anyhow!("S3 rate limit exceeded"))
+        }
+
+        fn check_bandwidth_limit(&self) -> Result<()> {
+            if let Some(limiter) = &self.bandwidth_limiter {
+                limiter
+                    .check_n(self.chunk_size)
+                    .expect("shouldn't happen since burst = bytes_per_sec.max(chunk_size")
+                    .map_err(|err| anyhow::anyhow!("S3 bandwidth limit exceeded {err:?}"))?;
+            }
+            Ok(())
+        }
+    }
 }
 
 // === Hybrid Implementation ===
@@ -237,10 +293,10 @@ impl<T1, T2> HybridRpcProvider<T1, T2> {
 }
 
 #[async_trait]
-impl<T1, T2> RpcProvider for HybridRpcProvider<T1, T2>
+impl<T1, T2> RpcDataProvider for HybridRpcProvider<T1, T2>
 where
-    T1: RpcProvider,
-    T2: RpcProvider,
+    T1: RpcDataProvider,
+    T2: RpcDataProvider,
 {
     async fn get_archive_info(&self, mc_seqno: u32) -> Result<ArchiveInfo> {
         // Try primary first
@@ -325,30 +381,30 @@ where
 
 // === IntoRpcProvider trait ===
 
-pub trait IntoRpcProvider {
-    fn into_rpc_provider(self, proxy_to_s3: bool) -> Arc<dyn RpcProvider>;
+pub trait IntoRpcDataProvider {
+    fn into_data_provider(self) -> Arc<dyn RpcDataProvider>;
 }
 
-impl<T: RpcProvider> IntoRpcProvider for (T,) {
+impl<T: RpcDataProvider> IntoRpcDataProvider for (T,) {
     #[inline]
-    fn into_rpc_provider(self, _proxy_to_s3: bool) -> Arc<dyn RpcProvider> {
+    fn into_data_provider(self) -> Arc<dyn RpcDataProvider> {
         Arc::new(self.0)
     }
 }
 
-impl<T1: RpcProvider, T2: RpcProvider> IntoRpcProvider for (T1, Option<T2>) {
-    fn into_rpc_provider(self, proxy_to_s3: bool) -> Arc<dyn RpcProvider> {
+impl<T1: RpcDataProvider, T2: RpcDataProvider> IntoRpcDataProvider for (T1, Option<T2>) {
+    fn into_data_provider(self) -> Arc<dyn RpcDataProvider> {
         let (primary, fallback) = self;
-        match fallback.filter(|_| proxy_to_s3) {
+        match fallback {
             None => Arc::new(primary),
             Some(fallback) => Arc::new(HybridRpcProvider::new(primary, fallback)),
         }
     }
 }
 
-impl IntoRpcProvider for CoreStorage {
+impl IntoRpcDataProvider for CoreStorage {
     #[inline]
-    fn into_rpc_provider(self, _proxy_to_s3: bool) -> Arc<dyn RpcProvider> {
-        Arc::new(StorageRpcProvider::new(self))
+    fn into_data_provider(self) -> Arc<dyn RpcDataProvider> {
+        Arc::new(StorageRpcDataProvider::new(self))
     }
 }

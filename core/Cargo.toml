@@ -42,6 +42,7 @@ clap = { workspace = true, optional = true }
 crc32c = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
+governor = { workspace = true, optional = true }
 humantime = { workspace = true }
 metrics = { workspace = true }
 moka = { workspace = true }
@@ -86,7 +87,7 @@ default = ["cells-metrics"]
 test = []
 cli = ["dep:clap", "clap/derive", "tycho-util/cli"]
 cells-metrics = []
-s3 = ["dep:object_store", "object_store/aws"]
+s3 = ["dep:object_store", "object_store/aws", "dep:governor"]
 
 [build-dependencies]
 tycho-build-info = { workspace = true }

@@ -121,8 +121,8 @@ impl S3Client {
         &self.inner.client
     }
 
-    pub fn chunk_size(&self) -> usize {
-        self.inner.chunk_size.get() as usize
+    pub fn chunk_size(&self) -> NonZeroU32 {
+        self.inner.chunk_size
     }
 
     pub fn make_archive_key(&self, archive_id: u32) -> Path {
