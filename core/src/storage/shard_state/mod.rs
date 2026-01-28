@@ -17,7 +17,6 @@ use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run;
 use tycho_util::{FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
@@ -44,7 +43,7 @@ pub struct ShardStateStorage {
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
 
-    accumulated_per_shard: tokio::sync::Mutex<FastHashMap<ShardIdent, ShardAccumulator>>,
+    accumulated_per_shard: parking_lot::Mutex<FastHashMap<ShardIdent, ShardAccumulator>>,
 
     shard_split_depth: u8,
     new_cells_threshold: usize,
@@ -74,12 +73,12 @@ impl ShardStateStorage {
             cell_storage,
             shard_split_depth: config.shard_split_depth,
             new_cells_threshold: config.max_new_cells_threshold,
-            store_shard_state_step: NonZeroU8::new(config.store_shard_state_step).unwrap(),
+            store_shard_state_step: config.store_shard_state_step,
             gc_lock: Default::default(),
             min_ref_mc_state: MinRefMcStateTracker::new(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
-            accumulated_per_shard: tokio::sync::Mutex::new(FastHashMap::default()),
+            accumulated_per_shard: parking_lot::Mutex::new(FastHashMap::default()),
         }))
     }
 
@@ -147,42 +146,32 @@ impl ShardStateStorage {
             return Ok(StoreStateStatus::Exist);
         }
 
-        // TODO: what if the first block is (seqno % store_shard_state_step != 0) - case of hardforks
-        // TODO: Move node_state to ShardStateStorage and check handle.ref_by_mc_seqno() == node_state.load_zerostate_id().seqno ???
-        let mut should_store = handle.is_masterchain()
-            || hint.is_top_block == Some(true)
-            || handle
-                .id()
-                .seqno
-                .is_multiple_of(self.store_shard_state_step.get() as u32);
-
-        if !should_store {
-            let mut guard = self.accumulated_per_shard.lock().await;
-            let acc = guard.entry(handle.id().shard).or_default();
-
-            // prevents double counting
-            if acc.blocks.insert(handle.id().seqno) {
-                acc.new_cells += hint.new_cell_count;
-            }
-
-            if acc.new_cells >= self.new_cells_threshold {
-                // Accumulated too many changes - need to store state
-                should_store = true;
-            }
-        }
-
-        if !should_store {
-            metrics::counter!("tycho_storage_shard_state_skipped").increment(1);
-            return Ok(StoreStateStatus::Skipped);
-        }
-
-        // Reset accumulator after storing shardchain state
-        // Masterchain blocks don't accumulate so we only reset for shardchain
         if !handle.is_masterchain() {
-            self.accumulated_per_shard
-                .lock()
-                .await
-                .remove(&handle.id().shard);
+            let mut guard = self.accumulated_per_shard.lock();
+
+            let force_store = hint.is_top_block == Some(true)
+                || handle
+                    .id()
+                    .seqno
+                    .is_multiple_of(self.store_shard_state_step.get() as u32);
+
+            if force_store {
+                guard.remove(&handle.id().shard);
+            } else {
+                let acc = guard.entry(handle.id().shard).or_default();
+
+                if acc.blocks.insert(handle.id().seqno) {
+                    acc.new_cells += hint.new_cell_count;
+                }
+
+                if acc.new_cells < self.new_cells_threshold {
+                    metrics::counter!("tycho_storage_shard_state_skipped").increment(1);
+                    return Ok(StoreStateStatus::Skipped);
+                }
+
+                guard.remove(&handle.id().shard);
+            }
+
             metrics::counter!("tycho_storage_shard_state_stored").increment(1);
         }
 
@@ -304,7 +293,7 @@ impl ShardStateStorage {
     // knowing its `min_ref_mc_seqno` which can only be found out by
     // parsing the state. Creating a "Brief State" struct won't work either
     // because due to model complexity it is going to be error-prone.
-    pub async fn direct_load_state(
+    pub async fn load_state_direct(
         &self,
         ref_by_mc_seqno: u32,
         block_id: &BlockId,
@@ -343,20 +332,20 @@ impl ShardStateStorage {
         get_cached: F,
     ) -> Result<ShardStateStuff>
     where
-        F: Fn(&BlockId) -> Option<(BlockId, u32, MerkleUpdate)>,
+        F: Fn(&BlockId) -> Option<CachedStateUpdate>,
     {
         // Collect chain of state updates for non-masterchain blocks
         let mut chain = Vec::new();
         let mut current_block_id = *block_id;
 
         if !block_id.is_masterchain() {
-            while !self.is_state_exist(&current_block_id)? {
+            while !self.contains_state(&current_block_id)? {
                 match get_cached(&current_block_id) {
                     // Try to get from cache first
-                    Some((prev_id, cached_ref_by_mc_seqno, state_update)) => {
-                        ref_by_mc_seqno = ref_by_mc_seqno.min(cached_ref_by_mc_seqno);
-                        chain.push((current_block_id, state_update));
-                        current_block_id = prev_id;
+                    Some(cached) => {
+                        ref_by_mc_seqno = ref_by_mc_seqno.min(cached.ref_by_mc_seqno);
+                        chain.push((current_block_id, cached.state_update));
+                        current_block_id = cached.prev_block_id;
                     }
                     None => {
                         // Fallback to storage
@@ -380,20 +369,24 @@ impl ShardStateStorage {
         }
 
         let mut state = self
-            .direct_load_state(ref_by_mc_seqno, &current_block_id)
+            .load_state_direct(ref_by_mc_seqno, &current_block_id)
             .await?;
 
-        // Apply state updates
-        while let Some((block_id, merkle_update)) = chain.pop() {
-            let prev_block_id = *state.block_id();
+        // Apply state updates in a single blocking task
+        if !chain.is_empty() {
             let split_at_depth = self.shard_split_depth;
-            state = rayon_run({
-                move || state.par_make_next_state(&block_id, &merkle_update, Some(split_at_depth))
+            state = tokio::task::spawn_blocking(move || {
+                while let Some((block_id, merkle_update)) = chain.pop() {
+                    let prev_block_id = *state.block_id();
+                    state = state
+                        .par_make_next_state(&block_id, &merkle_update, Some(split_at_depth))
+                        .with_context(|| {
+                            format!("failed to apply merkle of block {block_id} to {prev_block_id}")
+                        })?;
+                }
+                Ok::<_, anyhow::Error>(state)
             })
-            .await
-            .with_context(|| {
-                format!("failed to apply merkle of block {block_id} to {prev_block_id}")
-            })?;
+            .await??;
         }
 
         Ok(state)
@@ -410,7 +403,7 @@ impl ShardStateStorage {
         }
     }
 
-    pub fn is_state_exist(&self, block_id: &BlockId) -> Result<bool> {
+    pub fn contains_state(&self, block_id: &BlockId) -> Result<bool> {
         let shard_states = &self.cells_db.shard_states;
         Ok(shard_states.get(block_id.to_vec())?.is_some())
     }
@@ -679,6 +672,12 @@ pub fn split_shard_accounts(
         .context("failed to load shard accounts")?;
 
     split_aug_dict_raw(shard_accounts, split_depth).context("failed to split shard accounts")
+}
+
+pub struct CachedStateUpdate {
+    pub prev_block_id: BlockId,
+    pub ref_by_mc_seqno: u32,
+    pub state_update: MerkleUpdate,
 }
 
 pub enum StoreStateStatus {

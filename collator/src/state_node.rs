@@ -10,7 +10,8 @@ use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{
-    BlockHandle, CoreStorage, MaybeExistingHandle, NewBlockMeta, StoreStateHint, StoreStateStatus,
+    BlockHandle, CachedStateUpdate, CoreStorage, MaybeExistingHandle, NewBlockMeta, StoreStateHint,
+    StoreStateStatus,
 };
 use tycho_network::PeerId;
 use tycho_types::boc::BocRepr;
@@ -107,6 +108,7 @@ pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, Arc<BlockStuffForSync>>>,
     shard_blocks: FastDashMap<ShardIdent, BTreeMap<u32, ShardBlockData>>,
+    last_stored_state_seqno: Mutex<FastHashMap<ShardIdent, u32>>,
     storage: CoreStorage,
     broadcaster: broadcast::Sender<BlockId>,
 
@@ -131,6 +133,7 @@ impl StateNodeAdapterStdImpl {
             storage,
             blocks: Default::default(),
             shard_blocks: Default::default(),
+            last_stored_state_seqno: Default::default(),
             broadcaster,
             sync_context_tx,
             delayed_state_notifier: DelayedStateNotifier::default(),
@@ -213,7 +216,11 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                 self.shard_blocks
                     .get(&current_block_id.shard)
                     .and_then(|shard_blocks| shard_blocks.get(&current_block_id.seqno).cloned())
-                    .map(|block| (block.prev_id, block.ref_by_mc_seqno, block.state_update))
+                    .map(|block| CachedStateUpdate {
+                        prev_block_id: block.prev_id,
+                        ref_by_mc_seqno: block.ref_by_mc_seqno,
+                        state_update: block.state_update,
+                    })
             })
             .await?;
 
@@ -240,13 +247,19 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             .block_handle_storage()
             .create_or_load_handle(block_id, meta);
 
-        let updated = self
+        let status = self
             .storage
             .shard_state_storage()
             .store_state_root(&handle, state_root, hint)
             .await?;
 
-        Ok(updated)
+        if status.is_stored() {
+            self.last_stored_state_seqno
+                .lock()
+                .insert(block_id.shard, block_id.seqno);
+        }
+
+        Ok(status)
     }
 
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>> {
@@ -406,15 +419,18 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         Reclaimer::instance().drop(to_drop);
 
         let mut to_drop = Vec::new();
-        for (shard, seqno) in &to_split {
-            const BUFFER_LEN: u32 = 32; // must be more than `store_shard_state_step`
-            let safe_seqno = seqno.saturating_sub(BUFFER_LEN);
+        let last_stored = self.last_stored_state_seqno.lock();
+        for (shard, _) in &to_split {
+            let Some(&safe_seqno) = last_stored.get(shard) else {
+                continue;
+            };
 
             if let Some(mut shard_blocks) = self.shard_blocks.get_mut(shard) {
                 let retained = shard_blocks.split_off(&safe_seqno);
                 to_drop.push(std::mem::replace(&mut *shard_blocks, retained));
             }
         }
+        drop(last_stored);
 
         // Don't wait for drop inside a tokio context.
         Reclaimer::instance().drop(to_drop);
