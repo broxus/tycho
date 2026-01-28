@@ -4,14 +4,17 @@ use tycho_network::PeerId;
 
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::point_status::{
-    PointStatus, PointStatusFound, PointStatusIllFormed, PointStatusNotFound, PointStatusValidated,
+    PointStatus, PointStatusFound, PointStatusIllFormed, PointStatusInvalid, PointStatusNotFound,
+    PointStatusTransInvalid, PointStatusValid,
 };
 use crate::models::{Digest, PointId, PointInfo, PointKey, Round};
 
 /// Note: all points with `Found` status must repeat `verify()`,
 ///       because vset may have changed after status reset on history fix
 pub enum PointRestore {
-    Validated(PointInfo, PointStatusValidated),
+    Valid(PointInfo, PointStatusValid),
+    TransInvalid(PointInfo, PointStatusTransInvalid),
+    Invalid(PointInfo, PointStatusInvalid),
     IllFormed(PointId, PointStatusIllFormed),
     NotFound(PointKey, PointStatusNotFound),
     Found(PointInfo, PointStatusFound),
@@ -25,11 +28,13 @@ impl PointRestore {
             let mut priority = 2;
             priority |= (status.is_first_resolved() as u8) << 7;
             priority |= (status.is_first_valid() as u8) << 6;
-            priority |= (status.is_valid() as u8) << 5;
+            priority |= (T::is_valid() as u8) << 5;
             priority
         }
         let desc = match self {
-            PointRestore::Validated(_, status) => order_desc(status),
+            PointRestore::Valid(_, status) => order_desc(status),
+            PointRestore::TransInvalid(_, status) => order_desc(status),
+            PointRestore::Invalid(_, status) => order_desc(status),
             PointRestore::IllFormed(_, status) => order_desc(status),
             PointRestore::NotFound(_, status) => order_desc(status),
             PointRestore::Found(_, _) => 0,
@@ -39,7 +44,10 @@ impl PointRestore {
 
     pub fn round(&self) -> Round {
         match self {
-            Self::Validated(info, _) | Self::Found(info, _) => info.round(),
+            Self::Valid(info, _)
+            | Self::TransInvalid(info, _)
+            | Self::Invalid(info, _)
+            | Self::Found(info, _) => info.round(),
             Self::IllFormed(id, _) => id.round,
             Self::NotFound(key, _) => key.round,
         }
@@ -47,7 +55,10 @@ impl PointRestore {
 
     pub fn author(&self) -> &PeerId {
         match self {
-            Self::Validated(info, _) | Self::Found(info, _) => info.author(),
+            Self::Valid(info, _)
+            | Self::TransInvalid(info, _)
+            | Self::Invalid(info, _)
+            | Self::Found(info, _) => info.author(),
             Self::IllFormed(id, _) => &id.author,
             Self::NotFound(_, status) => &status.author,
         }
@@ -55,7 +66,10 @@ impl PointRestore {
 
     pub fn digest(&self) -> &Digest {
         match self {
-            Self::Validated(info, _) | Self::Found(info, _) => info.digest(),
+            Self::Valid(info, _)
+            | Self::TransInvalid(info, _)
+            | Self::Invalid(info, _)
+            | Self::Found(info, _) => info.digest(),
             Self::IllFormed(id, _) => &id.digest,
             Self::NotFound(key, _) => &key.digest,
         }
@@ -71,7 +85,9 @@ impl PointRestore {
 
     pub fn has_proof(&self) -> bool {
         match self {
-            Self::Validated(_, status) => status.has_proof,
+            Self::Valid(_, status) => status.has_proof,
+            Self::TransInvalid(_, status) => status.has_proof,
+            Self::Invalid(_, status) => status.has_proof,
             Self::IllFormed(_, status) => status.has_proof,
             Self::NotFound(_, status) => status.has_proof,
             Self::Found(_, status) => status.has_proof,
@@ -85,7 +101,13 @@ impl std::fmt::Debug for AltFmt<'_, PointRestore> {
         let inner = AltFormat::unpack(self);
         write!(f, "Restore {{ {:?} ", inner.id().alt())?;
         match inner {
-            PointRestore::Validated(_, status) => {
+            PointRestore::Valid(_, status) => {
+                write!(f, "{status}")?;
+            }
+            PointRestore::TransInvalid(_, status) => {
+                write!(f, "{status}")?;
+            }
+            PointRestore::Invalid(_, status) => {
                 write!(f, "{status}")?;
             }
             PointRestore::IllFormed(_, status) => {
