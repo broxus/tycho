@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes};
+#[cfg(feature = "s3")]
+use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::message::validate_external_message;
 use tycho_network::{Response, Service, ServiceRequest, try_handle_prefix};
@@ -11,7 +13,7 @@ use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::blockchain_rpc::broadcast_listener::{BroadcastListener, NoopBroadcastListener};
-use crate::blockchain_rpc::providers::{IntoRpcProvider, RpcProvider};
+use crate::blockchain_rpc::providers::{IntoRpcDataProvider, RpcDataProvider};
 use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
@@ -23,6 +25,30 @@ const RPC_METHOD_TIMINGS_METRIC: &str = "tycho_blockchain_rpc_method_time";
 const BLOCK_DATA_CHUNK_SIZE: u32 = 1024 * 1024; // 1 MB
 #[cfg(test)]
 const BLOCK_DATA_CHUNK_SIZE: u32 = 10; // 10 bytes so we have zillions of chunks in tests
+
+#[cfg(feature = "s3")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3ProxyConfig {
+    /// Rate limit (requests per second)
+    ///
+    /// Default: 100.
+    pub rate_limit: NonZeroU32,
+
+    /// Bandwidth limit (bytes per second)
+    ///
+    /// Default: 100 MiB (0 - unlimited)
+    pub bandwidth_limit: ByteSize,
+}
+
+#[cfg(feature = "s3")]
+impl Default for S3ProxyConfig {
+    fn default() -> Self {
+        Self {
+            rate_limit: NonZeroU32::new(100).unwrap(),
+            bandwidth_limit: ByteSize::mib(100),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -38,11 +64,11 @@ pub struct BlockchainRpcServiceConfig {
     /// Default: yes.
     pub serve_persistent_states: bool,
 
-    /// Enable proxying requests to S3 when data is not available in storage (GC passed).
-    /// Requires the `s3` feature and S3 client configuration.
+    /// S3 proxy configuration.
     ///
-    /// Default: true.
-    pub proxy_to_s3: bool,
+    /// Default: enabled.
+    #[cfg(feature = "s3")]
+    pub s3_proxy: Option<S3ProxyConfig>,
 }
 
 impl Default for BlockchainRpcServiceConfig {
@@ -50,7 +76,8 @@ impl Default for BlockchainRpcServiceConfig {
         Self {
             max_key_blocks_list_len: 8,
             serve_persistent_states: true,
-            proxy_to_s3: true,
+            #[cfg(feature = "s3")]
+            s3_proxy: Some(S3ProxyConfig::default()),
         }
     }
 }
@@ -60,17 +87,17 @@ pub struct BlockchainRpcServiceBuilder<MandatoryFields> {
     mandatory_fields: MandatoryFields,
 }
 
-impl<B> BlockchainRpcServiceBuilder<(B, CoreStorage, Arc<dyn RpcProvider>)>
+impl<B> BlockchainRpcServiceBuilder<(B, CoreStorage, Arc<dyn RpcDataProvider>)>
 where
     B: BroadcastListener,
 {
     pub fn build(self) -> BlockchainRpcService<B> {
-        let (broadcast_listener, storage, rpc_provider) = self.mandatory_fields;
+        let (broadcast_listener, storage, rpc_data_provider) = self.mandatory_fields;
 
         BlockchainRpcService {
             inner: Arc::new(Inner {
                 storage,
-                rpc_provider,
+                rpc_data_provider,
                 config: self.config,
                 broadcast_listener,
             }),
@@ -84,12 +111,12 @@ where
 {
     pub fn build(self) -> BlockchainRpcService<B> {
         let (broadcast_listener, storage, _) = self.mandatory_fields;
-        let rpc_provider = storage.clone().into_rpc_provider(self.config.proxy_to_s3);
+        let rpc_data_provider = storage.clone().into_data_provider();
 
         BlockchainRpcService {
             inner: Arc::new(Inner {
                 storage,
-                rpc_provider,
+                rpc_data_provider,
                 config: self.config,
                 broadcast_listener,
             }),
@@ -140,16 +167,16 @@ impl<T2, T3> BlockchainRpcServiceBuilder<((), T2, T3)> {
 }
 
 impl<T1, T2> BlockchainRpcServiceBuilder<(T1, T2, ())> {
-    pub fn with_rpc_provider<RP: IntoRpcProvider>(
+    pub fn with_data_provider<RP: IntoRpcDataProvider>(
         self,
         provider: RP,
-    ) -> BlockchainRpcServiceBuilder<(T1, T2, Arc<dyn RpcProvider>)> {
+    ) -> BlockchainRpcServiceBuilder<(T1, T2, Arc<dyn RpcDataProvider>)> {
         let (broadcast_listener, storage, _) = self.mandatory_fields;
-        let rpc_provider = provider.into_rpc_provider(self.config.proxy_to_s3);
+        let rpc_data_provider = provider.into_data_provider();
 
         BlockchainRpcServiceBuilder {
             config: self.config,
-            mandatory_fields: (broadcast_listener, storage, rpc_provider),
+            mandatory_fields: (broadcast_listener, storage, rpc_data_provider),
         }
     }
 }
@@ -395,7 +422,7 @@ struct Inner<B> {
     storage: CoreStorage,
     config: BlockchainRpcServiceConfig,
     broadcast_listener: B,
-    rpc_provider: Arc<dyn RpcProvider>,
+    rpc_data_provider: Arc<dyn RpcDataProvider>,
 }
 
 impl<B> Inner<B> {
@@ -561,7 +588,7 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetArchiveInfo,
     ) -> overlay::Response<ArchiveInfo> {
-        match self.rpc_provider.get_archive_info(req.mc_seqno).await {
+        match self.rpc_data_provider.get_archive_info(req.mc_seqno).await {
             Ok(info) => overlay::Response::Ok(info),
             Err(e) => {
                 tracing::warn!(mc_seqno = req.mc_seqno, "get_archive_info failed: {e:?}");
@@ -575,7 +602,7 @@ impl<B> Inner<B> {
         req: &rpc::GetArchiveChunk,
     ) -> overlay::Response<Data> {
         match self
-            .rpc_provider
+            .rpc_data_provider
             .get_archive_chunk(req.archive_id as u32, req.offset)
             .await
         {
@@ -704,7 +731,7 @@ impl<B> Inner<B> {
     ) -> anyhow::Result<PersistentStateInfo> {
         if self.config.serve_persistent_states
             && let Some(info) = self
-                .rpc_provider
+                .rpc_data_provider
                 .get_persistent_state_info(block_id, state_kind)
                 .await?
         {
@@ -737,7 +764,7 @@ impl<B> Inner<B> {
         }
 
         match self
-            .rpc_provider
+            .rpc_data_provider
             .get_persistent_state_chunk(block_id, offset, state_kind)
             .await
         {
