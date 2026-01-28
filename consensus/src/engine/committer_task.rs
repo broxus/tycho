@@ -283,6 +283,7 @@ impl RoundCtx {
                     skipped_rounds,
                     valid_points,
                     equivocated,
+                    trans_invalid_points,
                     invalid_points,
                     ill_formed_points,
                     references_skipped,

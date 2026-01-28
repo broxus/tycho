@@ -2,17 +2,21 @@ pub use all_stored::*;
 pub use committable::*;
 pub use found::*;
 pub use ill_formed::*;
+pub use invalid::*;
 pub use not_found::*;
 pub use proven::*;
-pub use validated::*;
+pub use trans_invalid::*;
+pub use valid::*;
 
 mod all_stored;
 mod committable;
 mod found;
 mod ill_formed;
+mod invalid;
 mod not_found;
 mod proven;
-mod validated;
+mod trans_invalid;
+mod valid;
 
 // mandatory first 2 bytes for every stored record
 bitflags::bitflags! {
@@ -60,7 +64,7 @@ bitflags::bitflags! {
 pub trait PointStatus: std::fmt::Display {
     fn set_first_resolved(&mut self);
     fn is_first_resolved(&self) -> bool;
-    fn is_valid(&self) -> bool {
+    fn is_valid() -> bool {
         false
     }
     fn set_first_valid(&mut self) {}
@@ -118,7 +122,23 @@ mod test {
     #[test]
     fn check_valid() -> anyhow::Result<()> {
         for _ in 0..50 {
-            self_check::<PointStatusValidated, { PointStatusValidated::BYTE_SIZE }>()?;
+            self_check::<PointStatusValid, { PointStatusValid::BYTE_SIZE }>()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn check_trans_invalid() -> anyhow::Result<()> {
+        for _ in 0..100 {
+            self_check::<PointStatusTransInvalid, { PointStatusTransInvalid::BYTE_SIZE }>()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn check_invalid() -> anyhow::Result<()> {
+        for _ in 0..25 {
+            self_check::<PointStatusInvalid, { PointStatusInvalid::BYTE_SIZE }>()?;
         }
         Ok(())
     }

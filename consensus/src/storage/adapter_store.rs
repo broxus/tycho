@@ -203,13 +203,19 @@ impl MempoolAdapterStore {
             .load_restore(&RangeInclusive::new(Round(bottom_round), last_db_round))
             .into_iter()
             .filter_map(|item| match item {
-                PointRestore::Validated(info, status) => {
-                    if status.anchor_flags.contains(AnchorFlags::Used) {
-                        anchors.insert(info.round(), info.clone());
-                    }
-                    status.committed.map(|committed| (committed, info))
+                PointRestore::Valid(info, status) => {
+                    Some((info, status.anchor_flags, status.committed))
+                }
+                PointRestore::TransInvalid(info, status) => {
+                    Some((info, status.anchor_flags, status.committed))
                 }
                 _ => None,
+            })
+            .filter_map(|(info, anchor_flags, committed_opt)| {
+                if anchor_flags.contains(AnchorFlags::Used) {
+                    anchors.insert(info.round(), info.clone());
+                }
+                committed_opt.map(|committed| (committed, info))
             })
             .collect::<Vec<_>>();
 

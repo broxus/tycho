@@ -4,7 +4,7 @@ use tl_proto::{TlRead, TlWrite};
 use tycho_network::PeerId;
 
 use crate::effects::{AltFmt, AltFormat};
-use crate::models::{PointId, PointMap};
+use crate::models::{Digest, PointId, PointMap, Round};
 
 #[derive(Clone, Debug, PartialEq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
@@ -43,6 +43,40 @@ pub enum Through {
 
 impl Through {
     pub const MAX_TL_BYTES: usize = 4 + PeerId::MAX_TL_BYTES;
+}
+
+impl IndirectLink {
+    pub fn fill(&self, dest: &mut [u8]) -> anyhow::Result<()> {
+        let len = dest.len();
+        anyhow::ensure!(len == Self::MAX_TL_BYTES, "fill buf len {len}");
+
+        let mut start: usize = 0;
+        let mut end: usize = 0;
+
+        let mut fill_next = |len: usize, source: &[u8]| {
+            end += len;
+            dest[start..end].copy_from_slice(source);
+            start = end;
+        };
+
+        fill_next(4, &Self::TL_ID.to_le_bytes());
+        fill_next(4, &PointId::TL_ID.to_le_bytes());
+        fill_next(Round::MAX_TL_SIZE, &self.to.round.0.to_le_bytes());
+        fill_next(Digest::MAX_TL_BYTES, self.to.digest.inner());
+        fill_next(4, &PeerId::TL_ID.to_le_bytes());
+        fill_next(PeerId::MAX_TL_BYTES - 4, &self.to.author.0);
+
+        let (tl_id, peer_id) = match &self.path {
+            Through::Includes(peer_id) => (Through::TL_ID_INCLUDES, peer_id),
+            Through::Witness(peer_id) => (Through::TL_ID_WITNESS, peer_id),
+        };
+
+        fill_next(4, &tl_id.to_le_bytes());
+        fill_next(4, &PeerId::TL_ID.to_le_bytes());
+        fill_next(PeerId::MAX_TL_BYTES - 4, &peer_id.0);
+
+        Ok(())
+    }
 }
 
 impl AltFormat for AnchorLink {}
@@ -106,5 +140,34 @@ impl Through {
         } else {
             Through::Witness(PeerId(rand::random()))
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::effects::AltFormat;
+
+    #[test]
+    fn indirect_link_fill_mimics_tl() -> anyhow::Result<()> {
+        let link = IndirectLink::random();
+
+        let mut buf: [u8; IndirectLink::MAX_TL_BYTES] = [0; _];
+        link.fill(&mut buf)?;
+
+        let tl = tl_proto::serialize(&link);
+
+        anyhow::ensure!(
+            buf.as_slice() == tl.as_slice(),
+            "got:\n{}\nexpected:\n{}",
+            buf.as_slice().alt(),
+            tl.as_slice().alt()
+        );
+
+        let l_2 = tl_proto::deserialize::<IndirectLink>(&buf[..])?;
+
+        anyhow::ensure!(l_2 == link);
+
+        Ok(())
     }
 }

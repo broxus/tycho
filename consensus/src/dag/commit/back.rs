@@ -16,7 +16,9 @@ use crate::dag::commit::SyncError;
 use crate::dag::commit::anchor_chain::EnqueuedAnchor;
 use crate::effects::{AltFmt, AltFormat, Cancelled};
 use crate::engine::MempoolConfig;
-use crate::models::{AnchorLink, AnchorStageRole, DagPoint, Digest, PointInfo, Round, ValidPoint};
+use crate::models::{
+    AnchorLink, AnchorStageRole, Committable, DagPoint, Digest, PointInfo, Round, ValidPoint,
+};
 
 #[derive(Default)]
 pub struct DagBack {
@@ -396,7 +398,7 @@ impl DagBack {
         full_history_bottom: Round,
         anchor: &PointInfo, // @ r+1
         conf: &MempoolConfig,
-    ) -> Result<VecDeque<ValidPoint>, SyncError> {
+    ) -> Result<VecDeque<Committable>, SyncError> {
         fn extend(to: &mut FastHashMap<Digest, PeerId>, from: &FastHashMap<PeerId, Digest>) {
             if to.is_empty() {
                 to.reserve(from.len());
@@ -442,9 +444,9 @@ impl DagBack {
                 // Any equivocated point (except anchor) is ok, as they are globally available
                 // because of anchor, and their payload is deduplicated after mempool anyway.
                 let global = // point @ r+0; break and return `None` if not ready yet
-                    Self::ready_valid_point(point_round, peer, digest, "point")?;
+                    Self::committable_point(point_round, peer, digest)?;
                 // select only uncommitted ones
-                if !global.is_committed().load(atomic::Ordering::Relaxed) {
+                if !global.is_committed() {
                     extend(&mut r[1], global.info().includes()); // points @ r-1
                     extend(&mut r[2], global.info().witness()); // points @ r-2
                     uncommitted.push_front(global);
@@ -487,6 +489,8 @@ impl DagBack {
                             { valid.info().anchor_trigger() == &AnchorLink::ToSelf }
                                 .then_some(Ok(valid))
                         }
+                        DagPoint::TransInvalid(invalid) => (invalid.has_proof())
+                            .then_some(Err(SyncError::HistoryConflict(dag_round.round()))),
                         not_valid if not_valid.is_certified() => {
                             Some(Err(SyncError::HistoryConflict(dag_round.round())))
                         }
@@ -495,7 +499,7 @@ impl DagBack {
                         }
                     })
                     .flatten()
-                    .next()
+                    .find_or_first(|result| result.is_ok())
             })
             .flatten()
             .unwrap_or(Err(SyncError::TryLater))
@@ -520,8 +524,37 @@ impl DagBack {
             not_valid if not_valid.is_certified() => {
                 Err(SyncError::HistoryConflict(dag_round.round()))
             }
-            dp @ (DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_)) => {
+            dp => {
                 panic!("{point_kind} {}: {:?}", dp.alt(), dp.id().alt())
+            }
+        }
+    }
+
+    // needed only in commit where all points are validated and stored in DAG
+    fn committable_point(
+        dag_round: &DagRound,
+        author: &PeerId,
+        digest: &Digest,
+    ) -> Result<Committable, SyncError> {
+        let dag_point = dag_round
+            .view(author, |loc| loc.versions.get(digest).cloned()) // not yet created
+            .flatten()
+            .and_then(|p| p.now_or_never())
+            .transpose()? // cancelled
+            .ok_or(SyncError::TryLater)?; // not yet resolved
+        match dag_point {
+            DagPoint::Valid(valid) => Ok(valid.committable()),
+            DagPoint::TransInvalid(invalid) => {
+                if invalid.has_proof() {
+                    return Err(SyncError::HistoryConflict(dag_round.round()));
+                }
+                Ok(invalid.committable())
+            }
+            not_valid if not_valid.is_certified() => {
+                Err(SyncError::HistoryConflict(dag_round.round()))
+            }
+            dp @ (DagPoint::Invalid(_) | DagPoint::NotFound(_) | DagPoint::IllFormed(_)) => {
+                panic!("not committable {}: {:?}", dp.alt(), dp.id().alt())
             }
         }
     }
