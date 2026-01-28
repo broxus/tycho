@@ -244,8 +244,14 @@ impl MempoolStoreImpl for MempoolDb {
             .map(|digest| PointKey::new(key.round.prev(), *digest));
 
         match status {
-            PointStatusStored::Validated(s) => {
-                batch::<{ PointStatusValidated::BYTE_SIZE }, _>(self, key, s, &prev_key)
+            PointStatusStored::Valid(s) => {
+                batch::<{ PointStatusValid::BYTE_SIZE }, _>(self, key, s, &prev_key)
+            }
+            PointStatusStored::TransInvalid(s) => {
+                batch::<{ PointStatusTransInvalid::BYTE_SIZE }, _>(self, key, s, &prev_key)
+            }
+            PointStatusStored::Invalid(s) => {
+                batch::<{ PointStatusInvalid::BYTE_SIZE }, _>(self, key, s, &prev_key)
             }
             PointStatusStored::IllFormed(s) => {
                 batch::<{ PointStatusIllFormed::BYTE_SIZE }, _>(self, key, s, &prev_key)
@@ -457,10 +463,20 @@ impl MempoolStoreImpl for MempoolDb {
                 .with_context(|| PointKey::format_loose(&key_bytes))?;
 
             match status {
-                PointStatusStored::Validated(status) => {
+                PointStatusStored::Valid(status) => {
                     let info = get_value::<PointInfo>(&mut info_iter, &key_bytes)
                         .with_context(|| format!("table point info, status {status} {key:?}"))?;
-                    result.push(PointRestore::Validated(info, status));
+                    result.push(PointRestore::Valid(info, status));
+                }
+                PointStatusStored::TransInvalid(status) => {
+                    let info = get_value::<PointInfo>(&mut info_iter, &key_bytes)
+                        .with_context(|| format!("table point info, status {status} {key:?}"))?;
+                    result.push(PointRestore::TransInvalid(info, status));
+                }
+                PointStatusStored::Invalid(status) => {
+                    let info = get_value::<PointInfo>(&mut info_iter, &key_bytes)
+                        .with_context(|| format!("table point info, status {status} {key:?}"))?;
+                    result.push(PointRestore::Invalid(info, status));
                 }
                 PointStatusStored::IllFormed(status) => {
                     let info = get_value::<PointInfo>(&mut info_iter, &key_bytes)

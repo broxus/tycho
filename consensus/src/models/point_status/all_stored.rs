@@ -6,7 +6,9 @@ use crate::models::PointKey;
 /// To read from DB
 #[cfg_attr(any(test, feature = "test"), derive(PartialEq))]
 pub enum PointStatusStored {
-    Validated(PointStatusValidated),
+    Valid(PointStatusValid),
+    TransInvalid(PointStatusTransInvalid),
+    Invalid(PointStatusInvalid),
     IllFormed(PointStatusIllFormed),
     NotFound(PointStatusNotFound),
     Found(PointStatusFound),
@@ -19,14 +21,16 @@ impl PointStatusStored {
     /// in par with [`crate::dag::Verifier::validate`]
     pub fn can_certify(&self) -> bool {
         match self {
-            Self::Validated(_) | Self::Proven(_) => true,
+            Self::Valid(_) | Self::TransInvalid(_) | Self::Invalid(_) | Self::Proven(_) => true,
             Self::IllFormed(_) | Self::NotFound(_) | Self::Found(_) | Self::Committable(_) => false,
         }
     }
 
     pub fn byte_size(&self) -> usize {
         match self {
-            Self::Validated(_) => PointStatusValidated::BYTE_SIZE,
+            Self::Valid(_) => PointStatusValid::BYTE_SIZE,
+            Self::TransInvalid(_) => PointStatusTransInvalid::BYTE_SIZE,
+            Self::Invalid(_) => PointStatusInvalid::BYTE_SIZE,
             Self::IllFormed(_) => PointStatusIllFormed::BYTE_SIZE,
             Self::NotFound(_) => PointStatusNotFound::BYTE_SIZE,
             Self::Found(_) => PointStatusFound::BYTE_SIZE,
@@ -37,7 +41,9 @@ impl PointStatusStored {
 
     pub fn write_to(&self, buffer: &mut Vec<u8>) {
         match self {
-            Self::Validated(val) => val.write_to(buffer),
+            Self::Valid(val) => val.write_to(buffer),
+            Self::TransInvalid(val) => val.write_to(buffer),
+            Self::Invalid(val) => val.write_to(buffer),
             Self::IllFormed(val) => val.write_to(buffer),
             Self::NotFound(val) => val.write_to(buffer),
             Self::Found(val) => val.write_to(buffer),
@@ -59,8 +65,12 @@ impl PointStatusStored {
         let flags = StatusFlags::from_bits_retain(u16::from_be_bytes(raw));
 
         let type_byte = if flags.contains(StatusFlags::Resolved) {
-            if flags.contains(PointStatusValidated::DEFAULT_FLAGS) {
-                PointStatusValidated::TYPE
+            if flags.contains(PointStatusValid::DEFAULT_FLAGS) {
+                PointStatusValid::TYPE
+            } else if flags.contains(PointStatusTransInvalid::DEFAULT_FLAGS) {
+                PointStatusTransInvalid::TYPE
+            } else if flags.contains(PointStatusInvalid::DEFAULT_FLAGS) {
+                PointStatusInvalid::TYPE
             } else if flags.contains(PointStatusIllFormed::DEFAULT_FLAGS) {
                 PointStatusIllFormed::TYPE
             } else if flags.contains(PointStatusNotFound::DEFAULT_FLAGS) {
@@ -77,7 +87,9 @@ impl PointStatusStored {
         };
 
         let expected_len = match type_byte {
-            PointStatusValidated::TYPE => PointStatusValidated::BYTE_SIZE,
+            PointStatusValid::TYPE => PointStatusValid::BYTE_SIZE,
+            PointStatusTransInvalid::TYPE => PointStatusTransInvalid::BYTE_SIZE,
+            PointStatusInvalid::TYPE => PointStatusInvalid::BYTE_SIZE,
             PointStatusIllFormed::TYPE => PointStatusIllFormed::BYTE_SIZE,
             PointStatusNotFound::TYPE => PointStatusNotFound::BYTE_SIZE,
             PointStatusFound::TYPE => PointStatusFound::BYTE_SIZE,
@@ -95,7 +107,9 @@ impl PointStatusStored {
         let (flags, type_byte) = Self::read_flags_inner(stored)?;
 
         Ok(match type_byte {
-            PointStatusValidated::TYPE => Self::Validated(<_>::read(flags, stored)?),
+            PointStatusValid::TYPE => Self::Valid(<_>::read(flags, stored)?),
+            PointStatusTransInvalid::TYPE => Self::TransInvalid(<_>::read(flags, stored)?),
+            PointStatusInvalid::TYPE => Self::Invalid(<_>::read(flags, stored)?),
             PointStatusIllFormed::TYPE => Self::IllFormed(<_>::read(flags, stored)?),
             PointStatusNotFound::TYPE => Self::NotFound(<_>::read(flags, stored)?),
             PointStatusFound::TYPE => Self::Found(<_>::read(flags, stored)?),
@@ -154,7 +168,9 @@ pub fn merge_bytes<'a>(key: &[u8], iter: impl Iterator<Item = &'a [u8]>) -> Opti
 impl Display for PointStatusStored {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Validated(val) => Display::fmt(val, f),
+            Self::Valid(val) => Display::fmt(val, f),
+            Self::TransInvalid(val) => Display::fmt(val, f),
+            Self::Invalid(val) => Display::fmt(val, f),
             Self::IllFormed(val) => Display::fmt(val, f),
             Self::NotFound(val) => Display::fmt(val, f),
             Self::Found(val) => Display::fmt(val, f),
@@ -174,9 +190,17 @@ mod test {
     #[test]
     fn decode_one() -> Result<()> {
         for _ in 0..10 {
-            match PointStatusStored::decode(&PointStatusValidated::random().bytes())? {
-                PointStatusStored::Validated(_) => {}
+            match PointStatusStored::decode(&PointStatusValid::random().bytes())? {
+                PointStatusStored::Valid(_) => {}
                 x => anyhow::bail!("Valid read as {x}"),
+            }
+            match PointStatusStored::decode(&PointStatusTransInvalid::random().bytes())? {
+                PointStatusStored::TransInvalid(_) => {}
+                x => anyhow::bail!("TransInvalid read as {x}"),
+            }
+            match PointStatusStored::decode(&PointStatusInvalid::random().bytes())? {
+                PointStatusStored::Invalid(_) => {}
+                x => anyhow::bail!("Invalid read as {x}"),
             }
             match PointStatusStored::decode(&PointStatusIllFormed::random().bytes())? {
                 PointStatusStored::IllFormed(_) => {}
@@ -204,7 +228,9 @@ mod test {
 
     fn init_bytes() -> Result<Vec<(StatusFlags, Vec<u8>)>> {
         [
-            PointStatusValidated::random().bytes(),
+            PointStatusValid::random().bytes(),
+            PointStatusTransInvalid::random().bytes(),
+            PointStatusInvalid::random().bytes(),
             PointStatusIllFormed::random().bytes(),
             PointStatusNotFound::random().bytes(),
             PointStatusFound::random().bytes(),
