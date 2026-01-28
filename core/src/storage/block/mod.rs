@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use moka::policy::EvictionPolicy;
 use tokio::sync::broadcast;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};
@@ -62,6 +63,7 @@ impl BlockStorage {
         }
 
         let blocks_cache = moka::sync::Cache::builder()
+            .eviction_policy(EvictionPolicy::lru())
             .time_to_live(config.blocks_cache.ttl)
             .max_capacity(config.blocks_cache.size.as_u64())
             .weigher(weigher)

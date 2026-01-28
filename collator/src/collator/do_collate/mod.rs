@@ -1040,9 +1040,18 @@ impl CollatorStdImpl {
             };
             let adapter = self.state_node_adapter.clone();
             let new_state_root = finalized.new_state_root.clone();
+
             let hint = StoreStateHint {
-                block_data_size: Some(finalized.block_candidate.block.data_size()),
+                block_data_size: finalized.block_candidate.block.data_size(),
+                new_cell_count: finalized.merkle_build.stats.new_cells_count,
+                is_top_block: None,
             };
+
+            adapter.fill_shard_blocks_cache(
+                finalized.block_candidate.ref_by_mc_seqno,
+                finalized.block_candidate.block.data.clone(),
+            )?;
+
             async move {
                 adapter
                     .store_state_root(&block_id, meta, new_state_root, hint)
@@ -1092,7 +1101,7 @@ impl CollatorStdImpl {
                 block_id,
                 finalized.new_observable_state,
                 finalized.new_state_root,
-                finalized.state_update,
+                finalized.merkle_build.update,
                 store_new_state_task,
                 new_queue_diff_hash,
                 new_mc_data,

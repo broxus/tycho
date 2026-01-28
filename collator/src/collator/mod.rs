@@ -14,6 +14,7 @@ use tracing::Instrument;
 use tycho_block_util::block::calc_next_block_id_short;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::global_config::{MempoolGlobalConfig, ZerostateId};
+use tycho_core::storage::StoreStateStatus;
 use tycho_network::PeerId;
 use tycho_types::cell::{Cell, HashBytes};
 use tycho_types::merkle::MerkleUpdate;
@@ -647,6 +648,7 @@ impl CollatorStdImpl {
 
         // update collation session info to refer to a correct subset in collated block
         self.collation_session = collation_session;
+
         let mut working_state = if !reset {
             let mut working_state = self.delayed_working_state.wait().await?;
 
@@ -745,11 +747,12 @@ impl CollatorStdImpl {
                             prev_state = rayon_run({
                                 let block_id = task.block_id;
                                 let merkle_update = task.state_update.clone();
+                                let split_at_depth = self.state_node_adapter.shard_split_depth();
                                 move || {
                                     prev_state.par_make_next_state(
                                         &block_id,
                                         &merkle_update,
-                                        Some(5),
+                                        Some(split_at_depth),
                                     )
                                 }
                             })
@@ -1017,7 +1020,7 @@ impl CollatorStdImpl {
         new_observable_state: Box<ShardStateUnsplit>,
         new_observable_state_root: Cell,
         state_update: MerkleUpdate,
-        store_new_state_task: JoinTask<Result<bool>>,
+        store_new_state_task: JoinTask<Result<StoreStateStatus>>,
         new_queue_diff_hash: HashBytes,
         new_mc_data: Arc<McData>,
         collation_config: Arc<CollationConfig>,
@@ -1027,7 +1030,7 @@ impl CollatorStdImpl {
         resume_collation_elapsed: Duration,
     ) -> Result<()> {
         enum GetNewShardStateStuff {
-            ReloadFromStorage(JoinTask<Result<bool>>),
+            ReloadFromStorage(JoinTask<Result<StoreStateStatus>>),
             BuildFromNewObservable {
                 block_id: BlockId,
                 new_observable_state: Box<ShardStateUnsplit>,
@@ -2397,7 +2400,7 @@ impl DelayedWorkingState {
 
 struct StateUpdateContext {
     block_id: BlockId,
-    store_new_state_task: JoinTask<Result<bool>>,
+    store_new_state_task: JoinTask<Result<StoreStateStatus>>,
     state_update: MerkleUpdate,
 }
 

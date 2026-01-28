@@ -10,11 +10,12 @@ use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_core::global_config::ZerostateId;
 use tycho_core::storage::{
-    BlockHandle, CoreStorage, MaybeExistingHandle, NewBlockMeta, StoreStateHint,
+    BlockHandle, CachedStateUpdate, CoreStorage, MaybeExistingHandle, NewBlockMeta, StoreStateHint,
+    StoreStateStatus,
 };
 use tycho_network::PeerId;
 use tycho_types::boc::BocRepr;
-use tycho_types::merkle::MerkleProof;
+use tycho_types::merkle::{MerkleProof, MerkleUpdate};
 use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::mem::Reclaimer;
@@ -73,7 +74,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
         meta: NewBlockMeta,
         state_root: Cell,
         hint: StoreStateHint,
-    ) -> Result<bool>;
+    ) -> Result<StoreStateStatus>;
     /// Return block by its id from node local state
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>>;
     /// Return block by its handle from node local state
@@ -86,6 +87,8 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     /// 1. (TODO) Broadcast block to blockchain network
     /// 2. Provide block to the block strider
     fn accept_block(&self, block: Arc<BlockStuffForSync>) -> Result<()>;
+    /// Fill the shard blocks cache is used for building new states by applying Merkle updates
+    fn fill_shard_blocks_cache(&self, ref_by_mc_seqno: u32, block: BlockStuff) -> Result<()>;
     /// Waits for the specified block to be received and returns it
     async fn wait_for_block(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Waits for the specified block by `prev_id` to be received and returns it
@@ -98,11 +101,14 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     fn set_sync_context(&self, sync_context: CollatorSyncContext);
     fn load_init_block_id(&self) -> Option<BlockId>;
     fn zerostate_id(&self) -> &ZerostateId;
+    fn shard_split_depth(&self) -> u8;
 }
 
 pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, Arc<BlockStuffForSync>>>,
+    shard_blocks: FastDashMap<ShardIdent, BTreeMap<u32, ShardBlockData>>,
+    last_stored_state_seqno: Mutex<FastHashMap<ShardIdent, u32>>,
     storage: CoreStorage,
     broadcaster: broadcast::Sender<BlockId>,
 
@@ -121,10 +127,13 @@ impl StateNodeAdapterStdImpl {
     ) -> Self {
         let (sync_context_tx, mut sync_context_rx) = watch::channel(initial_sync_context);
         let (broadcaster, _) = broadcast::channel(10000);
+
         let adapter = Self {
             listener,
             storage,
             blocks: Default::default(),
+            shard_blocks: Default::default(),
+            last_stored_state_seqno: Default::default(),
             broadcaster,
             sync_context_tx,
             delayed_state_notifier: DelayedStateNotifier::default(),
@@ -176,9 +185,6 @@ impl StateNodeAdapterStdImpl {
 
 #[async_trait]
 impl StateNodeAdapter for StateNodeAdapterStdImpl {
-    fn zerostate_id(&self) -> &ZerostateId {
-        &self.zerostate_id
-    }
     fn load_last_applied_mc_block_id(&self) -> Result<BlockId> {
         let las_applied_mc_block_id = self
             .storage
@@ -206,9 +212,17 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let state = self
             .storage
             .shard_state_storage()
-            .load_state(ref_by_mc_seqno, block_id)
-            .await
-            .context("failed to load state for node state adapter")?;
+            .load_state_with_cache(ref_by_mc_seqno, block_id, |current_block_id| {
+                self.shard_blocks
+                    .get(&current_block_id.shard)
+                    .and_then(|shard_blocks| shard_blocks.get(&current_block_id.seqno).cloned())
+                    .map(|block| CachedStateUpdate {
+                        prev_block_id: block.prev_id,
+                        ref_by_mc_seqno: block.ref_by_mc_seqno,
+                        state_update: block.state_update,
+                    })
+            })
+            .await?;
 
         Ok(state)
     }
@@ -219,7 +233,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         meta: NewBlockMeta,
         state_root: Cell,
         hint: StoreStateHint,
-    ) -> Result<bool> {
+    ) -> Result<StoreStateStatus> {
         let labels = [("workchain", block_id.shard.workchain().to_string())];
         let _histogram = HistogramGuard::begin_with_labels(
             "tycho_collator_state_store_state_root_time_high",
@@ -233,13 +247,19 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             .block_handle_storage()
             .create_or_load_handle(block_id, meta);
 
-        let updated = self
+        let status = self
             .storage
             .shard_state_storage()
             .store_state_root(&handle, state_root, hint)
             .await?;
 
-        Ok(updated)
+        if status.is_stored() {
+            self.last_stored_state_seqno
+                .lock()
+                .insert(block_id.shard, block_id.seqno);
+        }
+
+        Ok(status)
     }
 
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>> {
@@ -290,6 +310,28 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         let broadcast_result = self.broadcaster.send(block_id).ok();
         tracing::trace!(target: tracing_targets::STATE_NODE_ADAPTER, "Block broadcast_result: {:?}", broadcast_result);
+        Ok(())
+    }
+
+    fn fill_shard_blocks_cache(&self, ref_by_mc_seqno: u32, block: BlockStuff) -> Result<()> {
+        let block_id = *block.id();
+
+        if !block_id.is_masterchain() {
+            tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Shard block accepted: {}", block_id.as_short_id());
+
+            let (prev_id, prev_id_alt) = block.construct_prev_id()?;
+
+            self.shard_blocks.entry(block_id.shard).or_default().insert(
+                block_id.seqno,
+                ShardBlockData {
+                    prev_id,
+                    ref_by_mc_seqno,
+                    _prev_id_alt: prev_id_alt,
+                    state_update: block.block().load_state_update()?,
+                },
+            );
+        }
+
         Ok(())
     }
 
@@ -367,11 +409,28 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         let mut to_drop = Vec::new();
         for (shard, seqno) in &to_split {
-            if let Some(mut shard_blocks) = self.blocks.get_mut(shard) {
-                let retained_blocks = shard_blocks.split_off(seqno);
-                to_drop.push(std::mem::replace(&mut *shard_blocks, retained_blocks));
+            if let Some(mut blocks) = self.blocks.get_mut(shard) {
+                let retained = blocks.split_off(seqno);
+                to_drop.push(std::mem::replace(&mut *blocks, retained));
             }
         }
+
+        // Don't wait for drop inside a tokio context.
+        Reclaimer::instance().drop(to_drop);
+
+        let mut to_drop = Vec::new();
+        let last_stored = self.last_stored_state_seqno.lock();
+        for (shard, _) in &to_split {
+            let Some(&safe_seqno) = last_stored.get(shard) else {
+                continue;
+            };
+
+            if let Some(mut shard_blocks) = self.shard_blocks.get_mut(shard) {
+                let retained = shard_blocks.split_off(&safe_seqno);
+                to_drop.push(std::mem::replace(&mut *shard_blocks, retained));
+            }
+        }
+        drop(last_stored);
 
         // Don't wait for drop inside a tokio context.
         Reclaimer::instance().drop(to_drop);
@@ -408,6 +467,14 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
     fn load_init_block_id(&self) -> Option<BlockId> {
         self.storage.node_state().load_init_mc_block_id()
+    }
+
+    fn zerostate_id(&self) -> &ZerostateId {
+        &self.zerostate_id
+    }
+
+    fn shard_split_depth(&self) -> u8 {
+        self.storage.config().shard_split_depth
     }
 }
 
@@ -510,6 +577,14 @@ impl StateNodeAdapterStdImpl {
 
         Ok(())
     }
+}
+
+#[derive(Clone)]
+struct ShardBlockData {
+    prev_id: BlockId,
+    ref_by_mc_seqno: u32,
+    state_update: MerkleUpdate,
+    _prev_id_alt: Option<BlockId>, // TODO: consider split/merge
 }
 
 #[derive(Clone)]
