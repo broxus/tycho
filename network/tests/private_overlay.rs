@@ -85,7 +85,7 @@ fn make_network(node_count: usize) -> Vec<Node> {
 async fn private_overlays_accessible() -> Result<()> {
     tycho_util::test::init_logger("private_overlays_accessible", "debug");
 
-    let nodes = make_network(20);
+    let nodes = make_network(30);
 
     for node in &nodes {
         let resolved = FuturesUnordered::new();

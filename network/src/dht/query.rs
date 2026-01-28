@@ -397,36 +397,64 @@ pub struct StoreValue<F = ()> {
 }
 
 impl StoreValue<()> {
-    pub fn new(
-        network: Network,
-        routing_table: &HandlesRoutingTable,
-        value: &ValueRef<'_>,
-        max_k: usize,
-        local_peer_info: Option<&PeerInfo>,
-    ) -> StoreValue<impl Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send + use<>> {
-        let key_hash = match value {
-            ValueRef::Peer(value) => tl_proto::hash(&value.key),
-            ValueRef::Merged(value) => tl_proto::hash(&value.key),
-        };
+    // pub fn new(
+    //     network: Network,
+    //     routing_table: &HandlesRoutingTable,
+    //     value: &ValueRef<'_>,
+    //     max_k: usize,
+    //     local_peer_info: Option<&PeerInfo>,
+    // ) -> StoreValue<impl Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send + use<>> {
+    //     let key_hash = match value {
+    //         ValueRef::Peer(value) => tl_proto::hash(&value.key),
+    //         ValueRef::Merged(value) => tl_proto::hash(&value.key),
+    //     };
+    //
+    //     let request_body = Bytes::from(match local_peer_info {
+    //         Some(peer_info) => tl_proto::serialize((
+    //             rpc::WithPeerInfo::wrap(peer_info),
+    //             rpc::StoreRef::wrap(value),
+    //         )),
+    //         None => tl_proto::serialize(rpc::StoreRef::wrap(value)),
+    //     });
+    //
+    //     let semaphore = Arc::new(Semaphore::new(10));
+    //     let futures = futures_util::stream::FuturesUnordered::new();
+    //     routing_table.visit_closest(&key_hash, max_k, |node| {
+    //         futures.push(Self::visit(
+    //             network.clone(),
+    //             node.load_peer_info(),
+    //             request_body.clone(),
+    //             semaphore.clone(),
+    //         ));
+    //     });
+    //
+    //     StoreValue { futures }
+    // }
 
-        let request_body = Bytes::from(match local_peer_info {
-            Some(peer_info) => tl_proto::serialize((
-                rpc::WithPeerInfo::wrap(peer_info),
-                rpc::StoreRef::wrap(value),
-            )),
+    pub fn new_with_peers(
+        network: Network,
+        peers: Vec<Arc<PeerInfo>>,
+        value: &ValueRef<'_>,
+        local_info: Option<&PeerInfo>,
+    ) -> StoreValue<impl Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send + use<>> {
+        let request_body = Bytes::from(match local_info {
+            Some(info) => {
+                tl_proto::serialize((rpc::WithPeerInfo::wrap(info), rpc::StoreRef::wrap(value)))
+            }
             None => tl_proto::serialize(rpc::StoreRef::wrap(value)),
         });
 
         let semaphore = Arc::new(Semaphore::new(10));
         let futures = futures_util::stream::FuturesUnordered::new();
-        routing_table.visit_closest(&key_hash, max_k, |node| {
+
+        for peer in peers {
             futures.push(Self::visit(
                 network.clone(),
-                node.load_peer_info(),
+                peer,
                 request_body.clone(),
                 semaphore.clone(),
             ));
-        });
+        }
 
         StoreValue { futures }
     }
