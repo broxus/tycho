@@ -84,6 +84,7 @@ pub struct MempoolPeerCounters {
     pub skipped_rounds: u32,
     pub valid_points: u32,
     pub equivocated: u32,
+    pub trans_invalid_points: u32,
     pub invalid_points: u32,
     pub ill_formed_points: u32,
     pub references_skipped: u32,
@@ -97,6 +98,7 @@ impl MempoolPeerCounters {
         self.skipped_rounds += other.skipped_rounds;
         self.valid_points += other.valid_points;
         self.equivocated += other.equivocated;
+        self.trans_invalid_points += other.trans_invalid_points;
         self.invalid_points += other.invalid_points;
         self.ill_formed_points += other.ill_formed_points;
         self.references_skipped += other.references_skipped;

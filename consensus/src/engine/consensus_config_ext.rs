@@ -52,6 +52,7 @@ impl ConsensusConfigExt for ConsensusConfig {
         // finished their validation, a new 'next' dag round will appear and so no `-1` below
         3 // new current, includes and witness rounds to validate
             + self.commit_history_rounds.get() as u32 // all committable history for every point
+            + 2 // bottommost includes and witness may not have dag round, so dependers are invalid
     }
 
     fn replay_anchor_rounds(&self) -> u32 {

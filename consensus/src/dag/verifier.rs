@@ -1,7 +1,7 @@
 use std::cmp;
 
-use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt};
 use tracing::Instrument;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
@@ -42,6 +42,7 @@ pub enum VerifyError {
 pub enum ValidateResult {
     IllFormed(IllFormedReason),
     Invalid(InvalidReason),
+    TransInvalid(InvalidDependency),
     Valid,
 }
 
@@ -112,8 +113,6 @@ pub enum InvalidReason {
     DepIllFormed((PointId, IllFormedReason)),
     #[error("dependency not found {:?}", .0.alt())]
     DepNotFound(PointId),
-    #[error("{0:?}")]
-    Dependency(InvalidDependency),
 }
 
 impl InvalidReason {
@@ -122,11 +121,6 @@ impl InvalidReason {
         match self {
             Self::AfterLoadFromDb { has_dag_round } => *has_dag_round,
             Self::NoRoundInDag(_) | Self::DependencyRoundDropped => false,
-            InvalidReason::Dependency(inv_dep) => match &*inv_dep.reason {
-                Self::AfterLoadFromDb { has_dag_round } => *has_dag_round,
-                Self::NoRoundInDag(_) | Self::DependencyRoundDropped => false,
-                _ => true,
-            },
             _ => true,
         }
     }
@@ -135,7 +129,7 @@ impl InvalidReason {
 #[derive(Clone)]
 pub struct InvalidDependency {
     pub link: IndirectLink,
-    pub reason: Box<InvalidReason>,
+    pub reason: InvalidReason,
 }
 
 impl std::fmt::Debug for InvalidDependency {
@@ -246,7 +240,16 @@ impl Verifier {
         drop(r_1);
         drop(r_2_opt);
 
-        ctx.validated(&cert, is_valid_fut.await?)
+        let valid_result = match is_valid_fut.await? {
+            ValidateResult::TransInvalid(inv_dep) => {
+                Self::check_indirect_links(&info, inv_dep, &r_0_weak, &downloader, &store, &ctx)
+                    .instrument(ctx.span().clone())
+                    .await?
+            }
+            other => other,
+        };
+
+        ctx.validated(&cert, valid_result)
     }
 
     fn check_links(
@@ -438,7 +441,9 @@ impl Verifier {
                                         Some(InvalidReason::MustHaveReferencedPrevPoint(dep_id));
                                 } // else: will not throw err only when first valid is referenced
                             }
-                            DagPoint::Invalid(_) | DagPoint::IllFormed(_) => {
+                            DagPoint::TransInvalid(_)
+                            | DagPoint::Invalid(_)
+                            | DagPoint::IllFormed(_) => {
                                 invalid_reason = Some(InvalidReason::MustHaveSkippedRound(dep_id));
                             }
                             DagPoint::NotFound(not_found) => {
@@ -455,14 +460,15 @@ impl Verifier {
                 false
             };
 
-            let dep = match Self::dependency(&mut latest_invalid_dep, &dag_point, None, prev_round)
-            {
-                Ok(dep) => dep,
-                Err(reason) => {
-                    invalid_reason = Some(reason);
-                    continue; // invalidating deps (ill and not found) are not checked against
-                }
-            };
+            let dep =
+                match Self::dependency(&mut latest_invalid_dep, &dag_point, None, prev_round, conf)
+                {
+                    Ok(dep) => dep,
+                    Err(reason) => {
+                        invalid_reason = Some(reason);
+                        continue; // invalidating deps (ill and not found) are not checked against
+                    }
+                };
 
             if is_prev_point && let Some(reason) = Self::is_proof_ok(info, dep) {
                 invalid_reason = Some(reason);
@@ -505,9 +511,101 @@ impl Verifier {
         Ok(if let Some(invalid) = invalid_reason {
             ValidateResult::Invalid(invalid)
         } else if let Some(inv_dep) = latest_invalid_dep {
-            ValidateResult::Invalid(InvalidReason::Dependency(inv_dep))
+            ValidateResult::TransInvalid(inv_dep)
         } else {
             ValidateResult::Valid
+        })
+    }
+
+    async fn check_indirect_links(
+        info: &PointInfo, // @ r+0
+        direct_invalid_dep: InvalidDependency,
+        r_0: &WeakDagRound, // r+0
+        downloader: &Downloader,
+        store: &MempoolStore,
+        ctx: &ValidateCtx,
+    ) -> TaskResult<ValidateResult> {
+        let anchor_trigger_link = match info.anchor_trigger() {
+            AnchorLink::Indirect(link) => Some(link),
+            AnchorLink::ToSelf | AnchorLink::Direct(_) => None,
+        };
+        let anchor_proof_link = match info.anchor_proof() {
+            AnchorLink::Indirect(link) => Some(link),
+            AnchorLink::ToSelf | AnchorLink::Direct(_) => None,
+        };
+
+        let mut rev_sorted = [anchor_trigger_link, anchor_proof_link];
+        rev_sorted.sort_unstable_by_key(|id_opt| id_opt.map(|link| cmp::Reverse(link.to.round)));
+
+        let mut linked_deps = FuturesUnordered::new();
+        let mut last_scanned_round = r_0.upgrade();
+        for maybe_link in rev_sorted {
+            let Some(link) = maybe_link else {
+                continue;
+            };
+            let Some(dag_round) = last_scanned_round.as_ref() else {
+                break; // ok when too long ago
+            };
+            if dag_round.round() == link.to.round {
+                let (fut, _) = dag_round.add_dependency(
+                    &link.to.author,
+                    &link.to.digest,
+                    info.author(),
+                    downloader,
+                    store,
+                    ctx,
+                );
+                linked_deps.push(fut.map(|res| res.map(|opt| opt.map(|dp| (dp, &link.path)))));
+            } else {
+                last_scanned_round = dag_round.scan(link.to.round);
+            }
+        }
+        drop(last_scanned_round);
+
+        let prev_round = info.round().prev();
+        let max_allowed_dep_time =
+            info.time() + UnixTime::from_millis(ctx.conf().consensus.clock_skew_millis.get() as _);
+        let mut invalid_reason = None;
+        let mut latest_invalid_dep = Some(direct_invalid_dep);
+
+        while let Some(task_result) = linked_deps.next().await {
+            let Some((dag_point, through)) = task_result? else {
+                continue; // one old link doesn't mean others are unreachable
+            };
+            let dep_id = *dag_point.id();
+
+            let dep = match Self::dependency(
+                &mut latest_invalid_dep,
+                &dag_point,
+                Some(through),
+                prev_round,
+                ctx.conf(),
+            ) {
+                Ok(dep) => dep,
+                Err(reason) => {
+                    invalid_reason = Some(reason);
+                    continue; // invalidating deps (ill and not found) are not checked against
+                }
+            };
+
+            if dep.time() > max_allowed_dep_time {
+                // dependency time may exceed those in point only by a small value from config
+                invalid_reason = Some(InvalidReason::DependencyTimeTooFarInFuture(dep_id));
+            }
+
+            if let Some(anchor_proof_link) = anchor_proof_link
+                && dep_id == anchor_proof_link.to
+                && dep.anchor_time() != info.anchor_time()
+            {
+                // anchor candidate's time is not inherited from its proof
+                invalid_reason = Some(InvalidReason::AnchorTimeNotInheritedFromProof(dep_id));
+            }
+        }
+
+        Ok(if let Some(invalid) = invalid_reason {
+            ValidateResult::Invalid(invalid)
+        } else {
+            ValidateResult::TransInvalid(latest_invalid_dep.expect("must be init with prev result"))
         })
     }
 
@@ -517,11 +615,24 @@ impl Verifier {
         dag_point: &'a DagPoint,
         indirect_through: Option<&Through>,
         prev_round: Round,
+        conf: &MempoolConfig,
     ) -> Result<&'a PointInfo, InvalidReason> {
         let (inv_info, root_cause_id, reason) = match dag_point {
             DagPoint::Valid(valid) => return Ok(valid.info()),
             DagPoint::Invalid(invalid) if invalid.is_certified() => return Ok(invalid.info()),
+            DagPoint::TransInvalid(invalid) if invalid.is_certified() => return Ok(invalid.info()),
             DagPoint::Invalid(invalid) => (invalid.info(), invalid.info().id(), invalid.reason()),
+            DagPoint::TransInvalid(invalid) => {
+                // for example, with config value 20 and oldest invalid point at round 0,
+                // points at rounds 1..=20 will be transitionally invalidated
+                // and point at round 21 will become valid again
+                let root = invalid.root_cause();
+                let last_invalid = root.link.to.round + conf.consensus.commit_history_rounds.get();
+                if prev_round >= last_invalid {
+                    return Ok(invalid.info());
+                }
+                (invalid.info(), &root.link.to, &root.reason)
+            }
             DagPoint::IllFormed(ill) => {
                 let tuple = (*ill.id(), ill.reason().clone());
                 return Err(InvalidReason::DepIllFormed(tuple));
@@ -531,7 +642,8 @@ impl Verifier {
             }
         };
 
-        // newer round takes priority; at equal rounds `has_dag_round` takes priority
+        // newer round takes priority; at equal rounds `has_dag_round` takes priority;
+        // no order within (round, has_dag_round) group: let every cause a chance to be propagated
         if (inv_dep.as_ref()).is_none_or(|old| {
             old.link.to.round < root_cause_id.round
                 || (old.link.to.round == root_cause_id.round
@@ -539,7 +651,7 @@ impl Verifier {
                     && reason.has_dag_round())
         }) {
             *inv_dep = Some(InvalidDependency {
-                reason: Box::new(reason.clone()),
+                reason: reason.clone(),
                 link: IndirectLink {
                     to: *root_cause_id,
                     path: indirect_through.cloned().unwrap_or_else(|| {
@@ -553,6 +665,7 @@ impl Verifier {
             });
         };
 
+        // an (in)direct invalid dependency has to be checked against, but not invalidating one
         Ok(inv_info)
     }
 
@@ -841,6 +954,7 @@ impl ValidateCtx {
             DagPoint::NotFound(_) => "not_found",
             DagPoint::IllFormed(_) => "ill_formed",
             DagPoint::Invalid(_) => "invalid",
+            DagPoint::TransInvalid(_) => "trans_invalid",
             DagPoint::Valid(_) => {
                 metrics::counter!("tycho_mempool_points_resolved_ok", ORD => ord).increment(1);
                 return;
@@ -867,6 +981,15 @@ impl ValidateCtx {
                     is_certified = cert.is_certified(),
                     result = "invalid",
                     reason = display(reason),
+                    "validated",
+                );
+            }
+            ValidateResult::TransInvalid(reason) => {
+                tracing::warn!(
+                    parent: self.span(),
+                    is_certified = cert.is_certified(),
+                    result = "trans invalid",
+                    reason = debug(reason),
                     "validated",
                 );
             }

@@ -18,6 +18,15 @@ thread_local! {
 }
 
 impl Cert {
+    /// `commit` is an action on certified points only
+    pub fn set_committed(&self) {
+        self.0.set_committed();
+    }
+
+    pub fn is_committed(&self) -> bool {
+        self.0.is_committed()
+    }
+
     pub fn is_certified(&self) -> bool {
         self.0.certified().is_some()
     }
@@ -138,14 +147,15 @@ mod inner {
     use super::*;
 
     // NOTE: flag related stuff is private, height in super module always has upper bits unset
-    const TOP: u16 = 0b_100 << 13;
-    const INIT_STARTED: u16 = 0b_010 << 13;
-    const INIT_COMPLETED: u16 = INIT_STARTED | (0b_001 << 13);
-    const ALL_FLAGS: u16 = TOP | INIT_COMPLETED;
+    const TOP: u16 = 0b_1000 << 12;
+    const INIT_STARTED: u16 = 0b_0100 << 12;
+    const INIT_COMPLETED: u16 = INIT_STARTED | (0b_0010 << 12);
+    const COMMITTED: u16 = 0b_0001 << 12;
+    const ALL_FLAGS: u16 = TOP | INIT_COMPLETED | COMMITTED;
 
     pub struct CertInner {
         /// * `0`: current point is not certified (default)
-        /// * `1`: current point is (transitively) certified, but its direct deps aren't
+        /// * `1`: current point belongs to a certified subtree, but its direct deps aren't
         /// * `2`: current point and its direct `includes` are certified
         /// * `3`: direct `includes` and `witness` are certified, and also `includes` of `includes`
         /// * ... (_happy cycling_)
@@ -166,7 +176,18 @@ mod inner {
     }
 
     impl CertInner {
-        /// Option contains `true` in case was directly certified and `false` if transitively
+        pub fn set_committed(&self) {
+            let height = (self.height).fetch_or(COMMITTED, atomic::Ordering::Relaxed);
+            assert_ne!(height & !ALL_FLAGS, 0, "not certified by anchor: {height}");
+            assert_eq!(height & COMMITTED, 0, "committed twice: {height}");
+        }
+
+        pub fn is_committed(&self) -> bool {
+            let height = self.height.load(atomic::Ordering::Relaxed);
+            height & COMMITTED == COMMITTED
+        }
+
+        /// Option contains `true` only if the carrier was directly certified
         pub fn certified(&self) -> Option<bool> {
             let height = self.height.load(atomic::Ordering::Relaxed);
             (height & !ALL_FLAGS != 0).then_some(height & TOP == TOP)

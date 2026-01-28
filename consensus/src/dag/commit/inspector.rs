@@ -66,6 +66,12 @@ impl RoundInspector {
                         authored_versions += 1;
                         has_valid = true;
                     }
+                    DagPoint::TransInvalid(invalid) => {
+                        authored_versions += 1;
+                        if !invalid.has_proof() && invalid.root_cause().reason.has_dag_round() {
+                            author_counters.trans_invalid_points += 1;
+                        }
+                    }
                     DagPoint::Invalid(invalid) => {
                         authored_versions += 1;
                         if !invalid.is_certified() && invalid.reason().has_dag_round() {
