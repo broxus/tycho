@@ -146,8 +146,16 @@ impl ShardStateStorage {
             return Ok(StoreStateStatus::Exist);
         }
 
-        if !handle.is_masterchain() {
+        let estimated_merkle_update_size = if handle.is_masterchain() {
+            hint.new_cell_count
+        } else {
             let mut guard = self.accumulated_per_shard.lock();
+
+            // Accumulate current block's cells
+            let acc = guard.entry(handle.id().shard).or_default();
+            if acc.blocks.insert(handle.id().seqno) {
+                acc.new_cells += hint.new_cell_count;
+            }
 
             let force_store = hint.is_top_block == Some(true)
                 || handle
@@ -155,25 +163,17 @@ impl ShardStateStorage {
                     .seqno
                     .is_multiple_of(self.store_shard_state_step.get() as u32);
 
-            if force_store {
-                guard.remove(&handle.id().shard);
-            } else {
-                let acc = guard.entry(handle.id().shard).or_default();
-
-                if acc.blocks.insert(handle.id().seqno) {
-                    acc.new_cells += hint.new_cell_count;
-                }
-
-                if acc.new_cells < self.new_cells_threshold {
-                    metrics::counter!("tycho_storage_shard_state_skipped").increment(1);
-                    return Ok(StoreStateStatus::Skipped);
-                }
-
-                guard.remove(&handle.id().shard);
+            if !force_store && acc.new_cells < self.new_cells_threshold {
+                metrics::counter!("tycho_storage_shard_state_skipped").increment(1);
+                return Ok(StoreStateStatus::Skipped);
             }
 
             metrics::counter!("tycho_storage_shard_state_stored").increment(1);
-        }
+
+            guard
+                .remove(&handle.id().shard)
+                .map_or(hint.new_cell_count, |acc| acc.new_cells)
+        };
 
         let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
 
@@ -188,7 +188,6 @@ impl ShardStateStorage {
         // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
         let (new_cell_count, status) = tokio::task::spawn_blocking(move || {
             let root_hash = *root_cell.repr_hash();
-            let estimated_merkle_update_size = hint.new_cell_count;
 
             let estimated_update_size_bytes = estimated_merkle_update_size * 192; // p50 cell size in bytes
             let mut batch = rocksdb::WriteBatch::with_capacity_bytes(estimated_update_size_bytes);
