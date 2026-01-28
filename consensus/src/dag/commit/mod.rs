@@ -276,9 +276,9 @@ impl Committer {
         // Note every iteration marks committed points before next uncommitted are gathered
         let committed = uncommitted
             .into_iter()
-            .map(|valid| {
-                valid.is_committed().store(true, Ordering::Relaxed);
-                valid.info().clone()
+            .map(|committable| {
+                committable.set_committed();
+                committable.info().clone()
             })
             .collect::<Vec<_>>();
         Ok(AnchorData {

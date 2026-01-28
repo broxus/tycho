@@ -1,15 +1,15 @@
 use std::fmt::{Display, Formatter};
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, atomic};
+use std::sync::Arc;
 
 use tycho_network::PeerId;
 
-use crate::dag::{IllFormedReason, InvalidReason};
+use crate::dag::{IllFormedReason, InvalidDependency, InvalidReason};
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::cert::Cert;
 use crate::models::point::{Digest, PointId};
 use crate::models::point_status::{
-    PointStatusIllFormed, PointStatusNotFound, PointStatusValidated,
+    PointStatusIllFormed, PointStatusInvalid, PointStatusNotFound, PointStatusTransInvalid,
+    PointStatusValid,
 };
 use crate::models::{PointInfo, PointKey, Round};
 
@@ -20,6 +20,14 @@ use crate::models::{PointInfo, PointKey, Round};
 /// * in dependency graph - cannot be used, most likely will not be downloaded, i.e. `NotExist`
 pub enum DagPoint {
     Valid(ValidPoint),
+    /// A subtree with not valid sink points has `commit_history_rounds` length of transitionally
+    /// invalid points. I.e. it acts as invalid locally but quorum decision may be to commit
+    /// but invalid/ill-formed/not-found points stay out of commit history anyway.
+    /// Quorum decision to commit must not contradict local one because of all:
+    /// * DAG length is limited and not reproducible across network
+    /// * points to be signed and included must have a valid `commit_history_rounds` subtree
+    /// * deeper points may be of any kind and are ignored anyway
+    TransInvalid(TransInvalidPoint),
     /// dependency issues;
     /// invalidates dependent point; needed to blame equivocation
     Invalid(InvalidPoint),
@@ -32,24 +40,35 @@ pub enum DagPoint {
 }
 
 impl DagPoint {
-    pub fn new_valid(info: PointInfo, cert: Cert, status: &PointStatusValidated) -> Self {
-        assert!(status.is_valid, "used as valid: {status}");
+    pub fn new_valid(info: PointInfo, cert: Cert, status: &PointStatusValid) -> Self {
         DagPoint::Valid(ValidPoint(Arc::new(ValidPointInner {
             info,
             first_valid: status.is_first_valid,
             is_first_resolved: status.is_first_resolved,
             cert,
-            is_committed: AtomicBool::new(false), // ignore status to repeat commit after reboot
+        })))
+    }
+
+    pub fn new_trans_invalid(
+        info: PointInfo,
+        cert: Cert,
+        status: &PointStatusTransInvalid,
+        root_cause: InvalidDependency,
+    ) -> Self {
+        DagPoint::TransInvalid(TransInvalidPoint(Arc::new(TransInvalidPointInner {
+            info,
+            is_first_resolved: status.is_first_resolved,
+            cert,
+            root_cause,
         })))
     }
 
     pub fn new_invalid(
         info: PointInfo,
         cert: Cert,
-        status: &PointStatusValidated,
+        status: &PointStatusInvalid,
         reason: InvalidReason,
     ) -> Self {
-        assert!(!status.is_valid, "used as invalid: {status}");
         DagPoint::Invalid(InvalidPoint(Arc::new(InvalidPointInner {
             info,
             is_first_resolved: status.is_first_resolved,
@@ -94,6 +113,7 @@ impl DagPoint {
     pub fn trusted(&self) -> Option<&PointInfo> {
         match self {
             Self::Valid(valid) => Some(valid.info()),
+            Self::TransInvalid(invalid) if invalid.is_certified() => Some(invalid.info()),
             Self::Invalid(invalid) if invalid.is_certified() => Some(invalid.info()),
             _ => None,
         }
@@ -102,6 +122,7 @@ impl DagPoint {
     pub fn id(&self) -> &PointId {
         match self {
             Self::Valid(valid) => valid.info().id(),
+            Self::TransInvalid(trans_invalid) => trans_invalid.info().id(),
             Self::Invalid(invalid) => invalid.info().id(),
             Self::IllFormed(ill) => ill.id(),
             Self::NotFound(not_found) => not_found.id(),
@@ -127,6 +148,7 @@ impl DagPoint {
     pub fn prev_digest(&self) -> Option<&Digest> {
         let info = match self {
             Self::Valid(valid) => valid.info(),
+            Self::TransInvalid(trans_invalid) => trans_invalid.info(),
             Self::Invalid(invalid) => invalid.info(),
             Self::IllFormed(_) | Self::NotFound(_) => return None,
         };
@@ -136,6 +158,7 @@ impl DagPoint {
     pub fn is_first_resolved(&self) -> bool {
         match self {
             Self::Valid(valid) => valid.is_first_resolved(),
+            Self::TransInvalid(trans_invalid) => trans_invalid.is_first_resolved(),
             Self::Invalid(invalid) => invalid.is_first_resolved(),
             Self::IllFormed(ill) => ill.is_first_resolved(),
             Self::NotFound(not_found) => not_found.is_first_resolved(),
@@ -145,9 +168,41 @@ impl DagPoint {
     pub fn is_certified(&self) -> bool {
         match self {
             Self::Valid(valid) => valid.is_certified(),
+            Self::TransInvalid(trans_invalid) => trans_invalid.is_certified(),
             Self::Invalid(invalid) => invalid.is_certified(),
             Self::IllFormed(ill) => ill.is_certified(),
             Self::NotFound(not_found) => not_found.is_certified(),
+        }
+    }
+}
+
+pub struct Committable(CommittableInner);
+enum CommittableInner {
+    Valid(ValidPoint),
+    TransInvalid(TransInvalidPoint),
+}
+impl Committable {
+    pub fn info(&self) -> &PointInfo {
+        self.0.info()
+    }
+    pub fn set_committed(&self) {
+        self.0.cert().set_committed();
+    }
+    pub fn is_committed(&self) -> bool {
+        self.0.cert().is_committed()
+    }
+}
+impl CommittableInner {
+    fn info(&self) -> &PointInfo {
+        match self {
+            Self::Valid(valid) => valid.info(),
+            Self::TransInvalid(invalid) => invalid.info(),
+        }
+    }
+    fn cert(&self) -> &Cert {
+        match self {
+            Self::Valid(valid) => &valid.0.cert,
+            Self::TransInvalid(invalid) => &invalid.0.cert,
         }
     }
 }
@@ -159,7 +214,6 @@ struct ValidPointInner {
     first_valid: bool,
     is_first_resolved: bool,
     cert: Cert,
-    is_committed: AtomicBool,
 }
 impl ValidPoint {
     pub fn info(&self) -> &PointInfo {
@@ -174,8 +228,37 @@ impl ValidPoint {
     pub fn is_certified(&self) -> bool {
         self.0.cert.is_certified()
     }
-    pub fn is_committed(&self) -> &AtomicBool {
-        &self.0.is_committed
+    pub fn committable(self) -> Committable {
+        Committable(CommittableInner::Valid(self))
+    }
+}
+
+#[derive(Clone)]
+pub struct TransInvalidPoint(Arc<TransInvalidPointInner>);
+struct TransInvalidPointInner {
+    info: PointInfo,
+    is_first_resolved: bool,
+    cert: Cert,
+    root_cause: InvalidDependency,
+}
+impl TransInvalidPoint {
+    pub fn info(&self) -> &PointInfo {
+        &self.0.info
+    }
+    pub fn is_first_resolved(&self) -> bool {
+        self.0.is_first_resolved
+    }
+    pub fn has_proof(&self) -> bool {
+        self.0.cert.has_proof()
+    }
+    pub fn is_certified(&self) -> bool {
+        self.0.cert.is_certified()
+    }
+    pub fn root_cause(&self) -> &InvalidDependency {
+        &self.0.root_cause
+    }
+    pub fn committable(self) -> Committable {
+        Committable(CommittableInner::TransInvalid(self))
     }
 }
 
@@ -250,6 +333,7 @@ impl Display for AltFmt<'_, DagPoint> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match AltFormat::unpack(self) {
             DagPoint::Valid(valid) => Display::fmt(&valid.alt(), f),
+            DagPoint::TransInvalid(valid) => Display::fmt(&valid.alt(), f),
             DagPoint::Invalid(invalid) => Display::fmt(&invalid.alt(), f),
             DagPoint::IllFormed(ill) => Display::fmt(&ill.alt(), f),
             DagPoint::NotFound(not_found) => Display::fmt(&not_found.alt(), f),
@@ -271,9 +355,25 @@ impl Display for AltFmt<'_, ValidPoint> {
         if valid.0.cert.is_certified() {
             tuple.field(&"certified");
         }
-        if valid.0.is_committed.load(atomic::Ordering::Relaxed) {
+        if valid.0.cert.is_committed() {
             tuple.field(&"committed");
         }
+        tuple.finish()
+    }
+}
+
+impl AltFormat for TransInvalidPoint {}
+impl Display for AltFmt<'_, TransInvalidPoint> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let invalid = AltFormat::unpack(self);
+        let mut tuple = f.debug_tuple("TransInvalidPoint");
+        if invalid.0.is_first_resolved {
+            tuple.field(&"first resolved");
+        }
+        if invalid.0.cert.is_certified() {
+            tuple.field(&"certified");
+        }
+        tuple.field(&invalid.0.root_cause);
         tuple.finish()
     }
 }

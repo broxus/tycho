@@ -96,7 +96,7 @@ impl InclusionState {
         //  * if the first resolved is not valid, then some next valid will be the first valid
         let resolved = self.0.resolved.get_or_init(|| {
             status.set_first_resolved();
-            if status.is_valid() {
+            if T::is_valid() {
                 // the only place with nested lock - to resolve race during general work
                 let valid = self.0.valid.0.get_or_init(|| {
                     status.set_first_valid();
@@ -113,7 +113,7 @@ impl InclusionState {
                 FirstResolved::NotValid(id.digest)
             }
         });
-        if !status.is_first_resolved() && status.is_valid() {
+        if !status.is_first_resolved() && T::is_valid() {
             self.0.valid.0.get_or_init(|| {
                 status.set_first_valid();
                 id.digest
@@ -140,7 +140,7 @@ impl InclusionState {
     pub fn acquire_restore<T: PointStatus>(&self, id: &PointId, status: &T) {
         if status.is_first_resolved() {
             let resolved = self.0.resolved.get_or_init(|| {
-                if status.is_valid() {
+                if T::is_valid() {
                     FirstResolved::Valid(id.digest, OnceLock::new())
                 } else {
                     FirstResolved::NotValid(id.digest)
@@ -158,7 +158,7 @@ impl InclusionState {
         }
         if status.is_first_valid() {
             assert!(
-                status.is_valid(),
+                T::is_valid(),
                 "{:?} {status} is not valid but has first_valid flag",
                 id.alt()
             );
