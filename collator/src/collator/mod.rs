@@ -684,6 +684,14 @@ impl CollatorStdImpl {
                     {
                         let stored = last_task.store_new_state_task.await?.is_stored();
                         if stored || self.store_new_state_tasks.is_empty() {
+                            if !stored {
+                                metrics::counter!(
+                                    "tycho_collator_skipped_last_state_load_count",
+                                    &labels
+                                )
+                                .increment(1);
+                            }
+
                             Self::reload_prev_data(
                                 prev_mc_seqno,
                                 &mut working_state,
@@ -745,6 +753,14 @@ impl CollatorStdImpl {
                                         }),
                                     });
                                     continue;
+                                }
+
+                                if !status.is_stored() {
+                                    metrics::counter!(
+                                        "tycho_collator_skipped_last_state_load_count",
+                                        &labels
+                                    )
+                                    .increment(1);
                                 }
 
                                 // load stored state
