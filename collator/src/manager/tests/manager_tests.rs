@@ -4383,6 +4383,9 @@ impl StateNodeAdapter for TestStateNodeAdapter {
     async fn handle_state(&self, _: &BlockId, _state: &ShardStateStuff) -> Result<()> {
         unreachable!()
     }
+    fn cache_state(&self, _state: &ShardStateStuff) {
+        // No-op for tests
+    }
     fn set_sync_context(&self, _sync_context: CollatorSyncContext) {
         unreachable!()
     }

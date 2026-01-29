@@ -367,9 +367,13 @@ impl ShardStateStorage {
             }
         }
 
+        let full = HistogramGuard::begin("tycho_storage_load_state_full_time_high");
+
         let mut state = self
             .load_state_direct(ref_by_mc_seqno, &current_block_id)
             .await?;
+
+        let merkle = HistogramGuard::begin("tycho_storage_load_state_merkle_time_high");
 
         // Apply state updates in a single blocking task
         if !chain.is_empty() {
@@ -387,6 +391,9 @@ impl ShardStateStorage {
             })
             .await??;
         }
+
+        full.finish();
+        merkle.finish();
 
         Ok(state)
     }

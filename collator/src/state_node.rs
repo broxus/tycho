@@ -95,6 +95,8 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn wait_for_block_next(&self, prev_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Handle state after block was applied
     async fn handle_state(&self, mc_block_id: &BlockId, state: &ShardStateStuff) -> Result<()>;
+    /// Cache state for faster subsequent loads
+    fn cache_state(&self, state: &ShardStateStuff);
     /// Load queue diff
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
     /// Handle sync context update
@@ -371,12 +373,6 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let block_id = *state.block_id();
         debug_assert!(!block_id.is_masterchain() || &block_id == mc_block_id);
 
-        // Cache the state for faster subsequent loads
-        self.shard_states
-            .entry(block_id.shard)
-            .or_default()
-            .insert(block_id.seqno, state.clone());
-
         let mut to_split = Vec::new();
 
         let shard = block_id.shard;
@@ -464,6 +460,14 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         Reclaimer::instance().drop(states_to_drop);
 
         Ok(())
+    }
+
+    fn cache_state(&self, state: &ShardStateStuff) {
+        let block_id = state.block_id();
+        self.shard_states
+            .entry(block_id.shard)
+            .or_default()
+            .insert(block_id.seqno, state.clone());
     }
 
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>> {
