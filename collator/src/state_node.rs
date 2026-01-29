@@ -108,6 +108,7 @@ pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: FastDashMap<ShardIdent, BTreeMap<u32, Arc<BlockStuffForSync>>>,
     shard_blocks: FastDashMap<ShardIdent, BTreeMap<u32, ShardBlockData>>,
+    shard_states: FastDashMap<ShardIdent, BTreeMap<u32, ShardStateStuff>>,
     last_stored_state_seqno: Mutex<FastHashMap<ShardIdent, u32>>,
     storage: CoreStorage,
     broadcaster: broadcast::Sender<BlockId>,
@@ -133,6 +134,7 @@ impl StateNodeAdapterStdImpl {
             storage,
             blocks: Default::default(),
             shard_blocks: Default::default(),
+            shard_states: Default::default(),
             last_stored_state_seqno: Default::default(),
             broadcaster,
             sync_context_tx,
@@ -209,6 +211,13 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
 
+        // Check loaded states cache first
+        if let Some(states) = self.shard_states.get(&block_id.shard) {
+            if let Some(state) = states.get(&block_id.seqno) {
+                return Ok(state.clone());
+            }
+        }
+
         let state = self
             .storage
             .shard_state_storage()
@@ -223,6 +232,12 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                     })
             })
             .await?;
+
+        // Cache the loaded state
+        self.shard_states
+            .entry(block_id.shard)
+            .or_default()
+            .insert(block_id.seqno, state.clone());
 
         Ok(state)
     }
@@ -356,6 +371,12 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let block_id = *state.block_id();
         debug_assert!(!block_id.is_masterchain() || &block_id == mc_block_id);
 
+        // Cache the state for faster subsequent loads
+        self.shard_states
+            .entry(block_id.shard)
+            .or_default()
+            .insert(block_id.seqno, state.clone());
+
         let mut to_split = Vec::new();
 
         let shard = block_id.shard;
@@ -418,7 +439,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         // Don't wait for drop inside a tokio context.
         Reclaimer::instance().drop(to_drop);
 
-        let mut to_drop = Vec::new();
+        let mut blocks_to_drop = Vec::new();
+        let mut states_to_drop = Vec::new();
         let last_stored = self.last_stored_state_seqno.lock();
         for (shard, _) in &to_split {
             let Some(&safe_seqno) = last_stored.get(shard) else {
@@ -427,13 +449,19 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
             if let Some(mut shard_blocks) = self.shard_blocks.get_mut(shard) {
                 let retained = shard_blocks.split_off(&safe_seqno);
-                to_drop.push(std::mem::replace(&mut *shard_blocks, retained));
+                blocks_to_drop.push(std::mem::replace(&mut *shard_blocks, retained));
+            }
+
+            if let Some(mut shard_states) = self.shard_states.get_mut(shard) {
+                let retained = shard_states.split_off(&safe_seqno);
+                states_to_drop.push(std::mem::replace(&mut *shard_states, retained));
             }
         }
         drop(last_stored);
 
         // Don't wait for drop inside a tokio context.
-        Reclaimer::instance().drop(to_drop);
+        Reclaimer::instance().drop(blocks_to_drop);
+        Reclaimer::instance().drop(states_to_drop);
 
         Ok(())
     }
