@@ -12,6 +12,7 @@ use crate::dag::commit::inspector::RoundInspector;
 use crate::effects::{AltFmt, AltFormat, Cancelled, TaskResult};
 use crate::engine::MempoolConfig;
 use crate::models::{AnchorData, AnchorStageRole, MempoolStatsOutput, Round};
+use crate::moderator::JournalEvent;
 
 #[derive(thiserror::Error, Debug)]
 #[error("Committer encountered local history conflict at round {}", .0.0)]
@@ -110,7 +111,7 @@ impl Committer {
         &mut self,
         last_anchor: Round,
         conf: &MempoolConfig,
-    ) -> TaskResult<MempoolStatsOutput> {
+    ) -> TaskResult<(MempoolStatsOutput, Vec<JournalEvent>)> {
         // in case previous anchor was triggered directly - rounds are already dropped
         let drained =
             (self.dag).drain_upto(last_anchor - conf.consensus.commit_history_rounds.get());
@@ -126,10 +127,12 @@ impl Committer {
         if !drained.is_empty() {
             tycho_util::mem::Reclaimer::instance().drop(drained);
         }
-        Ok(MempoolStatsOutput {
+        let stats = MempoolStatsOutput {
             anchor_round: last_anchor,
             data: self.inspector.take_stats(),
-        })
+        };
+        let events = self.inspector.take_events();
+        Ok((stats, events))
     }
 
     pub fn commit(
