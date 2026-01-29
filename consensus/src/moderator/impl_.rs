@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use tycho_network::Network;
 use tycho_util::futures::{JoinTask, Shared};
 
+use crate::effects::{Cancelled, TaskResult};
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
 use crate::models::UnixTime;
@@ -66,13 +67,16 @@ impl Moderator {
         let inner = Arc::new(ModeratorInner {
             ban_core: ban_core.clone(),
             mempool_conf_tx,
-            _delayed_db_writer: JoinTask::new(ModeratorInner::delayed_db_runner(
-                journal_store.clone(),
-                config.journal,
-                init_rx,
-                mempool_conf_rx,
-                delayed_db_tasks_rx,
-            )),
+            _delayed_db_writer: {
+                let f = ModeratorInner::delayed_db_runner(
+                    journal_store.clone(),
+                    config.journal,
+                    init_rx,
+                    mempool_conf_rx,
+                    delayed_db_tasks_rx,
+                );
+                JoinTask::new(async { f.await.expect("delayed db runner failed") })
+            },
             init_task: {
                 let f = move || {
                     let short_events = journal_store.load_restore(special_since, all_since);
@@ -81,12 +85,9 @@ impl Moderator {
                     (init_tx.send(())).map_err(|()| "cannot notify mempool init".to_string())?;
                     Ok(())
                 };
-                let task = async move {
-                    match tokio::task::spawn_blocking(f).await {
-                        Ok(result) => result,
-                        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                        Err(e) => Err(format!("blocking task aborted: {e:?}")),
-                    }
+                let task = async {
+                    (db_spawn(f).await)
+                        .unwrap_or_else(|Cancelled()| Err("restore aborted".to_string()))
                 };
                 Shared::new(task.boxed())
             },
@@ -109,7 +110,7 @@ impl Moderator {
         self.0.set_peer_schedule(peer_schedule);
     }
 
-    pub fn report(&self, data: JournalEvent) {
+    pub(crate) fn report(&self, data: JournalEvent) {
         self.0.report(data);
     }
 
@@ -169,13 +170,13 @@ impl ModeratorInner {
         init_rx: oneshot::Receiver<()>,
         mut mempool_conf_rx: mpsc::UnboundedReceiver<MempoolConfig>,
         mut delayed_db_tasks_rx: mpsc::UnboundedReceiver<DelayedDbTask>,
-    ) {
+    ) -> Result<()> {
         scopeguard::defer!(tracing::warn!(
             "Mempool moderator delayed db writer shut down"
         ));
         if init_rx.await.is_err() {
             tracing::warn!("Mempool init aborted, shutting down Moderator DB Writer");
-            return;
+            return Ok(());
         }
         let mut j_point_max_bytes = 1_000_000; // only to alloc; don't wait config
         let mut batch_interval = tokio::time::interval(journal_config.batch_interval);
@@ -195,23 +196,23 @@ impl ModeratorInner {
                         }
                         full_items.append(&mut items);
                         if let Some(user_callback) = user_callback {
-                            store_events(&mut full_items, &journal_store, j_point_max_bytes).await;
+                            store_events(&mut full_items, &journal_store, j_point_max_bytes).await?;
                             batch_interval.reset();
                             user_callback.send(Ok(())).ok();
                         }
                     },
                 },
                 _ = batch_interval.tick() => {
-                    store_events(&mut full_items, &journal_store, j_point_max_bytes).await;
+                    store_events(&mut full_items, &journal_store, j_point_max_bytes).await?;
                     batch_interval.reset(); // give time to form a new batch
                 },
                 _ = clean_interval.tick() => {
-                    store_events(&mut full_items, &journal_store, j_point_max_bytes).await;
+                    store_events(&mut full_items, &journal_store, j_point_max_bytes).await?;
                     batch_interval.reset();
                     let range = UnixTime::from_millis(0).. UnixTime::now() - journal_config.ttl.to_time();
-                    delete_events(range, &journal_store).await.expect("journal clean");
+                    delete_events(range, &journal_store).await?;
                 },
-                else => return,
+                else => panic!("unhandled match arm in delayed_db_runner"),
             }
         }
     }
@@ -221,30 +222,35 @@ async fn store_events(
     full_items: &mut Vec<JournalItemFull>,
     journal_store: &JournalStore,
     j_point_max_bytes: usize,
-) {
+) -> Result<()> {
     if full_items.is_empty() {
-        return;
+        return Ok(());
     }
     let journal_store = journal_store.clone();
     let moved_items = std::mem::take(full_items);
     db_spawn(move || journal_store.store_records(batch(&moved_items), j_point_max_bytes))
         .await
-        .expect("Mempool moderator delayed db store events");
+        .unwrap_or_else(|Cancelled()| Err(anyhow::anyhow!("db call aborted")))
+        .context("journal store events")
 }
 
 async fn delete_events(range: Range<UnixTime>, journal_store: &JournalStore) -> Result<()> {
     let journal_store = journal_store.clone();
-    db_spawn(move || journal_store.delete(range)).await
+    db_spawn(move || journal_store.delete(range))
+        .await
+        .unwrap_or_else(|Cancelled()| Err(anyhow::anyhow!("db call aborted")))
+        .context("journal delete events")
 }
 
-async fn db_spawn<F>(f: F) -> Result<()>
+async fn db_spawn<F, R>(f: F) -> TaskResult<R>
 where
-    F: FnOnce() -> Result<()> + Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
 {
     match tokio::task::spawn_blocking(f).await {
-        Ok(result) => result,
+        Ok(result) => Ok(result),
         Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-        Err(e) => anyhow::bail!("blocking task aborted: {e:?}"),
+        Err(_) => Err(Cancelled()),
     }
 }
 

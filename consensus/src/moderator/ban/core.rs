@@ -11,6 +11,7 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 use tycho_util::futures::JoinTask;
 
+use crate::effects::{Cancelled, TaskResult};
 use crate::intercom::PeerSchedule;
 use crate::models::UnixTime;
 use crate::moderator::ban::state::BanCoreState;
@@ -46,7 +47,8 @@ impl BanCore {
             delayed_db_tasks_tx,
             _updater: JoinTask::new({
                 let weak = weak.clone();
-                UnbanScheduler::default().run(weak, updates_rx)
+                let task = UnbanScheduler::default().run(weak, updates_rx);
+                async move { task.await.expect("moderator unban scheduler") }
             }),
         }))
     }
@@ -90,17 +92,17 @@ impl UnbanScheduler {
         mut self,
         weak: Weak<BanCoreInner>,
         mut updates_rx: mpsc::UnboundedReceiver<UpdaterQueueItem>,
-    ) {
+    ) -> TaskResult<()> {
         scopeguard::defer!(tracing::warn!("Mempool ban core updater shut down"));
         loop {
             tokio::select! {
                 Some(queue_item) = updates_rx.recv() => {
                     let Some(inner) = weak.upgrade() else {
-                        return;
+                        return Ok(());
                     };
                     match queue_item {
                         UpdaterQueueItem::Event(event) => {
-                            self.on_event(&inner, event);
+                            self.on_event(&inner, event)?;
                         },
                         UpdaterQueueItem::Banned{peer_id, q_ban} => {
                             self.on_banned(&inner, &peer_id, q_ban);
@@ -109,9 +111,9 @@ impl UnbanScheduler {
                 },
                 Some(expired) = self.auto_unbans.next() => {
                     let Some(inner) = weak.upgrade() else {
-                        return;
+                        return Ok(());
                     };
-                    self.on_auto_unban(&inner, expired);
+                    self.on_auto_unban(&inner, expired)?;
                 },
                 else => panic!("unexpected branch in BanCore update task"),
             }
@@ -119,7 +121,7 @@ impl UnbanScheduler {
     }
 
     #[allow(clippy::unused_self, reason = "style + may use later")]
-    fn on_event(&self, inner: &BanCoreInner, event: JournalEvent) {
+    fn on_event(&self, inner: &BanCoreInner, event: JournalEvent) -> TaskResult<()> {
         let mut state = inner.state.lock().unwrap();
 
         let mut event_item = None;
@@ -150,13 +152,16 @@ impl UnbanScheduler {
         let items = event_item.into_iter().chain(maybe_ban).collect::<Vec<_>>();
 
         if !items.is_empty() {
-            (inner.delayed_db_tasks_tx)
-                .send(DelayedDbTask::Items {
-                    items,
-                    user_callback: None,
-                })
-                .expect("channel delayed DB write of event");
+            let items = DelayedDbTask::Items {
+                items,
+                user_callback: None,
+            };
+            if (inner.delayed_db_tasks_tx).send(items).is_err() {
+                tracing::error!("failed to channel to delayed db writer");
+                return Err(Cancelled());
+            }
         }
+        Ok(())
     }
 
     fn on_banned(&mut self, inner: &BanCoreInner, peer_id: &PeerId, q_ban: CurrentBan) {
@@ -179,7 +184,7 @@ impl UnbanScheduler {
         };
     }
 
-    fn on_auto_unban(&mut self, inner: &BanCoreInner, expired: Expired<PeerId>) {
+    fn on_auto_unban(&mut self, inner: &BanCoreInner, expired: Expired<PeerId>) -> TaskResult<()> {
         let (dq_key, q_ban) = (self.last_bans)
             .remove(expired.get_ref())
             .expect("peer unban was scheduled without last_bans entry");
@@ -194,7 +199,7 @@ impl UnbanScheduler {
 
         if !state.unban(&peer_id, q_ban.until) {
             // there is a new auto-unban waiting in channel, skip this
-            return;
+            return Ok(());
         }
 
         let item_full = JournalItemFull {
@@ -204,11 +209,14 @@ impl UnbanScheduler {
                 origin: UnbanOrigin::Parent(q_ban.key),
             }),
         };
-        (inner.delayed_db_tasks_tx)
-            .send(DelayedDbTask::Items {
-                items: vec![item_full],
-                user_callback: None,
-            })
-            .expect("channel delayed db write on auto unban");
+        let items = DelayedDbTask::Items {
+            items: vec![item_full],
+            user_callback: None,
+        };
+        if (inner.delayed_db_tasks_tx).send(items).is_err() {
+            tracing::error!("failed to channel to delayed db writer");
+            return Err(Cancelled());
+        }
+        Ok(())
     }
 }
