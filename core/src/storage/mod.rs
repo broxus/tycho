@@ -28,8 +28,8 @@ pub use self::persistent_state::{
     ShardStateWriter,
 };
 pub use self::shard_state::{
-    ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics, StoreStateHint,
-    split_shard_accounts,
+    CachedStateUpdate, ShardStateStorage, ShardStateStorageError, ShardStateStorageMetrics,
+    StoreStateHint, StoreStateStatus, split_shard_accounts,
 };
 
 pub mod tables;
@@ -81,13 +81,13 @@ impl CoreStorage {
         )
         .await?;
         let block_storage = Arc::new(block_storage);
+
         let shard_state_storage = ShardStateStorage::new(
             cells_db.clone(),
             block_handle_storage.clone(),
             block_storage.clone(),
             ctx.temp_files().clone(),
-            config.cells_cache_size,
-            config.drop_interval,
+            &config,
         )?;
         let persistent_state_storage = PersistentStateStorage::new(
             cells_db.clone(),
