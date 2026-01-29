@@ -673,6 +673,8 @@ impl CollatorStdImpl {
                     // get last store task
                     let last_task = self.store_new_state_tasks.pop().expect("shouldn't happen");
 
+                    let mut unfinished_tasks: Vec<StateUpdateContext> = Vec::new();
+
                     // If it is finished or there's only one task, just await and reload.
                     // NOTE: when there's only one task, we can't apply merkle chain because the previous block's
                     // state might not be in storage yet — StoreTask just send to background_store_new_state_tx without
@@ -680,15 +682,23 @@ impl CollatorStdImpl {
                     if last_task.store_new_state_task.is_finished()
                         || self.store_new_state_tasks.is_empty()
                     {
-                        last_task.store_new_state_task.await?;
-
-                        // and reload pure prev state in the working state
-                        Self::reload_prev_data(
-                            prev_mc_seqno,
-                            &mut working_state,
-                            self.state_node_adapter.clone(),
-                        )
-                        .await?;
+                        let stored = last_task.store_new_state_task.await?.is_stored();
+                        if stored || self.store_new_state_tasks.is_empty() {
+                            Self::reload_prev_data(
+                                prev_mc_seqno,
+                                &mut working_state,
+                                self.state_node_adapter.clone(),
+                            )
+                            .await?;
+                        } else {
+                            unfinished_tasks.push(StateUpdateContext {
+                                block_id: last_task.block_id,
+                                state_update: last_task.state_update,
+                                store_new_state_task: JoinTask::new(async move {
+                                    Ok(StoreStateStatus::Skipped)
+                                }),
+                            });
+                        }
                     } else {
                         // Slow path: last task is not finished yet so we
                         // need to build state by applying merkle updates chain.
@@ -706,8 +716,10 @@ impl CollatorStdImpl {
                         //    - Wait for that task, load its state
                         //    - Apply merkle updates from collected unfinished tasks
 
-                        let mut unfinished_tasks = vec![last_task];
+                        unfinished_tasks.push(last_task);
+                    }
 
+                    if !unfinished_tasks.is_empty() {
                         let mut prev_state = 'find_state: {
                             while let Some(task) = self.store_new_state_tasks.pop() {
                                 let is_last = self.store_new_state_tasks.is_empty();
@@ -721,7 +733,19 @@ impl CollatorStdImpl {
                                     continue;
                                 }
 
-                                task.store_new_state_task.await?;
+                                let status = task.store_new_state_task.await?;
+
+                                // Wait for the real task that persists state to the db
+                                if !status.is_stored() && !is_last {
+                                    unfinished_tasks.push(StateUpdateContext {
+                                        block_id: task.block_id,
+                                        state_update: task.state_update,
+                                        store_new_state_task: JoinTask::new(async move {
+                                            Ok(StoreStateStatus::Skipped)
+                                        }),
+                                    });
+                                    continue;
+                                }
 
                                 // load stored state
                                 let prev_state = self
