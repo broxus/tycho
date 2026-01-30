@@ -17,11 +17,12 @@ use tycho_block_util::archive::Archive;
 use tycho_block_util::block::{BlockIdRelation, BlockStuffAug};
 use tycho_types::models::BlockId;
 use tycho_util::fs::TargetWriter;
+use tycho_util::serde_helpers;
 
 use crate::block_strider::provider::{BlockProvider, CheckProof, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc;
 use crate::blockchain_rpc::BlockchainRpcClient;
-use crate::overlay_client::{Neighbour, PunishReason};
+use crate::overlay_client::{Error, Neighbour, PunishReason};
 #[cfg(feature = "s3")]
 use crate::s3::S3Client;
 use crate::storage::CoreStorage;
@@ -30,12 +31,19 @@ use crate::storage::CoreStorage;
 #[serde(default)]
 pub struct ArchiveBlockProviderConfig {
     pub max_archive_to_memory_size: ByteSize,
+
+    /// Time threshold to consider a block as recent.
+    ///
+    /// Default: 600 secs.
+    #[serde(with = "serde_helpers::humantime")]
+    pub recent_block_threshold: Duration,
 }
 
 impl Default for ArchiveBlockProviderConfig {
     fn default() -> Self {
         Self {
             max_archive_to_memory_size: ByteSize::mb(100),
+            recent_block_threshold: Duration::from_secs(600),
         }
     }
 }
@@ -76,7 +84,13 @@ impl ArchiveBlockProvider {
         let next_mc_seqno = block_id.seqno + 1;
 
         loop {
-            let Some((archive_key, info)) = this.get_archive(next_mc_seqno).await else {
+            let Some((archive_key, info)) = this
+                .get_archive(ArchiveRequest::NextMcBlock {
+                    mc_seqno: next_mc_seqno,
+                    prev_block_id: *block_id,
+                })
+                .await
+            else {
                 tracing::warn!(prev_block_id = ?block_id, "archive not found");
                 break None;
             };
@@ -118,7 +132,12 @@ impl ArchiveBlockProvider {
         let mc_block_id = block_id_relation.mc_block_id;
 
         loop {
-            let Some((archive_key, info)) = this.get_archive(mc_block_id.seqno).await else {
+            let Some((archive_key, info)) = this
+                .get_archive(ArchiveRequest::ShardBlock {
+                    mc_seqno: mc_block_id.seqno,
+                })
+                .await
+            else {
                 tracing::warn!("shard block is too new for archives");
 
                 // NOTE: This is a strange situation, but if we wait a bit it might go away.
@@ -182,7 +201,8 @@ struct Inner {
 }
 
 impl Inner {
-    async fn get_archive(&self, mc_seqno: u32) -> Option<(u32, ArchiveInfo)> {
+    async fn get_archive(&self, request: ArchiveRequest) -> Option<(u32, ArchiveInfo)> {
+        let mc_seqno = request.mc_seqno();
         loop {
             let mut pending = 'pending: {
                 let mut guard = self.known_archives.lock();
@@ -200,7 +220,7 @@ impl Inner {
                 }
 
                 // Start downloading otherwise
-                let task = self.make_downloader().spawn(mc_seqno);
+                let task = self.make_downloader().spawn(request);
                 guard.insert(mc_seqno, ArchiveSlot::Pending(task.clone()));
 
                 task
@@ -274,6 +294,7 @@ impl Inner {
             client: self.client.clone(),
             storage: self.storage.clone(),
             memory_threshold: self.config.max_archive_to_memory_size,
+            recent_block_threshold: self.config.recent_block_threshold,
         }
     }
 
@@ -322,6 +343,32 @@ enum ArchiveSlot {
     Pending(ArchiveTask),
 }
 
+#[derive(Clone, Copy)]
+enum ArchiveRequest {
+    NextMcBlock {
+        mc_seqno: u32,
+        prev_block_id: BlockId,
+    },
+    ShardBlock {
+        mc_seqno: u32,
+    },
+}
+
+impl ArchiveRequest {
+    fn mc_seqno(&self) -> u32 {
+        match self {
+            Self::NextMcBlock { mc_seqno, .. } | Self::ShardBlock { mc_seqno } => *mc_seqno,
+        }
+    }
+
+    fn prev_block_id(&self) -> Option<BlockId> {
+        match self {
+            Self::NextMcBlock { prev_block_id, .. } => Some(*prev_block_id),
+            Self::ShardBlock { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ArchiveInfo {
     from: Option<Neighbour>, // None for S3
@@ -332,12 +379,15 @@ struct ArchiveDownloader {
     client: Arc<dyn ArchiveClient>,
     storage: CoreStorage,
     memory_threshold: ByteSize,
+    recent_block_threshold: Duration,
 }
 
 impl ArchiveDownloader {
-    fn spawn(self, mc_seqno: u32) -> ArchiveTask {
+    fn spawn(self, request: ArchiveRequest) -> ArchiveTask {
         // TODO: Use a proper backoff here?
         const INTERVAL: Duration = Duration::from_secs(1);
+
+        let mc_seqno = request.mc_seqno();
 
         let (tx, rx) = watch::channel(ArchiveTaskState::None);
 
@@ -365,6 +415,33 @@ impl ArchiveDownloader {
                         break;
                     }
                     Err(e) => {
+                        if let Some(Error::NotFound) = e.downcast_ref::<Error>() {
+                            // Check if block is recent - if so, switch to blockchain provider
+                            if let Some(prev_block_id) = request.prev_block_id()
+                                && let Some(handle) = self
+                                    .storage
+                                    .block_handle_storage()
+                                    .load_handle(&prev_block_id)
+                            {
+                                let now = tycho_util::time::now_sec();
+                                let prev_gen_utime = handle.gen_utime();
+
+                                if now.saturating_sub(prev_gen_utime)
+                                    < self.recent_block_threshold.as_secs() as u32
+                                {
+                                    // Block is recent, switch to blockchain provider
+                                    tracing::info!(mc_seqno, prev_gen_utime, "block is recent");
+
+                                    let tx = scopeguard::ScopeGuard::into_inner(guard);
+                                    tx.send_modify(move |prev| {
+                                        *prev = ArchiveTaskState::Finished(None);
+                                    });
+
+                                    break;
+                                }
+                            }
+                        }
+
                         tracing::error!(mc_seqno, "failed to preload archive {e:?}");
                         tokio::time::sleep(INTERVAL).await;
                     }
