@@ -1,7 +1,8 @@
 use bytes::{Buf, Bytes};
 use tl_proto::{RawBytes, TlError, TlRead, TlWrite};
-use tycho_network::Request;
+use tycho_network::PrefixedRequest;
 
+use crate::intercom::Dispatcher;
 use crate::models::{Point, PointId, Round, StructureIssue};
 
 #[derive(Copy, Clone, Debug, PartialEq, TlRead, TlWrite)]
@@ -22,22 +23,22 @@ pub enum QueryRequest {
 }
 
 impl QueryRequest {
-    pub fn broadcast(point: &Point) -> Request {
-        Request::from_tl(QueryRequestWrite {
+    pub fn broadcast(dispatcher: &Dispatcher, point: &Point) -> PrefixedRequest {
+        dispatcher.request_from_tl(QueryRequestWrite {
             tag: QueryRequestTag::Broadcast,
             body: &RawBytes::<tl_proto::Boxed>::new(point.serialized()),
         })
     }
 
-    pub fn signature(round: Round) -> Request {
-        Request::from_tl(QueryRequestWrite {
+    pub fn signature(dispatcher: &Dispatcher, round: Round) -> PrefixedRequest {
+        dispatcher.request_from_tl(QueryRequestWrite {
             tag: QueryRequestTag::Signature,
             body: &round,
         })
     }
 
-    pub fn download(id: &PointId) -> Request {
-        Request::from_tl(QueryRequestWrite {
+    pub fn download(dispatcher: &Dispatcher, id: &PointId) -> PrefixedRequest {
+        dispatcher.request_from_tl(QueryRequestWrite {
             tag: QueryRequestTag::Download,
             body: id,
         })

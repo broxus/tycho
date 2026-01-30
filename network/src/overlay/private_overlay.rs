@@ -2,7 +2,6 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 
 use anyhow::Result;
-use bytes::{Bytes, BytesMut};
 use indexmap::IndexMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use rand::Rng;
@@ -10,12 +9,13 @@ use tokio::sync::broadcast;
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::{FastHashSet, FastHasherState};
 
+use crate::PrefixedRequest;
 use crate::dht::{PeerResolver, PeerResolverHandle};
 use crate::network::Network;
 use crate::overlay::OverlayId;
 use crate::overlay::metrics::Metrics;
 use crate::proto::overlay::rpc;
-use crate::types::{BoxService, PeerId, Request, Response, Service, ServiceExt, ServiceRequest};
+use crate::types::{BoxService, PeerId, Response, Service, ServiceExt, ServiceRequest};
 use crate::util::NetworkExt;
 
 pub struct PrivateOverlayBuilder {
@@ -113,26 +113,31 @@ impl PrivateOverlay {
         &self.inner.overlay_id
     }
 
+    pub fn request_from_tl<T>(&self, body: T) -> PrefixedRequest
+    where
+        T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
+    {
+        PrefixedRequest::from_tl(&self.inner.request_prefix, body)
+    }
+
     pub async fn query(
         &self,
         network: &Network,
         peer_id: &PeerId,
-        mut request: Request,
+        request: PrefixedRequest,
     ) -> Result<Response> {
-        self.inner.metrics.record_rx(request.body.len());
-        self.prepend_prefix_to_body(&mut request.body);
-        network.query(peer_id, request).await
+        self.inner.metrics.record_rx(request.body_len());
+        network.query(peer_id, request.into()).await
     }
 
     pub async fn send(
         &self,
         network: &Network,
         peer_id: &PeerId,
-        mut request: Request,
+        request: PrefixedRequest,
     ) -> Result<()> {
-        self.inner.metrics.record_rx(request.body.len());
-        self.prepend_prefix_to_body(&mut request.body);
-        network.send(peer_id, request).await
+        self.inner.metrics.record_rx(request.body_len());
+        network.send(peer_id, request.into()).await
     }
 
     pub fn write_entries(&self) -> PrivateOverlayEntriesWriteGuard<'_> {
@@ -163,14 +168,6 @@ impl PrivateOverlay {
         } else {
             BoxFutureOrNoop::Noop
         }
-    }
-
-    fn prepend_prefix_to_body(&self, body: &mut Bytes) {
-        // TODO: reduce allocations
-        let mut res = BytesMut::with_capacity(self.inner.request_prefix.len() + body.len());
-        res.extend_from_slice(&self.inner.request_prefix);
-        res.extend_from_slice(body);
-        *body = res.freeze();
     }
 }
 
