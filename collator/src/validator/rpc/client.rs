@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tycho_network::{Network, PeerId, PrivateOverlay, Request, Response};
+use tycho_network::{Network, PeerId, PrefixedRequest, PrivateOverlay, Response};
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -28,7 +28,14 @@ impl ValidatorClient {
         self.inner.network.peer_id()
     }
 
-    pub async fn query(&self, peer_id: &PeerId, req: Request) -> Result<Response> {
+    pub fn request_from_tl<T>(&self, body: T) -> PrefixedRequest
+    where
+        T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
+    {
+        self.inner.overlay.request_from_tl(body)
+    }
+
+    pub async fn query(&self, peer_id: &PeerId, req: PrefixedRequest) -> Result<Response> {
         self.inner
             .overlay
             .query(&self.inner.network, peer_id, req)

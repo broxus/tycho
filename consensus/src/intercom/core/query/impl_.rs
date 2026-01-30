@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use tl_proto::TlError;
-use tycho_network::{PeerId, Request};
+use tycho_network::{PeerId, PrefixedRequest};
 use tycho_util::metrics::HistogramGuard;
 
 use crate::intercom::Dispatcher;
@@ -20,14 +20,15 @@ pub enum QueryError {
 
 pub struct BroadcastQuery {
     dispatcher: Dispatcher,
-    request: Request,
+    request: PrefixedRequest,
 }
 
 impl BroadcastQuery {
     pub fn new(dispatcher: Dispatcher, point: &Point) -> Self {
+        let request = QueryRequest::broadcast(&dispatcher, point);
         Self {
             dispatcher,
-            request: QueryRequest::broadcast(point),
+            request,
         }
     }
     pub async fn send(&self, peer_id: &PeerId) -> Result<BroadcastResponse, QueryError> {
@@ -55,13 +56,14 @@ impl BroadcastQuery {
 
 pub struct SignatureQuery {
     dispatcher: Dispatcher,
-    request: Request,
+    request: PrefixedRequest,
 }
 impl SignatureQuery {
     pub fn new(dispatcher: Dispatcher, round: Round) -> Self {
+        let request = QueryRequest::signature(&dispatcher, round);
         Self {
             dispatcher,
-            request: QueryRequest::signature(round),
+            request,
         }
     }
     pub async fn send(&self, peer_id: &PeerId) -> Result<SignatureResponse, QueryError> {
@@ -91,15 +93,16 @@ impl SignatureQuery {
 pub struct DownloadQuery(Arc<DownloadQueryInner>);
 struct DownloadQueryInner {
     dispatcher: Dispatcher,
-    request: Request,
+    request: PrefixedRequest,
     point_id: PointId,
 }
 
 impl DownloadQuery {
     pub fn new(dispatcher: Dispatcher, point_id: &PointId) -> Self {
+        let request = QueryRequest::download(&dispatcher, point_id);
         Self(Arc::new(DownloadQueryInner {
             dispatcher,
-            request: QueryRequest::download(point_id),
+            request,
             point_id: *point_id,
         }))
     }

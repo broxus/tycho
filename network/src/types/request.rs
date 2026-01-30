@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
 use crate::types::PeerId;
@@ -81,6 +81,54 @@ impl AsRef<[u8]> for Request {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         self.body.as_ref()
+    }
+}
+
+impl From<PrefixedRequest> for Request {
+    fn from(request: PrefixedRequest) -> Self {
+        Self {
+            version: request.version,
+            body: request.prefixed_body,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PrefixedRequest {
+    pub version: Version,
+    prefixed_body: Bytes,
+    prefix_len: usize,
+}
+
+impl PrefixedRequest {
+    /// follows [`Request::from_tl`]
+    pub(crate) fn from_tl<T>(prefix: &[u8], body: T) -> Self
+    where
+        T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
+    {
+        let prefix_len = prefix.len();
+        let mut prefixed_body = BytesMut::with_capacity(prefix_len + body.max_size_hint());
+
+        prefixed_body.extend_from_slice(prefix);
+        body.write_to(&mut prefixed_body);
+
+        Self {
+            version: Default::default(),
+            prefixed_body: prefixed_body.freeze(),
+            prefix_len,
+        }
+    }
+
+    pub fn body(&self) -> Bytes {
+        debug_assert!(
+            self.prefixed_body.len() >= self.prefix_len,
+            "actual request body is shorter than declared prefix len"
+        );
+        self.prefixed_body.slice(self.prefix_len..)
+    }
+
+    pub fn body_len(&self) -> usize {
+        self.prefixed_body.len().saturating_sub(self.prefix_len)
     }
 }
 

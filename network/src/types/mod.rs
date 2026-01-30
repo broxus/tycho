@@ -3,7 +3,7 @@ pub use self::peer_event::{DisconnectReason, PeerEvent, PeerEventData};
 pub use self::peer_id::PeerId;
 pub use self::peer_info::{PeerAffinity, PeerInfo};
 pub use self::request::{
-    Direction, InboundRequestMeta, Request, Response, ServiceRequest, Version,
+    Direction, InboundRequestMeta, PrefixedRequest, Request, Response, ServiceRequest, Version,
 };
 pub use self::rpc::RpcQuery;
 pub use self::service::{
