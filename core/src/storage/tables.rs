@@ -128,9 +128,9 @@ impl ColumnFamilyOptions<TableContext> for FullBlockIds {
     }
 }
 
-/// Maps `BlockId` to root cell hash
+/// Maps `BlockId` to root cell hash and parts info
 /// - Key: `BlockId`
-/// - Value: `[u8; 32] (state root hash)`
+/// - Value: `ShardStateEntry`
 pub struct ShardStates;
 
 impl ColumnFamily for ShardStates {

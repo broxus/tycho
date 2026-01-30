@@ -3,37 +3,47 @@ use std::io::{BufWriter, Read, Seek, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use tycho_block_util::block::{DisplayShardPrefix, ShardPrefix};
 use tycho_storage::fs::TempFileStorage;
 use tycho_storage::kv::StoredValue;
 use tycho_types::cell::*;
 use tycho_types::models::BlockId;
 use tycho_types::util::ArrayVec;
-use tycho_util::FastHashMap;
 use tycho_util::fs::MappedFile;
 use tycho_util::io::ByteOrderRead;
 use tycho_util::progress_bar::*;
+use tycho_util::{FastHashMap, FastHashSet};
 use weedb::{BoundedCfHandle, rocksdb};
 
+use super::ShardStateEntry;
 use super::cell_storage::*;
 use super::entries_buffer::*;
-use crate::storage::{BriefBocHeader, CellsDb, ShardStateReader};
+use crate::storage::db::{CellStorageDb, CellsDbOps};
+use crate::storage::{BriefBocHeader, ShardStateReader};
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
 pub struct StoreStateContext {
-    pub cells_db: CellsDb,
+    pub cells_db: CellStorageDb,
     pub cell_storage: Arc<CellStorage>,
     pub temp_file_storage: TempFileStorage,
 }
 
 impl StoreStateContext {
-    // Stores shard state and returns the hash of its root cell.
-    pub fn store<R>(&self, block_id: &BlockId, reader: R) -> Result<HashBytes>
+    /// Stores shard state, returns the hash of its root cell,
+    /// and pruned parts root cells
+    #[tracing::instrument(skip_all, fields(block_id = %block_id.as_short_id(), shard_prefix = %DisplayShardPrefix(&shard_prefix)))]
+    pub fn store<R>(
+        &self,
+        block_id: &BlockId,
+        reader: R,
+        shard_prefix: ShardPrefix,
+    ) -> Result<StoreStateResult>
     where
         R: std::io::Read,
     {
         let preprocessed = self.preprocess(reader)?;
-        self.finalize(block_id, preprocessed)
+        self.finalize(block_id, preprocessed, shard_prefix)
     }
 
     fn preprocess<R>(&self, reader: R) -> Result<PreprocessedState>
@@ -95,7 +105,12 @@ impl StoreStateContext {
         }
     }
 
-    fn finalize(&self, block_id: &BlockId, preprocessed: PreprocessedState) -> Result<HashBytes> {
+    fn finalize(
+        &self,
+        block_id: &BlockId,
+        preprocessed: PreprocessedState,
+        shard_prefix: ShardPrefix,
+    ) -> Result<StoreStateResult> {
         // 2^7 bits + 1 bytes
         const MAX_DATA_SIZE: usize = 128;
         const CELLS_PER_BATCH: u64 = 1_000_000;
@@ -115,9 +130,9 @@ impl StoreStateContext {
             .open_as_mapped_mut()?;
 
         let raw = self.cells_db.rocksdb().as_ref();
-        let write_options = self.cells_db.temp_cells.write_config();
+        let write_options = self.cells_db.temp_cells().write_config();
 
-        let mut ctx = FinalizationContext::new(&self.cells_db);
+        let mut ctx = FinalizationContext::new(self.cells_db.temp_cells().cf());
         ctx.clear_temp_cells(&self.cells_db)?;
 
         // Allocate on heap to prevent big future size
@@ -126,6 +141,8 @@ impl StoreStateContext {
 
         let total_size = file.length();
         pg.set_total(total_size as u64);
+
+        let mut absent_cells_hashes = FastHashSet::default();
 
         let mut file_pos = total_size;
         let mut cell_index = header.cell_count;
@@ -167,6 +184,7 @@ impl StoreStateContext {
                     &mut data_buffer,
                 )?;
 
+                // read children entries from hashes file
                 for (&index, buffer) in cell
                     .reference_indices
                     .as_ref()
@@ -177,8 +195,13 @@ impl StoreStateContext {
                     unsafe { hashes_file.read_exact_at(index as usize * HashesEntry::LEN, buffer) }
                 }
 
-                ctx.finalize_cell(cell_index as u32, cell)?;
+                if let FinalizeCellResult::Absent { hash, .. } =
+                    ctx.finalize_cell(cell_index as u32, cell)?
+                {
+                    absent_cells_hashes.insert(hash);
+                }
 
+                // write current entry to hashes file
                 // SAFETY: `entries_buffer` is guaranteed to be in separate memory area
                 unsafe {
                     hashes_file.write_all_at(
@@ -205,26 +228,45 @@ impl StoreStateContext {
         }
 
         // Current entry contains root cell
-        let root_hash = ctx.entries_buffer.repr_hash();
-        ctx.final_check(root_hash)?;
+        let repr_hash = ctx.entries_buffer.repr_hash();
+        let root_hash = HashBytes::from_slice(repr_hash);
 
-        self.cell_storage
-            .apply_temp_cell(HashBytes::wrap(root_hash))?;
+        ctx.final_check(repr_hash)?;
+
+        let skip_roots = (!absent_cells_hashes.is_empty()).then_some(&absent_cells_hashes);
+        self.cell_storage.apply_temp_cell(&root_hash, skip_roots)?;
         ctx.clear_temp_cells(&self.cells_db)?;
 
         let shard_state_key = block_id.to_vec();
+        let entry = ShardStateEntry {
+            root_hash,
+            parts_info: None,
+        };
         self.cells_db
-            .shard_states
-            .insert(&shard_state_key, root_hash.as_slice())?;
+            .shard_states()
+            .insert(&shard_state_key, entry.to_vec())?;
 
         pg.complete();
 
         // Load stored shard state
-        match self.cells_db.shard_states.get(shard_state_key)? {
-            Some(root) => Ok(HashBytes::from_slice(&root[..32])),
+        match self.cells_db.shard_states().get(shard_state_key)? {
+            Some(value) => {
+                let root_hash = ShardStateEntry::from_slice(value.as_ref()).root_hash;
+                Ok(StoreStateResult {
+                    root_hash,
+                    shard_prefix,
+                    absent_cells_hashes,
+                })
+            }
             None => Err(StoreStateError::NotFound.into()),
         }
     }
+}
+
+pub struct StoreStateResult {
+    pub root_hash: HashBytes,
+    pub shard_prefix: ShardPrefix,
+    pub absent_cells_hashes: FastHashSet<HashBytes>,
 }
 
 struct FinalizationContext<'a> {
@@ -237,25 +279,25 @@ struct FinalizationContext<'a> {
 }
 
 impl<'a> FinalizationContext<'a> {
-    fn new(db: &'a CellsDb) -> Self {
+    fn new(temp_cells_cf: BoundedCfHandle<'a>) -> Self {
         Self {
             pruned_branches: Default::default(),
             cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
             entries_buffer: EntriesBuffer::new(),
             output_buffer: Vec::with_capacity(1 << 10),
-            temp_cells_cf: db.temp_cells.cf(),
+            temp_cells_cf,
             write_batch: rocksdb::WriteBatch::default(),
         }
     }
 
-    fn clear_temp_cells(&self, db: &CellsDb) -> std::result::Result<(), rocksdb::Error> {
+    fn clear_temp_cells(&self, db: &CellStorageDb) -> std::result::Result<(), rocksdb::Error> {
         let from = &[0x00; 32];
         let to = &[0xff; 32];
         db.rocksdb().delete_range_cf(&self.temp_cells_cf, from, to)
     }
 
     // TODO: Somehow reuse `tycho_types::cell::CellParts`.
-    fn finalize_cell(&mut self, cell_index: u32, cell: RawCell<'_>) -> Result<()> {
+    fn finalize_cell(&mut self, cell_index: u32, cell: RawCell<'_>) -> Result<FinalizeCellResult> {
         use sha2::{Digest, Sha256};
 
         let (mut current_entry, children) = self
@@ -273,7 +315,13 @@ impl<'a> FinalizationContext<'a> {
 
         let mut is_merkle_cell = false;
         let mut is_pruned_cell = false;
+        let mut is_absent_cell = false;
+
         let level_mask = match cell.descriptor.cell_type() {
+            CellType::Ordinary if cell.descriptor.is_absent() => {
+                is_absent_cell = true;
+                cell.descriptor.level_mask()
+            }
             CellType::Ordinary => children_mask,
             CellType::PrunedBranch => {
                 is_pruned_cell = true;
@@ -293,6 +341,7 @@ impl<'a> FinalizationContext<'a> {
         // Save mask and counters
         current_entry.set_level_mask(level_mask);
         current_entry.set_cell_type(cell.descriptor.cell_type());
+        current_entry.set_is_absent(is_absent_cell);
 
         // Calculate hashes
         let hash_count = if is_pruned_cell {
@@ -308,6 +357,20 @@ impl<'a> FinalizationContext<'a> {
             if level != 0 && (is_pruned_cell || !level_mask.contains(level)) {
                 continue;
             }
+
+            // for absent cell read depth and hash from data
+            if is_absent_cell {
+                let depth = read_stored_depth(level_mask, level, cell.data, 0);
+                current_entry.set_depth(hash_idx, depth);
+
+                let hash = read_stored_hash(level_mask, level, cell.data, 0)
+                    .context("invalid absent cell")?;
+                current_entry.set_hash(hash_idx, hash);
+
+                hash_idx += 1;
+                continue;
+            }
+
             let mut hasher = Sha256::new();
 
             let level_mask = if is_pruned_cell {
@@ -377,6 +440,31 @@ impl<'a> FinalizationContext<'a> {
             self.pruned_branches.insert(cell_index, cell.data.to_vec());
         }
 
+        // get cell hash
+        let mut lvl_0_hash = HashBytes::default();
+        let repr_hash = if is_pruned_cell {
+            let repr_hash = current_entry
+                .as_reader()
+                .pruned_branch_hash(LevelMask::MAX_LEVEL, cell.data)
+                .context("Invalid pruned branch")?;
+            let lvl_0_hash_slice = current_entry
+                .as_reader()
+                .pruned_branch_hash(0, cell.data)
+                .context("Invalid pruned branch")?;
+            lvl_0_hash = HashBytes::from_slice(lvl_0_hash_slice);
+            *repr_hash
+        } else {
+            let repr_hash = current_entry.as_reader().hash(LevelMask::MAX_LEVEL);
+            *repr_hash
+        };
+
+        // do not store absent cell to storage
+        if is_absent_cell {
+            return Ok(FinalizeCellResult::Absent {
+                hash: HashBytes::from_slice(&repr_hash),
+            });
+        }
+
         // Write cell data
         let output_buffer = &mut self.output_buffer;
         output_buffer.clear();
@@ -408,26 +496,25 @@ impl<'a> FinalizationContext<'a> {
                 child.hash(LevelMask::MAX_LEVEL)
             };
 
-            *self.cell_usages.entry(*child_hash).or_default() += 1;
+            // update cell usages only when child is not absent
+            // because we won't store absent cells
+            if !child.is_absent() {
+                *self.cell_usages.entry(*child_hash).or_default() += 1;
+            }
             output_buffer.extend_from_slice(child_hash);
         }
 
         // Save serialized data
-        let repr_hash = if is_pruned_cell {
-            current_entry
-                .as_reader()
-                .pruned_branch_hash(LevelMask::MAX_LEVEL, cell.data)
-                .context("Invalid pruned branch")?
-        } else {
-            current_entry.as_reader().hash(LevelMask::MAX_LEVEL)
-        };
-
         self.write_batch
             .put_cf(&self.temp_cells_cf, repr_hash, output_buffer.as_slice());
-        self.cell_usages.insert(*repr_hash, -1);
+        self.cell_usages.insert(repr_hash, -1);
 
         // Done
-        Ok(())
+        if is_pruned_cell {
+            Ok(FinalizeCellResult::PrunedBranch { lvl_0_hash })
+        } else {
+            Ok(FinalizeCellResult::Other)
+        }
     }
 
     fn finalize_cell_usages(&mut self) {
@@ -436,7 +523,7 @@ impl<'a> FinalizationContext<'a> {
 
     fn final_check(&self, root_hash: &[u8; 32]) -> Result<()> {
         tracing::info!(root_hash = %HashBytes::wrap(root_hash), "Final check");
-        tracing::info!(len=?self.cell_usages.len(), "Cell usages");
+        tracing::info!(len = self.cell_usages.len(), "Cell usages",);
 
         anyhow::ensure!(
             self.cell_usages.len() == 1 && self.cell_usages.contains_key(root_hash),
@@ -444,6 +531,13 @@ impl<'a> FinalizationContext<'a> {
         );
         Ok(())
     }
+}
+
+#[allow(dead_code)]
+enum FinalizeCellResult {
+    PrunedBranch { lvl_0_hash: HashBytes },
+    Absent { hash: HashBytes },
+    Other,
 }
 
 struct PreprocessedState {
@@ -475,21 +569,32 @@ impl<'a> RawCell<'a> {
         let byte_len = descriptor.byte_len() as usize;
         let ref_count = descriptor.reference_count() as usize;
 
-        if descriptor.is_absent() || ref_count > 4 {
+        if ref_count > 4 && !descriptor.is_absent() {
             return Err(parser_error("invalid preprocessed cell descriptor"));
         }
 
-        let data = &mut data_buffer[0..byte_len];
+        // for absent cells read stored hashes and depth into data
+        let data_len = if descriptor.is_absent() {
+            descriptor.hash_count() as usize * (32 + 2) + byte_len
+        } else {
+            byte_len
+        };
+
+        let data = &mut data_buffer[0..data_len];
         src.read_exact(data)?;
 
         let mut reference_indices = ArrayVec::new();
-        for _ in 0..ref_count {
-            let index = src.read_be_uint(ref_size)? as usize;
-            if index > cell_count || index <= cell_index {
-                return Err(parser_error("reference index out of range"));
-            } else {
-                // SAFETY: `ref_count` is in range 0..=4
-                unsafe { reference_indices.push(index as u32) };
+
+        // skip refs for absent cells
+        if !descriptor.is_absent() {
+            for _ in 0..ref_count {
+                let index = src.read_be_uint(ref_size)? as usize;
+                if index > cell_count || index <= cell_index {
+                    return Err(parser_error("reference index out of range"));
+                } else {
+                    // SAFETY: `ref_count` is in range 0..=4
+                    unsafe { reference_indices.push(index as u32) };
+                }
             }
         }
 
@@ -540,7 +645,7 @@ mod test {
     use weedb::rocksdb::{IteratorMode, WriteBatch};
 
     use super::*;
-    use crate::storage::{CoreStorage, CoreStorageConfig};
+    use crate::storage::{CellsDbOps, CoreStorage, CoreStorageConfig};
 
     #[tokio::test]
     #[ignore]
@@ -596,7 +701,7 @@ mod test {
             #[allow(clippy::disallowed_methods)]
             let file = File::open(file.path())?;
 
-            store_ctx.store(&block_id, file)?;
+            store_ctx.store(&block_id, file, ShardIdent::PREFIX_FULL)?;
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");
@@ -605,31 +710,40 @@ mod test {
         Ok(())
     }
 
-    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CellsDb) -> Result<()> {
-        let states_iterator = db.shard_states.iterator(IteratorMode::Start);
+    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &CellStorageDb) -> Result<()> {
+        let states_iterator = db.shard_states().iterator(IteratorMode::Start);
         let bump = bumpalo::Bump::new();
 
-        let total_states = db.shard_states.iterator(IteratorMode::Start).count();
+        let total_states = db.shard_states().iterator(IteratorMode::Start).count();
 
         for (deleted, state) in states_iterator.enumerate() {
             let (_, value) = state?;
 
             // check that state actually exists
-            let cell = cell_storage.load_cell(&HashBytes::from_slice(value[..32].as_ref()), 0)?;
+            let entry = ShardStateEntry::from_slice(value.as_ref());
+            let cell = cell_storage.load_cell(&entry.root_hash, 0)?;
 
             let (_, batch) = cell_storage.remove_cell(&bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
             // execute batch
-            db.rocksdb().write_opt(batch, db.cells.write_config())?;
+            db.rocksdb().write_opt(batch, db.cells().write_config())?;
 
             tracing::info!("State deleted. Progress: {}/{total_states}", deleted + 1);
         }
 
         // two compactions in row. First one run merge operators, second one will remove all tombstones
-        db.trigger_compaction().await;
-        db.trigger_compaction().await;
+        match db {
+            CellStorageDb::Main(db) => {
+                db.trigger_compaction().await;
+                db.trigger_compaction().await;
+            }
+            CellStorageDb::Part(db) => {
+                db.trigger_compaction().await;
+                db.trigger_compaction().await;
+            }
+        }
 
-        let cells_left = db.cells.iterator(IteratorMode::Start).count();
+        let cells_left = db.cells().iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
 
@@ -706,6 +820,7 @@ mod test {
                 new_dict_cell.as_ref(),
                 &mut batch,
                 Default::default(),
+                false,
                 MODIFY_COUNT * 3,
             )?;
 
@@ -713,7 +828,7 @@ mod test {
 
             cells_db
                 .rocksdb()
-                .write_opt(batch, cells_db.cells.write_config())?;
+                .write_opt(batch, cells_db.cells().write_config())?;
 
             tracing::info!("Iteration {i} Finished. traversed: {traversed}",);
         }
@@ -730,16 +845,24 @@ mod test {
             let (res, batch) = cell_storage.remove_cell(&bump, &key)?;
             cells_db
                 .rocksdb()
-                .write_opt(batch, cells_db.cells.write_config())?;
+                .write_opt(batch, cells_db.cells().write_config())?;
             tracing::info!("Gc {id} of {total} done. Traversed: {res}",);
             bump.reset();
         }
 
         // two compactions in row. First one run merge operators, second one will remove all tombstones
-        cells_db.trigger_compaction().await;
-        cells_db.trigger_compaction().await;
+        match cells_db {
+            CellStorageDb::Main(db) => {
+                db.trigger_compaction().await;
+                db.trigger_compaction().await;
+            }
+            CellStorageDb::Part(db) => {
+                db.trigger_compaction().await;
+                db.trigger_compaction().await;
+            }
+        }
 
-        let cells_left = cells_db.cells.iterator(IteratorMode::Start).count();
+        let cells_left = cells_db.cells().iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
         assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
         Ok(())

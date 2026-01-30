@@ -36,40 +36,51 @@ impl BlockHandleStorage {
         updated
     }
 
-    pub fn set_has_shard_state(&self, handle: &BlockHandle) -> bool {
-        let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
+    pub fn remove_flags(&self, handle: &BlockHandle, flags: BlockFlags) -> bool {
+        let updated = handle.meta().remove_flags(flags);
         if updated {
             self.store_handle(handle, false);
         }
         updated
+    }
+
+    pub fn set_flags(&self, handle: &BlockHandle, flags: BlockFlags) -> bool {
+        let updated = handle.meta().add_flags(flags);
+        if updated {
+            self.store_handle(handle, false);
+        }
+        updated
+    }
+
+    pub fn set_has_shard_state(&self, handle: &BlockHandle) -> bool {
+        self.set_flags(
+            handle,
+            BlockFlags::HAS_STATE_MAIN.union(BlockFlags::HAS_STATE_PARTS),
+        )
+    }
+
+    pub fn set_has_shard_state_main(&self, handle: &BlockHandle) -> bool {
+        self.set_flags(handle, BlockFlags::HAS_STATE_MAIN)
+    }
+
+    pub fn set_has_shard_state_parts(&self, handle: &BlockHandle) -> bool {
+        self.set_flags(handle, BlockFlags::HAS_STATE_PARTS)
     }
 
     pub fn set_block_persistent(&self, handle: &BlockHandle) -> bool {
-        let updated = handle.meta().add_flags(BlockFlags::IS_PERSISTENT);
-        if updated {
-            self.store_handle(handle, false);
-        }
-        updated
+        self.set_flags(handle, BlockFlags::IS_PERSISTENT)
     }
 
-    pub fn set_has_persistent_shard_state(&self, handle: &BlockHandle) -> bool {
-        let updated = handle
-            .meta()
-            .add_flags(BlockFlags::HAS_PERSISTENT_SHARD_STATE);
-        if updated {
-            self.store_handle(handle, false);
-        }
-        updated
+    pub fn set_has_persistent_shard_state_main(&self, handle: &BlockHandle) -> bool {
+        self.set_flags(handle, BlockFlags::HAS_PERSISTENT_SHARD_STATE_MAIN)
+    }
+
+    pub fn set_has_persistent_shard_state_parts(&self, handle: &BlockHandle) -> bool {
+        self.set_flags(handle, BlockFlags::HAS_PERSISTENT_SHARD_STATE_PARTS)
     }
 
     pub fn set_has_persistent_queue_state(&self, handle: &BlockHandle) -> bool {
-        let updated = handle
-            .meta()
-            .add_flags(BlockFlags::HAS_PERSISTENT_QUEUE_STATE);
-        if updated {
-            self.store_handle(handle, false);
-        }
-        updated
+        self.set_flags(handle, BlockFlags::HAS_PERSISTENT_QUEUE_STATE)
     }
 
     pub fn set_is_zerostate(&self, handle: &BlockHandle) -> bool {
