@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tycho_network::{Network, PeerId, PrivateOverlay, Request, Response};
+use tycho_network::{Network, PeerId, PrefixedRequest, PrivateOverlay, Response};
 
 use crate::engine::MempoolConfig;
 use crate::intercom::core::bcast_rate_limit::BcastSenderLimits;
@@ -34,7 +34,18 @@ impl Dispatcher {
         &self.0.download_rate_limit
     }
 
-    pub(super) async fn query(&self, peer_id: &PeerId, request: Request) -> Result<Response> {
+    pub(super) fn request_from_tl<T>(&self, body: T) -> PrefixedRequest
+    where
+        T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
+    {
+        self.0.overlay.request_from_tl(body)
+    }
+
+    pub(super) async fn query(
+        &self,
+        peer_id: &PeerId,
+        request: PrefixedRequest,
+    ) -> Result<Response> {
         (self.0.overlay)
             .query(&self.0.network, peer_id, request)
             .await
@@ -49,14 +60,15 @@ impl Dispatcher {
 #[cfg(feature = "mock-feedback")]
 pub struct MockFeedbackMessage {
     dispatcher: Dispatcher,
-    request: Request,
+    request: PrefixedRequest,
 }
 #[cfg(feature = "mock-feedback")]
 impl MockFeedbackMessage {
     pub fn new(dispatcher: Dispatcher, round: crate::models::Round) -> Self {
+        let request = dispatcher.request_from_tl(crate::mock_feedback::RoundBoxed { round });
         Self {
             dispatcher,
-            request: Request::from_tl(crate::mock_feedback::RoundBoxed { round }),
+            request,
         }
     }
     pub async fn send(&self, peer_id: &PeerId) -> anyhow::Result<()> {
