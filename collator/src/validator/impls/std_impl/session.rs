@@ -15,7 +15,7 @@ use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_crypto::ed25519::KeyPair;
-use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
+use tycho_network::{OverlayId, PeerId, PrivateOverlay};
 use tycho_types::models::*;
 use tycho_util::FastHashMap;
 use tycho_util::futures::JoinTask;
@@ -478,7 +478,7 @@ impl Inner {
         let _histogram = HistogramGuard::begin(METRIC_RECEIVE_SIGNATURE_TIME);
 
         let block_seqno = block_signatures.block_id.seqno;
-        let req = Request::from_tl(proto::rpc::ExchangeSignaturesRef {
+        let req = (self.client).request_from_tl(proto::rpc::ExchangeSignaturesRef {
             block_seqno,
             signature: block_signatures.own_signature.as_ref(),
         });
