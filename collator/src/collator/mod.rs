@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -255,9 +254,6 @@ pub struct CollatorStdImpl {
     delayed_working_state: DelayedWorkingState,
     store_new_state_tasks: Vec<StateUpdateContext>,
 
-    /// Refs on states to keep them alive until a Merkle chain is applied
-    store_state_refs: VecDeque<Cell>,
-
     background_store_new_state_tx: tokio::sync::mpsc::UnboundedSender<StateUpdateContext>,
 
     anchors_cache: AnchorsCache,
@@ -308,8 +304,6 @@ impl CollatorStdImpl {
         let (background_store_new_state_tx, mut background_store_new_state_rx) =
             tokio::sync::mpsc::unbounded_channel::<StateUpdateContext>();
 
-        let store_state_refs = VecDeque::with_capacity(config.merkle_chain_limit);
-
         let processor = Self {
             next_block_info,
             config,
@@ -326,7 +320,6 @@ impl CollatorStdImpl {
                 }
             }),
             store_new_state_tasks: Default::default(),
-            store_state_refs,
             background_store_new_state_tx,
             anchors_cache: Default::default(),
             block_serializer_cache: BlockSerializerCache::with_capacity(BLOCK_CELL_COUNT_BASELINE),
@@ -796,11 +789,6 @@ impl CollatorStdImpl {
                 }
             }
 
-            // Drop states
-            while let Some(cell) = self.store_state_refs.pop_front() {
-                Reclaimer::instance().drop(cell);
-            }
-
             // finalize all remaining state store tasks in background
             for cx in self.store_new_state_tasks.drain(..) {
                 self.background_store_new_state_tx.send(cx)?;
@@ -808,11 +796,6 @@ impl CollatorStdImpl {
 
             working_state
         } else {
-            // Drop states
-            while let Some(cell) = self.store_state_refs.pop_front() {
-                Reclaimer::instance().drop(cell);
-            }
-
             // finalize all remaining state store tasks in background
             for cx in self.store_new_state_tasks.drain(..) {
                 self.background_store_new_state_tx.send(cx)?;
@@ -1069,16 +1052,6 @@ impl CollatorStdImpl {
                 store_new_state_task,
                 state_update,
             });
-
-            // Keep only the last `merkle_chain_limit` states alive
-            if self.store_state_refs.len() == self.config.merkle_chain_limit
-                && let Some(old_ref) = self.store_state_refs.pop_front()
-            {
-                // NOTE: State update can be quite huge so drop it outside of tokio.
-                Reclaimer::instance().drop(old_ref);
-            }
-            self.store_state_refs
-                .push_back(new_observable_state_root.clone());
 
             // build state stuff from new observable state after collation
             GetNewShardStateStuff::BuildFromNewObservable {

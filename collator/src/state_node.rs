@@ -212,10 +212,10 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let state = self
             .storage
             .shard_state_storage()
-            .load_state_with_cache(ref_by_mc_seqno, block_id, |current_block_id| {
+            .load_state_with_cache(ref_by_mc_seqno, block_id, |block_id| {
                 self.shard_blocks
-                    .get(&current_block_id.shard)
-                    .and_then(|shard_blocks| shard_blocks.get(&current_block_id.seqno).cloned())
+                    .get(&block_id.shard)
+                    .and_then(|shard_blocks| shard_blocks.get(&block_id.seqno).cloned())
                     .map(|block| CachedStateUpdate {
                         prev_block_id: block.prev_id,
                         ref_by_mc_seqno: block.ref_by_mc_seqno,
