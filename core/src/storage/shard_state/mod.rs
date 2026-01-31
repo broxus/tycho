@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Cursor;
 use std::num::NonZeroU8;
@@ -17,7 +18,7 @@ use tycho_types::models::*;
 use tycho_types::prelude::*;
 use tycho_util::mem::Reclaimer;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 use weedb::rocksdb;
 
 use self::cell_storage::*;
@@ -44,6 +45,8 @@ pub struct ShardStateStorage {
     max_new_sc_cell_count: AtomicUsize,
 
     accumulated_per_shard: parking_lot::Mutex<FastHashMap<ShardIdent, ShardAccumulator>>,
+
+    shard_states_cache: FastDashMap<ShardIdent, BTreeMap<u32, ShardStateStuff>>,
 
     shard_split_depth: u8,
     new_cells_threshold: usize,
@@ -79,6 +82,7 @@ impl ShardStateStorage {
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
             accumulated_per_shard: parking_lot::Mutex::new(FastHashMap::default()),
+            shard_states_cache: Default::default(),
         }))
     }
 
@@ -132,6 +136,10 @@ impl ShardStateStorage {
         root_cell: Cell,
         hint: StoreStateHint,
     ) -> Result<StoreStateStatus> {
+        // NOTE: Cache is populated for all states (not just skipped) because
+        // FORCE_RELOAD clearing must run unconditionally.
+        self.cache_shard_state_root(handle.id(), &root_cell)?;
+
         if handle.has_state() {
             return Ok(StoreStateStatus::Exist);
         }
@@ -165,6 +173,14 @@ impl ShardStateStorage {
 
             if !force_store && acc.new_cells < self.new_cells_threshold {
                 metrics::counter!("tycho_storage_shard_state_skipped").increment(1);
+
+                // HAS_STATE is set because the state can always be reconstructed
+                // by applying merkle updates from stored blocks.
+                let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
+                if updated {
+                    let block_handle_storage = self.block_handle_storage.clone();
+                    block_handle_storage.store_handle(handle, false);
+                }
                 return Ok(StoreStateStatus::Skipped);
             }
 
@@ -323,70 +339,87 @@ impl ShardStateStorage {
             .await
     }
 
-    /// Loads state for specified block using an optional cache lookup.
+    /// Loads state for specified block using optional cache with `CachedStateUpdate` lookups.
     pub async fn load_state_with_cache<F>(
         &self,
         mut ref_by_mc_seqno: u32,
         block_id: &BlockId,
-        get_cached: F,
+        get_cached_state_update: F,
     ) -> Result<ShardStateStuff>
     where
         F: Fn(&BlockId) -> Option<CachedStateUpdate>,
     {
-        // Collect chain of state updates for non-masterchain blocks
+        // Fast path: exact cache hit
+        if let Some(state) = self.get_cached_shard_state(block_id) {
+            return Ok(state);
+        }
+
+        // Masterchain states are always stored
+        if block_id.is_masterchain() {
+            return self.load_state_direct(ref_by_mc_seqno, block_id).await;
+        }
+
+        // Walk backwards collecting merkle updates until a base state is found
         let mut chain = Vec::new();
         let mut current_block_id = *block_id;
 
-        if !block_id.is_masterchain() {
-            while !self.contains_state(&current_block_id)? {
-                match get_cached(&current_block_id) {
-                    // Try to get from cache first
-                    Some(cached) => {
-                        ref_by_mc_seqno = ref_by_mc_seqno.min(cached.ref_by_mc_seqno);
-                        chain.push((current_block_id, cached.state_update));
-                        current_block_id = cached.prev_block_id;
-                    }
-                    None => {
-                        // Fallback to storage
-                        let handle = self
-                            .block_handle_storage
-                            .load_handle(&current_block_id)
-                            .ok_or(ShardStateStorageError::BlockHandleNotFound(
-                                block_id.as_short_id(),
-                            ))?;
+        let base_state = loop {
+            if let Some(state) = self.get_cached_shard_state(&current_block_id) {
+                break state;
+            }
 
-                        ref_by_mc_seqno = ref_by_mc_seqno.min(handle.meta().ref_by_mc_seqno());
+            if self.contains_state(&current_block_id)? {
+                break self
+                    .load_state_direct(ref_by_mc_seqno, &current_block_id)
+                    .await?;
+            }
 
-                        let block = self.block_storage.load_block_data(&handle).await?;
-                        chain.push((current_block_id, block.block().state_update.load()?));
+            match get_cached_state_update(&current_block_id) {
+                // Try to get from state updates cache first
+                Some(cached) => {
+                    ref_by_mc_seqno = ref_by_mc_seqno.min(cached.ref_by_mc_seqno);
+                    chain.push((current_block_id, cached.state_update));
+                    current_block_id = cached.prev_block_id;
+                }
+                None => {
+                    // Fallback to storage
+                    let handle = self
+                        .block_handle_storage
+                        .load_handle(&current_block_id)
+                        .ok_or(ShardStateStorageError::BlockHandleNotFound(
+                            block_id.as_short_id(),
+                        ))?;
 
-                        let (prev_id, _prev_id_alt) = block.construct_prev_id()?;
-                        current_block_id = prev_id;
-                    }
+                    ref_by_mc_seqno = ref_by_mc_seqno.min(handle.meta().ref_by_mc_seqno());
+
+                    let block = self.block_storage.load_block_data(&handle).await?;
+                    chain.push((current_block_id, block.block().state_update.load()?));
+
+                    let (prev_id, _prev_id_alt) = block.construct_prev_id()?;
+                    current_block_id = prev_id;
                 }
             }
+        };
+
+        // Apply collected merkle updates
+        if chain.is_empty() {
+            return Ok(base_state);
         }
 
-        let mut state = self
-            .load_state_direct(ref_by_mc_seqno, &current_block_id)
-            .await?;
-
-        // Apply state updates in a single blocking task
-        if !chain.is_empty() {
-            let split_at_depth = self.shard_split_depth;
-            state = tokio::task::spawn_blocking(move || {
-                while let Some((block_id, merkle_update)) = chain.pop() {
-                    let prev_block_id = *state.block_id();
-                    state = state
-                        .par_make_next_state(&block_id, &merkle_update, Some(split_at_depth))
-                        .with_context(|| {
-                            format!("failed to apply merkle of block {block_id} to {prev_block_id}")
-                        })?;
-                }
-                Ok::<_, anyhow::Error>(state)
-            })
-            .await??;
-        }
+        let split_at_depth = self.shard_split_depth;
+        let state = tokio::task::spawn_blocking(move || {
+            let mut state = base_state;
+            while let Some((block_id, update)) = chain.pop() {
+                let prev_block_id = *state.block_id();
+                state = state
+                    .par_make_next_state(&block_id, &update, Some(split_at_depth))
+                    .with_context(|| {
+                        format!("failed to apply merkle of block {block_id} to {prev_block_id}")
+                    })?;
+            }
+            Ok::<_, anyhow::Error>(state)
+        })
+        .await??;
 
         Ok(state)
     }
@@ -619,6 +652,46 @@ impl ShardStateStorage {
         iter.seek_to_first();
 
         Ok(iter.key().map(BlockId::from_slice))
+    }
+
+    fn cache_shard_state_root(&self, block_id: &BlockId, state_root: &Cell) -> Result<()> {
+        if block_id.is_masterchain() {
+            return Ok(());
+        }
+
+        /// Force reload interval: clear cache and skip insertion so that
+        /// the next `load_state` loads a clean state from storage.
+        const FORCE_RELOAD: u32 = 10;
+        if block_id.seqno.is_multiple_of(FORCE_RELOAD) {
+            if let Some(mut shard_states) = self.shard_states_cache.get_mut(&block_id.shard) {
+                let old = std::mem::take(&mut *shard_states);
+                Reclaimer::instance().drop(old);
+            }
+            return Ok(());
+        }
+
+        let shard_state = state_root.parse::<Box<ShardStateUnsplit>>()?;
+        let handle = self.min_ref_mc_state.insert(&shard_state);
+
+        let state = ShardStateStuff::from_state_and_root(
+            block_id,
+            shard_state,
+            state_root.clone(),
+            handle,
+        )?;
+
+        self.shard_states_cache
+            .entry(block_id.shard)
+            .or_default()
+            .insert(block_id.seqno, state);
+
+        Ok(())
+    }
+
+    fn get_cached_shard_state(&self, block_id: &BlockId) -> Option<ShardStateStuff> {
+        self.shard_states_cache
+            .get(&block_id.shard)
+            .and_then(|states| states.get(&block_id.seqno).cloned())
     }
 }
 
