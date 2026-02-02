@@ -786,14 +786,19 @@
     ton-lite-client "^3.1.1"
     ts-node "^10.9.1"
 
-"@ton/core@0.60.1", "@ton/core@^0.60.1":
+"@ton/core@0.60.1":
   version "0.60.1"
   resolved "https://registry.yarnpkg.com/@ton/core/-/core-0.60.1.tgz#cc9a62fb308d7597b1217dc8e44c7e2dcc0aceaa"
   integrity sha512-8FwybYbfkk57C3l9gvnlRhRBHbLYmeu0LbB1z9N+dhDz0Z+FJW8w0TJlks8CgHrAFxsT3FlR2LsqFnsauMp38w==
   dependencies:
     symbol.inspect "1.0.1"
 
-"@ton/core@^0.61.0", "@ton/core@~0":
+"@ton/core@>=0.62.0":
+  version "0.63.0"
+  resolved "https://registry.yarnpkg.com/@ton/core/-/core-0.63.0.tgz#87487072f707d8ac7fc00983d5aa707409728c07"
+  integrity sha512-uBc0WQNYVzjAwPvIazf0Ryhpv4nJd4dKIuHoj766gUdwe8sVzGM+TxKKKJETL70hh/mxACyUlR4tAwN0LWDNow==
+
+"@ton/core@^0.61.0":
   version "0.61.0"
   resolved "https://registry.yarnpkg.com/@ton/core/-/core-0.61.0.tgz#09b37801cb2f5a942020fcc992be1e99f4b16689"
   integrity sha512-0qyVfP2dDue2bq80ydXggo2MlufcmzuFk6G94qRrZxvyQ3NSe4UeBTeRf1gQmN7tywgTsX2gS61e4yvJrlUu4Q==
@@ -816,16 +821,16 @@
     jssha "3.2.0"
     tweetnacl "1.0.3"
 
-"@ton/sandbox@>=0.37.0":
-  version "0.37.0"
-  resolved "https://registry.yarnpkg.com/@ton/sandbox/-/sandbox-0.37.0.tgz#8315977379fabeaee8398dd89a72e1a0fb2ffd9f"
-  integrity sha512-1WK79g2cksOJPLsGtF/U8eZwSjw92jw7Jzb6R0wzUfWwZ8S9hEyQZcevkU8FOVDMWXJO84i+8is8GW8TsYZpFg==
+"@ton/sandbox@>=0.39.0":
+  version "0.41.0"
+  resolved "https://registry.yarnpkg.com/@ton/sandbox/-/sandbox-0.41.0.tgz#a0c81cca5dedb1891e1cf3f621f730f6bac63539"
+  integrity sha512-+WRWiHfm62xQebVt6BvLb2UhVphpBHCwSby8R5vP9llzdVck+XEs+p4csIkZBh6gRQsy1Xomzh1PpgZS5XVE3A==
   dependencies:
     "@vscode/debugadapter" "^1.68.0"
     chalk "^4.1.2"
     fflate "^0.8.2"
     table "^6.9.0"
-    ton-assembly "0.1.0"
+    ton-assembly "0.6.1"
 
 "@ton/sandbox@^0.32.2":
   version "0.32.2"
@@ -923,10 +928,10 @@
   dependencies:
     tslib "^2.4.0"
 
-"@tychosdk/emulator@^0.2.0":
-  version "0.2.0"
-  resolved "https://registry.yarnpkg.com/@tychosdk/emulator/-/emulator-0.2.0.tgz#d1d28542d28b13b087e278924acdaa96002928f1"
-  integrity sha512-hyvd/iCqjUfBArgR/BjY3znjVSPB4xeDnzQi9rnf4SaMfKqzuIBk0jK02Y3g/n5egy02Hh+PfWeUoKr029z6zw==
+"@tychosdk/emulator@^0.2.6":
+  version "0.2.6"
+  resolved "https://registry.yarnpkg.com/@tychosdk/emulator/-/emulator-0.2.6.tgz#5f52aaddd71d8c14a5cffe82b400eacd41ae01ad"
+  integrity sha512-03pJ9RroOpyVQ7006Ib7YSYeQBXS3ZeLHriU53jliKR0hZQmU+JqxFyKpa2DAvzM+G8VYTvBKWTwsH1XVdkUlw==
   dependencies:
     axios "^1.8.4"
     zod "^3.24.2"
@@ -3351,14 +3356,14 @@ to-regex-range@^5.0.1:
   dependencies:
     is-number "^7.0.0"
 
-ton-assembly@0.1.0:
-  version "0.1.0"
-  resolved "https://registry.yarnpkg.com/ton-assembly/-/ton-assembly-0.1.0.tgz#a3f1da50c2d2be1cd0f9837a9399ea80f80021eb"
-  integrity sha512-2k0vIKleGMXXu6yXV8L1eICClGZVwqfs4G0FgBCgC6Qgani6pAqoLGNBNjcdw3554Ua3E+1K4oz/oW+GhZfm+w==
+ton-assembly@0.6.1:
+  version "0.6.1"
+  resolved "https://registry.yarnpkg.com/ton-assembly/-/ton-assembly-0.6.1.tgz#ad8c48e317b4dcc71903d17515275ecf9fcdb8a6"
+  integrity sha512-HZNDD2Cy8DQ9UY+8eCgCFY9RBnHEA+Abxo6chDtZQqsX1xo97UZzhMWzK+bYoe1w9gsGugi+1kOH7cpjzDN6jQ==
   dependencies:
-    "@ton/core" "^0.60.1"
     "@tonstudio/parser-runtime" "^0.0.1"
     cac "^6.7.14"
+    ton-source-map "^0.2.2"
 
 ton-lite-client@^3.1.1:
   version "3.1.1"
@@ -3371,6 +3376,11 @@ ton-lite-client@^3.1.1:
     teslabot "^1.5.0"
     ton-tl "^1.0.1"
     tweetnacl "^1.0.3"
+
+ton-source-map@^0.2.2:
+  version "0.2.2"
+  resolved "https://registry.yarnpkg.com/ton-source-map/-/ton-source-map-0.2.2.tgz#a7b647a085d23a05172b26c110d7197ab4446f9a"
+  integrity sha512-T9as2Cmv5aqFbELd0ZxIyY3NRPGxf3ltpVN8rm+uIXMMDlNaGW3Wf6jFcaJYwkRNB2eR52PhNbt5tI5lwgL1Cg==
 
 ton-tl@^1.0.1:
   version "1.0.1"
